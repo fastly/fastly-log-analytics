@@ -1,17 +1,19 @@
-"""RUM sync cron job — ingest raw beacon logs from FOS.
-
-Registered in scheduler as cron_rum_sync. Runs periodically (configurable interval).
-"""
+"""RUM beacon log sync and Faro bundle reconciliation cron job."""
 
 from __future__ import annotations
 
 import logging
+import sys as _sys
 import time
 
+from backend import config as svcconfig
 from backend.core.rum_ingest import ingest_rum_logs
-from backend.cron.decorators import cron_task
+from backend.cron.jobs._common import _resolve_sync_hook
+from backend.cron.scheduler import cron_run, cron_task
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("backend.scheduler")
+
+_orig_ingest_rum_logs = ingest_rum_logs
 
 
 def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
@@ -21,12 +23,9 @@ def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
     log downloads (F-1 audit finding). ``Surrogate-Key: rum-faro-sdk`` is
     set only in the RUM fetch-cache snippet, which is deployed to the
     instrumented *logging* service, never the CDN service — a purge
-    targeting the CDN service can never match anything there. Mirrors the
-    fire-and-forget convention of ``_purge_surrogate_key`` in
-    ``backend.core.iceberg._core`` (which purges a different, unrelated key
-    on the CDN service, where that IS the correct target): a missing
-    service id/token or a purge failure must never surface — the FOS
-    upload it follows already succeeded.
+    targeting the CDN service can never match anything there. Fire-and-forget:
+    a missing service id/token or a purge failure must never surface — the
+    FOS upload it follows already succeeded.
     """
     if not logging_service_id or not token:
         return
@@ -38,7 +37,7 @@ def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
         logger.warning("Faro surrogate-key purge failed for %s (non-fatal)", logging_service_id, exc_info=True)
 
 
-def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
+def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
     """Keep the operator's pinned Faro bundle present and intact in FOS.
 
     Two deliberately different cadences: a cheap FOS HEAD every tick (catches
@@ -83,9 +82,8 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
     """
     import asyncio
 
-    from backend import config as svcconfig
     from backend.core.faro_versions import DEFAULT_FARO_VERSION
-    from backend.cron_progress import add_progress
+    from backend.cron.scheduler import add_progress
     from backend.provision.rum_assets import (
         detect_faro_version_change,
         download_and_upload_faro,
@@ -97,71 +95,53 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
         if run_id:
             add_progress(run_id, {"type": "status", "message": msg})
 
+    def _upload_and_purge(
+        ver: str, expected_ver: str | None, ok_msg: str, err_label: str, *, check_auth: bool = True
+    ) -> bool:
+        try:
+            asyncio.run(download_and_upload_faro(service_id, ver, token, expected_current_version=expected_ver))
+            _faro_purge_surrogate_key(service_id, token)
+            report(ok_msg)
+            return True
+        except Exception as e:
+            msg = str(e)
+            if check_auth and ("403" in msg or "401" in msg or "unauthorized" in msg.lower()):
+                logger.warning("%s failed for %s (S3/FOS write credentials unauthorized: %s)", err_label, service_id, e)
+            else:
+                logger.warning("%s failed for %s", err_label, service_id, exc_info=True)
+            return False
+
     try:
         cfg = svcconfig.load_config(service_id)
-        if not cfg:
-            return
+        if not cfg or not svcconfig.is_rum_enabled(cfg):
+            return True
         rum_cfg = cfg.get("rum")
-        rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-        # Mirrors the OR-pattern used elsewhere (e.g. routers/rum.py,
-        # cron/scheduler.py): the declarative enable_rum() path only ever
-        # sets the top-level rum_enabled flag, while the older imperative
-        # provisioning path also sets rum.enabled — either one means RUM is
-        # actually on for this service.
-        if not (cfg.get("rum_enabled") or rum_cfg.get("enabled")):
-            return
         token = cfg.get("fastly_api_key", "")
-
-        pinned_version = rum_cfg.get("faro_version")
+        pinned_version = (rum_cfg if isinstance(rum_cfg, dict) else {}).get("faro_version")
         if not pinned_version:
-            # Self-heal: a service enabled before every enable path pinned a
-            # version by default. Adopt the default rather than leave
-            # /js/faro-sdk.js 404ing for every visitor.
+            # Self-heal: adopt the default rather than leave /js/faro-sdk.js 404ing.
             report(f"RUM enabled with no pinned Faro version; adopting default v{DEFAULT_FARO_VERSION}")
-            try:
-                asyncio.run(
-                    download_and_upload_faro(service_id, DEFAULT_FARO_VERSION, token, expected_current_version=None)
-                )
-                _faro_purge_surrogate_key(service_id, token)
-                report(f"Faro v{DEFAULT_FARO_VERSION} adopted and uploaded to FOS")
-                pinned_version = DEFAULT_FARO_VERSION
-                # Reload: download_and_upload_faro just persisted
-                # faro_version/faro_content_hash/faro_fos_etag_md5 via its
-                # own save_config call, which the stale in-memory cfg above
-                # wouldn't reflect. Without this, the integrity check right
-                # below would see no stored etag, treat the bundle it just
-                # uploaded as "not intact", and re-upload it a second time
-                # this same tick.
-                cfg = svcconfig.load_config(service_id) or cfg
-            except Exception:
-                logger.warning("Faro default-version adoption failed for %s", service_id, exc_info=True)
-                return
+            if not _upload_and_purge(
+                DEFAULT_FARO_VERSION,
+                None,
+                f"Faro v{DEFAULT_FARO_VERSION} adopted and uploaded to FOS",
+                "Faro default-version adoption",
+            ):
+                return False
+            pinned_version = DEFAULT_FARO_VERSION
+            # Reload so the integrity check below sees the newly persisted etag/hash.
+            cfg = svcconfig.load_config(service_id) or cfg
 
-            # The bundle now exists in FOS, but the deployed VCL for this
-            # service may still be missing the routes for it entirely (see
-            # the docstring above) — reconcile now so /js/faro-sdk.js
-            # actually resolves. Best-effort: a reconcile failure here must
-            # not abort the bundle-ingest cron tick; the next tick retries
-            # since pinned_version is now set but the live VCL wasn't
-            # reconciled to match, so `rum_vcl_fingerprint`-based drift
-            # detection (/rum/status) will keep reporting drift until an
-            # operator-triggered reconcile (or a future tick, if this is
-            # ever made retryable) succeeds.
+            # Reconcile VCL so /js/faro-sdk.js routes to the newly adopted bundle (best-effort).
             try:
                 from backend.provision.declarative.reconciler import reconcile_vcl_state
-                from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
+                from backend.provision.rum_orchestrator import rum_vcl_fingerprint
 
                 reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
                 report(f"VCL reconciled: /js/faro-sdk.js now routes to v{DEFAULT_FARO_VERSION}")
-                # #2 audit finding: refresh the stored fingerprint now that the
-                # live VCL actually matches what the generator produces for
-                # this pin — without this, /rum/status's vcl_drift would keep
-                # reporting drift forever after this self-heal, even though
-                # it just successfully reconciled. Mirrors the refresh
-                # upgrade_faro_version does after its own activation.
-                cfg = svcconfig.load_config(service_id) or cfg
-                cfg["rum_vcl_sha"] = rum_vcl_fingerprint(service_id, cfg)
-                svcconfig.save_config(service_id, cfg)
+                svcconfig.mutate_config(
+                    service_id, lambda c: c.__setitem__("rum_vcl_sha", rum_vcl_fingerprint(service_id, c))
+                )
             except Exception:
                 logger.warning(
                     "Faro default-version VCL reconcile failed for %s "
@@ -173,18 +153,16 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
         # 1. Cheap integrity check — every tick.
         if not faro_bundle_intact(cfg, pinned_version):
             report(f"Faro bundle v{pinned_version} missing/corrupt in FOS, restoring")
-            try:
-                asyncio.run(
-                    download_and_upload_faro(service_id, pinned_version, token, expected_current_version=pinned_version)
-                )
-                _faro_purge_surrogate_key(service_id, token)
-                report(f"Faro bundle v{pinned_version} restored to FOS")
-            except Exception:
-                logger.warning("Faro bundle restore failed for %s", service_id, exc_info=True)
+            if not _upload_and_purge(
+                pinned_version,
+                pinned_version,
+                f"Faro bundle v{pinned_version} restored to FOS",
+                "Faro bundle restore",
+            ):
+                return False
 
-        # 2. Throttled upstream drift check. Reload cfg first in case the
-        # restore above just rewrote faro_content_hash, so the timestamp
-        # write below doesn't clobber it with a stale in-memory copy.
+        # 2. Throttled upstream drift check. Reload cfg first so the timestamp write
+        # below doesn't clobber a freshly restored faro_content_hash.
         cfg = svcconfig.load_config(service_id) or cfg
         rum_cfg = dict(cfg.get("rum") or {})
         last_check = rum_cfg.get("faro_last_upstream_check") or 0
@@ -198,79 +176,115 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> None:
             except Exception:
                 logger.warning("Faro upstream drift check failed for %s", service_id, exc_info=True)
             finally:
-                # Write the attempt timestamp even on failure — otherwise a
-                # persistently failing upstream turns into a per-tick
-                # download storm instead of once per window.
-                cfg = svcconfig.load_config(service_id) or cfg
-                rum_cfg = dict(cfg.get("rum") or {})
-                rum_cfg["faro_last_upstream_check"] = now
-                cfg["rum"] = rum_cfg
-                svcconfig.save_config(service_id, cfg)
+                # Write attempt timestamp even on failure to avoid per-tick download storms.
+                svcconfig.mutate_config(
+                    service_id,
+                    lambda c: c.__setitem__("rum", {**(c.get("rum") or {}), "faro_last_upstream_check": now}),
+                )
 
             if drift:
                 report(f"Faro upstream drift detected for v{pinned_version}, re-syncing")
-                try:
-                    asyncio.run(
-                        download_and_upload_faro(
-                            service_id, pinned_version, token, expected_current_version=pinned_version
-                        )
-                    )
-                    _faro_purge_surrogate_key(service_id, token)
-                    report(f"Faro bundle v{pinned_version} re-synced from upstream")
-                except Exception:
-                    logger.warning("Faro upstream re-sync failed for %s", service_id, exc_info=True)
+                if not _upload_and_purge(
+                    pinned_version,
+                    pinned_version,
+                    f"Faro bundle v{pinned_version} re-synced from upstream",
+                    "Faro upstream re-sync",
+                    check_auth=False,
+                ):
+                    return False
+        return True
     except Exception:
         logger.warning("Faro reconcile failed for %s", service_id, exc_info=True)
+        return False
 
 
-@cron_task("cron_rum_sync")
+_orig_reconcile_faro_bundle = _reconcile_faro_bundle
+
+
+@cron_task("cron_rum_sync", job_name="rum_sync")
 def _run_rum_sync(service_id: str, **kwargs) -> None:
     """Sync RUM beacon logs from FOS raw/rum/ into local DuckDB tables.
 
     Calls ingest_rum_logs generator which handles orphan-row safety internally.
     """
+    # No start-of-tick active-request gate here (mirroring 5a7541fd): a deferred
+    # tick waits a full interval, and dashboard/SSE polling kept it tripped.
     logger.info(f"RUM sync starting for {service_id}")
+    is_manual = kwargs.get("is_manual", False) or kwargs.get("run_id") is not None
+    pass_max_seconds = 20 if not is_manual else 240
 
-    from backend.cron_progress import add_progress, cleanup_progress_and_reap, end_progress, start_progress
+    from backend.core import metadata
+    from backend.cron.scheduler import add_progress
 
-    run_id = None
-    try:
-        for event in ingest_rum_logs(service_id):
-            if event[0] == "started":
-                run_id = event[1]
-                start_progress(run_id, service_id=service_id, task="rum_sync")
-                add_progress(run_id, {"type": "status", "message": f"RUM sync starting for {service_id}"})
-                _reconcile_faro_bundle(service_id, run_id)
-            elif event[0] == "file_done":
-                _, filename, count = event
-                msg = f"{filename}: {count} rows"
-                logger.debug(f"  {msg}")
-                if run_id:
-                    add_progress(run_id, {"type": "status", "message": msg})
-            elif event[0] == "error":
-                _, location, msg = event
-                logger.warning(f"  Error in {location}: {msg}")
-                if run_id:
-                    add_progress(run_id, {"type": "error", "message": f"Error in {location}: {msg}"})
-            elif event[0] == "cleanup_done":
-                _, cleanup_files, cleanup_bytes = event
-                msg = f"RUM cleanup deleted {cleanup_files} files, freed {cleanup_bytes / (1024 * 1024):.2f} MB"
-                logger.info(msg)
-                if run_id:
-                    add_progress(run_id, {"type": "status", "message": msg})
-            elif event[0] == "done":
-                _, total = event
-                msg = f"RUM sync complete: {total} total rows"
-                logger.info(msg)
-                if run_id:
-                    add_progress(run_id, {"type": "status", "message": msg})
-                    end_progress(run_id)
+    ingest_fn = _resolve_sync_hook("ingest_rum_logs", ingest_rum_logs, _orig_ingest_rum_logs)
+    reconcile_fn = _resolve_sync_hook("_reconcile_faro_bundle", _reconcile_faro_bundle, _orig_reconcile_faro_bundle)
 
-    except Exception as e:
-        logger.error(f"RUM sync failed: {e}", exc_info=True)
-        if run_id:
+    had_warning = False
+    with cron_run(
+        service_id,
+        "rum_sync",
+        run_id=kwargs.get("run_id"),
+        include_log_output=False,
+        finalize_running_backstop=True,
+    ) as run:
+        if not run.ok:
+            return
+        run_id = run.run_id
+        try:
+            for event in ingest_fn(service_id, max_seconds=pass_max_seconds, run_id=run_id):
+                kind = event[0]
+                if kind == "started":
+                    add_progress(run_id, {"type": "status", "message": f"RUM sync starting for {service_id}"})
+                    if not reconcile_fn(service_id, run_id):
+                        had_warning = True
+                elif kind == "file_done":
+                    msg = f"{event[1]}: {event[2]} rows"
+                    logger.debug(f"  {msg}")
+                    add_progress(run_id, {"type": "status", "message": msg})
+                elif kind == "error":
+                    err_msg = f"Error in {event[1]}: {event[2]}"
+                    logger.warning(f"  {err_msg}")
+                    add_progress(run_id, {"type": "error", "message": err_msg})
+                elif kind == "cleanup_done":
+                    msg = f"RUM cleanup deleted {event[1]} files, freed {event[2] / (1024 * 1024):.2f} MB"
+                    logger.info(msg)
+                    add_progress(run_id, {"type": "status", "message": msg})
+                elif kind == "done":
+                    total = event[1]
+                    msg = f"RUM sync complete: {total} total rows" + (" (with warnings)" if had_warning else "")
+                    logger.info(msg)
+                    add_progress(run_id, {"type": "status", "message": msg})
+                    if had_warning:
+                        try:
+                            con = metadata.get_con(service_id)
+                            con.execute(
+                                "UPDATE cron_runs SET status = 'warning' "
+                                "WHERE id = ? AND service_id = ? AND status = 'success'",
+                                (run_id, service_id),
+                            )
+                            con.commit()
+                        except Exception:
+                            logger.warning(
+                                "Could not mark RUM cron run as warning",
+                                extra={"service_id": service_id, "run_id": run_id},
+                                exc_info=True,
+                            )
+                    if total > 0:
+                        try:
+                            logger.info(
+                                "⚡ [rum_sync] %s: triggering post-sync RUM commit for %d new rows", service_id, total
+                            )
+                            from backend.cron.jobs import rum_commit as _rc_mod
+
+                            commit_fn = _rc_mod._run_rum_commit
+                            for mod_name in ("backend.cron.jobs.rum_sync", "backend.cron.jobs.sync"):
+                                mod = _sys.modules.get(mod_name)
+                                if mod is not None and "_run_rum_commit" in mod.__dict__:
+                                    commit_fn = mod.__dict__["_run_rum_commit"]
+                                    break
+                            commit_fn(service_id)
+                        except Exception as commit_err:
+                            logger.warning("RUM post-sync commit failed for %s: %s", service_id, commit_err)
+        except Exception as e:
+            logger.error(f"RUM sync failed: {e}", exc_info=True)
             add_progress(run_id, {"type": "error", "message": f"RUM sync failed: {e}"})
-            end_progress(run_id, {"type": "error", "message": f"RUM sync failed: {e}"})
-    finally:
-        if run_id:
-            cleanup_progress_and_reap()

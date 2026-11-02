@@ -17,22 +17,28 @@ import { useEffect } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
-export default function ErrorPage({
-  error,
-  reset,
-}: {
+export interface RouteErrorBoundaryProps {
   error: Error & { digest?: string }
   reset: () => void
-}) {
+  pageName?: string
+  logPrefix?: string
+}
+
+export function RouteErrorBoundary({
+  error,
+  reset,
+  pageName,
+  logPrefix = '[app/error]',
+}: RouteErrorBoundaryProps) {
   useEffect(() => {
     // Surface the error so the existing console + Sentry/PostHog
     // listeners (if/when wired) pick it up. Digest is the build-time
     // hash Next.js assigns each unique error site — useful for de-dup
     // in any aggregator.
     if (typeof console !== 'undefined') {
-      console.error('[app/error] uncaught render error:', error, error.digest)
+      console.error(`${logPrefix} uncaught render error:`, error, error.digest)
     }
-  }, [error])
+  }, [error, logPrefix])
 
   return (
     <div className="flex flex-1 items-center justify-center p-6">
@@ -45,7 +51,11 @@ export default function ErrorPage({
           <AlertCircle className="h-5 w-5" aria-hidden="true" />
           {/* text-foreground (not the inherited destructive red): red text on
               the destructive/5 tint is sub-AA contrast. Keep the icon red. */}
-          <h2 className="text-base font-semibold text-foreground">Something went wrong on this page.</h2>
+          <h2 className="text-base font-semibold text-foreground">
+            {pageName
+              ? `Something went wrong on the ${pageName} page.`
+              : 'Something went wrong on this page.'}
+          </h2>
         </div>
         <p className="text-sm text-muted-foreground">
           The view failed to render. The rest of the app is still working —
@@ -87,3 +97,28 @@ export default function ErrorPage({
     </div>
   )
 }
+
+export function createRouteErrorBoundary(pageName?: string, logPrefix?: string) {
+  function RouteErrorPage({
+    error,
+    reset,
+  }: {
+    error: Error & { digest?: string }
+    reset: () => void
+  }) {
+    return (
+      <RouteErrorBoundary
+        error={error}
+        reset={reset}
+        pageName={pageName}
+        logPrefix={logPrefix}
+      />
+    )
+  }
+  RouteErrorPage.displayName = pageName
+    ? `${pageName.replace(/\s+/g, '')}ErrorPage`
+    : 'ErrorPage'
+  return RouteErrorPage
+}
+
+export default createRouteErrorBoundary()

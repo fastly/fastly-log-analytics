@@ -1,7 +1,7 @@
 # ADR-11 — Secret Rotation Policy
 
-**Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective (2026-06-10)
+**Status:** Accepted
+**Decided by:** Engineering retrospective
 
 ## 1. Context & Motivation
 
@@ -12,7 +12,7 @@ The project handles five categories of secret with five different lifecycles, on
 | **Fastly API key** (`FASTLY_API_KEY`) | env var / per-service config, read via [`get_fastly_api_key`](../../backend/config.py) | No documented procedure |
 | **FOS access key / secret** | per-service config | Generated at provision; no rotation path |
 | **CDN secret** (`cdn_secret`) | per-service config, embedded in `x-fastly-key` header | Regenerated only on explicit provisioning re-run |
-| **Share / analyst session passcode** | per-invite, Argon2id-hashed in `share_db` | Per-login upgrade from scrypt → argon2id; no time-based rotation |
+| **Share / analyst session passcode** | per-invite, Argon2id-hashed in `share_db` | Rehashed on login if argon2id parameters change; no time-based rotation |
 | **AES-256 cookie key** (session scoring) | Fastly ConfigStore, two-slot grace window | **Documented runbook** ([docs/session_scoring_runbook.md](../../docs/session_scoring_runbook.md)) — the model to generalize |
 
 The AES rotation runbook works. It encodes a real operational pattern — current key in slot A, previous key in slot B for one full session-idle timeout window — and the runbook explicitly warns against double-rotating within that window (because the second rotation evicts the original key before in-flight sessions can re-issue). That same shape applies to most of the other secrets in the table, but nobody has written it down.
@@ -28,7 +28,7 @@ This ADR generalises the grace-window pattern, names the secrets we expect to ro
 | Fastly API key | Suspected leak; departing operator with access; never on a fixed schedule | Manual: regenerate in Fastly UI, update env, redeploy. New key takes over immediately. | None — Fastly API keys are independent; old + new can both be valid until old is revoked |
 | FOS access key / secret | Suspected leak; AWS-side rotation policy if applicable; new bucket | Regenerate via FOS console; PATCH service config; redeploy backend (env doesn't pick up live) | Both keys valid in parallel during the redeploy window |
 | CDN secret | Suspected leak; on FOS bucket reprovisioning | Re-run `/api/admin/services/{id}/regenerate_cdn_secret` endpoint; deploy backend (clients re-read on next bootstrap) | None — single-secret per service; brief 4xx window during redeploy |
-| Share passcode | User-initiated; on per-invite expiry; no time-based rotation | Per-login opportunistic upgrade scrypt → argon2id via `needs_rehash` ([backend/core/share_db/passcode.py:117-138](../../backend/core/share_db/passcode.py)). New invites get OWASP-2026 argon2id params. | N/A — historic hashes verify until the user logs in or the invite is revoked |
+| Share passcode | User-initiated; on per-invite expiry; no time-based rotation | Per-login opportunistic rehash via `needs_rehash` (`backend/core/share_db/__init__.py`) when the argon2id parameters are raised. New invites get OWASP-2026 argon2id params. | N/A — hashes verify until the user logs in or the invite is revoked |
 | AES cookie key | Quarterly, suspected leak, or on operator transition | [docs/session_scoring_runbook.md:68-84](../../docs/session_scoring_runbook.md) two-slot rotation; new key in slot A, old in slot B | Two-slot ConfigStore. Wait ≥ session-idle-timeout (default 30 min) before second rotation |
 
 ### 2.2 The grace-window pattern (the AES model, generalised)
@@ -40,7 +40,7 @@ Use this pattern when a secret signs/encrypts material that needs to remain read
 3. **Issue** new artifacts with primary; **verify** incoming artifacts against (primary OR secondary) for one full lifetime of the artifact.
 4. **Demote** secondary after that window. Optional: keep secondary archived for forensic decrypt of historical artifacts.
 
-The AES rotation endpoint ([backend/routers/session_scoring_admin.py:857-925](../../backend/routers/session_scoring_admin.py)) implements this. New rotation-bearing secrets follow the same shape.
+The AES rotation endpoint (backend/routers/session_scoring_admin.py:857-925) implements this. New rotation-bearing secrets follow the same shape.
 
 **Do NOT** rotate twice within the grace window. The runbook IMPORTANT note exists because we've seen the consequence — every cookie signed under the original key becomes tampered-looking the moment the second rotation evicts the previous slot.
 
@@ -80,7 +80,7 @@ If/when SOC2 (or equivalent compliance) becomes a real requirement, replace this
 - **Frontend credential storage.** Tokens in localStorage, env-loaded API URLs, etc. live in the frontend codebase.
 - **TLS certificate rotation** for production domains — Fastly-managed, not an application secret.
 - **Database authentication** (DuckDB, SQLite) — local, ephemeral, not an API secret.
-- **External breach-list integration** (HIBP k-anonymity). The hook exists ([backend/core/share_db/passcode.py:144](../../backend/core/share_db/passcode.py)) but the external service integration is its own concern.
+- **External breach-list integration** (HIBP k-anonymity). The hook exists (backend/core/share_db/passcode.py:144) but the external service integration is its own concern.
 - **Compute@Edge / VCL secrets** beyond what ConfigStore provisioning manages. The edge scorer's secret management is owned by the Compute service deployment, not this backend.
 - **Compliance audit retention.** Audit log retention/export for compliance purposes is a separate problem; this ADR covers the rotation machinery, not the audit trail policy.
 
@@ -91,7 +91,7 @@ If/when SOC2 (or equivalent compliance) becomes a real requirement, replace this
 | AES key rotated twice within grace window | Every cookie signed under the original key flags as tampered → forced re-login for all active sessions. Recovery: wait out the session-idle-timeout (~30 min); affected users re-authenticate. Document in a session note. |
 | Fastly API key revoked without backend env update | Backend's Fastly API calls start failing 401. Stats / provisioning ops break. Recovery: update env, redeploy. Surface via `/api/admin/health-snapshot` if it doesn't already (TODO). |
 | CDN secret regenerated without service config save | New secret is in memory; restart loses it; clients calling with old secret get 4xx. Recovery: re-run the regenerate endpoint or POST the new secret via service-update. |
-| Passcode hash format upgraded mid-flight | `verify_passcode` checks argon2id first, falls through to scrypt for legacy hashes. Old hashes keep working; new ones use argon2id. No active recovery needed. |
+| Passcode hash parameters raised mid-flight | `verify_passcode` verifies argon2id hashes regardless of their cost parameters; `needs_rehash` flags lower-cost hashes and login rewrites them. No active recovery needed. |
 | Share session host suspected compromised | No documented incident playbook today. Manual procedure: revoke all invites for the affected service via admin endpoint; force all analysts to re-login. Add to this ADR if it happens. |
 | Secret accidentally committed | gitleaks fails the commit. Recovery: rewrite history (`git rebase -i` + force-push if branch is private) AND rotate the secret per §2.3 because git history is not a security boundary. |
 | Secret leaked in a log line | Hard to detect after the fact. Recovery per §2.3 — assume the secret is public, rotate immediately, audit what's been accessed under it. |

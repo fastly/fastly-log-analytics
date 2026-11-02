@@ -1,252 +1,334 @@
-"""Tests for backend.repositories.rum — client_vitals / client_errors query layer.
-
-This repository queries the modern RUM dataset stored in DuckDB/Iceberg.
-"""
+"""Tests for Standard-mode ``backend.repositories.rum`` against DuckDB."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from backend.repositories import rum as rum_repo
-from backend.repositories._base import QueryRunner
 
 
-def _runner(con, source) -> QueryRunner:
-    return QueryRunner(con, source)
-
-
-def test_get_web_vitals_summary_computes_percentiles_per_metric(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
+def _create_raw_rum_tables(con) -> None:
     con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    # LCP values 1,2,3,4 in the same hour bucket -> p50 should land at 2.5 (linear interpolation).
-    for v in (1.0, 2.0, 3.0, 4.0):
-        con.execute(
-            "INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', ?)",
-            [base, v],
+        """
+        CREATE TABLE client_vitals (
+            timestamp TIMESTAMPTZ,
+            req_id VARCHAR,
+            cid VARCHAR,
+            metric_name VARCHAR,
+            metric_value DOUBLE,
+            metric_rating VARCHAR,
+            browser VARCHAR,
+            os VARCHAR,
+            device VARCHAR,
+            pathname VARCHAR,
+            city VARCHAR,
+            region VARCHAR,
+            country VARCHAR,
+            pop VARCHAR,
+            tls VARCHAR,
+            ttfb DOUBLE
         )
-    runner = _runner(con, test_service_source)
-
-    rows = rum_repo.get_web_vitals_summary(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
-
-    assert len(rows) == 1
-    hour, metric_name, p50, p75, p95, count = rows[0]
-    assert metric_name == "LCP"
-    assert count == 4
-    assert p50 == 2.5
-
-
-def test_get_web_vitals_summary_excludes_metrics_outside_the_known_set(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
-    con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    con.execute("INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', 2.0)", [base])
-    con.execute(
-        "INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'NOT_A_REAL_METRIC', 99.0)", [base]
-    )
-    runner = _runner(con, test_service_source)
-
-    rows = rum_repo.get_web_vitals_summary(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
-
-    metric_names = {r[1] for r in rows}
-    assert metric_names == {"LCP"}
-
-
-def test_get_web_vitals_summary_respects_time_window(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
-    con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    con.execute("INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', 2.0)", [base])
-    con.execute(
-        "INSERT INTO client_vitals (timestamp, metric_name, metric_value) VALUES (?, 'LCP', 9.0)",
-        [base - timedelta(days=5)],
-    )
-    runner = _runner(con, test_service_source)
-
-    rows = rum_repo.get_web_vitals_summary(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
-
-    assert len(rows) == 1
-    assert rows[0][2] == 2.0  # p50 — only the in-window row counted
-
-
-def test_get_error_rate_trend_computes_percentage_across_vitals_and_errors(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
-    con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+        """
     )
     con.execute(
-        "CREATE TABLE client_errors ("
-        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    # 3 vitals beacons (no error) + 1 error beacon => 4 total, 1 error => 25%.
-    for i in range(3):
-        con.execute(
-            "INSERT INTO client_vitals (timestamp, metric_name, metric_value, req_id) VALUES (?, 'LCP', 2.0, ?)",
-            [base, f"req_v_{i}"],
+        """
+        CREATE TABLE client_errors (
+            timestamp TIMESTAMPTZ,
+            req_id VARCHAR,
+            cid VARCHAR,
+            pathname VARCHAR,
+            error_message VARCHAR,
+            error_file VARCHAR,
+            error_line BIGINT,
+            error_col BIGINT,
+            browser VARCHAR,
+            os VARCHAR,
+            device VARCHAR,
+            city VARCHAR,
+            region VARCHAR,
+            country VARCHAR,
+            pop VARCHAR,
+            tls VARCHAR,
+            ttfb DOUBLE
         )
+        """
+    )
+
+
+def _create_rollup_rum_tables(con) -> None:
     con.execute(
-        "INSERT INTO client_errors (timestamp, error_message, req_id) VALUES (?, 'TypeError: boom', 'req_err_1')",
+        """
+        CREATE TABLE rum_vitals_aggregates (
+            service_id VARCHAR,
+            bucket_start TIMESTAMPTZ,
+            dimension VARCHAR,
+            value VARCHAR,
+            event_count BIGINT,
+            value_sum DOUBLE,
+            good_count BIGINT,
+            ni_count BIGINT,
+            poor_count BIGINT,
+            p50_value DOUBLE,
+            p75_value DOUBLE,
+            p99_value DOUBLE
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE rum_error_aggregates (
+            service_id VARCHAR,
+            bucket_start TIMESTAMPTZ,
+            dimension VARCHAR,
+            value VARCHAR,
+            error_count BIGINT
+        )
+        """
+    )
+
+
+def test_get_beacon_health_and_header_stats_and_schema(in_memory_duckdb) -> None:
+    con = in_memory_duckdb
+    assert rum_repo.get_client_vitals_columns(con) is None
+
+    _create_raw_rum_tables(con)
+    cols = rum_repo.get_client_vitals_columns(con)
+    assert cols is not None
+    assert "metric_name" in cols
+    assert "pathname" in cols
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    old_ts = now - timedelta(hours=3)
+    recent_vital_ts = now - timedelta(minutes=20)
+    recent_err_ts = now - timedelta(minutes=5)
+
+    con.execute(
+        "INSERT INTO client_vitals (timestamp, req_id, cid, metric_name, metric_value, metric_rating, pathname) "
+        "VALUES (?, 'r-old', 'c1', 'LCP', 1200.0, 'good', '/home'), "
+        "(?, 'r-recent', 'c2', 'LCP', 1800.0, 'good', '/home')",
+        [old_ts, recent_vital_ts],
+    )
+    con.execute(
+        "INSERT INTO client_errors (timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col) "
+        "VALUES (?, 'r-err', 'c3', '/checkout', 'ReferenceError: x', 'app.js', 10, 2)",
+        [recent_err_ts],
+    )
+
+    recent_count, newest_dt = rum_repo.get_beacon_health(con)
+    assert recent_count == 2
+    assert newest_dt == recent_err_ts
+
+    distinct_beacons, header_newest = rum_repo.get_header_stats(con)
+    assert distinct_beacons == 3
+    assert header_newest == recent_err_ts
+
+
+def test_fetch_rum_analytics_raw_scan_and_empty_state(in_memory_duckdb) -> None:
+    con = in_memory_duckdb
+    _create_raw_rum_tables(con)
+
+    base = datetime(2026, 8, 5, 10, 15, 0, tzinfo=UTC)
+    start_iso = (base - timedelta(hours=1)).isoformat()
+    end_iso = (base + timedelta(hours=1)).isoformat()
+
+    empty = rum_repo.fetch_rum_analytics(
+        con,
+        service_id="svc-std",
+        start_time=start_iso,
+        end_time=end_iso,
+        parsed_filters={},
+        where_sql="timestamp >= ? AND timestamp <= ?",
+        params=[start_iso, end_iso],
+        raw_window_max_s=86400,
+    )
+    assert empty == {"no_data": True}
+
+    con.execute(
+        """
+        INSERT INTO client_vitals (
+            timestamp, req_id, cid, metric_name, metric_value, metric_rating,
+            browser, os, device, pathname
+        ) VALUES
+            (?, 'req-1', 'c1', 'LCP', 1500.0, 'good', 'Chrome', 'macOS', 'Desktop', '/'),
+            (?, 'req-2', 'c2', 'LCP', 4200.0, 'poor', 'Safari', 'iOS', 'Mobile', '/checkout'),
+            (?, 'req-3', 'c3', 'CLS', 0.05, 'good', 'Chrome', 'macOS', 'Desktop', '/'),
+            (?, 'req-4', 'c4', 'event_click', 12.0, 'good', 'Chrome', 'macOS', 'Desktop', '/checkout')
+        """,
+        [base, base, base, base],
+    )
+    con.execute(
+        """
+        INSERT INTO client_errors (
+            timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col
+        ) VALUES
+            (?, 'req-err-1', 'c2', '/checkout', 'TypeError: boom', 'checkout.js', 42, 7)
+        """,
         [base],
     )
-    runner = _runner(con, test_service_source)
 
-    rows = rum_repo.get_error_rate_trend(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
+    result = rum_repo.fetch_rum_analytics(
+        con,
+        service_id="svc-std",
+        start_time=start_iso,
+        end_time=end_iso,
+        parsed_filters={},
+        where_sql="timestamp >= ? AND timestamp <= ?",
+        params=[start_iso, end_iso],
+        raw_window_max_s=86400,
+    )
 
-    assert len(rows) == 1
-    _hour, error_count, total_beacons, error_rate_pct = rows[0]
-    assert error_count == 1
-    assert total_beacons == 4
-    assert error_rate_pct == 25.0
+    assert result["no_data"] is False
+    assert result["pageviews"] == 3
+    assert result["interactions"] == 1
+    assert result["errors_count"] == 1
+    assert result["total_beacons"] == 5
+    assert result["browsers"] == {"Chrome": 3, "Safari": 1}
+    assert result["os"] == {"macOS": 3, "iOS": 1}
+    assert result["devices"] == {"Desktop": 3, "Mobile": 1}
+
+    vitals_by_name = {row[0]: row for row in result["vitals_rows"]}
+    assert vitals_by_name["LCP"][2] == 2  # total_count
+    assert vitals_by_name["LCP"][3] == 1  # good_count
+    assert vitals_by_name["LCP"][5] == 1  # poor_count
+
+    assert result[" worst_pages_rows" if " worst_pages_rows" in result else "worst_pages_rows"][0][0] == "/checkout"
+    assert result["errors_rows"] == [("TypeError: boom", "checkout.js", 42, 7, 1)]
+    assert len(result["trends_rows"]) == 1
 
 
-def test_get_error_rate_trend_zero_beacons_does_not_divide_by_zero(in_memory_duckdb, test_service_source):
+def test_fetch_rum_analytics_rollup_and_tail_merge(in_memory_duckdb) -> None:
     con = in_memory_duckdb
+    _create_raw_rum_tables(con)
+    _create_rollup_rum_tables(con)
+
+    bucket_closed = datetime(2026, 8, 1, 10, 0, 0, tzinfo=UTC)
+    bucket_tail = datetime(2026, 8, 5, 11, 0, 0, tzinfo=UTC)
+    tail_ts = bucket_tail + timedelta(minutes=15)
+
     con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+        """
+        INSERT INTO rum_vitals_aggregates VALUES
+            ('svc-std', ?, 'total', 'pageviews', 10, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'total', 'interactions', 2, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'total', 'total_beacons', 12, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'metric_name', 'LCP', 10, 18000.0, 8, 1, 1, 1600.0, 2100.0, 3200.0),
+            ('svc-std', ?, 'browser', 'Chrome', 10, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'os', 'macOS', 10, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'device', 'Desktop', 10, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'pathname', '/home', 10, 0.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'path_metric_load', '/home', 10, 18000.0, 0, 0, 0, 0.0, 0.0, 0.0),
+            ('svc-std', ?, 'path_metric_lcp', '/home', 10, 0.0, 0, 0, 0, 0.0, 2100.0, 0.0)
+        """,
+        [bucket_closed] * 10,
     )
     con.execute(
-        "CREATE TABLE client_errors ("
-        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+        """
+        INSERT INTO rum_error_aggregates VALUES
+            ('svc-std', ?, 'total', 'errors', 1),
+            ('svc-std', ?, 'pathname', '/home', 1),
+            ('svc-std', ?, 'exception', 'SyntaxError: bad|bundle.js|12|4', 1)
+        """,
+        [bucket_closed] * 3,
     )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    runner = _runner(con, test_service_source)
 
-    rows = rum_repo.get_error_rate_trend(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
+    assert rum_repo.count_aggregate_buckets(con, "svc-std") == 1
 
-    assert rows == []
+    # Add un-aggregated tail events in a newer hour so RUM_EFF_*_AGG_CREATE merges them.
+    con.execute(
+        """
+        INSERT INTO client_vitals (
+            timestamp, req_id, cid, metric_name, metric_value, metric_rating,
+            browser, os, device, pathname
+        ) VALUES
+            (?, 'tail-req-1', 'c9', 'LCP', 1900.0, 'good', 'Firefox', 'Linux', 'Desktop', '/tail')
+        """,
+        [tail_ts],
+    )
+    con.execute(
+        """
+        INSERT INTO client_errors (
+            timestamp, req_id, cid, pathname, error_message, error_file, error_line, error_col
+        ) VALUES
+            (?, 'tail-err-1', 'c9', '/tail', 'RangeError: oob', 'tail.js', 9, 1)
+        """,
+        [tail_ts],
+    )
+
+    start_iso = (bucket_closed - timedelta(hours=1)).isoformat()
+    end_iso = (bucket_tail + timedelta(hours=1)).isoformat()
+
+    result = rum_repo.fetch_rum_analytics(
+        con,
+        service_id="svc-std",
+        start_time=start_iso,
+        end_time=end_iso,
+        parsed_filters={},
+        where_sql="timestamp >= ? AND timestamp <= ?",
+        params=[start_iso, end_iso],
+        raw_window_max_s=3600,  # multi-day window > 1h uses rollup + tail merge
+    )
+
+    assert result["no_data"] is False
+    assert result["_approx"] is True
+    assert result["pageviews"] == 11
+    assert result["interactions"] == 2
+    assert result["errors_count"] == 2
+    assert result["total_beacons"] == 14
+    assert result["browsers"] == {"Chrome": 10, "Firefox": 1}
+    assert ("SyntaxError: bad", "bundle.js", 12, 4, 1) in result["errors_rows"]
+    assert ("RangeError: oob", "tail.js", 9, 1, 1) in result["errors_rows"]
 
 
-def test_get_worst_pages_orders_by_combined_poor_percentage(in_memory_duckdb, test_service_source):
+def test_fetch_rum_live_events_and_prune_missing_view_files(in_memory_duckdb, tmp_path: Path) -> None:
     con = in_memory_duckdb
+    _create_raw_rum_tables(con)
+
+    t1 = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 8, 5, 12, 1, 0, tzinfo=UTC)
+    # Insert duplicate vital rows to verify QUALIFY deduplication and ordering.
     con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    # /bad: LCP+INP+CLS all poor for both sessions (100% poor on every metric).
-    # /good: same three metrics present but rated good (0% poor on every
-    # metric) — every metric type must be present on both pages so neither
-    # page's *_poor_pct is NULL (NULLIF divide-by-zero), keeping the DESC
-    # ordering by the summed percentage well-defined.
-    for cid in ("s1", "s2"):
-        for metric in ("LCP", "INP", "CLS"):
-            con.execute(
-                "INSERT INTO client_vitals (timestamp, metric_name, metric_rating, pathname, cid) VALUES (?, ?, 'poor', '/bad', ?)",
-                [base, metric, cid],
-            )
-            con.execute(
-                "INSERT INTO client_vitals (timestamp, metric_name, metric_rating, pathname, cid) VALUES (?, ?, 'good', '/good', ?)",
-                [base, metric, cid],
-            )
-    runner = _runner(con, test_service_source)
-
-    rows = rum_repo.get_worst_pages(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
-
-    assert [r[0] for r in rows] == ["/bad", "/good"]
-    assert rows[0][1] == 100.0  # lcp_poor_pct for /bad
-    assert rows[0][4] == 2  # session_count
-    assert rows[1][1] == 0.0  # lcp_poor_pct for /good
-
-
-def test_get_worst_pages_respects_limit(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
-    con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    for i in range(5):
-        con.execute(
-            "INSERT INTO client_vitals (timestamp, metric_name, metric_rating, pathname, cid) VALUES (?, 'LCP', 'poor', ?, 's1')",
-            [base, f"/page{i}"],
-        )
-    runner = _runner(con, test_service_source)
-
-    rows = rum_repo.get_worst_pages(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1), limit=2)
-
-    assert len(rows) == 2
-
-
-def test_get_worst_sessions_requires_more_than_five_metrics(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
-    con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+        """
+        INSERT INTO client_vitals (
+            timestamp, pathname, metric_name, metric_value, metric_rating,
+            browser, os, device, cid, req_id, city, region, country, pop, tls, ttfb
+        ) VALUES
+            (?, '/p1', 'LCP', 1100.0, 'good', 'Chrome', 'macOS', 'Desktop', 'c1', 'r1', 'Denver', 'CO', 'US', 'DEN', 'TLSv1.3', 45.0),
+            (?, '/p1', 'LCP', 1100.0, 'good', 'Chrome', 'macOS', 'Desktop', 'c1', 'r1', 'Denver', 'CO', 'US', 'DEN', 'TLSv1.3', 45.0)
+        """,
+        [t1, t1],
     )
     con.execute(
-        "CREATE TABLE client_errors ("
-        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
+        """
+        INSERT INTO client_errors (
+            timestamp, pathname, browser, os, device, cid, req_id,
+            error_message, error_file, error_line, city, region, country, pop, tls, ttfb
+        ) VALUES
+            (?, '/p2', 'Safari', 'iOS', 'Mobile', 'c2', 'r2', 'Error: fail', 'app.js', 5, 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 60.0)
+        """,
+        [t2],
     )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    # session "small" has only 3 metrics -> excluded by HAVING COUNT(*) > 5.
-    for i in range(3):
-        con.execute(
-            "INSERT INTO client_vitals (timestamp, metric_rating, pathname, cid) VALUES (?, 'good', ?, 'small')",
-            [base, f"/p{i}"],
-        )
-    # session "big" has 6 metrics, 2 poor -> included.
-    for i in range(6):
-        rating = "poor" if i < 2 else "good"
-        con.execute(
-            "INSERT INTO client_vitals (timestamp, metric_rating, pathname, cid) VALUES (?, ?, ?, 'big')",
-            [base, rating, f"/p{i}"],
-        )
+
+    events = rum_repo.fetch_rum_live_events(
+        con,
+        where_sql="timestamp >= ?",
+        params=[t1 - timedelta(minutes=5)],
+    )
+    assert len(events) == 2
+    assert events[0][0] == "error"
+    assert events[1][0] == "pageview"
+
+    # Verify _prune_missing_files_from_rum_views rewrites views referencing deleted parquet files.
+    valid_parquet = tmp_path / "batch_001.parquet"
+    missing_parquet = tmp_path / "batch_002.parquet"
+    con.execute(f"COPY (SELECT * FROM client_vitals) TO '{valid_parquet}' (FORMAT PARQUET)")
+    con.execute(f"COPY (SELECT * FROM client_vitals) TO '{missing_parquet}' (FORMAT PARQUET)")
+    con.execute("DROP TABLE client_vitals")
     con.execute(
-        "INSERT INTO client_errors (timestamp, cid) VALUES (?, 'big')",
-        [base],
+        f"CREATE TEMP VIEW client_vitals AS SELECT * FROM read_parquet(['{valid_parquet}', '{missing_parquet}'])"
     )
-    runner = _runner(con, test_service_source)
+    missing_parquet.unlink()
 
-    rows = rum_repo.get_worst_sessions(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1))
-
-    session_ids = [r[0] for r in rows]
-    assert session_ids == ["big"]
-    _cid, page_count, poor_metrics, error_count, _last_seen = rows[0]
-    assert page_count == 6
-    assert poor_metrics == 2
-    assert error_count == 1
-
-
-def test_get_worst_sessions_respects_limit(in_memory_duckdb, test_service_source):
-    con = in_memory_duckdb
-    con.execute(
-        "CREATE TABLE client_vitals ("
-        "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, "
-        "metric_rating VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    con.execute(
-        "CREATE TABLE client_errors ("
-        "timestamp TIMESTAMPTZ, error_message VARCHAR, pathname VARCHAR, cid VARCHAR, req_id VARCHAR)"
-    )
-    base = datetime(2026, 8, 5, 10, 0, 0, tzinfo=UTC)
-    for sid in ("a", "b", "c"):
-        for i in range(6):
-            con.execute(
-                "INSERT INTO client_vitals (timestamp, metric_rating, pathname, cid) VALUES (?, 'good', ?, ?)",
-                [base, f"/p{i}", sid],
-            )
-    runner = _runner(con, test_service_source)
-
-    rows = rum_repo.get_worst_sessions(runner, "svc1", base - timedelta(hours=1), base + timedelta(hours=1), limit=1)
-
-    assert len(rows) == 1
+    rum_repo._prune_missing_files_from_rum_views(con)
+    rows = con.execute("SELECT COUNT(*) FROM client_vitals").fetchone()
+    assert rows[0] == 2

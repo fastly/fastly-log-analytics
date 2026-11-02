@@ -1,735 +1,148 @@
-"""Log field catalog and format generator for field-aware logging configuration.
+"""Log field catalog, typed registry, metric expressions, and VCL format/safety utilities.
 
-Every loggable field is defined here: its VCL expression, DuckDB type, typical
-byte cost, and which insights require it.  Nothing else in the codebase should
-hard-code VCL log format strings.
-
-Relationship to ``backend.core.field_registry``
------------------------------------------------
-A frozen-dataclass view of this catalog lives at
-``backend/core/field_registry.py`` (`REGISTRY`, `BY_CODE`, `BY_GROUP`,
-`WIRE_ORDER`); the registry is derived from `LOG_FIELD_CATALOG` below at
-import time and stays byte-for-byte equivalent — a parity test in
-``tests/core/test_field_registry.py`` guards both views. The dual surface
-is intentional, not a transitional state: this module is the canonical
-data source, and the registry exposes the same data in a typed shape for
-callers that prefer that ergonomics. New fields must be added HERE (as a
-dict entry); the registry picks them up automatically.
-
-Usage
------
-    from backend.core.log_fields import generate_log_format, estimate_log_line_bytes, PRESETS
-
-    cfg = {"groups": ["A", "C", "D", "I"], "field_overrides": {"referer": False}}
-    fmt = generate_log_format(cfg)         # → compact single-line JSON VCL string
-    size = estimate_log_line_bytes(cfg)    # → ~490
-
-Group IDs
----------
-    None  Always-on (locked, cannot be disabled)
-    A     Request Identity
-    B     Cache Deep-Dive
-    C     Infrastructure
-    D     Geolocation Basic
-    E     Geolocation Precision  (requires D)
-    F     Network Quality Core
-    G     Network Quality Deep   (requires F)
-    H     Security: TLS Fingerprinting
-    I     Security: Proxy & Anonymization
-    J     WAF / NGWAF
-    K     QUIC / HTTP3
-    L     Origin Metrics
-
-Opt-in (``default_off``) fields
--------------------------------
-A field may carry ``"default_off": True`` in its catalog entry. Such a field
-is EXCLUDED from ``resolve_enabled_fields`` even when its group is enabled;
-it is emitted ONLY when explicitly turned on through the per-field override
-mechanism (``field_overrides[id] = True`` — the admin log-fields toggle or
-the provisioning ``--enable-field``). This is the deliberate-opt-in gate for
-sensitive captures such as ``cookie_session`` (a stable per-session client
-identifier): selecting the security/full preset must NOT silently start
-hashing+storing session cookies. The flag is general — add it to any future
-field that should require an explicit operator choice.
+Facade module re-exporting from:
+- ``backend.core.catalog``
+- ``backend.core.presets``
+- ``backend.core.insight_definitions``
+- ``backend.core.metric_expressions``
+- ``backend.core.vcl_generator``
 """
 
-import hashlib
-import re
+from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Fastly runtime limits (distinct from the template-size cap enforced at
-# provision time in backend/provision/fastly_api.py).
-#
-# Per https://docs.fastly.com/products/network-services-resource-limits the
-# emitted log LINE is capped at 16 KiB for Deliver services (64 KiB for
-# Compute). Past the cap Fastly silently truncates — there is no error
-# surfaced to the customer, so a config whose typical line lands close to
-# 16 KiB will start emitting corrupt JSON the moment per-request values
-# (long URLs, fat headers) push it over. The template-size gate (8000
-# chars) does NOT protect against this.
-#
-# We compare the estimate against a headroom-aware threshold rather than the
-# raw cap so configs that *typically* fit are still flagged when their
-# worst-case lines have no slack. ``estimate_log_line_bytes`` returns
-# average bytes; production traffic regularly drives 2-3x that on URL- or
-# UA-heavy requests, so the threshold sits at ~60% of the cap.
-# ---------------------------------------------------------------------------
+# ruff: noqa: I001
+import hashlib  # noqa: F401
+import json  # noqa: F401
+import os  # noqa: F401
+import re  # noqa: F401
+import shutil  # noqa: F401
+import subprocess  # noqa: F401
+import sys
+import tempfile  # noqa: F401
+import types
+from typing import Any
 
-FASTLY_LOG_LINE_DELIVER_MAX = 16 * 1024  # 16 KiB hard cap, silent truncation
-FASTLY_LOG_LINE_SAFE_MAX = int(FASTLY_LOG_LINE_DELIVER_MAX * 0.60)  # 9830 bytes
-# Numeric/boolean custom fields can't be long (a u64 is ≤20 chars), so their
-# substr() reservation is clamped to this instead of the 2000-char string
-# default — otherwise they starve the line budget for later fields.
-_NUMERIC_FIELD_MAX_LEN = 20
-
-# ---------------------------------------------------------------------------
-# Custom field validation constants
-
-VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
-
-_DUCKDB_RESERVED = frozenset(
-    {
-        "select",
-        "from",
-        "where",
-        "table",
-        "column",
-        "index",
-        "view",
-        "join",
-        "on",
-        "as",
-        "is",
-        "in",
-        "not",
-        "null",
-        "true",
-        "false",
-        "and",
-        "or",
-        "case",
-        "when",
-        "then",
-        "else",
-        "end",
-        "order",
-        "group",
-        "by",
-        "having",
-        "limit",
-        "offset",
-        "union",
-        "all",
-        "distinct",
-        "with",
-        "insert",
-        "update",
-        "delete",
-        "create",
-        "drop",
-        "alter",
-        "add",
-        "set",
-        "values",
-        "into",
-        "exists",
-        "between",
-        "like",
-        "ilike",
-        "cast",
-        "try_cast",
-        "extract",
-        "interval",
-        "timestamp",
-        "date",
-        "time",
-        "integer",
-        "varchar",
-        "boolean",
-        "double",
-        "bigint",
-        "float",
-        "struct",
-        "list",
-        "map",
-        # Partition columns used internally
-        "dt",
-        "timestamp_hour",
-    }
-)
-
-_DUCKDB_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
-    "VARCHAR": {"string", "ip", "url"},
-    "INTEGER": {"numeric"},
-    "BIGINT": {"numeric"},
-    "DOUBLE": {"numeric"},
-    "BOOLEAN": {"boolean"},
-}
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Field catalog (carved out to backend/core/_log_fields_data.py for the
-# v2.0 file-size sweep — LOG_FIELD_CATALOG alone is ~970 lines).
-# ──────────────────────────────────────────────────────────────────────────
-from backend.core._log_fields_data import (  # noqa: F401
+from backend.core import catalog as _catalog_mod
+from backend.core.catalog import (  # noqa: F401
+    _BUILTIN_FIELD_NAMES,
+    _CATALOG,
+    _DEFAULT_LF_CONFIG,
+    _DUCKDB_RESERVED,
+    _DUCKDB_TYPE_VALUE_TYPE_COMPAT,
+    _NUMERIC_FIELD_MAX_LEN,
+    _SUBSTR_RE,
+    _VARIABLE_FIELD_DEFAULTS,
+    BY_CODE,
+    BY_GROUP,
+    CONN_SPEED_ENCODE,
+    DEFAULT_OFF_FIELD_IDS,
+    FASTLY_LOG_LINE_DELIVER_MAX,
+    FASTLY_LOG_LINE_SAFE_MAX,
     GROUP_DEPENDENCIES,
     GROUP_INFO,
-    INSIGHT_DEFINITIONS,
     LOG_FIELD_CATALOG,
-    PRESETS,
+    PROXY_DESC_ENCODE,
+    PROXY_TYPE_ENCODE,
+    REGISTRY,
+    VALID_NAME_RE,
+    DuckType,
+    Group,
+    LogField,
+    _detect_substr_cap,
+    _f,
+    _field_from_dict,
+    _filter_user_custom_fields,
+    _g,
+    _group_index,
+    _is_system_field,
+    _m,
+    _opt_int,
+    _opt_str,
+    _v,
+    check_log_line_budget,
+    derived,
+    duckdb_decode_case,
+    estimate_log_line_bytes,
+    get,
+    get_catalog_for_api,
+    get_custom_fields_catalog_entries,
+    get_groups_for_api,
+    get_lf_config,
+    get_required_edge_headers,
+    in_group,
+    resolve_enabled_fields,
+    try_get,
+    validate_custom_field,
+    vcl_encode_chain,
+)
+from backend.core.fastly.client import fastly  # noqa: F401
+from backend.core import (
+    insight_definitions as _insights_mod,
+    metric_expressions as _metrics_mod,
+    presets as _presets_mod,
+    vcl_generator as _vcl_mod,
+)
+from backend.core.insight_definitions import INSIGHT_DEFINITIONS, _i  # noqa: F401
+from backend.core.metric_expressions import (  # noqa: F401
+    HIT_STATES,
+    METRIC_DEFINITIONS,
+    MetricType,
+    coalesce,
+    column_or_default,
+    get_metric_sql,
+    origin_latency_us,
+    sum_or_zero,
+)
+from backend.core.presets import PRESETS, _p  # noqa: F401
+from backend.core.vcl_generator import (  # noqa: F401
+    _DESTRUCTIVE_SCOPE,
+    _FORBIDDEN_ALLOW_BACKSLASH,
+    _FORBIDDEN_STRICT,
+    MAX_REGEX_BYTES,
+    LintResult,
+    RegexValidationError,
+    VclSafetyError,
+    _auth_err,
+    _falco_binary,
+    _parse_falco_output,
+    _parse_scopes,
+    _run_falco_lint,
+    format_hash,
+    generate_log_format,
+    lint_document,
+    lint_log_format,
+    lint_vcl,
+    log_format_to_vcl_log,
+    logger,
+    validate_destructive_token,
+    validate_log_format_macro,
+    validate_quoted_literal,
+    validate_recv_exclusion_regex_with_lint,
+    validate_url_exclusion_regex,
 )
 
-# Opt-in field IDs: fields flagged ``default_off`` in the catalog are excluded
-# from ``resolve_enabled_fields`` even when their group is on, and emit only
-# when explicitly opted in via ``field_overrides``. Frozen at import time; the
-# catalog is a module-level literal so this never needs re-computing.
-DEFAULT_OFF_FIELD_IDS: frozenset[str] = frozenset(f["id"] for f in LOG_FIELD_CATALOG if f.get("default_off"))
-
-
-def resolve_enabled_fields(cfg: dict) -> set:
-    """Expand group selections and per-field overrides into a flat set of enabled field IDs.
-
-    Opt-in fields (``default_off``): a field flagged ``default_off`` in the
-    catalog is NOT auto-included by its group. It is emitted only when the
-    config explicitly opts it in via ``field_overrides[id] = True``. This is
-    the deliberate-opt-in gate for sensitive captures (e.g. ``cookie_session``,
-    a per-session client identifier) so that enabling a group / preset does
-    not silently start collecting them. Everything else is unchanged: normal
-    group fields are auto-enabled, and ``field_overrides`` can force any field
-    on (True) or off (False) regardless of its group.
-    """
-    if cfg is None:
-        # Default to standard groups if no config provided
-        cfg = {"groups": PRESETS["standard"]["groups"], "field_overrides": {}}
-
-    # Start with always-on fields
-    enabled = {f["id"] for f in LOG_FIELD_CATALOG if f["group"] is None}
-
-    # Add all fields from enabled groups (respecting dependency order)
-    enabled_groups = set(cfg.get("groups", []))
-
-    # Enforce dependencies: if a group requires another group, auto-enable it
-    changed = True
-    while changed:
-        changed = False
-        for grp, required in GROUP_DEPENDENCIES.items():
-            if grp in enabled_groups and required not in enabled_groups:
-                enabled_groups.add(required)
-                changed = True
-
-    for field in LOG_FIELD_CATALOG:
-        # ``default_off`` fields are opt-in: skip them during group expansion.
-        # An explicit ``field_overrides[id] = True`` below still turns them on.
-        if field["group"] in enabled_groups and field["id"] not in DEFAULT_OFF_FIELD_IDS:
-            enabled.add(field["id"])
-
-    # Apply per-field overrides. This is the sole path that can enable a
-    # ``default_off`` field — an explicit opt-in wins over the skip above.
-    for field_id, on in cfg.get("field_overrides", {}).items():
-        if on:
-            enabled.add(field_id)
-        else:
-            enabled.discard(field_id)
-
-    return enabled
-
-
-def get_required_edge_headers(log_fields_config: dict) -> set:
-    """Return the set of x-fos-edge-data keys required by the enabled log fields.
-
-    Analyzes the VCL expressions of all enabled fields to determine which
-    subfields of the x-fos-edge-data header must be captured at the edge.
-    """
-    enabled = resolve_enabled_fields(log_fields_config)
-    required = set()
-    # Regex to find x-fos-edge-data subfields in VCL expressions
-    pattern = re.compile(r"req\.http\.x-fos-edge-data:([a-z0-9_]+)")
-    for field in LOG_FIELD_CATALOG:
-        if field["id"] in enabled:
-            matches = pattern.findall(field["vcl"])
-            required.update(matches)
-    return required
-
-
-def generate_log_format(log_fields_config: dict) -> str:
-    """Build the VCL log format string from a log_fields config dict.
-
-    Returns a compact single-line JSON string suitable for Fastly's logging endpoint.
-    Fastly's S3/FOS logging endpoint emits one JSON object per line, so the format
-    must not contain internal newlines — DuckDB's newline_delimited reader requires this.
-
-    Aggregate-budget guard (F013): individual per-field substr() limits used
-    to be applied independently, so a config that summed url(2000) + ua(1000)
-    + referer(1000) + 7 custom fields * 2000 = ~18 KB could blow past
-    Fastly's 16 KiB silent-truncation cap, dropping the entire log line.
-    Track ``budget`` as we lay down VCL: subtract structural overhead and
-    fixed-typical-bytes up front, then clamp each variable-length field
-    (url/ua/referer + custom fields) to the remaining budget before emitting
-    its substr() limit. Greedy allocation in field-catalog order; custom
-    fields share whatever's left.
-    """
-    enabled = resolve_enabled_fields(log_fields_config)
-    limits = log_fields_config.get("field_limits") or {}
-    custom_fields = [cf for cf in log_fields_config.get("custom_fields", []) if cf.get("enabled", True)]
-
-    # Mirror estimate_log_line_bytes's structural model: braces (2) +
-    # key/quote/colon/comma overhead (~5) per enabled built-in and custom field.
-    budget = FASTLY_LOG_LINE_DELIVER_MAX
-    budget -= 2 + len(enabled) * 5
-    budget -= len(custom_fields) * 5
-    # Pre-subtract fixed-length built-ins (everything except the variable
-    # url/ua/referer trio). typical_bytes is the calibrated avg from
-    # estimate_log_line_bytes and represents what those fields actually
-    # write at run time.
-    for field in LOG_FIELD_CATALOG:
-        if field["id"] in enabled and field["id"] not in ("url", "ua", "referer"):
-            budget -= int(field.get("typical_bytes", 0) or 0)
-
-    parts = []
-    for field in LOG_FIELD_CATALOG:
-        if field["id"] in enabled:
-            vcl = field["vcl"]
-            if vcl is None:
-                continue
-            # Inject dynamic limits
-            if field["id"] == "url":
-                limit = int(limits.get("url", 2000))
-                limit = max(0, min(limit, budget))
-                budget -= limit
-                # Overwrite the static substr limit in the built-in VCL
-                vcl = vcl.replace("substr(req.url, 0, 2000)", f"substr(req.url, 0, {limit // 6})")
-            elif field["id"] == "ua":
-                # Security: keep the substr cap even when generating the
-                # alternative VCL variant. The edge-side substr (in vcl_recv)
-                # is a *first* truncation — but we never want a 100 KB header
-                # to slip through if the edge snippet is missing or fails to
-                # run (e.g., on a request that bypasses our snippet stack).
-                # An unbounded UA can truncate the entire JSON log line at
-                # the 16 KB Fastly limit, dropping the request from the audit
-                # trail entirely (repudiation attack).
-                ua_limit = int(limits.get("ua", 1000))
-                ua_limit = max(0, min(ua_limit, budget))
-                budget -= ua_limit
-                vcl = (
-                    f'"ua":"%{{json.escape(substr(if(req.http.x-fos-edge-data:ua != "",'
-                    f' req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, {ua_limit // 6}))}}V"'
-                )
-            elif field["id"] == "referer":
-                # Same reasoning as above — keep the substr cap.
-                ref_limit = int(limits.get("referer", 1000))
-                ref_limit = max(0, min(ref_limit, budget))
-                budget -= ref_limit
-                vcl = (
-                    f'"referer":"%{{json.escape(substr(if(req.http.x-fos-edge-data:referer != "",'
-                    f' req.http.x-fos-edge-data:referer, req.http.Referer), 0, {ref_limit // 6}))}}V"'
-                )
-
-            parts.append(vcl)
-
-    # Append enabled custom fields in alphabetical order for determinism
-    for cf in sorted(custom_fields, key=lambda x: x["name"]):
-        name = cf["name"]
-        stage = cf.get("collection_stage", "edge")
-        value_type = cf.get("value_type", "string")
-
-        # Cap per-field limit at remaining budget so the aggregate line
-        # cannot exceed FASTLY_LOG_LINE_DELIVER_MAX.
-        estimate = cf.get("bytes_estimate")
-        default_limit = min(max((estimate or 0) * 4, 40), 2000) if estimate else 2000
-        cf_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
-        # Numeric/boolean values are short (a u64 is ≤20 chars). Never let
-        # them reserve the 2000-char string default: greedy allocation runs
-        # in alphabetical order, so a handful of numeric fields each grabbing
-        # 2000 chars exhausts the line budget before the alphabetically-last
-        # fields, which then get substr(..., 0, 0) and silently log null.
-        # (Surfaced when edge_score_rtt_us + edge_sid both went null after
-        # the latency fields were added.)
-        if value_type in ("numeric", "boolean"):
-            cf_limit = min(cf_limit, _NUMERIC_FIELD_MAX_LEN)
-        cf_limit = max(0, min(cf_limit, budget))
-        budget -= cf_limit
-
-        if stage == "deliver":
-            # Deliver-stage fields (session-scoring) need TWO gates:
-            #   1. edge-only (fastly.ff.visits_this_service == 0) — the
-            #      shield POP never ran our scoring snippets, so the
-            #      req.http subfields don't exist there.
-            #   2. non-empty value — avoid breaking JSON.
-            # Combined into ONE if() with compound AND so we don't end up
-            # with nested if(if(...) != "", ...) which Fastly's parser
-            # rejects ("if() condition must be a simple expression, not a
-            # function call").
-            raw_expr = cf.get("vcl_log_expression") or f"req.http.x-fos-edge-data:{name}"
-            if value_type in ("numeric", "boolean"):
-                # 014: ``!= ""`` only rejects empty strings — any other
-                # text (`"true"`, ``"abc"``, ``"]"``) flows straight into
-                # the JSON log line unquoted and breaks the JSON
-                # structure, dropping the line from ingestion (log
-                # injection / repudiation). Match a strict numeric form
-                # so non-digit values fall through to ``"null"``.
-                vcl_macro = (
-                    f"if(fastly.ff.visits_this_service == 0 && "
-                    f'substr({raw_expr}, 0, {cf_limit}) ~ "^-?[0-9]+(\\\\.[0-9]+)?$", substr({raw_expr}, 0, {cf_limit}), "null")'
-                )
-                entry = f'"{name}":%{{{vcl_macro}}}V'
-            else:
-                # 016: clamp the string-field value to a sane length
-                # (default 2000) BEFORE json.escape so a multi-megabyte
-                # attacker-controlled custom field cannot push the log
-                # line past Fastly's 16 KB limit and silently drop the
-                # whole entry. The substr is INSIDE json.escape so the
-                # encoded length stays bounded.
-                vcl_macro = (
-                    f'json.escape(if(fastly.ff.visits_this_service == 0, substr({raw_expr}, 0, {cf_limit // 6}), ""))'
-                )
-                entry = f'"{name}":"%{{{vcl_macro}}}V"'
-            parts.append(entry)
-            continue
-
-        if stage == "edge":
-            expr = f"req.http.x-fos-edge-data:{name}"
-        elif stage == "origin":
-            expr = f"req.http.x-fos-origin-data:{name}"
-        else:
-            # Fallback if there's old data
-            expr = f"req.http.x-fos-edge-data:{name}"
-
-        if value_type in ("numeric", "boolean"):
-            # 014: see deliver-stage comment above — strict numeric
-            # regex instead of ``!= ""`` so a custom-field header value
-            # like ``"]"`` cannot break out of the JSON log line.
-            vcl_macro = (
-                f'if(substr({expr}, 0, {cf_limit}) ~ "^-?[0-9]+(\\\\.[0-9]+)?$", substr({expr}, 0, {cf_limit}), "null")'
-            )
-            entry = f'"{name}":%{{{vcl_macro}}}V'
-        else:
-            # 016: substr-clamp the value before json.escape so an
-            # oversized custom string field cannot push the line past
-            # Fastly's 16 KB log-line limit.
-            vcl_macro = f"json.escape(substr({expr}, 0, {cf_limit // 6}))"
-            entry = f'"{name}":"%{{{vcl_macro}}}V"'
-
-        parts.append(entry)
-
-    raw = "{" + ",".join(parts) + "}"
-    # Collapse all whitespace to single spaces (same as the old load_log_format did)
-    return re.sub(r"\s+", " ", raw).strip()
-
-
-def estimate_log_line_bytes(log_fields_config: dict) -> int:
-    """Return the estimated average uncompressed log line size in bytes."""
-    enabled = resolve_enabled_fields(log_fields_config)
-    field_bytes = sum(f["typical_bytes"] for f in LOG_FIELD_CATALOG if f["id"] in enabled)
-    # JSON structural overhead: braces (2) + key quotes (2 per field) + colon (1) + comma+space (2 per field except last)
-    structural = 2 + len(enabled) * 5
-
-    # Add enabled custom fields
-    custom_fields = log_fields_config.get("custom_fields", [])
-    custom_count = 0
-    for cf in custom_fields:
-        if cf.get("enabled", True):
-            field_bytes += cf.get("bytes_estimate", 0)
-            custom_count += 1
-    structural += custom_count * 5
-
-    return structural + field_bytes
-
-
-def check_log_line_budget(log_fields_config: dict) -> dict | None:
-    """Return a warning dict when the estimated emitted log line approaches the
-    Fastly Deliver 16 KiB cap, or None when the config is comfortably under.
-
-    The returned shape matches the ``waf_warning`` envelope used elsewhere in
-    the log-fields response so the frontend can render it without a new
-    component. ``severity`` is "error" past the hard cap and "warn" past the
-    safe-max headroom threshold.
-
-    Why a soft threshold: ``estimate_log_line_bytes`` returns the *average*
-    line size based on typical_bytes; real-request URLs and UAs routinely run
-    2-3x that. A config whose average is already 12 KB will see truncation
-    on long-URL traffic without any config-time signal. The safe-max sits at
-    ~60% of the cap so the warning fires before production starts losing
-    bytes.
-    """
-    estimate = estimate_log_line_bytes(log_fields_config)
-    if estimate >= FASTLY_LOG_LINE_DELIVER_MAX:
-        return {
-            "code": "LOG_LINE_TOO_LARGE",
-            "severity": "error",
-            "estimate_bytes": estimate,
-            "deliver_max_bytes": FASTLY_LOG_LINE_DELIVER_MAX,
-            "safe_max_bytes": FASTLY_LOG_LINE_SAFE_MAX,
-            "message": (
-                f"Estimated log line is {estimate} bytes; Fastly Deliver services "
-                f"silently truncate at {FASTLY_LOG_LINE_DELIVER_MAX} bytes (16 KiB). "
-                "Disable some fields to avoid corrupt JSON in ingested logs."
-            ),
-        }
-    if estimate >= FASTLY_LOG_LINE_SAFE_MAX:
-        return {
-            "code": "LOG_LINE_APPROACHING_LIMIT",
-            "severity": "warn",
-            "estimate_bytes": estimate,
-            "deliver_max_bytes": FASTLY_LOG_LINE_DELIVER_MAX,
-            "safe_max_bytes": FASTLY_LOG_LINE_SAFE_MAX,
-            "message": (
-                f"Estimated log line is {estimate} bytes; Fastly silently truncates "
-                f"at {FASTLY_LOG_LINE_DELIVER_MAX} bytes (16 KiB). Per-request "
-                "values (long URLs, fat headers) can push real lines past the cap. "
-                "Consider trimming optional fields."
-            ),
-        }
-    return None
-
-
-def estimate_daily_bytes(log_fields_config: dict, req_per_day: int = 1_000_000) -> dict:
-    """Return storage estimates for the given config and daily request volume."""
-    line_bytes = estimate_log_line_bytes(log_fields_config)
-    raw_bytes_day = line_bytes * req_per_day
-    # Parquet compressed is roughly 10% of raw JSON (DuckDB ZSTD + dictionary encoding)
-    parquet_bytes_day = int(raw_bytes_day * 0.10)
-    parquet_bytes_30d = parquet_bytes_day * 30
-    return {
-        "line_bytes": line_bytes,
-        "raw_mb_day": round(raw_bytes_day / (1024 * 1024), 1),
-        "parquet_mb_day": round(parquet_bytes_day / (1024 * 1024), 1),
-        "parquet_gb_30d": round(parquet_bytes_30d / (1024**3), 2),
-    }
-
-
-def format_hash(log_fields_config: dict) -> str:
-    """Return a SHA256 fingerprint of the generated log format for drift detection."""
-    fmt = generate_log_format(log_fields_config)
-    return "sha256:" + hashlib.sha256(fmt.encode()).hexdigest()
-
-
-def get_catalog_for_api(field_limits: dict[str, int] | None = None) -> list:
-    """Return a simplified catalog suitable for the /api/log-fields/catalog endpoint."""
-    result = []
-    limits = field_limits or {}
-    for f in LOG_FIELD_CATALOG:
-        entry = {
-            "id": f["id"],
-            "group": f["group"],
-            "label": f["label"],
-            "description": f["description"],
-            "duckdb_type": f["duckdb_type"],
-            "typical_bytes": f["typical_bytes"],
-            "required_by": f.get("required_by", []),
-            "formatter": f.get("formatter"),
-            "unit": f.get("unit"),
-            "precision": f.get("precision"),
-        }
-        if f.get("individually_toggleable"):
-            entry["individually_toggleable"] = True
-        if f.get("default_off"):
-            # Opt-in field: the admin UI renders it OFF even when its group is
-            # enabled, requiring an explicit toggle to start collecting it.
-            entry["default_off"] = True
-        if f.get("note"):
-            entry["note"] = f["note"]
-
-        if f["id"] == "url":
-            entry["limit"] = limits.get("url", 2000)
-            entry["has_limit"] = True
-        elif f["id"] == "ua":
-            entry["limit"] = limits.get("ua", 1000)
-            entry["has_limit"] = True
-        elif f["id"] == "referer":
-            entry["limit"] = limits.get("referer", 1000)
-            entry["has_limit"] = True
-
-        result.append(entry)
-    return result
-
-
-def get_groups_for_api() -> list:
-    """Return group metadata suitable for the /api/log-fields/catalog endpoint."""
-    result = []
-    ordered_groups = [None, "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "METRICS"]
-    for gid in ordered_groups:
-        info = GROUP_INFO[gid]
-        fields = [f for f in LOG_FIELD_CATALOG if f["group"] == gid]
-        total_bytes = sum(f["typical_bytes"] for f in fields)
-        result.append(
-            {
-                "id": gid,
-                "label": info["label"],
-                "description": info["description"],
-                "locked": info.get("locked", False),
-                "requires": info.get("requires"),
-                "note": info.get("note"),
-                "recommended_with": info.get("recommended_with"),
-                "total_bytes": total_bytes,
-                "fields": [f["id"] for f in fields],
-            }
-        )
-    return result
-
-
-def validate_group_deps(groups: list) -> list:
-    """Return a list of error strings for any unsatisfied group dependencies."""
-    errors = []
-    for grp in groups:
-        required = GROUP_DEPENDENCIES.get(grp)
-        if required and required not in groups:
-            errors.append(
-                f"Group {grp} ({GROUP_INFO[grp]['label']}) requires Group {required} "
-                f"({GROUP_INFO[required]['label']}) to also be enabled."
-            )
-    return errors
-
-
-# ---------------------------------------------------------------------------
-# Custom field support
-
-_BUILTIN_FIELD_NAMES = frozenset(f["id"] for f in LOG_FIELD_CATALOG)
-# Iceberg partition columns that must not be used as field names
-_RESERVED_PARTITION_COLS = frozenset({"dt", "timestamp_hour"})
-
-
-def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
-    """Validate a custom field definition dict.
-
-    Parameters
-    ----------
-    field : dict
-        The candidate custom field (user-supplied, not yet saved).
-    existing_names : list[str]
-        Names of all currently saved custom fields for this service
-        (excluding the field being validated, for update operations).
-
-    Returns
-    -------
-    list[str]
-        List of human-readable error strings. Empty means valid.
-        Warnings are prefixed with "WARN: ".
-    """
-    errors: list[str] = []
-    name = field.get("name", "")
-
-    # 1. Required keys
-    for key in ("name", "label", "vcl_log_expression", "duckdb_type", "value_type", "bytes_estimate"):
-        if key not in field or field[key] is None:
-            errors.append(f"Missing required field: '{key}'")
-    if errors:
-        return errors
-
-    # 2. Name regex
-    if not VALID_NAME_RE.match(name):
-        errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
-
-    # 3. DuckDB/SQL reserved word
-    if name in _DUCKDB_RESERVED:
-        errors.append(f"'{name}' is a DuckDB/SQL reserved word and cannot be used as a field name")
-
-    # 4. Built-in field collision
-    if name in _BUILTIN_FIELD_NAMES:
-        errors.append(f"'{name}' is already a built-in field name")
-
-    # 5. Duplicate custom field
-    if name in existing_names:
-        errors.append(f"A custom field named '{name}' already exists on this service")
-
-    # 6. Label length
-    label = field.get("label", "")
-    if not (1 <= len(label) <= 80):
-        errors.append("'label' must be 1–80 characters")
-
-    # 7. Description length
-    desc = field.get("description", "")
-    if len(desc) > 500:
-        errors.append("'description' must not exceed 500 characters")
-
-    # 8. VCL expression
-    expr = field.get("vcl_log_expression", "")
-    if not expr.strip():
-        errors.append("'vcl_log_expression' must not be empty")
-    elif len(expr) > 512:
-        errors.append(f"'vcl_log_expression' must be ≤ 512 characters (got {len(expr)})")
-    elif "\n" in expr:
-        errors.append("'vcl_log_expression' must not contain raw newlines")
-    else:
-        # VCL injection protection — semicolons end statements; comments hide injected code.
-        # Curly braces are intentionally allowed: %{variable}V is standard VCL interpolation.
-        if ";" in expr:
-            errors.append("'vcl_log_expression' must not contain semicolons (;)")
-        if "//" in expr or "/*" in expr or "#" in expr:
-            errors.append("'vcl_log_expression' must not contain VCL comments (//, /*, or #)")
-
-    # 9. duckdb_type enum
-    valid_types = set(_DUCKDB_TYPE_VALUE_TYPE_COMPAT)
-    duckdb_type = field.get("duckdb_type", "")
-    if duckdb_type not in valid_types:
-        errors.append(f"'duckdb_type' must be one of: {', '.join(sorted(valid_types))}")
-
-    # 10. value_type enum
-    all_value_types = {"string", "numeric", "boolean", "ip", "url"}
-    value_type = field.get("value_type", "")
-    if value_type not in all_value_types:
-        errors.append(f"'value_type' must be one of: {', '.join(sorted(all_value_types))}")
-
-    # 11. duckdb_type / value_type compatibility
-    if duckdb_type in _DUCKDB_TYPE_VALUE_TYPE_COMPAT and value_type in all_value_types:
-        if value_type not in _DUCKDB_TYPE_VALUE_TYPE_COMPAT[duckdb_type]:
-            compat = ", ".join(sorted(_DUCKDB_TYPE_VALUE_TYPE_COMPAT[duckdb_type]))
-            errors.append(
-                f"'value_type' '{value_type}' is not compatible with 'duckdb_type' '{duckdb_type}'. "
-                f"Compatible value_types: {compat}"
-            )
-
-    # 12. bytes_estimate range
-    bytes_est = field.get("bytes_estimate", 0)
-    try:
-        bytes_est = int(bytes_est)
-        if not (1 <= bytes_est <= 1024):
-            errors.append("'bytes_estimate' must be between 1 and 1024")
-    except (TypeError, ValueError):
-        errors.append("'bytes_estimate' must be an integer")
-
-    # 13. Validate collection_stage
-    stage = field.get("collection_stage", "edge")
-    if stage not in ("edge", "origin"):
-        errors.append(f"'collection_stage' must be 'edge' or 'origin' (got '{stage}')")
-
-    # 14. Warn on suspiciously low bytes_estimate
-    if isinstance(bytes_est, int) and isinstance(name, str):
-        min_bytes = len(name) + 5  # key + quotes + colon + value
-        if 1 <= bytes_est < min_bytes:
-            errors.append(
-                f"WARN: 'bytes_estimate' ({bytes_est}) is less than the field name overhead "
-                f'({min_bytes} bytes for "{name}":). The estimate is likely too low.'
-            )
-
-    return errors
-
-
-def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
-    """Return custom fields in the same shape as built-in catalog entries."""
-    return [
-        {
-            "id": cf["name"],
-            "label": cf["label"],
-            "group": "custom",
-            "duckdb_type": cf.get("duckdb_type", "VARCHAR"),
-            "description": cf.get("description", ""),
-            "show_in_dashboard": cf.get("show_in_dashboard", False),
-            "show_in_logs": cf.get("show_in_logs", True),
-            "filterable": cf.get("filterable", True),
-            "value_type": cf.get("value_type", "string"),
-            "is_custom": True,
-        }
-        for cf in log_fields_config.get("custom_fields", [])
-        if cf.get("enabled", True)
-    ]
-
-
-_DEFAULT_LF_CONFIG: dict = {"schema_version": 2, "custom_fields": []}
-
-
-def get_lf_config(cfg: dict) -> dict:
-    """Return the log_fields config from a service config dict, with a safe default.
-
-    Centralises the ``cfg.get("log_fields") or {...}`` pattern used across routers.
-    """
-    return cfg.get("log_fields") or _DEFAULT_LF_CONFIG.copy()
+_SUBMODULES = (
+    _catalog_mod,
+    _presets_mod,
+    _insights_mod,
+    _metrics_mod,
+    _vcl_mod,
+)
+
+
+class _LogFieldsShimModule(types.ModuleType):
+    """Forwards attribute assignments/deletions on ``backend.core.log_fields`` to owning submodules."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        for submod in _SUBMODULES:
+            if hasattr(submod, name):
+                setattr(submod, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        super().__delattr__(name)
+
+
+_self_mod = sys.modules.get(__name__)
+if _self_mod is not None and not isinstance(_self_mod, _LogFieldsShimModule):
+    _self_mod.__class__ = _LogFieldsShimModule

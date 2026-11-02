@@ -1,0 +1,42 @@
+{
+  "_is_cached": false,
+  "beacon_count": 0,
+  "environments": {
+    "browsers": {},
+    "devices": {},
+    "os": {}
+  },
+  "error_count": 0,
+  "errors": [],
+  "interaction_count": 0,
+  "is_mock": false,
+  "message": "Waiting for real-time RUM user events...",
+  "no_data": true,
+  "pageview_count": 0,
+  "trends": {
+    "cls": [],
+    "error_rate": [],
+    "lcp": [],
+    "timestamps": []
+  },
+  "vitals": {
+    "cls": {
+      "distribution": null,
+      "p75": null
+    },
+    "fid": {
+      "fcp": null,
+      "p75": null,
+      "ttfb": null
+    },
+    "inp": {
+      "distribution": null,
+      "p75": null
+    },
+    "lcp": {
+      "distribution": null,
+      "p75": null
+    }
+  },
+  "worst_pages": []
+}

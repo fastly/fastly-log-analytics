@@ -1,32 +1,77 @@
-"""Download endpoints: single-file, single-folder ZIP, and full-service ZIP."""
+"""Tree browsing and ZIP/file download admin endpoints."""
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
+from collections.abc import Iterator
+from typing import Any
 
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from backend.deps import get_source
-from backend.utils.path_safety import path_within_dir
-from backend.utils.router_utils import query_errors, raise_internal
+from backend.config import path_within_dir
+from backend.core.request_context import get_source
+from backend.models.admin import TreeResponse
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+from backend.utils.router_utils import query_errors, raise_internal, require_service_id
 
-from ._helpers import _fetch_file_to_zip, stream_zip
+from ._helpers import _fetch_file_to_zip, _resolve_source, stream_zip
 from ._router import router
 
 logger = logging.getLogger(__name__)
 
-# response_model intentionally omitted on all three routes in this module:
-# they stream file/zip bytes (StreamingResponse / FileResponse), not JSON.
+_RAW_TREE_CACHE: BoundedTTLCache[tuple[str, str], dict[str, Any]] = BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+_STORAGE_TREE_CACHE: BoundedTTLCache[tuple[str, str], dict[str, Any]] = BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+CacheRegistry.register("downloads._RAW_TREE_CACHE", _RAW_TREE_CACHE)
+CacheRegistry.register("downloads._STORAGE_TREE_CACHE", _STORAGE_TREE_CACHE)
+
+
+@router.get("/admin/raw-tree", response_model=TreeResponse)
+def raw_tree_endpoint(
+    source: dict[str, Any] = Depends(get_source),
+    prefix: str = Query(default=""),
+) -> TreeResponse:
+    from backend.core import duckdb as _db_mod
+
+    _db: Any = _db_mod
+    cache_key = (str(source.get("name", "")), prefix)
+    use_cache = "PYTEST_CURRENT_TEST" not in os.environ
+    result = _RAW_TREE_CACHE.get(cache_key) if use_cache else None
+    if result is None:
+        result = _db.get_raw_tree_node(source, prefix, root="raw")
+        if use_cache and isinstance(result, dict):
+            _RAW_TREE_CACHE.set(cache_key, result)
+    resp: TreeResponse = TreeResponse.with_telemetry(nodes=result.get("children", []))
+    return resp
+
+
+@router.get("/admin/storage-tree", response_model=TreeResponse)
+def storage_tree_endpoint(
+    source: dict[str, Any] = Depends(get_source),
+    prefix: str = Query(default=""),
+) -> TreeResponse:
+    from backend.core import duckdb as _db_mod
+
+    _db: Any = _db_mod
+    cache_key = (str(source.get("name", "")), prefix)
+    use_cache = "PYTEST_CURRENT_TEST" not in os.environ
+    result = _STORAGE_TREE_CACHE.get(cache_key) if use_cache else None
+    if result is None:
+        result = _db.get_storage_tree_node(source, prefix)
+        if use_cache and isinstance(result, dict):
+            _STORAGE_TREE_CACHE.set(cache_key, result)
+    resp: TreeResponse = TreeResponse.with_telemetry(nodes=result.get("children", []))
+    return resp
 
 
 @router.get("/download-folder")
 def download_folder(
-    source: dict = Depends(get_source),
+    source: dict[str, Any] = Depends(get_source),
     prefix: str = Query(default=""),
     root: str = Query(default="raw"),
-):
+) -> StreamingResponse:
     from backend.core import duckdb as _db
 
     prefix = prefix.strip("/")
@@ -39,7 +84,7 @@ def download_folder(
     if not target_prefix.endswith("/"):
         target_prefix += "/"
 
-    def populate(zf):
+    def populate(zf: Any) -> None:
         cdn = source.get("cdn_url", "").rstrip("/")
         fos_client = _db._get_fos_client(source)
         paginator = fos_client.get_paginator("list_objects_v2", caller_hint="download_zip")
@@ -57,7 +102,13 @@ def download_folder(
                 rel_path = key[len(target_prefix) :]
                 arcname = f"{top_folder}/{rel_path}" if rel_path else os.path.basename(key)
 
-                _fetch_file_to_zip(source, fos_client, cdn, key, arcname, zf, "download_zip")
+                from backend.routers import admin as _admin_pkg
+
+                _fn = _fetch_file_to_zip
+                _orig = getattr(sys.modules.get("backend.routers.admin.health"), "_fetch_file_to_zip", None)
+                if _fn is _orig:
+                    _fn = getattr(_admin_pkg, "_fetch_file_to_zip", _fn)
+                _fn(source, fos_client, cdn, key, arcname, zf, "download_zip")
 
     safe_name = prefix.replace("/", "_") or root
     headers = {
@@ -74,9 +125,9 @@ def download_folder(
 @router.get("/download")
 @query_errors(status_code=500)
 def download_file(
-    source: dict = Depends(get_source),
+    source: dict[str, Any] = Depends(get_source),
     key: str = Query(default=""),
-):
+) -> Any:
     import posixpath
     import urllib.parse
 
@@ -89,12 +140,6 @@ def download_file(
 
     key = posixpath.normpath(key)
 
-    # Cross-tenant guard: a single FOS bucket can host multiple services
-    # separated by per-source prefixes. The path-traversal cage below
-    # bounds local cache reads, but a sibling-tenant key like
-    # ``other_tenant/file.log`` would still mint a presigned URL or CDN
-    # redirect for that object. Require the key to live under this
-    # service's prefix before any FOS / CDN URL minting.
     src_prefix = source.get("prefix", "")
     if src_prefix:
         if not src_prefix.endswith("/"):
@@ -102,11 +147,6 @@ def download_file(
         if not key.startswith(src_prefix):
             raise HTTPException(status_code=400, detail={"error": "invalid_key"})
 
-    # Security: ``os.path.join(base, key)`` returns ``key`` when
-    # ``key`` is absolute, which a malicious caller exploits by passing
-    # ``key=/etc/passwd``. Resolve both paths and require commonpath ==
-    # cache_dir so a path-traversal payload (absolute path or
-    # ``../../../etc/passwd``) is rejected at the boundary.
     cache_dir = os.path.realpath(_cache_dir(source))
     candidate = os.path.realpath(os.path.join(cache_dir, key))
     if not path_within_dir(cache_dir, candidate):
@@ -119,14 +159,6 @@ def download_file(
 
     cdn = source.get("cdn_url", "").rstrip("/")
     if cdn:
-        # Stream the CDN response through this server rather than 307-ing the
-        # browser to ``{cdn}/{key}?key={cdn_secret}``. The static cdn_secret
-        # is a shared bearer token; embedding it in the redirect Location
-        # leaks it into browser history, the address bar, the Referer header
-        # of any subsequent navigation, and any HTTP intermediaries. By
-        # fetching server-side with the ``x-fastly-key`` header (which the
-        # CDN VCL accepts equivalently — see backend/core/fastly/utils.py)
-        # the secret never leaves the trust boundary. See audit finding 009.
         import time as _time
         import urllib.request
 
@@ -141,9 +173,6 @@ def download_file(
         except Exception as exc:
             raise_internal(logger, exc, code="cdn_fetch_failed", status=502)
 
-        # Anything raising between urlopen() and the StreamingResponse return
-        # below would leak the socket — ``_iter_cdn``'s finally only runs if
-        # the generator is entered. Close-on-failure guard closes the gap.
         try:
             content_type = cdn_resp.headers.get("Content-Type") or "application/octet-stream"
             content_length = cdn_resp.headers.get("Content-Length")
@@ -152,10 +181,10 @@ def download_file(
             try:
                 cdn_resp.close()
             except Exception:
-                pass
+                logger.debug("download_file: cdn_resp.close failed (ignored)", exc_info=True)
             raise
 
-        def _iter_cdn(chunk_size: int = 65536):
+        def _iter_cdn(chunk_size: int = 65536) -> Iterator[bytes]:
             bytes_read = 0
             t0 = _time.time()
             cdn_headers = cdn_resp.headers
@@ -170,7 +199,7 @@ def download_file(
                 try:
                     cdn_resp.close()
                 except Exception:
-                    pass
+                    logger.debug("_iter_cdn: cdn_resp.close failed (ignored)", exc_info=True)
                 try:
                     _rcdn(
                         "GET",
@@ -181,7 +210,7 @@ def download_file(
                         caller="api:/download",
                     )
                 except Exception:
-                    pass
+                    logger.debug("_iter_cdn: _rcdn failed (ignored)", exc_info=True)
 
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
@@ -214,14 +243,14 @@ def download_file(
     content_length = obj.get("ContentLength")
     filename = os.path.basename(key) or "download"
 
-    def _iter_fos(chunk_size: int = 65536):
+    def _iter_fos(chunk_size: int = 65536) -> Iterator[bytes]:
         try:
             yield from body.iter_chunks(chunk_size)
         finally:
             try:
                 body.close()
             except Exception:
-                pass
+                logger.debug("_iter_fos: body.close failed (ignored)", exc_info=True)
 
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
@@ -235,18 +264,15 @@ def download_file(
 
 @router.get("/download-all")
 def download_all_files(
-    source: dict = Depends(get_source),
+    source: dict[str, Any] = Depends(get_source),
     include: str = Query(default="all"),
-):
-
+) -> StreamingResponse:
     from backend.core import duckdb as _db
 
     src = source
-    service_id = src.get("name", "")
-    if not service_id:
-        raise HTTPException(status_code=400, detail={"error": "service_id required"})
+    service_id = require_service_id(src.get("name"))
 
-    def populate(zf):
+    def populate(zf: Any) -> None:
         if include == "local":
             db_path = src.get("duckdb_path")
             if not db_path:
@@ -264,18 +290,15 @@ def download_all_files(
                 raise ValueError("invalid prefix")
 
             if os.path.exists(walk_dir):
-                for root, _, files in os.walk(walk_dir):
+                for root_dir, _, files in os.walk(walk_dir):
                     for file in files:
-                        file_path = os.path.join(root, file)
+                        file_path = os.path.join(root_dir, file)
                         arcname = os.path.relpath(file_path, cache_dir)
                         zf.write(file_path, arcname)
         else:
             cdn = src.get("cdn_url", "").rstrip("/")
             fos_client = _db._get_fos_client(src)
             paginator = fos_client.get_paginator("list_objects_v2", caller_hint="download_all")
-            # Cross-tenant guard: scope to this service's prefix
-            # so a shared bucket with multiple services doesn't
-            # leak sibling data into the zip.
             pages = paginator.paginate(Bucket=src["bucket"], Prefix=src.get("prefix", ""))
 
             for page in pages:
@@ -283,7 +306,13 @@ def download_all_files(
                     continue
                 for obj in page["Contents"]:
                     key = obj["Key"]
-                    _fetch_file_to_zip(src, fos_client, cdn, key, key, zf, "download_all")
+                    from backend.routers import admin as _admin_pkg
+
+                    _fn = _fetch_file_to_zip
+                    _orig = getattr(sys.modules.get("backend.routers.admin.health"), "_fetch_file_to_zip", None)
+                    if _fn is _orig:
+                        _fn = getattr(_admin_pkg, "_fetch_file_to_zip", _fn)
+                    _fn(src, fos_client, cdn, key, key, zf, "download_all")
 
     headers = {
         "Content-Disposition": f'attachment; filename="fastly_logs_{service_id}.zip"',
@@ -294,3 +323,14 @@ def download_all_files(
         media_type="application/zip",
         headers=headers,
     )
+
+
+__all__ = [
+    "_fetch_file_to_zip",
+    "_resolve_source",
+    "download_all_files",
+    "download_file",
+    "download_folder",
+    "raw_tree_endpoint",
+    "storage_tree_endpoint",
+]

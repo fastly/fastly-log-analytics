@@ -1,7 +1,19 @@
 # ADR-08 — Observability Strategy
 
-**Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective (2026-06-10)
+**Status:** Accepted (Storage Updated by [ADR-22](22-postgres-only-metadata.md))
+**Decided by:** Engineering retrospective
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **PostgreSQL 16 Unified Storage ([ADR-22](22-postgres-only-metadata.md)):** Layer 4 (`usage_log`) has migrated from per-service SQLite `metadata.db` to unified PostgreSQL 16 (`usage_log` and `usage_log_hourly_summary`), queryable across all deployment modes via `/api/admin/log-accounting`.
+> - **High-Scale Telemetry ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ClickHouse and micro-batch worker telemetry are integrated into system vitals and Prometheus/OpenTelemetry metrics.
+> - **Optional private receivers (2026-10):** The existing OTLP/HTTP
+>   exporters can send directly to private Prometheus/Tempo receivers through
+>   the opt-in Standard overlays or the existing Helm chart's separate minimal
+>   profile. No Collector or Grafana is required; existing defaults are unchanged.
+>   See the [deployment guide](../deploy/observability.md) for resource/retention
+>   bounds, private Prometheus UI access, and the distinct container-SDK and
+>   normal-request delivery proofs. Neither proves all-endpoint coverage or durability.
 
 ## 1. Context & Motivation
 
@@ -39,11 +51,17 @@ These are not SLOs (we make no uptime promise). They are the line at which a reg
 
 ### 2.3 Exporter wiring contract
 
-`OTEL_EXPORTER` (read in [backend/core/request_telemetry.py](../../backend/core/request_telemetry.py)) is the single switch:
+`OTEL_EXPORTER` (read in [backend/core/request_telemetry.py](../../backend/core/request_telemetry/)) is the single switch:
 
 - `none` (default in prod) — SDK uninitialised; spans/metrics record against global no-op providers; zero network/disk cost. Right answer for "we're not running a collector yet."
-- `console` (default in dev) — `ConsoleSpanExporter` + `ConsoleMetricExporter`. Writes to stdout. **Never set in prod** — the 2026-06-10 incident is the load-bearing reason.
-- `otlp` (when a collector is provisioned) — wire in `_setup_sdk` ([backend/core/request_telemetry.py:86](../../backend/core/request_telemetry.py)). Sampling strategy: head-based 10% for spans, 60s metric export interval. Re-evaluate once we have a real exporter target.
+- `console` (explicit development-only choice) — `ConsoleSpanExporter` +
+  `ConsoleMetricExporter`. Writes to stdout. **Never set in prod** — the
+  2026-06-10 incident is the load-bearing reason. Unset still means `none`.
+- `otlp` — the existing `_setup_sdk` in
+  [request_telemetry.py](../../backend/core/request_telemetry/) uses OTLP/HTTP
+  exporters with both explicit full signal endpoints. It supports direct
+  Prometheus metrics and Tempo traces; a Collector is not required. Metrics
+  export every 15 seconds; span sampling follows the SDK configuration.
 
 The exporter choice is honest about reality: there is no production collector today, so the production default is `none`. The frontend bug-report flow + per-service `usage_log` queries cover the cost-attribution use case that an OTLP backend would otherwise own.
 
@@ -66,15 +84,15 @@ Each entry: symptom → first thing to look at → next thing → resolution if 
 #### C. FOS / CDN cost spike
 **Symptom:** Fastly billing or Class-A counter in `/api/admin/log-accounting` shows order-of-magnitude jump from baseline.
 **Look at:** `usage_log` aggregates per `function_caller`. The 2026-05-20 incident was 517K manifest reads from one function path.
-**Then:** check MONKEYPATCHES.md for related patches; if a patch was reverted or rebased away, it likely re-opened the regression. Check pyiceberg version pin in pyproject.toml.
-**Resolution:** depends on root cause. Re-apply the relevant patch from MONKEYPATCHES.md or pin pyiceberg back to a known-good version.
+**Then:** check git history on the storage/ingest modules; if a caching or batching fix was reverted or rebased away, it likely re-opened the regression.
+**Resolution:** depends on root cause. Restore the relevant caching/batching guard or pin the affected dependency back to a known-good version.
 
 ### 2.5 What every new endpoint / cron job MUST emit
 
 Minimum bar for "good citizen" instrumentation. Reviewer enforces at PR time:
 
 - **HTTP endpoint**: nothing extra — `BaseResponse._section_timings` + structlog access log covers it. Only add a span event for sub-operations that take > 100ms.
-- **Cron job**: must call `start_progress` / `finish_progress` ([backend/cron_progress.py](../../backend/cron_progress.py)) so `/api/admin/health-snapshot` reflects it. Errors must be `logger.exception("event", service_id=..., ...)`.
+- **Cron job**: must call `start_progress` / `finish_progress` (backend/cron_progress.py) so `/api/admin/health-snapshot` reflects it. Errors must be `logger.exception("event", service_id=..., ...)`.
 - **Sub-operation that hits FOS or CDN**: must flow through the existing helpers that write `usage_log` rows. Don't bypass; if a new code path needs FOS access, route it through the existing wrapper or add a wrapper that tags `function_caller`.
 - **Anything user-facing > 100ms**: name an OTel sub-span. `start_as_current_span("descriptive_name")` so traces are inspectable when the exporter is wired.
 
@@ -115,6 +133,6 @@ It has failed if observability decisions get made ad-hoc per endpoint, if the de
 This ADR documents existing behavior; rolling back means undoing the strategy, not the code. Concretely:
 
 - Delete this ADR; the OTel + structlog + usage_log code stays in place and keeps working.
-- Remove the `STRUCTLOG_FORMAT` ([backend/utils/structlog_config.py](../../backend/utils/structlog_config.py)) / `OTEL_EXPORTER` ([backend/core/request_telemetry.py](../../backend/core/request_telemetry.py)) defaults if reverting to "no observability strategy."
+- Remove the `STRUCTLOG_FORMAT` (backend/utils/structlog_config.py) / `OTEL_EXPORTER` ([backend/core/request_telemetry.py](../../backend/core/request_telemetry/)) defaults if reverting to "no observability strategy."
 
 No code changes, no infrastructure changes. The instrumentation is decoupled from the strategy doc.

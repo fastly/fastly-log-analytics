@@ -15,10 +15,8 @@
  *   - ``openapi-typescript`` is invoked via ``npm run gen:types``, a
  *     package.json script knip doesn't introspect.
  *
- * Run via ``make knip`` (or ``cd frontend && npx knip``). The gate
- * runs but stays advisory — the baseline of intentionally-exported
- * design-system types in ``types/api.ts`` still needs per-export
- * curation before gating CI on it.
+ * Run via ``make knip`` (or ``cd frontend && npx knip``). Enforced in CI
+ * via ``make ci`` to catch dead exports and unused dependencies early.
  */
 import type { KnipConfig } from 'knip'
 
@@ -26,10 +24,11 @@ const config: KnipConfig = {
   entry: [
     'app/**/{page,layout,loading,error,not-found,route,template,default,global-error}.{ts,tsx}',
     'next.config.{js,mjs,ts}',
-    'tests/**/*.{ts,tsx}',
     '__tests__/**/*.{test,spec}.{ts,tsx}',
+    '__tests__/helpers/**/*.{ts,tsx}',
     'e2e/**/*.{ts,tsx}',
     'scripts/**/*.{js,mjs,ts}',
+    'lib/workers/*.ts',
   ],
 
   project: ['**/*.{ts,tsx}!'],

@@ -1,0 +1,82 @@
+name: E2E Nightly (Cross-Browser & Exhaustive Perf)
+
+# Exhaustive nightly E2E run:
+# - Matrix of Chromium, Firefox, WebKit
+# - PERF_EXHAUSTIVE=1 (full 27-route 5-iteration performance profiling)
+# Runs daily at 04:00 UTC and on manual dispatch.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  playwright-nightly:
+    name: Playwright Nightly (${{ matrix.browser }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: ducklake_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup E2E environment
+        uses: ./.github/actions/e2e-setup
+        with:
+          browser: ${{ matrix.browser }}
+
+      - name: Run Playwright Nightly (${{ matrix.browser }})
+        env:
+          CI: "1"
+          PLAYWRIGHT_WORKERS: "2"
+          PLAYWRIGHT_RETRIES: "1"
+          PERF_EXHAUSTIVE: "1"
+        run: cd frontend && npx playwright test --project=${{ matrix.browser }}
+
+      - name: Upload Playwright report
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: playwright-nightly-report-${{ matrix.browser }}
+          path: frontend/playwright-report
+          retention-days: 14
+
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: playwright-nightly-traces-${{ matrix.browser }}
+          path: frontend/test-results
+          retention-days: 14

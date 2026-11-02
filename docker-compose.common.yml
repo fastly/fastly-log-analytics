@@ -1,0 +1,32 @@
+# Shared service fragments. NOT a stack: never pass this file to
+# `docker compose -f`. docker-compose.yml and docker-compose.multipod.yml pull
+# these in with `extends` so the frontend, caddy and postgres definitions that
+# are identical across topologies live in one place.
+#
+# The backend is deliberately NOT factored out: tests pin its raw per-file YAML
+# (tests/architecture/test_import_boundaries.py, tests/deploy/test_gateway_deployment.py),
+# so it stays spelled out in each file.
+services:
+  frontend:
+    image: fastly-log-analytics-frontend:latest
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    environment:
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=fla
+      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
+      - POSTGRES_DB=ducklake
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fla -d ducklake"]
+      interval: 10s
+      retries: 5

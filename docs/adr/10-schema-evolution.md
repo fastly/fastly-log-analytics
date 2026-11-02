@@ -1,16 +1,22 @@
 # ADR-10 — Schema Evolution Contract
 
-**Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective (2026-06-10)
+**Status:** Accepted for field-schema rules; storage mechanics superseded by [ADR-14](14-ducklake-replacement.md) and [ADR-22](22-postgres-only-metadata.md)
+**Decided by:** Engineering retrospective
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **Metadata Storage ([ADR-22](22-postgres-only-metadata.md)):** Per-service SQLite metadata and `sqlite_migrations.py` (`PRAGMA user_version`) have been eliminated. Metadata schema evolution is defined in `backend/core/metadata/pg_schema.py` against unified PostgreSQL 16.
+> - **Table Schema ([ADR-14](14-ducklake-replacement.md)):** Durable analytical table schema evolution is handled through DuckLake rather than PyIceberg schema alteration methods.
+> - **Strict Invariants Preserved:** Additive-only schema changes and positional stability rules (`_FIELD_ORDER` and `WIRE_ORDER` in `field_registry.py` matching the Rust Scorer in `compute/scorer/`) remain active and mandatory.
 
 ## 1. Context & Motivation
 
 The codebase has working schema-evolution machinery across four layers:
 
-- **Built-in log fields** defined as dict literals in [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py), derived into a frozen [`field_registry.REGISTRY`](../../backend/core/field_registry.py) at import time.
+- **Built-in log fields** defined as dict literals in [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py), derived into a frozen `field_registry.REGISTRY` at import time.
 - **Custom log fields** per-service in service-config JSON, validated by `validate_custom_field` (VCL injection guards, type compat, name collisions).
 - **Iceberg table schema** derived dynamically from `LOG_FIELD_CATALOG + custom_fields` via `get_iceberg_schema()`; existing tables evolved via `update_schema().add_column()` in `_init_iceberg_table_locked`.
-- **Per-service metadata SQLite** versioned by `PRAGMA user_version`; migrations in [`backend/core/sqlite_migrations.py`](../../backend/core/sqlite_migrations.py) are idempotent + transactional.
+- **Per-service metadata SQLite** versioned by `PRAGMA user_version`; migrations in `backend/core/sqlite_migrations.py` (removed) are idempotent + transactional.
 - **Long-running data backfills** (rollups, hour-bundling) via the backfill helpers in [`backend/core/rollups/`](../../backend/core/rollups/) (`backfill_rollups`, `backfill_missing_bundles`, `backfill_day_bundles`), run on demand through the [`POST /api/admin/backfill-bundle-rollups`](../../backend/routers/admin/compaction.py) endpoint or the recompute cron: non-transactional, idempotent (they re-derive from the Iceberg source, so re-running is always safe).
 
 The machinery exists. What's missing is the contract for **what gets to change**, **how**, and **what gets guaranteed afterwards**. The README claims "schema evolution handled gracefully" — this ADR is what that sentence promises.
@@ -25,10 +31,10 @@ Schema evolution is **additive-only by default** at every layer. Removals, renam
 
 | Surface | Source of truth | How to add | How to remove |
 |---|---|---|---|
-| **Built-in log field** | [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py) dict + [`_FIELD_ORDER`](../../backend/core/iceberg/_core.py) tuple | Append to dict, append to `_FIELD_ORDER` (NEVER insert mid-list — IDs are positional and pinned), append to `WIRE_ORDER` if security-relevant, run `tests/core/test_field_registry.py` parity tests | Mark `deprecated: True` in catalog; keep ID slot reserved; remove from `_FIELD_ORDER` only after 2 minor versions + Rust scorer drops the field |
+| **Built-in log field** | [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py) dict + [`_FIELD_ORDER`](../../backend/core/storage/_core.py) tuple | Append to dict, append to `_FIELD_ORDER` (NEVER insert mid-list — IDs are positional and pinned), append to `WIRE_ORDER` if security-relevant, run `tests/core/test_field_registry.py` parity tests | Mark `deprecated: True` in catalog; keep ID slot reserved; remove from `_FIELD_ORDER` only after 2 minor versions + Rust scorer drops the field |
 | **Custom log field** (per-service) | Service config JSON `log_fields.custom_fields` array | POST to service-update endpoint with `validate_custom_field` checks; Iceberg adds column via `update_schema().add_column()` on next ingest | `disabled: True` in config keeps the slot reserved (ID enumeration stable); hard-removing means the next custom field gets a different ID for new services |
 | **Iceberg table** (per-service) | Derived from above; mutated via `_init_iceberg_table_locked` | Automatic on first ingest after field added | Iceberg supports `drop_column`; we do not call it. Disabled fields stay in the schema until the table is dropped + re-created. |
-| **Metadata SQLite** (per-service) | [`backend/core/sqlite_migrations.py:MIGRATIONS`](../../backend/core/sqlite_migrations.py) dict | Append `_migration_N` callable; bump `user_version`; transactional; idempotent | Migrations apply on open; loss of metadata.db is recovered by re-running all migrations against a fresh DB |
+| **Metadata SQLite** (per-service) | `backend/core/sqlite_migrations.py:MIGRATIONS` (removed) dict | Append `_migration_N` callable; bump `user_version`; transactional; idempotent | Migrations apply on open; loss of metadata.db is recovered by re-running all migrations against a fresh DB |
 | **Long-running data backfill** | backfill helpers in [`backend/core/rollups/`](../../backend/core/rollups/) | Add a `backfill_*` helper; non-transactional; must be idempotent; run on demand via [`POST /api/admin/backfill-bundle-rollups`](../../backend/routers/admin/compaction.py) or the recompute cron | No persistent tracking — backfills re-derive from the Iceberg source, so re-running from scratch is the recovery path |
 
 ### 2.2 Field-ID stability rules (Iceberg + Rust scorer)
@@ -37,8 +43,8 @@ These are the rules that break things silently when violated. Read them.
 
 1. **Built-in IDs are positional in `_FIELD_ORDER`.** Position N → ID N+1 (Iceberg field IDs are 1-indexed). Never insert; always append.
 2. **Custom IDs are derived from sorted custom-field names**, enumerated AFTER built-in IDs. Disabling a custom field reserves its slot so subsequent IDs don't shift. **Never remove a disabled custom field from the slot reservation** without a coordinated re-bind of all referencing data.
-3. **`WIRE_ORDER` in [field_registry.py](../../backend/core/field_registry.py)** is byte-identical to the order log lines emit fields. Reordering it without simultaneously updating `compute/scorer/` rust code breaks scorer parity silently — the scorer reads positionally and will mis-attribute every subsequent field. `tests/core/test_field_registry.py::test_wire_order_matches` is the gate; do not delete it.
-4. **`SECURITY_HOOK_CODES` in [field_registry.py](../../backend/core/field_registry.py)** drives which fields the scorer inspects for security signals. Adding a security-hook field is a coordinated PR: field-registry + scorer rust code + scorer fixture tests, all in one commit.
+3. **`WIRE_ORDER` in field_registry.py** is byte-identical to the order log lines emit fields. Reordering it without simultaneously updating `compute/scorer/` rust code breaks scorer parity silently — the scorer reads positionally and will mis-attribute every subsequent field. `tests/core/test_field_registry.py::test_wire_order_matches` is the gate; do not delete it.
+4. **`SECURITY_HOOK_CODES` in field_registry.py** drives which fields the scorer inspects for security signals. Adding a security-hook field is a coordinated PR: field-registry + scorer rust code + scorer fixture tests, all in one commit.
 
 ### 2.3 Backward-compat guarantees
 
@@ -52,7 +58,7 @@ For each surface, what existing-data callers can rely on:
 ### 2.4 The four-step workflow for adding a built-in log field
 
 1. **Dict entry** in [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py) — name, VCL expression, DuckDB type, group, optional `value_type` for enums.
-2. **Order pin**: append to [`_FIELD_ORDER`](../../backend/core/iceberg/_core.py), append to [`WIRE_ORDER`](../../backend/core/field_registry.py) if log-line-positional.
+2. **Order pin**: append to [`_FIELD_ORDER`](../../backend/core/storage/_core.py), append to `WIRE_ORDER` if log-line-positional.
 3. **Tests**: `tests/core/test_field_registry.py` parity tests run automatically; if the field is security-relevant, also append to `SECURITY_HOOK_CODES` and update `tests/scoring/`.
 4. **Documentation**: brief comment in catalog (one line) explaining what the field captures, where it comes from in VCL, and whether it's sensitive (analyst-visible vs admin-only).
 

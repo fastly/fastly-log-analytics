@@ -1,113 +1,135 @@
 'use client'
 
-import * as React from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, History, Info, RotateCcw } from 'lucide-react'
-
-import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { MatrixHistoryHelp } from '@/components/SessionScoring/help-content'
+import React from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { ColumnDef } from '@tanstack/react-table'
+import { History, Info, RotateCcw } from 'lucide-react'
+import { AnalyticsCard, CardErrorState } from '@/components/AnalyticsCard'
+import { DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { Skeleton } from '@/components/ui/skeleton'
-import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { SkeletonGrid } from '@/components/ui/skeleton'
+import { client, unwrapClient } from '@/lib/api'
+import { formatBytes, formatDeterministicUTC } from '@/lib/utils'
+import type { components } from '@/types/api'
+import { MatrixHistoryHelp } from './help-content'
+import { invalidateServiceScoringQueries, useScoringQuery } from './ScoringAdminPanels'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import { client } from '@/lib/api'
-import type { components } from '@/types/api.generated'
+  DeployHintBox,
+  RetrainButton,
+  RotateKeyButton,
+  AuditLogTab,
+} from './ScoringOperationsAndAudit'
 
-interface MatrixVersionsCardProps {
-  serviceId: string
-}
+export { DeployHintBox, RetrainButton, RotateKeyButton, AuditLogTab }
 
-type MatrixVersionsResponse = components['schemas']['ScoringMatrixVersionsResponse']
 type RestoreResponse = components['schemas']['ScoringMatrixRestoreResponse']
+type MatrixVersion = components['schemas']['ScoringMatrixVersion']
 
-import { formatBytes } from '@/lib/format'
-import { formatDeterministicUTC } from '@/lib/date'
-
-export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
+export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
   const qc = useQueryClient()
   const [pendingVersion, setPendingVersion] = React.useState<string | null>(null)
   const [restoreResult, setRestoreResult] = React.useState<RestoreResponse | null>(null)
-  const { copied, copy: copyText } = useCopyToClipboard(1500)
 
-  const { data, isLoading, isFetching, isError, error } = useQuery({
-    queryKey: ['scoring-matrix-versions', serviceId],
-    queryFn: async () => {
-      const { data, response } = await client.GET(
-        '/api/services/{service_id}/scoring/matrix-versions' as any,
-        {
-          params: { path: { service_id: serviceId } },
-        } as any,
-      )
-      if (!response.ok) throw new Error(`status ${response.status}`)
-      return data as MatrixVersionsResponse
-    },
-  })
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(
+    ['scoring-matrix-versions', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/matrix-versions', {
+        params: { path: { service_id: serviceId } },
+      }),
+  )
 
   const restore = useMutation({
-    mutationFn: async (version: string): Promise<RestoreResponse> => {
-      const { data, response } = await client.POST(
-        '/api/services/{service_id}/scoring/matrix-versions/{version}/restore' as any,
-        {
-          params: {
-            path: { service_id: serviceId, version },
-            query: { confirm: true },
-          },
-        } as any,
-      )
-      if (!response.ok) {
-        const msg = (data as any)?.detail?.error ?? `status ${response.status}`
-        throw new Error(msg)
-      }
-      return data as RestoreResponse
-    },
+    mutationFn: (version: string): Promise<RestoreResponse> =>
+      unwrapClient(
+        client.POST('/api/services/{service_id}/scoring/matrix-versions/{version}/restore', {
+          params: { path: { service_id: serviceId, version }, query: { confirm: true } },
+        }),
+      ),
     onSuccess: (res) => {
       setRestoreResult(res)
       setPendingVersion(null)
-      // Refresh AUC / status / versions list — every card keyed on
-      // 'scoring-*' for this service should refetch.
-      qc.invalidateQueries({
-        predicate: (q) =>
-          Array.isArray(q.queryKey) &&
-          typeof q.queryKey[0] === 'string' &&
-          (q.queryKey[0] as string).startsWith('scoring-') &&
-          q.queryKey[1] === serviceId,
-      })
+      invalidateServiceScoringQueries(qc, serviceId)
     },
   })
 
-  const onCopyHint = () => {
-    if (restoreResult?.deploy_hint) copyText(restoreResult.deploy_hint)
-  }
+  const currentVersion = data?.current_version ?? null
+  const restorePending = restore.isPending
+
+  const columns = React.useMemo<ColumnDef<MatrixVersion>[]>(
+    () => [
+      {
+        id: 'version',
+        header: 'Version',
+        accessorFn: (v) => v.version ?? '',
+        size: 260,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex items-center gap-2 font-mono text-xs">
+            <span>{row.original.version}</span>
+            {currentVersion === row.original.version && (
+              <Badge variant="default" className="text-[10px]">
+                current
+              </Badge>
+            )}
+          </div>
+        ),
+      },
+      {
+        id: 'last_modified',
+        header: 'Last modified',
+        accessorFn: (v) => v.last_modified ?? '',
+        size: 200,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="text-xs text-muted-foreground">{formatDeterministicUTC(row.original.last_modified)}</span>
+        ),
+      },
+      {
+        id: 'size_bytes',
+        header: 'Size',
+        accessorFn: (v) => v.size_bytes ?? 0,
+        size: 110,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <span className="text-xs font-mono tabular-nums">{formatBytes(row.original.size_bytes ?? 0)}</span>
+        ),
+      },
+      {
+        id: 'actions',
+        header: 'Actions',
+        size: 130,
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex justify-end">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
+              disabled={currentVersion === row.original.version || restorePending}
+              onClick={() => setPendingVersion(row.original.version ?? null)}
+            >
+              <RotateCcw className="h-3 w-3 mr-1" /> Restore
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [currentVersion, restorePending],
+  )
 
   if (isError) {
     return (
-      <Card className="border-destructive/20 bg-destructive/5">
-        <CardContent className="pt-6">
-          <div className="flex items-center gap-2 text-destructive">
-            <Info className="h-4 w-4" />
-            <span className="text-sm font-medium">Failed to load matrix versions</span>
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">
-            {(error as Error)?.message || 'Unknown error'}
-          </p>
-        </CardContent>
-      </Card>
+      <CardErrorState
+        icon={<Info className="h-4 w-4" />}
+        title="Failed to load matrix versions"
+        message={(error as Error)?.message || 'Unknown error'}
+      />
     )
   }
 
   const versions = data?.versions ?? []
-  const currentVersion = data?.current_version ?? null
-
   return (
     <AnalyticsCard
       title="Matrix history"
@@ -121,91 +143,36 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
     >
       {isLoading ? (
         <div className="p-4 space-y-2">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full" />
-          ))}
+          <SkeletonGrid count={3} height="2.5rem" className="rounded-md" />
         </div>
       ) : versions.length === 0 ? (
         <div className="p-6 text-center text-sm text-muted-foreground">
           No prior matrix versions saved yet. Versions accumulate as you retrain.
         </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Version</TableHead>
-              <TableHead>Last modified</TableHead>
-              <TableHead>Size</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {versions.map((v) => {
-              const isCurrent = currentVersion === v.version
-              return (
-                <TableRow key={v.version}>
-                  <TableCell className="font-mono text-xs">
-                    <div className="flex items-center gap-2">
-                      <span>{v.version}</span>
-                      {isCurrent && (
-                        <Badge variant="default" className="text-[10px]">current</Badge>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {formatDeterministicUTC(v.last_modified)}
-                  </TableCell>
-                  <TableCell className="text-xs font-mono tabular-nums">
-                    {formatBytes(v.size_bytes ?? 0)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive border-destructive/30"
-                      disabled={isCurrent || restore.isPending}
-                      onClick={() => setPendingVersion(v.version ?? null)}
-                    >
-                      <RotateCcw className="h-3 w-3 mr-1" />
-                      Restore
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              )
-            })}
-          </TableBody>
-        </Table>
+        <DataTableReadonly
+          columns={columns}
+          data={versions}
+          hideToolbar
+          showPagination={versions.length > 50}
+          tableCaption="Matrix versions"
+        />
       )}
-
       {restoreResult && (
         <div className="border-t p-4 space-y-2">
           <div className="text-xs font-semibold">
-            Restored matrix version{' '}
-            <span className="font-mono">{restoreResult.restored_version}</span>
+            Restored matrix version <span className="font-mono">{restoreResult.restored_version}</span>
           </div>
-          <div className="rounded-md border bg-muted overflow-hidden">
-            <div className="px-3 py-1.5 border-b bg-muted/50 flex items-center justify-between">
-              <span className="text-[10px] font-mono text-muted-foreground">
-                deploy hint
-              </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={copied ? 'Copied deploy command' : 'Copy deploy command'}
-                className="h-6 w-6 hover:bg-muted-foreground/10"
-                onClick={onCopyHint}
-                title={copied ? 'Copied!' : 'Copy to clipboard'}
-              >
-                <Copy className="h-3 w-3" />
-              </Button>
-            </div>
-            <pre className="p-3 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap leading-relaxed">
-              {restoreResult.deploy_hint}
-            </pre>
-          </div>
+          <DeployHintBox
+            title="deploy hint"
+            hint={restoreResult.deploy_hint ?? ''}
+            ariaLabel="Copy deploy command"
+            copiedAriaLabel="Copied deploy command"
+            buttonTitle="Copy to clipboard"
+            timeoutMs={1500}
+          />
         </div>
       )}
-
       <ConfirmDialog
         open={pendingVersion !== null}
         onOpenChange={(open) => {
@@ -217,23 +184,16 @@ export function MatrixVersionsCard({ serviceId }: MatrixVersionsCardProps) {
             <p>This will:</p>
             <ul className="list-disc list-inside space-y-1 text-xs">
               <li>
-                Snapshot the current matrix.json to{' '}
-                <span className="font-mono">pre-restore-{`{epoch_ms}`}</span> (reversible).
+                Snapshot the current matrix.json to <span className="font-mono">pre-restore-{`{epoch_ms}`}</span>{' '}
+                (reversible).
               </li>
+              <li>Make the chosen version live for the admin AUC immediately.</li>
               <li>
-                Make the chosen version live for the admin AUC immediately.
-              </li>
-              <li>
-                <strong>EDGE behavior:</strong> the Wasm at the edge keeps the
-                embedded matrix until <span className="font-mono">deploy_wasm.sh</span>{' '}
-                re-runs.
+                <strong>EDGE behavior:</strong> the Wasm at the edge keeps the embedded matrix until{' '}
+                <span className="font-mono">deploy_wasm.sh</span> re-runs.
               </li>
             </ul>
-            {restore.isError && (
-              <p className="text-destructive text-xs">
-                {(restore.error as Error).message}
-              </p>
-            )}
+            {restore.isError && <p className="text-destructive text-xs">{(restore.error as Error).message}</p>}
           </div>
         }
         confirmLabel="Restore version"

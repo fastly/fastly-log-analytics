@@ -1,4 +1,4 @@
-import { DashboardSkeleton } from '@/components/skeletons/PageSkeleton'
+import { DashboardSkeleton } from '@/components/ui/skeleton'
 
 export default function ControlRoomLoading() {
   return <DashboardSkeleton />

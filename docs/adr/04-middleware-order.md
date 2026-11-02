@@ -1,7 +1,7 @@
 # ADR-04 — Middleware Order
 
-**Status:** Accepted (Phase 0)
-**Decided by:** v2.0 cleanup planning
+**Status:** Accepted
+**Decided by:** Engineering retrospective
 **Supersedes:** the paragraph-long prose comments in [backend/main.py:434-501](../../backend/main.py#L434-L501)
 
 ## Context
@@ -60,7 +60,7 @@ def assert_middleware_order(app: FastAPI) -> None:
 assert_middleware_order(app)
 ```
 
-The pytest snapshot (`tests/test_trust_topology.py`) imports the app and compares `app.user_middleware` against the same tuple.
+The pytest snapshot (`tests/test_trust_topology.py` (test removed)) imports the app and compares `app.user_middleware` against the same tuple.
 
 ## Trust topology — extended invariants
 

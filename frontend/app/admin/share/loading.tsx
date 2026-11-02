@@ -1,5 +1,5 @@
-import { FormSkeleton } from '@/components/skeletons/PageSkeleton'
+import { RouteSkeleton } from '@/components/ui/skeleton'
 
 export default function Loading() {
-  return <FormSkeleton />
+  return <RouteSkeleton variant="admin-share" />
 }

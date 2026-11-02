@@ -1,22 +1,46 @@
-"""RUM asset generation and FOS upload (JS tracker, etc.)."""
-
-from __future__ import annotations
+"""RUM assets & Faro SDK management."""
 
 import hashlib
 import logging
 import xml.etree.ElementTree as ET
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
-import certifi
 import httpx
+from botocore.auth import S3SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 
 from backend import config as svcconfig
 from backend.core.faro_versions import fetch_faro_bundle
-from backend.core.fastly.utils import region_endpoint
-from backend.utils.fos_signing import sign_fos_request
+from backend.core.fastly.client import is_mock_mode, region_endpoint
+from backend.utils.http import make_client
 
 logger = logging.getLogger(__name__)
+
+
+def sign_fos_request(
+    method: str,
+    url: str,
+    headers: dict | None,
+    body: bytes,
+    access_key_id: str,
+    secret_access_key: str,
+    region: str = "us-east-1",
+) -> dict[str, str]:
+    """Sign a FOS request using AWS SigV4."""
+    if headers is None:
+        headers = {}
+
+    if "Host" not in headers and "host" not in headers:
+        headers["Host"] = urlparse(url).netloc
+
+    credentials = Credentials(access_key_id, secret_access_key)
+    aws_req = AWSRequest(method=method, url=url, headers=headers, data=body)
+    S3SigV4Auth(credentials, "s3", region).add_auth(aws_req)
+    headers.update(dict(aws_req.headers))
+    return headers
+
 
 # Faro bundles are stored per-version so a mid-upgrade failure never leaves
 # the currently-served bundle half-overwritten; cleanup sweeps this prefix.
@@ -33,6 +57,14 @@ _S3_LIST_XMLNS = "http://s3.amazonaws.com/doc/2006-03-01/"
 # as that sentinel because it's also a legitimate expected value (an
 # unpinned service).
 _NO_EXPECTATION = object()
+
+
+class _FaroPinChanged(Exception):
+    """The persisted Faro pin no longer matches the version this sync started from."""
+
+    def __init__(self, found: object) -> None:
+        super().__init__(f"faro pin is now {found!r}")
+        self.found = found
 
 
 def _faro_fos_key(version: str) -> str:
@@ -69,7 +101,8 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
     if not all([access_key, secret_key, bucket]) or not stored_hash:
         return False
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     fos_key = f"{FARO_KEY_PREFIX}{pinned_version}{FARO_KEY_SUFFIX}"
     fos_host = region_endpoint(region)
@@ -85,14 +118,21 @@ def faro_bundle_intact(cfg: dict, pinned_version: str) -> bool:
             secret_access_key=secret_key,
             region=region,
         )
-        with httpx.Client(verify=certifi.where()) as client:
-            response = client.head(fos_url, headers=headers, timeout=10.0)
+        with make_client() as client:
+            try:
+                response = client.head(fos_url, headers=headers, timeout=10.0)
+            except httpx.TimeoutException:
+                response = client.head(fos_url, headers=headers, timeout=10.0)
         if response.status_code != 200:
             return False
         etag = response.headers.get("ETag", "").strip('"')
         return etag == stored_hash
-    except Exception:
-        logger.warning("Faro FOS integrity HEAD check failed (treating as needs-restore)", exc_info=True)
+    except Exception as e:
+        logger.warning(
+            "Faro FOS integrity HEAD check failed, treating as needs-restore: %s: %s",
+            type(e).__name__,
+            e,
+        )
         return False
 
 
@@ -129,7 +169,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     1. Loads the self-hosted Faro Web SDK bundle from this service's own
        domain — always the relative, first-party ``/js/faro-sdk.js``, never
        a third-party CDN. That path is served from FOS via the RUM asset
-       fetch VCL (backend/core/fastly/rum_provisioning.py), which routes it
+       fetch VCL (backend/core/fastly/client.py), which routes it
        to the pinned bundle uploaded by ``download_and_upload_faro``.
     2. Initializes it with the service's beacon endpoint
     3. Sends beacons back to the origin
@@ -217,43 +257,83 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 
       if (metrics.length > 0) {{
         metrics.forEach(function(m) {{
-          var extra = '?service_id=' + SERVICE_ID;
-          extra += '&rum_metric_name=' + encodeURIComponent(m.name) + '&rum_metric_value=' + encodeURIComponent(m.value);
-          if (m.rating) extra += '&rum_metric_rating=' + encodeURIComponent(m.rating);
-          if (cid) extra += '&cid=' + encodeURIComponent(cid);
-          extra += '&rum_pathname=' + encodeURIComponent(pathname);
-          pendingBeacons.push(extra);
+          pendingBeacons.push({{
+            type: 'metric',
+            name: m.name,
+            value: m.value,
+            rating: m.rating || '',
+            cid: cid,
+            pathname: pathname
+          }});
         }});
       }} else if (errorMessage) {{
-        var extra = '?service_id=' + SERVICE_ID;
-        extra += '&rum_error_message=' + encodeURIComponent(errorMessage);
-        if (errorFile) extra += '&rum_error_file=' + encodeURIComponent(errorFile);
-        if (errorLine) extra += '&rum_error_line=' + errorLine;
-        if (errorCol) extra += '&rum_error_col=' + errorCol;
-        if (cid) extra += '&cid=' + encodeURIComponent(cid);
-        extra += '&rum_pathname=' + encodeURIComponent(pathname);
-        pendingBeacons.push(extra);
+        pendingBeacons.push({{
+          type: 'error',
+          message: errorMessage,
+          file: errorFile || '',
+          line: errorLine || 0,
+          col: errorCol || 0,
+          cid: cid,
+          pathname: pathname
+        }});
       }}
     }} catch (e) {{
       console.error('RUM: failed to queue unrolled beacon:', e);
     }}
   }}
 
-  // Helper to synchronously flush queued unrolled beacons
+  // Helper to synchronously flush queued beacons as a single batched request per (cid, pathname)
   function flushPendingBeacons(useBeacon) {{
     if (pendingBeacons.length === 0) return;
-    var beaconsToSend = pendingBeacons.slice();
+    var itemsToSend = pendingBeacons.slice();
     pendingBeacons = [];
 
-    beaconsToSend.forEach(function(extra) {{
+    var groups = {{}};
+    var groupKeys = [];
+    itemsToSend.forEach(function(entry) {{
+      var gKey = (entry.cid || '') + '\\0' + (entry.pathname || '/');
+      if (!groups[gKey]) {{
+        groups[gKey] = {{ cid: entry.cid || '', pathname: entry.pathname || '/', metrics: [], errors: [] }};
+        groupKeys.push(gKey);
+      }}
+      if (entry.type === 'metric') {{
+        groups[gKey].metrics.push(entry);
+      }} else if (entry.type === 'error') {{
+        groups[gKey].errors.push(entry);
+      }}
+    }});
+
+    groupKeys.forEach(function(gKey) {{
+      var g = groups[gKey];
+      var extra = '?service_id=' + SERVICE_ID;
+      var hasAnyRating = g.metrics.some(function(m) {{ return Boolean(m.rating); }});
+      g.metrics.forEach(function(m) {{
+        extra += '&rum_metric_name=' + encodeURIComponent(m.name) + '&rum_metric_value=' + encodeURIComponent(m.value);
+        if (hasAnyRating) {{
+          extra += '&rum_metric_rating=' + encodeURIComponent(m.rating || '');
+        }}
+      }});
+      var hasAnyErrorLoc = g.errors.some(function(e) {{ return Boolean(e.file || e.line || e.col); }});
+      g.errors.forEach(function(e) {{
+        extra += '&rum_error_message=' + encodeURIComponent(e.message);
+        if (hasAnyErrorLoc) {{
+          extra += '&rum_error_file=' + encodeURIComponent(e.file || '');
+          extra += '&rum_error_line=' + (e.line || 0);
+          extra += '&rum_error_col=' + (e.col || 0);
+        }}
+      }});
+      if (g.cid) extra += '&cid=' + encodeURIComponent(g.cid);
+      extra += '&rum_pathname=' + encodeURIComponent(g.pathname);
+
       var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
-      if (useBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
+      if (useBeacon && typeof navigator !== 'undefined' && typeof originalSendBeacon === 'function') {{
         originalSendBeacon.call(navigator, cleanBeaconUrl, '');
       }} else if (typeof originalFetch === 'function') {{
         originalFetch.call(window, cleanBeaconUrl, {{
           method: 'POST',
           headers: {{ 'Content-Type': 'text/plain' }},
-          body: ''
+          body: '',
+          keepalive: true
         }}).catch(function() {{}});
       }}
     }});
@@ -269,6 +349,20 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       }}
       return originalSendBeacon.call(this, url, data);
     }};
+  }}
+
+  // Flush any pending metrics immediately when the page is hidden or unloaded
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {{
+    window.addEventListener('pagehide', function() {{
+      flushPendingBeacons(true);
+    }});
+  }}
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {{
+    document.addEventListener('visibilitychange', function() {{
+      if (document.visibilityState === 'hidden') {{
+        flushPendingBeacons(true);
+      }}
+    }});
   }}
 
   // 2. Intercept fetch
@@ -377,8 +471,8 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
       samplingRate: 1.0,
       batching: {{
         enabled: true,
-        sendTimeout: 10,
-        itemLimit: 1
+        sendTimeout: 1000,
+        itemLimit: 25
       }},
 
 
@@ -469,7 +563,7 @@ def upload_rum_tracker_js(
             "skipped": bool (present and True only when readiness failed),
         }
     """
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -483,7 +577,8 @@ def upload_rum_tracker_js(
     if not all([access_key, secret_key, bucket]):
         raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     fos_key = "rum/rum-tracker.js"
     fos_host = region_endpoint(region)
@@ -509,17 +604,15 @@ def upload_rum_tracker_js(
     js_content = generate_rum_tracker_js(service_id)
     js_bytes = js_content.encode("utf-8")
 
-    import hashlib
-
     # Compared against the FOS/S3 ETag header below, which is protocol-
     # mandated MD5 of the object bytes for a single-part PUT — not a
     # security use of the hash, just matching S3's ETag semantics.
     local_md5 = hashlib.md5(js_bytes, usedforsecurity=False).hexdigest()
 
-    if bucket != "mock_bucket":
+    if not (is_mock_mode() and bucket == "mock_bucket"):
         try:
             # Check if file already exists and is up to date via HEAD request
-            with httpx.Client(verify=certifi.where()) as client:
+            with make_client() as client:
                 head_headers = sign_fos_request(
                     method="HEAD",
                     url=fos_url,
@@ -562,7 +655,7 @@ def upload_rum_tracker_js(
     }
 
     try:
-        if bucket == "mock_bucket":
+        if is_mock_mode() and bucket == "mock_bucket":
             ok(f"[MOCK] Mock uploaded RUM tracker JS ({len(js_bytes)} bytes) to {fos_key}")
             if status_cb:
                 status_cb(f"✅ RUM tracker JS uploaded ({len(js_bytes)} bytes)")
@@ -579,7 +672,7 @@ def upload_rum_tracker_js(
             )
 
             # Upload to FOS
-            with httpx.Client(verify=certifi.where()) as client:
+            with make_client() as client:
                 response = client.put(
                     fos_url,
                     content=js_bytes,
@@ -613,7 +706,7 @@ def delete_rum_tracker_js(
     status_cb=None,
 ) -> None:
     """Delete rum-tracker.js from FOS bucket (cleanup on disable)."""
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -629,7 +722,8 @@ def delete_rum_tracker_js(
         warn(f"Service {service_id} missing FOS credentials — skipping JS cleanup")
         return
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     info(f"Deleting RUM tracker JS from FOS bucket {bucket}")
     if status_cb:
@@ -652,7 +746,7 @@ def delete_rum_tracker_js(
             region=region,
         )
 
-        with httpx.Client(verify=certifi.where()) as client:
+        with make_client() as client:
             response = client.delete(
                 fos_url,
                 headers=signed_headers,
@@ -726,7 +820,7 @@ async def download_and_upload_faro(
                 guard above skipped the config write),
         }
     """
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -740,7 +834,8 @@ async def download_and_upload_faro(
     if not all([access_key, secret_key, bucket]):
         raise RuntimeError(f"Service {service_id} missing FOS credentials (access_key, secret_key, bucket)")
 
-    assert access_key is not None and secret_key is not None
+    if access_key is None or secret_key is None:
+        raise RuntimeError("access_key / secret_key is unexpectedly None")
 
     info(f"Downloading Faro Web SDK v{version}")
     if status_cb:
@@ -768,7 +863,7 @@ async def download_and_upload_faro(
         status_cb(f"⏳ Uploading Faro Web SDK v{version}…")
 
     try:
-        if bucket == "mock_bucket":
+        if is_mock_mode() and bucket == "mock_bucket":
             ok(f"[MOCK] Mock uploaded Faro Web SDK v{version} ({len(bundle)} bytes) to {fos_key}")
             if status_cb:
                 status_cb(f"✅ Faro Web SDK v{version} uploaded ({len(bundle)} bytes)")
@@ -783,7 +878,7 @@ async def download_and_upload_faro(
                 region=region,
             )
 
-            with httpx.Client(verify=certifi.where()) as client:
+            with make_client() as client:
                 response = client.put(
                     fos_url,
                     content=bundle,
@@ -807,12 +902,24 @@ async def download_and_upload_faro(
     # above may have taken long enough for a concurrent, explicit pin change
     # to land. See the expected_current_version note in this function's
     # docstring.
-    fresh_cfg = svcconfig.load_config(service_id) or cfg
-    rum_cfg = dict(fresh_cfg.get("rum") or {})
-    if expected_current_version is not _NO_EXPECTATION and rum_cfg.get("faro_version") != expected_current_version:
+    def _commit_pin(target_cfg: dict) -> None:
+        rum_cfg = dict(target_cfg.get("rum") or {})
+        if expected_current_version is not _NO_EXPECTATION and rum_cfg.get("faro_version") != expected_current_version:
+            raise _FaroPinChanged(rum_cfg.get("faro_version"))
+        rum_cfg["faro_version"] = version
+        rum_cfg["faro_content_hash"] = content_hash
+        rum_cfg["faro_fos_etag_md5"] = etag_md5
+        target_cfg["rum"] = rum_cfg
+
+    try:
+        # Compare-and-set under the config lock: the pin check and the write see the same config.
+        if svcconfig.mutate_config(service_id, _commit_pin) is None:
+            # The service was deleted mid-sync; recreating its config from the stale copy would resurrect it.
+            warn(f"Service {service_id} no longer has a config; Faro v{version} uploaded but pin not persisted")
+    except _FaroPinChanged as changed:
         warn(
             f"Faro pin for {service_id} changed concurrently while syncing v{version} "
-            f"(expected {expected_current_version!r}, found {rum_cfg.get('faro_version')!r}); "
+            f"(expected {expected_current_version!r}, found {changed.found!r}); "
             "bundle bytes uploaded to their own FOS key but config left untouched"
         )
         if status_cb:
@@ -825,12 +932,6 @@ async def download_and_upload_faro(
             "fos_key": f"s3://{bucket}/{fos_key}",
             "config_updated": False,
         }
-
-    rum_cfg["faro_version"] = version
-    rum_cfg["faro_content_hash"] = content_hash
-    rum_cfg["faro_fos_etag_md5"] = etag_md5
-    fresh_cfg["rum"] = rum_cfg
-    svcconfig.save_config(service_id, fresh_cfg)
 
     return {
         "version": version,
@@ -873,7 +974,7 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
     (listing error, transient FOS blip) must never surface to the caller —
     it would otherwise turn a successful upgrade into a reported failure.
     """
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     try:
         cfg = svcconfig.load_config(service_id)
@@ -888,7 +989,8 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
         if not all([access_key, secret_key, bucket]):
             return
 
-        assert access_key is not None and secret_key is not None
+        if access_key is None or secret_key is None:
+            raise RuntimeError("access_key / secret_key is unexpectedly None")
 
         keep_version = (cfg.get("rum") or {}).get("faro_version") if keep_current else None
         keep_key = _faro_fos_key(keep_version) if keep_version else None
@@ -896,7 +998,7 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
         fos_host = region_endpoint(region)
         list_url = f"https://{fos_host}/{bucket}?list-type=2&prefix={quote(FARO_KEY_PREFIX, safe='')}"
 
-        with httpx.Client(verify=certifi.where()) as client:
+        with make_client() as client:
             list_headers = sign_fos_request(
                 method="GET",
                 url=list_url,

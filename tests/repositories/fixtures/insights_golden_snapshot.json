@@ -1,0 +1,3022 @@
+{
+  "admin": {
+    "error_spikes": {
+      "category": "origin",
+      "title": "Error Spikes",
+      "severity": "critical",
+      "summary": "1 URLs with elevated server error rates",
+      "items": [
+        {
+          "label": "/api/err-spike",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% 5xx",
+          "meta": {
+            "requests": 5,
+            "errors": 5,
+            "filters": {
+              "url": "/api/err-spike"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Ferr-spike"
+        }
+      ]
+    },
+    "botnet_grouping": {
+      "category": "security",
+      "title": "Botnet Grouping",
+      "severity": "warning",
+      "summary": "3 fingerprints with suspicious IP spread",
+      "items": [
+        {
+          "label": "ja4_res_disp_1",
+          "current_val": 32,
+          "baseline_val": 2,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 32,
+            "ip_ratio": 32.0,
+            "filters": {
+              "ja4": "ja4_res_disp_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_res_disp_1"
+        },
+        {
+          "label": "ja4_default",
+          "current_val": 24,
+          "baseline_val": 9,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 1954,
+            "ip_ratio": 24.0,
+            "filters": {
+              "ja4": "ja4_default"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_default"
+        },
+        {
+          "label": "ja4_botnet_1",
+          "current_val": 6,
+          "baseline_val": 1,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 6,
+            "ip_ratio": 6.0,
+            "filters": {
+              "ja4": "ja4_botnet_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_botnet_1"
+        }
+      ]
+    },
+    "new_country_traffic": {
+      "category": "traffic",
+      "title": "New Country Traffic",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Iceland",
+          "current_val": 4,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "filters": {
+              "country": "IS"
+            }
+          },
+          "severity": "info",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_country=IS"
+        }
+      ]
+    },
+    "city_surges": {
+      "category": "traffic",
+      "title": "City Traffic Surges",
+      "severity": "warning",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "Ashburn, VA, United States",
+          "current_val": 1951,
+          "baseline_val": 35.916666666666664,
+          "unit": "requests",
+          "meta": {
+            "spike_ratio": 54.3,
+            "filters": {
+              "city": "Ashburn",
+              "region": "VA",
+              "country": "US"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=Ashburn&filter_region=VA&filter_country=US"
+        },
+        {
+          "label": "Surgeville, TX, United States",
+          "current_val": 25,
+          "baseline_val": 0.20833333333333334,
+          "unit": "requests",
+          "meta": {
+            "spike_ratio": 25.0,
+            "filters": {
+              "city": "SurgeVille",
+              "region": "TX",
+              "country": "US"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=SurgeVille&filter_region=TX&filter_country=US"
+        }
+      ]
+    },
+    "city_error_spikes": {
+      "category": "origin",
+      "title": "City Error Spikes",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Errtown, CA, United States",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% error",
+          "meta": {
+            "requests": 12,
+            "errors": 12,
+            "filters": {
+              "city": "ErrTown",
+              "region": "CA",
+              "country": "US"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=ErrTown&filter_region=CA&filter_country=US"
+        }
+      ]
+    },
+    "city_latency_regressions": {
+      "category": "edge",
+      "title": "City Latency Regressions",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Slowberg, NY, United States",
+          "current_val": 1500.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 15.0,
+            "requests": 12,
+            "filters": {
+              "city": "SlowBerg",
+              "region": "NY",
+              "country": "US"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=SlowBerg&filter_region=NY&filter_country=US"
+        }
+      ]
+    },
+    "new_city_traffic": {
+      "category": "traffic",
+      "title": "New City Traffic",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Freshpolis, WA, United States",
+          "current_val": 6,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "filters": {
+              "city": "FreshPolis",
+              "region": "WA",
+              "country": "US"
+            }
+          },
+          "severity": "info",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=FreshPolis&filter_region=WA&filter_country=US"
+        }
+      ]
+    },
+    "ua_monoculture": {
+      "category": "traffic",
+      "title": "User-Agent Monoculture",
+      "severity": "warning",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "MonoScraper/9.9",
+          "current_val": 25.870646766169155,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 520,
+            "filters": {
+              "ua": "MonoScraper/9.9"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ua=MonoScraper%2F9.9"
+        },
+        {
+          "label": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+          "current_val": 25.124378109452735,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 505,
+            "filters": {
+              "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ua=Mozilla%2F5.0+%28Windows+NT+10.0%3B+Win64%3B+x64%29+Chrome%2F120.0.0.0+Safari%2F537.36"
+        }
+      ]
+    },
+    "new_probe_urls": {
+      "category": "security",
+      "title": "New Probe URLs",
+      "severity": "warning",
+      "summary": "4 anomalies detected",
+      "items": [
+        {
+          "label": "/wp-admin/setup.php",
+          "current_val": 4,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/wp-admin/setup.php"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fwp-admin%2Fsetup.php"
+        },
+        {
+          "label": "/.env",
+          "current_val": 3,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/.env"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2F.env"
+        },
+        {
+          "label": "/.git/config",
+          "current_val": 2,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/.git/config"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2F.git%2Fconfig"
+        },
+        {
+          "label": "/wp-login.php",
+          "current_val": 1,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/wp-login.php"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fwp-login.php"
+        }
+      ]
+    },
+    "waf_signal_spikes": {
+      "category": "security",
+      "title": "WAF Signal Spikes",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "SQLI-PROBE",
+          "current_val": 5,
+          "baseline_val": 0.041666666666666664,
+          "unit": "hits",
+          "meta": {
+            "spike_ratio": 10.0,
+            "filters": {
+              "waf_sig_ind": "SQLI-PROBE"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_waf_sig_ind=SQLI-PROBE"
+        }
+      ]
+    },
+    "proxy_surge": {
+      "category": "security",
+      "title": "Anonymizing Proxy Surge",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "hosting",
+          "current_val": 6.0,
+          "baseline_val": null,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 120,
+            "filters": {
+              "p_type": "hosting"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_p_type=hosting"
+        }
+      ]
+    },
+    "asn_concentration": {
+      "category": "network",
+      "title": "ASN Concentration",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64501",
+          "current_val": 50.995024875621894,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 1025,
+            "asn": 64501,
+            "filters": {
+              "asn": 64501
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64501"
+        }
+      ]
+    },
+    "asn_metro_performance": {
+      "category": "network",
+      "title": "ASN/Metro Performance Regressions",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64502 in New York, NY",
+          "current_val": 120.0,
+          "baseline_val": 20.0,
+          "unit": "ms RTT",
+          "meta": {
+            "regression_ratio": 6.0,
+            "requests": 22,
+            "filters": {
+              "asn": 64502,
+              "country": "US"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64502&filter_country=US"
+        }
+      ]
+    },
+    "cache_collapse": {
+      "category": "edge",
+      "title": "Cache Efficiency Collapse",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/static/bundle.js",
+          "current_val": 0.0,
+          "baseline_val": 100.0,
+          "unit": "% HIT",
+          "meta": {
+            "window_requests": 10,
+            "baseline_requests": 25,
+            "filters": {
+              "url": "/static/bundle.js"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fstatic%2Fbundle.js"
+        }
+      ]
+    },
+    "cacheability_regression": {
+      "category": "edge",
+      "title": "Cacheability Regression",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/account/overview",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% PASS",
+          "meta": {
+            "window_requests": 12,
+            "baseline_requests": 55,
+            "filters": {
+              "url": "/account/overview"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Faccount%2Foverview"
+        }
+      ]
+    },
+    "latency_regression": {
+      "category": "edge",
+      "title": "Latency Regression",
+      "severity": "warning",
+      "summary": "4 anomalies detected",
+      "items": [
+        {
+          "label": "/city/slowberg",
+          "current_val": 1500.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 15.0,
+            "window_requests": 12,
+            "filters": {
+              "url": "/city/slowberg"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fcity%2Fslowberg"
+        },
+        {
+          "label": "/pop/den",
+          "current_val": 500.0,
+          "baseline_val": 50.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 10.0,
+            "window_requests": 22,
+            "filters": {
+              "url": "/pop/den"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fpop%2Fden"
+        },
+        {
+          "label": "/api/slow-endpoint",
+          "current_val": 900.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 9.0,
+            "window_requests": 8,
+            "filters": {
+              "url": "/api/slow-endpoint"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Fslow-endpoint"
+        },
+        {
+          "label": "/api/origin-timed",
+          "current_val": 600.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 6.0,
+            "window_requests": 55,
+            "filters": {
+              "url": "/api/origin-timed"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Forigin-timed"
+        }
+      ]
+    },
+    "impossible_distance": {
+      "category": "security",
+      "title": "Impossible Distance / Spoofing",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "ja4_spoof_fp",
+          "current_val": 8647.0,
+          "baseline_val": 200.0,
+          "baseline_label": "max allowed",
+          "unit": "km",
+          "meta": {
+            "hits": 3,
+            "excess_km": 8447.0,
+            "pop": "JFK",
+            "sample_ip": "198.51.100.77",
+            "client_lat": 0.0,
+            "client_lon": 0.0,
+            "pop_lat": 40.6413,
+            "pop_lon": -73.7781,
+            "tcp_rtt": 1000,
+            "country": "US",
+            "city": "Ashburn",
+            "filters": {
+              "ja4": "ja4_spoof_fp"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_spoof_fp"
+        }
+      ]
+    },
+    "tail_latency": {
+      "category": "edge",
+      "title": "Tail Latency Anomaly",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/api/tail-heavy",
+          "current_val": 200.0,
+          "baseline_val": 10.0,
+          "baseline_label": "P50",
+          "unit": "ms (P99 vs P50)",
+          "meta": {
+            "p99_ms": 200.0,
+            "p50_ms": 10.0,
+            "ratio": 20.0,
+            "requests": 24,
+            "filters": {
+              "url": "/api/tail-heavy"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Ftail-heavy"
+        }
+      ]
+    },
+    "cipher_spread": {
+      "category": "security",
+      "title": "Cipher Fingerprint Clustering",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "cipher_defau\u2026",
+          "current_val": 58,
+          "baseline_val": 0.5,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 2004,
+            "baseline_total_ips": 11,
+            "sha": "cipher_default",
+            "filters": {
+              "tls_ciphers_sha": "cipher_default"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_tls_ciphers_sha=cipher_default"
+        },
+        {
+          "label": "cipher_sha_b\u2026",
+          "current_val": 6,
+          "baseline_val": 0.0,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 6,
+            "baseline_total_ips": 1,
+            "sha": "cipher_sha_bot_1",
+            "filters": {
+              "tls_ciphers_sha": "cipher_sha_bot_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_tls_ciphers_sha=cipher_sha_bot_1"
+        }
+      ]
+    },
+    "request_size_anomaly": {
+      "category": "security",
+      "title": "Oversized Request Headers",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.3.0.1",
+          "current_val": 12000,
+          "baseline_val": 500,
+          "baseline_label": "P95 baseline",
+          "unit": "bytes (max header)",
+          "meta": {
+            "max_bytes": 12000,
+            "avg_bytes": 12000,
+            "requests": 4,
+            "p95_baseline": 500,
+            "filters": {
+              "ip": "10.3.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.3.0.1"
+        }
+      ]
+    },
+    "connection_abuse": {
+      "category": "security",
+      "title": "Connection Reuse Anomaly",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.4.0.1",
+          "current_val": 120,
+          "baseline_val": 5,
+          "baseline_label": "P95 baseline",
+          "unit": "reqs/conn (max)",
+          "meta": {
+            "max_conn_reqs": 120,
+            "avg_conn_reqs": 120,
+            "requests": 6,
+            "p95_baseline": 5,
+            "filters": {
+              "ip": "10.4.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.4.0.1"
+        }
+      ]
+    },
+    "region_latency": {
+      "category": "network",
+      "title": "Regional Latency Degradation",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "US-East",
+          "current_val": 600.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 6.0,
+            "window_requests": 55,
+            "filters": {
+              "server_region": "US-East"
+            },
+            "ottfb_p95_ms": 450.0
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_server_region=US-East"
+        }
+      ]
+    },
+    "cache_ttl_mismatch": {
+      "category": "edge",
+      "title": "Cache TTL Inefficiency",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/Promo/Banner",
+          "current_val": 0.0,
+          "baseline_val": null,
+          "unit": "avg hits",
+          "meta": {
+            "avg_ttl_s": 3600.0,
+            "avg_hits": 0.0,
+            "avg_age_s": 10.0,
+            "samples": 12,
+            "filters": {
+              "url": "/Promo/Banner"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2FPromo%2FBanner"
+        }
+      ]
+    },
+    "image_optimization_opportunities": {
+      "category": "edge",
+      "title": "Image Optimization Opportunities",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/media/hero-banner.png",
+          "current_val": 100.0,
+          "baseline_val": null,
+          "unit": "KB avg",
+          "meta": {
+            "requests": 10,
+            "total_mb": 0.98,
+            "mobile_ratio": 1.0,
+            "filters": {
+              "url": "/media/hero-banner.png"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fmedia%2Fhero-banner.png"
+        }
+      ]
+    },
+    "origin_latency_spike": {
+      "category": "origin",
+      "title": "Origin Latency Spike",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "/api/origin-timed",
+          "current_val": 450.0,
+          "baseline_val": 28.0,
+          "unit": "ms P95",
+          "meta": {
+            "requests": 55,
+            "filters": {
+              "url": "/api/origin-timed"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Forigin-timed"
+        },
+        {
+          "label": "/normal/page",
+          "current_val": 260.0,
+          "baseline_val": 28.0,
+          "unit": "ms P95",
+          "meta": {
+            "requests": 12,
+            "filters": {
+              "url": "/normal/page"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fnormal%2Fpage"
+        }
+      ]
+    },
+    "origin_error_rate": {
+      "category": "origin",
+      "title": "Origin Error Rate",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "HTTP 503",
+          "current_val": 33.3,
+          "baseline_val": null,
+          "unit": "%",
+          "meta": {
+            "filters": {
+              "ost": 503
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ost=503"
+        }
+      ]
+    },
+    "origin_retries": {
+      "category": "origin",
+      "title": "Origin Retries Elevated",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/api/flaky-upstream",
+          "current_val": 3.0,
+          "baseline_val": null,
+          "unit": "avg retries",
+          "meta": {
+            "max_retries": 3,
+            "filters": {
+              "url": "/api/flaky-upstream"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Fflaky-upstream"
+        }
+      ]
+    },
+    "origin_ip_failure": {
+      "category": "origin",
+      "title": "Specific Origin IP Failing",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "192.0.2.99",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% errors",
+          "meta": {
+            "requests": 12,
+            "filters": {
+              "oip": "192.0.2.99"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_oip=192.0.2.99"
+        }
+      ]
+    },
+    "shield_path_degradation": {
+      "category": "origin",
+      "title": "Shield Path Degradation",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "IAD \u2192 Direct to Origin",
+          "current_val": 450.0,
+          "baseline_val": 20.0,
+          "unit": "ms P50",
+          "severity": "critical",
+          "meta": {
+            "ratio": 22.5,
+            "requests": 55
+          },
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        },
+        {
+          "label": "LAX \u2192 IAD",
+          "current_val": 240.0,
+          "baseline_val": 40.0,
+          "unit": "ms P50",
+          "severity": "critical",
+          "meta": {
+            "ratio": 6.0,
+            "requests": 6
+          },
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "repeated_patterns": {
+      "category": "security",
+      "title": "Scripted Traffic Patterns",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.5.0.1",
+          "current_val": 10.0,
+          "baseline_val": 0.0,
+          "baseline_label": "jitter (\u03c3)",
+          "unit": "s interval",
+          "meta": {
+            "score": 100,
+            "cv": 0.0,
+            "modal_frac": 1.0,
+            "mean_interval_s": 10.0,
+            "stddev_s": 0.0,
+            "mode_gap_s": 10,
+            "n_gaps": 14,
+            "n_events": 15,
+            "span_s": 140,
+            "rps": 0.1071,
+            "distinct_ua": 1,
+            "filters": {
+              "ip": "10.5.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.5.0.1"
+        }
+      ]
+    },
+    "repeated_patterns_fp": {
+      "category": "security",
+      "title": "Scripted Traffic Patterns (by TLS Fingerprint)",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "ja4_beacon_1",
+          "current_val": 10.0,
+          "baseline_val": 0.0,
+          "baseline_label": "jitter (\u03c3)",
+          "unit": "s interval",
+          "meta": {
+            "score": 100,
+            "cv": 0.0,
+            "modal_frac": 1.0,
+            "mean_interval_s": 10.0,
+            "stddev_s": 0.0,
+            "mode_gap_s": 10,
+            "n_gaps": 14,
+            "n_events": 15,
+            "span_s": 140,
+            "rps": 0.1071,
+            "distinct_ip": 1,
+            "filters": {
+              "ja4": "ja4_beacon_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_beacon_1"
+        }
+      ]
+    },
+    "low_and_slow": {
+      "category": "security",
+      "title": "Low and Slow Scans",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.6.0.1",
+          "current_val": 3,
+          "baseline_val": null,
+          "unit": "sensitive paths",
+          "meta": {
+            "hits": 6,
+            "distinct_paths": 3,
+            "span_s": 750,
+            "rps": 0.008,
+            "filters": {
+              "ip": "10.6.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.6.0.1"
+        }
+      ]
+    },
+    "credential_enumeration": {
+      "category": "security",
+      "title": "Credential Enumeration / Brute Force",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.7.0.1",
+          "current_val": 25,
+          "baseline_val": 0,
+          "baseline_label": "baseline denied",
+          "unit": "denied (401/403)",
+          "meta": {
+            "attempts": 25,
+            "denied": 25,
+            "fail_rate_pct": 100.0,
+            "distinct_paths": 1,
+            "filters": {
+              "ip": "10.7.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.7.0.1"
+        }
+      ]
+    },
+    "network_asn_health": {
+      "category": "network",
+      "title": "Network Path (ASN) Health",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64503",
+          "current_val": 8.0,
+          "baseline_val": 0.1,
+          "unit": "% packet loss",
+          "meta": {
+            "window_packet_loss_pct": 8.0,
+            "baseline_packet_loss_pct": 0.1,
+            "window_jitter_ms": 60.0,
+            "baseline_jitter_ms": 5.0,
+            "window_retrans_avg": 2.0,
+            "baseline_retrans_avg": 0.0,
+            "requests": 55,
+            "asn": 64503,
+            "filters": {
+              "asn": 64503
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64503"
+        }
+      ]
+    },
+    "content_discovery": {
+      "category": "security",
+      "title": "Content-Discovery Scanning",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.8.0.1",
+          "current_val": 22,
+          "baseline_val": 0,
+          "baseline_label": "baseline 404s",
+          "unit": "404s",
+          "meta": {
+            "requests": 22,
+            "not_found": 22,
+            "not_found_rate_pct": 100.0,
+            "distinct_404_urls": 18,
+            "filters": {
+              "ip": "10.8.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.8.0.1"
+        }
+      ]
+    },
+    "referer_monoculture": {
+      "category": "traffic",
+      "title": "Referer Monoculture",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "https://hotlink-scraper.example/page",
+          "current_val": 50.995024875621894,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 1025,
+            "filters": {
+              "referer": "https://hotlink-scraper.example/page"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_referer=https%3A%2F%2Fhotlink-scraper.example%2Fpage"
+        }
+      ]
+    },
+    "method_drift": {
+      "category": "traffic",
+      "title": "HTTP Method Drift",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "POST",
+          "current_val": 10.945273631840797,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 220,
+            "method": "POST",
+            "filters": {
+              "method": "POST"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_method=POST"
+        }
+      ]
+    },
+    "new_asn_traffic": {
+      "category": "network",
+      "title": "New ASN Traffic",
+      "severity": "warning",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "AS64501",
+          "current_val": 1025,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "requests": 1025,
+            "asn": 64501,
+            "filters": {
+              "asn": 64501
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64501"
+        },
+        {
+          "label": "AS64504",
+          "current_val": 22,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "requests": 22,
+            "asn": 64504,
+            "filters": {
+              "asn": 64504
+            }
+          },
+          "severity": "info",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64504"
+        }
+      ]
+    },
+    "asn_hosting_shift": {
+      "category": "network",
+      "title": "ASN Hosting Shift",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64505",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% hosting",
+          "meta": {
+            "window_hosting": 120,
+            "window_total": 120,
+            "asn": 64505,
+            "filters": {
+              "asn": 64505
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64505"
+        }
+      ]
+    },
+    "metro_delivery_degradation": {
+      "category": "network",
+      "title": "Metro Delivery-Rate Degradation",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Los Angeles, CA",
+          "current_val": 0.8,
+          "baseline_val": 4.0,
+          "unit": "Mbps (median)",
+          "meta": {
+            "window_requests": 22,
+            "window_mbps": 0.8,
+            "baseline_mbps": 4.0,
+            "filters": {
+              "metro": 803
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_metro=803"
+        }
+      ]
+    },
+    "connection_type_mix": {
+      "category": "network",
+      "title": "Connection-Type Mix Shift",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "cellular / 5g",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% of typed traffic",
+          "meta": {
+            "requests": 25,
+            "c_type": "cellular",
+            "c_speed": "5g",
+            "filters": {
+              "c_type": "cellular",
+              "c_speed": "5g"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_c_type=cellular&filter_c_speed=5g"
+        }
+      ]
+    },
+    "pop_latency_regression": {
+      "category": "edge",
+      "title": "PoP Latency Regression",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "DEN",
+          "current_val": 500.0,
+          "baseline_val": 50.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 10.0,
+            "window_requests": 22,
+            "filters": {
+              "pop": "DEN"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_pop=DEN"
+        }
+      ]
+    },
+    "http3_fallback": {
+      "category": "network",
+      "title": "HTTP/3 \u2192 TCP Fallback Spike",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "HTTP/3 (QUIC) adoption",
+          "current_val": 10.0,
+          "baseline_val": 50.0,
+          "baseline_label": "baseline QUIC share",
+          "unit": "% QUIC",
+          "meta": {
+            "window_quic": 12,
+            "window_total": 120,
+            "share_drop_pts": 40.0,
+            "filters": {
+              "transport": "tcp"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_transport=tcp"
+        }
+      ]
+    },
+    "cache_hit_cliff": {
+      "category": "edge",
+      "title": "Cache HIT-Ratio Cliff",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Service-wide cache HIT ratio",
+          "current_val": 74.2,
+          "baseline_val": 100.0,
+          "unit": "% HIT",
+          "meta": {
+            "window_cacheable": 1998,
+            "baseline_cacheable": 942,
+            "drop_pts": 25.8
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "payload_compression_regression": {
+      "category": "edge",
+      "title": "Payload Compression Regression",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/static/main.js",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% uncompressed",
+          "meta": {
+            "window_requests": 12,
+            "baseline_requests": 55,
+            "filters": {
+              "url": "/static/main.js"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fstatic%2Fmain.js"
+        }
+      ]
+    },
+    "session_harvesting": {
+      "category": "security",
+      "title": "Session-ID Harvesting",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.9.0.1",
+          "current_val": 22,
+          "baseline_val": 0,
+          "baseline_label": "baseline sessions",
+          "unit": "distinct sessions",
+          "meta": {
+            "requests": 22,
+            "distinct_sessions": 22,
+            "baseline_distinct_sessions": 0,
+            "filters": {
+              "ip": "10.9.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.9.0.1"
+        }
+      ]
+    },
+    "timeout_split": {
+      "category": "origin",
+      "title": "Origin Connect vs Read Timeout Split",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Origin read P95",
+          "current_val": 300.0,
+          "baseline_val": 10.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "phase": "read",
+            "connect_p95_ms": 150.0,
+            "baseline_connect_p95_ms": 10.0,
+            "read_p95_ms": 300.0,
+            "baseline_read_p95_ms": 10.0,
+            "window_requests": 55
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "crawler_disparity": {
+      "category": "security",
+      "title": "Bot & Crawler Referral & Bandwidth Disparity",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "Monoscraper",
+          "current_val": 520.0,
+          "baseline_val": 0.0,
+          "unit": "crawls/referral",
+          "meta": {
+            "crawls": 520,
+            "referrals": 0,
+            "w_bytes": 1064960,
+            "bandwidth_share_pct": 20.7,
+            "crawls_per_referral": 520.0,
+            "baseline_crawls_per_referral": 0.0,
+            "bytes_per_referral": 1064960.0,
+            "baseline_bytes_per_referral": 0.0
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        },
+        {
+          "label": "Anthropic Crawler Search",
+          "current_val": 105.0,
+          "baseline_val": 10.0,
+          "unit": "crawls/referral",
+          "meta": {
+            "crawls": 105,
+            "referrals": 0,
+            "w_bytes": 215040,
+            "bandwidth_share_pct": 4.18,
+            "crawls_per_referral": 105.0,
+            "baseline_crawls_per_referral": 10.0,
+            "bytes_per_referral": 215040.0,
+            "baseline_bytes_per_referral": 20480.0
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "stale_browser_version": {
+      "category": "security",
+      "title": "Stale Headless Browser",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Chrome 120",
+          "current_val": 505,
+          "baseline_val": 10,
+          "baseline_label": "distinct IPs",
+          "unit": "requests",
+          "meta": {
+            "requests": 505,
+            "ips": 10,
+            "surge_ratio": 505.0
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "orphaned_deep_crawl": {
+      "category": "security",
+      "title": "Orphaned Deep Crawl",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.10.0.1",
+          "current_val": 55,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "requests": 55,
+            "distinct_urls": 15,
+            "requests_per_url": 3.6666666666666665,
+            "surge_ratio": 55.0,
+            "filters": {
+              "ip": "10.10.0.1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.10.0.1"
+        }
+      ]
+    },
+    "residential_fingerprint_dispersion": {
+      "category": "security",
+      "title": "Residential Fingerprint Dispersion",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "ja4_res_disp_1",
+          "current_val": 6,
+          "baseline_val": 2,
+          "baseline_label": "baseline IPs",
+          "unit": "ASNs",
+          "meta": {
+            "ja4": "ja4_res_disp_1",
+            "ips": 32,
+            "asns": 6,
+            "requests": 32,
+            "asn_expansion_ratio": 6.0
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    }
+  },
+  "analyst_clamped_masked": {
+    "error_spikes": {
+      "category": "origin",
+      "title": "Error Spikes",
+      "severity": "critical",
+      "summary": "1 URLs with elevated server error rates",
+      "items": [
+        {
+          "label": "/api/err-spike",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% 5xx",
+          "meta": {
+            "requests": 5,
+            "errors": 5,
+            "filters": {
+              "url": "/api/err-spike"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Ferr-spike"
+        }
+      ]
+    },
+    "botnet_grouping": {
+      "category": "security",
+      "title": "Botnet Grouping",
+      "severity": "warning",
+      "summary": "3 fingerprints with suspicious IP spread",
+      "items": [
+        {
+          "label": "ja4_res_disp_1",
+          "current_val": 32,
+          "baseline_val": 2,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 32,
+            "ip_ratio": 32.0,
+            "filters": {
+              "ja4": "ja4_res_disp_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_res_disp_1"
+        },
+        {
+          "label": "ja4_default",
+          "current_val": 24,
+          "baseline_val": 9,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 1954,
+            "ip_ratio": 24.0,
+            "filters": {
+              "ja4": "ja4_default"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_default"
+        },
+        {
+          "label": "ja4_botnet_1",
+          "current_val": 6,
+          "baseline_val": 1,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 6,
+            "ip_ratio": 6.0,
+            "filters": {
+              "ja4": "ja4_botnet_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_botnet_1"
+        }
+      ]
+    },
+    "new_country_traffic": {
+      "category": "traffic",
+      "title": "New Country Traffic",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Iceland",
+          "current_val": 4,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "filters": {
+              "country": "IS"
+            }
+          },
+          "severity": "info",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_country=IS"
+        }
+      ]
+    },
+    "city_surges": {
+      "category": "traffic",
+      "title": "City Traffic Surges",
+      "severity": "warning",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "Ashburn, VA, United States",
+          "current_val": 1951,
+          "baseline_val": 35.916666666666664,
+          "unit": "requests",
+          "meta": {
+            "spike_ratio": 54.3,
+            "filters": {
+              "city": "Ashburn",
+              "region": "VA",
+              "country": "US"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=Ashburn&filter_region=VA&filter_country=US"
+        },
+        {
+          "label": "Surgeville, TX, United States",
+          "current_val": 25,
+          "baseline_val": 0.20833333333333334,
+          "unit": "requests",
+          "meta": {
+            "spike_ratio": 25.0,
+            "filters": {
+              "city": "SurgeVille",
+              "region": "TX",
+              "country": "US"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=SurgeVille&filter_region=TX&filter_country=US"
+        }
+      ]
+    },
+    "city_error_spikes": {
+      "category": "origin",
+      "title": "City Error Spikes",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Errtown, CA, United States",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% error",
+          "meta": {
+            "requests": 12,
+            "errors": 12,
+            "filters": {
+              "city": "ErrTown",
+              "region": "CA",
+              "country": "US"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=ErrTown&filter_region=CA&filter_country=US"
+        }
+      ]
+    },
+    "city_latency_regressions": {
+      "category": "edge",
+      "title": "City Latency Regressions",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Slowberg, NY, United States",
+          "current_val": 1500.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 15.0,
+            "requests": 12,
+            "filters": {
+              "city": "SlowBerg",
+              "region": "NY",
+              "country": "US"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=SlowBerg&filter_region=NY&filter_country=US"
+        }
+      ]
+    },
+    "new_city_traffic": {
+      "category": "traffic",
+      "title": "New City Traffic",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Freshpolis, WA, United States",
+          "current_val": 6,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "filters": {
+              "city": "FreshPolis",
+              "region": "WA",
+              "country": "US"
+            }
+          },
+          "severity": "info",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_city=FreshPolis&filter_region=WA&filter_country=US"
+        }
+      ]
+    },
+    "ua_monoculture": {
+      "category": "traffic",
+      "title": "User-Agent Monoculture",
+      "severity": "warning",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "MonoScraper/9.9",
+          "current_val": 25.870646766169155,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 520,
+            "filters": {
+              "ua": "MonoScraper/9.9"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ua=MonoScraper%2F9.9"
+        },
+        {
+          "label": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+          "current_val": 25.124378109452735,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 505,
+            "filters": {
+              "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ua=Mozilla%2F5.0+%28Windows+NT+10.0%3B+Win64%3B+x64%29+Chrome%2F120.0.0.0+Safari%2F537.36"
+        }
+      ]
+    },
+    "new_probe_urls": {
+      "category": "security",
+      "title": "New Probe URLs",
+      "severity": "warning",
+      "summary": "4 anomalies detected",
+      "items": [
+        {
+          "label": "/wp-admin/setup.php",
+          "current_val": 4,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/wp-admin/setup.php"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fwp-admin%2Fsetup.php"
+        },
+        {
+          "label": "/.env",
+          "current_val": 3,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/.env"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2F.env"
+        },
+        {
+          "label": "/.git/config",
+          "current_val": 2,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/.git/config"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2F.git%2Fconfig"
+        },
+        {
+          "label": "/wp-login.php",
+          "current_val": 1,
+          "baseline_val": null,
+          "unit": "requests",
+          "meta": {
+            "error_pct": 100.0,
+            "filters": {
+              "url": "/wp-login.php"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fwp-login.php"
+        }
+      ]
+    },
+    "waf_signal_spikes": {
+      "category": "security",
+      "title": "WAF Signal Spikes",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "SQLI-PROBE",
+          "current_val": 5,
+          "baseline_val": 0.041666666666666664,
+          "unit": "hits",
+          "meta": {
+            "spike_ratio": 10.0,
+            "filters": {
+              "waf_sig_ind": "SQLI-PROBE"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_waf_sig_ind=SQLI-PROBE"
+        }
+      ]
+    },
+    "proxy_surge": {
+      "category": "security",
+      "title": "Anonymizing Proxy Surge",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "hosting",
+          "current_val": 6.0,
+          "baseline_val": null,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 120,
+            "filters": {
+              "p_type": "hosting"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_p_type=hosting"
+        }
+      ]
+    },
+    "asn_concentration": {
+      "category": "network",
+      "title": "ASN Concentration",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64501",
+          "current_val": 50.995024875621894,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 1025,
+            "asn": 64501,
+            "filters": {
+              "asn": 64501
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64501"
+        }
+      ]
+    },
+    "asn_metro_performance": {
+      "category": "network",
+      "title": "ASN/Metro Performance Regressions",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64502 in New York, NY",
+          "current_val": 120.0,
+          "baseline_val": 20.0,
+          "unit": "ms RTT",
+          "meta": {
+            "regression_ratio": 6.0,
+            "requests": 22,
+            "filters": {
+              "asn": 64502,
+              "country": "US"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64502&filter_country=US"
+        }
+      ]
+    },
+    "cache_collapse": {
+      "category": "edge",
+      "title": "Cache Efficiency Collapse",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/static/bundle.js",
+          "current_val": 0.0,
+          "baseline_val": 100.0,
+          "unit": "% HIT",
+          "meta": {
+            "window_requests": 10,
+            "baseline_requests": 25,
+            "filters": {
+              "url": "/static/bundle.js"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fstatic%2Fbundle.js"
+        }
+      ]
+    },
+    "cacheability_regression": {
+      "category": "edge",
+      "title": "Cacheability Regression",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/account/overview",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% PASS",
+          "meta": {
+            "window_requests": 12,
+            "baseline_requests": 55,
+            "filters": {
+              "url": "/account/overview"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Faccount%2Foverview"
+        }
+      ]
+    },
+    "latency_regression": {
+      "category": "edge",
+      "title": "Latency Regression",
+      "severity": "warning",
+      "summary": "4 anomalies detected",
+      "items": [
+        {
+          "label": "/city/slowberg",
+          "current_val": 1500.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 15.0,
+            "window_requests": 12,
+            "filters": {
+              "url": "/city/slowberg"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fcity%2Fslowberg"
+        },
+        {
+          "label": "/pop/den",
+          "current_val": 500.0,
+          "baseline_val": 50.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 10.0,
+            "window_requests": 22,
+            "filters": {
+              "url": "/pop/den"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fpop%2Fden"
+        },
+        {
+          "label": "/api/slow-endpoint",
+          "current_val": 900.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 9.0,
+            "window_requests": 8,
+            "filters": {
+              "url": "/api/slow-endpoint"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Fslow-endpoint"
+        },
+        {
+          "label": "/api/origin-timed",
+          "current_val": 600.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 6.0,
+            "window_requests": 55,
+            "filters": {
+              "url": "/api/origin-timed"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Forigin-timed"
+        }
+      ]
+    },
+    "impossible_distance": {
+      "category": "security",
+      "title": "Impossible Distance / Spoofing",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "ja4_spoof_fp",
+          "current_val": 8647.0,
+          "baseline_val": 200.0,
+          "baseline_label": "max allowed",
+          "unit": "km",
+          "meta": {
+            "hits": 3,
+            "excess_km": 8447.0,
+            "pop": "JFK",
+            "sample_ip": "198.51.100.xxx",
+            "client_lat": 0.0,
+            "client_lon": 0.0,
+            "pop_lat": 40.6413,
+            "pop_lon": -73.7781,
+            "tcp_rtt": 1000,
+            "country": "US",
+            "city": "Ashburn",
+            "filters": {
+              "ja4": "ja4_spoof_fp"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_spoof_fp"
+        }
+      ]
+    },
+    "tail_latency": {
+      "category": "edge",
+      "title": "Tail Latency Anomaly",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/api/tail-heavy",
+          "current_val": 200.0,
+          "baseline_val": 10.0,
+          "baseline_label": "P50",
+          "unit": "ms (P99 vs P50)",
+          "meta": {
+            "p99_ms": 200.0,
+            "p50_ms": 10.0,
+            "ratio": 20.0,
+            "requests": 24,
+            "filters": {
+              "url": "/api/tail-heavy"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Ftail-heavy"
+        }
+      ]
+    },
+    "cipher_spread": {
+      "category": "security",
+      "title": "Cipher Fingerprint Clustering",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "cipher_defau\u2026",
+          "current_val": 58,
+          "baseline_val": 0.5,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 2004,
+            "baseline_total_ips": 11,
+            "sha": "cipher_default",
+            "filters": {
+              "tls_ciphers_sha": "cipher_default"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_tls_ciphers_sha=cipher_default"
+        },
+        {
+          "label": "cipher_sha_b\u2026",
+          "current_val": 6,
+          "baseline_val": 0.0,
+          "unit": "distinct IPs",
+          "meta": {
+            "requests": 6,
+            "baseline_total_ips": 1,
+            "sha": "cipher_sha_bot_1",
+            "filters": {
+              "tls_ciphers_sha": "cipher_sha_bot_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_tls_ciphers_sha=cipher_sha_bot_1"
+        }
+      ]
+    },
+    "request_size_anomaly": {
+      "category": "security",
+      "title": "Oversized Request Headers",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.3.0.xxx",
+          "current_val": 12000,
+          "baseline_val": 500,
+          "baseline_label": "P95 baseline",
+          "unit": "bytes (max header)",
+          "meta": {
+            "max_bytes": 12000,
+            "avg_bytes": 12000,
+            "requests": 4,
+            "p95_baseline": 500,
+            "filters": {
+              "ip": "10.3.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.3.0.xxx"
+        }
+      ]
+    },
+    "connection_abuse": {
+      "category": "security",
+      "title": "Connection Reuse Anomaly",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.4.0.xxx",
+          "current_val": 120,
+          "baseline_val": 5,
+          "baseline_label": "P95 baseline",
+          "unit": "reqs/conn (max)",
+          "meta": {
+            "max_conn_reqs": 120,
+            "avg_conn_reqs": 120,
+            "requests": 6,
+            "p95_baseline": 5,
+            "filters": {
+              "ip": "10.4.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.4.0.xxx"
+        }
+      ]
+    },
+    "region_latency": {
+      "category": "network",
+      "title": "Regional Latency Degradation",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "US-East",
+          "current_val": 600.0,
+          "baseline_val": 100.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 6.0,
+            "window_requests": 55,
+            "filters": {
+              "server_region": "US-East"
+            },
+            "ottfb_p95_ms": 450.0
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_server_region=US-East"
+        }
+      ]
+    },
+    "cache_ttl_mismatch": {
+      "category": "edge",
+      "title": "Cache TTL Inefficiency",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/Promo/Banner",
+          "current_val": 0.0,
+          "baseline_val": null,
+          "unit": "avg hits",
+          "meta": {
+            "avg_ttl_s": 3600.0,
+            "avg_hits": 0.0,
+            "avg_age_s": 10.0,
+            "samples": 12,
+            "filters": {
+              "url": "/Promo/Banner"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2FPromo%2FBanner"
+        }
+      ]
+    },
+    "image_optimization_opportunities": {
+      "category": "edge",
+      "title": "Image Optimization Opportunities",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/media/hero-banner.png",
+          "current_val": 100.0,
+          "baseline_val": null,
+          "unit": "KB avg",
+          "meta": {
+            "requests": 10,
+            "total_mb": 0.98,
+            "mobile_ratio": 1.0,
+            "filters": {
+              "url": "/media/hero-banner.png"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fmedia%2Fhero-banner.png"
+        }
+      ]
+    },
+    "origin_latency_spike": {
+      "category": "origin",
+      "title": "Origin Latency Spike",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "/api/origin-timed",
+          "current_val": 450.0,
+          "baseline_val": 28.0,
+          "unit": "ms P95",
+          "meta": {
+            "requests": 55,
+            "filters": {
+              "url": "/api/origin-timed"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Forigin-timed"
+        },
+        {
+          "label": "/normal/page",
+          "current_val": 260.0,
+          "baseline_val": 28.0,
+          "unit": "ms P95",
+          "meta": {
+            "requests": 12,
+            "filters": {
+              "url": "/normal/page"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fnormal%2Fpage"
+        }
+      ]
+    },
+    "origin_error_rate": {
+      "category": "origin",
+      "title": "Origin Error Rate",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "HTTP 503",
+          "current_val": 33.3,
+          "baseline_val": null,
+          "unit": "%",
+          "meta": {
+            "filters": {
+              "ost": 503
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ost=503"
+        }
+      ]
+    },
+    "origin_retries": {
+      "category": "origin",
+      "title": "Origin Retries Elevated",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/api/flaky-upstream",
+          "current_val": 3.0,
+          "baseline_val": null,
+          "unit": "avg retries",
+          "meta": {
+            "max_retries": 3,
+            "filters": {
+              "url": "/api/flaky-upstream"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fapi%2Fflaky-upstream"
+        }
+      ]
+    },
+    "origin_ip_failure": {
+      "category": "origin",
+      "title": "Specific Origin IP Failing",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "192.0.2.99",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% errors",
+          "meta": {
+            "requests": 12,
+            "filters": {
+              "oip": "192.0.2.99"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_oip=192.0.2.99"
+        }
+      ]
+    },
+    "shield_path_degradation": {
+      "category": "origin",
+      "title": "Shield Path Degradation",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "IAD \u2192 Direct to Origin",
+          "current_val": 450.0,
+          "baseline_val": 20.0,
+          "unit": "ms P50",
+          "severity": "critical",
+          "meta": {
+            "ratio": 22.5,
+            "requests": 55
+          },
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        },
+        {
+          "label": "LAX \u2192 IAD",
+          "current_val": 240.0,
+          "baseline_val": 40.0,
+          "unit": "ms P50",
+          "severity": "critical",
+          "meta": {
+            "ratio": 6.0,
+            "requests": 6
+          },
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "repeated_patterns": {
+      "category": "security",
+      "title": "Scripted Traffic Patterns",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.5.0.xxx",
+          "current_val": 10.0,
+          "baseline_val": 0.0,
+          "baseline_label": "jitter (\u03c3)",
+          "unit": "s interval",
+          "meta": {
+            "score": 100,
+            "cv": 0.0,
+            "modal_frac": 1.0,
+            "mean_interval_s": 10.0,
+            "stddev_s": 0.0,
+            "mode_gap_s": 10,
+            "n_gaps": 14,
+            "n_events": 15,
+            "span_s": 140,
+            "rps": 0.1071,
+            "distinct_ua": 1,
+            "filters": {
+              "ip": "10.5.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.5.0.xxx"
+        }
+      ]
+    },
+    "repeated_patterns_fp": {
+      "category": "security",
+      "title": "Scripted Traffic Patterns (by TLS Fingerprint)",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "ja4_beacon_1",
+          "current_val": 10.0,
+          "baseline_val": 0.0,
+          "baseline_label": "jitter (\u03c3)",
+          "unit": "s interval",
+          "meta": {
+            "score": 100,
+            "cv": 0.0,
+            "modal_frac": 1.0,
+            "mean_interval_s": 10.0,
+            "stddev_s": 0.0,
+            "mode_gap_s": 10,
+            "n_gaps": 14,
+            "n_events": 15,
+            "span_s": 140,
+            "rps": 0.1071,
+            "distinct_ip": 1,
+            "filters": {
+              "ja4": "ja4_beacon_1"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ja4=ja4_beacon_1"
+        }
+      ]
+    },
+    "low_and_slow": {
+      "category": "security",
+      "title": "Low and Slow Scans",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.6.0.xxx",
+          "current_val": 3,
+          "baseline_val": null,
+          "unit": "sensitive paths",
+          "meta": {
+            "hits": 6,
+            "distinct_paths": 3,
+            "span_s": 750,
+            "rps": 0.008,
+            "filters": {
+              "ip": "10.6.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.6.0.xxx"
+        }
+      ]
+    },
+    "credential_enumeration": {
+      "category": "security",
+      "title": "Credential Enumeration / Brute Force",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.7.0.xxx",
+          "current_val": 25,
+          "baseline_val": 0,
+          "baseline_label": "baseline denied",
+          "unit": "denied (401/403)",
+          "meta": {
+            "attempts": 25,
+            "denied": 25,
+            "fail_rate_pct": 100.0,
+            "distinct_paths": 1,
+            "filters": {
+              "ip": "10.7.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.7.0.xxx"
+        }
+      ]
+    },
+    "network_asn_health": {
+      "category": "network",
+      "title": "Network Path (ASN) Health",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64503",
+          "current_val": 8.0,
+          "baseline_val": 0.1,
+          "unit": "% packet loss",
+          "meta": {
+            "window_packet_loss_pct": 8.0,
+            "baseline_packet_loss_pct": 0.1,
+            "window_jitter_ms": 60.0,
+            "baseline_jitter_ms": 5.0,
+            "window_retrans_avg": 2.0,
+            "baseline_retrans_avg": 0.0,
+            "requests": 55,
+            "asn": 64503,
+            "filters": {
+              "asn": 64503
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64503"
+        }
+      ]
+    },
+    "content_discovery": {
+      "category": "security",
+      "title": "Content-Discovery Scanning",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.8.0.xxx",
+          "current_val": 22,
+          "baseline_val": 0,
+          "baseline_label": "baseline 404s",
+          "unit": "404s",
+          "meta": {
+            "requests": 22,
+            "not_found": 22,
+            "not_found_rate_pct": 100.0,
+            "distinct_404_urls": 18,
+            "filters": {
+              "ip": "10.8.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.8.0.xxx"
+        }
+      ]
+    },
+    "referer_monoculture": {
+      "category": "traffic",
+      "title": "Referer Monoculture",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "https://hotlink-scraper.example/page",
+          "current_val": 50.995024875621894,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 1025,
+            "filters": {
+              "referer": "https://hotlink-scraper.example/page"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_referer=https%3A%2F%2Fhotlink-scraper.example%2Fpage"
+        }
+      ]
+    },
+    "method_drift": {
+      "category": "traffic",
+      "title": "HTTP Method Drift",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "POST",
+          "current_val": 10.945273631840797,
+          "baseline_val": 0.0,
+          "unit": "% of traffic",
+          "meta": {
+            "requests": 220,
+            "method": "POST",
+            "filters": {
+              "method": "POST"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_method=POST"
+        }
+      ]
+    },
+    "new_asn_traffic": {
+      "category": "network",
+      "title": "New ASN Traffic",
+      "severity": "warning",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "AS64501",
+          "current_val": 1025,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "requests": 1025,
+            "asn": 64501,
+            "filters": {
+              "asn": 64501
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64501"
+        },
+        {
+          "label": "AS64504",
+          "current_val": 22,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "requests": 22,
+            "asn": 64504,
+            "filters": {
+              "asn": 64504
+            }
+          },
+          "severity": "info",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64504"
+        }
+      ]
+    },
+    "asn_hosting_shift": {
+      "category": "network",
+      "title": "ASN Hosting Shift",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "AS64505",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% hosting",
+          "meta": {
+            "window_hosting": 120,
+            "window_total": 120,
+            "asn": 64505,
+            "filters": {
+              "asn": 64505
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_asn=64505"
+        }
+      ]
+    },
+    "metro_delivery_degradation": {
+      "category": "network",
+      "title": "Metro Delivery-Rate Degradation",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Los Angeles, CA",
+          "current_val": 0.8,
+          "baseline_val": 4.0,
+          "unit": "Mbps (median)",
+          "meta": {
+            "window_requests": 22,
+            "window_mbps": 0.8,
+            "baseline_mbps": 4.0,
+            "filters": {
+              "metro": 803
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_metro=803"
+        }
+      ]
+    },
+    "connection_type_mix": {
+      "category": "network",
+      "title": "Connection-Type Mix Shift",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "cellular / 5g",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% of typed traffic",
+          "meta": {
+            "requests": 25,
+            "c_type": "cellular",
+            "c_speed": "5g",
+            "filters": {
+              "c_type": "cellular",
+              "c_speed": "5g"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_c_type=cellular&filter_c_speed=5g"
+        }
+      ]
+    },
+    "pop_latency_regression": {
+      "category": "edge",
+      "title": "PoP Latency Regression",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "DEN",
+          "current_val": 500.0,
+          "baseline_val": 50.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "regression_ratio": 10.0,
+            "window_requests": 22,
+            "filters": {
+              "pop": "DEN"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_pop=DEN"
+        }
+      ]
+    },
+    "http3_fallback": {
+      "category": "network",
+      "title": "HTTP/3 \u2192 TCP Fallback Spike",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "HTTP/3 (QUIC) adoption",
+          "current_val": 10.0,
+          "baseline_val": 50.0,
+          "baseline_label": "baseline QUIC share",
+          "unit": "% QUIC",
+          "meta": {
+            "window_quic": 12,
+            "window_total": 120,
+            "share_drop_pts": 40.0,
+            "filters": {
+              "transport": "tcp"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_transport=tcp"
+        }
+      ]
+    },
+    "cache_hit_cliff": {
+      "category": "edge",
+      "title": "Cache HIT-Ratio Cliff",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Service-wide cache HIT ratio",
+          "current_val": 74.2,
+          "baseline_val": 100.0,
+          "unit": "% HIT",
+          "meta": {
+            "window_cacheable": 1998,
+            "baseline_cacheable": 942,
+            "drop_pts": 25.8
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "payload_compression_regression": {
+      "category": "edge",
+      "title": "Payload Compression Regression",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "/static/main.js",
+          "current_val": 100.0,
+          "baseline_val": 0.0,
+          "unit": "% uncompressed",
+          "meta": {
+            "window_requests": 12,
+            "baseline_requests": 55,
+            "filters": {
+              "url": "/static/main.js"
+            }
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_url=%2Fstatic%2Fmain.js"
+        }
+      ]
+    },
+    "session_harvesting": {
+      "category": "security",
+      "title": "Session-ID Harvesting",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.9.0.xxx",
+          "current_val": 22,
+          "baseline_val": 0,
+          "baseline_label": "baseline sessions",
+          "unit": "distinct sessions",
+          "meta": {
+            "requests": 22,
+            "distinct_sessions": 22,
+            "baseline_distinct_sessions": 0,
+            "filters": {
+              "ip": "10.9.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.9.0.xxx"
+        }
+      ]
+    },
+    "timeout_split": {
+      "category": "origin",
+      "title": "Origin Connect vs Read Timeout Split",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Origin read P95",
+          "current_val": 300.0,
+          "baseline_val": 10.0,
+          "unit": "ms (P95)",
+          "meta": {
+            "phase": "read",
+            "connect_p95_ms": 150.0,
+            "baseline_connect_p95_ms": 10.0,
+            "read_p95_ms": 300.0,
+            "baseline_read_p95_ms": 10.0,
+            "window_requests": 55
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "crawler_disparity": {
+      "category": "security",
+      "title": "Bot & Crawler Referral & Bandwidth Disparity",
+      "severity": "critical",
+      "summary": "2 anomalies detected",
+      "items": [
+        {
+          "label": "Monoscraper",
+          "current_val": 520.0,
+          "baseline_val": 0.0,
+          "unit": "crawls/referral",
+          "meta": {
+            "crawls": 520,
+            "referrals": 0,
+            "w_bytes": 1064960,
+            "bandwidth_share_pct": 20.7,
+            "crawls_per_referral": 520.0,
+            "baseline_crawls_per_referral": 0.0,
+            "bytes_per_referral": 1064960.0,
+            "baseline_bytes_per_referral": 0.0
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        },
+        {
+          "label": "Anthropic Crawler Search",
+          "current_val": 105.0,
+          "baseline_val": 10.0,
+          "unit": "crawls/referral",
+          "meta": {
+            "crawls": 105,
+            "referrals": 0,
+            "w_bytes": 215040,
+            "bandwidth_share_pct": 4.18,
+            "crawls_per_referral": 105.0,
+            "baseline_crawls_per_referral": 10.0,
+            "bytes_per_referral": 215040.0,
+            "baseline_bytes_per_referral": 20480.0
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "stale_browser_version": {
+      "category": "security",
+      "title": "Stale Headless Browser",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "Chrome 120",
+          "current_val": 505,
+          "baseline_val": 10,
+          "baseline_label": "distinct IPs",
+          "unit": "requests",
+          "meta": {
+            "requests": 505,
+            "ips": 10,
+            "surge_ratio": 505.0
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    },
+    "orphaned_deep_crawl": {
+      "category": "security",
+      "title": "Orphaned Deep Crawl",
+      "severity": "warning",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "10.10.0.xxx",
+          "current_val": 55,
+          "baseline_val": 0,
+          "unit": "requests",
+          "meta": {
+            "requests": 55,
+            "distinct_urls": 15,
+            "requests_per_url": 3.6666666666666665,
+            "surge_ratio": 55.0,
+            "filters": {
+              "ip": "10.10.0.xxx"
+            }
+          },
+          "severity": "warning",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00&filter_ip=10.10.0.xxx"
+        }
+      ]
+    },
+    "residential_fingerprint_dispersion": {
+      "category": "security",
+      "title": "Residential Fingerprint Dispersion",
+      "severity": "critical",
+      "summary": "1 anomalies detected",
+      "items": [
+        {
+          "label": "ja4_res_disp_1",
+          "current_val": 6,
+          "baseline_val": 2,
+          "baseline_label": "baseline IPs",
+          "unit": "ASNs",
+          "meta": {
+            "ja4": "ja4_res_disp_1",
+            "ips": 32,
+            "asns": 6,
+            "requests": 32,
+            "asn_expansion_ratio": 6.0
+          },
+          "severity": "critical",
+          "investigate_url": "/dashboard?service=svc-golden&start=2026-06-15T11%3A00%3A00%2B00%3A00&end=2026-06-15T12%3A00%3A00%2B00%3A00"
+        }
+      ]
+    }
+  },
+  "cache_collapse_detail": {
+    "url": "/static/bundle.js",
+    "timeline": [
+      {
+        "bucket": "2026-06-15T00:00:00+00:00",
+        "expected_hits": 25.0,
+        "real_hits": 25,
+        "misses": 0,
+        "total_requests": 25,
+        "hit_rate": 1.0
+      },
+      {
+        "bucket": "2026-06-15T11:30:00+00:00",
+        "expected_hits": 10.0,
+        "real_hits": 0,
+        "misses": 10,
+        "total_requests": 10,
+        "hit_rate": 0.0
+      }
+    ],
+    "recent_misses": [
+      {
+        "timestamp": "2026-06-15T11:30:00.009000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.008000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.007000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.006000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.005000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.004000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.003000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.002000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00.001000+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      },
+      {
+        "timestamp": "2026-06-15T11:30:00+00:00",
+        "cache": "MISS",
+        "pop": "IAD",
+        "ip": "192.0.2.1",
+        "status": 200
+      }
+    ],
+    "breakdown": {
+      "hits": 0,
+      "misses": 10,
+      "passes": 0,
+      "other": 0
+    },
+    "baseline_hit_rate": 100.0,
+    "window_hit_rate": 0.0,
+    "baseline_pass_rate": 0.0,
+    "window_pass_rate": 0.0,
+    "debug_calls": []
+  }
+}

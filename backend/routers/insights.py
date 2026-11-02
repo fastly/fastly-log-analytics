@@ -1,4 +1,4 @@
-"""Insights router — anomaly detection."""
+"""Insights router — anomaly detection and cache-collapse detail endpoints."""
 
 from __future__ import annotations
 
@@ -9,19 +9,24 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.dashboard import (
+from backend.core.storage import execute_with_stale_view_retry
+from backend.cron.jobs.insights_prewarmer import record_insights_request
+from backend.models.analytics import (
     CacheCollapseDetailRequest,
     CacheCollapseDetailResponse,
     InsightsRequest,
     InsightsResponse,
 )
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.repositories import insights as repo
+from backend.models.common import DEFAULT_ERROR_RESPONSES
+from backend.repositories import insights as insights_repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.remote_access import analyst_clamp_cache_key
 from backend.utils.router_utils import query_errors
 
+repo = insights_repo
+
 router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RESPONSES)
+insights_router = router
 
 # Per-service semaphore (capacity=1) serialises concurrent insights scans.
 # A second request for the same service parks here; when the first finishes
@@ -31,11 +36,20 @@ _insights_sems: dict[str, asyncio.Semaphore] = {}
 _insights_sems_lock = threading.Lock()
 
 
-def _get_insights_sem(service_id: str) -> asyncio.Semaphore:
+def _get_insights_sem(
+    service_id: str,
+    window_hours: float | None = None,
+    baseline_hours: float | None = None,
+) -> asyncio.Semaphore:
+    sem_key = (
+        service_id
+        if window_hours is None and baseline_hours is None
+        else f"{service_id}:{float(window_hours or 0):.2f}:{float(baseline_hours or 0):.2f}"
+    )
     with _insights_sems_lock:
-        if service_id not in _insights_sems:
-            _insights_sems[service_id] = asyncio.Semaphore(1)
-        return _insights_sems[service_id]
+        if sem_key not in _insights_sems:
+            _insights_sems[sem_key] = asyncio.Semaphore(1)
+        return _insights_sems[sem_key]
 
 
 def _analyst_lookback_clamp(
@@ -77,23 +91,61 @@ async def insights_endpoint(
     req: InsightsRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    record_insights_request(ctx.service_id)
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
-    sem = _get_insights_sem(ctx.service_id)
+    high_scale_service = ctx.high_scale
+    force_refresh = req.force_refresh if ctx.analyst_session is None else False
+    sem = _get_insights_sem(ctx.service_id, req.window_size_hrs, req.baseline_hours)
+    if high_scale_service is not None:
+        from backend.high_scale.insights import insights_endpoint as hs_insights
+
+        async with sem:
+            return await asyncio.to_thread(
+                hs_insights,
+                high_scale_service,
+                req,
+                clamp_start,
+                clamp_end,
+                mask_ips,
+                clamp_cache_key=clamp_cache_key,
+                force_refresh=force_refresh,
+            )
+
+    cached = insights_repo.check_insights_cache(
+        src=ctx.source,
+        window_hours=req.window_size_hrs,
+        baseline_hours=req.baseline_hours,
+        clamp_start=clamp_start,
+        clamp_end=clamp_end,
+        mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
+        force_refresh=force_refresh,
+        filters=req.filters,
+    )
+    if cached is not None:
+        return cached
+
+    await ctx.prewarm_con()
     async with sem:
-        return await asyncio.to_thread(
-            repo.get_insights,
-            con=ctx.con,
-            src=ctx.source,
-            window_hours=req.window_size_hrs,
-            baseline_hours=req.baseline_hours,
-            service_id=ctx.service_id,
-            clamp_start=clamp_start,
-            clamp_end=clamp_end,
-            mask_ips=mask_ips,
-            clamp_cache_key=clamp_cache_key,
-        )
+
+        def _run_insights(con):
+            return insights_repo.get_insights(
+                con=con,
+                src=ctx.source,
+                window_hours=req.window_size_hrs,
+                baseline_hours=req.baseline_hours,
+                service_id=ctx.service_id,
+                clamp_start=clamp_start,
+                clamp_end=clamp_end,
+                mask_ips=mask_ips,
+                clamp_cache_key=clamp_cache_key,
+                force_refresh=force_refresh,
+                filters=req.filters,
+            )
+
+        return await asyncio.to_thread(execute_with_stale_view_retry, ctx.con, ctx.source, _run_insights)
 
 
 @router.post("/insights/cache-collapse-detail", response_model=CacheCollapseDetailResponse)
@@ -102,14 +154,25 @@ def cache_collapse_detail_endpoint(
     req: CacheCollapseDetailRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
+    record_insights_request(ctx.service_id)
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
-    return repo.get_cache_collapse_detail(
-        con=ctx.con,
-        src=ctx.source,
-        url=req.url,
-        window_hours=req.window_size_hrs,
-        baseline_hours=req.baseline_hours,
-        clamp_start=clamp_start,
-        clamp_end=clamp_end,
-        mask_ips=mask_ips,
-    )
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.insights import cache_collapse_detail_endpoint as hs_detail
+
+        return hs_detail(high_scale_service, req, clamp_start, clamp_end, mask_ips)
+
+    def _run_detail(con):
+        return insights_repo.get_cache_collapse_detail(
+            con=con,
+            src=ctx.source,
+            url=req.url,
+            window_hours=req.window_size_hrs,
+            baseline_hours=req.baseline_hours,
+            clamp_start=clamp_start,
+            clamp_end=clamp_end,
+            mask_ips=mask_ips,
+        )
+
+    return execute_with_stale_view_retry(ctx.con, ctx.source, _run_detail)

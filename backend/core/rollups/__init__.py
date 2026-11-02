@@ -1,62 +1,69 @@
 """Hourly Top-N + bundled rollups for the dashboard.
 
-Carved out of a single 2,045-line ``rollups.py`` for 10.9 file-size
-sweep. Submodules:
+Submodules:
 
 - :mod:`._common` — constants, validators, paths, query builders, atomic
   marker IO. Imported by every other sub-module.
-- :mod:`.time_series` — per-hour 1-minute time_series.parquet bundles.
-- :mod:`.sessions` — per-hour per-(ip, ja4) sessions.parquet bundles.
-- :mod:`.hour_bundles` — combine per-field hour parquets into
-  ``hour_bundled/hour=H/all_fields.parquet`` + retention sweep + backfill.
-- :mod:`.day_bundles` — combine per-field day parquets into
+- :mod:`.bundle_builder` — generic multi-spec per-hour/day bundle writers,
+  partition publishing, and shared DuckDB rollup session management.
+- :mod:`.time_series_rollups` — per-hour 1-minute time_series.parquet bundles.
+- :mod:`.overview_rollups` — per-hour overview.parquet bundles + backfill.
+- :mod:`.session_rollups` — per-hour per-(ip, ja4) sessions.parquet bundles.
+- :mod:`.rollup_coverage` — rollup partition discovery, coverage indexing, and
+  window read planning.
+- :mod:`.day_bundles` — combine per-field hour/day parquets into
+  ``hour_bundled/hour=H/all_fields.parquet`` and
   ``day_bundled/day=D/all_fields.parquet`` + closed-day compactor.
+- :mod:`.day_compaction_sql` — domain closed-day compaction SQL builders and
+  compactor definitions.
+- :mod:`.partial_hour` — active-hour incremental rollup accumulator and reader.
 - :mod:`.recompute` — per-tick recompute + one-shot backfill + cleanup +
-  the shared per-field COPY driver.
-- :mod:`.wellknown_bots` — pre-materialised bot-prefiltered rollup +
-  read path.
-
-External surface (preserved verbatim from the pre-split file — every
-symbol on the right-hand side of an existing
-``from backend.core.rollups import ...`` keeps working):
-
-  Public writers:
-    build_time_series_bundles
-    build_session_bundles
-    bundle_hours
-    bundle_days, backfill_day_bundles, compact_closed_days_to_daily
-    recompute_touched_hours, backfill_rollups
-    cleanup_old_rollups
-    recompute_wellknown_bots_rollup, read_wellknown_bots_rollup
-
-  Test-touched / cross-package internals:
-    _is_safe_ident, _safe_table_for, _VIRTUAL_FIELD_BACKING
-    _rollups_root, _day_rollups_root, _hour_bundled_root, _day_bundled_root
-    _markers_path, _load_markers, _save_markers
-    _build_copy_query, _build_virtual_field_copy_query
-    _publish_field_partitions, _get_fields
-    TOP_K, DAY_BUNDLE_FILENAME, DAY_BUNDLE_TOP_K,
-    TIME_SERIES_BUNDLE_FILENAME, SESSIONS_BUNDLE_FILENAME
-    _time_series_bundle_path, _sessions_bundle_path
-    _wellknown_bots_root, _parse_iso_to_hour, _run_per_field_copy
-    _cleanup_per_field_after_bundle
+  the shared per-field COPY driver + RUM aggregate rollups.
+- :mod:`.origin_dims` — origin and performance rollup writers.
+- :mod:`.network_dims` — POP health and network dimension rollup writers.
+- :mod:`.security_dims` — security and NGWAF bots rollup writers.
+- :mod:`.security_bots` — Fastly NGWAF API client, bot cache helpers, and
+  well-known bots rollup writers/readers.
 """
 
 from __future__ import annotations
 
-# Re-exports — pull every public symbol up so callers continue to use
-# the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
-# side-effect imports here.
+from backend.utils.module_shim import install_shim_module
+
+from . import (
+    _common,
+    bundle_builder,
+    day_bundles,
+    day_compaction_sql,
+    network_dims,
+    origin_dims,
+    overview_rollups,
+    partial_hour,
+    recompute,
+    rollup_coverage,
+    security_bots,
+    security_dims,
+    session_rollups,
+    time_series_rollups,
+)
+
+network = origin_dims
+perf_latency = origin_dims
+hour_bundles = day_bundles
+time_series = time_series_rollups
+rum = recompute
+spec = recompute
+ngwaf_bots = security_dims
+wellknown_bots = security_dims
+
 from ._common import (
-    _SAFE_IDENT_RE,
     _VIRTUAL_FIELD_BACKING,
     DAY_BUNDLE_FILENAME,
     DAY_BUNDLE_TOP_K,
     NETWORK_SUMMARY_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
-    ORIGIN_DIMS_BUNDLE_TOP_K,
+    NGWAF_BOTS_TS_BUNDLE_FILENAME,
     ORIGIN_IP_BUNDLE_FILENAME,
-    ORIGIN_IP_MIN_REQUESTS_PER_HOUR,
     ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
@@ -65,100 +72,120 @@ from ._common import (
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_TTL_DIST_BUNDLE_FILENAME,
+    SECURITY_BOT_EFF_BUNDLE_FILENAME,
+    SECURITY_BOT_EFF_UA_TOP_K,
     SECURITY_CONN_REUSE_BUNDLE_FILENAME,
     SECURITY_COV_BUNDLE_FILENAME,
+    SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME,
+    SECURITY_PROXY_QUALITY_BUNDLE_FILENAME,
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
     SECURITY_TOPIPS_BUNDLE_FILENAME,
-    SECURITY_TOPIPS_BUNDLE_TOP_K,
     SESSIONS_BUNDLE_FILENAME,
     SLOW_URLS_BUNDLE_FILENAME,
-    SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR,
-    SLOW_URLS_BUNDLE_TOP_K,
     TIME_SERIES_BUNDLE_FILENAME,
     TOP_K,
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
     _build_copy_query,
     _build_virtual_field_copy_query,
     _day_bundled_root,
-    _day_rollups_root,
     _get_fields,
     _hour_bundled_root,
     _is_safe_ident,
-    _load_markers,
-    _markers_path,
-    _network_summary_bundle_path,
-    _origin_ip_bundle_path,
-    _origin_latency_ts_bundle_path,
-    _origin_path_bundle_path,
-    _origin_pop_bundle_path,
-    _origin_summary_bundle_path,
-    _overview_bundle_path,
-    _perf_top_asns_bundle_path,
-    _perf_top_urls_bundle_path,
-    _perf_ttl_dist_bundle_path,
     _publish_field_partitions,
     _rollups_root,
     _safe_table_for,
-    _save_markers,
-    _security_conn_reuse_bundle_path,
-    _security_cov_bundle_path,
-    _security_req_size_bundle_path,
-    _security_topips_bundle_path,
-    _sessions_bundle_path,
-    _slow_urls_bundle_path,
-    _time_series_bundle_path,
-    _verified_bots_ts_bundle_path,
+    mark_rollup_coverage_ready,
+    reset_rollup_coverage_ready,
+    rollup_coverage_ready,
+    rollups_present,
 )
 from .day_bundles import (
+    _cleanup_per_field_after_bundle,
     backfill_day_bundles,
     bundle_days,
+    bundle_hours,
     compact_closed_days_to_daily,
+    compact_network_quality_closed_days_to_daily,
     compact_network_rtt_closed_days_to_daily,
     compact_network_speed_closed_days_to_daily,
     compact_ngwaf_bots_closed_days_to_daily,
+    compact_ngwaf_bots_ts_closed_days_to_daily,
     compact_origin_dims_closed_days_to_daily,
     compact_origin_latency_ts_closed_days_to_daily,
     compact_origin_summary_closed_days_to_daily,
     compact_overview_closed_days_to_daily,
     compact_perf_dims_closed_days_to_daily,
     compact_perf_latency_closed_days_to_daily,
+    compact_pop_health_closed_days_to_daily,
     compact_security_dims_closed_days_to_daily,
+    compact_security_proxies_closed_days_to_daily,
+    compact_time_series_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
+    retire_compacted_hour_bundles,
 )
-from .hour_bundles import (
-    _cleanup_per_field_after_bundle,
-    bundle_hours,
+from .origin_dims import (
+    backfill_network_geo_bundles,
+    backfill_network_heatmap_bundles,
+    backfill_network_quality_bundles,
+    backfill_network_rtt_bundles,
+    backfill_network_speed_bundles,
+    backfill_network_summary_bundles,
+    backfill_origin_dims_bundles,
+    backfill_origin_latency_ts_bundles,
+    backfill_origin_summary_bundles,
+    backfill_perf_dims_bundles,
+    backfill_perf_latency_bundles,
+    backfill_pop_health_bundles,
+    backfill_slow_urls_bundles,
+    build_network_geo_bundles,
+    build_network_heatmap_bundles,
+    build_network_quality_bundles,
+    build_network_rtt_bundles,
+    build_network_speed_bundles,
+    build_network_summary_bundles,
+    build_origin_dims_bundles,
+    build_origin_latency_ts_bundles,
+    build_origin_summary_bundles,
+    build_perf_dims_bundles,
+    build_perf_latency_bundles,
+    build_pop_health_bundles,
+    build_slow_urls_bundles,
 )
-from .network_rtt import backfill_network_rtt_bundles, build_network_rtt_bundles
-from .network_speed import backfill_network_speed_bundles, build_network_speed_bundles
-from .network_summary import backfill_network_summary_bundles, build_network_summary_bundles
-from .ngwaf_bots import backfill_ngwaf_bots_bundles, build_ngwaf_bots_bundles
-from .origin_dims import backfill_origin_dims_bundles, build_origin_dims_bundles
-from .origin_latency_ts import backfill_origin_latency_ts_bundles, build_origin_latency_ts_bundles
-from .origin_summary import backfill_origin_summary_bundles, build_origin_summary_bundles
-from .overview import backfill_overview_bundles, build_overview_bundles
-from .perf_dims import backfill_perf_dims_bundles, build_perf_dims_bundles
-from .perf_latency import backfill_perf_latency_bundles, build_perf_latency_bundles
+from .overview_rollups import (
+    backfill_overview_bundles,
+    build_overview_bundles,
+)
 from .recompute import (
+    ADMIN_BACKFILLS,
+    DAY_COMPACTORS,
+    HOUR_WRITERS,
+    DayCompactorSpec,
+    RollupSpec,
     _run_per_field_copy,
     backfill_missing_hour_bundles,
     backfill_missing_hour_ip_spread,
-    backfill_rollups,
+    backfill_missing_rum_aggregates,
     cleanup_old_rollups,
+    recompute_rum_aggregates,
     recompute_touched_hours,
 )
-from .security_dims import backfill_security_dims_bundles, build_security_dims_bundles
-from .sessions import build_session_bundles
-from .slow_urls import backfill_slow_urls_bundles, build_slow_urls_bundles
-from .time_series import build_time_series_bundles
-from .verified_bots_ts import backfill_verified_bots_ts_bundles, build_verified_bots_ts_bundles
-from .wellknown_bots import (
-    _parse_iso_to_hour,
-    _wellknown_bots_root,
+from .security_dims import (
+    backfill_ngwaf_bots_bundles,
+    backfill_ngwaf_bots_ts_bundles,
+    backfill_security_dims_bundles,
+    backfill_security_proxies_bundles,
+    backfill_verified_bots_ts_bundles,
     backfill_wellknown_bots_rollup,
+    build_ngwaf_bots_bundles,
+    build_ngwaf_bots_ts_bundles,
+    build_security_dims_bundles,
+    build_security_proxies_bundles,
+    build_verified_bots_ts_bundles,
     read_wellknown_bots_rollup,
     recompute_wellknown_bots_rollup,
 )
+from .session_rollups import build_session_bundles
+from .time_series_rollups import build_time_series_bundles
 
 __all__ = [
     # Public writers
@@ -176,20 +203,32 @@ __all__ = [
     "backfill_origin_latency_ts_bundles",
     "build_network_rtt_bundles",
     "backfill_network_rtt_bundles",
+    "build_network_heatmap_bundles",
+    "backfill_network_heatmap_bundles",
+    "build_network_geo_bundles",
+    "backfill_network_geo_bundles",
     "build_network_summary_bundles",
     "backfill_network_summary_bundles",
     "build_network_speed_bundles",
+    "build_network_quality_bundles",
+    "backfill_network_quality_bundles",
     "backfill_network_speed_bundles",
     "build_ngwaf_bots_bundles",
     "backfill_ngwaf_bots_bundles",
+    "build_ngwaf_bots_ts_bundles",
+    "backfill_ngwaf_bots_ts_bundles",
     "build_verified_bots_ts_bundles",
     "backfill_verified_bots_ts_bundles",
     "build_perf_latency_bundles",
     "backfill_perf_latency_bundles",
+    "build_pop_health_bundles",
+    "backfill_pop_health_bundles",
     "build_perf_dims_bundles",
     "backfill_perf_dims_bundles",
     "build_security_dims_bundles",
     "backfill_security_dims_bundles",
+    "build_security_proxies_bundles",
+    "backfill_security_proxies_bundles",
     "bundle_hours",
     "bundle_days",
     "backfill_day_bundles",
@@ -199,16 +238,28 @@ __all__ = [
     "compact_origin_dims_closed_days_to_daily",
     "compact_origin_latency_ts_closed_days_to_daily",
     "compact_network_rtt_closed_days_to_daily",
+    "compact_network_quality_closed_days_to_daily",
     "compact_network_speed_closed_days_to_daily",
     "compact_ngwaf_bots_closed_days_to_daily",
+    "compact_ngwaf_bots_ts_closed_days_to_daily",
     "compact_verified_bots_ts_closed_days_to_daily",
     "compact_perf_latency_closed_days_to_daily",
+    "compact_pop_health_closed_days_to_daily",
     "compact_perf_dims_closed_days_to_daily",
     "compact_security_dims_closed_days_to_daily",
+    "compact_security_proxies_closed_days_to_daily",
+    "compact_time_series_closed_days_to_daily",
+    "retire_compacted_hour_bundles",
     "recompute_touched_hours",
-    "backfill_rollups",
+    "RollupSpec",
+    "HOUR_WRITERS",
+    "DayCompactorSpec",
+    "DAY_COMPACTORS",
+    "ADMIN_BACKFILLS",
     "backfill_missing_hour_bundles",
     "backfill_missing_hour_ip_spread",
+    "backfill_missing_rum_aggregates",
+    "recompute_rum_aggregates",
     "cleanup_old_rollups",
     "recompute_wellknown_bots_rollup",
     "backfill_wellknown_bots_rollup",
@@ -220,16 +271,12 @@ __all__ = [
     "TIME_SERIES_BUNDLE_FILENAME",
     "SESSIONS_BUNDLE_FILENAME",
     "SLOW_URLS_BUNDLE_FILENAME",
-    "SLOW_URLS_BUNDLE_TOP_K",
-    "SLOW_URLS_BUNDLE_MIN_REQUESTS_PER_HOUR",
     "NETWORK_SUMMARY_BUNDLE_FILENAME",
     "OVERVIEW_BUNDLE_FILENAME",
     "ORIGIN_SUMMARY_BUNDLE_FILENAME",
     "ORIGIN_POP_BUNDLE_FILENAME",
     "ORIGIN_IP_BUNDLE_FILENAME",
     "ORIGIN_PATH_BUNDLE_FILENAME",
-    "ORIGIN_DIMS_BUNDLE_TOP_K",
-    "ORIGIN_IP_MIN_REQUESTS_PER_HOUR",
     "ORIGIN_LATENCY_TS_BUNDLE_FILENAME",
     "VERIFIED_BOTS_TS_BUNDLE_FILENAME",
     "PERF_TOP_URLS_BUNDLE_FILENAME",
@@ -237,46 +284,61 @@ __all__ = [
     "PERF_TTL_DIST_BUNDLE_FILENAME",
     "SECURITY_REQ_SIZE_BUNDLE_FILENAME",
     "NGWAF_BOTS_BUNDLE_FILENAME",
+    "NGWAF_BOTS_TS_BUNDLE_FILENAME",
     "SECURITY_CONN_REUSE_BUNDLE_FILENAME",
     "SECURITY_TOPIPS_BUNDLE_FILENAME",
     "SECURITY_COV_BUNDLE_FILENAME",
-    "SECURITY_TOPIPS_BUNDLE_TOP_K",
+    "SECURITY_PROXY_QUALITY_BUNDLE_FILENAME",
+    "SECURITY_PROXY_FLAGGED_BUNDLE_FILENAME",
+    "SECURITY_BOT_EFF_BUNDLE_FILENAME",
+    "SECURITY_BOT_EFF_UA_TOP_K",
     # Cross-package + test-touched internals
     "_is_safe_ident",
     "_safe_table_for",
     "_VIRTUAL_FIELD_BACKING",
-    "_SAFE_IDENT_RE",
     "_rollups_root",
-    "_day_rollups_root",
     "_hour_bundled_root",
     "_day_bundled_root",
-    "_markers_path",
-    "_load_markers",
-    "_save_markers",
+    "mark_rollup_coverage_ready",
+    "reset_rollup_coverage_ready",
+    "rollup_coverage_ready",
+    "rollups_present",
     "_build_copy_query",
     "_build_virtual_field_copy_query",
     "_publish_field_partitions",
     "_get_fields",
-    "_time_series_bundle_path",
-    "_sessions_bundle_path",
-    "_slow_urls_bundle_path",
-    "_network_summary_bundle_path",
-    "_overview_bundle_path",
-    "_origin_summary_bundle_path",
-    "_origin_pop_bundle_path",
-    "_origin_ip_bundle_path",
-    "_origin_path_bundle_path",
-    "_origin_latency_ts_bundle_path",
-    "_verified_bots_ts_bundle_path",
-    "_perf_top_urls_bundle_path",
-    "_perf_top_asns_bundle_path",
-    "_perf_ttl_dist_bundle_path",
-    "_security_req_size_bundle_path",
-    "_security_conn_reuse_bundle_path",
-    "_security_topips_bundle_path",
-    "_security_cov_bundle_path",
-    "_wellknown_bots_root",
-    "_parse_iso_to_hour",
     "_run_per_field_copy",
     "_cleanup_per_field_after_bundle",
+    "_common",
+    "bundle_builder",
+    "day_bundles",
+    "day_compaction_sql",
+    "network_dims",
+    "partial_hour",
+    "rollup_coverage",
+    "overview_rollups",
+    "security_bots",
+    "session_rollups",
+    "time_series_rollups",
 ]
+
+install_shim_module(
+    __name__,
+    (
+        _common,
+        bundle_builder,
+        day_bundles,
+        day_compaction_sql,
+        network_dims,
+        partial_hour,
+        origin_dims,
+        overview_rollups,
+        recompute,
+        rollup_coverage,
+        security_bots,
+        security_dims,
+        session_rollups,
+        time_series_rollups,
+    ),
+    only_existing_attrs=True,
+)

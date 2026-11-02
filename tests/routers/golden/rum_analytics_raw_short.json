@@ -1,0 +1,120 @@
+{
+  "_is_cached": false,
+  "beacon_count": 4,
+  "environments": {
+    "browsers": {
+      "Chrome": 2,
+      "Firefox": 1,
+      "Safari": 1
+    },
+    "devices": {
+      "Desktop": 3,
+      "Mobile": 1
+    },
+    "os": {
+      "Android": 1,
+      "Windows": 1,
+      "macOS": 2
+    }
+  },
+  "error_count": 2,
+  "errors": [
+    {
+      "col": 0,
+      "count": 2,
+      "file": "app.js",
+      "line": 0,
+      "message": "Boom 2"
+    },
+    {
+      "col": 0,
+      "count": 1,
+      "file": "app.js",
+      "line": 0,
+      "message": "Boom 3"
+    }
+  ],
+  "interaction_count": 0,
+  "is_mock": false,
+  "no_data": false,
+  "pageview_count": 4,
+  "trends": {
+    "cls": [
+      0.225,
+      0.02
+    ],
+    "error_rate": [
+      25.0,
+      50.0
+    ],
+    "errors": [
+      1,
+      1
+    ],
+    "interactions": [
+      0,
+      0
+    ],
+    "lcp": [
+      4.1,
+      1.8
+    ],
+    "pageviews": [
+      3,
+      1
+    ],
+    "timestamps": [
+      "2026-08-05T10:00:00+00:00",
+      "2026-08-05T11:00:00+00:00"
+    ]
+  },
+  "vitals": {
+    "cls": {
+      "distribution": {
+        "good": 50,
+        "needs_improvement": 25,
+        "poor": 25
+      },
+      "p75": 0.188
+    },
+    "fid": {
+      "fcp": null,
+      "p75": null,
+      "ttfb": null
+    },
+    "inp": {
+      "distribution": {
+        "good": 50,
+        "needs_improvement": 25,
+        "poor": 25
+      },
+      "p75": 402
+    },
+    "lcp": {
+      "distribution": {
+        "good": 0,
+        "needs_improvement": 0,
+        "poor": 100
+      },
+      "p75": 3.75
+    }
+  },
+  "worst_pages": [
+    {
+      "avg_load_time": 1.65,
+      "cls_p75": 0.23,
+      "error_rate": 100.0,
+      "lcp_p75": 4.05,
+      "path": "/cart",
+      "views": 2
+    },
+    {
+      "avg_load_time": 1.38,
+      "cls_p75": 0.125,
+      "error_rate": 0.0,
+      "lcp_p75": 3.08,
+      "path": "/home",
+      "views": 2
+    }
+  ]
+}

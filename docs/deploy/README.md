@@ -1,11 +1,20 @@
 # Deployment runbooks
 
-The application runs on **any Linux VM with Docker**. Storage stays on **Fastly Object Storage** (S3-compatible) regardless of host platform. Only the host-provisioning + firewall + secrets-source steps differ per platform; the Caddy config, docker compose file, `restart.sh` body, and post-deploy curl commands are identical across all four runbooks below.
+The application runs on **any Linux VM with Docker**. Storage stays on **Fastly Object Storage** (S3-compatible) regardless of host platform. Only the host-provisioning + firewall + secrets-source steps differ per platform; the Caddy config, docker compose files, `restart.sh` body, and post-deploy curl commands are identical across all four runbooks below.
 
 ## Platform runbooks
 
+- [Optional private telemetry](observability.md) — existing SDK directly
+  to Prometheus and Tempo for Standard Compose and the existing Helm receivers;
+  opt-in private listeners/storage, delivery proofs and a private Metrics UI.
+
+- [Optional admin mTLS gateway](../../deploy/chart/admin-gateway/README.md) —
+  shared standard Compose/Kubernetes gateway, operator-owned certificates,
+  explicit client installation, expiry and emergency CA rotation. The
+  gateway is opt-in; retain host-management SSH.
+
 - [aws_ec2.md](aws_ec2.md) — Amazon Linux 2023 + Docker, IMDSv2 session-token note, SG rules, EBS volume mount, optional systemd unit.
-- [gce.md](gce.md) — Debian/Ubuntu + Docker, persistent-disk mount, formalized `restart.sh` flow.
+- [gce.md](gce.md) — Debian/Ubuntu + Docker, persistent-disk mount, `restart.sh` flow.
 - [azure_vm.md](azure_vm.md) — Ubuntu 22.04 + Docker, NSG rules, managed-identity secrets pattern with Key Vault.
 - [generic_linux.md](generic_linux.md) — Linode / DigitalOcean / Hetzner / bare metal, env-file secrets pattern, provider-specific firewall gotchas.
 
@@ -13,19 +22,20 @@ Each runbook covers the same seven sections so a reader switching platforms can 
 
 ## What stays the same across platforms
 
-- The `restart.sh` script (`git pull` + `docker compose --build` + healthcheck).
-- The docker compose file and Caddy configuration.
+- The `restart.sh` pattern: a small script you keep on the VM (`git pull` + `docker compose build` + container swap + healthcheck); the reference body is in [gce.md](gce.md).
+- The docker compose files (`docker-compose.yml` + the `docker-compose.prod.yml` production overlay; never a plain `docker compose up` in production) and Caddy configuration.
+- PostgreSQL 16 (provided by the compose stack) for operational metadata and the DuckLake catalog.
 - Fastly Object Storage access (boto3 + Fastly's S3-compatible endpoint).
 - The admin SSH-port-forward auth flow — a network-layer primitive, not platform-specific.
 
 ## What varies
 
-- **Cloud metadata service.** All three major clouds expose metadata at `169.254.169.254`. AWS requires IMDSv2 session tokens by default; GCE and Azure do not. The SSRF guard in `backend/models/lake.py` blocks that IP in URL validation; nothing in the app reads from the metadata service itself.
+- **Cloud metadata service.** All three major clouds expose metadata at `169.254.169.254`. AWS requires IMDSv2 session tokens by default; GCE and Azure do not. Nothing in the app reads from the metadata service itself.
 - **Firewall.** AWS security groups, GCE firewall rules, Azure NSGs — same goal, different UX.
 - **Secrets source.** AWS Secrets Manager / GCE Secret Manager / Azure Key Vault / env-file on generic Linux. The runbooks document the recommended pattern for each.
 
 ## Out of scope
 
-- Non-Fastly object storage (GCS, S3, ADLS). Storage stays Fastly per the v2.0 storage-model decision (see [adr/01-storage-model.md](../adr/01-storage-model.md)).
-- Multi-region deploy. Single-region per the v2.0 plan.
-- Kubernetes / Nomad / other orchestrators. Single-host docker compose stays the deploy model.
+- Non-Fastly object storage (GCS, S3, ADLS). Storage stays Fastly per the storage-model decision (see [adr/01-storage-model.md](../adr/01-storage-model.md)).
+- Multi-region deploy. Single-region.
+- Nomad / other orchestrators. The VM guides here use single-host docker compose; Kubernetes (High-Scale) is covered by the Helm charts under `deploy/chart/`.

@@ -2,11 +2,14 @@
 
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
-import { Sparkline } from '@/components/Sparkline'
-import { useMounted } from '@/hooks/useMounted'
-import { client } from '@/lib/api'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
+import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
+import { useMounted } from '@/hooks/useBootstrap'
+import { client, unwrapClient, queryKeys } from "@/lib/api";
 import type { components } from '@/types/api.generated'
 
 type TrendPoint = components['schemas']['MetricHistoryPoint']
@@ -49,14 +52,6 @@ type HealthSnapshot = Omit<components['schemas']['HealthSnapshotResponse'], 'poo
 // "we couldn't measure this" reads differently from "this is a healthy low
 // reading".
 type Tone = 'default' | 'warn' | 'crit' | 'unknown'
-
-/** Compact "time ago" for an age in seconds: 45s / 12m / 3.4h / 6.2d. */
-function fmtAgeS(seconds: number): string {
-  if (seconds < 90) return `${Math.round(seconds)}s`
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`
-  if (seconds < 172800) return `${(seconds / 3600).toFixed(1)}h`
-  return `${(seconds / 86400).toFixed(1)}d`
-}
 
 function Stat({ label, value, sub, tone = 'default', trend, trendDomain, formatTrendValue }: {
   label: string
@@ -116,10 +111,12 @@ export function SystemHealthCard() {
   // refetchInterval is a pure safety net for silently-dropped streams
   // — same shape as useSyncStatus / useLastSync.
   const { data: snap, isLoading, isFetching, error } = useQuery({
-    queryKey: ['admin', 'health-snapshot'],
+    queryKey: queryKeys.admin.healthSnapshot(),
     queryFn: async () => {
-      const { data } = await client.GET('/api/admin/health-snapshot')
-      return data as HealthSnapshot
+      return (await unwrapClient(
+        client.GET('/api/admin/health-snapshot'),
+        'Failed to load system health snapshot',
+      )) as HealthSnapshot
     },
     staleTime: 5_000,
     refetchInterval: 5 * 60_000,
@@ -130,10 +127,12 @@ export function SystemHealthCard() {
   // so a 1h window gives ~60 points per series. SSE pushes via
   // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
-    queryKey: ['admin', 'metric-history-batch', '1h'],
+    queryKey: queryKeys.admin.metricHistoryBatch('1h'),
     queryFn: async () => {
-      const { data } = await client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } })
-      return data as TrendBatch
+      return (await unwrapClient(
+        client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } }),
+        'Failed to load metric history batch',
+      )) as TrendBatch
     },
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
@@ -246,6 +245,18 @@ export function SystemHealthCard() {
     poolMaxP95 > 50 || poolRejects > 0 ? 'warn' :
     'default'
 
+  const celery = snap.celery ?? null
+  const queueDepth = celery?.queue_depth ?? null
+  const activeWorkers = celery?.active_workers ?? null
+  const brokerReachable = celery?.broker_reachable ?? true
+
+  const celeryTone: Tone =
+    celery == null ? 'unknown' :
+    !brokerReachable ? 'crit' :
+    queueDepth != null && queueDepth > 500 ? 'crit' :
+    queueDepth != null && queueDepth > 50 ? 'warn' :
+    'default'
+
   return (
     <AnalyticsCard
       title="System Health"
@@ -291,6 +302,14 @@ export function SystemHealthCard() {
           trendDomain={[0, 100]}
           formatTrendValue={(v) => `${v.toFixed(1)}%`}
         />
+        {celery != null && (
+          <Stat
+            label="Celery Queue"
+            value={!brokerReachable ? 'OFFLINE' : queueDepth == null ? '–' : `${queueDepth}`}
+            sub={!brokerReachable ? 'Broker Unreachable' : `${activeWorkers} Active Worker(s)`}
+            tone={celeryTone}
+          />
+        )}
         <Stat
           label="Cache files"
           value={totalFiles}
@@ -300,7 +319,7 @@ export function SystemHealthCard() {
         <Stat
           label="Active queries"
           value={inFlight.length}
-          sub={inFlight.length > 0 ? inFlight.slice(0, 2).map(r => r.task).join(', ') : 'idle'}
+          sub={inFlight.length > 0 ? `${inFlight.length} tasks running` : 'idle'}
           trend={series['active_query_count']}
           formatTrendValue={(v) => v.toFixed(0)}
         />
@@ -325,7 +344,7 @@ export function SystemHealthCard() {
         />
         <Stat
           label="Scheduler"
-          value={tickAge == null ? '–' : `${fmtAgeS(tickAge)} ago`}
+          value={tickAge == null ? '–' : `${formatElapsed(tickAge, ELAPSED_AGE_COMPACT)} ago`}
           sub={tickAge == null
             ? 'no ticks yet'
             : tickTone === 'default' ? 'cron loop alive' : 'last metric tick — overdue?'}
@@ -333,7 +352,7 @@ export function SystemHealthCard() {
         />
         <Stat
           label="Config backup"
-          value={backup == null || backupAgeS == null ? 'never' : `${fmtAgeS(backupAgeS)} ago`}
+          value={backup == null || backupAgeS == null ? 'never' : `${formatElapsed(backupAgeS, ELAPSED_AGE_COMPACT)} ago`}
           sub={backup == null || backupAgeS == null
             ? 'no off-VM backup recorded'
             : (backup.last_backup_at ?? 'unknown')}
@@ -382,45 +401,11 @@ export function SystemHealthCard() {
             Per-service pool wait (Phase 6 telemetry)
           </summary>
           <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-xs sm:text-[11px] tabular-nums">
-              <thead className="text-muted-foreground">
-                <tr>
-                  <th className="text-left font-medium pr-3 pb-1">Service</th>
-                  <th className="text-right font-medium px-2 pb-1">In-use</th>
-                  <th className="text-right font-medium px-2 pb-1">Idle</th>
-                  <th className="text-right font-medium px-2 pb-1">Samples</th>
-                  <th className="text-right font-medium px-2 pb-1">p50</th>
-                  <th className="text-right font-medium px-2 pb-1">p95</th>
-                  <th className="text-right font-medium px-2 pb-1">p99</th>
-                  <th className="text-right font-medium px-2 pb-1">max</th>
-                  {/* SRE-12 + SRE-16 */}
-                  <th className="text-right font-medium px-2 pb-1">503s</th>
-                  <th className="text-right font-medium px-2 pb-1">Warmed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pools.map(p => (
-                  <tr key={p.service} className="border-t border-muted/40">
-                    <td className="pr-3 py-1 font-mono">{p.service.slice(0, 22)}</td>
-                    <td className="text-right px-2 py-1">{p.in_use}/{p.max_size}</td>
-                    <td className="text-right px-2 py-1">{p.idle}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.count ?? 0}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.p50_ms?.toFixed(1) ?? '–'}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.p95_ms?.toFixed(1) ?? '–'}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.p99_ms?.toFixed(1) ?? '–'}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.max_ms?.toFixed(1) ?? '–'}</td>
-                    <td className={`text-right px-2 py-1 ${(p.saturated_rejects_total ?? 0) > 0 ? 'text-amber-700 dark:text-amber-500' : ''}`}>
-                      {p.saturated_rejects_total ?? 0}
-                    </td>
-                    <td className="text-right px-2 py-1">{p.last_warmed_at ? p.last_warmed_at.slice(11, 19) : '–'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <PoolWaitTable pools={pools} />
             <p className="mt-1 text-[11px] sm:text-[10px] text-muted-foreground">
               Wait-time samples over the last ~1024 checkouts per service. ADR-03 escalation threshold: p95 &gt; 50ms ⇒ consider separate-process cron isolation.
               503s = pool-saturation rejects (SRE-12); Warmed = last writer-driven view rebuild (SRE-16).
-              Same samples stream to OTel ``app.thread_wait_ms`` for off-box analysis.
+              Same samples stream to OTel <code>app.thread_wait_ms</code> for off-box analysis.
             </p>
           </div>
         </details>
@@ -437,5 +422,50 @@ export function SystemHealthCard() {
         </p>
       )}
     </AnalyticsCard>
+  )
+}
+
+function PoolWaitTable({ pools }: { pools: PoolStats[] }) {
+  const columns = React.useMemo<ColumnDef<PoolStats>[]>(
+    () => [
+      { id: 'service', header: () => <span className="text-left font-medium pr-3 pb-1">Service</span>, cell: ({ row }) => <span className="pr-3 py-1 font-mono">{row.original.service.slice(0, 22)}</span> },
+      { id: 'in_use', header: () => <span className="text-right font-medium px-2 pb-1">In-use</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.in_use}/{row.original.max_size}</span> },
+      { id: 'idle', header: () => <span className="text-right font-medium px-2 pb-1">Idle</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.idle}</span> },
+      { id: 'samples', header: () => <span className="text-right font-medium px-2 pb-1">Samples</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.count ?? 0}</span> },
+      { id: 'p50', header: () => <span className="text-right font-medium px-2 pb-1">p50</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p50_ms?.toFixed(1) ?? '–'}</span> },
+      { id: 'p95', header: () => <span className="text-right font-medium px-2 pb-1">p95</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p95_ms?.toFixed(1) ?? '–'}</span> },
+      { id: 'p99', header: () => <span className="text-right font-medium px-2 pb-1">p99</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p99_ms?.toFixed(1) ?? '–'}</span> },
+      { id: 'max', header: () => <span className="text-right font-medium px-2 pb-1">max</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.max_ms?.toFixed(1) ?? '–'}</span> },
+      { id: '503s', header: () => <span className="text-right font-medium px-2 pb-1">503s</span>, cell: ({ row }) => <span className={`text-right px-2 py-1 ${(row.original.saturated_rejects_total ?? 0) > 0 ? 'text-amber-700 dark:text-amber-500' : ''}`}>{row.original.saturated_rejects_total ?? 0}</span> },
+      { id: 'warmed', header: () => <span className="text-right font-medium px-2 pb-1">Warmed</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.last_warmed_at ? row.original.last_warmed_at.slice(11, 19) : '–'}</span> },
+    ],
+    [],
+  )
+  const table = useReactTable({ data: pools, columns, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className="w-full text-xs sm:text-[11px] tabular-nums">
+      <TableHeader className="text-muted-foreground">
+        {table.getHeaderGroups().map((hg) => (
+          <TableRow key={hg.id}>
+            {hg.headers.map((header) => (
+              <TableHead key={header.id} className={header.column.id === 'service' ? 'text-left font-medium pr-3 pb-1 h-auto' : 'text-right font-medium px-2 pb-1 h-auto'}>
+                {flexRender(header.column.columnDef.header, header.getContext())}
+              </TableHead>
+            ))}
+          </TableRow>
+        ))}
+      </TableHeader>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => (
+          <TableRow key={row.original.service} className="border-t border-muted/40">
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id} className={cell.column.id === 'service' ? 'pr-3 py-1 font-mono' : 'text-right px-2 py-1'}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   )
 }

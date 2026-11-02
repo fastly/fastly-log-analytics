@@ -1,0 +1,799 @@
+"""ClickHouse observer, cluster/table health verification, Postgres manifest, and publication orchestration."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import threading
+import time
+from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
+from functools import partial
+from typing import Any, cast
+from uuid import uuid4
+
+import structlog
+from opentelemetry.metrics import Observation
+from psycopg import Connection
+from psycopg_pool import ConnectionPool
+
+from backend import config
+from backend.core.clickhouse.client import (
+    ClickHouseClient,
+    _require_client,
+    get_clickhouse_client,
+    record_publication,
+)
+from backend.core.clickhouse.constants import (
+    CLICKHOUSE_FACT_COLUMNS,
+    CLICKHOUSE_FACT_DDL,
+    CLICKHOUSE_SCHEMA_VERSION,
+    FACT_TYPES,
+    Artifact,
+    Dataset,
+    DurableBatch,
+    PublicationResult,
+    ReplayResult,
+    _construct,
+)
+from backend.core.clickhouse.params import (
+    _validate_payload,
+    canonical_bytes,
+    canonical_row,
+)
+from backend.core.metadata import base as pg_connection
+from backend.core.metadata.base import CLICKHOUSE_CONTROL_DDL, get_pg_pool
+from backend.core.request_telemetry import get_meter
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+
+logger = structlog.get_logger("backend.core.clickhouse")
+
+_OBSERVER_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=16, ttl_seconds=10.0, name="clickhouse_observer")
+CacheRegistry.register("clickhouse_observer", _OBSERVER_CACHE)
+
+
+class ClickHouseObserver:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._client: ClickHouseClient | None = None
+        self._registered = False
+        self._sampled_at = 0.0
+        self._values: dict[str, float] = {}
+        self._cache: BoundedTTLCache = _OBSERVER_CACHE
+
+    def start(self, client: ClickHouseClient) -> None:
+        with self._lock:
+            if self._client is not None:
+                client.close()
+                return
+            self._client = client
+            self._sampled_at = 0
+            self._cache.pop(id(self), None)
+            if not self._registered:
+                meter = get_meter()
+                for key, name, unit in (
+                    ("up", "up", ""),
+                    ("disk_free", "disk_free", "By"),
+                    ("disk_total", "disk_total", "By"),
+                    ("lag", "publication_lag_seconds", "s"),
+                ):
+                    meter.create_observable_gauge(
+                        f"app.clickhouse_{name}",
+                        callbacks=[partial(self.observe, key)],
+                        unit=unit,
+                    )
+                self._registered = True
+
+    def observe(self, key: str, options: Any = None) -> list[Observation]:
+        # All four callbacks run on the exporter, never the serving path.
+        with self._lock:
+            if self._client is None:
+                return []
+            cached = self._cache.get(id(self)) if self._sampled_at > 0 else None
+            if cached is None or time.monotonic() - self._sampled_at >= 10:
+                values: dict[str, float] = {"up": 0}
+                try:
+                    values.update(self._client.storage_health())
+                except Exception as exc:
+                    self._log_error("storage", exc)
+                try:
+                    manifest_cls = globals().get("PgManifest", PgManifest)
+                    values["lag"] = manifest_cls().publication_lag_seconds()
+                except Exception as exc:
+                    self._log_error("manifest", exc)
+                self._values = values
+                self._sampled_at = time.monotonic()
+                self._cache[id(self)] = values
+            else:
+                self._values = cached
+            value = self._values.get(key)
+            return [] if value is None else [Observation(value)]
+
+    @staticmethod
+    def _log_error(probe: str, exc: Exception) -> None:
+        try:
+            logger.warning("clickhouse.observe_failed", probe=probe, error_kind=type(exc).__name__)
+        except Exception:
+            logger.debug("_log_error: logger.warning failed (ignored)", exc_info=True)
+
+    def stop(self) -> None:
+        with self._lock:
+            client, self._client = self._client, None
+            self._values = {}
+            self._cache.pop(id(self), None)
+        if client is not None:
+            client.close()
+
+
+_observer = ClickHouseObserver()
+
+
+def start_clickhouse_observer() -> None:
+    try:
+        settings = config.load_clickhouse_config()
+        if settings is None:
+            return
+        client_cls = globals().get("ClickHouseClient", ClickHouseClient)
+        # Do not contend with serving admission or inherit long query timeouts.
+        client = client_cls(
+            replace(
+                settings,
+                pool_max_size=1,
+                connect_timeout_s=2,
+                query_timeout_s=2,
+                pool_timeout_s=2,
+            )
+        )
+        _observer.start(client)
+    except Exception as exc:
+        stop_clickhouse_observer()
+        _observer._log_error("startup", exc)
+
+
+def stop_clickhouse_observer() -> None:
+    try:
+        _observer.stop()
+    except Exception as exc:
+        _observer._log_error("shutdown", exc)
+
+
+# ── Transactional Postgres manifest; never use the SQLite-shaped commit shim ──
+
+
+def require_postgres() -> None:
+    if not pg_connection.is_postgres():
+        raise RuntimeError("ClickHouse prototype requires Postgres METADATA_DSN; SQLite is unsupported")
+
+
+class PgManifest:
+    def __init__(self, *, bounded: bool = False):
+        require_postgres()
+        self.pool = cast(ConnectionPool[Connection[dict[str, Any]]], get_pg_pool())
+        self.bounded = bounded
+
+    @contextmanager
+    def transaction(self) -> Any:
+        started = time.monotonic()
+        outcome = "error"
+        try:
+            connection = self.pool.connection(timeout=2) if self.bounded else self.pool.connection()
+            with connection as con, con.transaction():
+                if self.bounded:
+                    con.execute("SET LOCAL statement_timeout = '2s'")
+                    con.execute("SET LOCAL lock_timeout = '2s'")
+                yield con
+            outcome = "success"
+        finally:
+            logger.info("clickhouse.manifest", outcome=outcome, duration_ms=(time.monotonic() - started) * 1000)
+
+    def admin_status(self, service_id: str, target: str) -> dict:
+        """Service-scoped metadata only; counts include expired/retired history.
+
+        Pending age is actionable backlog only. An expired selected dataset
+        remains visible, but is never described as ready to serve.
+        """
+        with self.pool.connection(timeout=2) as con, con.transaction():
+            con.execute("SET TRANSACTION READ ONLY")
+            con.execute("SET LOCAL statement_timeout = '2s'")
+            schema = con.execute(
+                "SELECT schema_version FROM clickhouse_schema_state WHERE target_identity=%s", (target,)
+            ).fetchone()
+            counts = con.execute(
+                "SELECT status,count(*) AS n FROM clickhouse_publications WHERE service_id=%s GROUP BY status",
+                (service_id,),
+            ).fetchall()
+            freshness = con.execute(
+                "SELECT MAX(p.published_at) AS last_published_at,"
+                "MAX(EXTRACT(EPOCH FROM (clock_timestamp()-p.created_at))) FILTER "
+                "(WHERE p.status IN ('pending','claimed','failed') AND g.status='building' "
+                "AND d.expires_at>clock_timestamp() AND s.revision=g.selection_revision) AS pending_age "
+                "FROM clickhouse_publications p JOIN clickhouse_generations g USING(service_id,generation,dataset_id) "
+                "JOIN clickhouse_datasets d USING(service_id,dataset_id) "
+                "LEFT JOIN clickhouse_service_selection s ON s.service_id=p.service_id WHERE p.service_id=%s",
+                (service_id,),
+            ).fetchone()
+            active = con.execute(
+                "SELECT g.generation,g.dataset_id,g.target_identity,d.coverage_start,d.coverage_end,d.expires_at,"
+                "d.expires_at<=clock_timestamp() AS expired,"
+                "GREATEST(0,EXTRACT(EPOCH FROM (clock_timestamp()-d.coverage_end))) AS coverage_age_seconds "
+                "FROM clickhouse_service_selection s JOIN clickhouse_generations g USING(service_id,generation) "
+                "JOIN clickhouse_datasets d USING(service_id,dataset_id) WHERE s.service_id=%s AND g.status='active'",
+                (service_id,),
+            ).fetchone()
+            expired = con.execute(
+                "SELECT count(*) AS n FROM clickhouse_datasets WHERE service_id=%s AND expires_at<=clock_timestamp()",
+                (service_id,),
+            ).fetchone()
+        if freshness is None or expired is None:
+            raise RuntimeError("freshness / expired is unexpectedly None")
+        active_response = None
+        if active:
+            active_response = {
+                "generation": active["generation"],
+                "dataset_id": active["dataset_id"],
+                "coverage_start": active["coverage_start"].isoformat(),
+                "coverage_end": active["coverage_end"].isoformat(),
+                "expires_at": active["expires_at"].isoformat(),
+                "expired": active["expired"],
+                "target_matches": active["target_identity"] == target,
+                "coverage_age_seconds": float(active["coverage_age_seconds"]),
+            }
+        return {
+            "schema_version": schema["schema_version"] if schema else None,
+            "publication_counts": {
+                **dict.fromkeys(("pending", "claimed", "failed", "published"), 0),
+                **{row["status"]: row["n"] for row in counts},
+            },
+            "oldest_pending_age_seconds": (
+                max(0.0, float(freshness["pending_age"])) if freshness["pending_age"] is not None else None
+            ),
+            "last_published_at": (
+                freshness["last_published_at"].isoformat() if freshness["last_published_at"] else None
+            ),
+            "active_generation": active_response,
+            "expired_dataset_count": expired["n"],
+        }
+
+    def replay_preview(
+        self, service_id: str, *, dataset_id: str | None, generation: str | None, target: str, limit: int
+    ) -> dict:
+        """Read-only reference validation, also bounding final activation work.
+
+        Activation verifies the entire dataset, not just this request's pending
+        slice. Refuse datasets above the HTTP cap before allocating a generation.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("HTTP replay limit exceeded")
+        with self.pool.connection(timeout=2) as con, con.transaction():
+            con.execute("SET TRANSACTION READ ONLY")
+            con.execute("SET LOCAL statement_timeout = '2s'")
+            if generation:
+                gen = con.execute(
+                    "SELECT g.dataset_id,g.status,g.target_identity,"
+                    "g.selection_revision=s.revision AS current_revision "
+                    "FROM clickhouse_generations g JOIN clickhouse_service_selection s USING(service_id) "
+                    "WHERE g.service_id=%s AND g.generation=%s",
+                    (service_id, generation),
+                ).fetchone()
+                if gen is None:
+                    raise LookupError("reference not found")
+                if gen["status"] != "building" or not gen["current_revision"] or gen["target_identity"] != target:
+                    raise ValueError("generation cannot resume")
+                dataset_id = gen["dataset_id"]
+            dataset = con.execute(
+                "SELECT expires_at,schema_version FROM clickhouse_datasets WHERE service_id=%s AND dataset_id=%s",
+                (service_id, dataset_id),
+            ).fetchone()
+            if dataset is None:
+                raise LookupError("reference not found")
+            if dataset["expires_at"] <= datetime.now(UTC) or dataset["schema_version"] != CLICKHOUSE_SCHEMA_VERSION:
+                raise ValueError("dataset expired or unsupported")
+            count_row = con.execute(
+                "SELECT count(*) AS n FROM "
+                "(SELECT 1 FROM clickhouse_artifacts WHERE service_id=%s AND dataset_id=%s LIMIT 101) a",
+                (service_id, dataset_id),
+            ).fetchone()
+            if count_row is None:
+                raise RuntimeError("count_row is unexpectedly None")
+            count = count_row["n"]
+            if count > 100:
+                raise ValueError("dataset exceeds HTTP replay cap")
+            pending = count
+            if generation:
+                pending_row = con.execute(
+                    "SELECT count(*) AS n FROM clickhouse_publications "
+                    "WHERE service_id=%s AND generation=%s AND status!='published'",
+                    (service_id, generation),
+                ).fetchone()
+                if pending_row is None:
+                    raise RuntimeError("pending_row is unexpectedly None")
+                pending = pending_row["n"]
+        return {"dataset_id": dataset_id, "artifact_count": count, "planned_artifacts": min(pending, limit)}
+
+    def publication_lag_seconds(self) -> float:
+        """Oldest actionable backlog age, not the age of retired/expired work.
+
+        NULL after a successful aggregate means no backlog. Database errors
+        propagate so observers omit unknown lag instead of reporting zero.
+        """
+        with self.pool.connection(timeout=2) as con, con.transaction():
+            con.execute("SET LOCAL statement_timeout = '2s'")
+            row = con.execute(
+                "SELECT MAX(EXTRACT(EPOCH FROM (clock_timestamp()-p.created_at))) AS lag_seconds "
+                "FROM clickhouse_publications p "
+                "JOIN clickhouse_generations g ON g.service_id=p.service_id AND g.generation=p.generation "
+                "JOIN clickhouse_datasets d ON d.service_id=g.service_id AND d.dataset_id=g.dataset_id "
+                "JOIN clickhouse_service_selection s ON s.service_id=g.service_id "
+                "AND s.revision=g.selection_revision "
+                "WHERE p.status IN ('pending', 'claimed', 'failed') AND g.status='building' "
+                "AND d.expires_at>clock_timestamp()"
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("row is unexpectedly None")
+        return max(0.0, float(row["lag_seconds"])) if row["lag_seconds"] is not None else 0.0
+
+    def dataset(self, service_id: str, dataset_id: str) -> Dataset:
+        with self.transaction() as con:
+            row = con.execute(
+                "SELECT * FROM clickhouse_datasets WHERE service_id=%s AND dataset_id=%s",
+                (service_id, dataset_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("dataset not found")
+        dataset = _construct(Dataset, row)
+        if dataset.expires_at <= datetime.now(UTC):
+            raise ValueError("dataset expired")
+        if dataset.schema_version != CLICKHOUSE_SCHEMA_VERSION:
+            raise ValueError("dataset schema unsupported")
+        return dataset
+
+    def artifacts(self, service_id: str, dataset_id: str) -> list[Artifact]:
+        with self.transaction() as con:
+            rows = con.execute(
+                "SELECT * FROM clickhouse_artifacts WHERE service_id=%s AND dataset_id=%s ORDER BY ordinal_start",
+                (service_id, dataset_id),
+            ).fetchall()
+        return [_construct(Artifact, row) for row in rows]
+
+    def artifact(self, service_id: str, generation: str, batch_id: str) -> Artifact:
+        gen = self.generation(service_id, generation)
+        self.dataset(service_id, gen["dataset_id"])
+        with self.transaction() as con:
+            row = con.execute(
+                "SELECT * FROM clickhouse_artifacts WHERE service_id=%s AND dataset_id=%s AND batch_id=%s",
+                (service_id, gen["dataset_id"], batch_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("artifact not in generation")
+        return _construct(Artifact, row)
+
+    def generation(self, service_id: str, generation: str) -> dict:
+        with self.transaction() as con:
+            row = con.execute(
+                "SELECT * FROM clickhouse_generations WHERE service_id=%s AND generation=%s",
+                (service_id, generation),
+            ).fetchone()
+        if row is None:
+            raise ValueError("generation not found")
+        return dict(row)
+
+    def begin_generation(self, service_id: str, dataset_id: str, target: str) -> str:
+        self.dataset(service_id, dataset_id)
+        generation = uuid4().hex
+        with self.transaction() as con:
+            con.execute(
+                "INSERT INTO clickhouse_service_selection(service_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                (service_id,),
+            )
+            revision_row = con.execute(
+                "SELECT revision FROM clickhouse_service_selection WHERE service_id=%s FOR UPDATE",
+                (service_id,),
+            ).fetchone()
+            if revision_row is None:
+                raise RuntimeError("revision_row is unexpectedly None")
+            revision = revision_row["revision"]
+            con.execute(
+                "INSERT INTO clickhouse_generations(service_id,generation,dataset_id,target_identity,selection_revision)"
+                " VALUES (%s,%s,%s,%s,%s)",
+                (service_id, generation, dataset_id, target, revision),
+            )
+            con.execute(
+                "INSERT INTO clickhouse_publications(service_id,generation,dataset_id,batch_id) "
+                "SELECT service_id,%s,dataset_id,batch_id FROM clickhouse_artifacts WHERE service_id=%s AND dataset_id=%s",
+                (generation, service_id, dataset_id),
+            )
+        return generation
+
+    def claim(self, service_id: str, generation: str, batch_id: str, *, lease_seconds: int = 120) -> int | None:
+        if not 1 <= lease_seconds <= 300:
+            raise ValueError("lease must be bounded")
+        with self.transaction() as con:
+            row = con.execute(
+                "UPDATE clickhouse_publications p SET status='claimed', lease_fence=lease_fence+1,"
+                "attempt_count=attempt_count+1, lease_until=clock_timestamp()+%s * interval '1 second',"
+                "updated_at=clock_timestamp() FROM clickhouse_generations g, clickhouse_datasets d "
+                "WHERE p.service_id=%s AND p.generation=%s AND p.batch_id=%s "
+                "AND g.service_id=p.service_id AND g.generation=p.generation AND g.status='building' "
+                "AND d.service_id=p.service_id AND d.dataset_id=p.dataset_id AND d.expires_at>clock_timestamp() "
+                "AND p.status!='published' AND (p.status!='claimed' OR p.lease_until<=clock_timestamp()) "
+                "RETURNING p.lease_fence",
+                (lease_seconds, service_id, generation, batch_id),
+            ).fetchone()
+        return row["lease_fence"] if row else None
+
+    def finish(
+        self,
+        service_id: str,
+        generation: str,
+        batch_id: str,
+        fence: int,
+        *,
+        digest: str | None,
+        error: str | None = None,
+    ) -> bool:
+        with self.transaction() as con:
+            result = con.execute(
+                "UPDATE clickhouse_publications p SET status=%s,verified_digest=%s,"
+                "published_at=CASE WHEN %s THEN clock_timestamp() ELSE NULL END,"
+                "first_error=COALESCE(first_error,%s),last_error=%s,updated_at=clock_timestamp() "
+                "FROM clickhouse_datasets d WHERE p.service_id=%s AND p.generation=%s AND p.batch_id=%s "
+                "AND p.lease_fence=%s AND p.status='claimed' AND p.lease_until>clock_timestamp() "
+                "AND d.service_id=p.service_id AND d.dataset_id=p.dataset_id AND d.expires_at>clock_timestamp()",
+                (
+                    "published" if digest else "failed",
+                    digest,
+                    bool(digest),
+                    error,
+                    error,
+                    service_id,
+                    generation,
+                    batch_id,
+                    fence,
+                ),
+            )
+            return result.rowcount == 1
+
+    def activate(self, service_id: str, generation: str, target: str) -> bool:
+        """Caller verified the target; lock + revision CAS prevents late promotion."""
+        with self.transaction() as con:
+            selection = con.execute(
+                "SELECT * FROM clickhouse_service_selection WHERE service_id=%s FOR UPDATE",
+                (service_id,),
+            ).fetchone()
+            gen = con.execute(
+                "SELECT g.*, d.expires_at FROM clickhouse_generations g JOIN clickhouse_datasets d "
+                "USING(service_id,dataset_id) WHERE g.service_id=%s AND g.generation=%s FOR UPDATE OF g",
+                (service_id, generation),
+            ).fetchone()
+            if (
+                not selection
+                or not gen
+                or (
+                    gen["status"] != "building"
+                    or gen["target_identity"] != target
+                    or gen["selection_revision"] != selection["revision"]
+                    or gen["expires_at"] <= datetime.now(UTC)
+                )
+            ):
+                return False
+            missing_row = con.execute(
+                "SELECT count(*) AS n FROM clickhouse_artifacts a LEFT JOIN clickhouse_publications p "
+                "ON p.service_id=a.service_id AND p.dataset_id=a.dataset_id AND p.batch_id=a.batch_id "
+                "AND p.generation=%s WHERE a.service_id=%s AND a.dataset_id=%s "
+                "AND (p.status IS DISTINCT FROM 'published' OR p.verified_digest IS DISTINCT FROM a.canonical_digest)",
+                (generation, service_id, gen["dataset_id"]),
+            ).fetchone()
+            if missing_row is None or missing_row["n"]:
+                return False
+            con.execute(
+                "UPDATE clickhouse_generations SET status='retired' WHERE service_id=%s AND status='active'",
+                (service_id,),
+            )
+            con.execute(
+                "UPDATE clickhouse_generations SET status='active',activated_at=clock_timestamp() "
+                "WHERE service_id=%s AND generation=%s",
+                (service_id, generation),
+            )
+            con.execute(
+                "UPDATE clickhouse_service_selection SET generation=%s,revision=revision+1 WHERE service_id=%s",
+                (generation, service_id),
+            )
+            return True
+
+    def selected(self, service_id: str) -> dict | None:
+        with self.transaction() as con:
+            row = con.execute(
+                "SELECT g.* FROM clickhouse_service_selection s JOIN clickhouse_generations g "
+                "USING(service_id,generation) WHERE s.service_id=%s AND g.status='active'",
+                (service_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def pending(self, service_id: str, generation: str, limit: int) -> list[str]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be 1..1000")
+        with self.transaction() as con:
+            rows = con.execute(
+                "SELECT p.batch_id FROM clickhouse_publications p JOIN clickhouse_artifacts a "
+                "USING(service_id,dataset_id,batch_id) WHERE p.service_id=%s AND p.generation=%s "
+                "AND p.status!='published' ORDER BY a.ordinal_start LIMIT %s",
+                (service_id, generation, limit),
+            ).fetchall()
+        return [r["batch_id"] for r in rows]
+
+
+# ── ClickHouse Publication & Schema ──
+
+
+def target_identity(client: ClickHouseClient) -> str:
+    """Proof of the actual table, not a host name (a replacement volume differs)."""
+    tables = client.execute(
+        "SELECT toString(uuid) AS uuid, engine, sorting_key, partition_key FROM system.tables "
+        "WHERE database = currentDatabase() AND name = 'log_facts'"
+    )
+    if (
+        len(tables) != 1
+        or tables[0].get("engine") != "ReplacingMergeTree"
+        or tables[0].get("sorting_key") != "service_id, generation, batch_id, row_ordinal"
+        or tables[0].get("partition_key") != "(service_id, generation)"
+        or tables[0].get("uuid") in (None, "", "00000000-0000-0000-0000-000000000000")
+    ):
+        raise RuntimeError("ClickHouse fact schema mismatch or missing table identity")
+    columns = client.execute(
+        "SELECT name, type FROM system.columns "
+        "WHERE database = currentDatabase() AND table = 'log_facts' ORDER BY position"
+    )
+    if [(r["name"], r["type"]) for r in columns] != list(FACT_TYPES):
+        raise RuntimeError("ClickHouse fact schema columns mismatch")
+    return tables[0]["uuid"]
+
+
+def _record_schema(identity: str) -> None:
+    require_postgres()
+    # The SQLite-shaped wrapper's commit() is a no-op. Use a real psycopg
+    # transaction even though the underlying pool connections are autocommit.
+    with pg_connection.get_pg_pool().connection() as con, con.transaction():
+        con.execute("SELECT pg_advisory_xact_lock(2080406)")
+        for ddl in CLICKHOUSE_CONTROL_DDL:
+            con.execute(ddl)
+        con.execute(
+            "INSERT INTO clickhouse_schema_state(target_identity, schema_version) VALUES (%s, %s) "
+            "ON CONFLICT (target_identity) DO UPDATE SET "
+            "schema_version = EXCLUDED.schema_version, checked_at = clock_timestamp()",
+            (identity, CLICKHOUSE_SCHEMA_VERSION),
+        )
+
+
+def maintain_clickhouse_system_tables(client: ClickHouseClient) -> None:
+    """Ensure internal system tables do not accumulate unbounded parts and trigger merge OOMs."""
+    log = logging.getLogger("backend.core.clickhouse")
+    for profiler_tbl in ("trace_log", "processors_profile_log"):
+        try:
+            client.execute(f"TRUNCATE TABLE IF EXISTS system.{profiler_tbl}")
+        except Exception as e:
+            log.debug("Failed to truncate system.%s: %s", profiler_tbl, e)
+
+    for tbl in ("metric_log", "asynchronous_metric_log", "text_log", "query_log", "part_log", "error_log", "trace_log"):
+        try:
+            client.execute(f"ALTER TABLE system.{tbl} MODIFY TTL event_date + INTERVAL 1 DAY")
+        except Exception as e:
+            log.debug("Failed to alter TTL on system.%s: %s", tbl, e)
+
+
+def create_clickhouse_schema(client: ClickHouseClient) -> None:
+    require_postgres()
+    maintain_clickhouse_system_tables(client)
+    client.execute(CLICKHOUSE_FACT_DDL)
+    _record_schema(target_identity(client))
+
+
+def main() -> None:
+    client = get_clickhouse_client()
+    if client is None:
+        raise RuntimeError("ClickHouse prototype is disabled")
+    try:
+        create_clickhouse_schema(client)
+
+        try:
+            from backend.high_scale.archive import install_clickhouse_schema
+
+            install_clickhouse_schema()
+        except ImportError:
+            pass
+
+        logging.getLogger("backend.core.clickhouse").info("ClickHouse schema v%s verified", CLICKHOUSE_SCHEMA_VERSION)
+    finally:
+        client.close()
+        if pg_connection.is_postgres():
+            pg_connection.get_pg_pool().close()
+
+
+def _ensure_manifest_symbols() -> None:
+    if "PgManifest" not in globals():
+        from backend.core.clickhouse import Artifact as _A
+        from backend.core.clickhouse import Dataset as _D
+        from backend.core.clickhouse import PgManifest as _M
+
+        globals()["Artifact"] = _A
+        globals()["Dataset"] = _D
+        globals()["PgManifest"] = _M
+
+
+def _target_rows(client: ClickHouseClient, service_id: str, generation: str, artifact: Artifact) -> tuple:
+    rows = client.execute(
+        "SELECT source_identity,row_ordinal,timestamp,country,ip,url,conn_requests FROM log_facts FINAL "
+        "WHERE service_id={service:String} AND generation={generation:String} AND batch_id={batch:String} "
+        "ORDER BY row_ordinal LIMIT 10001",
+        {"service": service_id, "generation": generation, "batch": artifact.batch_id},
+    )
+    return tuple(canonical_row(row) for row in rows)
+
+
+def publish_batch(
+    service_id: str,
+    batch: DurableBatch,
+    *,
+    generation: str,
+    store: PgManifest | None = None,
+    client: ClickHouseClient | None = None,
+) -> PublicationResult:
+    started = time.monotonic()
+    outcome = "failed"
+    error_kind = None
+    try:
+        result = _publish_batch(service_id, batch, generation=generation, store=store, client=client)
+        outcome = result.status
+        return result
+    except Exception as exc:
+        error_kind = type(exc).__name__
+        raise
+    finally:
+        # The outer boundary includes config, manifest, payload and claim
+        # failures. Observers must never replace an original result/error.
+        try:
+            record_publication(outcome)
+        except Exception:
+            logger.debug("publish_batch: record_publication failed (ignored)", exc_info=True)
+        try:
+            log = logger.error if outcome == "failed" else logger.info
+            log(
+                "clickhouse.publication",
+                outcome=outcome,
+                error_kind=error_kind,
+                batch_id=batch.artifact.batch_id,
+                rows=len(batch.rows),
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+        except Exception:
+            logger.debug("publish_batch: log failed (ignored)", exc_info=True)
+
+
+def _publish_batch(
+    service_id: str,
+    batch: DurableBatch,
+    *,
+    generation: str,
+    store: PgManifest | None,
+    client: ClickHouseClient | None,
+) -> PublicationResult:
+    _ensure_manifest_symbols()
+    store = store or PgManifest()
+    client = _require_client(client)
+    artifact = store.artifact(service_id, generation, batch.artifact.batch_id)
+    if artifact != batch.artifact:
+        raise ValueError("artifact differs from immutable manifest")
+    _validate_payload(artifact, batch.rows)
+    gen = store.generation(service_id, generation)
+    if target_identity(client) != gen["target_identity"]:
+        raise ValueError("target changed; full rebuild required")
+    fence = store.claim(service_id, generation, artifact.batch_id)
+    if fence is None:
+        return PublicationResult(artifact.batch_id, "not_claimed")
+    try:
+        # Each chunk is at most ~4 MiB of canonical payload; rows are already
+        # artifact-validated, so a delayed worker cannot insert different values.
+        chunk: list[tuple] = []
+        size = 0
+        for row in batch.rows:
+            if size >= 4 * 1024 * 1024 or len(chunk) >= 1000:
+                client.insert_rows("log_facts", list(CLICKHOUSE_FACT_COLUMNS), chunk)
+                chunk, size = [], 0
+            chunk.append((service_id, artifact.batch_id, row[0], row[1], generation, *row[2:]))
+            size += len(canonical_bytes(row))
+        client.insert_rows("log_facts", list(CLICKHOUSE_FACT_COLUMNS), chunk)
+        actual = _target_rows(client, service_id, generation, artifact)
+        if actual != batch.rows:
+            raise ValueError("ordered target payload mismatch")
+        if target_identity(client) != gen["target_identity"]:
+            raise ValueError("target changed during publication")
+        published = store.finish(service_id, generation, artifact.batch_id, fence, digest=artifact.canonical_digest)
+    except Exception as exc:
+        kind = type(exc).__name__
+        try:
+            store.finish(service_id, generation, artifact.batch_id, fence, digest=None, error=kind)
+        except Exception:
+            logger.warning("_publish_batch: store.finish failed (ignored)", exc_info=True)
+        raise RuntimeError(f"ClickHouse publication failed: {kind}") from None
+    return PublicationResult(artifact.batch_id, "published" if published else "stale", len(batch.rows), fence)
+
+
+def verify_generation(service_id: str, generation: str, *, store: PgManifest, client: ClickHouseClient) -> Dataset:
+    gen = store.generation(service_id, generation)
+    dataset = store.dataset(service_id, gen["dataset_id"])
+    if target_identity(client) != gen["target_identity"]:
+        raise ValueError("target changed; full rebuild required")
+    digest = hashlib.sha256()
+    count = 0
+    for artifact in store.artifacts(service_id, dataset.dataset_id):
+        if artifact.ordinal_start != count:
+            raise ValueError("manifest coverage mismatch")
+        rows = _target_rows(client, service_id, generation, artifact)
+        _validate_payload(artifact, rows)
+        for row in rows:
+            digest.update(canonical_bytes(row))
+        count += len(rows)
+    actual_count = client.execute(
+        "SELECT count() AS n FROM log_facts FINAL WHERE service_id={service:String} AND generation={generation:String}",
+        {"service": service_id, "generation": generation},
+    )[0]["n"]
+    if actual_count != count or count != dataset.expected_rows or digest.hexdigest() != dataset.canonical_digest:
+        raise ValueError("generation coverage or digest mismatch")
+    return dataset
+
+
+def activate_generation(service_id: str, generation: str, *, store: PgManifest, client: ClickHouseClient) -> bool:
+    verify_generation(service_id, generation, store=store, client=client)
+    return store.activate(service_id, generation, target_identity(client))
+
+
+def replay_unpublished(
+    service_id: str,
+    *,
+    generation: str,
+    loader: Callable[[Artifact], DurableBatch],
+    limit: int = 100,
+    store: PgManifest | None = None,
+    client: ClickHouseClient | None = None,
+) -> ReplayResult:
+    """Resume this building generation only. Rebuild uses full_rebuild instead."""
+    _ensure_manifest_symbols()
+    store = store or PgManifest()
+    client = _require_client(client)
+    gen = store.generation(service_id, generation)
+    store.dataset(service_id, gen["dataset_id"])
+    batches = store.pending(service_id, generation, limit)
+    published = 0
+    for batch_id in batches:
+        result = publish_batch(
+            service_id,
+            loader(store.artifact(service_id, generation, batch_id)),
+            generation=generation,
+            store=store,
+            client=client,
+        )
+        published += result.status == "published"
+    activated = False
+    if not store.pending(service_id, generation, 1):
+        activated = activate_generation(service_id, generation, store=store, client=client)
+    return ReplayResult(generation, len(batches), published, activated)
+
+
+def full_rebuild(
+    service_id: str,
+    dataset_id: str,
+    *,
+    loader: Callable[[Artifact], DurableBatch],
+    limit: int = 100,
+    store: PgManifest | None = None,
+    client: ClickHouseClient | None = None,
+) -> ReplayResult:
+    """Always allocate a new target generation, including previously published rows."""
+    if not 1 <= limit <= 1000:
+        raise ValueError("limit must be 1..1000")
+    _ensure_manifest_symbols()
+    store = store or PgManifest()
+    client = _require_client(client)
+    generation = store.begin_generation(service_id, dataset_id, target_identity(client))
+    return replay_unpublished(service_id, generation=generation, loader=loader, limit=limit, store=store, client=client)

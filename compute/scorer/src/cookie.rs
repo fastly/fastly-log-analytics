@@ -1,6 +1,6 @@
 //! AES-GCM-with-AAD session cookie codec.
 //!
-//! Wire-format contract with the Python reference (`backend/scoring/cookie.py`).
+//! Wire-format contract with the Python reference (`backend/scoring/__init__.py`).
 //! The packed-binary layout, AAD format, dual-key trial-decrypt order, and
 //! base64url encoding all match byte-for-byte. The cross-language fixture
 //! tests in [`tests::wire_format`] are the canonical source of truth — if a

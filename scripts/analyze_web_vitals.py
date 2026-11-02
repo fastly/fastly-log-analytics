@@ -3,7 +3,7 @@
 agent) can act on.
 
 Reads the JSONL sink written by ``POST /api/web-vitals`` when collection
-is enabled (``WEB_VITALS_COLLECT=1`` — see backend/core/web_vitals_store.py)
+is enabled (``WEB_VITALS_COLLECT=1`` — see backend/core/request_telemetry/instruments.py)
 and emits a per-route / per-metric breakdown: sample counts, p50/p75/p95,
 and the rating distribution, ranked by how far each route's p75 sits past
 Google's Core Web Vitals "good" threshold. The "Focus" section at the top
@@ -38,7 +38,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Mirrors backend/core/web_vitals_store.py:LOG_PATH (resolved against the
+# Mirrors backend/core/request_telemetry/instruments.py:LOG_PATH (resolved against the
 # repo root so the script works regardless of the caller's CWD).
 DEFAULT_INPUT = REPO_ROOT / "data" / "system" / "web_vitals.jsonl"
 
@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
 
     path: Path = args.input
     # The store rotates the active file to a single ".1" backup at its size
-    # cap (backend/core/web_vitals_store.py:rotated_path); include it so the
+    # cap (backend/core/request_telemetry/instruments.py:rotated_path); include it so the
     # report + purge span the full retained window. Oldest segment first.
     rotated = path.with_name(path.name + ".1")
     segments = [p for p in (rotated, path) if p.exists()]

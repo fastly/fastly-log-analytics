@@ -1,71 +1,276 @@
-"""Provision CLI — typer subcommands that wrap the original
-``handle_*`` / ``wizard`` functions.
+"""Provision CLI and print/prompt/lifecycle helpers.
 
-Phase 10.5 adopts typer for arg parsing and rich for output. The
-handler functions below keep their original signature
-(``def handle_foo(args) -> ...``) because:
-
-  - tests/test_provision_cli_handlers.py drives them by constructing
-    ``SimpleNamespace`` instances and calling the handler directly;
-  - patches like ``patch("backend.provision.cli.perform_teardown")``
-    rely on the handler doing its real work in this module's
-    namespace.
-
-Typer commands at the bottom build a ``SimpleNamespace`` from their
-typed options and call the corresponding handler, so
-``python -m backend.provision.cli teardown --bucket foo`` works
-end-to-end while the handler logic stays unit-testable.
+Consolidates ``backend.provision.utils`` (plus ``log_paths`` and ``draft_version``)
+and ``backend.provision.cli`` into a single module.
 """
 
+from __future__ import annotations
+
 import datetime
+import logging
 import os
+import queue
 import re
 import secrets
 import sys
+import threading
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from datetime import datetime as _datetime
 from types import SimpleNamespace
+from typing import Any
 
 import typer
+from rich.console import Console
 
-from backend.core.fastly.client import fastly
-from backend.core.fastly.service import find_service_by_name
-from backend.core.fastly.utils import SHIELD_MAP, parse_period
-from backend.provision.fastly_api import (
+# ── Rich Consoles & ANSI colour helpers (folded from utils.py) ───────────────
+_stdout = Console(highlight=False, markup=False, soft_wrap=True)
+_stderr = Console(stderr=True, highlight=False, markup=False, soft_wrap=True)
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[91m"
+GRN = "\033[92m"
+YLW = "\033[93m"
+BLU = "\033[94m"
+MAG = "\033[95m"
+CYN = "\033[96m"
+RST = "\033[0m"
+
+
+def _c(color, text):
+    return f"{color}{text}{RST}"
+
+
+def _highlight(msg):
+    if "\033" in msg:
+        return msg
+    return re.sub(r"'([^']+)'", rf"'{_c(MAG, r'\1')}'", msg)
+
+
+def _emit(console: Console, line: str) -> None:
+    """Single write path through rich."""
+    console.print(line, end="\n", soft_wrap=True)
+
+
+def ok(msg):
+    _emit(_stdout, f"  {_c(GRN + BOLD, '✓')}  {_highlight(msg)}")
+
+
+def fail(msg):
+    _emit(_stderr, f"  {_c(RED + BOLD, '✗')}  {_c(RED, msg)}")
+
+
+def info(msg):
+    _emit(_stdout, f"  {_c(BLU + BOLD, '→')}  {_highlight(msg)}")
+
+
+def warn(msg):
+    _emit(_stdout, f"  {_c(YLW + BOLD, '⚠')}  {_c(YLW, msg)}")
+
+
+def blank():
+    sys.stdout.write("\n")
+
+
+def step(n, total, title):
+    blank()
+    _emit(_stdout, f"{_c(BOLD + MAG, f'[{n}/{total}]')} {_c(BOLD + CYN, title)}")
+
+
+def banner(title):
+    bar = "━" * 64
+    blank()
+    _emit(_stdout, _c(MAG + BOLD, bar))
+    _emit(_stdout, _c(CYN + BOLD, f"  {title}"))
+    _emit(_stdout, _c(MAG + BOLD, bar))
+
+
+def ask(question, default=None):
+    suffix = f" {_c(DIM, f'[{default}]')}" if default is not None else ""
+    prompt_str = f"  {_c(CYN, '?')}  {question}{suffix}: "
+    raw = input(prompt_str).strip()
+    return raw if raw else (default if default is not None else "")
+
+
+def ask_yes(question, default=True):
+    hint = _c(DIM, "Y/n" if default else "y/N")
+    raw = input(f"  {_c(CYN, '?')}  {question} [{hint}]: ").strip().lower()
+    if not raw:
+        return default
+    return raw.startswith("y")
+
+
+def ask_int(question, default, min_val=None, max_val=None):
+    while True:
+        raw = ask(question, default)
+        try:
+            val = int(raw)
+            if min_val is not None and val < min_val:
+                warn(f"Value must be at least {min_val}")
+                continue
+            if max_val is not None and val > max_val:
+                warn(f"Value must be at most {max_val}")
+                continue
+            return val
+        except ValueError:
+            warn("Please enter a valid integer.")
+
+
+def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
+    q: queue.Queue[str | None] = queue.Queue()
+    kwargs["status_cb"] = q.put
+    res = []
+    err = []
+
+    def worker():
+        try:
+            res.append(func(*args, **kwargs))
+        except Exception as e:
+            err.append(e)
+        finally:
+            q.put(None)
+
+    t = threading.Thread(target=worker)
+    t.start()
+
+    while True:
+        msg = q.get()
+        if msg is None:
+            break
+        yield {"type": "status", "message": msg}
+
+    t.join()
+    if err:
+        if raise_on_error:
+            raise err[0]
+        yield {"type": "error", "message": str(err[0])}
+        return None
+    return res[0]
+
+
+class VclBuilder:
+    """Line- and section-joining helpers for VCL generators."""
+
+    @staticmethod
+    def join_lines(items: Iterable[str]) -> str:
+        """``"\\n"``-join an iterable of already-rendered lines."""
+        return "\n".join(items)
+
+    @staticmethod
+    def join_sections(sections: Iterable[str]) -> str:
+        """``"\\n\\n"``-join sections, dropping blank/whitespace-only ones."""
+        return "\n\n".join(s for s in sections if s.strip())
+
+
+# ── Canonical FOS log object path templates (merged from log_paths.py) ────────
+
+ANALYTICS_LOG_LAYOUT = "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+RUM_LOG_LAYOUT = "raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+
+
+def analytics_log_path() -> str:
+    """Logging-endpoint ``path`` for the main analytics log stream."""
+    return ANALYTICS_LOG_LAYOUT
+
+
+def rum_log_path() -> str:
+    """Logging-endpoint ``path`` for the RUM beacon log stream."""
+    return RUM_LOG_LAYOUT
+
+
+def minute_list_prefix(dt: _datetime) -> str:
+    """S3 LIST ``Prefix`` bounding exactly one closed minute of analytics logs."""
+    return dt.strftime("raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+
+
+def rum_minute_list_prefix(dt: _datetime) -> str:
+    """S3 LIST ``Prefix`` bounding exactly one closed minute of RUM beacon logs."""
+    return dt.strftime("raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+
+
+# ── Fastly service version lifecycle (merged from draft_version.py) ───────────
+
+_draft_logger = logging.getLogger("backend.provision.draft_version")
+
+
+def rollback_to_version(service_id: str, token: str, base_version: int, *, call: Callable[..., Any]) -> None:
+    """Re-activate ``base_version``. A failed rollback is logged at WARNING, never raised."""
+    try:
+        call("PUT", f"/service/{service_id}/version/{base_version}/activate", token=token)
+    except RuntimeError:
+        _draft_logger.warning(
+            "rollback activation of version %s failed for %s", base_version, service_id, exc_info=True
+        )
+
+
+@contextmanager
+def draft_version(
+    service_id: str,
+    token: str,
+    *,
+    base_version: int,
+    call: Callable[..., Any],
+    comment: str | None = None,
+    comment_before_activate: bool = False,
+    status_cb: Callable[[str], None] | None = None,
+    validate: bool = True,
+    validate_msg: str = "Validating draft version {ver}...",
+    activate_msg: str = "Activating version {ver}...",
+    expect_empty_activate: bool = False,
+    rollback: bool = True,
+    on_failure: Callable[[Exception], None] | None = None,
+) -> Iterator[int]:
+    """Yield the new draft version number; validate + activate it when the body completes."""
+    clone = call("PUT", f"/service/{service_id}/version/{base_version}/clone", token=token)
+    new_ver = int(clone["number"])
+    if comment is not None and not comment_before_activate:
+        call("PUT", f"/service/{service_id}/version/{new_ver}", {"comment": comment}, token=token)
+
+    try:
+        yield new_ver
+
+        if validate:
+            if status_cb:
+                status_cb(validate_msg.format(ver=new_ver))
+            result = call("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
+            if result.get("status") != "ok":
+                raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
+
+        if comment is not None and comment_before_activate:
+            call("PUT", f"/service/{service_id}/version/{new_ver}", {"comment": comment}, token=token)
+
+        if status_cb:
+            status_cb(activate_msg.format(ver=new_ver))
+        activate_kwargs: dict[str, Any] = {"expect_empty": True} if expect_empty_activate else {}
+        call("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token, **activate_kwargs)
+    except Exception as exc:
+        if on_failure is not None:
+            on_failure(exc)
+        if rollback:
+            rollback_to_version(service_id, token, base_version, call=call)
+        raise
+
+
+from backend.core.fastly.client import SHIELD_MAP, fastly, find_service_by_name, parse_period  # noqa: E402
+from backend.provision.fastly_api import (  # noqa: E402
     account_has_rate_limiting,
     redeploy_cdn_vcl,
     update_logging_endpoint,
     validate_log_format,
 )
-from backend.provision.orchestrator import (
+from backend.provision.orchestrator import (  # noqa: E402
     _build_log_fields_config,
     cleanup_local_data,
-    generate_analyst_invite,
     perform_teardown,
     write_service_config,
-)
-from backend.provision.utils import (
-    BLU,
-    BOLD,
-    CYN,
-    DIM,
-    MAG,
-    YLW,
-    _c,
-    ask,
-    ask_int,
-    ask_yes,
-    banner,
-    blank,
-    fail,
-    info,
-    ok,
-    warn,
 )
 
 # ────────────────────────────────────────────────────────────────────────────
 # Handler functions — driven directly by the unit tests; the typer
 # commands at the bottom call into these via a SimpleNamespace.
 # Patching contracts (the test file pokes ``backend.provision.cli.<name>``):
-#   perform_teardown, cleanup_local_data, generate_analyst_invite,
+#   perform_teardown, cleanup_local_data,
 #   update_logging_endpoint, write_service_config, validate_log_format,
 #   redeploy_cdn_vcl, find_service_by_name, fastly, ask, ask_yes, ask_int
 # ────────────────────────────────────────────────────────────────────────────
@@ -76,8 +281,6 @@ def wizard(args) -> dict:
     _preflight_lf = _build_log_fields_config(args)
     fmt_errors = validate_log_format(_preflight_lf)
     if fmt_errors:
-        from backend.provision.utils import RED
-
         for err in fmt_errors:
             print(f"  {_c(RED, 'ERROR:')} {err}")
         sys.exit(1)
@@ -93,10 +296,11 @@ def wizard(args) -> dict:
 
     safe_id = re.sub(r"[^a-zA-Z0-9]", "-", service_id)
     safe_id = re.sub(r"-+", "-", safe_id).strip("-")
-    bucket_name = args.bucket or (f"fos-{safe_id}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id}-logs"))
-    fos_prefix = (
-        args.prefix if args.prefix is not None else ("" if args.yes else ask("Base log prefix inside bucket", ""))
+    safe_id_lower = safe_id.lower()
+    bucket_name = args.bucket or (
+        f"fos-{safe_id_lower}-logs" if args.yes else ask("FOS bucket name", f"fos-{safe_id_lower}-logs")
     )
+    fos_prefix = ""
     sample_rate = max(
         1,
         min(
@@ -192,8 +396,6 @@ def handle_teardown(args):
                 "cdn_url": prov_cfg.get("cdn_url", ""),
                 "cdn_secret": svc_cfg.get("cdn_secret", ""),
                 "admin_token": svc_cfg.get("fastly_api_key", ""),
-                # Carry the scoring block so perform_teardown can tear down the
-                # Compute scorer service + its stores (mirrors the HTTP route).
                 "scoring": svc_cfg.get("scoring") or {},
             }
 
@@ -254,7 +456,7 @@ def handle_teardown(args):
 def handle_reset_logs(args):
     banner("Fastly Log Analysis — Delete Data")
     from backend import config as svcconfig
-    from backend.core.metadata.reconciliation import is_ingested_files_dedup_active
+    from backend.core.metadata.base import is_ingested_files_dedup_active
     from backend.core.reset import reset_service_logs
     from backend.cron.scheduler import get_scheduler
 
@@ -267,12 +469,12 @@ def handle_reset_logs(args):
     if not args.yes:
         blank()
         print(f"  {_c(YLW + BOLD, 'The following will be permanently deleted:')}")
-        print(f"  {_c(DIM, 'Cloud Iceberg log table (iceberg/, except iceberg/meta/)')}")
+        print(f"  {_c(DIM, 'Cloud DuckLake log data (ducklake/ in FOS, High-Scale only)')}")
         print(f"  {_c(DIM, 'Quarantined-file copies (errors/)')}")
-        print(f"  {_c(DIM, 'Local DuckDB analytical database + cache')}")
+        print(f"  {_c(DIM, 'Local DuckLake data, DuckDB analytical database + cache')}")
         print(f"  {_c(DIM, 'Local ingestion dedup indexes')}")
         if args.delete_raw:
-            print(f"  {_c(YLW + BOLD, 'Raw .gz logs in cloud storage (raw/)')}")
+            print(f"  {_c(YLW + BOLD, 'Raw .gz request logs in cloud storage (raw/request/)')}")
         if args.wipe_usage:
             print(f"  {_c(DIM, 'Usage-log (Class A/B) billing history')}")
         blank()
@@ -282,7 +484,7 @@ def handle_reset_logs(args):
         if args.delete_raw and not is_ingested_files_dedup_active(service_id):
             blank()
             warn(
-                "This source keeps raw logs after ingest (delete_after=False). Deleting raw/ now "
+                "This source keeps request logs after ingest (delete_after=False). Deleting raw/request/ now "
                 "means the next full sync has no dedup record left and will re-ingest this "
                 "service's ENTIRE history."
             )
@@ -309,50 +511,8 @@ def handle_reset_logs(args):
         sys.exit(1)
 
 
-def handle_invite_analyst(args):
-    banner("Fastly Log Analysis — Invite Analyst")
+def _resolve_cli_service_and_token(args, *, require_token: bool = True) -> tuple[str, dict, str]:
     from backend import config as svcconfig
-
-    service_id = args.service_id
-    if not service_id:
-        ids = svcconfig.list_service_ids()
-        if len(ids) == 1:
-            service_id = ids[0]
-        elif ids:
-            for sid in ids:
-                c = svcconfig.load_config(sid)
-                info(f"  {sid}  ({c.get('name', '')})")
-            service_id = ask("Service ID")
-    if not service_id:
-        fail("--service-id is required.")
-        sys.exit(1)
-
-    cfg = svcconfig.load_config(service_id)
-    if not cfg or cfg.get("access_level") != "read_write":
-        fail("Service not found or not read_write.")
-        sys.exit(1)
-
-    if not args.yes and not ask_yes("Proceed?"):
-        return
-
-    try:
-        import json
-
-        result = generate_analyst_invite(service_id)
-        print(json.dumps({k: v for k, v in result.items() if v}, indent=2))
-        warn("Save the secret_key now — it cannot be retrieved again.")
-    except Exception as e:
-        fail(str(e))
-        sys.exit(1)
-
-
-def handle_update_logs(args):
-    banner("Fastly Log Analysis — Update Logs")
-    from backend import config as svcconfig
-    from backend.provision.system_fields import (
-        reconcile_system_custom_fields,
-        system_feature_flags,
-    )
 
     service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
     if not service_id:
@@ -362,8 +522,24 @@ def handle_update_logs(args):
     if not cfg:
         fail(f"Config for {service_id} not found.")
         sys.exit(1)
+    if not require_token:
+        return service_id, cfg, ""
+    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
+    if not token:
+        sys.exit(1)
+    return service_id, cfg, token
 
-    from backend.core import field_registry as lf
+
+def handle_update_logs(args):
+    banner("Fastly Log Analysis — Update Logs")
+    from backend.provision.orchestrator import (
+        reconcile_system_custom_fields,
+        system_feature_flags,
+    )
+
+    service_id, cfg, _ = _resolve_cli_service_and_token(args, require_token=False)
+
+    from backend.core import log_fields as lf
 
     new_lf_config = (
         _build_log_fields_config(args)
@@ -371,15 +547,6 @@ def handle_update_logs(args):
         else (cfg.get("log_fields") or _build_log_fields_config(args))
     )
 
-    # MERGE GUARD (sibling of state_sync.import_admin_state fix from
-    # 2026-06-02 incident): _build_log_fields_config(args) returns
-    # {schema_version, preset, groups, field_overrides} — it has NO
-    # custom_fields key. Assigning the result wholesale to
-    # cfg["log_fields"] would strip the scoring/CMCD custom_fields the
-    # orchestrators injected, the user's own custom_fields, and any
-    # format_hash/updated_at metadata. Preserve custom_fields from the
-    # on-disk cfg, then re-inject the canonical system entries from code
-    # for whichever features are enabled — code is the source of truth.
     existing_lf = cfg.get("log_fields") or {}
     existing_custom = list(existing_lf.get("custom_fields") or [])
     scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
@@ -428,18 +595,7 @@ def handle_update_cdn(args):
     banner("Fastly Log Analysis — Update CDN Service")
     from backend import config as svcconfig
 
-    service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
-    if not service_id:
-        fail("No services configured.")
-        sys.exit(1)
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        fail(f"Config for {service_id} not found.")
-        sys.exit(1)
-
-    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
-    if not token:
-        sys.exit(1)
+    service_id, cfg, token = _resolve_cli_service_and_token(args)
 
     prov_cfg = cfg.get("provisioning", {})
     cdn_service_id = prov_cfg.get("cdn_service_id") or cfg.get("cdn_service_id")
@@ -452,12 +608,6 @@ def handle_update_cdn(args):
         sys.exit(1)
 
     try:
-        # Re-probe the account's edge rate-limiting entitlement so a customer who
-        # enabled it after provisioning gets the ratecounter VCL on this redeploy
-        # (and one who lost it gets a clean deploy). Probe the CDN service itself
-        # and the logging service — either reflects the account-level pragma. Fall
-        # back to the persisted flag (default True) when detection is inconclusive;
-        # the reactive validate fallback still backstops a wrong guess.
         persisted = cfg.get("provisioning", {}).get("rate_limiting", True)
         detected = account_has_rate_limiting(token, cdn_service_id, service_id)
         rate_limiting = detected if detected is not None else persisted
@@ -465,7 +615,9 @@ def handle_update_cdn(args):
             prov = cfg.get("provisioning", {})
             prov["rate_limiting"] = detected
             cfg["provisioning"] = prov
-            svcconfig.save_config(service_id, cfg)
+            svcconfig.mutate_config(
+                service_id, lambda c: c.setdefault("provisioning", {}).__setitem__("rate_limiting", detected)
+            )
             if detected:
                 ok("Edge rate limiting detected on this account — enabling it on the CDN service")
             else:
@@ -478,30 +630,9 @@ def handle_update_cdn(args):
 
 
 def handle_enable_scoring(args):
-    """Enable — or redeploy — session scoring on a logging service.
-
-    Wraps ``session_scoring_orchestrator.enable_scoring``, which is the same
-    end-to-end flow the admin UI's Enable/Redeploy button runs: provision (or
-    reuse) the scorer Compute service, upload the committed Wasm + seed the
-    matrix KV, then clone + activate the logging VCL. Idempotent — re-running
-    on an enabled service is the supported redeploy path. The orchestrator
-    emits its own per-stage console lines (the two-phase Compute/Logging
-    progress), so the CLI only adds the final summary."""
+    """Enable — or redeploy — session scoring on a logging service."""
     banner("Fastly Log Analysis — Enable Session Scoring")
-    from backend import config as svcconfig
-
-    service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
-    if not service_id:
-        fail("No services configured.")
-        sys.exit(1)
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        fail(f"Config for {service_id} not found.")
-        sys.exit(1)
-
-    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
-    if not token:
-        sys.exit(1)
+    service_id, _cfg, token = _resolve_cli_service_and_token(args)
 
     from backend.provision.session_scoring_orchestrator import enable_scoring
 
@@ -516,27 +647,9 @@ def handle_enable_scoring(args):
 
 
 def handle_disable_scoring(args):
-    """Disable session scoring on a logging service.
-
-    Wraps ``session_scoring_orchestrator.disable_scoring``: strips the scoring
-    VCL snippets + custom_fields, re-activates the logging service without
-    them, then tears down the scorer Compute service + ConfigStores. Prompts
-    for confirmation unless ``--yes`` is passed."""
+    """Disable session scoring on a logging service."""
     banner("Fastly Log Analysis — Disable Session Scoring")
-    from backend import config as svcconfig
-
-    service_id = args.service_id or (svcconfig.list_service_ids()[0] if svcconfig.list_service_ids() else None)
-    if not service_id:
-        fail("No services configured.")
-        sys.exit(1)
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        fail(f"Config for {service_id} not found.")
-        sys.exit(1)
-
-    token = args.token or cfg.get("fastly_api_key") or ask("Fastly API token")
-    if not token:
-        sys.exit(1)
+    service_id, _cfg, token = _resolve_cli_service_and_token(args)
 
     if not getattr(args, "yes", False):
         blank()
@@ -559,14 +672,14 @@ def handle_disable_scoring(args):
 
 def handle_list_groups(args):
     from backend import config as svcconfig
-    from backend.core import field_registry as lf
+    from backend.core import log_fields as lf
 
     existing_cfg = (
         svcconfig.load_config(args.service_id).get("log_fields", {}) if getattr(args, "service_id", None) else {}
     )
     enabled_groups = set(existing_cfg.get("groups", lf.PRESETS["standard"]["groups"]))
     print(f"\n  {'Group':<7} {'Enabled':<9} {'Bytes':>6}    Fields")
-    for gid, info_dict in lf.GROUP_INFO.items():
+    for gid, _info_dict in lf.GROUP_INFO.items():
         fields = [f for f in lf.LOG_FIELD_CATALOG if f["group"] == gid]
         print(
             f"  {('(core)' if gid is None else gid):<7} {('yes' if (gid is None or gid in enabled_groups) else 'no'):<9} {sum(f['typical_bytes'] for f in fields):>6}    {', '.join(f['id'] for f in fields)}"
@@ -574,7 +687,7 @@ def handle_list_groups(args):
 
 
 def handle_list_fields(args):
-    from backend.core import field_registry as lf
+    from backend.core import log_fields as lf
 
     print(f"\n  {'Field':<20} {'Group':<6} {'Type':<12} {'Bytes':>6}    Description")
     for f in lf.LOG_FIELD_CATALOG:
@@ -604,7 +717,6 @@ def cmd_provision(
     endpoint_name: str | None = typer.Option(None, "--endpoint-name"),
     region: str | None = typer.Option(None, "--region", help="FOS region (e.g. us-east-1)."),
     bucket: str | None = typer.Option(None, "--bucket", help="FOS bucket name."),
-    prefix: str | None = typer.Option(None, "--prefix", help="Base log prefix inside bucket."),
     sample_rate: int | None = typer.Option(None, "--sample-rate", min=1, max=100),
     edge_only: bool | None = typer.Option(None, "--edge-only/--no-edge-only"),
     period: str | None = typer.Option(None, "--period", help="Log rotation period (e.g. '1 minute')."),
@@ -629,7 +741,7 @@ def cmd_provision(
         endpoint_name=endpoint_name,
         region=region,
         bucket=bucket,
-        prefix=prefix,
+        prefix="",
         sample_rate=sample_rate,
         edge_only=edge_only,
         period=period,
@@ -647,7 +759,18 @@ def cmd_provision(
         enable_field=enable_field,
         disable_field=disable_field,
     )
-    wizard(args)
+    cfg = wizard(args)
+    from backend.provision.orchestrator import provision
+
+    try:
+        for event in provision(cfg):
+            if event.get("type") == "status":
+                info(event.get("message", ""))
+            elif event.get("type") == "done":
+                ok(event.get("message", ""))
+    except Exception as e:
+        fail(f"Provisioning failed: {e}")
+        sys.exit(1)
 
 
 @app.command("teardown", help="Tear down a provisioned service.")
@@ -695,13 +818,21 @@ def cmd_reset_logs(
     handle_reset_logs(args)
 
 
-@app.command("invite-analyst", help="Generate a read-only analyst invite.")
-def cmd_invite_analyst(
-    yes: bool = typer.Option(False, "--yes", "-y"),
-    service_id: str | None = typer.Option(None, "--service-id"),
+@app.command("restore-data", help="Rebuild a service's local DuckLake data from its cloud copy in FOS.")
+def cmd_restore_data(
+    service_id: str = typer.Option(..., "--service-id", help="The Fastly service ID to restore."),
 ):
-    args = SimpleNamespace(yes=yes, service_id=service_id)
-    handle_invite_analyst(args)
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.storage.backup import restore_from_cloud
+
+    source = get_source_for_service(service_id)
+    if source is None:
+        raise typer.BadParameter(f"No configured service {service_id!r}", param_hint="--service-id")
+    result = restore_from_cloud(source, progress=info)
+    ok(
+        f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, "
+        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed."
+    )
 
 
 @app.command("update-logs", help="Push a refreshed log_fields config.")
