@@ -522,10 +522,12 @@ def _sample_duckdb_size() -> int:
     count = 0
     try:
         from backend import config as svcconfig
+        from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
+        hs_registry = get_high_scale_service_registry()
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id")
-            if not service_id:
+            if not service_id or hs_registry.resolve(str(service_id)) is not None:
                 continue
             try:
                 db_path = svcconfig.duckdb_path(service_id)

@@ -655,6 +655,20 @@ describe('request header timestamp', () => {
     expect(screen.getByText(syncTimestamp)).toBeInTheDocument()
   })
 
+  it('prefers newer request.last_sync_at over a stale legacy log_discovery lastSync timestamp', async () => {
+    const newerSyncTimestamp = '2026-09-08T17:59:55Z'
+    mocks.lastSync.mockReturnValue({ data: { started_at: oldTimestamp, status: 'success' } })
+    mocks.status.mockReturnValue({
+      data: {
+        latest_log_at: requestTimestamp,
+        request: { latest_log_at: requestTimestamp, last_sync_at: newerSyncTimestamp },
+      },
+    })
+    mountBadge()
+    await waitFor(() => expect(screen.getByText(newerSyncTimestamp)).toBeInTheDocument())
+    expect(screen.queryByText(oldTimestamp)).not.toBeInTheDocument()
+  })
+
   it('uses the analyst request extent from bootstrap and omits stale-log dot', async () => {
     mocks.analyst.mockReturnValue(true)
     mocks.bootstrap.mockReturnValue({ data: { header_badge: { latest_log_at: oldTimestamp, request: { latest_log_at: requestTimestamp } } } })

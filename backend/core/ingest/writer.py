@@ -714,6 +714,10 @@ def merge_lake_files(service_id: str) -> None:
 
     from backend.core.duckdb import get_memory_connection, get_source_for_service
     from backend.core.storage._core import _ducklake_attach, ducklake_write_admission
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        return
 
     src = get_source_for_service(service_id)
     if src is None:

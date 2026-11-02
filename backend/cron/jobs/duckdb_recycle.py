@@ -54,8 +54,14 @@ def _recycle_lock_timeout_s() -> float:
 
 
 def _sources_by_db_path() -> dict[str, list[dict]]:
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
+
+    hs_registry = get_high_scale_service_registry()
     groups: dict[str, list[dict]] = {}
     for cfg in svcconfig.list_configs():
+        svc_id = cfg.get("service_id") or cfg.get("logging_service_id")
+        if svc_id and hs_registry.resolve(str(svc_id)) is not None:
+            continue
         try:
             src = _db._source_from_config(cfg)
         except Exception:

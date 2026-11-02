@@ -47,14 +47,14 @@ When running as a shared server (remote sharing), the host machine should meet t
 
 Fastly Log Analytics supports two primary deployment topologies sized for different log volumes:
 
-| Architecture | Intended Log Throughput | Backend Engine | Ingest Topology | Best For |
+| Architecture | Intended Throughput (requests/sec at your VCL service, 100% logged) | Backend Engine | Ingest Topology | Best For |
 |---|---|---|---|---|
-| **Standard Architecture** | **Up to 5,000 – 10,000 logged RPS** | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
-| **High-Scale Architecture** | **50,000 sustained logged RPS** *(burst to 100,000+ RPS)* | ClickHouse | High-Scale micro-batching workers + PostgreSQL control plane + FOS Archive Parquet | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
+| **Standard Architecture** | **Up to 5,000 – 10,000 RPS** | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
+| **High-Scale Architecture** | **50,000 sustained RPS** *(bursts to 100,000+ RPS)* | ClickHouse | High-Scale micro-batching workers + PostgreSQL control plane + FOS Archive Parquet | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
 
 > [!NOTE]
-> **Edge Traffic vs. Logged Throughput:**
-> Sizing figures represent the volume of **logged records streamed to Fastly Object Storage**, *not* your service's total CDN edge traffic. Fastly services handling tens or hundreds of thousands of edge requests per second can comfortably use either architecture by leveraging Fastly VCL log conditions:
+> **Requests per second at your VCL service:**
+> Sizing figures are the request rate at your Fastly VCL service when every request is logged (one log line per request, streamed to Fastly Object Storage). Fastly services handling tens or hundreds of thousands of requests per second can comfortably use either architecture by leveraging Fastly VCL log conditions:
 > - **Sampling:** Stream 1-in-10 (`randombool(1, 10)`) or 1-in-50 requests for statistical sampling of high-volume traffic.
 > - **Conditional Logging:** Log only requests meeting specific criteria (e.g., HTTP errors `resp.status >= 400`, backend origin fetches, requests with origin latency above a threshold, or security/WAF events).
 >

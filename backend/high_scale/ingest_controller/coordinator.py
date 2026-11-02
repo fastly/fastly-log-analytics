@@ -918,14 +918,14 @@ class HighScaleWorkerCoordinator:
             if objects:
                 candidate_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
                 if (
-                    listing_cursor
+                    isinstance(listing_cursor, str)
                     and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX)
                     and listing_cursor > candidate_cursor
                 ):
                     next_cursor = listing_cursor
                 else:
                     next_cursor = candidate_cursor
-            elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
+            elif isinstance(listing_cursor, str) and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
                 next_cursor = listing_cursor
 
         processed = duplicates = failed = missing = 0
@@ -1089,7 +1089,7 @@ class HighScaleWorkerCoordinator:
                 self._advance_cursor(
                     service_id,
                     domain,
-                    next_cursor,
+                    next_cursor or (INITIAL_SOURCE_CURSOR if listing_cursor == INITIAL_SOURCE_CURSOR else None),
                     current_owner,
                     epoch,
                     reinspection_cursor=page.next_reinspection_cursor if has_reinspection else None,

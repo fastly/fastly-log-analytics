@@ -448,7 +448,12 @@ function SyncStatusBadgeInner() {
   const requestLatestLogAt = snapshot?.request !== undefined
     ? requestMetrics?.latest_log_at ?? null
     : snapshot?.latest_log_at ?? null
-  const requestLastSyncAt = lastSync?.started_at ?? requestMetrics?.last_sync_at ?? null
+  const requestLastSyncAt =
+    lastSync?.started_at && requestMetrics?.last_sync_at
+      ? (toUTCDate(requestMetrics.last_sync_at).getTime() >= toUTCDate(lastSync.started_at).getTime()
+          ? requestMetrics.last_sync_at
+          : lastSync.started_at)
+      : (requestMetrics?.last_sync_at ?? lastSync?.started_at ?? null)
 
   const renderStreamRow = (
     label: string,

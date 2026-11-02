@@ -549,7 +549,7 @@ class Scheduler:
                         misfire_grace_time=3600,
                     )
                 self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
-            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
+                self._register_insights_prewarmer_job(service_id, seen_ids, prov)
             if not is_clickhouse_hs:
                 compact_cfg = prov.get("cron_compact", {})
                 if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
