@@ -1,3 +1,28 @@
+"""ISO 3166-1 alpha-2 country code mappings and city label formatting."""
+
+from __future__ import annotations
+
+from backend.utils.pop_utils import (
+    _DEFAULT_POP_COORDS,
+    _SAFE_POP_CODE_RE,
+    CACHE_FILE,
+    _build_pop_case_sql,
+    _effective_pop_lat_lon_map,
+    _haversine_sql_expr,
+    _lat_lon_cache,
+    _lat_lon_cache_lock,
+    _load_mtime_cached,
+    _loc_cache,
+    _loc_cache_lock,
+    build_pop_haversine_case_sql,
+    build_pop_lat_case_sql,
+    build_pop_lon_case_sql,
+    fetch_pop_locations,
+    get_pop_lat_lon_map,
+    get_pop_location_map,
+    get_pop_locations,
+)
+
 COUNTRY_MAP = {
     "AF": "Afghanistan",
     "AX": "Aland Islands",
@@ -249,3 +274,46 @@ COUNTRY_MAP = {
     "ZM": "Zambia",
     "ZW": "Zimbabwe",
 }
+
+
+def format_city_label(city: str, country: str, region: str = "") -> str:
+    city = city or ""
+    country = country or ""
+    region = region or ""
+    c_name = COUNTRY_MAP.get(country.upper(), country.upper())
+
+    parts = []
+    if city:
+        parts.append(city.title())
+    if region:
+        parts.append(region.upper())
+    if c_name:
+        parts.append(c_name)
+    elif country:
+        parts.append(country.upper())
+
+    return ", ".join(parts) if parts else "Unknown"
+
+
+__all__ = [
+    "CACHE_FILE",
+    "COUNTRY_MAP",
+    "_DEFAULT_POP_COORDS",
+    "_SAFE_POP_CODE_RE",
+    "_build_pop_case_sql",
+    "_effective_pop_lat_lon_map",
+    "_haversine_sql_expr",
+    "_lat_lon_cache",
+    "_lat_lon_cache_lock",
+    "_load_mtime_cached",
+    "_loc_cache",
+    "_loc_cache_lock",
+    "build_pop_haversine_case_sql",
+    "build_pop_lat_case_sql",
+    "build_pop_lon_case_sql",
+    "fetch_pop_locations",
+    "format_city_label",
+    "get_pop_lat_lon_map",
+    "get_pop_location_map",
+    "get_pop_locations",
+]

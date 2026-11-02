@@ -46,3 +46,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# maplibre worker bundles (copied from node_modules by postinstall/dev/build)
+/public/maplibre-gl-worker.mjs
+/public/maplibre-gl-shared.mjs

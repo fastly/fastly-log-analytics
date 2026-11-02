@@ -121,6 +121,23 @@ def main():
         ["osv-scanner", "scan", "-r", ".", "--format", "json"], capture_output=True, text=True, check=False
     )
 
+    if json_result.stderr:
+        stderr_lower = json_result.stderr.lower()
+        if any(tok in stderr_lower for tok in ("error", "failed", "timeout", "unreachable", "network", "dial tcp")):
+            print(f"⚠️  osv-scanner reported stderr warning/error:\n{json_result.stderr.strip()}", file=sys.stderr)
+
+    # osv-scanner exit codes: 0 = no vulns, 1 = vulns found, not in (0, 1) = scanner/network/config error
+    if json_result.returncode not in (0, 1):
+        print(
+            f"Error: osv-scanner exited with operational failure code {json_result.returncode}.",
+            file=sys.stderr,
+        )
+        sys.exit(json_result.returncode if json_result.returncode > 0 else 1)
+
+    if not json_result.stdout.strip():
+        print("Error: osv-scanner produced empty JSON output.", file=sys.stderr)
+        sys.exit(1)
+
     try:
         data = json.loads(json_result.stdout)
     except json.JSONDecodeError:
@@ -129,9 +146,13 @@ def main():
         print("Stderr:", json_result.stderr, file=sys.stderr)
         sys.exit(1)
 
+    if not isinstance(data, dict):
+        print("Error: osv-scanner JSON root must be an object.", file=sys.stderr)
+        sys.exit(1)
+
     vulnerabilities = []
     critical_count = 0
-    results = data.get("results", [])
+    results = data.get("results") or []
     for r in results:
         source_path = r.get("source", {}).get("path", "unknown")
         for pkg_info in r.get("packages", []):

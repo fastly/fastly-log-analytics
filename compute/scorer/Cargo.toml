@@ -21,8 +21,6 @@ aes-gcm = "0.10"
 # fast cold-start instantiation (Fastly Compute is instance-per-request).
 # Cookie wire format.
 base64 = "0.22"
-# For HashMap with deterministic iteration (used for scoring).
-# (Pulled transitively by serde_json; declared explicitly for clarity.)
 # Hex-encode the raw session id bytes for the X-Edge-Sid response header.
 # Promoted from dev-deps once main.rs needed it for live emission.
 hex = "0.4"
@@ -32,11 +30,6 @@ hex = "0.4"
 # to one "session" in the labels table. getrandom 0.2 auto-selects the
 # WASI random_get import on wasm32-wasip1 — no extra features needed.
 getrandom = "0.2"
-
-[dev-dependencies]
-# Cross-language fixture byte-exact tests use the same dependency that
-# the runtime uses, so listing it again here is redundant; kept for
-# explicit readability if dev-only test helpers ever need it.
 
 [profile.release]
 # Optimize for size + execution speed. Wasm runtimes pay for both.

@@ -2,72 +2,35 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
-import { useDebugStore } from '@/stores/debugStore'
+import { useDebugStore } from '@/stores/filterStore'
+import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
-import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2, Copy, Check } from 'lucide-react'
+import { CopyButton } from '@/components/ui/confirm-dialog'
+import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
-import { DEBUG_RESPONSES_COOKIE } from '@/lib/debug-cookie'
+import { unwrapClient } from '@/lib/api'
+import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
-interface DebugQuery {
-  id: string
-  sql: string
-  time_ms: number
-  is_cached?: boolean
-}
+type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & { id: string; is_cached?: boolean }
 
-interface DebugCall {
+type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   id: string
-  service: string
   caller?: string
-  method: string
-  path: string
   status: string
-  time_ms: number
   details?: string
-}
-
-interface CopyButtonProps {
-  text: string
-}
-
-function CopyButton({ text }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy text: ', err)
-    }
-  }
-
-  return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="h-5 w-5 text-muted-foreground hover:text-foreground hover:bg-muted ml-1 shrink-0"
-      onClick={handleCopy}
-      title="Copy for AI Analysis"
-    >
-      {copied ? (
-        <Check className="h-3 w-3 text-green-500" />
-      ) : (
-        <Copy className="h-3 w-3" />
-      )}
-    </Button>
-  )
 }
 
 export function DebugPanel() {
   const { enabled, apiCallsEnabled } = useDebugStore()
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const services = useServiceStore((s) => s.services)
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
   const [isCallsOpen, setIsCallsOpen] = React.useState(false)
   const [isSqliteOpen, setIsSqliteOpen] = React.useState(false)
@@ -100,12 +63,12 @@ export function DebugPanel() {
   // quieter. The default 'page' view reads _debug_sqlite off the page's
   // own responses and needs no poll at all.
   const sqliteQuery = useQuery<SqliteRecentResponse>({
-    queryKey: ['debug', 'recent-sqlite'],
+    queryKey: ['debug', 'recent-postgres'],
     queryFn: async () => {
-      const { data, error } = await client.GET('/api/debug/recent-sqlite', {
+      const { data, error } = await client.GET('/api/debug/recent-postgres', {
         params: { query: { limit: 500 } },
       })
-      if (error) throw new Error(extractApiError(error) || 'recent-sqlite failed')
+      if (error) throw new Error(extractApiError(error) || 'recent-postgres failed')
       return data as SqliteRecentResponse
     },
     enabled: enabled && sqliteScope === 'buffer',
@@ -117,7 +80,7 @@ export function DebugPanel() {
   const totalSqliteTime = sqliteEntries.reduce((acc, q) => acc + q.time_ms, 0)
 
   const clearSqlite = async () => {
-    await client.POST('/api/debug/clear-sqlite', {})
+    await unwrapClient(client.POST('/api/debug/clear-postgres', {}))
     sqliteQuery.refetch()
   }
 
@@ -158,13 +121,21 @@ export function DebugPanel() {
       _debug_queries?: DebugQuery[]
       _debug_calls?: DebugCall[]
       _debug_sqlite?: SqliteEntry[]
+      _debug_postgres?: SqliteEntry[]
       _is_cached?: boolean
     }
 
     const sameQueries = (a: DebugQuery[], b: DebugQuery[]) => {
       if (a.length !== b.length) return false
       for (let i = 0; i < a.length; i++) {
-        if (a[i].sql !== b[i].sql || a[i].time_ms !== b[i].time_ms || a[i].is_cached !== b[i].is_cached) return false
+        if (
+          a[i].sql !== b[i].sql ||
+          a[i].time_ms !== b[i].time_ms ||
+          a[i].is_cached !== b[i].is_cached ||
+          a[i].engine !== b[i].engine
+        ) {
+          return false
+        }
       }
       return true
     }
@@ -196,8 +167,10 @@ export function DebugPanel() {
       let callCounter = 0
 
       const extractSqlite = (data: DebugData) => {
-        if (!enabled || !Array.isArray(data._debug_sqlite)) return
-        for (const sq of data._debug_sqlite) {
+        if (!enabled) return
+        const rawStatements = data._debug_postgres ?? data._debug_sqlite
+        if (!Array.isArray(rawStatements)) return
+        for (const sq of rawStatements) {
           if (!seenSqliteSeq.has(sq.seq)) {
             extractedSqlite.push(sq)
             seenSqliteSeq.add(sq.seq)
@@ -301,12 +274,23 @@ export function DebugPanel() {
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
+  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
+  const isHighScaleService = Boolean(activeService?.is_high_scale)
+  const defaultEngine = isHighScaleService ? 'ClickHouse' : 'DuckDB'
+  const queryEngines = Array.from(
+    new Set(
+      queries
+        .map((q) => q.engine)
+        .filter((e): e is string => Boolean(e) && (isHighScaleService || e !== 'ClickHouse')),
+    ),
+  )
+  const engineLabel = queryEngines.length > 0 ? queryEngines.join(' / ') : defaultEngine
 
-  const duckDbCopyText = `DuckDB Queries (Total Time: ${totalQueryTime.toFixed(2)}ms)
-${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.is_cached ? ', Cached' : ''}):
+  const duckDbCopyText = `Data Queries (${engineLabel}) (Total Time: ${totalQueryTime.toFixed(2)}ms)
+${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.engine ? `, ${q.engine}` : ''}${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
-  const sqliteCopyText = `SQLite Queries (Total Time: ${totalSqliteTime.toFixed(2)}ms, Scope: ${sqliteScope})
+  const sqliteCopyText = `Postgres Queries (Total Time: ${totalSqliteTime.toFixed(2)}ms, Scope: ${sqliteScope})
 ${sqliteEntries.map((q) => `[${q.ts}] #${q.seq} ${q.op} (${q.time_ms.toFixed(2)}ms, rows: ${q.rows}):
 ${q.sql}`).join('\n\n')}`
 
@@ -322,7 +306,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-primary/10 p-1.5 rounded-md">
                 <Database className="h-4 w-4 text-primary" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">DuckDB Queries</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Data Queries ({engineLabel})</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -348,8 +332,14 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               {queries.map((q, i) => (
                 <div key={q.id} className="bg-muted/30 p-4 rounded-md border font-mono text-[11px] relative group">
                   <div className="flex justify-between items-center mb-2 pb-2 border-b border-muted">
-                    <span className="text-muted-foreground font-semibold">
-                      QUERY #{i + 1} {q.is_cached && <span className="text-blue-500 ml-2">(CACHED)</span>}
+                    <span className="text-muted-foreground font-semibold flex items-center gap-2">
+                      QUERY #{i + 1}
+                      {q.engine && (
+                        <Badge variant="outline" className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                          {q.engine}
+                        </Badge>
+                      )}
+                      {q.is_cached && <span className="text-blue-500 text-[10px]">(CACHED)</span>}
                     </span>
                     <Badge variant={q.time_ms > 1000 ? "destructive" : q.time_ms > 200 ? "secondary" : "outline"} className="font-mono">
                       {q.time_ms}ms
@@ -370,7 +360,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               <div className="bg-emerald-500/10 p-1.5 rounded-md">
                 <HardDrive className="h-4 w-4 text-emerald-500" />
               </div>
-              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">SQLite Queries</h3>
+              <h3 className="text-sm font-bold text-muted-foreground uppercase tracking-tight">Postgres Queries</h3>
               <Button
                 variant="ghost"
                 size="sm"
@@ -380,7 +370,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                 {isSqliteOpen ? <ChevronUp className="h-3 w-3 mr-1" /> : <ChevronDown className="h-3 w-3 mr-1" />}
                 {isSqliteOpen ? 'Hide' : 'Show'} {sqliteEntries.length} statements
               </Button>
-              <div className="flex items-center rounded-md border overflow-hidden" role="group" aria-label="SQLite statement scope">
+              <div className="flex items-center rounded-md border overflow-hidden" role="group" aria-label="Postgres statement scope">
                 <button
                   type="button"
                   className={`h-6 text-[10px] px-2 ${sqliteScope === 'page' ? 'bg-muted font-semibold text-foreground' : 'text-muted-foreground'}`}
@@ -404,7 +394,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                   size="sm"
                   className="h-6 text-[10px] px-2 text-muted-foreground"
                   onClick={clearSqlite}
-                  title="Clear the SQLite capture buffer"
+                  title="Clear the Postgres capture buffer"
                 >
                   <Trash2 className="h-3 w-3 mr-1" />
                   Clear
@@ -439,8 +429,8 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
               {sqliteEntries.length === 0 ? (
                 <div className="text-muted-foreground text-xs italic p-4 text-center border rounded-md bg-muted/20">
                   {sqliteScope === 'page'
-                    ? 'No SQLite statements were executed by this page’s API requests. Switch to Process-wide to see cron/background activity.'
-                    : 'No SQLite statements captured yet. Statements appear here as cron jobs and metadata reads execute.'}
+                    ? 'No Postgres statements were executed by this page’s API requests. Switch to Process-wide to see cron/background activity.'
+                    : 'No Postgres statements captured yet. Statements appear here as cron jobs and metadata reads execute.'}
                 </div>
               ) : (
                 [...sqliteEntries].reverse().map((q) => (

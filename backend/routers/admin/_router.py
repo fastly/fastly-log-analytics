@@ -1,15 +1,11 @@
-"""Shared APIRouter instance for the admin package.
-
-Lives in its own module so sub-modules can do
-``from backend.routers.admin._router import router`` without triggering
-the package-init's sub-module imports (which would be a circular
-dependency).
-"""
+"""Shared FastAPI router instance for the admin subpackage."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 
-router: APIRouter = APIRouter(prefix="/api", tags=["admin"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter(prefix="/api", tags=["admin"], responses=DEFAULT_ERROR_RESPONSES)
+
+__all__ = ["router"]

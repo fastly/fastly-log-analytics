@@ -1,7 +1,1 @@
-'use client'
-
-import FastlyValueClient from './_sections/FastlyValueClient'
-
-export default function FastlyValuePage() {
-  return <FastlyValueClient />
-}
+export { default, FastlyValueClient, OffloadAndCacheCharts, IOValueTab } from './_sections/FastlyValueClient'

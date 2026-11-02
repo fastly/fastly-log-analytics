@@ -1,0 +1,42 @@
+# Companion release; never takes ownership of the application's Deployments.
+host: ""
+gateway:
+  # false installs only a reserved Service/IP, before certificate issuance.
+  enabled: true
+# Required: the purpose-built image from deploy/admin-gateway/Dockerfile,
+# published to a registry the cluster may pull from (adapter: --image),
+# ideally pinned by digest. The upstream caddy image cannot run here: its
+# cap_net_bind_service file capability makes exec fail once the container
+# drops ALL capabilities.
+image: ""
+existingSecret: ""
+# Secret keys: server.crt, server.key, client-ca.crt, ADMIN_GATEWAY_SECRET.
+# Never include either CA signing key or any client private key.
+frontendUpstream: ""
+backendUpstream: ""
+service:
+  type: ClusterIP
+  # Required for LoadBalancer: gke-internal. Other providers use ClusterIP
+  # until an explicitly reviewed internal-only adapter is added.
+  internalProvider: ""
+  annotations: {}
+  loadBalancerIP: ""
+networkPolicy:
+  enabled: true
+  # Empty allows TCP/TLS connections to this gateway from any source; mTLS
+  # remains mandatory. Set explicit pod/namespace selectors or ipBlock for
+  # a private LoadBalancer. No public HTTP listener is created.
+  ingressFrom: []
+  # Gateway egress defaults to same-namespace pods on app ports.
+  # Override for applications in another namespace.
+  upstreamTo:
+    - podSelector: {}
+# sizeLimit for the two Caddy scratch emptyDir volumes (data, runtime config).
+emptyDirSizeLimit: 64Mi
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: "1"
+    memory: 128Mi

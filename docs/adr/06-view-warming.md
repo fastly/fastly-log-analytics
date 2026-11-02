@@ -1,7 +1,13 @@
 # ADR-06 — Writer-Driven View Warming
 
-**Status:** Accepted (v2.0 Phase 4)
-**Decided by:** v2.0 cleanup planning
+**Status:** Scoped to Standard Mode (Amended by [ADR-14](14-ducklake-replacement.md) & [ADR-21](21-high-scale-serving-architecture.md))
+**Decided by:** Engineering retrospective
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **Scope Restricted to Standard Mode:** Writer-driven view warming and connection pool fingerprint tracking apply specifically to `DEPLOYMENT_MODE=standard` (where DuckDB queries local buffer Parquet and DuckLake via persistent DuckDB instances).
+> - **High-Scale Serving ([ADR-21](21-high-scale-serving-architecture.md)):** Serving connections query ClickHouse or use independent ephemeral in-memory DuckDB instances reading durable DuckLake state; pod-local DuckDB views and local buffer Parquet are not queried on the serving path.
+> - **DuckLake Terminology ([ADR-14](14-ducklake-replacement.md)):** All references to the historical Iceberg view (`update_iceberg_view`, `_view_cache`) operate on DuckLake catalog tables and the unified `logs` view.
 
 ## 1. Context & Motivation
 
@@ -155,7 +161,7 @@ Add the refresh + warm pair inside the existing `if result.get("files_committed"
 
 ### 3.5 Tombstone Grace Bump
 
-`_TOMBSTONE_GRACE_SECONDS` in `backend/core/iceberg/_core.py:1052` increases from `60` → `300`. The docstring already documents the rationale: tombstone marking (which hides files from new view binds) happens immediately on commit; only physical sweep is delayed. This is purely a knob to widen the safety margin for in-flight readers whose connections were bound before the tombstone was placed.
+`_TOMBSTONE_GRACE_SECONDS` in `backend/core/iceberg/_core.py:1052` (removed) increases from `60` → `300`. The docstring already documents the rationale: tombstone marking (which hides files from new view binds) happens immediately on commit; only physical sweep is delayed. This is purely a knob to widen the safety margin for in-flight readers whose connections were bound before the tombstone was placed.
 
 No freshness impact. Trade-off: ~5 minutes of disk retention for tombstoned buffer files, which is negligible relative to the buffer dir's working set.
 
@@ -163,8 +169,8 @@ No freshness impact. Trade-off: ~5 minutes of disk retention for tombstoned buff
 
 ## 4. Out of Scope
 
-- **Local compaction warming.** `backend/core/local_compaction.py` rewrites files under `cache/data/`, not the buffer dir. Per the explicit comment in `backend/routers/query.py:44–48`, the "Cannot open file" race local_compaction can trigger is a glob-enumeration race resolved at query execution time, not a view-binding race. The existing one-shot retry handles it correctly; rebinding the view does not reach inside the race window. If observed to matter post-deploy, the right fix is extending compaction's own pre-delete grace, not pool warming.
-- **Schema-change warming.** Same writer-side hook pattern would apply, but schema changes are rare enough to leave to the existing reader-side self-heal path (`execute_with_stale_view_retry` in `backend/core/iceberg/_core.py`).
+- **Local compaction warming.** `backend/core/storage/compaction.py` rewrites files under `cache/data/`, not the buffer dir. Per the explicit comment in `backend/routers/query.py:44–48`, the "Cannot open file" race local_compaction can trigger is a glob-enumeration race resolved at query execution time, not a view-binding race. The existing one-shot retry handles it correctly; rebinding the view does not reach inside the race window. If observed to matter post-deploy, the right fix is extending compaction's own pre-delete grace, not pool warming.
+- **Schema-change warming.** Same writer-side hook pattern would apply, but schema changes are rare enough to leave to the existing reader-side self-heal path (`execute_with_stale_view_retry` in `backend/core/iceberg/_core.py` (removed)).
 - **Per-page-load coalescing.** Once writer-driven warming is in place, the request-path cost is sub-ms per checkout. Coalescing across panels would be premature.
 
 ---
@@ -184,7 +190,7 @@ No freshness impact. Trade-off: ~5 minutes of disk retention for tombstoned buff
 
 ## 6. Verification
 
-**Unit (`tests/test_pool_warm_idle.py`, new):**
+**Unit (`tests/test_pool_warm_idle.py` (test removed), new):**
 
 - `warm_idle` invokes `_try_fast_path_view` on every idle connection and stamps the fingerprint
 - `warm_idle` on an empty pool is a no-op

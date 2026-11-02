@@ -1,13 +1,13 @@
 //! URL → canonical (route, category) pair.
 //!
-//! Mirrors `backend/scoring/normalize.py`. Same patterns, same category map,
+//! Mirrors `backend/scoring/__init__.py`. Same patterns, same category map,
 //! same lowercase-then-collapse order. Anything that normalizes differently
 //! between Python and Rust would corrupt matrix lookups at runtime (the matrix
 //! is TRAINED with the Python normalizer and SCORED with this one). The
 //! cross-language parity contract is pinned by the `cross_lang_parity_*` tests
-//! below ↔ `tests/scoring/test_normalize_parity.py`; known intentional
+//! below ↔ `tests/scoring/test_scorer_parity_and_vectors.py`; known intentional
 //! divergences (encoded `%2F`) are pinned by the parity test
-//! (`tests/scoring/test_normalize_parity.py`).
+//! (`tests/scoring/test_scorer_parity_and_vectors.py`).
 //!
 //! **ASCII-only normalization contract (EC-02).** Path keys are normalized as
 //! ASCII: lowercasing is `to_ascii_lowercase` and the numeric-id collapse uses
@@ -16,7 +16,7 @@
 //! not a bug. A non-ASCII route is keyed by its raw bytes here, so the worst
 //! case is the edge treating an i18n path as a novel route (an accuracy loss in
 //! L2's coarse signal, never a category-evasion bypass). These divergence
-//! classes are pinned by `tests/scoring/test_normalize_runtime_parity.py`; if
+//! classes are pinned by `tests/scoring/test_scorer_parity_and_vectors.py`; if
 //! the site needs true Unicode parity, port Unicode case/digit folding into
 //! BOTH normalizers together (it would pull unicode crates into the Wasm).
 //! Raw C0 control chars (`\t \n \r`) are NOT a divergence: both sides strip
@@ -69,7 +69,7 @@ const CATEGORY_MAP: &[(&str, &str)] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Route {
     pub path: String,
-    pub category: String,
+    pub category: &'static str,
 }
 
 fn strip_query(url: &str) -> &str {
@@ -150,9 +150,8 @@ fn looks_like_id(segment: &str) -> bool {
 }
 
 fn category_for(first_segment: &str) -> &'static str {
-    let lower = first_segment.to_ascii_lowercase();
     for (k, v) in CATEGORY_MAP {
-        if *k == lower {
+        if k.eq_ignore_ascii_case(first_segment) {
             return v;
         }
     }
@@ -273,7 +272,7 @@ pub fn normalize(url: &str) -> Route {
     if decoded.is_empty() || decoded == "/" {
         return Route {
             path: "/".to_string(),
-            category: "home".to_string(),
+            category: "home",
         };
     }
     // posixpath.normpath equivalent: collapse `.`, `..`, and empty segments on
@@ -292,7 +291,7 @@ pub fn normalize(url: &str) -> Route {
     if norm_segments.is_empty() {
         return Route {
             path: "/".to_string(),
-            category: "home".to_string(),
+            category: "home",
         };
     }
 
@@ -311,7 +310,7 @@ pub fn normalize(url: &str) -> Route {
         })
         .collect();
     let canonical = format!("/{}", normalized.join("/"));
-    let category = category_for(&raw_segments[0]).to_string();
+    let category = category_for(&raw_segments[0]);
     Route {
         path: canonical,
         category,

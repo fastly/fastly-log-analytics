@@ -18,10 +18,8 @@ only the host-provisioning steps differ.
   must be on EBS — the instance store on `t3` types is ephemeral and will
   vanish on stop/start.
 - **IMDSv2**: Amazon Linux 2023 defaults to IMDSv2 (session-token required).
-  The backend's SSRF probe in `backend/models/lake.py` already handles this —
-  it does not call the metadata service in production paths, only the SSRF
-  test does, and that test treats both IMDSv1 (`GET`) and IMDSv2
-  (`PUT /latest/api/token` first) as equivalent untrusted endpoints. **Do not
+  The backend does not call the metadata service in production
+  paths. **Do not
   re-enable IMDSv1** on the instance; if you ever need to read instance
   metadata for debugging, use:
 
@@ -67,12 +65,12 @@ echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme1n1) /mnt/app-data ext4 defaul
   | sudo tee -a /etc/fstab
 
 sudo chown -R ec2-user:ec2-user /mnt/app-data
-mkdir -p /mnt/app-data/{data,cache,configs}
+mkdir -p /mnt/app-data/{data,cache,configs,postgres}
 ```
 
-Update `docker-compose.yml`'s volume mounts to reference `/mnt/app-data` (or
-keep the repo at `/mnt/app-data/fastly-log-analytics` so the relative `./data`
-paths already resolve to the EBS mount).
+`docker-compose.prod.yml` bind-mounts `/mnt/app-data/{configs,data,cache,postgres}`
+directly into the `backend` and `postgres` containers (overriding the relative
+paths in `docker-compose.yml`), so `/mnt/app-data` must exist at that path.
 
 ## 4. Caddy / SSL
 
@@ -92,8 +90,11 @@ image and set the `CLOUDFLARE_API_TOKEN` env var.
 cd /mnt/app-data
 git clone https://github.com/fastly/fastly-log-analytics.git
 cd fastly-log-analytics
+# Create .env from .env.example and set DUCKLAKE_PG_PASSWORD.
 # Copy configs from your local dev box or restore from S3 backup.
-docker compose up -d --build
+# The backend runs as UID/GID 1000: make data/, cache/, and configs/ writable
+# by that user (sudo chown -R 1000:1000 /mnt/app-data/{data,cache,configs}).
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
 The repeat-deploy flow is the platform-agnostic `restart.sh` pattern:
@@ -104,9 +105,16 @@ The repeat-deploy flow is the platform-agnostic `restart.sh` pattern:
 set -euo pipefail
 cd /mnt/app-data/fastly-log-analytics
 git pull
-docker compose up -d --build
-sleep 10
-curl -fsS http://localhost:8000/api/health
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+for i in $(seq 1 100); do
+  if curl -fsS 'http://localhost:8000/api/health?deep=1' 2>/dev/null | grep -q '^{"status":"ok"'; then
+    echo "backend warm after $((i * 15))s"
+    exit 0
+  fi
+  sleep 15
+done
+echo "backend did not report ready within 25 min" >&2
+exit 1
 ```
 
 After a force-push to the deploy branch, pre-flight with
@@ -130,8 +138,8 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/mnt/app-data/fastly-log-analytics
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml down
 User=ec2-user
 
 [Install]
@@ -145,8 +153,11 @@ sudo systemctl enable --now fastly-log-analytics
 
 ## 6. Secrets management
 
-The backend reads Fastly Object Storage credentials from environment variables.
-Three options, in order of preference:
+The stack reads database and auth secrets (`DUCKLAKE_PG_PASSWORD`, `METADATA_DSN`,
+`DUCKLAKE_CATALOG`, `ADMIN_SHARED_SECRET`, `OAUTH_*`) from environment variables,
+while per-service Fastly Object Storage credentials live in `configs/{service_id}.json`
+(and the PostgreSQL metadata store).
+Three options for managing VM environment secrets, in order of preference:
 
 1. **AWS Secrets Manager + `aws secretsmanager get-secret-value`** in a wrapper
    script that exports the values before `docker compose up`. Lowest blast
@@ -188,12 +199,9 @@ If `/api/health` returns 200 but `/admin` returns 403 via the public URL,
 that is correct — the admin surface only opens for SSH-port-forwarded
 connections (which present loopback IPs and bypass the analyst proxy header).
 
-To reach `/admin` securely with full HTTP/2 (multiplexing) support to prevent browser connection starvation when opening multiple tabs, forward the secure Caddy port `8443` from your laptop:
+To reach `/admin`, forward the frontend port over SSH (the tunneled connection presents a loopback address):
 
 ```sh
-ssh -L 8443:127.0.0.1:8443 ec2-user@<instance-public-ip>
-# then browse to https://localhost:8443/admin
+ssh -L 3000:127.0.0.1:3000 ec2-user@<instance-public-ip>
+# then browse to http://localhost:3000/admin
 ```
-
-> [!NOTE]
-> Since this uses Caddy's internal self-signed TLS certificates for local loopback verification, your browser will display a certificate warning when you first visit `https://localhost:8443`. It is completely safe to bypass this warning (click "Advanced" -> "Proceed to localhost"), as the connection is running entirely inside your encrypted SSH tunnel.

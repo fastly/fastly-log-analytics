@@ -27,10 +27,22 @@ function Tooltip({ ...props }: TooltipPrimitive.Root.Props) {
   return <TooltipPrimitive.Root data-slot="tooltip" {...props} />
 }
 
-function TooltipTrigger({ asChild, ...props }: TooltipPrimitive.Trigger.Props & { asChild?: boolean }) {
-  // Note: Base UI uses `render` prop instead of `asChild`.
-  // We spread the props since `render` handles custom tags in Base UI.
-  return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />
+function TooltipTrigger({
+  asChild,
+  children,
+  render,
+  ...props
+}: TooltipPrimitive.Trigger.Props & { asChild?: boolean }) {
+  // Base UI uses `render` prop instead of `asChild`. Map `asChild` to `render`
+  // so callers passing a single child element don't get wrapped in an extra <button>.
+  if (asChild && React.isValidElement(children)) {
+    return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" render={children} {...props} />
+  }
+  return (
+    <TooltipPrimitive.Trigger data-slot="tooltip-trigger" render={render} {...props}>
+      {children}
+    </TooltipPrimitive.Trigger>
+  )
 }
 
 function TooltipContent({

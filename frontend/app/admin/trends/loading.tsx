@@ -1,5 +1,5 @@
-import { GenericPageSkeleton } from '@/components/skeletons/PageSkeleton'
+import { RouteSkeleton } from '@/components/ui/skeleton'
 
 export default function Loading() {
-  return <GenericPageSkeleton />
+  return <RouteSkeleton variant="admin-trends" />
 }

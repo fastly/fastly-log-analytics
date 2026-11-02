@@ -1,79 +1,336 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2 } from 'lucide-react'
+import React, { useMemo, useState, type ReactNode } from 'react'
+import { Check, ChevronsUpDown, CloudDownload, Loader2, Pin, PinOff } from 'lucide-react'
 import { usePathname } from 'next/navigation'
-import { useServiceStore } from '@/stores/serviceStore'
-import { client } from '@/lib/api'
-import { useBootstrapPending } from '@/hooks/useIsDataReady'
-import { useIsAnalyst, useSyncStatus, type SyncStatus } from '@/hooks/useSyncStatus'
-import { useHeaderBadgeStream } from '@/hooks/useHeaderBadgeStream'
-import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
-import { useLastSync, type LastSyncInfo } from '@/hooks/useLastSync'
-import { useQueryClient } from '@tanstack/react-query'
-import { useBootstrap } from '@/hooks/useBootstrap'
-import { useDateFormat } from '@/hooks/useDateFormat'
-import { useElapsedTime } from '@/hooks/useElapsedTime'
-import { useNowMs } from '@/hooks/useNowSeconds'
-import { useMounted } from '@/hooks/useMounted'
-import { TimeAgo } from '@/components/TimeAgo'
-import { Badge } from '@/components/ui/badge'
+import { Button, buttonVariants } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+} from '@/components/ui/command'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import { useServiceStore, useTimezoneStore } from '@/stores/filterStore'
+import { useIsAnalyst, useBootstrap, useMounted } from '@/hooks/useBootstrap'
+import {
+  useAdminEventStream,
+  useElapsedTime,
+  useHeaderBadgeStream,
+  useLastSync,
+  useLocalStorageString,
+  useNowMs,
+  useOpenGeneration,
+  useSeededReady,
+  useSyncStatus,
+  type AdminEventChannel,
+} from '@/hooks/useSSE'
+import { formatCompactDuration, formatCount, formatForInput, formatTimeAgo, parseFromInput, toUTCDate, cn, panelDialogContent, panelDialogHeaderMuted } from "@/lib/utils";
+import { queryKeys } from "@/lib/api";
 
-// The live "X ago" text node now lives in the shared `@/components/TimeAgo`
-// (text-only leaf so the surrounding header chrome stays stable between
-// cron pushes — putting useNowMs() on SyncStatusBadge itself would
-// re-render the whole badge every second). Imported above.
+const PREFS_KEY = 'fla-service-switcher-prefs'
+const MAX_MRU = 5
 
-// Mirrors the LiveTimer pattern from CronScheduleBox but sized for
-// the header badge (font-size inherited from the badge instead of
-// hardcoded text-xs / text-[9px]). Used while a sync is mid-flight
-// so the header surfaces the live elapsed time instead of the static
-// "running" label that doesn't change between SSE pushes.
-function HeaderLiveTimer({ startedAt }: { startedAt: string }) {
-  const elapsed = useElapsedTime(startedAt)
-  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
-  return <span className="font-mono text-blue-500 tabular-nums font-medium animate-pulse">{fmt}</span>
+interface ServicePrefs {
+  pinned: string[]
+  mru: string[]
 }
 
-// SRE-07: standing escalation for a pure ingest stall. The "Latest Log" badge
-// is on every page's header, but it only showed a neutral "X ago" — a stall
-// (orphan-row / OOM-restart / FOS-slow modes where data simply stops landing)
-// escalated nothing here; the only "stalled" classifier lived on the
-// must-navigate /admin/usage-log chart. This text-leaf owns the 1 Hz tick (so
-// the surrounding badge chrome stays stable) and shows an amber dot once the
-// newest log is >1h old (well past normal Fastly delivery lag) → red at >3h.
-// Plain `title` attr, not a nested Tooltip — the badge is already a tooltip
-// trigger; mirrors the existing last-sync-error dot.
-function StalenessDot({ timestamp }: { timestamp: string }) {
-  const now = useNowMs()
-  const mounted = useMounted()
-  if (!mounted) return null
-  const ageMs = now - new Date(timestamp).getTime()
-  if (!(ageMs > 3_600_000)) return null
-  const ageH = ageMs / 3_600_000
-  const crit = ageH >= 3
-  const label = `Latest log is ${ageH.toFixed(1)}h old — ingestion may be stalled`
-  return (
-    <span
-      role="img"
-      aria-label={label}
-      title={label}
-      className={`ml-1.5 ${crit ? 'text-red-500' : 'text-amber-500'}`}
+function parsePrefs(raw: string | null): ServicePrefs {
+  if (!raw) return { pinned: [], mru: [] }
+  try {
+    const parsed = JSON.parse(raw)
+    return {
+      pinned: Array.isArray(parsed.pinned) ? parsed.pinned : [],
+      mru: Array.isArray(parsed.mru) ? parsed.mru : [],
+    }
+  } catch {
+    return { pinned: [], mru: [] }
+  }
+}
+
+export function ServiceSwitcher() {
+  const [open, setOpen] = React.useState(false)
+  const services = useServiceStore((s) => s.services)
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
+  const pathname = usePathname()
+
+  const [prefsRaw, writePrefsRaw] = useLocalStorageString(PREFS_KEY)
+  const prefs = React.useMemo(() => parsePrefs(prefsRaw), [prefsRaw])
+  const savePrefs = React.useCallback((next: ServicePrefs) => writePrefsRaw(JSON.stringify(next)), [writePrefsRaw])
+
+  React.useEffect(() => {
+    if (!activeServiceId || prefs.mru[0] === activeServiceId) return
+    savePrefs({
+      ...prefs,
+      mru: [activeServiceId, ...prefs.mru.filter((x) => x !== activeServiceId)].slice(0, MAX_MRU),
+    })
+  }, [activeServiceId, prefs, savePrefs])
+
+  const activeService = services.find((s) => s.id === activeServiceId)
+  const byId = React.useMemo(() => {
+    const m = new Map<string, (typeof services)[number]>()
+    for (const s of services) m.set(s.id, s)
+    return m
+  }, [services])
+
+  const pinnedServices = React.useMemo(
+    () => prefs.pinned.map((id) => byId.get(id)).filter(Boolean) as typeof services,
+    [prefs.pinned, byId],
+  )
+  const pinnedSet = React.useMemo(() => new Set(prefs.pinned), [prefs.pinned])
+  const recentServices = React.useMemo(
+    () =>
+      prefs.mru
+        .filter((id) => !pinnedSet.has(id))
+        .map((id) => byId.get(id))
+        .filter(Boolean) as typeof services,
+    [prefs.mru, pinnedSet, byId],
+  )
+  const recentSet = React.useMemo(() => new Set(recentServices.map((s) => s.id)), [recentServices])
+  const otherServices = React.useMemo(
+    () =>
+      services
+        .filter((s) => !pinnedSet.has(s.id) && !recentSet.has(s.id))
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [services, pinnedSet, recentSet],
+  )
+
+  const handleSelect = (id: string) => {
+    setActiveServiceId(id)
+    setOpen(false)
+    window.location.assign(`${pathname}?service=${id}`)
+  }
+
+  const handleTogglePin = (id: string) => {
+    savePrefs({
+      ...prefs,
+      pinned: prefs.pinned.includes(id)
+        ? prefs.pinned.filter((x) => x !== id)
+        : [...prefs.pinned, id],
+    })
+  }
+
+  const renderRow = (
+    service: (typeof services)[number],
+    opts: { pinned: boolean },
+  ) => (
+    <CommandItem
+      key={service.id}
+      value={service.name}
+      onSelect={() => handleSelect(service.id)}
+      className="group/row flex items-center gap-1 pr-1"
     >
-      ●
-    </span>
+      <Check
+        className={cn(
+          'mr-2 h-4 w-4 shrink-0',
+          activeServiceId === service.id ? 'opacity-100' : 'opacity-0',
+        )}
+      />
+      <span className="truncate flex-1">{service.name}</span>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={opts.pinned ? `Unpin ${service.name}` : `Pin ${service.name} to top`}
+        title={opts.pinned ? 'Unpin' : 'Pin to top'}
+        onClick={(e) => {
+          e.stopPropagation()
+          handleTogglePin(service.id)
+        }}
+        className={cn(
+          'h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground',
+          opts.pinned
+            ? 'opacity-90'
+            : 'opacity-0 group-hover/row:opacity-60 focus-visible:opacity-100',
+        )}
+      >
+        {opts.pinned ? <Pin className="h-3 w-3" /> : <PinOff className="h-3 w-3" />}
+      </Button>
+    </CommandItem>
+  )
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        role="combobox"
+        aria-expanded={open}
+        aria-label="Active service"
+        className={cn(
+          buttonVariants({ variant: 'outline' }),
+          'w-auto max-w-[60vw] sm:w-[250px] sm:max-w-none justify-between',
+        )}
+      >
+        <span className="flex min-w-0 flex-1 items-center justify-between">
+          <span className="truncate">
+            {activeService ? activeService.name : 'Select service...'}
+          </span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </span>
+      </PopoverTrigger>
+      <PopoverContent className="w-[260px] p-0">
+        <Command>
+          <CommandInput placeholder="Search service..." />
+          <CommandList>
+            <CommandEmpty>No service found.</CommandEmpty>
+            {pinnedServices.length > 0 && (
+              <CommandGroup heading="Pinned">
+                {pinnedServices.map((s) => renderRow(s, { pinned: true }))}
+              </CommandGroup>
+            )}
+            {recentServices.length > 0 && (
+              <>
+                {pinnedServices.length > 0 && <CommandSeparator />}
+                <CommandGroup heading="Recent">
+                  {recentServices.map((s) => renderRow(s, { pinned: false }))}
+                </CommandGroup>
+              </>
+            )}
+            {otherServices.length > 0 && (
+              <>
+                {(pinnedServices.length > 0 || recentServices.length > 0) && (
+                  <CommandSeparator />
+                )}
+                <CommandGroup
+                  heading={
+                    pinnedServices.length > 0 || recentServices.length > 0
+                      ? 'All services'
+                      : undefined
+                  }
+                >
+                  {otherServices.map((s) => renderRow(s, { pinned: false }))}
+                </CommandGroup>
+              </>
+            )}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   )
 }
 
+interface BackfillRangeModalProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onStartSync: (range: { start: string; end: string }) => void
+}
+
+export function BackfillRangeModal(props: BackfillRangeModalProps) {
+  const generation = useOpenGeneration(props.open)
+  return <BackfillRangeModalBody key={generation} {...props} />
+}
+
+const DATETIME_INPUT_CLASS =
+  'flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-xs shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono'
+
+function BackfillRangeModalBody({ open, onOpenChange, onStartSync }: BackfillRangeModalProps) {
+  const { timezone } = useTimezoneStore()
+  const [range, setRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
+  const invalid = !range.start || !range.end || range.start >= range.end
+
+  const handleStartSync = () => {
+    if (invalid) return
+    onStartSync(range)
+    onOpenChange(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className={cn("sm:max-w-xl", panelDialogContent)}>
+        <DialogHeader className={panelDialogHeaderMuted}>
+          <DialogTitle className="flex items-center gap-2">
+            <CloudDownload className="h-5 w-5 text-primary" />
+            Backfill Logs
+          </DialogTitle>
+          <div className="text-sm text-muted-foreground mt-1">
+            Re-import raw logs for a specific window, for example to close an ingest gap.
+          </div>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          <div className="p-4 border rounded-lg bg-muted/5 grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="backfill-start" className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Start Time</Label>
+              <input
+                id="backfill-start"
+                type="datetime-local"
+                step="1"
+                value={formatForInput(range.start, timezone)}
+                max={formatForInput(range.end, timezone)}
+                onChange={(e) => setRange(prev => ({ ...prev, start: parseFromInput(e.target.value, timezone) ?? '' }))}
+                className={DATETIME_INPUT_CLASS}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="backfill-end" className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">End Time</Label>
+              <input
+                id="backfill-end"
+                type="datetime-local"
+                step="1"
+                value={formatForInput(range.end, timezone)}
+                min={formatForInput(range.start, timezone)}
+                onChange={(e) => setRange(prev => ({ ...prev, end: parseFromInput(e.target.value, timezone) ?? '' }))}
+                className={DATETIME_INPUT_CLASS}
+              />
+            </div>
+          </div>
+          <Button onClick={handleStartSync} disabled={invalid} className="w-full h-8 text-xs" variant="default">
+            Start Backfill
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+export function TimeAgo({
+  timestamp,
+  fallback = null,
+}: {
+  timestamp: string | null | undefined
+  fallback?: ReactNode
+}) {
+  useNowMs()
+  const mounted = useMounted()
+  if (!timestamp) return <>{fallback}</>
+  if (!mounted) return <>{fallback}</>
+  return <>{formatTimeAgo(timestamp)}</>
+}
+
+/** Ticking "Ns" / "Nm Ns" elapsed label for a running job. Callers supply the
+ *  typography via ``className`` (the tick itself is the shared useNowMs ticker). */
+export function LiveElapsed({ startedAt, className }: { startedAt: string; className?: string }) {
+  const elapsed = useElapsedTime(startedAt)
+  const fmt = elapsed < 60 ? `${elapsed.toFixed(0)}s` : `${Math.floor(elapsed / 60)}m ${Math.floor(elapsed % 60)}s`
+  return <span className={className}>{fmt}</span>
+}
+
+/** Ticking countdown until ``when`` (or "Disabled" when nullish). */
+export function NextRunCountdown({ when }: { when: string | null | undefined }) {
+  const nowMs = useNowMs()
+  if (!when) return <>Disabled</>
+  return <>{formatCompactDuration(Math.floor((toUTCDate(when).getTime() - nowMs) / 1000))}</>
+}
+
+const SEED_KEYS = [queryKeys.syncStatus, queryKeys.lastSync] as const
+
 export function SyncStatusBadge() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const queryClient = useQueryClient()
 
   // Sibling Warning and Cache Mount Race Fix: returning null on the first client
   // render lets us safely and synchronously seed the query cache with empty/placeholder
@@ -81,31 +338,17 @@ export function SyncStatusBadge() {
   // This guarantees that when the inner component mounts and calls those hooks, the cache
   // keys already exist and we never trigger a mid-render QueryCache.build -> add notify
   // update that causes React 19 setState-in-render violations.
-  const [ready, setReady] = useState(false)
-  useEffect(() => {
-    if (activeServiceId) {
-      const existingStatus = queryClient.getQueryData(['sync-status', activeServiceId])
-      if (existingStatus === undefined) {
-        queryClient.setQueryData(['sync-status', activeServiceId], null)
-      }
-      const existingLast = queryClient.getQueryData(['last-sync', activeServiceId])
-      if (existingLast === undefined) {
-        queryClient.setQueryData(['last-sync', activeServiceId], null)
-      }
-    }
-    queueMicrotask(() => {
-      setReady(true)
-    })
-  }, [activeServiceId, queryClient])
+  const ready = useSeededReady(activeServiceId, SEED_KEYS, true)
 
-  if (!ready) return null
+  if (!ready) {
+    return <div className="hidden md:block w-[409px] h-7 mr-2 shrink-0" aria-hidden="true" />
+  }
 
   return <SyncStatusBadgeInner />
 }
 
 function SyncStatusBadgeInner() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const { full, abbr } = useDateFormat()
   const pathname = usePathname()
   const { data: status } = useSyncStatus()
   const { data: lastSync } = useLastSync()
@@ -126,14 +369,14 @@ function SyncStatusBadgeInner() {
   //  - sync-status: full snapshot → ['sync-status', svc]
   //  - cron-runs: cron-run state changes → invalidates ['admin','cron-logs'],
   //      ['admin','cron-logs-recent'], ['last-sync', svc] (on task === 'sync'),
-  //      and the iceberg/audit/ingested/schema keys.
+  //      and the storage/audit/ingested/schema keys.
   //  - system-metrics: bundled snapshot → the seven admin-overview slice keys.
   //  - share: lean tunnel-live snapshot → ['admin','share','live'] (only on
   //      /admin/share; replaces the page's separate useShareStream connection).
   // Mounted in the always-present header so the channels stay open across
   // navigation; /logs + /admin read from the warm cache for free.
   // The analyst path keeps its own single projected stream (log-extents).
-  const analystStreamState = useHeaderBadgeStream(streamsEnabled && isAnalyst)
+  useHeaderBadgeStream(streamsEnabled && isAnalyst)
 
   // system-metrics only feeds the admin-overview cards (SystemHealthCard,
   // OperationsOverview teasers, MetadataStorageCard, SystemStatus) — add it
@@ -151,12 +394,7 @@ function SyncStatusBadgeInner() {
     if (sharePageMounted) ch.push('share')
     return ch
   }, [adminPageMounted, sharePageMounted])
-  const adminStreamState = useAdminEventStream(streamsEnabled && !isAnalyst, adminChannels)
-
-  // The active stream's connection state — picks whichever side is gated on
-  // for the current session (admin OR analyst), defaults to idle when both
-  // are off (e.g. /share-login).
-  const liveStreamState = isAnalyst ? analystStreamState.state : adminStreamState.state
+  useAdminEventStream(streamsEnabled && !isAnalyst, adminChannels)
 
   // Bootstrap fallback for analyst sessions — /api/sync-status is
   // admin-only (RemoteAccessMiddleware blocks analysts → 403), so
@@ -165,146 +403,71 @@ function SyncStatusBadgeInner() {
   // renders so analysts see Latest Log / Total Logs the same way
   // admins do. Refreshes at bootstrap's 5-min staleTime — fine for an
   // at-a-glance header.
-  interface StreamMetrics {
-    latest_log_at?: string | null
-    total_rows?: number | null
-    last_sync_at?: string | null
-  }
-
-  interface HeaderBadgeData {
-    latest_log_at?: string | null
-    local_rows?: number | null
-    rum?: StreamMetrics | null
-    request?: StreamMetrics | null
-  }
-
   const { data: bootstrap } = useBootstrap()
-  const headerBadge = (bootstrap as Record<string, unknown>)?.header_badge as
-    | HeaderBadgeData
-    | null
-    | undefined
+  const headerBadge = bootstrap?.header_badge
 
   // a11y (WCAG 4.1.2): announce sync state transitions to screen readers
   // via an sr-only role="status" live region. We only fire on actual
-  // state changes (tracked via useRef) — not on every poll/render — so
-  // assistive tech doesn't spam "running" each time the badge re-renders.
-  const prevSyncStatusRef = useRef<string | null | undefined>(undefined)
+  // state changes (tracked against the previously rendered status) — not on every
+  // poll/render — so assistive tech doesn't spam "running" each time the badge re-renders.
+  const currentSyncStatus = lastSync?.status ?? null
+  const [prevSyncStatus, setPrevSyncStatus] = useState<string | null>(currentSyncStatus)
   const [a11yAnnouncement, setA11yAnnouncement] = useState<string>('')
-  useEffect(() => {
-    const current = lastSync?.status ?? null
-    const prev = prevSyncStatusRef.current
-    if (prev !== undefined && prev !== current) {
-      if (current === 'running') {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setA11yAnnouncement('Sync started')
-      } else if (current === 'error') {
+  if (prevSyncStatus !== currentSyncStatus) {
+    setPrevSyncStatus(currentSyncStatus)
+    if (currentSyncStatus === 'running') setA11yAnnouncement('Sync started')
+    else if (currentSyncStatus === 'error') setA11yAnnouncement('Sync errored')
+    else if (prevSyncStatus === 'running' && currentSyncStatus) setA11yAnnouncement('Sync finished')
+  }
 
-        setA11yAnnouncement('Sync errored')
-      } else if (prev === 'running' && current && current !== 'running') {
+  if (!activeServiceId) {
+    return <div className="hidden md:block w-[409px] h-7 mr-2 shrink-0" aria-hidden="true" />
+  }
+  if (!status && !headerBadge) {
+    return <div className="hidden md:block w-[409px] h-7 mr-2 shrink-0" aria-hidden="true" />
+  }
 
-        setA11yAnnouncement('Sync finished')
-      }
-    }
-    prevSyncStatusRef.current = current
-  }, [lastSync?.status])
-
-  if (!activeServiceId) return null
-  // Prefer the admin sync-status data (richer, polled every 30s);
-  // fall back to bootstrap's header_badge for analyst sessions or
-  // before sync-status has resolved.
-  const fileTs =
-    status?.latest_log_at ||
-    status?.latest_available_file_at ||
-    status?.latest_ingested_file_at ||
-    headerBadge?.latest_log_at ||
-    null
-  const localRows = status?.local_rows ?? headerBadge?.local_rows ?? null
-  if (!status && !headerBadge) return null
-
-  // SSE live dot. Green = stream open, amber = (re)connecting, hidden = idle.
-  // Sized to match the existing badges (px-2 py-0.5 / h-5-ish). aria-live
-  // off because the surrounding badges already announce sync state; this
-  // is a visual at-a-glance affordance and shouldn't spam SR users.
-  const liveDotTitle =
-    liveStreamState === 'open' ? 'Live updates connected'
-    : liveStreamState === 'connecting' ? 'Connecting to live updates…'
-    : liveStreamState === 'reconnecting' ? 'Reconnecting to live updates…'
-    : null
-  const showLiveDot = liveDotTitle !== null
-
-  // Extract RUM and REQUEST metrics from bootstrap
   const activeSvc = bootstrap?.services?.find(s => s.service_id === activeServiceId)
   const isRumEnabled = activeSvc?.rum_enabled ?? false
 
-  const rumMetrics = headerBadge?.rum
-  const requestMetrics = headerBadge?.request
+  // A current snapshot can explicitly clear metrics after a reset; do not
+  // fill those clears with older bootstrap values.
+  const snapshot = status ?? headerBadge
+  const rumMetrics = snapshot?.rum
+  const requestMetrics = snapshot?.request
 
   // Derive real-time values for REQUEST using the live-updated sync status query
   const rumTotal = rumMetrics?.total_rows ?? 0
-  const liveLocalRows = status?.local_rows ?? headerBadge?.local_rows ?? null
-  const requestTotal = liveLocalRows !== null ? Math.max(0, liveLocalRows - rumTotal) : (requestMetrics?.total_rows ?? null)
+  const liveLocalRows = snapshot?.local_rows ?? null
+  const requestTotal =
+    requestMetrics?.total_rows ??
+    (liveLocalRows !== null
+      ? (liveLocalRows > rumTotal && rumTotal > 0 ? liveLocalRows - rumTotal : liveLocalRows)
+      : null)
 
-  const requestLatestLogAt = status?.latest_log_at ?? requestMetrics?.latest_log_at ?? null
+  const requestLatestLogAt = snapshot?.request !== undefined
+    ? requestMetrics?.latest_log_at ?? null
+    : snapshot?.latest_log_at ?? null
   const requestLastSyncAt = lastSync?.started_at ?? requestMetrics?.last_sync_at ?? null
-
-  const hasRumData = isRumEnabled && (rumMetrics?.latest_log_at || (rumMetrics?.total_rows != null && rumMetrics.total_rows > 0))
-  const hasRequestData = requestLatestLogAt || (requestTotal != null && requestTotal > 0)
 
   const renderStreamRow = (
     label: string,
-    showDot: boolean,
     latestTs: string | null | undefined,
     totalRows: number | null | undefined,
     lastSyncTs: string | null | undefined,
-    showStaleness: boolean = true,
     isRunning: boolean = false,
     startedAt: string | null | undefined = null,
   ) => {
-    const hasData = latestTs || totalRows != null
-    if (!hasData) return null
-
     return (
       <div key={label} className="flex items-center gap-1 min-w-0 text-[10px]">
-        {/* Column 0: Live Dot (fixed w-3 to preserve grid alignment even if empty) */}
-        <span className="w-3 flex-shrink-0 inline-flex items-center justify-center">
-          {showDot ? (
-            <Tooltip>
-              <TooltipTrigger render={
-                <span
-                  tabIndex={0}
-                  role="status"
-                  aria-label={liveDotTitle ?? ''}
-                  className="inline-flex items-center justify-center h-2.5 w-2.5 rounded-full hover:bg-muted/60 flex-shrink-0"
-                >
-                  <span className="relative flex h-1 w-1">
-                    {liveStreamState === 'open' ? (
-                      <>
-                        <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-60 animate-ping" />
-                        <span className="relative inline-flex h-1 w-1 rounded-full bg-emerald-500" />
-                      </>
-                    ) : (
-                      <>
-                        <span className="absolute inline-flex h-full w-full rounded-full bg-amber-500 opacity-60 animate-ping" />
-                        <span className="relative inline-flex h-1 w-1 rounded-full bg-amber-500" />
-                      </>
-                    )}
-                  </span>
-                </span>
-              } />
-              <TooltipContent className="text-xs">{liveDotTitle}</TooltipContent>
-            </Tooltip>
-          ) : null}
-        </span>
-
-        {/* Column 1: Label (fixed w-[58px]) */}
+        {/* Column 0: Label (fixed w-[58px]) */}
         <span className="w-[58px] flex-shrink-0 font-semibold text-muted-foreground whitespace-nowrap">{label}</span>
 
-        {/* Column 2: Latest Log TimeAgo (fixed w-[124px] + tabular-nums) */}
+        {/* Column 1: Latest Log TimeAgo (fixed w-[124px] + tabular-nums) */}
         {latestTs ? (
           <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap tabular-nums inline-flex items-center gap-1">
             <span className="text-muted-foreground/80 font-normal">latest:</span>
             <TimeAgo timestamp={latestTs} />
-            {showStaleness && <StalenessDot timestamp={latestTs} />}
           </span>
         ) : (
           <span className="w-[124px] flex-shrink-0 text-muted-foreground whitespace-nowrap inline-flex items-center gap-1">
@@ -313,21 +476,21 @@ function SyncStatusBadgeInner() {
           </span>
         )}
 
-        {/* Column 3: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
+        {/* Column 2: Row Count (fixed w-[110px] + tabular-nums + text-right + pr-2) */}
         {totalRows != null && totalRows > 0 ? (
-          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2 tabular-nums">total: {totalRows.toLocaleString()}</span>
+          <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2 tabular-nums">total: {formatCount(totalRows)}</span>
         ) : (
           <span className="w-[110px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-left pr-2">—</span>
         )}
 
-        {/* Column 4: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
+        {/* Column 3: Last Sync (fixed w-[105px] + tabular-nums + text-right) */}
         {lastSyncTs ? (
           <span className="w-[105px] flex-shrink-0 text-muted-foreground whitespace-nowrap text-[9px] inline-flex items-center justify-start gap-1 tabular-nums">
             <span className="text-muted-foreground/80">sync:</span>
             {isRunning && startedAt ? (
               <span className="inline-flex items-center gap-1 font-semibold text-blue-500 animate-pulse" aria-label="Sync in progress">
                 <Loader2 className="h-2.5 w-2.5 animate-spin shrink-0 text-blue-500" aria-hidden="true" />
-                <HeaderLiveTimer startedAt={startedAt} />
+                <LiveElapsed startedAt={startedAt} className="font-mono text-blue-500 tabular-nums font-medium animate-pulse" />
               </span>
             ) : (
               <TimeAgo timestamp={lastSyncTs} />
@@ -340,73 +503,27 @@ function SyncStatusBadgeInner() {
     )
   }
 
-  // If we have separate RUM/REQUEST data, show two rows; otherwise fall back to combined view
-  const showSeparateStreams = isRumEnabled && (hasRumData || hasRequestData)
-
   return (
-    <div className="hidden md:flex flex-col gap-0.5 mr-2 animate-in fade-in zoom-in-95">
-      {showSeparateStreams ? (
-        <div className="flex flex-col gap-0.5">
-          {/* REQUEST logs row with live dot */}
-          {renderStreamRow(
-            'REQUEST',
-            showLiveDot,
-            requestLatestLogAt,
-            requestTotal,
-            requestLastSyncAt,
-            false,
-            lastSync?.status === 'running',
-            lastSync?.started_at,
-          )}
+    <div className="hidden md:flex flex-col gap-0.5 min-w-[409px] mr-2 animate-in fade-in zoom-in-95">
+      <div className="flex flex-col gap-0.5">
+        {/* REQUEST logs row */}
+        {renderStreamRow(
+          'REQUEST',
+          requestLatestLogAt,
+          requestTotal,
+          requestLastSyncAt,
+          lastSync?.status === 'running',
+          lastSync?.started_at,
+        )}
 
-          {/* RUM logs row with live dot */}
-          {isRumEnabled && renderStreamRow(
-            'RUM',
-            showLiveDot,
-            rumMetrics?.latest_log_at,
-            rumMetrics?.total_rows,
-            rumMetrics?.last_sync_at,
-            false,
-          )}
-        </div>
-      ) : (
-        <>
-          {/* Fallback to combined view when no separate stream data */}
-          {localRows != null && (
-            <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[172px] tabular-nums">
-              <strong className="text-foreground mr-1">Total Logs:</strong>
-              {localRows.toLocaleString()}
-            </Badge>
-          )}
-
-          {fileTs ? (
-            <Tooltip>
-              <TooltipTrigger render={
-                <Badge
-                  variant="secondary"
-                  tabIndex={0}
-                  role="button"
-                  aria-label="Latest log details"
-                  aria-live="off"
-                  className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10 hover:bg-muted transition-colors min-w-[156px] tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <strong className="text-foreground mr-1">Latest Log:</strong>
-                  <TimeAgo timestamp={fileTs} />
-                  <StalenessDot timestamp={fileTs} />
-                </Badge>
-              } />
-              <TooltipContent className="text-xs">
-                {full(fileTs)} {abbr()}
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <Badge variant="secondary" className="px-2 py-0.5 shadow-none font-normal text-muted-foreground bg-muted/70 border-muted-foreground/10">
-              <strong className="text-foreground mr-1">Latest Log:</strong>
-              Never
-            </Badge>
-          )}
-        </>
-      )}
+        {/* RUM logs row */}
+        {isRumEnabled && renderStreamRow(
+          'RUM',
+          rumMetrics?.latest_log_at,
+          rumMetrics?.total_rows,
+          rumMetrics?.last_sync_at,
+        )}
+      </div>
 
       {/* a11y: sr-only live region for screen readers */}
       <span role="status" aria-live="polite" className="sr-only">

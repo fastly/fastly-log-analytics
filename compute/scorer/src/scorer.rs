@@ -1,9 +1,9 @@
 //! Layer 1 (universal behavioral) + Layer 2 (route transition) + combined.
 //!
-//! Mirrors `backend/scoring/scorer.py`. Constants are pinned to the same
+//! Mirrors `backend/scoring/__init__.py`. Constants are pinned to the same
 //! values; the math is the same algebraic identity for variance and the
 //! same `-log10(p) * 100/6` curve for the L2 score. Every Python test in
-//! `tests/scoring/test_scorer.py` has a paired Rust test here so behavioural
+//! `tests/scoring/test_scorer_parity_and_vectors.py` has a paired Rust test here so behavioural
 //! drift between the two impls is caught at build time.
 
 use crate::cookie::{quantize_score, SessionState};
@@ -166,7 +166,7 @@ fn transition_prob(matrix: &TransitionMatrix, prev: &str, current: &str, vocab_s
     let has_rows = matrix.has_rows();
     let prev_id = matrix.route_id(prev);
     // Fail closed on an unseen prev route in a POPULATED matrix — mirrors
-    // backend/scoring/scorer.py::_transition_prob. An unseen prev row isn't
+    // backend/scoring/__init__.py::_transition_prob. An unseen prev row isn't
     // neutral; it's a transition the model never observed (the shape of
     // evasion: prepend an untracked route to dodge the shield). Return the
     // floor so l2_score_from_trans_prob maps it to the max anomaly score.
@@ -360,10 +360,10 @@ mod tests {
         }
     }
 
-    fn r(path: &str, category: &str) -> Route {
+    fn r(path: &str, category: &'static str) -> Route {
         Route {
             path: path.to_string(),
-            category: category.to_string(),
+            category,
         }
     }
 

@@ -1,133 +1,55 @@
-"""Service management layer for consistent configuration listing and enrichment."""
+"""Service configuration and enriched status manager."""
+
+from __future__ import annotations
 
 import os
 import threading
-import time
 from typing import Any
 
+import backend.utils.dir_size as _dir_size_mod
 from backend import config as svcconfig
 from backend.core import duckdb as _db
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.dir_size import (
+    _DEFAULT_WALK_DIR_STATS,
+    get_dir_stats_swr,
+)
+from backend.utils.dir_size import (
+    _DIR_SIZE_CACHE as _shared_dir_size_cache,
+)
+from backend.utils.dir_size import (
+    _DIR_STATS_CACHE as _shared_dir_stats_cache,
+)
+from backend.utils.dir_size import (
+    _dir_size_lock as _shared_dir_size_lock,
+)
+from backend.utils.dir_size import (
+    walk_dir_stats as _walk_dir_stats,
+)
 
-# Cache dirs hold thousands of small parquet files; recursively stat'ing
-# them on every /api/bootstrap, /api/services, and admin tile render was a
-# big chunk of the page-navigation lag (200-1500ms per call). The dir
-# contents change on cron tick (every 2 min for most services), so a
-# 5-minute TTL is comfortably below the freshness floor users notice in
-# the "Local Cache" column while eliminating the per-request walk.
-#
-# Fully async, including the very first access: a missing cache entry
-# (process just started, or TTL expired) returns the best available
-# value IMMEDIATELY — the stale value if one exists, else (0, 0) — and
-# kicks off a background walk to populate/refresh the cache, coalesced
-# via `_dir_stats_refresh_in_flight` so concurrent readers on the same
-# path never trigger more than one walk. `_get_dir_stats` must NEVER
-# block its caller on the syscall storm: an earlier version walked
-# synchronously on the cold (no-entry) path, "only" the first caller
-# after each process start paying that cost — fine for a few thousand
-# files, but a service with 100k+ small cache files turned that one
-# request into minutes, and since /api/bootstrap and /api/services both
-# call in on every restart, it single-handedly made /admin
-# unreachable (a slow first response there also races the admin-token
-# hydration described in HydrateAdminToken, surfacing as a spurious
-# "Couldn't load services" 401 on top of the raw slowness).
 _DIR_STATS_TTL_SEC = 300.0
-_dir_stats_cache: dict[str, tuple[float, int, int]] = {}
-_dir_stats_lock = threading.Lock()
+_dir_stats_cache: Any = BoundedTTLCache(maxsize=4096, ttl_seconds=_DIR_STATS_TTL_SEC)
+_dir_stats_lock = _shared_dir_size_lock
 _dir_stats_refresh_in_flight: set[str] = set()
 
 
-def _walk_dir_stats(path: str) -> tuple[int, int]:
-    """Synchronous os.scandir walk. Returns (total_size_bytes, file_count).
-    Symlinks are skipped (preserves the prior os.walk behavior)."""
-    if not os.path.exists(path):
-        return (0, 0)
-    total_size = 0
-    file_count = 0
-    stack = [path]
-    while stack:
-        d = stack.pop()
-        try:
-            with os.scandir(d) as it:
-                for entry_de in it:
-                    try:
-                        if entry_de.is_symlink():
-                            continue
-                        if entry_de.is_dir(follow_symlinks=False):
-                            stack.append(entry_de.path)
-                        elif entry_de.is_file(follow_symlinks=False):
-                            total_size += entry_de.stat(follow_symlinks=False).st_size
-                            file_count += 1
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return (total_size, file_count)
-
-
-def _refresh_dir_stats_background(path: str) -> None:
-    """Run the walk off-thread and write the result back into the cache.
-    Guarded by _dir_stats_refresh_in_flight so concurrent expired reads
-    on the same path coalesce to a single background walk."""
-    try:
-        total_size, file_count = _walk_dir_stats(path)
-        with _dir_stats_lock:
-            _dir_stats_cache[path] = (time.monotonic(), total_size, file_count)
-    finally:
-        with _dir_stats_lock:
-            _dir_stats_refresh_in_flight.discard(path)
-
-
 def _get_dir_stats(path: str) -> tuple[int, int]:
-    """Return ``(total_size_bytes, file_count)`` for ``path`` recursively.
-
-    Uses os.scandir + DirEntry.stat so each file costs ~1 syscall instead
-    of the os.walk+islink+getsize trio (3+ per file). Cache dirs with
-    thousands of small parquet files were the main motivator.
-
-    Stale-while-revalidate semantics, including on first-ever access:
-      - Fresh entry (age < TTL): return cached value, no work.
-      - Stale OR missing entry: return the best available value
-        immediately — the stale value if one exists, else ``(0, 0)`` —
-        and kick off a background walk to populate/refresh the cache,
-        coalesced via the in-flight set so concurrent readers on the
-        same path never trigger more than one walk. This function
-        never blocks its caller on the syscall storm, not even the
-        very first call for a path.
-
-    The cache stores the result even when the path doesn't exist, so
-    nonexistent paths only stat once per TTL window.
-    """
-    now = time.monotonic()
-    with _dir_stats_lock:
-        entry = _dir_stats_cache.get(path)
-        if entry is not None and (now - entry[0]) < _DIR_STATS_TTL_SEC:
-            return (entry[1], entry[2])
-        # Either expired or never cached — serve the best available value
-        # (stale, or the (0, 0) cold-start placeholder) and schedule a
-        # background refresh, coalesced via the in-flight set. Start the
-        # thread AFTER releasing the lock so Thread().start()'s
-        # allocation cost doesn't block other readers under load.
-        best_effort = (entry[1], entry[2]) if entry is not None else (0, 0)
-        schedule_refresh = path not in _dir_stats_refresh_in_flight
-        if schedule_refresh:
-            _dir_stats_refresh_in_flight.add(path)
-
-    if schedule_refresh:
-        try:
-            threading.Thread(
-                target=_refresh_dir_stats_background,
-                args=(path,),
-                name=f"dir-stats-refresh:{os.path.basename(path)}",
-                daemon=True,
-            ).start()
-        except Exception:
-            # Resource exhaustion (RuntimeError 'can't start new thread',
-            # MemoryError). The cache must NOT be permanently stuck —
-            # release the in-flight marker so the next reader can try
-            # again. Serve the best-effort value this round.
-            with _dir_stats_lock:
-                _dir_stats_refresh_in_flight.discard(path)
-    return best_effort
+    """Return ``(total_size_bytes, file_count)`` for ``path`` recursively via shared SWR cache."""
+    fn = (
+        _dir_size_mod.walk_dir_stats if _dir_size_mod.walk_dir_stats is not _DEFAULT_WALK_DIR_STATS else _walk_dir_stats
+    )
+    return get_dir_stats_swr(
+        path,
+        stats_cache=_dir_stats_cache,
+        size_cache=_shared_dir_size_cache,
+        shared_stats_cache=_shared_dir_stats_cache,
+        in_flight=_dir_stats_refresh_in_flight,
+        lock=_dir_stats_lock,
+        ttl=_DIR_STATS_TTL_SEC,
+        walk_fn=fn,
+        thread_cls=threading.Thread,
+    )
 
 
 def get_enriched_services(active_service_id: str | None = None) -> list[dict[str, Any]]:
@@ -138,9 +60,13 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
     configs = svcconfig.list_configs()
     name_map = svcconfig.refresh_all_service_names(configs)
 
+    hs_service_ids = {s.strip() for s in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if s.strip()}
+
     result = []
     for cfg in configs:
         sid = cfg.get("service_id", "")
+        if not sid:
+            continue
         name = name_map.get(sid, sid)
 
         db_path = cfg.get("duckdb_path") or svcconfig.duckdb_path(sid)
@@ -156,12 +82,24 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
         cron_stats = cached_status.get("cron_stats", {})
         log_row_count = cached_status.get("local_rows", 0)
 
+        rum_val = cfg.get("rum")
+        rum_dict: dict[str, Any] = rum_val if isinstance(rum_val, dict) else {}
+        rum_lp = rum_dict.get("log_period")
+        if rum_lp is None:
+            rum_lp = cfg.get("rum_log_period")
+        if rum_lp is not None:
+            try:
+                rum_lp = int(rum_lp)
+            except (ValueError, TypeError):
+                rum_lp = None
+
+        is_hs = svcconfig.is_high_scale_mode(src_dict) and (not hs_service_ids or sid in hs_service_ids)
         result.append(
             {
                 "service_id": sid,
                 "name": name,
-                "access_level": cfg.get("access_level", "read_write"),
                 "storage_mode": cfg.get("storage_mode", "cloud"),
+                "is_high_scale": is_hs,
                 "log_period": cfg.get("log_period", 60),
                 "fos_bucket": cfg.get("fos_bucket", ""),
                 "fos_region": cfg.get("fos_region", ""),
@@ -192,7 +130,9 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 ),
                 "ngwaf_workspace_id": cfg.get("ngwaf_workspace_id"),
                 "logging_enabled": cfg.get("logging_enabled", True),
-                "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
+                "rum_enabled": svcconfig.is_rum_enabled(cfg),
+                "rum": cfg.get("rum"),
+                "rum_log_period": rum_lp,
                 "cmcd_enabled": bool((cfg.get("cmcd") or {}).get("enabled")),
             }
         )
@@ -201,10 +141,6 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
     result.sort(key=lambda x: (not x["is_active"], x["name"].lower()))
     return result
 
-
-# R-1: register the dir-stats TTL cache + in-flight set so the autouse
-# fixture in tests/conftest.py drains them via CacheRegistry.clear_all().
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("services.service_manager._dir_stats_cache", _dir_stats_cache)
 _CacheRegistry.register("services.service_manager._dir_stats_refresh_in_flight", _dir_stats_refresh_in_flight)

@@ -1,8 +1,8 @@
 .git
 .venv
-__pycache__
-*.pyc
-*.pyo
+**/__pycache__
+**/*.py[cod]
+*$py.class
 logs.duckdb
 cache/
 data/
@@ -10,19 +10,20 @@ configs/
 node_modules/
 frontend/node_modules/
 frontend/.next/
+frontend/.next-e2e/
 frontend/out/
-frontend/types/api.generated.ts
-frontend/openapi.json
+frontend/public/maplibre-gl-worker.mjs
+frontend/public/maplibre-gl-shared.mjs
 .env
 .DS_Store
 *.duckdb*
 .claude/
 
 # Test / lint caches
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.coverage
 htmlcov/
 *.log
 
@@ -34,6 +35,11 @@ frontend/playwright-report/
 frontend/test-results/
 frontend/coverage/
 frontend/vitest.config.*
+frontend/vitest.setup.ts
+frontend/playwright.config.*
+compute/scorer/target/
+compute/scorer/bin/
+compute/scorer/pkg/
 
 # Local docs / planning
 TESTING_PLAN*.md
@@ -42,3 +48,5 @@ docs/
 # IDE
 .vscode/
 .idea/
+.env*
+frontend/.env*

@@ -1,9 +1,15 @@
 import '@testing-library/jest-dom/vitest'
 import { afterAll, afterEach, expect } from 'vitest'
 import { act } from 'react'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 import * as matchers from 'vitest-axe/matchers'
-import { server } from './tests/msw/server'
+import { server } from './__tests__/helpers/msw/handlers'
+
+// waitFor/findBy poll observable state and only use this as a failure bound; the
+// 1s default is shorter than a cold render of a large page under worker
+// contention. Keep it below testTimeout (15s) so a real hang still reports the
+// unmet assertion rather than a bare test timeout.
+configure({ asyncUtilTimeout: 10000 })
 
 // React 19 emits "The current testing environment is not configured to support
 // act(...)" whenever a state update is flushed unless this flag is set on
@@ -27,12 +33,12 @@ if (typeof window !== 'undefined') {
   // already handles gracefully in non-browser environments.
   window.HTMLCanvasElement.prototype.getContext = function () {
     return null
-  } as unknown as HTMLCanvasElement['getContext']
+  }
 }
 
 // jsdom can't perform real navigation, so any code path that calls
 // location.assign/replace/reload or assigns location.href (e.g. lib/api.ts's
-// admin_token_invalid redirect, app/error.tsx's reload) makes jsdom emit a
+// /share-login redirect, app/error.tsx's reload) makes jsdom emit a
 // "Not implemented: navigation to another Document" error via its
 // virtualConsole — noise in tests that only assert the surrounding behavior.
 // jsdom's Location methods are non-configurable, so we replace window.location
@@ -58,7 +64,7 @@ if (typeof window !== 'undefined') {
       configurable: true,
       get: () => realLocation[key],
       // href assignment navigates; swallow it. Other components stay live.
-      set: key === 'href' ? () => {} : (v: string) => { (realLocation as unknown as Record<string, string>)[key] = v },
+      set: key === 'href' ? () => {} : (v: string) => { Reflect.set(realLocation, key, v) },
     })
   }
   Object.defineProperty(window, 'location', { configurable: true, writable: true, value: locationStub })
@@ -82,13 +88,26 @@ expect.extend(matchers)
 // ([lib/api.ts](./lib/api.ts)). If we hadn't patched fetch yet, the
 // captured reference would be the unpatched original and MSW would never
 // see those requests.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
 server.listen({
   onUnhandledRequest(request, print) {
-    const url = new URL(request.url)
+    let url: URL
+    try {
+      url = new URL(request.url)
+    } catch {
+      // Relative URL without a base origin in a test stub.
+      return
+    }
+    // Reject any unhandled request to a non-loopback (external) host.
+    if (!LOOPBACK_HOSTS.has(url.hostname)) {
+      print.error()
+      return
+    }
     // Backend base URL = 127.0.0.1:8000 (see ``handlers.ts``). Any
-    // other localhost port belongs to a test-owned http server (the
-    // SSR helper tests stand one up on a random port); let those
-    // through untouched.
+    // other loopback port belongs to a test-owned http server (the
+    // SSR helper tests stand one up on a random port) or jsdom's
+    // relative-URL origin; let those through untouched.
     const isBackendBase = url.hostname === '127.0.0.1' && url.port === '8000'
     if (!isBackendBase) return
     print.error()

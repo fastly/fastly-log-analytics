@@ -1,0 +1,1253 @@
+{
+ "_sql": {
+  "0e02dc33917c": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<21 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua'))",
+  "1afcd742b711": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<5 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua'))",
+  "248548cc3736": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<24 paths>], hive_partitioning=1) WHERE field IN ('country', 'ua'))",
+  "71a1d206b856": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<4 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua')) UNION ALL (SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<20 paths>], hive_partitioning=1) WHERE field IN ('country', 'ua'))",
+  "7e14d4b0a3a6": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<12 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua')) UNION ALL (SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<24 paths>], hive_partitioning=1) WHERE field IN ('country', 'ua'))",
+  "8be819041e5e": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<24 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua'))",
+  "9a9682e787ec": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<42 paths>], hive_partitioning=1) WHERE field IN ('country', 'ua'))",
+  "9cf4026b23aa": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<24 paths>], hive_partitioning=0) WHERE field IN ('country'))",
+  "b6638bf48384": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<8 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua'))",
+  "d8ceb1a80cf8": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<9 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua'))",
+  "dc17214daa87": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<48 paths>], hive_partitioning=1) WHERE field IN ('country', 'ua'))",
+  "e3d0b02d17c4": "(SELECT field, value, ip_sketch, sample_capped FROM read_parquet([<1 paths>], hive_partitioning=0) WHERE field IN ('country', 'ua'))"
+ },
+ "active_hour_excluded": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 24,
+   "listdir": 4
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "bundled_and_perfield_disjoint": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 36,
+    "sha": "5768ba37c36a",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 12,
+   "listdir": 28
+  },
+  "raised": null,
+  "sql": [
+   "7e14d4b0a3a6"
+  ]
+ },
+ "bundled_and_perfield_overlap": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 36,
+    "sha": "5768ba37c36a",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 12,
+   "listdir": 28
+  },
+  "raised": null,
+  "sql": [
+   "7e14d4b0a3a6"
+  ]
+ },
+ "bundled_full": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "bundled_gap_hours": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 21
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 21
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 21,
+    "sha": "3b8779086c77",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 21,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "0e02dc33917c"
+  ]
+ },
+ "bundled_wrong_filename": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": []
+ },
+ "durable_not_ready": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [],
+  "probes": {},
+  "raised": null,
+  "sql": []
+ },
+ "durable_ready": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "empty_bundled_root": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 4,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": []
+ },
+ "empty_perfield_root": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": []
+ },
+ "meta_coverage_union": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 4
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "7288a3685f50",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 4,
+   "listdir": 23
+  },
+  "raised": null,
+  "sql": [
+   "71a1d206b856"
+  ]
+ },
+ "no_trees": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [],
+  "probes": {
+   "isdir": 2
+  },
+  "raised": null,
+  "sql": []
+ },
+ "perfield_full": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-24/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-23/part-0.parquet"
+    ],
+    "n": 48,
+    "sha": "b738c246b919",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 51
+  },
+  "raised": null,
+  "sql": [
+   "dc17214daa87"
+  ]
+ },
+ "perfield_gap_hours": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 21
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 21
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-24/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-23/part-0.parquet"
+    ],
+    "n": 42,
+    "sha": "1c1cbb759e60",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 45
+  },
+  "raised": null,
+  "sql": [
+   "9a9682e787ec"
+  ]
+ },
+ "perfield_nonparquet": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 51
+  },
+  "raised": null,
+  "sql": []
+ },
+ "perfield_one_field_only": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 0
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-24/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-23/part-0.parquet"
+    ],
+    "n": 24,
+    "sha": "bc6dcd57bc55",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 26
+  },
+  "raised": null,
+  "sql": [
+   "248548cc3736"
+  ]
+ },
+ "perfield_tmp_files": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 51
+  },
+  "raised": null,
+  "sql": []
+ },
+ "perfield_unrequested_field": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": []
+ },
+ "rows_boom": {
+  "counts": {},
+  "executes": 1,
+  "meta": {},
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "rows_boom_perfield": {
+  "counts": {},
+  "executes": 1,
+  "meta": {},
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-24/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=country/hour=h-23/part-0.parquet"
+    ],
+    "n": 48,
+    "sha": "b738c246b919",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 3,
+   "listdir": 51
+  },
+  "raised": null,
+  "sql": [
+   "dc17214daa87"
+  ]
+ },
+ "rows_dirty_bundled": {
+  "counts": {
+   "country | US": 31,
+   "ua | bot": 15
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "rows_dirty_mixed": {
+  "counts": {
+   "country | US": 31,
+   "ua | bot": 15
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 36,
+    "sha": "5768ba37c36a",
+    "tail": [
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-2/part-0.parquet",
+     "<R>/rollups/hour_ip_spread/field=ua/hour=h-1/part-0.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 12,
+   "listdir": 28
+  },
+  "raised": null,
+  "sql": [
+   "7e14d4b0a3a6"
+  ]
+ },
+ "rows_empty": {
+  "counts": {},
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "shape_all_unsafe": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [],
+  "probes": {},
+  "raised": null,
+  "sql": []
+ },
+ "shape_empty_fields": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [],
+  "probes": {},
+  "raised": null,
+  "sql": []
+ },
+ "shape_no_phase_log": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "shape_single_field": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 24,
+   "listdir": 3
+  },
+  "raised": null,
+  "sql": [
+   "9cf4026b23aa"
+  ]
+ },
+ "shape_unsafe_mixed": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 3,
+   "isfile": 24,
+   "listdir": 3
+  },
+  "raised": null,
+  "sql": [
+   "9cf4026b23aa"
+  ]
+ },
+ "window_after_active": {
+  "counts": {},
+  "executes": 0,
+  "meta": {},
+  "paths": [],
+  "phases": [
+   "ip_spread_rollup:enumerate"
+  ],
+  "probes": {
+   "isdir": 4,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": []
+ },
+ "window_end_mid_hour": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 8
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 8
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-10/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-9/all_fields_ip.parquet"
+    ],
+    "n": 8,
+    "sha": "f4abe9899271",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-4/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-3/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 8,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "b6638bf48384"
+  ]
+ },
+ "window_end_on_boundary": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 8
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 8
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-10/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-9/all_fields_ip.parquet"
+    ],
+    "n": 8,
+    "sha": "f4abe9899271",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-4/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-3/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 8,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "b6638bf48384"
+  ]
+ },
+ "window_no_bounds": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "window_no_end": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 5
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 5
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-5/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-4/all_fields_ip.parquet"
+    ],
+    "n": 5,
+    "sha": "333f4314b995",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 5,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "1afcd742b711"
+  ]
+ },
+ "window_no_start": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 24
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 24
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-24/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-23/all_fields_ip.parquet"
+    ],
+    "n": 24,
+    "sha": "dee52f8931f4",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-2/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-1/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 24,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "8be819041e5e"
+  ]
+ },
+ "window_single_hour": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 1
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 1
+   }
+  },
+  "paths": [
+   [
+    "<R>/rollups/hour_bundled/hour=h-5/all_fields_ip.parquet"
+   ]
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 1,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "e3d0b02d17c4"
+  ]
+ },
+ "window_start_mid_hour": {
+  "counts": {
+   "country | DE": 10,
+   "country | US": 124,
+   "ua | curl": 9
+  },
+  "executes": 1,
+  "meta": {
+   "country": {
+    "capped_values": 1,
+    "coverage_hours": 9
+   },
+   "ua": {
+    "capped_values": 0,
+    "coverage_hours": 9
+   }
+  },
+  "paths": [
+   {
+    "head": [
+     "<R>/rollups/hour_bundled/hour=h-11/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-10/all_fields_ip.parquet"
+    ],
+    "n": 9,
+    "sha": "f5a4edce86fd",
+    "tail": [
+     "<R>/rollups/hour_bundled/hour=h-4/all_fields_ip.parquet",
+     "<R>/rollups/hour_bundled/hour=h-3/all_fields_ip.parquet"
+    ]
+   }
+  ],
+  "phases": [
+   "ip_spread_rollup:enumerate",
+   "ip_spread_rollup:read",
+   "ip_spread_rollup:merge"
+  ],
+  "probes": {
+   "isdir": 4,
+   "isfile": 9,
+   "listdir": 1
+  },
+  "raised": null,
+  "sql": [
+   "d8ceb1a80cf8"
+  ]
+ }
+}

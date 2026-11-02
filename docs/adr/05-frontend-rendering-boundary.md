@@ -1,7 +1,7 @@
 # ADR-05 — Frontend Rendering Boundary
 
-**Status:** Accepted (Phase 0)
-**Decided by:** v2.0 cleanup planning
+**Status:** Accepted
+**Decided by:** Engineering retrospective
 **Supersedes:** the implicit "CSR everywhere" pattern + the warm-up workarounds it forced
 
 ## Context
@@ -19,7 +19,7 @@ Each is a local fix. None followed from a stated rule.
 
 ## Decision
 
-Every route has an explicit rendering classification, documented in `frontend/app/_routing.md` (added in Phase 9a). The classifications:
+Every route has an explicit rendering classification, documented in `frontend/docs/routing.md` (added in Phase 9a). The classifications:
 
 - **RSC** — Server-rendered, no client JS for the initial paint. Used for routes that are read-mostly and don't need interactivity in the critical path. Data fetched server-side, streamed to the client.
 - **CSR** — Client-rendered. Used for routes that are inherently interactive (live filtering, charts, maps).
@@ -50,7 +50,7 @@ The actual route classifications get filled in during Phase 9a after auditing ea
 
 ### URL state policy
 
-- **`nuqs` is the *target* single source of truth for URL-driven state** (filters, active service, time window, custom metrics). Adoption is incremental: `serviceStore` is migrated via `useUrlServiceSync` (the first nuqs adoption); `filterStore` still uses the legacy `useUrlFilterSync` (plain `URLSearchParams` + `history.replaceState`) and its nuqs migration is deferred. See `frontend/app/_routing.md` for the live state.
+- **`nuqs` is the *target* single source of truth for URL-driven state** (filters, active service, time window, custom metrics). Adoption is incremental: `serviceStore` is migrated via `useUrlServiceSync` (the first nuqs adoption); `filterStore` still uses the legacy `useUrlFilterSync` (plain `URLSearchParams` + `history.replaceState`) and its nuqs migration is deferred. See `frontend/docs/routing.md` for the live state.
 - **Zustand stores own UI-only state** that doesn't survive a refresh. Anything that needs to survive a refresh lives in URL state.
 
 ## Consequences

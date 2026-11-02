@@ -1,23 +1,38 @@
+"""Fastly POP location cache and Haversine SQL expression builders."""
+
+from __future__ import annotations
+
 import json
 import logging
 import os
+import re
 import threading
+from collections.abc import Callable
+from typing import Any
+
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = "cache/pop_locations.json"
 
-# mtime-revalidated cache for the parsed lat/lon map. Bootstrap calls
-# get_pop_lat_lon_map() on every dashboard refresh; the POPs file rarely
-# changes (Fastly adds/removes datacenters maybe monthly) so the open +
-# json.loads + dict-comp on each request is wasted work.
-_lat_lon_cache: tuple[int, dict] | None = None
+_DEFAULT_POP_COORDS: dict[str, tuple[float, float]] = {
+    "SJC": (37.3382, -121.8863),
+    "IAD": (38.9531, -77.4565),
+    "NRT": (35.7720, 140.3929),
+}
+_SAFE_POP_CODE_RE = re.compile(r"^[A-Z0-9_]+$")
+
+_POP_CACHE_TTL_S = 300.0
+_lat_lon_cache: BoundedTTLCache | tuple[int, dict] | None = BoundedTTLCache(maxsize=16, ttl_seconds=_POP_CACHE_TTL_S)
 _lat_lon_cache_lock = threading.Lock()
 
-# Same mtime-revalidated cache pattern, but for the code -> {city, region,
-# country} map used to label the "Avg RTT by POP" breakdown.
-_loc_cache: tuple[int, dict] | None = None
+_loc_cache: BoundedTTLCache | tuple[int, dict] | None = BoundedTTLCache(maxsize=16, ttl_seconds=_POP_CACHE_TTL_S)
 _loc_cache_lock = threading.Lock()
+
+_CacheRegistry.register("utils.pop_utils._lat_lon_cache", _lat_lon_cache)
+_CacheRegistry.register("utils.pop_utils._loc_cache", _loc_cache)
 
 
 def fetch_pop_locations(api_key: str) -> bool:
@@ -27,10 +42,6 @@ def fetch_pop_locations(api_key: str) -> bool:
     if not api_key:
         return False
 
-    # /datacenters endpoint requires auth but provides the exact flat
-    # list of coordinates we need. fastly() handles auth + retry +
-    # telemetry internally — replaces the old urllib.request flow plus
-    # the redundant outer tracked_call wrapper.
     try:
         from backend.core.fastly.client import fastly
 
@@ -51,82 +62,207 @@ def get_pop_locations():
             with open(CACHE_FILE) as f:
                 return json.load(f)
         except Exception:
-            pass
+            logger.debug("get_pop_locations: step failed (ignored)", exc_info=True)
     return []
 
 
-def get_pop_lat_lon_map():
-    """Return a mapping of POP code to (lat, lon) using cached data.
-
-    Result is memoized and revalidated by CACHE_FILE's st_mtime_ns —
-    fetch_pop_locations writes via overwrite so a real change bumps the
-    mtime and busts the cache automatically.
-    """
-    global _lat_lon_cache
+def _load_mtime_cached(slot: str, lock: threading.Lock, builder: Callable[[list[Any]], dict]) -> dict:
     try:
         mtime_ns = os.stat(CACHE_FILE).st_mtime_ns
     except FileNotFoundError:
         return {}
 
-    cached = _lat_lon_cache
+    cache_obj = globals()[slot]
+    if isinstance(cache_obj, (BoundedTTLCache, dict)):
+        cached = cache_obj.get(CACHE_FILE)
+    else:
+        cached = cache_obj
     if cached is not None and cached[0] == mtime_ns:
         return cached[1]
 
     resp_data = get_pop_locations()
     if not isinstance(resp_data, list):
         return {}
-    # Standard /datacenters format (flat list of dicts with 'code', 'coordinates')
-    result = {
-        str(p["code"]).upper(): (p["coordinates"]["latitude"], p["coordinates"]["longitude"])
-        for p in resp_data
-        if p.get("code")
-        and "coordinates" in p
-        and p["coordinates"].get("latitude") is not None
-        and p["coordinates"].get("longitude") is not None
-    }
-    with _lat_lon_cache_lock:
-        _lat_lon_cache = (mtime_ns, result)
+
+    result = builder(resp_data)
+    with lock:
+        target = globals()[slot]
+        if isinstance(target, (BoundedTTLCache, dict)):
+            target[CACHE_FILE] = (mtime_ns, result)
+        else:
+            globals()[slot] = (mtime_ns, result)
     return result
+
+
+def get_pop_lat_lon_map():
+    """Return a mapping of POP code to (lat, lon) using cached data."""
+    return _load_mtime_cached(
+        "_lat_lon_cache",
+        _lat_lon_cache_lock,
+        lambda resp_data: {
+            str(p["code"]).upper(): (p["coordinates"]["latitude"], p["coordinates"]["longitude"])
+            for p in resp_data
+            if p.get("code")
+            and "coordinates" in p
+            and p["coordinates"].get("latitude") is not None
+            and p["coordinates"].get("longitude") is not None
+        },
+    )
 
 
 def get_pop_location_map() -> dict[str, dict]:
-    """Return ``{CODE: {"city", "region", "country"}}`` parsed from the cached
-    Fastly ``/datacenters`` list, memoized + mtime-revalidated like
-    get_pop_lat_lon_map.
+    """Return ``{CODE: {"city", "region", "country"}}`` parsed from cached Fastly ``/datacenters``."""
 
-    City comes from the datacenter ``name``; region (state/province) and
-    country are parsed from the ``shield`` code (e.g. ``sjc-ca-us`` -> region
-    ``ca``, country ``us``; ``lhr-uk`` -> country ``uk``). Anything missing is
-    left blank — the frontend's formatPopGeo degrades gracefully. Exposed to
-    the frontend via the bootstrap ``pop_geo`` field.
-    """
-    global _loc_cache
-    try:
-        mtime_ns = os.stat(CACHE_FILE).st_mtime_ns
-    except FileNotFoundError:
-        return {}
+    def _build(resp_data: list[Any]) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        for p in resp_data:
+            if not isinstance(p, dict) or not p.get("code"):
+                continue
+            shield_parts = str(p.get("shield") or "").split("-")
+            region = shield_parts[1] if len(shield_parts) == 3 else ""
+            country = shield_parts[-1] if len(shield_parts) >= 2 else ""
+            result[str(p["code"]).upper()] = {
+                "city": str(p.get("name") or ""),
+                "region": region,
+                "country": country,
+            }
+        return result
 
-    cached = _loc_cache
-    if cached is not None and cached[0] == mtime_ns:
-        return cached[1]
+    return _load_mtime_cached("_loc_cache", _loc_cache_lock, _build)
 
-    resp_data = get_pop_locations()
-    if not isinstance(resp_data, list):
-        return {}
 
-    result: dict[str, dict] = {}
-    for p in resp_data:
-        if not isinstance(p, dict) or not p.get("code"):
-            continue
-        shield_parts = str(p.get("shield") or "").split("-")
-        region = shield_parts[1] if len(shield_parts) == 3 else ""
-        country = shield_parts[-1] if len(shield_parts) >= 2 else ""
-        result[str(p["code"]).upper()] = {
-            "city": str(p.get("name") or ""),
-            "region": region,
-            "country": country,
-        }
+def _effective_pop_lat_lon_map() -> dict[str, tuple[float, float]]:
+    merged = dict(_DEFAULT_POP_COORDS)
+    for code, coords in get_pop_lat_lon_map().items():
+        norm = str(code).upper()
+        if _SAFE_POP_CODE_RE.fullmatch(norm) and isinstance(coords, (tuple, list)) and len(coords) == 2:
+            try:
+                merged[norm] = (float(coords[0]), float(coords[1]))
+            except (TypeError, ValueError):
+                continue
+    return merged
 
-    with _loc_cache_lock:
-        _loc_cache = (mtime_ns, result)
-    return result
+
+def _haversine_sql_expr(lat_col: str, lon_col: str, pop_lat: float, pop_lon: float) -> str:
+    return (
+        f"6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS({lat_col} - {pop_lat}) / 2), 2) "
+        f"+ COS(RADIANS({pop_lat})) * COS(RADIANS({lat_col})) "
+        f"* POWER(SIN(RADIANS({lon_col} - {pop_lon}) / 2), 2)))"
+    )
+
+
+def _build_pop_case_sql(
+    pop_col: str,
+    value_fn: Callable[[float, float], object],
+    else_expr: object,
+) -> str:
+    coords = _effective_pop_lat_lon_map()
+    whens = [f"WHEN {pop_col} = '{code}' THEN {value_fn(plat, plon)}" for code, (plat, plon) in coords.items()]
+    return "CASE " + " ".join(whens) + f" ELSE {else_expr} END"
+
+
+def build_pop_haversine_case_sql(
+    pop_col: str = "pop",
+    lat_col: str = "lat",
+    lon_col: str = "lon",
+    default_lat: float = 38.0,
+    default_lon: float = -97.0,
+) -> str:
+    """Build a SQL CASE expression computing Haversine distance (km) from POP to client (lat, lon)."""
+    return _build_pop_case_sql(
+        pop_col,
+        lambda plat, plon: _haversine_sql_expr(lat_col, lon_col, plat, plon),
+        _haversine_sql_expr(lat_col, lon_col, float(default_lat), float(default_lon)),
+    )
+
+
+def build_pop_lat_case_sql(pop_col: str = "pop", default_lat: float = 38.0) -> str:
+    """Build a SQL CASE expression mapping POP code to latitude."""
+    return _build_pop_case_sql(pop_col, lambda plat, _plon: plat, float(default_lat))
+
+
+def build_pop_lon_case_sql(pop_col: str = "pop", default_lon: float = -97.0) -> str:
+    """Build a SQL CASE expression mapping POP code to longitude."""
+    return _build_pop_case_sql(pop_col, lambda _plat, plon: plon, float(default_lon))
+
+
+_STATIC_POP_GEO_FALLBACK: dict[str, tuple[str, str, str]] = {
+    "AMS": ("Amsterdam", "NH", "NL"),
+    "ATL": ("Atlanta", "GA", "US"),
+    "BFI": ("Seattle", "WA", "US"),
+    "BOS": ("Boston", "MA", "US"),
+    "BUR": ("Burbank", "CA", "US"),
+    "CDG": ("Paris", "IDF", "FR"),
+    "CHI": ("Chicago", "IL", "US"),
+    "DEN": ("Denver", "CO", "US"),
+    "DFW": ("Dallas", "TX", "US"),
+    "DTW": ("Detroit", "MI", "US"),
+    "EWR": ("Newark", "NJ", "US"),
+    "FRA": ("Frankfurt", "HE", "DE"),
+    "GRU": ("Sao Paulo", "SP", "BR"),
+    "HKG": ("Hong Kong", "HK", "HK"),
+    "IAD": ("Ashburn", "VA", "US"),
+    "IAH": ("Houston", "TX", "US"),
+    "ICN": ("Seoul", "11", "KR"),
+    "JFK": ("New York", "NY", "US"),
+    "LAX": ("Los Angeles", "CA", "US"),
+    "LCY": ("London", "ENG", "GB"),
+    "LHR": ("London", "ENG", "GB"),
+    "LGA": ("New York", "NY", "US"),
+    "MAD": ("Madrid", "MD", "ES"),
+    "MCI": ("Kansas City", "MO", "US"),
+    "MIA": ("Miami", "FL", "US"),
+    "MIL": ("Milan", "LOM", "IT"),
+    "MSP": ("Minneapolis", "MN", "US"),
+    "NRT": ("Tokyo", "13", "JP"),
+    "ORD": ("Chicago", "IL", "US"),
+    "PAO": ("Palo Alto", "CA", "US"),
+    "PDX": ("Portland", "OR", "US"),
+    "PHX": ("Phoenix", "AZ", "US"),
+    "SEA": ("Seattle", "WA", "US"),
+    "SFO": ("San Francisco", "CA", "US"),
+    "SIN": ("Singapore", "01", "SG"),
+    "SJC": ("San Jose", "CA", "US"),
+    "STL": ("St. Louis", "MO", "US"),
+    "SYD": ("Sydney", "NSW", "AU"),
+    "TYO": ("Tokyo", "13", "JP"),
+    "YYZ": ("Toronto", "ON", "CA"),
+}
+
+
+def clean_edge_meta_str(val: Any) -> str:
+    """Strip sentinel/placeholder values ('unknown', '?', 'null', 'none', '-') to empty string."""
+    if not val:
+        return ""
+    s = str(val).strip()
+    if s.lower() in ("unknown", "?", "null", "none", "-", "—"):
+        return ""
+    return s
+
+
+def resolve_pop_geo_fallback(
+    pop: Any,
+    city: Any = "",
+    region: Any = "",
+    country: Any = "",
+) -> tuple[str, str, str]:
+    """Return (city, region, country), falling back to POP location when all geo fields are empty."""
+    c_city = clean_edge_meta_str(city)
+    c_region = clean_edge_meta_str(region)
+    c_country = clean_edge_meta_str(country)
+    if c_city or c_region or c_country:
+        return c_city, c_region, c_country
+    c_pop = clean_edge_meta_str(pop).upper()
+    if not c_pop:
+        return "", "", ""
+    pop_key = c_pop.split("-")[0][:3]
+    if pop_key in _STATIC_POP_GEO_FALLBACK:
+        return _STATIC_POP_GEO_FALLBACK[pop_key]
+    loc = get_pop_location_map().get(c_pop) or get_pop_location_map().get(pop_key)
+    if loc:
+        return (
+            clean_edge_meta_str(loc.get("city")),
+            clean_edge_meta_str(loc.get("region")).upper(),
+            clean_edge_meta_str(loc.get("country")).upper(),
+        )
+    return "", "", ""

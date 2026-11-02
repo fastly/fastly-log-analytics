@@ -1,0 +1,61 @@
+# Optional PRIVATE telemetry for Standard Compose; not the multipod overlay.
+# Merge after docker-compose.yml (and existing admin/HTTPS overlays).
+# Explicit OTEL settings still come from the operator's untracked environment.
+# See docs/deploy/observability.md. No Grafana, Collector or extra exporters.
+x-telemetry-limits: &telemetry-limits
+  restart: unless-stopped
+  # Local app services share the backend loopback. Publish NO receiver/query
+  # ports: use docker compose exec for verification. The prod overlay changes
+  # only network_mode to host, where these listeners still bind loopback.
+  network_mode: service:backend
+  cpus: 0.5
+  mem_limit: 512m
+  memswap_limit: 512m
+  pids_limit: 128
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  environment:
+    GOMEMLIMIT: 384MiB
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  backend:
+    environment:
+      - OTEL_EXPORTER=${OTEL_EXPORTER:-none}
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+
+  prometheus:
+    <<: *telemetry-limits
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.listen-address=127.0.0.1:9090
+      - --web.enable-otlp-receiver
+      - --storage.tsdb.retention.time=24h
+      - --storage.tsdb.retention.size=512MB
+      - --query.max-concurrency=2
+      - --query.timeout=10s
+    volumes:
+      - ./observability/standard/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - standard-prometheus-data:/prometheus
+
+  tempo:
+    <<: *telemetry-limits
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./observability/standard/tempo.yml:/etc/tempo/tempo.yml:ro
+      - standard-tempo-data:/var/tempo
+
+volumes:
+  standard-prometheus-data:
+  standard-tempo-data:
