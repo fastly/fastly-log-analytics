@@ -62,7 +62,7 @@ RUN /app/.venv/bin/python -c \
 # or goes missing on any host that only does a git checkout. Local non-Docker
 # dev builds the same artifact with `make scorer-package`.
 # rust:1.90-slim-bookworm (matches compute/scorer/rust-toolchain.toml)
-FROM rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9 AS scorer-builder
+FROM rust:1.99-slim-bookworm@sha256:24707e70a4f1e23d9a7b25202ec43126d28a52294b96aad5c670df1fd1f1d400 AS scorer-builder
 
 ARG TARGETARCH
 ARG FASTLY_CLI_VERSION=16.1.0
