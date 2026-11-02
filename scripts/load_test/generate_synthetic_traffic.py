@@ -203,6 +203,7 @@ def _allocate_pop_wave_chunks(
             take = min(max_chunk_rows, rem)
             chunks.append((pop, take))
             rem -= take
+    chunks.sort(key=lambda item: item[0])
     return chunks
 
 

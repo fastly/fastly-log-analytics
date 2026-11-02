@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import duckdb
+import orjson
 import zstandard as zstd
 
 from backend.core.log_fields import DuckType, try_get
@@ -80,7 +81,7 @@ def decode_source_object(
         if not raw_line.strip():
             continue
         try:
-            value = json.loads(raw_line)
+            value = orjson.loads(raw_line)
             if not isinstance(value, dict):
                 raise ValueError("record is not a JSON object")
             raw_json_str = raw_line.decode("utf-8")

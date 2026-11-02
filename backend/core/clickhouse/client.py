@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import threading
@@ -293,7 +294,7 @@ class ClickHouseClient:
                         "query": sql or "",
                         "async_insert": "0",
                         "date_time_input_format": "best_effort",
-                        "max_memory_usage": "536870912",
+                        "max_memory_usage": os.getenv("CLICKHOUSE_INSERT_MAX_MEMORY_BYTES", "536870912"),
                         "max_threads": "2",
                         "max_insert_threads": "1",
                         "max_block_size": "2048",

@@ -348,8 +348,12 @@ class PostgresControlPlane:
         with self.transaction(read_only=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND domain=%s "
-                "AND status='claimed' AND lease_until IS NOT NULL AND lease_until <= clock_timestamp() "
-                "ORDER BY lease_until, object_key LIMIT %s",
+                "AND ("
+                "(status='claimed' AND lease_until IS NOT NULL AND lease_until <= clock_timestamp()) "
+                "OR (status='discovered' AND lease_until IS NULL AND "
+                "(last_error IS NOT NULL OR updated_at <= clock_timestamp() - interval '30 seconds'))"
+                ") "
+                "ORDER BY COALESCE(lease_until, updated_at), object_key LIMIT %s",
                 (service_id, domain, limit),
             ).fetchall()
         return tuple(_source_from_row(row) for row in rows)
@@ -424,6 +428,78 @@ class PostgresControlPlane:
                 raise ValueError(f"source identity changed for {object_key}")
             return source
 
+    def discover_sources_batch(
+        self,
+        service_id: str,
+        domain: str,
+        objects: Sequence[Any],
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> dict[str, SourceObjectRecord]:
+        _require_texts(service_id=service_id, domain=domain, expected_owner=expected_owner)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        if not objects:
+            return {}
+        for obj in objects:
+            _require_texts(object_key=obj.object_key, checksum=obj.checksum)
+            if obj.size_bytes < 0:
+                raise ValueError("size_bytes must be non-negative")
+        object_keys = [obj.object_key for obj in objects]
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner=expected_owner,
+                fence_name="source discovery",
+            )
+            existing_rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                (service_id, object_keys),
+            ).fetchall()
+            by_key: dict[str, SourceObjectRecord] = {}
+            for row in existing_rows:
+                rec = _source_from_row(row)
+                by_key[rec.object_key] = rec
+            missing = [obj for obj in objects if obj.object_key not in by_key]
+            if missing:
+                placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, 'discovered')"] * len(missing))
+                params: list[Any] = []
+                for obj in missing:
+                    params.extend(
+                        (
+                            _source_object_id(service_id, domain, obj.object_key, obj.checksum),
+                            service_id,
+                            domain,
+                            obj.object_key,
+                            obj.checksum,
+                            obj.size_bytes,
+                            obj.version,
+                        )
+                    )
+                connection.execute(
+                    "INSERT INTO high_scale_source_objects "
+                    "(object_id, service_id, domain, object_key, checksum, size_bytes, version, status) "
+                    f"VALUES {placeholders} ON CONFLICT (service_id, object_key) DO NOTHING",
+                    tuple(params),
+                )
+                new_rows = connection.execute(
+                    "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                    (service_id, [obj.object_key for obj in missing]),
+                ).fetchall()
+                for row in new_rows:
+                    rec = _source_from_row(row)
+                    by_key[rec.object_key] = rec
+            for obj in objects:
+                source = by_key.get(obj.object_key)
+                if source is None:
+                    raise RuntimeError(f"source discovery insert did not produce a row for {obj.object_key}")
+                if source.checksum != obj.checksum or source.version != obj.version:
+                    raise ValueError(f"source identity changed for {obj.object_key}")
+            return by_key
+
     def claim_source(
         self,
         service_id: str,
@@ -457,7 +533,7 @@ class PostgresControlPlane:
             generation = source.lease_generation + 1
             connection.execute(
                 "UPDATE high_scale_source_objects SET status='claimed', owner=%s, lease_until=%s, "
-                "lease_generation=%s, owner_epoch=%s, updated_at=clock_timestamp() WHERE object_id=%s",
+                "lease_generation=%s, owner_epoch=%s, last_error=NULL, updated_at=clock_timestamp() WHERE object_id=%s",
                 (
                     worker_id,
                     observed + timedelta(seconds=lease_seconds),
@@ -512,7 +588,7 @@ class PostgresControlPlane:
             if keys_to_claim:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='claimed', owner=%s, lease_until=%s, "
-                    "lease_generation=lease_generation + 1, owner_epoch=%s, updated_at=clock_timestamp() "
+                    "lease_generation=lease_generation + 1, owner_epoch=%s, last_error=NULL, updated_at=clock_timestamp() "
                     "WHERE service_id=%s AND object_key = ANY(%s)",
                     (worker_id, lease_until, expected_owner_epoch, service_id, keys_to_claim),
                 )
@@ -573,6 +649,43 @@ class PostgresControlPlane:
                 "UPDATE high_scale_source_objects SET accepted_rows=%s, malformed_rows=%s, "
                 "updated_at=clock_timestamp() WHERE object_id=%s AND status='claimed' AND owner_epoch=%s",
                 (accepted_rows, malformed_rows, source.object_id, expected_owner_epoch),
+            )
+
+    def record_source_counts_batch(
+        self,
+        service_id: str,
+        counts: Sequence[tuple[str, int, int]],
+        *,
+        expected_owner_epoch: int,
+    ) -> None:
+        if not counts:
+            return
+        for _, accepted_rows, malformed_rows in counts:
+            if min(accepted_rows, malformed_rows) < 0:
+                raise ValueError("ledger counts must be non-negative")
+        object_keys = [key for key, _, _ in counts]
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            rows = connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                (service_id, object_keys),
+            ).fetchall()
+            by_key = {rec.object_key: rec for rec in (_source_from_row(r) for r in rows)}
+            for object_key, _, _ in counts:
+                source = by_key.get(object_key)
+                if source is None or source.status != "claimed" or source.owner_epoch != expected_owner_epoch:
+                    raise RuntimeError(f"stale or missing claim for {object_key}")
+            placeholders = ", ".join(["(%s, %s::bigint, %s::bigint)"] * len(counts))
+            params: list[Any] = []
+            for object_key, accepted_rows, malformed_rows in counts:
+                params.extend((by_key[object_key].object_id, accepted_rows, malformed_rows))
+            params.append(expected_owner_epoch)
+            connection.execute(
+                "UPDATE high_scale_source_objects AS o "
+                "SET accepted_rows = v.accepted_rows, malformed_rows = v.malformed_rows, updated_at = clock_timestamp() "
+                f"FROM (VALUES {placeholders}) AS v(object_id, accepted_rows, malformed_rows) "
+                "WHERE o.object_id = v.object_id AND o.status = 'claimed' AND o.owner_epoch = %s",
+                tuple(params),
             )
 
     def get_batch_manifest(self, batch_id: str) -> Any | None:
@@ -689,11 +802,10 @@ class PostgresControlPlane:
                 ),
             )
             if sources:
+                placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(sources))
+                src_params: list[Any] = []
                 for src in sources:
-                    connection.execute(
-                        "INSERT INTO high_scale_archive_manifest_sources "
-                        "(manifest_id, source_key, source_checksum, source_size, source_version, row_start, row_count, deletion_deadline) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (manifest_id, source_key) DO NOTHING",
+                    src_params.extend(
                         (
                             manifest.manifest_id,
                             src.key,
@@ -703,8 +815,14 @@ class PostgresControlPlane:
                             src.row_start,
                             src.row_count,
                             manifest.deletion_authorization_deadline,
-                        ),
+                        )
                     )
+                connection.execute(
+                    "INSERT INTO high_scale_archive_manifest_sources "
+                    "(manifest_id, source_key, source_checksum, source_size, source_version, row_start, row_count, deletion_deadline) "
+                    f"VALUES {placeholders} ON CONFLICT (manifest_id, source_key) DO NOTHING",
+                    tuple(src_params),
+                )
             result = self._archive_manifest(connection, manifest.manifest_id)
             if result.manifest != manifest or result.owner_epoch != owner_epoch:
                 raise ValueError("archive manifest identity changed")
@@ -834,7 +952,8 @@ class PostgresControlPlane:
             if object_keys:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='acknowledged', archive_manifest_id=%s, "
-                    "lease_until=NULL, updated_at=clock_timestamp() WHERE service_id=%s AND object_key = ANY(%s)",
+                    "lease_until=NULL, last_error=NULL, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s)",
                     (manifest_id, service_id, list(object_keys)),
                 )
             if next_cursor is not None:

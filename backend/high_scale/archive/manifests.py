@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
@@ -446,14 +447,20 @@ def _sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _canonical_json_bytes(event: Mapping[str, Any]) -> bytes:
+    try:
+        return orjson.dumps(event, option=orjson.OPT_SORT_KEYS)
+    except (TypeError, ValueError):
+        return json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 def event_digest(events: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
     keys = set().union(*(event.keys() for event in events))
     digest = hashlib.sha256()
     for event in events:
         canonical = {key: _parquet_safe_value(event.get(key)) for key in keys}
-        digest.update(
-            (json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
-        )
+        digest.update(_canonical_json_bytes(canonical))
+        digest.update(b"\n")
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -509,7 +516,14 @@ def write_batch_archive_checkpoint(
 
     keys = set().union(*(event.keys() for event in all_events))
     canonical_events = [{key: _parquet_safe_value(event.get(key)) for key in keys} for event in all_events]
-    artifact_digest = event_digest(canonical_events)
+    digest_hasher = hashlib.sha256()
+    byte_count = 0
+    for event in canonical_events:
+        encoded = _canonical_json_bytes(event)
+        byte_count += len(encoded)
+        digest_hasher.update(encoded)
+        digest_hasher.update(b"\n")
+    artifact_digest = f"sha256:{digest_hasher.hexdigest()}"
     source_token = hashlib.sha256(
         ":".join(f"{s.object_key}:{s.checksum}" for s, _ in source_batches).encode()
     ).hexdigest()[:16]
@@ -519,9 +533,6 @@ def write_batch_archive_checkpoint(
         pq.write_table(pa.Table.from_pylist(canonical_events), temp_path)
 
     artifact_checksum = _sha256(artifact_path)
-    byte_count = sum(
-        len(json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode()) for event in canonical_events
-    )
     artifact = ArchiveArtifact(
         artifact_path.as_uri(),
         artifact_checksum,

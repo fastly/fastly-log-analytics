@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import logging
 import math
+import os
 import re
 import threading
 from collections.abc import Mapping, Sequence
@@ -17,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid5
 
+import orjson
 import structlog
 from cachetools import LRUCache
 
@@ -131,7 +134,19 @@ class BaseClickHouseBatchAdapter:
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
         if existing_rows == 0:
-            self._client.insert_rows(table, columns, list(mapped_rows))
+            chunk_size = max(1, int(os.getenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "25000")))
+            inserted_any = False
+            try:
+                for chunk in itertools.batched(mapped_rows, chunk_size) if mapped_rows else ((),):
+                    self._client.insert_rows(table, columns, list(chunk))
+                    inserted_any = True
+            except Exception:
+                if inserted_any:
+                    try:
+                        self._client.delete_batch_rows(table, batch_uuid)
+                    except Exception:
+                        logger.debug("cleanup after chunked insert failure failed", exc_info=True)
+                raise
             existing_rows = self._count_rows(table, batch, batch_uuid)
         if existing_rows != expected:
             self._client.delete_batch_rows(table, batch_uuid)
@@ -340,7 +355,10 @@ class HighScaleBatch:
         for i, row in enumerate(self.rows):
             if i > 0:
                 h.update(b"\n")
-            h.update(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+            try:
+                h.update(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
+            except (TypeError, ValueError):
+                h.update(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
         return f"sha256:{h.hexdigest()}"
 
 

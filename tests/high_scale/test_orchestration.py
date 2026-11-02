@@ -3638,3 +3638,129 @@ def test_archive_storage_summary_separates_live_recently_expired_and_old_expired
     finally:
         with control.transaction() as connection:
             connection.execute("DELETE FROM high_scale_archive_manifests WHERE service_id = %s", (sid,))
+
+
+def test_clickhouse_adapter_chunks_large_inserts_and_cleans_up_on_mid_chunk_failure(monkeypatch) -> None:
+    monkeypatch.setenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "2")
+    base_row = _request_batch().rows[0]
+    rows = tuple({**base_row, "event_id": f"evt-{i}", "line_ordinal": i} for i in range(5))
+    batch = HighScaleBatch("svc:request:chunked", "svc", "request", "4", rows)
+
+    client = FakeHttpClickHouse()
+    result = ClickHouseBatchAdapter(client).insert(batch)
+    assert result.rows_inserted == 5
+    fact_chunks = [len(chunk) for table, _, chunk in client.inserts if table == "request_facts"]
+    assert fact_chunks == [2, 2, 1]
+
+    class FailingMidChunkClickHouse(FakeHttpClickHouse):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fact_calls = 0
+            self.deleted_batches: list[tuple[str, str]] = []
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            if table == "request_facts":
+                self.fact_calls += 1
+                if self.fact_calls == 2:
+                    raise RuntimeError("clickhouse memory limit on chunk 2")
+            super().insert_rows(table, columns, rows)
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            self.deleted_batches.append((table, batch_id))
+
+    failing_client = FailingMidChunkClickHouse()
+    with pytest.raises(RuntimeError, match="clickhouse memory limit on chunk 2"):
+        ClickHouseBatchAdapter(failing_client).insert(batch)
+    assert len(failing_client.deleted_batches) == 1
+    assert failing_client.deleted_batches[0][0] == "request_facts"
+
+
+def test_request_lister_backscans_current_minute_when_forward_terminal_cursor_is_empty() -> None:
+    terminal_cursor = (
+        f"{TERMINAL_SOURCE_CURSOR_PREFIX}"
+        "raw/request/year=2026/month=11/day=02/hour=20/minute=33/"
+        "2026-11-02T20:33:55.000-svc-YYZ-00259.log.zst"
+    )
+    missed_key = (
+        "raw/request/year=2026/month=11/day=02/hour=20/minute=33/"
+        "2026-11-02T20:33:55.000-svc-DEN-00105.log.zst"
+    )
+    client = _Client_late_rum_discovery([_page(), _page(key=missed_key)])
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    page = lister.list_source_objects("svc", "request", page_size=250, cursor=terminal_cursor)
+
+    assert [obj.object_key for obj in page.objects] == [missed_key]
+    assert len(client.paginator.requests) == 2
+    assert client.paginator.requests[0]["StartAfter"] == terminal_cursor.removeprefix(TERMINAL_SOURCE_CURSOR_PREFIX)
+    assert client.paginator.requests[1]["Prefix"] == "raw/request/"
+    assert (
+        client.paginator.requests[1]["StartAfter"]
+        == "raw/request/year=2026/month=11/day=02/hour=20/minute=33/"
+    )
+    assert page.next_cursor is None
+
+
+def test_postgres_batch_discovery_source_counts_and_retryable_discovered_claims() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = f"svc-batch-{uuid4().hex[:8]}"
+    try:
+        owner = control.initialize_owner(sid, owner="high_scale", source_cursor="initial")
+        descriptors = [
+            SourceObjectDescriptor(f"raw/request/{i}.log.zst", f"etag-{i}", 100 + i, "v1")
+            for i in range(3)
+        ]
+        discovered = control.discover_sources_batch(
+            sid,
+            "request",
+            descriptors,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        assert len(discovered) == 3
+        assert list(discovered.keys()) == [d.object_key for d in descriptors]
+
+        claimed = control.claim_sources_batch(
+            sid,
+            [d.object_key for d in descriptors[:2]],
+            "w1",
+            lease_seconds=60,
+            expected_owner_epoch=owner.owner_epoch,
+            expected_owner="high_scale",
+        )
+        assert len(claimed) == 2
+
+        control.fail_sources_batch(
+            sid,
+            [descriptors[0].object_key],
+            expected_owner_epoch=owner.owner_epoch,
+            error="Memory limit exceeded",
+        )
+        retryable = control.expired_claims(sid, "request", limit=10)
+        assert [r.object_key for r in retryable] == [descriptors[0].object_key]
+
+        reclaimed = control.claim_sources_batch(
+            sid,
+            [descriptors[0].object_key],
+            "w2",
+            lease_seconds=60,
+            expected_owner_epoch=owner.owner_epoch,
+            expected_owner="high_scale",
+        )
+        assert len(reclaimed) == 1 and reclaimed[0].last_error is None
+
+        control.record_source_counts_batch(
+            sid,
+            [
+                (descriptors[0].object_key, 490, 10),
+                (descriptors[1].object_key, 600, 0),
+            ],
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        refreshed = control.source(sid, descriptors[0].object_key)
+        assert (refreshed.accepted_rows, refreshed.malformed_rows) == (490, 10)
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+            connection.execute("DELETE FROM high_scale_ownership WHERE service_id = %s", (sid,))

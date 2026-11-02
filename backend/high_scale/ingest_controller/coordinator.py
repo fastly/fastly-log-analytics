@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import tempfile
+import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -218,6 +219,11 @@ class HighScaleIngestController:
         all_events: list[dict[str, Any]] = []
         sibling_events: list[dict[str, Any]] = []
         total_accepted = total_quarantined = sibling_quarantined = 0
+        use_batch_counts = self._control is not None and (
+            getattr(type(self._control), "record_source_counts_batch", None) is not None
+            or "record_source_counts_batch" in vars(self._control)
+        )
+        batch_counts: list[tuple[str, int, int]] = []
         for descriptor, payload in sources_payloads:
             if self._control is None:
                 src_obj = self._ledger.discover(
@@ -253,7 +259,9 @@ class HighScaleIngestController:
             )
             total_accepted += decoded.accepted_rows
             total_quarantined += decoded.quarantined_rows
-            if self._control is not None:
+            if use_batch_counts:
+                batch_counts.append((descriptor.object_key, decoded.accepted_rows, decoded.quarantined_rows))
+            elif self._control is not None:
                 self._control.record_source_counts(
                     service_id,
                     descriptor.object_key,
@@ -291,6 +299,10 @@ class HighScaleIngestController:
                 )
                 sibling_quarantined += sibling_decoded.quarantined_rows
                 sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
+        if use_batch_counts and batch_counts and self._control is not None:
+            getattr(self._control, "record_source_counts_batch")(
+                service_id, batch_counts, expected_owner_epoch=owner.owner_epoch
+            )
         if sibling_quarantined:
             logger.warning(
                 "high-scale RUM sibling decode rejected retained source records",
@@ -614,6 +626,18 @@ class S3SourceObjectLister:
         self._client = client
         self._bucket = bucket
         self._prefix = prefix.strip("/")
+        self._minute_backscans: dict[str, tuple[int, float]] = {}
+
+    def _should_backscan_minute(self, start_after: str) -> bool:
+        now_mono = time.monotonic()
+        count, last_mono = self._minute_backscans.get(start_after, (0, 0.0))
+        if count >= 3 or (count > 0 and now_mono - last_mono < 5.0):
+            return False
+        self._minute_backscans[start_after] = (count + 1, now_mono)
+        if len(self._minute_backscans) > 256:
+            oldest_key = next(iter(self._minute_backscans))
+            self._minute_backscans.pop(oldest_key, None)
+        return True
 
     def list_source_objects(
         self,
@@ -662,6 +686,35 @@ class S3SourceObjectLister:
             if isinstance(item.get("Key"), str)
         )
         next_cursor = page.get("NextToken")
+        if (
+            not objects
+            and next_cursor is None
+            and not reinspect
+            and listing_cursor
+            and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX)
+        ):
+            start_after = listing_cursor.removeprefix(TERMINAL_SOURCE_CURSOR_PREFIX)
+            if "/minute=" in start_after and start_after.startswith(resolved_prefix):
+                minute_prefix = start_after.rsplit("/", 1)[0] + "/"
+                if self._should_backscan_minute(start_after):
+                    backscan_req: dict[str, Any] = {
+                        "Bucket": self._bucket,
+                        "Prefix": resolved_prefix,
+                        "StartAfter": minute_prefix,
+                        "PaginationConfig": {"PageSize": page_size},
+                    }
+                    backscan_page = next(iter(self._client.get_paginator("list_objects_v2").paginate(**backscan_req)))
+                    objects = tuple(
+                        SourceObjectDescriptor(
+                            object_key=item["Key"],
+                            checksum=_source_checksum(item),
+                            size_bytes=int(item.get("Size", 0)),
+                            version=item.get("VersionId") or item.get("ETag"),
+                        )
+                        for item in backscan_page.get("Contents", [])
+                        if isinstance(item.get("Key"), str)
+                    )
+                    next_cursor = backscan_page.get("NextToken")
         if domain not in RUM_SOURCE_DOMAINS:
             return SourceObjectPage(objects, next_cursor)
         if reinspect:
@@ -849,11 +902,29 @@ class HighScaleWorkerCoordinator:
             raise ValueError("source object listing exceeded page_size")
 
         expired_sources = self._expired_claim_descriptors(service_id, domain)
-        discovered_by_key = {s.object_key: self._discover(service_id, domain, s, current_owner, epoch) for s in objects}
+        if self._control is not None and (
+            getattr(type(self._control), "discover_sources_batch", None) is not None
+            or "discover_sources_batch" in vars(self._control)
+        ):
+            discovered_by_key = getattr(self._control, "discover_sources_batch")(
+                service_id, domain, objects, expected_owner=current_owner, expected_owner_epoch=epoch
+            )
+        else:
+            discovered_by_key = {
+                s.object_key: self._discover(service_id, domain, s, current_owner, epoch) for s in objects
+            }
         next_cursor = page.next_cursor
         if next_cursor is None:
             if objects:
-                next_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
+                candidate_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
+                if (
+                    listing_cursor
+                    and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX)
+                    and listing_cursor > candidate_cursor
+                ):
+                    next_cursor = listing_cursor
+                else:
+                    next_cursor = candidate_cursor
             elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
                 next_cursor = listing_cursor
 
