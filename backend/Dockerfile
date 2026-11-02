@@ -12,7 +12,7 @@ RUN wget -qO- "https://github.com/ysugimoto/falco/archive/refs/tags/v${FALCO_VER
 
 # --- Build Stage ---
 # python:3.13-slim-bookworm
-FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS builder
+FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -99,7 +99,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- Production Stage ---
 # python:3.13-slim-bookworm
-FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS runner
+FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd AS runner
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
