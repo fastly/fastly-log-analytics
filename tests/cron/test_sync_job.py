@@ -2114,10 +2114,11 @@ def test_scheduler_skips_ducklake_ingest_crons_for_clickhouse_high_scale_service
         f"gap_heal_{sid}",
         f"optimize_{sid}",
         f"expire_{sid}",
+        f"insights_prewarmer_{sid}",
     ):
         assert forbidden not in s._job_ids
     assert f"alerts_evaluation_{sid}" in s._job_ids
-    assert f"insights_prewarmer_{sid}" in s._job_ids
+    assert f"metadata_cleanup_{sid}" in s._job_ids
 
 
 @pytest.mark.parametrize(

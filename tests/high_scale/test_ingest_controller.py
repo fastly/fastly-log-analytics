@@ -832,6 +832,71 @@ def test_coordinator_batch_page_processes_50_objects() -> None:
     assert controller.ingest.call_count == 0
 
 
+def test_coordinator_batch_page_chunks_large_pages_into_bounded_sub_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies that pages exceeding HIGH_SCALE_MAX_BATCH_OBJECTS are claimed, read,
+    and ingested in bounded sub-batches, advancing next_cursor only on the final chunk.
+    """
+    monkeypatch.setenv("HIGH_SCALE_MAX_BATCH_OBJECTS", "20")
+    page_items = [_make_source_payload(i) for i in range(50)]
+    descriptors = tuple(desc for desc, _ in page_items)
+    payload_map = {desc.object_key: data for desc, data in page_items}
+
+    lister = MagicMock()
+    lister.list_source_objects.return_value = SourceObjectPage(descriptors, next_cursor="cursor-50")
+
+    reader = MagicMock()
+    reader.read_source_object.side_effect = lambda svc, domain, key: payload_map[key]
+
+    control = MagicMock()
+    control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1, source_cursor="cursor-0")
+    control.source_cursor_for.return_value = "cursor-0"
+    control.claim_sources_batch = MagicMock(
+        side_effect=lambda svc, keys, *args, **kwargs: tuple(
+            MagicMock(object_key=k, checksum=f"sha256:{k}", claimed=True) for k in keys
+        )
+    )
+
+    controller = MagicMock()
+    controller.batch_capable = True
+    manifest = MagicMock(manifest_id="manifest-sub-batch")
+    publication = PublicationResult("batch-sub", PublicationStatus.VISIBLE, 20, False)
+    controller.ingest_batch.side_effect = lambda **kwargs: BatchIngestResult(
+        manifest=manifest,
+        publication=publication,
+        total_events=len(kwargs["sources_payloads"]),
+        quarantined_events=0,
+        sources_count=len(kwargs["sources_payloads"]),
+    )
+
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=reader,
+        controller=controller,
+        ownership=OwnershipStore(),
+        ledger=HighScaleLedger(),
+        worker_id="worker-chunk-test",
+        control_plane=control,
+        page_size=100,
+    )
+
+    run = coordinator.run_page(service_id="svc-test", domain="request")
+
+    assert run.discovered == 50
+    assert run.processed == 50
+    assert run.failed == 0
+    assert control.claim_sources_batch.call_count == 3
+    assert [len(call.args[1]) for call in control.claim_sources_batch.call_args_list] == [20, 20, 10]
+    assert controller.ingest_batch.call_count == 3
+    assert [len(call.kwargs["sources_payloads"]) for call in controller.ingest_batch.call_args_list] == [20, 20, 10]
+    assert [call.kwargs["next_cursor"] for call in controller.ingest_batch.call_args_list] == [
+        None,
+        None,
+        "cursor-50",
+    ]
+
+
 def test_coordinator_batch_page_partial_failure_holds_cursor() -> None:
     """Verifies that when individual objects fail during reading,
     the remaining valid objects are ingested but next_cursor is withheld (None),

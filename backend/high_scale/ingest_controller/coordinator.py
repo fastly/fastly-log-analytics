@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import tempfile
 import time
 from collections.abc import Sequence
@@ -82,6 +83,8 @@ from backend.high_scale.query_service import DecodeResult, decode_source_object 
 
 # ── Ingest Controller ─────────────────────────────────────────────────────────
 HIGH_SCALE_PAGE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB in-flight byte guard
+HIGH_SCALE_DEFAULT_MAX_BATCH_OBJECTS = 50
+HIGH_SCALE_DEFAULT_MAX_BATCH_BYTES = 12 * 1024 * 1024  # 12 MB compressed sub-batch target
 HIGH_SCALE_MAX_DEAD_LETTER_RATIO = 0.05  # 5% dead-letter limit
 _RUM_SIBLING_DOMAIN = {"rum_vitals": "rum_errors", "rum_errors": "rum_vitals"}
 
@@ -332,6 +335,7 @@ class HighScaleIngestController:
                 retention_seconds=self._retention_seconds,
                 deletion_grace_seconds=self._deletion_grace_seconds,
             )
+            source_batches.clear()
             artifact = Path(local_manifest.artifact.uri.removeprefix("file://")).read_bytes()
             manifest = replace(
                 local_manifest,
@@ -343,6 +347,7 @@ class HighScaleIngestController:
                 except KeyError:
                     pass
             self._archive.publish(manifest, artifact)
+            del artifact
         if self._control is not None:
             self._publish_control_manifest(manifest, owner.owner_epoch)
         current_owner = (
@@ -447,21 +452,45 @@ class HighScaleIngestController:
                 )
             if domain == "request":
                 origin_proj = build_origin_projection_rows(event_tuple)
-                perf_proj = build_performance_projection_rows(event_tuple)
-                security_proj = build_security_projection_rows(event_tuple)
-                network_proj = build_network_projection_rows(event_tuple)
                 for sub_domain, rows in (
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
-                    ("performance_dimensions", perf_proj.dimension_rows),
-                    ("performance_summary", perf_proj.summary_rows),
-                    ("performance_scatter", perf_proj.scatter_rows),
-                    ("security_dimensions", security_proj.dimension_rows),
-                    ("network_dimensions", network_proj.dimension_rows),
                 ):
                     if rows:
                         sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
                         self._aggregates.publish(HighScaleBatch(sub_id, service_id, sub_domain, str(owner_epoch), rows))
+                del origin_proj
+
+                perf_proj = build_performance_projection_rows(event_tuple)
+                for sub_domain, rows in (
+                    ("performance_dimensions", perf_proj.dimension_rows),
+                    ("performance_summary", perf_proj.summary_rows),
+                    ("performance_scatter", perf_proj.scatter_rows),
+                ):
+                    if rows:
+                        sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
+                        self._aggregates.publish(HighScaleBatch(sub_id, service_id, sub_domain, str(owner_epoch), rows))
+                del perf_proj
+
+                security_proj = build_security_projection_rows(event_tuple)
+                if security_proj.dimension_rows:
+                    sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:security_dimensions")
+                    self._aggregates.publish(
+                        HighScaleBatch(
+                            sub_id, service_id, "security_dimensions", str(owner_epoch), security_proj.dimension_rows
+                        )
+                    )
+                del security_proj
+
+                network_proj = build_network_projection_rows(event_tuple)
+                if network_proj.dimension_rows:
+                    sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:network_dimensions")
+                    self._aggregates.publish(
+                        HighScaleBatch(
+                            sub_id, service_id, "network_dimensions", str(owner_epoch), network_proj.dimension_rows
+                        )
+                    )
+                del network_proj
             return True, None
         except Exception as exc:
             logger.exception(
@@ -947,133 +976,150 @@ class HighScaleWorkerCoordinator:
                 active_keys.add(s.object_key)
 
         if active_sources:
-            unclaimable_keys: set[str] = set()
-            if self._control is not None and (
-                getattr(type(self._control), "claim_sources_batch", None) is not None
-                or "claim_sources_batch" in vars(self._control)
-            ):
-                claims = getattr(self._control, "claim_sources_batch")(
-                    service_id,
-                    tuple(s.object_key for s in active_sources),
-                    self._worker_id,
-                    expected_owner=current_owner,
-                    expected_owner_epoch=epoch,
-                    lease_seconds=self._lease_seconds,
-                    now=now,
-                )
-                claimed_keys = {c.object_key for c in claims}
-            elif self._control is not None:
-                claimed_keys = set()
-                for s in active_sources:
-                    try:
-                        c = self._control.claim_source(
-                            service_id,
-                            s.object_key,
-                            self._worker_id,
-                            expected_owner=current_owner,
-                            expected_owner_epoch=epoch,
-                            lease_seconds=self._lease_seconds,
-                            now=now,
-                        )
-                        if c.claimed:
-                            claimed_keys.add(s.object_key)
-                    except ValueError:
-                        if not self._already_terminal(service_id, s.object_key):
-                            failed += 1
-                            unclaimable_keys.add(s.object_key)
-            else:
-                claimed_keys = {
-                    s.object_key
-                    for s in active_sources
-                    if self._ledger.claim(service_id, s.object_key, self._worker_id).claimed
-                }
-
-            to_read: list[SourceObjectDescriptor] = []
-            for s in active_sources:
-                if s.object_key in claimed_keys:
-                    to_read.append(s)
-                elif s.object_key not in unclaimable_keys:
-                    duplicates += 1
-
-            if to_read:
-
-                def read_one(
-                    src: SourceObjectDescriptor,
-                ) -> tuple[SourceObjectDescriptor, bytes | None, str | None, bool]:
-                    try:
-                        return (src, self._reader.read_source_object(service_id, domain, src.object_key), None, False)
-                    except SourceObjectMissingError as exc:
-                        return (src, None, str(exc), True)
-                    except Exception as exc:
-                        return (src, None, str(exc), False)
-
-                workers = min(self._object_concurrency, len(to_read))
-                if workers <= 1:
-                    read_results = [read_one(s) for s in to_read]
+            source_chunks = self._chunk_active_sources(active_sources)
+            for chunk_idx, source_chunk in enumerate(source_chunks):
+                is_final_chunk = chunk_idx == len(source_chunks) - 1
+                unclaimable_keys: set[str] = set()
+                if self._control is not None and (
+                    getattr(type(self._control), "claim_sources_batch", None) is not None
+                    or "claim_sources_batch" in vars(self._control)
+                ):
+                    claims = getattr(self._control, "claim_sources_batch")(
+                        service_id,
+                        tuple(s.object_key for s in source_chunk),
+                        self._worker_id,
+                        expected_owner=current_owner,
+                        expected_owner_epoch=epoch,
+                        lease_seconds=self._lease_seconds,
+                        now=now,
+                    )
+                    claimed_keys = {c.object_key for c in claims}
+                elif self._control is not None:
+                    claimed_keys = set()
+                    for s in source_chunk:
+                        try:
+                            c = self._control.claim_source(
+                                service_id,
+                                s.object_key,
+                                self._worker_id,
+                                expected_owner=current_owner,
+                                expected_owner_epoch=epoch,
+                                lease_seconds=self._lease_seconds,
+                                now=now,
+                            )
+                            if c.claimed:
+                                claimed_keys.add(s.object_key)
+                        except ValueError:
+                            if not self._already_terminal(service_id, s.object_key):
+                                failed += 1
+                                unclaimable_keys.add(s.object_key)
                 else:
-                    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="high-scale-batch-reader") as pool:
-                        read_results = list(pool.map(read_one, to_read))
+                    claimed_keys = {
+                        s.object_key
+                        for s in source_chunk
+                        if self._ledger.claim(service_id, s.object_key, self._worker_id).claimed
+                    }
 
-                valid_payloads: list[tuple[SourceObjectDescriptor, bytes]] = []
-                for src, data, err, is_missing in read_results:
-                    if is_missing:
-                        self._mark_missing(
-                            service_id,
-                            object_key=src.object_key,
-                            expected_owner=current_owner,
-                            expected_epoch=epoch,
-                            error=err or "missing",
-                            now=now,
-                        )
-                        missing += 1
-                    elif err is not None:
-                        logger.exception(
-                            "high-scale source read failed",
-                            extra={
-                                "service_id": service_id,
-                                "domain": domain,
-                                "object_key": src.object_key,
-                                "error": err,
-                            },
-                        )
-                        failed += 1
-                    elif data is not None:
-                        valid_payloads.append((src, data))
+                to_read: list[SourceObjectDescriptor] = []
+                for s in source_chunk:
+                    if s.object_key in claimed_keys:
+                        to_read.append(s)
+                    elif s.object_key not in unclaimable_keys:
+                        duplicates += 1
 
-                if valid_payloads:
-                    try:
-                        batch_res = self._controller.ingest_batch(
-                            service_id=service_id,
-                            domain=domain,
-                            sources_payloads=valid_payloads,
-                            next_cursor=None if failed > 0 or page.reinspection_page else next_cursor,
-                            now=now,
-                        )
-                        if getattr(batch_res, "derived_publication_complete", True):
-                            processed += batch_res.sources_count
-                        else:
+                if to_read:
+
+                    def read_one(
+                        src: SourceObjectDescriptor,
+                    ) -> tuple[SourceObjectDescriptor, bytes | None, str | None, bool]:
+                        try:
+                            return (
+                                src,
+                                self._reader.read_source_object(service_id, domain, src.object_key),
+                                None,
+                                False,
+                            )
+                        except SourceObjectMissingError as exc:
+                            return (src, None, str(exc), True)
+                        except Exception as exc:
+                            return (src, None, str(exc), False)
+
+                    workers = min(self._object_concurrency, len(to_read))
+                    if workers <= 1:
+                        read_results = [read_one(s) for s in to_read]
+                    else:
+                        with ThreadPoolExecutor(
+                            max_workers=workers, thread_name_prefix="high-scale-batch-reader"
+                        ) as pool:
+                            read_results = list(pool.map(read_one, to_read))
+
+                    valid_payloads: list[tuple[SourceObjectDescriptor, bytes]] = []
+                    for src, data, err, is_missing in read_results:
+                        if is_missing:
+                            self._mark_missing(
+                                service_id,
+                                object_key=src.object_key,
+                                expected_owner=current_owner,
+                                expected_epoch=epoch,
+                                error=err or "missing",
+                                now=now,
+                            )
+                            missing += 1
+                        elif err is not None:
+                            logger.exception(
+                                "high-scale source read failed",
+                                extra={
+                                    "service_id": service_id,
+                                    "domain": domain,
+                                    "object_key": src.object_key,
+                                    "error": err,
+                                },
+                            )
+                            failed += 1
+                        elif data is not None:
+                            valid_payloads.append((src, data))
+                    del read_results
+
+                    if valid_payloads:
+                        try:
+                            batch_res = self._controller.ingest_batch(
+                                service_id=service_id,
+                                domain=domain,
+                                sources_payloads=valid_payloads,
+                                next_cursor=(
+                                    next_cursor
+                                    if is_final_chunk and failed == 0 and not page.reinspection_page
+                                    else None
+                                ),
+                                now=now,
+                            )
+                            if getattr(batch_res, "derived_publication_complete", True):
+                                processed += batch_res.sources_count
+                            else:
+                                failed += len(valid_payloads)
+                        except Exception as exc:
+                            logger.exception(
+                                "high-scale batch ingest failed",
+                                extra={"service_id": service_id, "domain": domain, "count": len(valid_payloads)},
+                            )
+                            if self._control is not None and hasattr(self._control, "fail_sources_batch"):
+                                try:
+                                    self._control.fail_sources_batch(
+                                        service_id,
+                                        tuple(src.object_key for src, _ in valid_payloads),
+                                        expected_owner_epoch=epoch,
+                                        error=str(exc),
+                                    )
+                                except Exception:
+                                    logger.debug("fail_sources_batch after ingest_batch error failed", exc_info=True)
+                            elif self._control is None and hasattr(self._ledger, "mark_failed"):
+                                for src, _ in valid_payloads:
+                                    cur = self._ledger.source(service_id, src.object_key)
+                                    if cur is not None:
+                                        self._ledger.mark_failed(
+                                            service_id, src.object_key, cur.lease_generation, str(exc)
+                                        )
                             failed += len(valid_payloads)
-                    except Exception as exc:
-                        logger.exception(
-                            "high-scale batch ingest failed",
-                            extra={"service_id": service_id, "domain": domain, "count": len(valid_payloads)},
-                        )
-                        if self._control is not None and hasattr(self._control, "fail_sources_batch"):
-                            try:
-                                self._control.fail_sources_batch(
-                                    service_id,
-                                    tuple(src.object_key for src, _ in valid_payloads),
-                                    expected_owner_epoch=epoch,
-                                    error=str(exc),
-                                )
-                            except Exception:
-                                logger.debug("fail_sources_batch after ingest_batch error failed", exc_info=True)
-                        elif self._control is None and hasattr(self._ledger, "mark_failed"):
-                            for src, _ in valid_payloads:
-                                cur = self._ledger.source(service_id, src.object_key)
-                                if cur is not None:
-                                    self._ledger.mark_failed(service_id, src.object_key, cur.lease_generation, str(exc))
-                        failed += len(valid_payloads)
 
         if failed == 0:
             if page.reinspection_page and has_reinspection and self._control is not None:
@@ -1098,6 +1144,31 @@ class HighScaleWorkerCoordinator:
                     ),
                 )
         return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
+
+    def _chunk_active_sources(
+        self, active_sources: Sequence[SourceObjectDescriptor]
+    ) -> list[list[SourceObjectDescriptor]]:
+        max_batch_objects = max(
+            1, int(os.getenv("HIGH_SCALE_MAX_BATCH_OBJECTS", str(HIGH_SCALE_DEFAULT_MAX_BATCH_OBJECTS)))
+        )
+        max_batch_bytes = min(
+            HIGH_SCALE_PAGE_MAX_BYTES,
+            max(1, int(os.getenv("HIGH_SCALE_MAX_BATCH_BYTES", str(HIGH_SCALE_DEFAULT_MAX_BATCH_BYTES)))),
+        )
+        chunks: list[list[SourceObjectDescriptor]] = []
+        current: list[SourceObjectDescriptor] = []
+        current_bytes = 0
+        for src in active_sources:
+            src_bytes = max(0, int(src.size_bytes or 0))
+            if current and (len(current) >= max_batch_objects or (current_bytes + src_bytes) > max_batch_bytes):
+                chunks.append(current)
+                current = []
+                current_bytes = 0
+            current.append(src)
+            current_bytes += src_bytes
+        if current:
+            chunks.append(current)
+        return chunks
 
     def _expired_claim_descriptors(self, service_id: str, domain: str) -> list[SourceObjectDescriptor]:
         expired_claims = getattr(self._control if self._control is not None else self._ledger, "expired_claims", None)
