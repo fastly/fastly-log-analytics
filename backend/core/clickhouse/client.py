@@ -279,12 +279,14 @@ class ClickHouseClient:
                 "wait_end_of_query": "1",
                 "default_format": "JSON",
                 "output_format_json_quote_64bit_integers": "0",
-                "max_memory_usage": "1073741824",
-                "max_threads": "2",
+                "max_memory_usage": os.getenv("CLICKHOUSE_QUERY_MAX_MEMORY_BYTES", "1073741824"),
+                "max_threads": os.getenv("CLICKHOUSE_QUERY_MAX_THREADS", "2"),
                 "memory_overcommit_ratio_denominator": "0",
                 "memory_overcommit_ratio_denominator_for_user": "0",
-                "max_bytes_before_external_group_by": "134217728",
-                "max_bytes_before_external_sort": "134217728",
+                "max_bytes_before_external_group_by": os.getenv(
+                    "CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY", "134217728"
+                ),
+                "max_bytes_before_external_sort": os.getenv("CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_SORT", "134217728"),
             }
             if settings:
                 query.update(settings)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
 import os
 import threading
 import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -301,17 +303,29 @@ def scoring_analytics_composite(
 ) -> dict:
     """Composite of the analytics endpoints into a single round-trip."""
     _enforce_scoring_service_scope(request, service_id)
+    _table_columns(service_id)
     sh = int(since_hours)
-    result = {
-        "top_flagged": scoring_top_flagged(request=request, service_id=service_id, since_hours=sh, limit=200),
-        "score_distribution": scoring_score_distribution(request=request, service_id=service_id, since_hours=sh),
-        "compliance_breakdown": scoring_compliance_breakdown(request=request, service_id=service_id, since_hours=sh),
-        "latency_timeseries": scoring_latency_timeseries(request=request, service_id=service_id, since_hours=sh),
-        "health": scoring_health(request=request, service_id=service_id, since_hours=sh),
+    tasks = {
+        "top_flagged": lambda: scoring_top_flagged(request=request, service_id=service_id, since_hours=sh, limit=200),
+        "score_distribution": lambda: scoring_score_distribution(
+            request=request, service_id=service_id, since_hours=sh
+        ),
+        "compliance_breakdown": lambda: scoring_compliance_breakdown(
+            request=request, service_id=service_id, since_hours=sh
+        ),
+        "latency_timeseries": lambda: scoring_latency_timeseries(
+            request=request, service_id=service_id, since_hours=sh
+        ),
+        "health": lambda: scoring_health(request=request, service_id=service_id, since_hours=sh),
     }
     if not _is_analyst_request(request):
-        result["evaluation"] = scoring_evaluation(request=request, service_id=service_id)
-        result["evaluation_per_reason"] = scoring_evaluation_per_reason(service_id=service_id)
+        tasks["evaluation"] = lambda: scoring_evaluation(request=request, service_id=service_id)
+        tasks["evaluation_per_reason"] = lambda: scoring_evaluation_per_reason(service_id=service_id)
+    result: dict = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {k: pool.submit(contextvars.copy_context().run, fn) for k, fn in tasks.items()}
+        for k, fut in futs.items():
+            result[k] = fut.result()
     return result
 
 
@@ -754,9 +768,6 @@ def scoring_dashboard(
     cache_key = ("scoring-dashboard", service_id, since_hours, threshold, n_good, n_bad, n_neutral)
 
     def _produce() -> dict:
-        import contextvars
-        from concurrent.futures import ThreadPoolExecutor
-
         cfg = svcconfig.load_config(service_id)
         status_block: dict = scoring_status(service_id=service_id) if cfg else {"enabled": False}
         _table_columns(service_id)

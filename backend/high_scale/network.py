@@ -24,6 +24,7 @@ from backend.high_scale._common import (
     finite_float as _finite_float,
 )
 from backend.high_scale._common import (
+    normalize_cache_bound,
     parse_time_window,
     resolve_asn_display_labels,
     visible_publication_fence_sql,
@@ -37,10 +38,20 @@ from backend.high_scale._common import (
 from backend.high_scale._common import (
     text as _text,
 )
-from backend.repositories.utils.response_cache import cache_result
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    cache_result,
+    client_cache_token,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
+from backend.utils.bounded_cache import CacheRegistry
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
+
+_network_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
+CacheRegistry.register("high_scale.network", _network_memo.cache)
 
 from backend.high_scale._common import optional_int as _finite_int
 from backend.models.analytics import (
@@ -282,6 +293,23 @@ def network_health(
 
     if start is not None and end is not None:
         bs = clamp_bucket_seconds(bs, start, end) or bs
+    memo_key = digest_cache_key(
+        {
+            "ep": "hs_network_health",
+            "cid": client_cache_token(service.client),
+            "s": normalize_cache_bound(start_time),
+            "e": normalize_cache_bound(end_time),
+            "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+            "bs": int(bs),
+            "tn": int(top_n),
+            "ma": str(map_asn),
+            "sec": sorted(sections) if sections is not None else None,
+            "m": str(getattr(req, "metric", "health_score") or "health_score"),
+        },
+        {"name": service.service_id, "service_id": service.service_id},
+    )
+    if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+        return NetworkHealthResponse.with_telemetry(**cached)
     filter_sql, filter_params = _filter_clause(getattr(req, "filters", None), drop_asn=map_asn != "all")
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     rtt_where, bucket_expr = f"{_RTT_FILTER}{filter_sql}", _ch_bucket_expr(bs)
@@ -290,6 +318,11 @@ def network_health(
         map_asn_sql, params["map_asn"] = f" AND {_ASN} = {{map_asn:Int32}}", int(map_asn)
 
     err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
+    top_asn_subquery = (
+        f"SELECT {_ASN} FROM request_facts "
+        f"WHERE {rtt_where} AND {_ASN} IS NOT NULL "
+        f"GROUP BY {_ASN} ORDER BY count() DESC LIMIT {top_n}"
+    )
     health_queries: tuple[tuple[str, str], ...] = (
         (
             "heatmap",
@@ -299,7 +332,7 @@ def network_health(
                 f"median({_RTT}) AS rtt_med_us, median({_RTT_MIN}) AS rtt_baseline_us, "
                 f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
                 f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr}",
-                f"{rtt_where} AND {_ASN} IS NOT NULL",
+                f"{rtt_where} AND {_ASN} IS NOT NULL AND {_ASN} IN ({top_asn_subquery})",
                 group_by="asn, bucket_ts",
                 order_by="reqs DESC",
                 limit=top_n * 200,
@@ -355,7 +388,7 @@ def network_health(
     q_results = trace.run_parallel(
         [(name, partial(service.client.execute, sql, params)) for name, sql in active_queries],
         source="fact",
-        max_workers=4,
+        max_workers=5,
         thread_name_prefix="hs-net-health",
     )
     heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = (
@@ -525,23 +558,26 @@ def network_health(
     )
     want_map = not sections or bool(set(sections) & {"health", "map_buckets", "cities"})
     req_metric = str(getattr(req, "metric", "health_score") or "health_score")
+    payload: dict[str, Any] = {
+        "available": True,
+        "has_data": bool(heatmap_rows or map_rows),
+        "section_timings": trace.timings(),
+        "metric": req_metric,
+        "bucket_seconds": bs,
+        "buckets": all_buckets,
+        "heatmap": heatmap,
+        "map_buckets": map_buckets if want_map else [],
+        "cities": [NetworkCityEntry(**c) for c in cities_list] if want_map else [],
+        "leaderboard": leaderboard,
+        "metro_leaderboard": metro_leaderboard,
+        "summary": summary,
+        "countries": sorted(countries_set),
+        "has_metro": has_metro,
+        "shielding_analysis": shielding,
+    }
+    _network_memo.put(memo_key, dict(payload))
     return NetworkHealthResponse.with_telemetry(
-        **cache_result({}, state="bypass", prewarmer=False),
-        available=True,
-        has_data=bool(heatmap_rows or map_rows),
-        section_timings=trace.timings(),
-        metric=req_metric,
-        bucket_seconds=bs,
-        buckets=all_buckets,
-        heatmap=heatmap,
-        map_buckets=map_buckets if want_map else [],
-        cities=[NetworkCityEntry(**c) for c in cities_list] if want_map else [],
-        leaderboard=leaderboard,
-        metro_leaderboard=metro_leaderboard,
-        summary=summary,
-        countries=sorted(countries_set),
-        has_metro=has_metro,
-        shielding_analysis=shielding,
+        **_network_memo.result(payload, state="miss"),
     )
 
 

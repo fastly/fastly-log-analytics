@@ -59,68 +59,105 @@ _SESSIONS_FAST_CTE = """
         SELECT
             client_ip AS ip,
             custom_fields['ja4'] AS ja4,
-            event_timestamp AS ts,
+            toUInt64(toUnixTimestamp64Milli(event_timestamp)) AS ts_ms,
             custom_fields['edge'] AS edge,
-            toUInt8(custom_fields['edge_sid'] != '') AS has_edge_sid_ev,
             toInt32OrZero(custom_fields['status']) AS status,
-            toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
-            toUInt8(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL) AS has_rtt_ev,
-            cmcd['sid'] AS cmcd_sid
+            toUInt64(greatest(toInt64OrZero(custom_fields['resp_bytes']), 0)) AS resp_bytes,
+            (bitShiftLeft(toUInt64(toUnixTimestamp64Milli(event_timestamp)), 8)
+                + bitShiftLeft(toUInt64(status >= 400 AND status < 500), 6)
+                + bitShiftLeft(toUInt64(status >= 500), 5)
+                + bitShiftLeft(toUInt64(lower(edge) IN ('1', 'true')), 4)
+                + bitShiftLeft(toUInt64(lower(edge) IN ('0', 'false')), 3)
+                + bitShiftLeft(toUInt64(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL), 2)
+                + bitShiftLeft(toUInt64(custom_fields['edge_sid'] != ''), 1)
+                + toUInt64(cmcd['sid'] != '')) AS packed_ev
         FROM request_facts
         WHERE {where}
     ),
-    base AS (
+    pair_sessions AS (
         SELECT
             ip,
             ja4,
-            toStartOfMinute(ts) AS bucket_ts,
-            min(ts) AS min_ts,
-            max(ts) AS max_ts,
-            count() AS req_count,
-            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
-            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
-            sum(resp_bytes) AS total_bytes,
-            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
-            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
-            max(has_rtt_ev) AS has_rtt_row,
-            max(has_edge_sid_ev) AS has_edge_sid_row,
-            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs
+            min(ts_ms) AS p_min_ms,
+            max(ts_ms) AS p_max_ms,
+            count() AS p_reqs,
+            sum(bitAnd(bitShiftRight(packed_ev, 6), 1)) AS p_4xx,
+            sum(bitAnd(bitShiftRight(packed_ev, 5), 1)) AS p_5xx,
+            sum(resp_bytes) AS p_bytes,
+            sum(bitAnd(bitShiftRight(packed_ev, 4), 1)) AS p_edge,
+            sum(bitAnd(bitShiftRight(packed_ev, 3), 1)) AS p_shield,
+            max(toUInt8(bitAnd(bitShiftRight(packed_ev, 2), 1))) AS p_rtt,
+            max(toUInt8(bitAnd(bitShiftRight(packed_ev, 1), 1))) AS p_esid,
+            sum(bitAnd(packed_ev, 1)) AS p_stream,
+            groupArray(packed_ev) AS raw_ev,
+            groupArray(resp_bytes) AS raw_bytes,
+            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort(raw_ev), []) AS sorted_ev,
+            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort((b, e) -> e, raw_bytes, raw_ev), []) AS sorted_bytes,
+            if(
+                intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
+                [toUInt32(1)],
+                arrayFilter(
+                    i -> i = 1 OR intDiv(bitShiftRight(sorted_ev[i], 8), 1000) - intDiv(bitShiftRight(sorted_ev[i - 1], 8), 1000) > 1800,
+                    arrayEnumerate(sorted_ev)
+                )
+            ) AS starts
         FROM raw_events
-        GROUP BY ip, ja4, bucket_ts
+        GROUP BY ip, ja4
     ),
-    gaps AS (
+    sessions_sliced AS (
         SELECT
-            *,
-            dateDiff('second', lagInFrame(max_ts) OVER (PARTITION BY ip, ja4 ORDER BY min_ts), min_ts) AS gap
-        FROM base
-    ),
-    sessions_raw AS (
-        SELECT
-            *,
-            sum(if(gap IS NULL OR gap > 1800, 1, 0)) OVER (
-                PARTITION BY ip, ja4 ORDER BY min_ts
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) AS sid
-        FROM gaps
+            ip,
+            ja4,
+            p_min_ms,
+            p_max_ms,
+            p_reqs,
+            p_4xx,
+            p_5xx,
+            p_bytes,
+            p_edge,
+            p_shield,
+            p_rtt,
+            p_esid,
+            p_stream,
+            sess_idx,
+            if(
+                sess_idx = 0,
+                [],
+                arraySlice(
+                    sorted_ev,
+                    starts[sess_idx],
+                    if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_ev) - starts[sess_idx] + 1)
+                )
+            ) AS s_ev,
+            if(
+                sess_idx = 0,
+                [],
+                arraySlice(
+                    sorted_bytes,
+                    starts[sess_idx],
+                    if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_bytes) - starts[sess_idx] + 1)
+                )
+            ) AS s_bytes
+        FROM pair_sessions
+        ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
     ),
     sessions_agg AS (
         SELECT
             ip,
             ja4,
-            min(min_ts) AS session_start,
-            max(max_ts) AS session_end,
-            sum(req_count) AS req_count,
-            sum(reqs_4xx) AS reqs_4xx,
-            sum(reqs_5xx) AS reqs_5xx,
-            sum(total_bytes) AS total_bytes,
-            sum(edge_count) AS edge_count,
-            sum(shield_count) AS shield_count,
-            max(has_rtt_row) AS has_rtt_row,
-            max(has_edge_sid_row) AS has_edge_sid_row,
-            sum(streaming_reqs) AS streaming_reqs,
-            sid
-        FROM sessions_raw
-        GROUP BY ip, ja4, sid
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, bitShiftRight(s_ev[1], 8)))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_max_ms, bitShiftRight(s_ev[-1], 8)))) AS session_end,
+            if(sess_idx = 0, p_reqs, toUInt64(length(s_ev))) AS req_count,
+            if(sess_idx = 0, p_4xx, arraySum(x -> bitAnd(bitShiftRight(x, 6), 1), s_ev)) AS reqs_4xx,
+            if(sess_idx = 0, p_5xx, arraySum(x -> bitAnd(bitShiftRight(x, 5), 1), s_ev)) AS reqs_5xx,
+            if(sess_idx = 0, p_bytes, arraySum(s_bytes)) AS total_bytes,
+            if(sess_idx = 0, p_edge, arraySum(x -> bitAnd(bitShiftRight(x, 4), 1), s_ev)) AS edge_count,
+            if(sess_idx = 0, p_shield, arraySum(x -> bitAnd(bitShiftRight(x, 3), 1), s_ev)) AS shield_count,
+            if(sess_idx = 0, p_rtt, arrayMax(x -> toUInt8(bitAnd(bitShiftRight(x, 2), 1)), s_ev)) AS has_rtt_row,
+            if(sess_idx = 0, p_esid, arrayMax(x -> toUInt8(bitAnd(bitShiftRight(x, 1), 1)), s_ev)) AS has_edge_sid_row,
+            if(sess_idx = 0, p_stream, arraySum(x -> bitAnd(x, 1), s_ev)) AS streaming_reqs,
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+        FROM sessions_sliced
     ),
     flagged_sessions AS (
         SELECT
@@ -366,7 +403,7 @@ def sessions_endpoint(
         },
         {"service_id": service.service_id},
     )
-    cached = _sessions_memo.get(memo_key)
+    cached = _sessions_memo.get_with_telemetry(memo_key)
     if cached is not None:
         return cached
     rows = [
