@@ -451,7 +451,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
 
     def _process_request_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         table = ducklake_table_name(src)
-        enter_write_admission()
         log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
         columns_sql = get_ingest_columns_sql(log_fields_config)
         local_files = [lf for lf, _s3, _k in files]
@@ -480,27 +479,8 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             "SELECT r.* EXCLUDE (filename), m.s3 AS _source_file "
             f"FROM {clean_batch_expr} r JOIN temp.srcmap m ON m.local = r.filename"
         )
-        needs_insert = True
-        if not _ducklake_table_exists(duckdb_con, table):
-            try:
-                duckdb_con.execute(f"CREATE TABLE lake.{table} AS {select_sql}")
-                needs_insert = False
-            except Exception as e:
-                if "already exists" not in str(e):
-                    raise
-        if needs_insert:
-            try:
-                existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
-                for p_col, p_type, *_ in duckdb_con.execute(f"DESCRIBE SELECT * FROM {read_expr} LIMIT 0").fetchall():
-                    if p_col != "filename" and p_col not in existing_cols:
-                        duckdb_con.execute(
-                            f'ALTER TABLE lake.{table} ADD COLUMN "{p_col.replace(chr(34), chr(34) * 2)}" {p_type}'
-                        )
-            except Exception as e:
-                logger.warning("[ledger] %s: batch schema sync failed (%d file(s)): %s", service_id, len(files), e)
-            _ducklake_replace_source_rows(
-                duckdb_con, table, "SELECT s3 FROM temp.srcmap", select_sql, "convert_batch_objects"
-            )
+        duckdb_con.execute("DROP TABLE IF EXISTS temp.staged_batch")
+        duckdb_con.execute(f"CREATE TEMP TABLE staged_batch AS {select_sql}")
         file_sizes_by_local = {local_file: os.path.getsize(local_file) for local_file, _s3_path, _k in files}
         for local_file, _s3_path, object_key in files:
             outcome = _new_object_outcome()
@@ -517,6 +497,29 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
                 logger.exception("[ledger] %s: quarantine check failed for %s", service_id, object_key)
                 outcome["quarantine_capture_failures"] = max(1, outcome["quarantine_capture_failures"])
             outcomes[object_key] = _finalize_object_outcome(outcome)
+        enter_write_admission()
+        staged_select_sql = "SELECT * FROM temp.staged_batch"
+        needs_insert = True
+        if not _ducklake_table_exists(duckdb_con, table):
+            try:
+                duckdb_con.execute(f"CREATE TABLE lake.{table} AS {staged_select_sql}")
+                needs_insert = False
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+        if needs_insert:
+            try:
+                existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
+                for p_col, p_type, *_ in duckdb_con.execute("DESCRIBE temp.staged_batch").fetchall():
+                    if p_col != "filename" and p_col not in existing_cols:
+                        duckdb_con.execute(
+                            f'ALTER TABLE lake.{table} ADD COLUMN "{p_col.replace(chr(34), chr(34) * 2)}" {p_type}'
+                        )
+            except Exception as e:
+                logger.warning("[ledger] %s: batch schema sync failed (%d file(s)): %s", service_id, len(files), e)
+            _ducklake_replace_source_rows(
+                duckdb_con, table, "SELECT s3 FROM temp.srcmap", staged_select_sql, "convert_batch_objects"
+            )
         try:
             metadata_db.insert_ingested_files(
                 service_id,

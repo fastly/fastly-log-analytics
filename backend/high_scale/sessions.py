@@ -138,7 +138,7 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
         FROM request_facts
         PREWHERE {where}
     ),
-    pair_sessions AS (
+    pair_split AS (
         SELECT
             ip,
             ja4,
@@ -157,6 +157,13 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
             ) AS starts
         FROM raw_events
         GROUP BY ip, ja4
+    ),
+    pair_sessions AS (
+        SELECT
+            *,
+            sum(length(starts)) OVER () AS total_sessions,
+            max(ja4 != '') OVER () AS any_ja4
+        FROM pair_split
     ),
     sessions_agg AS (
         SELECT
@@ -181,7 +188,13 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
             toUInt8(0) AS has_rtt_row,
             toUInt8(0) AS has_edge_sid_row,
             toUInt64(0) AS streaming_reqs,
-            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid,
+            total_sessions,
+            toUInt8(0) AS any_rtt,
+            any_ja4,
+            toUInt8(0) AS any_edge,
+            toUInt8(0) AS any_edge_sid,
+            toUInt8(0) AS any_cmcd
         FROM pair_sessions
         ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
     ),
@@ -586,12 +599,13 @@ def sessions_endpoint(
     def _compute() -> dict[str, Any]:
         if (cached_inner := _sessions_memo.get_with_telemetry(memo_key)) is not None:
             return cached_inner
-        rows = [
-            dict(r)
-            for r in service.client.execute(
-                "/* sessions:page */ "
-                + cte
-                + """
+        outer_select = (
+            """
+    SELECT *
+    FROM flagged_sessions
+    """
+            if use_slim_index and cte is fast_cte
+            else """
     SELECT *,
            count() OVER () AS total_sessions,
            max(has_rtt_row) OVER () AS any_rtt,
@@ -603,6 +617,13 @@ def sessions_endpoint(
     WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
     """
+        )
+        rows = [
+            dict(r)
+            for r in service.client.execute(
+                "/* sessions:page */ "
+                + cte
+                + outer_select
                 + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
                 {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
             )

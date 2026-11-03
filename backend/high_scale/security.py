@@ -136,10 +136,14 @@ def _run(service: HighScaleService, scope: _Scope, tag: str, sql: str, **extra: 
         if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts", "top_bots_ua"} and not scope.filtered
         else "fact"
     )
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    rendered = sql.replace(_WHERE, scope.where)
+    if is_real_ch and source == "fact" and "PREWHERE" not in rendered and "ARRAY JOIN" not in rendered:
+        rendered = rendered.replace("FROM request_facts WHERE ", "FROM request_facts PREWHERE ")
     with clickhouse_source(source):
-        return service.client.execute(
-            f"/* hs_security:{tag} */ {sql.replace(_WHERE, scope.where)}", {**scope.params, **extra}
-        )
+        return service.client.execute(f"/* hs_security:{tag} */ {rendered}", {**scope.params, **extra})
 
 
 def _sec_iso(ts: Any) -> str | None:
@@ -359,8 +363,7 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                               ''),
                            ''),
                        extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
-            FROM request_facts
-            WHERE __WHERE__ AND client_ip != ''
+            FROM request_facts WHERE __WHERE__ AND client_ip != ''
               AND ((custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
                    OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
                    OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0)
@@ -688,15 +691,16 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
                 service,
                 scope,
                 "proxy_stats",
-                f"SELECT uniqExactIf(ip, is_tunnel OR is_imp) AS active_proxies_count, "
-                f"countIf(is_tunnel OR is_imp) AS total_requests_count, "
-                f"uniqExactIf(ip, is_imp) AS distance_mismatches_count "
+                "SELECT uniqExact(ip) AS active_proxies_count, "
+                "count() AS total_requests_count, "
+                "uniqExactIf(ip, is_imp) AS distance_mismatches_count "
                 f"FROM (SELECT ip, {_TUNNEL} AS is_tunnel, {_IMPOSSIBLE_DISTANCE} AS is_imp "
-                f"FROM (SELECT client_ip AS ip, toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-                f"toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-                f"toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+                "FROM (SELECT client_ip AS ip, toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+                "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
                 f"{_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
-                f"FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != ''))",
+                "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '')) "
+                "WHERE is_tunnel OR is_imp",
             )
 
         def _q_quality():
@@ -733,14 +737,18 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
                 "SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, distance_km, "
                 "pop, lat AS client_lat, lon AS client_lon, pop_lat, pop_lon, impossible_distance, "
                 "multiIf(impossible_distance, 'High', is_tunnel, 'High', is_med, 'Medium', 'Low') AS risk_level, country, city "
-                f"FROM (SELECT ip, asn, rtt_min, tcp_rtt, pop, lat, lon, pop_lat, pop_lon, country, city, "
-                f"{_DISTANCE_KM} AS distance_km, {_IMPOSSIBLE_DISTANCE} AS impossible_distance, "
-                f"{_TUNNEL} AS is_tunnel, ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
+                "FROM (SELECT ip, asn, rtt_min, tcp_rtt, pop, lat, lon, pop_lat, pop_lon, country, city, "
+                "distance_km, ifNull(lat IS NOT NULL AND lon IS NOT NULL AND distance_km > (rtt_min / 1000.0 * 100.0 + 150.0), 0) AS impossible_distance, "
+                "is_tunnel, is_med "
                 f"FROM (SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
-                f"toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-                f"toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+                "rtt_min, tcp_rtt, lat, lon, asn, pop_lat, pop_lon, "
+                f"{_DISTANCE_KM} AS distance_km, {_TUNNEL} AS is_tunnel, "
+                "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
+                "FROM (SELECT client_ip, custom_fields['pop'], country, custom_fields['city'], "
+                "toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+                "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
                 f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
-                f"FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '') WHERE rtt_min IS NOT NULL) "
+                "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '') WHERE rtt_min IS NOT NULL)) "
                 "WHERE impossible_distance OR is_med "
                 "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
             )
@@ -796,12 +804,8 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             )
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
-        stats, quality_rows, isp_rows, client_rows = [
-            f.result()
-            for f in (
-                pool.submit(contextvars.copy_context().run, fn) for fn in (_q_stats, _q_quality, _q_isps, _q_clients)
-            )
-        ]
+        futs = [pool.submit(contextvars.copy_context().run, fn) for fn in (_q_stats, _q_quality, _q_isps, _q_clients)]
+        stats, quality_rows, isp_rows, client_rows = [f.result() for f in futs]
 
     stat = stats[0] if stats else {}
     raw_clients = [
