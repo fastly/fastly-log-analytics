@@ -102,6 +102,22 @@ def raise_internal(
     raise HTTPException(status_code=status, detail=detail) from exc
 
 
+def _caused_by_out_of_memory(e: BaseException) -> bool:
+    """True when ``e`` or anything in its ``__cause__`` / ``__context__`` chain is a DuckDB out-of-memory error.
+
+    Repository code re-raises engine failures as domain errors (for example the exact-window path raises
+    ``HistoricalCoverageUnavailable ... from exc``), so the memory failure is often not the outermost exception.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = e
+    while current is not None and id(current) not in seen:
+        if isinstance(current, duckdb.OutOfMemoryException):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _handle_query_error(
     e: Exception,
     *,
@@ -111,11 +127,7 @@ def _handle_query_error(
 ) -> NoReturn:
     if isinstance(e, HTTPException):
         raise e
-    if isinstance(e, ValueError):
-        raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e))) from e
-    if isinstance(e, LookupError):
-        raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e))) from e
-    if isinstance(e, duckdb.OutOfMemoryException):
+    if _caused_by_out_of_memory(e):
         # A scan that exhausts DuckDB memory or the temp-spill cap is a capacity limit, not a server bug: tell the user
         # how to get unstuck. The engine message carries server paths, so it stays in the log.
         raise_internal(
@@ -125,6 +137,10 @@ def _handle_query_error(
             status=503,
             message="This query needed more memory than is available. Narrow the time range or add a filter, then retry.",
         )
+    if isinstance(e, ValueError):
+        raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e))) from e
+    if isinstance(e, LookupError):
+        raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e))) from e
     raise_internal(logger_obj, e, code=code, status=status_code)
 
 

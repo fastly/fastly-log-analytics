@@ -256,6 +256,52 @@ def test_query_errors_maps_duckdb_out_of_memory_to_retryable_503_without_leaking
     assert any("query_resource_limit" in r.getMessage() for r in caplog.records)
 
 
+def test_query_errors_maps_a_wrapped_duckdb_out_of_memory_by_walking_the_cause_chain():
+    """The exact-window path re-raises any read failure as ``HistoricalCoverageUnavailable`` (a RuntimeError) ``from``
+    the engine error, so the memory failure is only reachable through ``__cause__``. Under load that surfaced as an
+    opaque 500 even after plain OOMs were mapped."""
+
+    class _Wrapper(RuntimeError):
+        pass
+
+    @router_utils.query_errors(status_code=500)
+    def explicit_cause():
+        try:
+            raise duckdb.OutOfMemoryException(
+                "Out of Memory Error: failed to offload data block (9.3 GiB/9.3 GiB used)"
+            )
+        except duckdb.OutOfMemoryException as exc:
+            raise _Wrapper("exact retained read failed") from exc
+
+    @router_utils.query_errors(status_code=500)
+    def implicit_context():
+        try:
+            raise duckdb.OutOfMemoryException("Out of Memory Error")
+        except duckdb.OutOfMemoryException:
+            raise _Wrapper("exact retained read failed")  # noqa: B904 - exercising __context__ on purpose
+
+    for handler in (explicit_cause, implicit_context):
+        with pytest.raises(HTTPException) as exc:
+            handler()
+        assert exc.value.status_code == 503
+        assert exc.value.detail["error"] == "query_resource_limit"
+        assert "GiB" not in str(exc.value.detail) and "exact retained" not in str(exc.value.detail)
+
+
+def test_query_errors_leaves_unrelated_wrapped_errors_as_unhandled():
+    @router_utils.query_errors(status_code=500)
+    def handler():
+        try:
+            raise KeyError("not a resource problem")
+        except KeyError as exc:
+            raise RuntimeError("wrapped") from exc
+
+    with pytest.raises(HTTPException) as exc:
+        handler()
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "unhandled_error"
+
+
 def test_query_errors_preserves_function_metadata_and_forwards_args():
     """``functools.wraps`` keeps __name__ and __doc__ for FastAPI OpenAPI op IDs
     and forwards positional/keyword arguments unchanged."""
