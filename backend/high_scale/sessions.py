@@ -664,7 +664,7 @@ def sessions_endpoint(
             cmcd_probe = service.client.execute(
                 "SELECT 1 AS c FROM cmcd_projection_facts WHERE service_id = {service_id:String} "
                 "AND event_timestamp >= {start_time:DateTime64(3)} "
-                "AND event_timestamp <= {end_time:DateTime64(3)} AND sid != '' LIMIT 1",
+                "AND event_timestamp <= {end_time:DateTime64(3)} AND cmcd['sid'] != '' LIMIT 1",
                 params,
             )
             has_cmcd = bool(cmcd_probe)

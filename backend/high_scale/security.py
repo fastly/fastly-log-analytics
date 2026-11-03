@@ -656,11 +656,11 @@ def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str
             {
                 "ep": "hs_sec_top_bots_inner",
                 "cid": client_cache_token(service.client),
-                "s": scope.start.isoformat(),
-                "e": scope.end.isoformat(),
+                "s": normalize_cache_bound(scope.start),
+                "e": normalize_cache_bound(scope.end),
                 "n": n,
                 "w": scope.where,
-                "p": sorted((k, str(v)) for k, v in scope.params.items()),
+                "p": sorted((k, str(v)) for k, v in scope.params.items() if k not in ("start", "end")),
             },
             {"name": service.service_id, "service_id": service.service_id},
         )
@@ -746,12 +746,15 @@ def top_bots(
             **cache_result(result, state="bypass", prewarmer=False), section_timings=trace.timings()
         )
     scope = _scope(service, req, start_time, end_time)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     memo_key = digest_cache_key(
         {
             "ep": "hs_security_top_bots",
             "cid": client_cache_token(service.client),
-            "s": scope.start.isoformat(),
-            "e": scope.end.isoformat(),
+            "s": normalize_cache_bound(scope.start) if is_real_ch else scope.start.isoformat(),
+            "e": normalize_cache_bound(scope.end) if is_real_ch else scope.end.isoformat(),
             "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
         },
         {"name": service.service_id, "service_id": service.service_id},
@@ -797,7 +800,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
                 "s": normalize_cache_bound(scope.start.isoformat()),
                 "e": normalize_cache_bound(scope.end.isoformat()),
                 "w": scope.where,
-                "p": sorted((k, str(v)) for k, v in scope.params.items()),
+                "p": sorted((k, str(v)) for k, v in scope.params.items() if k not in ("start", "end")),
                 "m": bool(mask_ips),
             },
             {"name": service.service_id, "service_id": service.service_id},

@@ -3013,6 +3013,17 @@ def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimiza
     assert any("PREWHERE" in q for q in queries)
     assert not any("/* hs_security:top_bots_ua */" in q for q in queries)
 
+    wm.last_visible_event_id = "evt-2"
+    queries.clear()
+    bundle_res_warm = hs_dashboard.bundle(
+        svc,  # type: ignore[arg-type]
+        AggregatesRequest(filters={"country": ["US"]}, fields=["url", "country", "ua"]),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    assert bundle_res_warm["aggregates"].total_rows == 50
+    assert len(queries) == 0
+
     queries.clear()
     sess_res = sessions_endpoint(
         svc,  # type: ignore[arg-type]

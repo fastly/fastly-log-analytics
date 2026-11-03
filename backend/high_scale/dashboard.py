@@ -741,11 +741,11 @@ def _filtered_aggregates(
                 {
                     "ep": "hs_sec_top_bots_inner",
                     "cid": client_cache_token(service.client),
-                    "s": sec_scope.start.isoformat(),
-                    "e": sec_scope.end.isoformat(),
+                    "s": normalize_cache_bound(sec_scope.start),
+                    "e": normalize_cache_bound(sec_scope.end),
                     "n": 10,
                     "w": sec_scope.where,
-                    "p": sorted((k, str(v)) for k, v in sec_scope.params.items()),
+                    "p": sorted((k, str(v)) for k, v in sec_scope.params.items() if k not in ("start", "end")),
                 },
                 {"name": service.service_id, "service_id": service.service_id},
             )
@@ -974,7 +974,11 @@ def dashboard_aggregates(
     ):
         norm_interval = "1 hour"
     trace = HighScaleSections(service.service_id, "dashboard")
-    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
+    request_watermark = (
+        None
+        if is_real_ch and _HS_DASHBOARD_CACHE_TTL > 0 and start is not None and end is not None
+        else trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
+    )
     cache_key: str | None = None
     if _HS_DASHBOARD_CACHE_TTL > 0 and start is not None and end is not None:
         raw_filters = (
@@ -985,7 +989,11 @@ def dashboard_aggregates(
                 "ep": "hs_dashboard_aggregates",
                 "svc": service.service_id,
                 "cid": client_cache_token(service.client),
-                "wm": (_watermark_extent(request_watermark.coverage_end), request_watermark.last_visible_event_id),
+                "wm": (
+                    None
+                    if is_real_ch or request_watermark is None
+                    else (_watermark_extent(request_watermark.coverage_end), request_watermark.last_visible_event_id)
+                ),
                 "s": normalize_cache_bound(start),
                 "e": normalize_cache_bound(end),
                 "f": serialize_filters_for_key(raw_filters),
@@ -1004,8 +1012,11 @@ def dashboard_aggregates(
             return AggregatesResponse.with_telemetry(**cached)
 
     def _compute_agg() -> AggregatesResponse:
+        nonlocal request_watermark
         if cache_key is not None and (cached_inner := _dashboard_memo.get_with_telemetry(cache_key)) is not None:
             return AggregatesResponse.with_telemetry(**cached_inner)
+        if request_watermark is None:
+            request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
         partial_minutes = (
             start is not None
             and end is not None

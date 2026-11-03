@@ -641,18 +641,6 @@ def _sweep_ledger_common(
     )
     dead_letter_count = 0
     try:
-        cur.execute(
-            "UPDATE ingest_ledger l SET status='committed', committed_at=?, last_error=NULL, error_kind=NULL "
-            "FROM high_scale_source_objects h "
-            "WHERE l.service_id=? AND l.status='dead_letter' AND l.error_kind='object_missing' "
-            "AND l.service_id = h.service_id AND l.object_key = h.object_key",
-            (now, service_id),
-        )
-        if cur.rowcount:
-            con.commit()
-    except Exception:
-        pass
-    try:
         dead_letter_row = con.execute(
             "SELECT COUNT(*) FROM ingest_ledger WHERE service_id=? AND status IN ('quarantined', 'dead_letter') "
             f"AND object_key {like_op} ?",
@@ -661,6 +649,21 @@ def _sweep_ledger_common(
         dead_letter_count = int(dead_letter_row[0]) if dead_letter_row else 0
     except Exception:
         dead_letter_count = 0
+    if dead_letter_count > 0:
+        try:
+            cur.execute(
+                "UPDATE ingest_ledger l SET status='committed', committed_at=?, last_error=NULL, error_kind=NULL "
+                "FROM high_scale_source_objects h "
+                "WHERE l.service_id=? AND l.status='dead_letter' AND l.error_kind='object_missing' "
+                "AND l.service_id = h.service_id AND l.object_key = h.object_key",
+                (now, service_id),
+            )
+            reconciled = int(getattr(cur, "rowcount", 0) or 0)
+            if reconciled > 0:
+                con.commit()
+                dead_letter_count = max(0, dead_letter_count - reconciled)
+        except Exception:
+            logger.debug("sweep_ledger_dead_letter_reconcile_failed: %s", service_id, exc_info=True)
     return {
         "reclaimed": len(reclaimed),
         "redispatched": redispatched,
