@@ -409,7 +409,12 @@ def _display_label(src: dict, service_id: str) -> str:
 
 
 _HEAVY_REFRESH_INTERVAL_SEC = 60.0
+# The heavy refresh scans retained data, so its cost grows with volume while a fixed interval does not: once one run
+# takes about as long as the interval, the throttle stops working and the step runs on every serial ingest tick.
+# Waiting this many times the last run's cost keeps the step to roughly 1/10 of wall time.
+_HEAVY_REFRESH_COST_MULTIPLE = 10.0
 _last_heavy_refresh: dict[str, float] = {}
+_last_heavy_refresh_cost: dict[str, float] = {}
 _last_heavy_refresh_lock = threading.Lock()
 
 
@@ -417,10 +422,18 @@ def _claim_heavy_refresh(service_id: str) -> bool:
     now = time.time()
     with _last_heavy_refresh_lock:
         last = _last_heavy_refresh.get(service_id, 0.0)
-        if (now - last) >= _HEAVY_REFRESH_INTERVAL_SEC:
+        wait = max(
+            _HEAVY_REFRESH_INTERVAL_SEC, _HEAVY_REFRESH_COST_MULTIPLE * _last_heavy_refresh_cost.get(service_id, 0.0)
+        )
+        if (now - last) >= wait:
             _last_heavy_refresh[service_id] = now
             return True
     return False
+
+
+def _record_heavy_refresh_cost(service_id: str, seconds: float) -> None:
+    with _last_heavy_refresh_lock:
+        _last_heavy_refresh_cost[service_id] = seconds
 
 
 def _elapsed_since(start: float) -> str:
@@ -573,6 +586,7 @@ def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int)
 
 
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
+_CacheRegistry.register("cron.scheduler._last_heavy_refresh_cost", _last_heavy_refresh_cost)
 
 __all__ = [
     "CronHeartbeat",
@@ -586,6 +600,7 @@ __all__ = [
     "_CRON_HARD_CAP_S",
     "_DISK_FREE_HARD_FLOOR_BYTES",
     "_DISK_FREE_HARD_FLOOR_PCT",
+    "_HEAVY_REFRESH_COST_MULTIPLE",
     "_HEAVY_REFRESH_INTERVAL_SEC",
     "_JOIN_TIMEOUT_S",
     "_ROOT",
@@ -598,8 +613,10 @@ __all__ = [
     "_extract_log_text",
     "_get_watchdog_executor",
     "_last_heavy_refresh",
+    "_last_heavy_refresh_cost",
     "_last_heavy_refresh_lock",
     "_log_and_add_progress",
+    "_record_heavy_refresh_cost",
     "_resolve_rum_sync_interval",
     "_service_has_alerts",
     "_status",

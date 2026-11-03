@@ -48,6 +48,7 @@ from backend.cron.scheduler import (
     _elapsed_since,
     _extract_log_text,
     _log_and_add_progress,
+    _record_heavy_refresh_cost,
     cron_run,
     cron_task,
     dev_mode_no_crons,  # noqa: F401
@@ -553,8 +554,10 @@ def _run_log_discovery_cron(
             refresh_config_status(service_id, include_top_values=True)
         except Exception:
             pass
+        _heavy_cost_s = time.time() - _t0
+        _record_heavy_refresh_cost(service_id, _heavy_cost_s)
         if run_id is not None:
-            _progress_status(f"refresh_config_status (heavy): {int((time.time() - _t0) * 1000)}ms")
+            _progress_status(f"refresh_config_status (heavy): {int(_heavy_cost_s * 1000)}ms")
 
     # ── 4. Usage log bookkeeping ──────────────────────────────────────────────
     if (sync_enabled or force) and run_id is not None and do_heavy_refresh:

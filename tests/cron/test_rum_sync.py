@@ -2190,6 +2190,31 @@ def test_claim_heavy_refresh_reopens_window_after_interval():
     assert sched._claim_heavy_refresh(sid) is True
 
 
+def test_claim_heavy_refresh_backs_off_in_proportion_to_the_last_run_cost():
+    """The heavy refresh scans retained data, so its cost grows with volume. A fixed 60 s interval stopped throttling
+    once one run took ~50 s on a ~110 s tick: it ran on every tick and capped ingest at about a third of arrivals."""
+    sid = "test-claim-heavy-cost"
+    sched._last_heavy_refresh.pop(sid, None)
+    sched._last_heavy_refresh_cost.pop(sid, None)
+    assert sched._claim_heavy_refresh(sid) is True
+    sched._record_heavy_refresh_cost(sid, 50.0)
+
+    sched._last_heavy_refresh[sid] = time.time() - 300  # past the 60 s floor, inside 10x the 50 s cost
+    assert sched._claim_heavy_refresh(sid) is False
+    sched._last_heavy_refresh[sid] = time.time() - 510
+    assert sched._claim_heavy_refresh(sid) is True
+
+
+def test_claim_heavy_refresh_cheap_runs_keep_the_base_interval():
+    sid = "test-claim-heavy-cheap"
+    sched._last_heavy_refresh_cost.pop(sid, None)
+    sched._record_heavy_refresh_cost(sid, 1.0)
+    sched._last_heavy_refresh[sid] = time.time() - sched._HEAVY_REFRESH_INTERVAL_SEC - 5
+    assert sched._claim_heavy_refresh(sid) is True
+    sched._last_heavy_refresh[sid] = time.time() - sched._HEAVY_REFRESH_INTERVAL_SEC / 2
+    assert sched._claim_heavy_refresh(sid) is False
+
+
 def test_service_has_alerts_returns_count_gt_zero():
     with patch("backend.core.metadata.count_alerts", return_value=3):
         assert sched._service_has_alerts("svc") is True
