@@ -99,6 +99,8 @@ _NSW = [0.72, 0.05, 0.02, 0.01, 0.10, 0.01, 0.005, 0.01, 0.05, 0.01, 0.005, 0.01
 NORMAL_STATUS_WEIGHTS = [w / sum(_NSW) for w in _NSW]
 CACHE_NORMAL = ["HIT", "HIT-CLUSTER", "MISS", "PASS", "ERROR"]
 CACHE_NORMAL_WEIGHTS = [0.70, 0.12, 0.12, 0.05, 0.01]
+ORIGIN_FETCH_STATES = ["MISS", "PASS", "ERROR"]
+ORIGIN_IPS = [f"203.0.113.{octet}" for octet in range(10, 18)]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36",
@@ -256,6 +258,12 @@ def generate_columns(
     has_waf_sig = rng.random(n) < (0.50 if scenario in ["bot-scrape", "ddos-spike"] else 0.05)
     waf_signal = np.where(has_waf_sig, waf_sig, None)
 
+    origin_fetch = np.isin(cache, ORIGIN_FETCH_STATES)
+    ost = status.astype(object)
+    ost[~origin_fetch] = None
+    oip = rng.choice(np.array(ORIGIN_IPS, dtype=object), size=n)
+    oip[~origin_fetch] = None
+
     return {
         "timestamp": ts_us, "ip": ip, "status": status, "elapsed": elapsed, "cache": cache,
         "resp_bytes": resp_bytes, "host": host, "url": url, "method": method, "proto": proto,
@@ -264,7 +272,7 @@ def generate_columns(
         "city": city, "metro": metro, "lat": lat, "lon": lon, "region": region,
         "tcp_rtt": tcp_rtt, "rtt_min": rtt_min, "rtt_var": rtt_var, "ploss": ploss,
         "ja3": ja3, "ja4": ja4, "cookie_session": cookie_session, "bot_category": bot_category,
-        "waf_signal": waf_signal, "_source_file": np.full(n, f"synthetic://gen/{int(time.time())}", dtype=object),
+        "waf_signal": waf_signal, "ost": ost, "oip": oip, "_source_file": np.full(n, f"synthetic://gen/{int(time.time())}", dtype=object),
     }
 
 
