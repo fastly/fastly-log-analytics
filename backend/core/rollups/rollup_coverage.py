@@ -196,7 +196,7 @@ class BundleProbe:
         key = (hour, filename)
         empty = self._empty.get(key)
         if empty is None:
-            empty = self._empty[key] = self.has(hour, filename) and _empty_parquet(self.path(hour, filename))
+            empty = self._empty[key] = _empty_parquet(self.path(hour, filename))
         return empty
 
 
@@ -458,6 +458,7 @@ def collect_day_prefer_paths(
         return None
 
     index = CoverageIndex.build(st, et, skip_partial_start=skip_partial_start)
+    probe = BundleProbe(hour_root)
     paths: list[str] = []
     covered_hours = 0
     day_files = hour_files = done_markers = 0
@@ -477,6 +478,8 @@ def collect_day_prefer_paths(
                 elif allow_empty_with_done and os.path.isfile(f"{path}.done"):
                     covered_hours += 1
                     done_markers += 1
+                elif probe.is_empty(hour, ALL_FIELDS_FILENAME):
+                    covered_hours += 1
 
     if observation is not None:
         observation.active_hour_start = index.active_dt.isoformat()
@@ -511,12 +514,17 @@ def collect_hour_paths_with_floor(
     if not os.path.isdir(bundled_root):
         return None
     index = CoverageIndex.build(st, et, skip_partial_start=True)
-    paths = [
-        path
-        for path in (os.path.join(bundled_root, f"hour={hour}", bundle_filename) for hour in index.closed_hours)
-        if os.path.exists(path)
-    ]
-    if not paths or not meets_coverage_floor(len(paths), len(index.closed_hours)):
+    probe = BundleProbe(bundled_root)
+    paths: list[str] = []
+    covered_hours = 0
+    for hour in index.closed_hours:
+        path = probe.path(hour, bundle_filename)
+        if os.path.exists(path):
+            paths.append(path)
+            covered_hours += 1
+        elif probe.is_empty(hour, ALL_FIELDS_FILENAME):
+            covered_hours += 1
+    if not paths or not meets_coverage_floor(covered_hours, len(index.closed_hours)):
         return None
     return paths
 

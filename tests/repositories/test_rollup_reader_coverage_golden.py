@@ -3109,3 +3109,79 @@ def test_ip_spread_closed_window_distinct_count_merge_agrees(tmp_path):
     # the IP_SAMPLE_CAP, so no (field, value) is flagged capped.
     assert meta["ja4"]["coverage_hours"] == len(closed_hours)
     assert meta["ja4"]["capped_values"] == 0
+
+
+def _origin_hour(root: Path, hour: int) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = root / "rollups/hour_bundled" / f"hour=2026-01-01-{hour:02d}" / "origin_summary.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({"requests": [1]}), path)
+
+
+def _all_fields_hour(root: Path, hour: int, *, rows: int) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = root / "rollups/hour_bundled" / f"hour=2026-01-01-{hour:02d}" / "all_fields.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
+    pq.write_table(
+        pa.table({"field": ["ip"] * rows, "value": ["1.1.1.1"] * rows, "count": [1] * rows}, schema=schema), path
+    )
+
+
+def test_verified_empty_hours_count_as_covered_for_every_rollup_family(tmp_path: Path) -> None:
+    """A new service has no rows in most of a 24 h window; those hours are stamped empty and must not push every
+    domain reader below the coverage floor and onto a raw scan."""
+    _origin_hour(tmp_path, 22)
+    _origin_hour(tmp_path, 23)
+    for hour in range(0, 22):
+        _all_fields_hour(tmp_path, hour, rows=0)
+    observed = RollupPathCoverage(bundle="security_conn_reuse")
+    with time_machine.travel(START + timedelta(days=1, hours=1), tick=False):
+        result = coverage.collect_day_prefer_paths(
+            {"_cache_dir_override": str(tmp_path)},
+            START,
+            START + timedelta(days=1),
+            "origin_summary.parquet",
+            observation=observed,
+        )
+    assert result is not None and len(result) == 2
+    assert observed.covered_hours == observed.closed_hours == 24
+    assert observed.reason == "planned"
+
+
+def test_hour_without_bundle_or_empty_sentinel_stays_uncovered(tmp_path: Path) -> None:
+    """Only a verified-empty hour is free coverage: an hour with data (non-empty all_fields) but no domain bundle, and an
+    hour with nothing at all, still count against the floor."""
+    _origin_hour(tmp_path, 23)
+    for hour in range(0, 8):
+        _all_fields_hour(tmp_path, hour, rows=0)
+    for hour in range(8, 16):
+        _all_fields_hour(tmp_path, hour, rows=3)
+    observed = RollupPathCoverage(bundle="security_conn_reuse")
+    with time_machine.travel(START + timedelta(days=1, hours=1), tick=False):
+        result = coverage.collect_day_prefer_paths(
+            {"_cache_dir_override": str(tmp_path)},
+            START,
+            START + timedelta(days=1),
+            "origin_summary.parquet",
+            observation=observed,
+        )
+    assert result is None
+    assert observed.covered_hours == 9 and observed.reason == "below_coverage_floor"
+
+
+def test_slow_urls_floor_counts_verified_empty_hours(tmp_path: Path) -> None:
+    path = tmp_path / "rollups/hour_bundled/hour=2026-01-01-23/slow_urls.parquet"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    for hour in range(0, 23):
+        _all_fields_hour(tmp_path, hour, rows=0)
+    with time_machine.travel(START + timedelta(days=1, hours=1), tick=False):
+        result = coverage.collect_hour_paths_with_floor(
+            {"_cache_dir_override": str(tmp_path)}, START, START + timedelta(days=1), "slow_urls.parquet"
+        )
+    assert result == [str(path)]
