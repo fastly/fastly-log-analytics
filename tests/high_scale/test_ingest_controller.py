@@ -3359,3 +3359,26 @@ def test_sharded_partition_prefix_and_partition_id_cursor_isolation() -> None:
     assert cp.source_cursor_for("svc", "request", partition_id="shard-01").endswith("shard=01/obj-1.log.zst")
     assert cp.source_cursor_for("svc", "request", partition_id="default") == "__initial__"
     assert [c["partition_id"] for c in ctrl.calls] == ["shard-00", "shard-01"]
+
+
+def test_watermark_rewrites_publication_fence_when_client_supports_it() -> None:
+    from backend.high_scale.ingest_controller.service import _watermark
+
+    class _FenceClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def rewrite_publication_fence(self, sql: str, params: dict[str, Any] | None = None) -> str:
+            return "publication_state = 'visible'"
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            self.calls.append((sql, dict(params or {})))
+            if "min(event_timestamp)" in sql:
+                return [{"coverage_start": "2026-09-14T00:00:00Z", "coverage_end": "2026-09-14T00:10:00Z"}]
+            return [{"last_visible_event_id": "evt-1"}]
+
+    client = _FenceClient()
+    wm = _watermark(client, "svc-fence", "request", owner_epoch=1)
+    assert wm.last_visible_event_id == "evt-1"
+    assert len(client.calls) == 2
+    assert all("high_scale_batch_publications" not in sql for sql, _ in client.calls)

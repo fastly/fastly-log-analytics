@@ -209,6 +209,17 @@ def _ledger_mark_dead_letter_missing(
     return int(cur.rowcount or 0)
 
 
+def _is_ingested_by_high_scale(con_meta: Any, service_id: str, object_key: str) -> bool:
+    try:
+        row = con_meta.execute(
+            "SELECT 1 FROM high_scale_source_objects WHERE service_id=? AND object_key=? LIMIT 1",
+            (service_id, object_key),
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
 def _ledger_claim_batch(con, service_id: str, object_keys: list[str], worker_id: str) -> dict[str, int]:
     cur = con.cursor()
     now = time.time()
@@ -283,10 +294,19 @@ def _download_and_classify_batch_files(
             continue
         active.remove(object_key)
         if _is_permanent_s3_missing(fos, bucket, object_key):
-            if _ledger_mark_dead_letter_missing(con_meta, service_id, object_key, claimed_generations[object_key]):
+            if _is_ingested_by_high_scale(con_meta, service_id, object_key):
+                if _ledger_mark_committed_batch(con_meta, service_id, [object_key], claimed_generations):
+                    summary["committed"] += 1
+                logger.info(
+                    "[ledger] %s: %s%s already ingested+deleted by high-scale — committed",
+                    service_id,
+                    log_label,
+                    object_key,
+                )
+            elif _ledger_mark_dead_letter_missing(con_meta, service_id, object_key, claimed_generations[object_key]):
                 summary["dead_letter"] += 1
                 batch_outcomes[object_key] = _failed_object_outcome()
-            logger.info("[ledger] %s: %s%s gone from FOS — dead_letter", service_id, log_label, object_key)
+                logger.info("[ledger] %s: %s%s gone from FOS — dead_letter", service_id, log_label, object_key)
         else:
             _ledger_record_failure(
                 con_meta,
@@ -617,6 +637,18 @@ def _sweep_ledger_common(
         service_id, start_time=st, run_id=run_id, originating_task="ledger_rum_sweep" if is_rum else "ledger_sweep"
     )
     dead_letter_count = 0
+    try:
+        cur.execute(
+            "UPDATE ingest_ledger l SET status='committed', committed_at=?, last_error=NULL, error_kind=NULL "
+            "FROM high_scale_source_objects h "
+            "WHERE l.service_id=? AND l.status='dead_letter' AND l.error_kind='object_missing' "
+            "AND l.service_id = h.service_id AND l.object_key = h.object_key",
+            (now, service_id),
+        )
+        if cur.rowcount:
+            con.commit()
+    except Exception:
+        pass
     try:
         dead_letter_row = con.execute(
             "SELECT COUNT(*) FROM ingest_ledger WHERE service_id=? AND status IN ('quarantined', 'dead_letter') "

@@ -263,12 +263,15 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
     if can_cache and (cached := _WATERMARK_CACHE.get(cache_key)) is not None:
         return cached
     table = _WATERMARK_TABLES[domain]
+    params: dict[str, Any] = {"service_id": service_id}
     fence_sql = visible_publication_fence_sql(domain)
+    if hasattr(client, "rewrite_publication_fence"):
+        fence_sql = client.rewrite_publication_fence(fence_sql, params)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
     rows = client.execute(
         f"SELECT min(event_timestamp) AS coverage_start, max(event_timestamp) AS coverage_end FROM {table} "
         f"WHERE service_id={{service_id:String}} AND {fence_sql}",
-        {"service_id": service_id},
+        params,
     )
     row = rows[0] if rows else {}
     coverage_end = _datetime_or_none(row.get("coverage_end"))
@@ -278,7 +281,7 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
             f"SELECT toString({event_id_column}) AS last_visible_event_id FROM {table} "
             f"WHERE service_id={{service_id:String}} AND {fence_sql} "
             f"AND event_timestamp={{coverage_end:DateTime64(3)}} ORDER BY {event_id_column} DESC LIMIT 1",
-            {"service_id": service_id, "coverage_end": coverage_end},
+            {**params, "coverage_end": coverage_end},
         )
         last_visible_event_id = _string_or_none((latest_rows[0] if latest_rows else {}).get("last_visible_event_id"))
     wm = ServingWatermark(

@@ -107,17 +107,23 @@ def _query_source_extents(
     count_expr: str = "count()",
     ts_col: str = "event_timestamp",
 ) -> tuple[int, str | None, str | None]:
-    rows = client.execute(
-        f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
-        f"FROM {table_name} "
-        "WHERE service_id={service_id:String} "
+    params = {"service_id": source_id, "domain": domain}
+    where_sql = (
+        "service_id={service_id:String} "
         "AND publication_state = 'visible' "
         "AND batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
         "WHERE service_id={service_id:String} AND domain={domain:String} "
         "AND publication_state = 'visible'"
-        ")",
-        {"service_id": source_id, "domain": domain},
+        ")"
+    )
+    if hasattr(client, "rewrite_publication_fence"):
+        where_sql = client.rewrite_publication_fence(where_sql, params)
+    rows = client.execute(
+        f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
+        f"FROM {table_name} "
+        f"WHERE {where_sql}",
+        params,
     )
     row = rows[0] if rows else {}
     total_rows = int(row.get("total_rows") or 0)
@@ -517,8 +523,9 @@ def _filtered_aggregates(
         if "SELECT" not in eff_where:
             sql = (
                 f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
-                f"FROM (SELECT [{pairs_sql}] AS pairs FROM request_facts PREWHERE {eff_where}) "
-                f"ARRAY JOIN pairs AS pair WHERE v != '' "
+                f"FROM (SELECT arrayFilter(p -> p.2 != '', [{pairs_sql}]) AS pairs "
+                f"FROM request_facts PREWHERE {eff_where}) "
+                f"ARRAY JOIN pairs AS pair "
                 f"GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT {limit_by} BY field_name"
             )
         else:
