@@ -425,8 +425,10 @@ class _ScalarsRollupMixin:
             f"LIMIT ?"
         )
         rows = self._exec_rollup(sql, [limit], tag="origin_pop_rollup")
-        if not rows:
+        if rows is None:
             return None
+        if not rows:
+            return {"has_data": False, "requires_group_c": False, "rows": []}
         valid_p95s = sorted(_us_to_ms(r[3]) for r in rows if r[3] is not None)  # type: ignore[type-var]
         median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
         out_rows = [
@@ -462,7 +464,7 @@ class _ScalarsRollupMixin:
             f"LIMIT ?"
         )
         rows = self._exec_rollup(sql, [limit], tag="origin_ip_rollup")
-        if not rows:
+        if rows is None:
             return None
         out_rows = [
             self._shape_latency_row("oip", r, error_pct=float(r[4]) if r[4] is not None else None) for r in rows
@@ -477,7 +479,7 @@ class _ScalarsRollupMixin:
             return None
         sql = f"SELECT edge,        {self._WEIGHTED_P50_P95_SELECT_SQL} FROM read_parquet([{paths_sql}]) GROUP BY edge"
         rows = self._exec_rollup(sql, tag="origin_path_rollup")
-        if not rows:
+        if rows is None:
             return None
         out_rows = [self._shape_latency_row("edge", r) for r in rows]
         return {
@@ -511,8 +513,10 @@ class _ScalarsRollupMixin:
             f"ORDER BY count DESC"
         )
         rows = self._exec_rollup(sql, tag="origin_status_rollup")
-        if not rows:
+        if rows is None:
             return None
+        if not rows:
+            return {"has_data": False, "rows": []}
         return {
             "has_data": True,
             "rows": [
@@ -734,7 +738,7 @@ class _ScalarsRollupMixin:
             f"ORDER BY mv"
         )
         rows = self._exec_rollup(sql, tag=log_tag)
-        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows] if rows else None
+        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows] if rows is not None else None
 
     def try_security_req_size_from_rollup(
         self, start_time: str | None, end_time: str | None, *, has_filters: bool

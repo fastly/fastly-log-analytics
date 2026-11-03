@@ -10292,7 +10292,11 @@
  "origin_ip_health": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10323,7 +10327,11 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10354,7 +10362,11 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10415,7 +10427,11 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10446,7 +10462,11 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10470,7 +10490,11 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10494,7 +10518,11 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10518,7 +10546,11 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10542,7 +10574,11 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10582,7 +10618,11 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10622,7 +10662,11 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10653,7 +10697,11 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10684,7 +10732,11 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10715,7 +10767,11 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10746,7 +10802,11 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10777,7 +10837,11 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10808,7 +10872,11 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10839,7 +10907,11 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10870,7 +10942,11 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10945,7 +11021,11 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -10976,7 +11056,11 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -11025,7 +11109,11 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -11086,7 +11174,11 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -12572,7 +12664,12 @@
  "origin_path_breakdown": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12601,7 +12698,12 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12630,7 +12732,12 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12689,7 +12796,12 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12718,7 +12830,12 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12740,7 +12857,12 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12762,7 +12884,12 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12784,7 +12911,12 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12806,7 +12938,12 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12844,7 +12981,12 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12882,7 +13024,12 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12911,7 +13058,12 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12940,7 +13092,12 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12969,7 +13126,12 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -12998,7 +13160,12 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13027,7 +13194,12 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13056,7 +13228,12 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13085,7 +13262,12 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13114,7 +13296,12 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13187,7 +13374,12 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13216,7 +13408,12 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13263,7 +13460,12 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13322,7 +13524,12 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "_approx": true,
+    "has_data": false,
+    "rows": [],
+    "shielding_detected": false
+   },
    "params": [
     null
    ],
@@ -13353,7 +13560,11 @@
  "origin_pop_latency": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13384,7 +13595,11 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13415,7 +13630,11 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13476,7 +13695,11 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13507,7 +13730,11 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13531,7 +13758,11 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13555,7 +13786,11 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13579,7 +13814,11 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13603,7 +13842,11 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13643,7 +13886,11 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13683,7 +13930,11 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13714,7 +13965,11 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13745,7 +14000,11 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13776,7 +14035,11 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13807,7 +14070,11 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13838,7 +14105,11 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13869,7 +14140,11 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13900,7 +14175,11 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -13931,7 +14210,11 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -14006,7 +14289,11 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -14037,7 +14324,11 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -14086,7 +14377,11 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -14147,7 +14442,11 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "requires_group_c": false,
+    "rows": []
+   },
    "params": [
     [
      10
@@ -14180,7 +14479,10 @@
  "origin_status": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14209,7 +14511,10 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14238,7 +14543,10 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14297,7 +14605,10 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14326,7 +14637,10 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14348,7 +14662,10 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14370,7 +14687,10 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14392,7 +14712,10 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14414,7 +14737,10 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14452,7 +14778,10 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14490,7 +14819,10 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14519,7 +14851,10 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14548,7 +14883,10 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14577,7 +14915,10 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14606,7 +14947,10 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14635,7 +14979,10 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14664,7 +15011,10 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14693,7 +15043,10 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14722,7 +15075,10 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14783,7 +15139,10 @@
   },
   "only_allfields_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14812,7 +15171,10 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14841,7 +15203,10 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14888,7 +15253,10 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -14947,7 +15315,10 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": {
+    "has_data": false,
+    "rows": []
+   },
    "params": [
     null
    ],
@@ -25347,7 +25718,7 @@
  "security_conn_reuse": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25376,7 +25747,7 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25405,7 +25776,7 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25464,7 +25835,7 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25493,7 +25864,7 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25515,7 +25886,7 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25537,7 +25908,7 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25559,7 +25930,7 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25581,7 +25952,7 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25619,7 +25990,7 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25657,7 +26028,7 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25686,7 +26057,7 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25715,7 +26086,7 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25744,7 +26115,7 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25773,7 +26144,7 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25802,7 +26173,7 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25831,7 +26202,7 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25860,7 +26231,7 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25889,7 +26260,7 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25962,7 +26333,7 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -25991,7 +26362,7 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -26038,7 +26409,7 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -26097,7 +26468,7 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -26909,7 +27280,7 @@
  "security_req_size": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -26938,7 +27309,7 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -26967,7 +27338,7 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27026,7 +27397,7 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27055,7 +27426,7 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27077,7 +27448,7 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27099,7 +27470,7 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27121,7 +27492,7 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27143,7 +27514,7 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27181,7 +27552,7 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27219,7 +27590,7 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27248,7 +27619,7 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27277,7 +27648,7 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27306,7 +27677,7 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27335,7 +27706,7 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27364,7 +27735,7 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27393,7 +27764,7 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27422,7 +27793,7 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27451,7 +27822,7 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27524,7 +27895,7 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27553,7 +27924,7 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27600,7 +27971,7 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27659,7 +28030,7 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27690,7 +28061,7 @@
  "security_top_ips": {
   "active_cross_full": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27719,7 +28090,7 @@
   },
   "active_missing_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27748,7 +28119,7 @@
   },
   "active_missing_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27807,7 +28178,7 @@
   },
   "coverage_60pct": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27836,7 +28207,7 @@
   },
   "days_alt_flat": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27858,7 +28229,7 @@
   },
   "days_alt_nested": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27880,7 +28251,7 @@
   },
   "days_and_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27902,7 +28273,7 @@
   },
   "days_preferred": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27924,7 +28295,7 @@
   },
   "days_residual_hours": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -27962,7 +28333,7 @@
   },
   "durable_ready": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28000,7 +28371,7 @@
   },
   "hours_full_72h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28029,7 +28400,7 @@
   },
   "missing_hour_beyond_heal_cap": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28058,7 +28429,7 @@
   },
   "missing_hour_empty_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28087,7 +28458,7 @@
   },
   "missing_hour_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28116,7 +28487,7 @@
   },
   "missing_hour_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28145,7 +28516,7 @@
   },
   "missing_hour_nonempty_allfields": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28174,7 +28545,7 @@
   },
   "missing_hour_recent_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28203,7 +28574,7 @@
   },
   "missing_hour_recent_no_marker": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28232,7 +28603,7 @@
   },
   "missing_hour_recent_sentinel": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28305,7 +28676,7 @@
   },
   "partial_start_day": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28334,7 +28705,7 @@
   },
   "partial_start_mid_hour": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28381,7 +28752,7 @@
   },
   "win_30h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],
@@ -28440,7 +28811,7 @@
   },
   "win_50h": {
    "executes": 1,
-   "outcome": null,
+   "outcome": [],
    "params": [
     null
    ],

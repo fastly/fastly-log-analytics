@@ -1325,7 +1325,7 @@ class _TopNRollupMixin:
             return None
         sql = f"SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh FROM read_parquet([{paths_sql}]) GROUP BY ip ORDER BY mh DESC LIMIT 10"
         rows = self._exec_rollup(sql, tag="security_top_ips_rollup")
-        return [{"ip": r[0], "max_header": int(r[1] or 0)} for r in rows] if rows else None
+        return [{"ip": r[0], "max_header": int(r[1] or 0)} for r in rows] if rows is not None else None
 
     def execute_ip_spread_rollups(
         self, fields: list[str], start_time: str | None, end_time: str | None, *, _phase_log: list[dict] | None = None
