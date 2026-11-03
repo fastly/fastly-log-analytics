@@ -456,7 +456,7 @@ def query_clickhouse_aggregates_batch(
                 edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
                 fence = visible_publication_fence_sql("request_aggregate")
 
-                def _build_hourly_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+                def _build_hourly_fast_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
                     sub_params = {k: v for k, v in h_params.items() if not k.startswith("dim_")}
                     sub_placeholders: list[str] = []
                     for idx, dim in enumerate(dims_subset):
@@ -465,48 +465,101 @@ def query_clickhouse_aggregates_batch(
                         sub_placeholders.append(f"{{{k}:String}}")
                     dim_in = f"dimension IN ({', '.join(sub_placeholders)})"
                     union_sql = (
-                        "SELECT dimension, value, sum(request_count) AS request_count FROM request_aggregates_1h "
+                        "SELECT dimension, value, request_count FROM request_aggregates_1h "
                         f"WHERE service_id={{service_id:String}} AND {dim_in} "
-                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
-                        "GROUP BY dimension, value"
+                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
                     )
                     if edge_clause is not None:
                         union_sql += (
-                            " UNION ALL SELECT dimension, value, sum(request_count) AS request_count FROM request_aggregates "
-                            f"WHERE service_id={{service_id:String}} AND {dim_in} AND {edge_clause} AND {fence} "
-                            "GROUP BY dimension, value"
+                            " UNION ALL SELECT dimension, value, request_count FROM request_aggregates "
+                            f"WHERE service_id={{service_id:String}} AND {dim_in} AND {edge_clause} AND {fence}"
                         )
                     sql = (
-                        f"SELECT dimension, value, sum(request_count) AS aggregate_count FROM ({union_sql}) "
+                        "SELECT dimension, value, sum(request_count) AS aggregate_count, "
+                        "sum(sum(request_count)) OVER (PARTITION BY dimension) AS total_count "
+                        f"FROM ({union_sql}) "
                         "GROUP BY dimension, value "
                         "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
                         "LIMIT 10 BY dimension"
                     )
                     return sql, sub_params
 
-                dim_in_all = f"dimension IN ({', '.join(dim_placeholders)})"
-                tot_union_sql = (
-                    "SELECT dimension, sum(request_count) AS request_count FROM request_aggregates_1h "
-                    f"WHERE service_id={{service_id:String}} AND {dim_in_all} "
-                    "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
-                    "GROUP BY dimension"
-                )
-                if edge_clause is not None:
-                    tot_union_sql += (
-                        " UNION ALL SELECT dimension, sum(request_count) AS request_count FROM request_aggregates "
-                        f"WHERE service_id={{service_id:String}} AND {dim_in_all} AND {edge_clause} AND {fence} "
-                        "GROUP BY dimension"
-                    )
-                h_totals_sql = (
-                    f"SELECT dimension, sum(request_count) AS total_count FROM ({tot_union_sql}) GROUP BY dimension"
-                )
+                def _build_hourly_heavy_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+                    sub_params = {k: v for k, v in h_params.items() if not k.startswith("dim_")}
+                    branches: list[str] = []
+                    for idx, dim in enumerate(dims_subset):
+                        k = f"hdim_{idx}"
+                        sub_params[k] = dim
+                        u_sql = (
+                            "SELECT value, request_count FROM request_aggregates_1h "
+                            f"WHERE service_id={{service_id:String}} AND dimension={{{k}:String}} "
+                            "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+                        )
+                        if edge_clause is not None:
+                            u_sql += (
+                                " UNION ALL SELECT value, request_count FROM request_aggregates "
+                                f"WHERE service_id={{service_id:String}} AND dimension={{{k}:String}} AND {edge_clause} AND {fence}"
+                            )
+                        branches.append(
+                            f"(SELECT {{{k}:String}} AS dimension, value, sum(request_count) AS aggregate_count "
+                            f"FROM ({u_sql}) GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10)"
+                        )
+                    return " UNION ALL ".join(branches), sub_params
+
+                heavy_set = {"client_ip", "ttl", "age", "asn", "city"}
+                heavy_dims = tuple(d for d in unique_dims if d in heavy_set)
+                fast_dims = tuple(d for d in unique_dims if d not in heavy_set)
                 try:
-                    h_top_sql, h_top_params = _build_hourly_top_query(tuple(unique_dims))
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                        totals_fut = pool.submit(contextvars.copy_context().run, client.execute, h_totals_sql, h_params)
-                        top_fut = pool.submit(contextvars.copy_context().run, client.execute, h_top_sql, h_top_params)
-                        totals_rows = totals_fut.result()
-                        top_rows = top_fut.result()
+                    if fast_dims and heavy_dims:
+                        h_fast_sql, h_fast_params = _build_hourly_fast_query(fast_dims)
+                        h_heavy_sql, h_heavy_params = _build_hourly_heavy_query(heavy_dims)
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                            fast_fut = pool.submit(
+                                contextvars.copy_context().run, client.execute, h_fast_sql, h_fast_params
+                            )
+                            heavy_fut = pool.submit(
+                                contextvars.copy_context().run, client.execute, h_heavy_sql, h_heavy_params
+                            )
+                            fast_res = list(fast_fut.result())
+                            heavy_res = list(heavy_fut.result())
+                        top_rows = fast_res + heavy_res
+                        dim_sums: dict[str, int] = {}
+                        for r in fast_res:
+                            d = str(r.get("dimension") or "")
+                            if d:
+                                dim_sums[d] = dim_sums.get(d, 0) + int(r.get("aggregate_count") or 0)
+                        seen_tot_dims: set[str] = set()
+                        totals_rows = []
+                        for r in fast_res:
+                            d = str(r.get("dimension") or "")
+                            if d and d not in seen_tot_dims:
+                                seen_tot_dims.add(d)
+                                tot_val = (
+                                    int(r["total_count"]) if r.get("total_count") is not None else dim_sums.get(d, 0)
+                                )
+                                totals_rows.append({"dimension": d, "total_count": tot_val})
+                        max_tot = max((int(r.get("total_count") or 0) for r in totals_rows), default=0)
+                        for d in heavy_dims:
+                            totals_rows.append({"dimension": d, "total_count": max_tot})
+                    else:
+                        h_fast_sql, h_fast_params = _build_hourly_fast_query(tuple(unique_dims))
+                        fast_res = list(client.execute(h_fast_sql, h_fast_params))
+                        top_rows = fast_res
+                        dim_sums = {}
+                        for r in fast_res:
+                            d = str(r.get("dimension") or "")
+                            if d:
+                                dim_sums[d] = dim_sums.get(d, 0) + int(r.get("aggregate_count") or 0)
+                        seen_tot_dims = set()
+                        totals_rows = []
+                        for r in fast_res:
+                            d = str(r.get("dimension") or "")
+                            if d and d not in seen_tot_dims:
+                                seen_tot_dims.add(d)
+                                tot_val = (
+                                    int(r["total_count"]) if r.get("total_count") is not None else dim_sums.get(d, 0)
+                                )
+                                totals_rows.append({"dimension": d, "total_count": tot_val})
                 except ClickHouseError:
                     totals_rows = []
                     top_rows = []

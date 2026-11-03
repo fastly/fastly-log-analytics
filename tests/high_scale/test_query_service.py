@@ -2838,7 +2838,7 @@ def test_hourly_rollup_stitching_and_fallback() -> None:
         client,
         service_id="svc-1h",
         domain="request",
-        dimensions=["country", "pop"],
+        dimensions=["country", "client_ip"],
         start=st,
         end=et,
         watermark=wm,

@@ -96,7 +96,7 @@ class ClickHouseClient:
         self._state_lock = threading.Lock()
         self._closed = False
         self._active = 0
-        self._pub_fence_cache: dict[str, tuple[float, bool]] = {}
+        self._pub_fence_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
         self._pub_fence_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=httpx.URL(
@@ -112,30 +112,37 @@ class ClickHouseClient:
             trust_env=False,
         )
 
-    def _can_elide_publication_fence(self, service_id: str) -> bool:
+    def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
         if isinstance(self._http._transport, httpx.MockTransport):
-            return False
+            return None
         now = time.monotonic()
         with self._pub_fence_lock:
             cached = self._pub_fence_cache.get(service_id)
-            if cached is not None and (now - cached[0]) < 5.0:
+            if cached is not None and (now - cached[0]) < 10.0:
                 return cached[1]
+        pending_map: dict[str, tuple[str, ...]] | None
         try:
             check_form = {
                 "query": (
-                    "SELECT countIf(visibility_state != 'visible') AS non_visible "
-                    "FROM high_scale_batch_publications "
-                    "WHERE service_id = {service_id:String}"
+                    "SELECT domain, batch_id "
+                    "FROM high_scale_batch_publications FINAL "
+                    "WHERE service_id = {service_id:String} AND publication_state != 'visible'"
                 ),
                 "param_service_id": _parameter(service_id),
             }
             rows = self._request("execute", data=check_form, settings=None)
-            all_visible = bool(rows and int(rows[0].get("non_visible", 1)) == 0)
+            by_dom: dict[str, list[str]] = {}
+            for r in rows or []:
+                dom = str(r.get("domain") or "")
+                bid = str(r.get("batch_id") or "")
+                if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
+                    by_dom.setdefault(dom, []).append(bid)
+            pending_map = {k: tuple(v) for k, v in by_dom.items()}
         except Exception:
-            all_visible = False
+            pending_map = None
         with self._pub_fence_lock:
-            self._pub_fence_cache[service_id] = (time.monotonic(), all_visible)
-        return all_visible
+            self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
+        return pending_map
 
     def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
         """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
@@ -156,11 +163,31 @@ class ClickHouseClient:
             isinstance(svc_id, str)
             and svc_id
             and "high_scale_batch_publications FINAL" in sql
-            and self._can_elide_publication_fence(svc_id)
+            and (pending_map := self._get_pending_batches(svc_id)) is not None
         ):
+
+            def _replace_fence(match: re.Match[str]) -> str:
+                where_body = match.group(1)
+                dom: str | None = None
+                if m_lit := re.search(r"domain\s*=\s*'([a-z0-9_]+)'", where_body):
+                    dom = m_lit.group(1)
+                elif m_par := re.search(r"domain\s*=\s*\{([a-zA-Z0-9_]+):String\}", where_body):
+                    dom = str((params or {}).get(m_par.group(1)) or "")
+                pending_ids = (
+                    pending_map.get(dom, ())
+                    if dom
+                    else tuple(sorted({bid for bids in pending_map.values() for bid in bids}))
+                )
+                if not pending_ids:
+                    return "1=1"
+                if len(pending_ids) <= 100:
+                    quoted = ", ".join(f"'{bid}'" for bid in pending_ids)
+                    return f"batch_id NOT IN ({quoted})"
+                return match.group(0)
+
             sql = re.sub(
-                r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+[^()]+?\)",
-                "1=1",
+                r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+([^()]+?)\)",
+                _replace_fence,
                 sql,
             )
         form = {"query": sql}

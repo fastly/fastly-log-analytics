@@ -709,7 +709,7 @@ def dashboard_aggregates(
     end = _range_value(end_time)
     norm_interval = _normalize_chart_interval(req.chart_interval)
     if (
-        req.chart_interval is None
+        (req.chart_interval is None or "chart_interval" not in getattr(req, "model_fields_set", set()))
         and is_real_ch
         and start is not None
         and end is not None
