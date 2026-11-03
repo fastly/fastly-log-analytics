@@ -62,7 +62,7 @@ Fastly Log Analytics supports two primary deployment topologies sized for differ
 
 ### Measured Standard-mode capacity (4 vCPU / 16 GB)
 
-Tested on a fresh install (no history) with a live synthetic feed stepped up without clearing data, log period 10 s, one analyst loading the pages every 30 s. Page times are API time-to-last-byte measured on the server; a browser adds network and render time (about 1–5 s usable at 1,000 RPS in our browser pass). Larger machines are not yet measured.
+Tested on a fresh install (no history) with a live synthetic feed stepped up without clearing data, log period 10 s, one analyst loading the pages every 30 s. Page times are API time-to-last-byte measured on the server; a browser adds network and render time (about 1–5 s usable at 1,000 RPS in our browser pass). Larger machines and log periods other than 10 s are not yet measured. On a live Fastly service, log-setting changes (including the log period) take a few minutes to propagate, so these figures assume a steady period.
 
 | Log rate | Ingest | Lag p95 | Dashboard | Network | Origin / Security / Performance |
 |---|---|---|---|---|---|
