@@ -95,7 +95,7 @@ _DISTANCE_KM = (
     "+ cos(radians(pop_lat)) * cos(radians(lat)) * pow(sin(radians(lon - pop_lon) / 2), 2)))"
 )
 _IMPOSSIBLE_DISTANCE = (
-    f"multiIf(rtt_min IS NULL OR lat IS NULL OR lon IS NULL, 0, "
+    f"multiIf(rtt_min IS NULL OR rtt_min >= 200000 OR lat IS NULL OR lon IS NULL, 0, "
     f"ifNull({_DISTANCE_KM} > (rtt_min / 1000.0 * 100.0 + 150.0), 0))"
 )
 _TUNNEL = "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 0)"
@@ -320,14 +320,19 @@ def _ngwaf_configured(service: HighScaleService) -> bool:
 def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
     from backend.utils.bot_sources import get_bot_regex_pattern
 
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     pattern = get_bot_regex_pattern(500)
     prefilter = " AND match(custom_fields['ua'], {bot_pattern:String})" if pattern else ""
+    where_kw = "PREWHERE" if is_real_ch else "WHERE"
+    post_filter = f" WHERE 1=1{prefilter}" if is_real_ch else prefilter
     rows = _run(
         service,
         scope,
         "wellknown_bots",
         f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
-        f"WHERE __WHERE__ AND custom_fields['ua'] != '' AND client_ip != ''{prefilter} "
+        f"{where_kw} __WHERE__ AND custom_fields['ua'] != '' AND client_ip != ''{post_filter} "
         "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
         **({"bot_pattern": pattern} if pattern else {}),
     )
@@ -337,11 +342,19 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
 def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
     from backend.repositories.security import summarize_bot_efficiency_rows
 
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    ref_clause = (
+        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' WHERE "
+        if is_real_ch
+        else "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND "
+    )
     rows = _run(
         service,
         scope,
         "bot_efficiency",
-        """
+        f"""
         WITH ua_all AS (
             SELECT custom_fields['ua'] AS key, count() AS cnt,
                    ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
@@ -363,8 +376,7 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                               ''),
                            ''),
                        extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
-            FROM request_facts WHERE __WHERE__ AND client_ip != ''
-              AND ((custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
+            {ref_clause}((custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
                    OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
                    OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0)
               AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
@@ -388,6 +400,80 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         (str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)) for r in rows
     )
     return summarize_bot_efficiency_rows(tagged)
+
+
+def _unpack_summap(val: Any) -> list[tuple[Any, int]]:
+    if isinstance(val, Mapping):
+        return [(k, int(v)) for k, v in val.items()]
+    if isinstance(val, (list, tuple)) and len(val) == 2 and isinstance(val[0], (list, tuple)):
+        return [(k, int(v)) for k, v in zip(val[0], val[1], strict=False)]
+    return []
+
+
+_COMBINED_OVERVIEW_KEYS = (
+    "fingerprint_coverage",
+    "req_size_dist",
+    "ipv6_adoption",
+    "proxy_dist",
+    "conn_reuse_dist",
+)
+
+
+def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_key: str | None) -> dict[str, Any]:
+    h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
+    c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
+    rows = _run(
+        service,
+        scope,
+        "overview_5in1",
+        f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
+        "count() AS total_rows, "
+        "countIf(custom_fields['tls_ciphers_sha'] != '') AS tls_populated, "
+        f"countIf({_IS_IPV6}) AS ipv6_rows, "
+        "sumMap(if(h IS NOT NULL, [h_b], []), if(h IS NOT NULL, [toUInt64(1)], [])) AS h_map, "
+        "sumMap(if(c IS NOT NULL AND c > 0, [c_b], []), if(c IS NOT NULL AND c > 0, [toUInt64(1)], [])) AS c_map, "
+        "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map "
+        "FROM (SELECT event_timestamp, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
+        "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
+        f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b "
+        "FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts",
+    )
+    total_rows = 0
+    tls_pop = 0
+    ipv6_list: list[dict[str, Any]] = []
+    h_counts: dict[str, int] = defaultdict(int)
+    c_counts: dict[str, int] = defaultdict(int)
+    p_counts: dict[str, int] = defaultdict(int)
+    for r in rows:
+        tr = int(r.get("total_rows") or 0)
+        total_rows += tr
+        tls_pop += int(r.get("tls_populated") or 0)
+        if tr > 0:
+            ipv6_list.append({"time": _sec_iso(r["bucket_ts"]), "pct": float(r.get("ipv6_rows") or 0) * 100.0 / tr})
+        for k, v in _unpack_summap(r.get("h_map")):
+            if k:
+                h_counts[str(k)] += v
+        for k, v in _unpack_summap(r.get("c_map")):
+            if k:
+                c_counts[str(k)] += v
+        for k, v in _unpack_summap(r.get("p_map")):
+            if k:
+                p_counts[str(k)] += v
+    h_order = [*(lbl for _, lbl in _REQ_HEADER_BUCKETS), _REQ_HEADER_LAST]
+    c_order = [*(lbl for _, lbl in _CONN_REUSE_BUCKETS), _CONN_REUSE_LAST]
+    bundle = {
+        "fingerprint_coverage": {"tls_ciphers_sha": (tls_pop / total_rows) if total_rows > 0 else 0.0},
+        "req_size_dist": [{"bucket": b, "count": h_counts[b]} for b in h_order if h_counts.get(b, 0) > 0],
+        "conn_reuse_dist": [{"bucket": b, "count": c_counts[b]} for b in c_order if c_counts.get(b, 0) > 0],
+        "ipv6_adoption": ipv6_list,
+        "proxy_dist": [
+            {"type": k, "count": v} for k, v in sorted(p_counts.items(), key=lambda kv: kv[1], reverse=True) if v > 0
+        ],
+    }
+    if sec_base_key is not None:
+        for k, val in bundle.items():
+            _security_memo.cache[f"{sec_base_key}:{k}"] = val
+    return bundle
 
 
 def _maybe_mask(ip: Any, mask_ips: bool) -> Any:
@@ -464,14 +550,45 @@ def security_aggregates(
         def want(name: str) -> bool:
             return sections is None or name in sections
 
+        wanted_overview = [
+            k
+            for k in _COMBINED_OVERVIEW_KEYS
+            if want(k) and (sec_base_key is None or f"{sec_base_key}:{k}" not in _security_memo.cache)
+        ]
+        use_combined_overview = is_real_ch and len(wanted_overview) >= 2
         candidates: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
             ("tls_fingerprints", want("tls_fingerprints"), lambda: _tls_fingerprints(service, scope)),
-            ("fingerprint_coverage", want("fingerprint_coverage"), lambda: _fingerprint_coverage(service, scope)),
-            ("req_size_dist", want("req_size_dist"), lambda: _req_size_dist(service, scope)),
+            (
+                "_combined_overview",
+                use_combined_overview,
+                lambda: _sec_combined_overview(service, scope, sec_base_key),
+            ),
+            (
+                "fingerprint_coverage",
+                want("fingerprint_coverage") and not use_combined_overview,
+                lambda: _fingerprint_coverage(service, scope),
+            ),
+            (
+                "req_size_dist",
+                want("req_size_dist") and not use_combined_overview,
+                lambda: _req_size_dist(service, scope),
+            ),
             ("top_ips_header", want("top_ips_header"), lambda: _top_ips_header(service, scope, mask_ips)),
-            ("ipv6_adoption", want("ipv6_adoption"), lambda: _ipv6_adoption(service, scope)),
-            ("proxy_dist", want("proxy_dist"), lambda: _proxy_dist(service, scope)),
-            ("conn_reuse_dist", want("conn_reuse_dist"), lambda: _conn_reuse_dist(service, scope)),
+            (
+                "ipv6_adoption",
+                want("ipv6_adoption") and not use_combined_overview,
+                lambda: _ipv6_adoption(service, scope),
+            ),
+            (
+                "proxy_dist",
+                want("proxy_dist") and not use_combined_overview,
+                lambda: _proxy_dist(service, scope),
+            ),
+            (
+                "conn_reuse_dist",
+                want("conn_reuse_dist") and not use_combined_overview,
+                lambda: _conn_reuse_dist(service, scope),
+            ),
             ("verified_bots_ts", want("verified_bots_ts"), lambda: _verified_bots_ts(service, scope, bucket_seconds)),
             (
                 "ngwaf_configured",
@@ -493,7 +610,7 @@ def security_aggregates(
             ("_top_bots", want("top_bots"), lambda: _top_bots(service, scope)),
             ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips)),
         )
-        tasks = [(k, _wrap_sec(k, fn)) for k, w, fn in candidates if w]
+        tasks = [(k, fn if k == "_combined_overview" else _wrap_sec(k, fn)) for k, w, fn in candidates if w]
 
         trace = HighScaleSections(service.service_id, "security")
 
@@ -516,6 +633,10 @@ def security_aggregates(
                 res.update(bots=val["bots"], ngwaf_bots=val["ngwaf_bots"])
             elif k == "_proxies":
                 res.update(val)
+            elif k == "_combined_overview":
+                for ok in _COMBINED_OVERVIEW_KEYS:
+                    if want(ok):
+                        res[ok] = val[ok]
             else:
                 res[k] = val
         res["section_timings"] = trace.timings()
@@ -685,73 +806,93 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             return cached
 
     if is_real_ch:
-
-        def _q_stats():
-            return _run(
-                service,
-                scope,
-                "proxy_stats",
-                "SELECT uniqExact(ip) AS active_proxies_count, "
-                "count() AS total_requests_count, "
-                "uniqExactIf(ip, is_imp) AS distance_mismatches_count "
-                f"FROM (SELECT ip, {_TUNNEL} AS is_tunnel, {_IMPOSSIBLE_DISTANCE} AS is_imp "
-                "FROM (SELECT client_ip AS ip, toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-                "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
-                f"{_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
-                "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '')) "
-                "WHERE is_tunnel OR is_imp",
-            )
-
-        def _q_quality():
-            return _run(
-                service,
-                scope,
-                "traffic_quality",
-                "SELECT multiIf(rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection', "
-                "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy', "
-                "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile', 'Direct Connection') AS type, count() AS count "
-                "FROM (SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt FROM request_facts PREWHERE __WHERE__) "
-                "GROUP BY type ORDER BY count DESC",
-            )
-
-        def _q_isps():
-            return _run(
-                service,
-                scope,
-                "suspicious_isps",
-                "SELECT asn, count() AS count FROM ("
-                "SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-                "toInt64OrNull(custom_fields['asn']) AS asn "
-                "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '' AND custom_fields['tcp_rtt'] != ''"
-                f") WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10",
-            )
-
-        def _q_clients():
-            return _run(
-                service,
-                scope,
-                "active_clients",
-                "SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, distance_km, "
-                "pop, lat AS client_lat, lon AS client_lon, pop_lat, pop_lon, impossible_distance, "
-                "multiIf(impossible_distance, 'High', is_tunnel, 'High', is_med, 'Medium', 'Low') AS risk_level, country, city "
-                "FROM (SELECT ip, asn, rtt_min, tcp_rtt, pop, lat, lon, pop_lat, pop_lon, country, city, "
-                "distance_km, ifNull(lat IS NOT NULL AND lon IS NOT NULL AND distance_km > (rtt_min / 1000.0 * 100.0 + 150.0), 0) AS impossible_distance, "
-                "is_tunnel, is_med "
-                f"FROM (SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
-                "rtt_min, tcp_rtt, lat, lon, asn, pop_lat, pop_lon, "
-                f"{_DISTANCE_KM} AS distance_km, {_TUNNEL} AS is_tunnel, "
-                "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
-                "FROM (SELECT client_ip, custom_fields['pop'], country, custom_fields['city'], "
-                "toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-                "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
-                f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
-                "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '') WHERE rtt_min IS NOT NULL)) "
-                "WHERE impossible_distance OR is_med "
-                "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
-            )
+        comb_rows = _run(
+            service,
+            scope,
+            "proxies_combined",
+            "SELECT "
+            "uniqExactIf(ip, is_tunnel OR is_imp) AS active_proxies_count, "
+            "countIf(is_tunnel OR is_imp) AS total_requests_count, "
+            "uniqExactIf(ip, is_imp) AS distance_mismatches_count, "
+            "countIf(is_tunnel) AS q_tunnel, "
+            "countIf(NOT is_tunnel AND tcp_rtt > 0 AND rtt_min IS NOT NULL AND rtt_min / tcp_rtt < 0.7) AS q_wifi, "
+            "count() AS q_total, "
+            "sumMap(if(is_tunnel, [ifNull(asn, -1)], []), if(is_tunnel, [toUInt64(1)], [])) AS isp_map, "
+            "groupArraySortedIf(100)("
+            "tuple("
+            "multiIf(is_imp OR is_tunnel, toUInt8(0), is_med, toUInt8(1), toUInt8(2)), "
+            "-ifNull(distance_km, -1e9), "
+            "ip, asn, rtt_min / 1000.0, tcp_rtt / 1000.0, distance_km, pop, lat, lon, pop_lat, pop_lon, "
+            "toUInt8(is_imp), multiIf(is_imp, 'High', is_tunnel, 'High', is_med, 'Medium', 'Low'), country, city"
+            "), rtt_min IS NOT NULL AND (is_imp OR is_med)"
+            ") AS top_clients "
+            "FROM ("
+            "SELECT ip, pop, country, city, rtt_min, tcp_rtt, lat, lon, asn, pop_lat, pop_lon, "
+            "distance_km, is_tunnel, is_med, "
+            "ifNull(rtt_min < 200000 AND lat IS NOT NULL AND lon IS NOT NULL AND distance_km > (rtt_min / 1000.0 * 100.0 + 150.0), 0) AS is_imp "
+            "FROM ("
+            "SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
+            "rtt_min, tcp_rtt, lat, lon, asn, pop_lat, pop_lon, "
+            f"if(rtt_min IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2)), {_DISTANCE_KM}, NULL) AS distance_km, "
+            f"{_TUNNEL} AS is_tunnel, "
+            "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
+            "FROM ("
+            "SELECT client_ip, custom_fields['pop'], country, custom_fields['city'], "
+            "toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+            "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+            "toFloat64OrNull(custom_fields['lat']) AS lat, "
+            "toFloat64OrNull(custom_fields['lon']) AS lon, "
+            f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
+            "FROM request_facts PREWHERE __WHERE__"
+            ")))",
+        )
+        comb = comb_rows[0] if comb_rows else {}
+        stat = {
+            "active_proxies_count": int(comb.get("active_proxies_count") or 0),
+            "total_requests_count": int(comb.get("total_requests_count") or 0),
+            "distance_mismatches_count": int(comb.get("distance_mismatches_count") or 0),
+        }
+        q_tunnel = int(comb.get("q_tunnel") or 0)
+        q_wifi = int(comb.get("q_wifi") or 0)
+        q_total = int(comb.get("q_total") or 0)
+        q_direct = max(0, q_total - q_tunnel - q_wifi)
+        q_candidates: list[dict[str, Any]] = [
+            {"type": "Direct Connection", "count": q_direct},
+            {"type": "WiFi / Mobile", "count": q_wifi},
+            {"type": "Active Tunnel / Proxy", "count": q_tunnel},
+        ]
+        quality_rows = sorted(
+            [r for r in q_candidates if int(r["count"]) > 0],
+            key=lambda x: int(x["count"]),
+            reverse=True,
+        )
+        isp_rows = [
+            {"asn": None if int(a) == -1 else int(a), "count": int(cnt)}
+            for a, cnt in sorted(_unpack_summap(comb.get("isp_map")), key=lambda kv: kv[1], reverse=True)[:10]
+            if cnt > 0
+        ]
+        client_rows = []
+        for item in comb.get("top_clients") or []:
+            seq = list(item.values()) if isinstance(item, Mapping) else item
+            if len(seq) >= 16:
+                client_rows.append(
+                    {
+                        "ip": seq[2],
+                        "asn": seq[3],
+                        "rtt_min_ms": seq[4],
+                        "tcp_rtt_ms": seq[5],
+                        "distance_km": seq[6],
+                        "pop": seq[7],
+                        "client_lat": seq[8],
+                        "client_lon": seq[9],
+                        "pop_lat": seq[10],
+                        "pop_lon": seq[11],
+                        "impossible_distance": seq[12],
+                        "risk_level": seq[13],
+                        "country": seq[14],
+                        "city": seq[15],
+                    }
+                )
     else:
 
         def _q_stats():
@@ -803,11 +944,13 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
                 "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
             )
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
-        futs = [pool.submit(contextvars.copy_context().run, fn) for fn in (_q_stats, _q_quality, _q_isps, _q_clients)]
-        stats, quality_rows, isp_rows, client_rows = [f.result() for f in futs]
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
+            futs = [
+                pool.submit(contextvars.copy_context().run, fn) for fn in (_q_stats, _q_quality, _q_isps, _q_clients)
+            ]
+            stats, quality_rows, isp_rows, client_rows = [f.result() for f in futs]
 
-    stat = stats[0] if stats else {}
+        stat = stats[0] if stats else {}
     raw_clients = [
         {
             "ip": r["ip"],

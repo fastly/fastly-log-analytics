@@ -92,6 +92,18 @@ def _fast_model_hit(memo_key: str) -> Any | None:
 
 
 from backend.high_scale._common import optional_int as _finite_int
+
+
+def _asn_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if (parsed := _finite_int(value)) is not None:
+        return str(parsed)
+    return ""
+
+
 from backend.models.analytics import (
     NetworkBundleRequest,
     NetworkBundleResponse,
@@ -223,8 +235,10 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     )
     shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
     if is_real_ch:
+        shield_prewhere = f"{_BASE_WHERE} AND custom_fields['prid'] != ''"
         shield_rows = service.client.execute(
-            f"SELECT count() AS n FROM ({_ch_fact_query('1', shield_where, limit=1)})",
+            f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} "
+            "WHERE lower(custom_fields['edge']) IN ('false', '0') LIMIT 1)",
             {"service_id": service.service_id, "start": start, "end": end},
         )
         if not shield_rows or int(shield_rows[0]["n"]) == 0:
@@ -416,26 +430,73 @@ def network_health(
         err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch and not map_only:
-            rtt_prewhere = f"{rtt_where} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
-            speed_sql = (
-                f"SELECT {_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt "
-                f"FROM request_facts PREWHERE {rtt_prewhere} AND custom_fields['asn'] != '' "
-                f"WHERE {_ASN} IS NOT NULL GROUP BY asn, c_speed ORDER BY cnt DESC LIMIT {top_n * 20}"
+            rtt_prewhere = (
+                f"{_BASE_WHERE}{filter_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             )
-            raw_speed_rows = trace.run("speed", lambda: service.client.execute(speed_sql, params), source="fact")
-            asn_totals: dict[int, int] = {}
-            for r in raw_speed_rows:
-                if r["asn"] is not None:
-                    a_int = int(r["asn"])
-                    asn_totals[a_int] = asn_totals.get(a_int, 0) + int(r["cnt"])
-            top_asn_ints = sorted(asn_totals, key=lambda a: asn_totals[a], reverse=True)[:top_n]
+            top_asn_ints: list[int] = []
+            raw_speed_rows: list[dict[str, Any]] | None = None
+            if not filter_sql and start is not None and end is not None:
+                from backend.high_scale.aggregate_query import _hourly_edge_time_clause, can_use_hourly_rollup
+
+                hourly_bounds = can_use_hourly_rollup(service.client, "request", start, end)
+                agg_fence = visible_publication_fence_sql(
+                    "request_aggregate", client=service.client, service_id=service.service_id
+                )
+                if hourly_bounds is not None:
+                    h_start, h_end = hourly_bounds
+                    edge_clause = _hourly_edge_time_clause(start, end, h_start, h_end)
+                    union_sql = (
+                        "SELECT value AS asn_s, sum(request_count) AS cnt FROM request_aggregates_1h "
+                        "WHERE service_id={service_id:String} AND dimension='asn' AND value != '' "
+                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} GROUP BY asn_s"
+                    )
+                    if edge_clause is not None:
+                        union_sql += (
+                            f" UNION ALL SELECT value AS asn_s, sum(request_count) AS cnt FROM request_aggregates "
+                            f"WHERE service_id={{service_id:String}} AND dimension='asn' AND value != '' AND {edge_clause} AND {agg_fence} GROUP BY asn_s"
+                        )
+                    top_asn_sql = (
+                        f"SELECT toInt32OrNull(asn_s) AS asn, sum(cnt) AS cnt FROM ({union_sql}) "
+                        f"GROUP BY asn HAVING asn IS NOT NULL ORDER BY cnt DESC LIMIT {top_n}"
+                    )
+                    top_asn_rows = trace.run(
+                        "top_asns",
+                        lambda: service.client.execute(top_asn_sql, {**params, "h_start": h_start, "h_end": h_end}),
+                        source="projection",
+                    )
+                else:
+                    top_asn_sql = (
+                        f"SELECT toInt32OrNull(value) AS asn, sum(request_count) AS cnt FROM request_aggregates "
+                        f"WHERE service_id={{service_id:String}} AND dimension='asn' AND value != '' "
+                        f"AND bucket_start >= toStartOfMinute({{start:DateTime64(3)}}) AND bucket_start < {{end:DateTime64(3)}} AND {agg_fence} "
+                        f"GROUP BY asn HAVING asn IS NOT NULL ORDER BY cnt DESC LIMIT {top_n}"
+                    )
+                    top_asn_rows = trace.run(
+                        "top_asns",
+                        lambda: service.client.execute(top_asn_sql, params),
+                        source="projection",
+                    )
+                top_asn_ints = [int(r["asn"]) for r in top_asn_rows if r.get("asn") is not None][:top_n]
+            if not top_asn_ints:
+                speed_sql = (
+                    f"SELECT {_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt "
+                    f"FROM request_facts PREWHERE {rtt_prewhere} AND custom_fields['asn'] != '' "
+                    f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn, c_speed ORDER BY cnt DESC LIMIT {top_n * 20}"
+                )
+                raw_speed_rows = trace.run("speed", lambda: service.client.execute(speed_sql, params), source="fact")
+                asn_totals: dict[int, int] = {}
+                for r in raw_speed_rows:
+                    if r["asn"] is not None:
+                        a_int = int(r["asn"])
+                        asn_totals[a_int] = asn_totals.get(a_int, 0) + int(r["cnt"])
+                top_asn_ints = sorted(asn_totals, key=lambda a: asn_totals[a], reverse=True)[:top_n]
             asn_in_filter = (
                 f" AND custom_fields['asn'] IN ({', '.join(repr(str(a)) for a in top_asn_ints)})"
                 if top_asn_ints
                 else " AND 1=0"
             )
-            speed_rows = [r for r in raw_speed_rows if r.get("c_speed")]
-            fast_queries: tuple[tuple[str, str], ...] = (
+            combine_metro_in_map = map_asn == "all"
+            fast_queries_list: list[tuple[str, str]] = [
                 (
                     "heatmap",
                     f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
@@ -444,33 +505,40 @@ def network_health(
                     f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
                     f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr} "
                     f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                    f"WHERE {_ASN} IS NOT NULL GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
+                    f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
                 ),
                 (
                     "map",
-                    f"SELECT country AS country, custom_fields['city'] AS city, "
+                    f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
                     "any(toFloat64OrNull(custom_fields['lat'])) AS lat, any(toFloat64OrNull(custom_fields['lon'])) AS lon, "
                     f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
                     f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
                     f"FROM request_facts PREWHERE {rtt_prewhere} AND country != ''{map_asn_sql} "
-                    "GROUP BY country, city, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 50 BY bucket_ts LIMIT 15000",
-                ),
-                (
-                    "metro",
-                    f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
-                    f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs "
-                    f"FROM request_facts PREWHERE {rtt_prewhere} AND country != '' "
-                    "GROUP BY country, city, region, metro ORDER BY total_reqs DESC LIMIT 200",
+                    f"WHERE {_RTT} > 0 "
+                    "GROUP BY country, city, region, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 100 BY bucket_ts LIMIT 20000",
                 ),
                 (
                     "percentiles",
-                    f"SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99 "
+                    f"SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99, "
+                    "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
+                    "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
                     f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                    f"WHERE {_ASN} IS NOT NULL GROUP BY asn ORDER BY count() DESC LIMIT {top_n * 5}",
+                    f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn ORDER BY count() DESC LIMIT {top_n * 5}",
                 ),
-            )
+            ]
+            if not combine_metro_in_map:
+                fast_queries_list.append(
+                    (
+                        "metro",
+                        f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
+                        f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs "
+                        f"FROM request_facts PREWHERE {rtt_prewhere} AND country != '' "
+                        f"WHERE {_RTT} > 0 "
+                        "GROUP BY country, city, region, metro ORDER BY total_reqs DESC LIMIT 200",
+                    )
+                )
             parallel_tasks: list[tuple[str, Callable[[], Any]]] = [
-                (name, partial(service.client.execute, sql, params)) for name, sql in fast_queries
+                (name, partial(service.client.execute, sql, params)) for name, sql in fast_queries_list
             ]
             if _want_shielding(sections):
                 parallel_tasks.append(
@@ -486,9 +554,55 @@ def network_health(
                 thread_name_prefix="hs-net-health",
             )
             shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
-            heatmap_rows, map_rows, metro_rows, pct_rows = (
-                q_results.get(k, []) for k in ("heatmap", "map", "metro", "percentiles")
-            )
+            heatmap_rows, map_rows, pct_rows = (q_results.get(k, []) for k in ("heatmap", "map", "percentiles"))
+            if raw_speed_rows is not None:
+                speed_rows = [r for r in raw_speed_rows if r.get("c_speed")]
+            else:
+                speed_rows = []
+                for pr in pct_rows:
+                    sm = pr.get("speed_map")
+                    pairs: list[tuple[Any, Any]]
+                    if isinstance(sm, Mapping):
+                        pairs = list(sm.items())
+                    elif isinstance(sm, (list, tuple)) and len(sm) == 2 and isinstance(sm[0], (list, tuple)):
+                        pairs = list(zip(sm[0], sm[1], strict=False))
+                    else:
+                        pairs = []
+                    for cs, cnt in pairs:
+                        if cs:
+                            speed_rows.append({"asn": pr["asn"], "c_speed": str(cs), "cnt": int(cnt)})
+            metro_rows: list[dict[str, Any]]
+            if combine_metro_in_map:
+                metro_acc: dict[tuple[str, str, str, str], list[float]] = {}
+                for mr in map_rows:
+                    key = (
+                        str(mr.get("country") or ""),
+                        str(mr.get("city") or ""),
+                        str(mr.get("region") or ""),
+                        str(mr.get("metro") or ""),
+                    )
+                    acc = metro_acc.setdefault(key, [0.0, 0.0, 0.0, 0.0])
+                    rq = float(mr.get("reqs") or 0)
+                    acc[0] += rq
+                    if mr.get("avg_ploss") is not None:
+                        acc[1] += float(mr["avg_ploss"]) * rq
+                        acc[2] += rq
+                    if mr.get("error_pct") is not None:
+                        acc[3] += float(mr["error_pct"]) * rq
+                metro_rows = [
+                    {
+                        "country": k[0],
+                        "city": k[1],
+                        "region": k[2],
+                        "metro": k[3],
+                        "total_reqs": int(v[0]),
+                        "avg_ploss": (v[1] / v[2]) if v[2] > 0 else None,
+                        "error_pct": (v[3] / v[0]) if v[0] > 0 else 0.0,
+                    }
+                    for k, v in sorted(metro_acc.items(), key=lambda kv: kv[1][0], reverse=True)[:200]
+                ]
+            else:
+                metro_rows = q_results.get("metro", [])
         else:
             top_asn_subquery = (
                 f"SELECT {_ASN} FROM request_facts "
@@ -670,18 +784,20 @@ def network_health(
                 if metro_code is not None
                 else (city.title() if city else "")
             )
-            map_by_bucket.setdefault(bucket, []).append(
-                {
-                    "country": ctry,
-                    "city_idx": _intern_city(display_city, _flt(r["lat"]), _flt(r["lon"])),
-                    "metro_code": metro_code,
-                    "rtt_med_us": _flt(r["rtt_med_us"]),
-                    "avg_ploss": pkt,
-                    "error_pct": _flt(err, 2),
-                    "health_score": _health_score(None, None, pkt, None, err),
-                    "reqs": int(r["reqs"]),
-                }
-            )
+            bucket_list = map_by_bucket.setdefault(bucket, [])
+            if len(bucket_list) < 50:
+                bucket_list.append(
+                    {
+                        "country": ctry,
+                        "city_idx": _intern_city(display_city, _flt(r["lat"]), _flt(r["lon"])),
+                        "metro_code": metro_code,
+                        "rtt_med_us": _flt(r["rtt_med_us"]),
+                        "avg_ploss": pkt,
+                        "error_pct": _flt(err, 2),
+                        "health_score": _health_score(None, None, pkt, None, err),
+                        "reqs": int(r["reqs"]),
+                    }
+                )
 
         map_buckets = (
             [{"bucket_idx": i, "bucket": b, "cities": map_by_bucket.get(b, [])} for i, b in enumerate(all_buckets)]
@@ -881,7 +997,7 @@ def network_quality(
             )
             rollup_bars = q_res_mixed["rollup_bars"]
             by_country = rollup_bars.get("country", [])
-            by_asn = rollup_bars.get("asn", [])
+            by_asn = rollup_bars.get("asn", []) or _bar(_ASN)
             by_pop = rollup_bars.get("pop", [])
             by_region = q_res_mixed["region"]
             scatter_rows = q_res_mixed["scatter"]
@@ -1225,7 +1341,7 @@ def build_network_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> Networ
         )
         c_speed = _text(row.get("c_speed"))
         for dim in ("country", "asn", "pop", "region"):
-            if val := _text(row.get(dim)):
+            if val := (_asn_text(row.get(dim)) if dim == "asn" else _text(row.get(dim))):
                 _network_update(
                     dimensions[(bucket, dim, val, c_speed if dim == "asn" else "")], is_error, tcp_rtt, ttfb, ploss
                 )

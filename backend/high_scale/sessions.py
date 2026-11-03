@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 _sessions_memo = ResponseMemo(ttl=30.0, maxsize=128)
 _CacheRegistry.register("high_scale.sessions._response_cache", _sessions_memo.cache)
+_sessions_ch_sem = threading.Semaphore(2)
 _DEFAULT_MIN_REQS_FLAG = SESSIONS_DEFAULT_MIN_REQS_FLAG
 _DEFAULT_MIN_4XX_PCT_FLAG = SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG
 _SORTABLE = SESSIONS_SORTABLE_COLUMNS
@@ -138,15 +140,14 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
         FROM request_facts
         PREWHERE {where}
     ),
-    pair_split AS (
+    pair_sessions AS (
         SELECT
             ip,
             ja4,
             min(ts_ms) AS p_min_ms,
             max(ts_ms) AS p_max_ms,
             count() AS p_reqs,
-            groupArray(ts_ms) AS raw_ts,
-            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ts, [])) AS sorted_ts,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, groupArray(ts_ms), [])) AS sorted_ts,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
@@ -157,13 +158,6 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
             ) AS starts
         FROM raw_events
         GROUP BY ip, ja4
-    ),
-    pair_sessions AS (
-        SELECT
-            *,
-            sum(length(starts)) OVER () AS total_sessions,
-            max(ja4 != '') OVER () AS any_ja4
-        FROM pair_split
     ),
     sessions_agg AS (
         SELECT
@@ -188,13 +182,7 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
             toUInt8(0) AS has_rtt_row,
             toUInt8(0) AS has_edge_sid_row,
             toUInt64(0) AS streaming_reqs,
-            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid,
-            total_sessions,
-            toUInt8(0) AS any_rtt,
-            any_ja4,
-            toUInt8(0) AS any_edge,
-            toUInt8(0) AS any_edge_sid,
-            toUInt8(0) AS any_cmcd
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
         FROM pair_sessions
         ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
     ),
@@ -601,7 +589,13 @@ def sessions_endpoint(
             return cached_inner
         outer_select = (
             """
-    SELECT *
+    SELECT *,
+           count() OVER () AS total_sessions,
+           toUInt8(0) AS any_rtt,
+           max(ja4 != '') OVER () AS any_ja4,
+           toUInt8(0) AS any_edge,
+           toUInt8(0) AS any_edge_sid,
+           toUInt8(0) AS any_cmcd
     FROM flagged_sessions
     """
             if use_slim_index and cte is fast_cte
@@ -618,16 +612,21 @@ def sessions_endpoint(
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
     """
         )
-        rows = [
-            dict(r)
-            for r in service.client.execute(
-                "/* sessions:page */ "
-                + cte
-                + outer_select
-                + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
-                {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
-            )
-        ]
+        page_sql = (
+            "/* sessions:page */ "
+            + cte
+            + outer_select
+            + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}"
+        )
+        page_params = {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit}
+        if is_real_ch:
+            with _sessions_ch_sem:
+                if (cached_sem := _sessions_memo.get_with_telemetry(memo_key)) is not None:
+                    return cached_sem
+                raw_page_rows = service.client.execute(page_sql, page_params)
+        else:
+            raw_page_rows = service.client.execute(page_sql, page_params)
+        rows = [dict(r) for r in raw_page_rows]
         if rows and "unique_urls" not in rows[0]:
             _enrich_paginated_sessions(service, rows, eff_where if use_slim_index else where, params)
         if rows:
