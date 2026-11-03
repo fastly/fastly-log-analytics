@@ -107,10 +107,10 @@ _SCHEMA = [
     # read after upgrade; transactional delta updates after that.
     """CREATE TABLE IF NOT EXISTS ingested_files_summary (
         source_name TEXT PRIMARY KEY,
-        file_count INTEGER NOT NULL DEFAULT 0,
-        total_rows INTEGER NOT NULL DEFAULT 0,
-        total_bytes INTEGER NOT NULL DEFAULT 0,
-        count_with_bytes INTEGER NOT NULL DEFAULT 0,
+        file_count BIGINT NOT NULL DEFAULT 0,
+        total_rows BIGINT NOT NULL DEFAULT 0,
+        total_bytes BIGINT NOT NULL DEFAULT 0,
+        count_with_bytes BIGINT NOT NULL DEFAULT 0,
         latest_file_name TEXT,
         last_ingested TEXT
     )""",
@@ -488,6 +488,26 @@ _RDNS_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_rdns_status_looked_up_at ON rdns (status, looked_up_at)
 """
 
+# ``ingested_files_summary`` accumulates compressed bytes over the whole retention window. As INTEGER it overflowed
+# at 2 GiB (about 190 logged RPS at the default one-day retention) and every ingest tick then failed. CREATE TABLE
+# IF NOT EXISTS cannot widen an existing column, so deployments created before the BIGINT change are widened here.
+# The guard keeps repeat boots from rewriting the table or taking its lock.
+_WIDEN_INGESTED_FILES_SUMMARY_DDL = """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'ingested_files_summary' AND data_type = 'integer'
+    ) THEN
+        ALTER TABLE ingested_files_summary
+            ALTER COLUMN file_count TYPE BIGINT,
+            ALTER COLUMN total_rows TYPE BIGINT,
+            ALTER COLUMN total_bytes TYPE BIGINT,
+            ALTER COLUMN count_with_bytes TYPE BIGINT;
+    END IF;
+END $$
+"""
+
 _INGEST_LEDGER_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_claimed_scan ON ingest_ledger(service_id, status, claimed_at)",
     "CREATE INDEX IF NOT EXISTS idx_ingest_ledger_commit_scan "
@@ -544,6 +564,7 @@ def pg_schema_statements() -> list[str]:
     statements.extend(_SLOW_QUERIES_INDEX_DDL)
     statements.append(_METRIC_SNAPSHOTS_DDL)
     statements.extend(_METRIC_SNAPSHOTS_INDEX_DDL)
+    statements.append(_WIDEN_INGESTED_FILES_SUMMARY_DDL)
     statements.extend(_INGEST_LEDGER_INDEXES)
     statements.extend(CLICKHOUSE_CONTROL_DDL)
     statements.append(HIGH_SCALE_CONTROL_DDL)

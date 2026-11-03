@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import inspect
 import json
+import re
 import sqlite3
 import stat
 import threading
@@ -482,6 +483,34 @@ def test_log_usage_calls_accepts_bytes_over_int4_max():
     assert row is not None and row[0] == big
     hourly = con.execute("SELECT max(bytes) FROM usage_log_hourly_summary WHERE service_id = ?", (sid,)).fetchone()
     assert hourly is not None and hourly[0] == big
+
+
+_SUMMARY_COUNTERS = ("file_count", "total_rows", "total_bytes", "count_with_bytes")
+
+
+def test_ingested_files_summary_counters_are_bigint_in_ddl():
+    ddl = next(s for s in pg_schema.pg_schema_statements() if "CREATE TABLE IF NOT EXISTS ingested_files_summary" in s)
+    for col in _SUMMARY_COUNTERS:
+        assert re.search(rf"\b{col}\s+BIGINT\b", ddl), f"{col} must be BIGINT: cumulative counters pass 2^31 in hours"
+
+
+def test_legacy_int4_summary_counters_are_widened_and_accept_totals_over_int4_max():
+    sid = "svc-summary-overflow"
+    con = metadata_db.get_con(sid)
+    for col in _SUMMARY_COUNTERS:  # simulate a deployment created before the columns were BIGINT
+        con.execute(f"ALTER TABLE ingested_files_summary ALTER COLUMN {col} TYPE INTEGER")
+    con.commit()
+    assert all(_column_type(con, "ingested_files_summary", c) == "integer" for c in _SUMMARY_COUNTERS)
+
+    _reapply_schema()
+    assert all(_column_type(con, "ingested_files_summary", c) == "bigint" for c in _SUMMARY_COUNTERS)
+
+    # Two ~2 GB files: the running total (4e9) exceeds the int4 max (2_147_483_647) that stalled ingest at 35k RPS.
+    metadata_db.insert_ingested_files(sid, [("big-a.gz", 1_000, 2_000_000_000), ("big-b.gz", 1_000, 2_000_000_000)])
+    total_bytes, total_rows, files = con.execute(
+        "SELECT total_bytes, total_rows, file_count FROM ingested_files_summary WHERE source_name = ?", (sid,)
+    ).fetchone()
+    assert (total_bytes, total_rows, files) == (4_000_000_000, 2_000, 2)
 
 
 def test_init_schema_idempotency_and_survival():
