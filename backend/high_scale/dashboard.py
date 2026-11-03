@@ -527,9 +527,9 @@ def _filtered_aggregates(
             for f in chunk:
                 col = _field_sql_column(f)
                 if include_bots and f == "ua":
-                    exprs.append(f"approx_top_kIf(1000, 3000)({col}, {col} != '') AS `{f}`")
+                    exprs.append(f"approx_top_kIf(1000, 3000)({col}, {col} != '') AS `_f_{f}`")
                 else:
-                    exprs.append(f"approx_top_kIf(15, 250)({col}, {col} != '') AS `{f}`")
+                    exprs.append(f"approx_top_kIf(15, 250)({col}, {col} != '') AS `_f_{f}`")
             if include_bots:
                 exprs.append(
                     "approx_top_kIf(200, 1000)("
@@ -552,7 +552,7 @@ def _filtered_aggregates(
                 chunk_total_counts.append(int(row["__total_count__"] or 0))
             out: dict[str, list[tuple[str, int]]] = {}
             for f in chunk:
-                items = row.get(f) or []
+                items = row.get(f"_f_{f}") or []
                 sorted_items = sorted(items, key=lambda x: (-int(x["count"]), str(x["item"])))
                 out[f] = [(str(x["item"]), int(x["count"])) for x in sorted_items[:10]]
                 if include_bots and f == "ua":
@@ -626,37 +626,37 @@ def _filtered_aggregates(
                 "status",
                 "cache",
                 "tls",
-                "tls_cipher",
+                "tls_ciphers_sha",
             ),
             (
                 "asn",
-                "region",
-                "conn_speed",
                 "host",
-                "content_type",
-                "shield",
+                "referer",
+                "cookie_session",
+                "resp_header_content_encoding",
+                "region",
+                "metro",
+                "transport",
+                "c_speed",
+                "c_type",
+                "backend",
                 "edge",
-                "h2_stream",
-                "error_code",
-                "beresp",
-                "waf_action",
-                "waf_block",
-                "waf_failures",
-                "waf_tags",
+                "server_region",
+                "is_ipv6",
             ),
             (
                 "pop",
                 "ttl",
                 "ua",
                 "age",
+                "conn_requests",
+                "waf",
+                "waf_resp",
+                "p_type",
+                "p_desc",
                 "ja4",
-                "ja4h",
-                "ddos_action",
-                "bot_score",
-                "edge_score_action",
-                "edge_score_reason",
-                "edge_sid",
-                "ngwaf_bot_category",
+                "io_input_format",
+                "io_output_format",
             ),
         )
         req_set = set(fields_to_query)

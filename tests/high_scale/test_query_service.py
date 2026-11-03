@@ -2925,9 +2925,9 @@ def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimiza
                 return [
                     {
                         "__total_count__": 50,
-                        "url": [{"item": "/home", "count": 50}],
-                        "country": [{"item": "US", "count": 50}],
-                        "ua": [{"item": "Googlebot/2.1", "count": 20}],
+                        "_f_url": [{"item": "/home", "count": 50}],
+                        "_f_country": [{"item": "US", "count": 50}],
+                        "_f_ua": [{"item": "Googlebot/2.1", "count": 20}],
                         "__ngwaf_bot__": [{"item": "googlebot\x1fsearch", "count": 20}],
                         "__ts_buckets__": [{"item": datetime(2026, 1, 1, 12, 0, tzinfo=UTC), "count": 50}],
                     }
