@@ -75,7 +75,7 @@ Tested on a fresh install (no history) with a live synthetic feed stepped up wit
 What drives page time:
 
 - **The live hour is read raw** and grows through the hour, so pages that read it slow down until the top of the hour (Network fell from 16 s to 0.2 s at the rollover). The dashboard top-N is accelerated by a 30 s speed layer; Network, Origin and Security are not yet.
-- **A just-closed hour needs its rollups built.** A busy hour takes minutes of CPU (about 9 minutes for ~9M rows on 4 vCPUs) and is read raw until then.
+- **A just-closed hour needs its rollups built.** A busy hour takes minutes of CPU: about 9 minutes for ~9M rows on an idle 4 vCPU machine, and about 22 minutes for an hour of ~18M rows (5,000 RPS) while serving traffic. Pages that read that hour fall back to raw scans, and ingest and page queries slow down, until it finishes.
 - **Ingest and rollup builds share the same CPUs as page queries**, so pages are slowest during commit and rollup bursts.
 
 Above ~2,000 RPS use a larger machine, sample or conditionally log at the edge (see the note above), or use the High-Scale architecture.
@@ -94,7 +94,7 @@ Local disk holds the DuckLake Parquet data, the incoming buffer, rollups, Postgr
 
 Add **10–50 GB for temporary spill** and about 20% headroom. Disk needed is roughly `retention_days × RPS × 86,400 × bytes_per_row`, plus those two allowances. Put the data volume on its own disk where possible so a spill or a full buffer cannot starve Postgres or the OS.
 
-**Spill space.** DuckDB writes large intermediate results (closed-hour rollups of a busy hour) to `data/services/.tmp`. The cap defaults to a quarter of the free disk, kept between 10 GB and 50 GB; set `DUCKDB_MAX_TEMP_DIRECTORY_SIZE` (for example `30GB`) to choose your own. At 5,000 RPS the folder reached 8–9 GB within minutes of a restart, so a cap below 10 GB makes busy-hour rollups fail with `failed to offload data block`.
+**Spill space.** DuckDB writes large intermediate results (closed-hour rollups of a busy hour) to `data/services/.tmp`. The cap defaults to a quarter of the free disk, kept between 10 GB and 50 GB; set `DUCKDB_MAX_TEMP_DIRECTORY_SIZE` (for example `30GB`) to choose your own. At 5,000 RPS the folder reached 8–9 GB within minutes of a restart and peaked at 15 GB during a closed-hour rebuild, so a cap below that makes busy-hour rollups fail with `failed to offload data block`.
 
 ---
 
