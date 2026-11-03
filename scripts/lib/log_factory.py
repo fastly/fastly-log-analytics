@@ -44,6 +44,13 @@ COUNTRY_GEO_MAP = {
     "IE": {"city": "Dublin", "metro": "372", "lat": 53.3498, "lon": -6.2603, "region": "L"},
 }
 
+POP_COORDS = {
+    "IAD": (38.95, -77.45), "LHR": (51.47, -0.45), "NRT": (35.77, 140.39), "SYD": (-33.94, 151.18),
+    "SFO": (37.62, -122.38), "FRA": (50.03, 8.57), "CDG": (49.01, 2.55), "SIN": (1.36, 103.99),
+    "ORD": (41.98, -87.90), "DFW": (32.90, -97.04), "AMS": (52.31, 4.76), "HKG": (22.31, 113.91),
+    "JFK": (40.64, -73.78), "LAX": (33.94, -118.41), "MIA": (25.79, -80.29), "SEA": (47.45, -122.31),
+    "DEN": (39.86, -104.67), "ATL": (33.64, -84.43), "BOS": (42.36, -71.01), "YYZ": (43.68, -79.62),
+}
 POPS = ["IAD", "LHR", "NRT", "SYD", "SFO", "FRA", "CDG", "SIN", "ORD", "DFW", "AMS", "HKG", "JFK", "LAX", "MIA", "SEA", "DEN", "ATL", "BOS", "YYZ"]
 POP_WAVE_POPS = [
     "IAD", "LHR", "NRT", "SYD", "SFO", "FRA", "CDG", "SIN", "ORD", "DFW",
@@ -124,6 +131,21 @@ URL_PATHS = [
     "/api/v2/checkout", "/api/v1/auth/login", "/api/v1/user/profile", "/assets/app.js",
     "/assets/styles.css", "/images/hero.webp", "/images/logo.png", "/docs/getting-started", "/blog/announcements",
 ]
+
+
+def _physical_rtts(rtt_min: Any, tcp_rtt: Any, pop: Any, lat: Any, lon: Any) -> tuple[Any, Any]:
+    """Raise RTTs to the light-in-fibre floor (100 km/ms) so only genuinely odd rows look like proxies."""
+    import numpy as np
+
+    labels, inverse = np.unique(np.asarray(pop, dtype=object).astype(str), return_inverse=True)
+    pop_lat = np.array([POP_COORDS.get(label, (38.0, -97.0))[0] for label in labels])[inverse]
+    pop_lon = np.array([POP_COORDS.get(label, (38.0, -97.0))[1] for label in labels])[inverse]
+    p1, p2 = np.radians(lat), np.radians(pop_lat)
+    a = np.sin((p2 - p1) / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(np.radians(pop_lon - lon) / 2) ** 2
+    distance_km = 6371 * 2 * np.arcsin(np.sqrt(a))
+    floor_us = (distance_km * 10).astype(np.int64)
+    rtt_min = np.maximum(rtt_min, floor_us).astype(np.int32)
+    return rtt_min, np.maximum(tcp_rtt, rtt_min).astype(np.int32)
 
 
 def generate_columns(
@@ -243,6 +265,8 @@ def generate_columns(
         rtt_min = np.clip((tcp_rtt * rng.uniform(0.7, 0.9, size=n)).astype(np.int32), 500, None)
         rtt_var = np.clip((tcp_rtt * rng.uniform(0.01, 0.12, size=n)).astype(np.int32), 100, None)
         ploss = rng.choice([0.0, 0.001, 0.005, 0.01, 0.02], size=n, p=[0.95, 0.02, 0.01, 0.01, 0.01])
+
+    rtt_min, tcp_rtt = _physical_rtts(rtt_min, tcp_rtt, pop, lat, lon)
 
     resp_bytes = np.clip(rng.lognormal(mean=np.log(8_000), sigma=1.5, size=n).astype(np.int64), 100, 25_000_000)
     req_bytes = np.clip(rng.lognormal(mean=np.log(1_000), sigma=0.8, size=n).astype(np.int64), 40, 500_000)

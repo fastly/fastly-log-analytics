@@ -44,3 +44,24 @@ def test_request_header_size_and_connection_reuse_are_populated_for_security_rol
     reqs = np.asarray(cols["conn_requests"])
     assert hdr.min() >= 120 and len(np.unique(hdr)) > 50
     assert reqs.min() >= 1 and reqs.max() > 20 and (reqs == 1).any()
+
+
+@pytest.mark.parametrize("scenario", ["diurnal", "slow-network"])
+def test_rtts_respect_geography_so_proxy_rollups_are_not_flooded(scenario: str) -> None:
+    from scripts.lib.log_factory import POP_COORDS
+
+    cols = _cols(scenario, n=20000)
+    pops = np.asarray(cols["pop"], dtype=object)
+    plat = np.array([POP_COORDS[p][0] for p in pops])
+    plon = np.array([POP_COORDS[p][1] for p in pops])
+    lat, lon = np.radians(cols["lat"]), np.radians(cols["lon"])
+    a = (
+        np.sin((np.radians(plat) - lat) / 2) ** 2
+        + np.cos(lat) * np.cos(np.radians(plat)) * np.sin((np.radians(plon) - lon) / 2) ** 2
+    )
+    distance_km = 6371 * 2 * np.arcsin(np.sqrt(a))
+    rtt_min_ms = np.asarray(cols["rtt_min"]) / 1000.0
+    tcp = np.asarray(cols["tcp_rtt"])
+    flagged = (distance_km > rtt_min_ms * 100.0 + 150.0) | ((tcp > 0) & (np.asarray(cols["rtt_min"]) / tcp < 0.2))
+    assert flagged.mean() < 0.01
+    assert (tcp >= np.asarray(cols["rtt_min"])).all()
