@@ -17,6 +17,7 @@ from . import partial_hour as _partial_hour
 from ._common import (
     DAY_BUNDLE_FILENAME,
     DAY_BUNDLE_TOP_K,
+    EMPTY_HOUR_GRACE_S,
     IP_SPREAD_BUNDLE_FILENAME,
     _closed_day_window,
     _day_bundled_root,
@@ -811,10 +812,14 @@ def stamp_empty_hour_sentinels(service_id: str, source: dict, hours: list[str]) 
     schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
     empty_table = pa.table({"field": [], "value": [], "count": []}, schema=schema)
     stamped = 0
+    now = datetime.now(UTC)
     for hour in hours:
         if hour >= active_hour:
             continue
-        if parse_hour_token(hour) is None:
+        hour_start = parse_hour_token(hour)
+        if hour_start is None:
+            continue
+        if now < hour_start + timedelta(hours=1, seconds=EMPTY_HOUR_GRACE_S):
             continue
         bundle_dir = os.path.join(bundled_root, f"hour={hour}")
         bundle_path = os.path.join(bundle_dir, "all_fields.parquet")

@@ -70,6 +70,7 @@ from .overview_rollups import (  # noqa: F401
 )
 from .rollup_coverage import (  # noqa: F401
     ALL_FIELDS_FILENAME,
+    EMPTY_HOUR_GRACE_S,
     LISTDIR_CACHE_MAX_ENTRIES,
     LISTDIR_CACHE_TTL_S,
     MIN_CLOSED_HOUR_COVERAGE,
@@ -100,6 +101,7 @@ from .rollup_coverage import (  # noqa: F401
     plan_time_series_rollup_window,
     rc_service_id,
     validated_daily_reference_minutes,
+    verified_empty_hour,
 )
 from .security_dims import (  # noqa: F401
     build_ngwaf_bots_bundles,

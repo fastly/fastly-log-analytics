@@ -20,6 +20,7 @@ from backend.utils.date_utils import parse_hour_key_strict, parse_window
 
 from ._common import (
     DAY_BUNDLE_FILENAME,
+    EMPTY_HOUR_GRACE_S,
     OVERVIEW_BUNDLE_FILENAME,
     TIME_SERIES_BUNDLE_FILENAME,
     _day_bundled_root,
@@ -198,6 +199,19 @@ class BundleProbe:
         if empty is None:
             empty = self._empty[key] = _empty_parquet(self.path(hour, filename))
         return empty
+
+
+def verified_empty_hour(probe: BundleProbe, hour: str) -> bool:
+    """True for a closed hour whose empty ``all_fields`` sentinel was stamped after the late-arrival grace."""
+    path = probe.path(hour, ALL_FIELDS_FILENAME)
+    if not probe.is_empty(hour, ALL_FIELDS_FILENAME):
+        return False
+    try:
+        stamped = os.path.getmtime(path)
+    except OSError:
+        return False
+    settled = parse_hour_key_strict(hour) + timedelta(hours=1, seconds=EMPTY_HOUR_GRACE_S)
+    return stamped >= settled.timestamp()
 
 
 def _per_field_hours(src: dict) -> set[str]:
@@ -478,7 +492,7 @@ def collect_day_prefer_paths(
                 elif allow_empty_with_done and os.path.isfile(f"{path}.done"):
                     covered_hours += 1
                     done_markers += 1
-                elif probe.is_empty(hour, ALL_FIELDS_FILENAME):
+                elif verified_empty_hour(probe, hour):
                     covered_hours += 1
 
     if observation is not None:
@@ -522,7 +536,7 @@ def collect_hour_paths_with_floor(
         if os.path.exists(path):
             paths.append(path)
             covered_hours += 1
-        elif probe.is_empty(hour, ALL_FIELDS_FILENAME):
+        elif verified_empty_hour(probe, hour):
             covered_hours += 1
     if not paths or not meets_coverage_floor(covered_hours, len(index.closed_hours)):
         return None

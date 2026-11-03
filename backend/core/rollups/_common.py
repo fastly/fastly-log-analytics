@@ -314,6 +314,11 @@ def _build_virtual_field_copy_query(table_ident: str, virtual_field: str, backin
     """
 
 
+# Log files can land minutes after their hour closes. An hour is only treated as verified-empty once this long after
+# its end, so a sentinel can never stand in for rows that were still on their way.
+EMPTY_HOUR_GRACE_S = int(os.getenv("ROLLUP_EMPTY_HOUR_GRACE_S", "300"))
+
+
 def _hour_bundled_root(source: dict[str, Any]) -> str:
     """Return the per-hour bundled rollup root.
 

@@ -3185,3 +3185,39 @@ def test_slow_urls_floor_counts_verified_empty_hours(tmp_path: Path) -> None:
             {"_cache_dir_override": str(tmp_path)}, START, START + timedelta(days=1), "slow_urls.parquet"
         )
     assert result == [str(path)]
+
+
+def _age_sentinel(root: Path, hour: int, *, seconds_after_hour_end: float) -> None:
+    path = root / "rollups/hour_bundled" / f"hour=2026-01-01-{hour:02d}" / "all_fields.parquet"
+    stamped = (START + timedelta(hours=hour + 1, seconds=seconds_after_hour_end)).timestamp()
+    os.utime(path, (stamped, stamped))
+
+
+def test_empty_sentinel_stamped_inside_the_late_arrival_grace_is_not_trusted(tmp_path: Path) -> None:
+    """Log files can land minutes after their hour closes. A sentinel stamped before that window may predate rows, so
+    it must not stand in for coverage: the reader falls back to raw rather than reporting zero for the hour."""
+    _origin_hour(tmp_path, 23)
+    for hour in range(0, 23):
+        _all_fields_hour(tmp_path, hour, rows=0)
+        _age_sentinel(tmp_path, hour, seconds_after_hour_end=60)
+    with time_machine.travel(START + timedelta(days=1, hours=1), tick=False):
+        early = coverage.collect_day_prefer_paths(
+            {"_cache_dir_override": str(tmp_path)}, START, START + timedelta(days=1), "origin_summary.parquet"
+        )
+        for hour in range(0, 23):
+            _age_sentinel(tmp_path, hour, seconds_after_hour_end=coverage.EMPTY_HOUR_GRACE_S + 1)
+        rollup_coverage._listdir_cache.clear()
+        settled = coverage.collect_day_prefer_paths(
+            {"_cache_dir_override": str(tmp_path)}, START, START + timedelta(days=1), "origin_summary.parquet"
+        )
+    assert early is None
+    assert settled is not None and len(settled) == 1
+
+
+def test_empty_sentinels_are_not_stamped_until_the_grace_has_passed(tmp_path: Path) -> None:
+    src = {"name": "svc-grace", "service_id": "svc-grace", "_cache_dir_override": str(tmp_path)}
+    hour_end = START + timedelta(hours=1)
+    with time_machine.travel(hour_end + timedelta(seconds=coverage.EMPTY_HOUR_GRACE_S - 1), tick=False):
+        assert rr.stamp_empty_hour_sentinels("svc-grace", src, ["2026-01-01-00"]) == 0
+    with time_machine.travel(hour_end + timedelta(seconds=coverage.EMPTY_HOUR_GRACE_S + 1), tick=False):
+        assert rr.stamp_empty_hour_sentinels("svc-grace", src, ["2026-01-01-00"]) == 1

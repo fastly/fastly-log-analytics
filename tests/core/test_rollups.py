@@ -1618,7 +1618,7 @@ def test_endpoint_incomplete_recompute_fails_explicitly(repair_client):
 class _FrozenNow(datetime):
     @classmethod
     def now(cls, tz=None):
-        return datetime(2026, 6, 5, 0, 0, 0, tzinfo=tz or UTC)
+        return datetime(2026, 6, 5, 0, 10, 0, tzinfo=tz or UTC)
 
 
 def _query_mem(sql: str) -> list:
