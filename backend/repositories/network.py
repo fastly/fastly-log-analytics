@@ -11,7 +11,7 @@ from typing import Any
 import duckdb
 
 from backend.core.metric_expressions import coalesce as _sql_coalesce
-from backend.core.metric_expressions import sum_or_zero
+from backend.core.metric_expressions import protocol_label_expr, sum_or_zero
 
 logger = logging.getLogger(__name__)
 
@@ -1328,6 +1328,13 @@ def get_quality(
             _drop_temp_table(get_runner(), temp_table, "get_quality")
 
 
+_TRANSPORT_APPROX_NOTE = (
+    "TCP RTT percentiles on this window are request-weighted averages of per-hour percentiles; "
+    "tail percentiles (p95/p99) can drift when a spike hits only a few hours. "
+    "Request counts, bandwidth, retransmit, loss, delivery rate and protocol share are exact."
+)
+
+
 def get_transport_metrics(
     con_factory: Any,
     src: dict[str, Any],
@@ -1355,6 +1362,41 @@ def get_transport_metrics(
         get_runner().execute(f"SELECT 1 FROM {table_name} LIMIT 1")
     except Exception:
         return default_resp
+
+    _t_rollup = _time.perf_counter()
+    rolled = get_runner().try_network_transport_from_rollup(
+        start_time, end_time, has_filters=bool(filters), actual_cols=actual_cols
+    )
+    timer.mark(
+        "transport_rollup",
+        _t_rollup,
+        source="rollup",
+        activity="compute" if rolled is not None else "overhead",
+        current_execution=True,
+        outcome="served" if rolled is not None else "fallback",
+    )
+    if rolled is not None:
+        rtt_ms = {k: (v / 1000.0 if v is not None else None) for k, v in rolled["rtt_us"].items()}
+        avg_ploss = rolled["avg_ploss"]
+        avg_rate = rolled["avg_delivery_rate"]
+        return {
+            **default_resp,
+            "tcp_rtt_p50_ms": _opt_float(rtt_ms["p50"], 2),
+            "tcp_rtt_p90_ms": _opt_float(rtt_ms["p90"], 2),
+            "tcp_rtt_p95_ms": _opt_float(rtt_ms["p95"], 2),
+            "tcp_rtt_p99_ms": _opt_float(rtt_ms["p99"], 2),
+            "retrans_rate_pct": _opt_float(rolled["avg_retrans"], 3),
+            "packet_loss_pct": _opt_float(avg_ploss * 100.0 if avg_ploss is not None else None, 3),
+            "delivery_rate_mbps": _opt_float(avg_rate * 8.0 / 1e6 if avg_rate is not None else None, 2),
+            "bandwidth_bytes": rolled["bandwidth_bytes"],
+            "total_requests": rolled["total_requests"],
+            "protocol_distribution": shape_protocol_distribution(
+                ((r[0], r[1]) for r in rolled["protocol_rows"]), total_requests=rolled["total_requests"]
+            ),
+            "_approx": True,
+            "_approx_note": _TRANSPORT_APPROX_NOTE,
+            **get_runner().telemetry(),
+        }
 
     params, where_clause = build_where_clause(
         start_time, end_time, filters or {}, list(actual_cols), inline_params=True
@@ -1404,18 +1446,7 @@ def get_transport_metrics(
         return default_resp
 
     protocol_distribution: list[dict[str, Any]] = []
-    proto_col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
-    proto_expr = (
-        f"""CASE
-                    WHEN CAST({proto_col} AS VARCHAR) IN ('3.0', '3', 'HTTP/3') THEN 'HTTP/3'
-                    WHEN CAST({proto_col} AS VARCHAR) IN ('2.0', '2', 'HTTP/2') THEN 'HTTP/2'
-                    WHEN CAST({proto_col} AS VARCHAR) IN ('1.1', 'HTTP/1.1') THEN 'HTTP/1.1'
-                    WHEN CAST({proto_col} AS VARCHAR) IN ('1.0', 'HTTP/1.0') THEN 'HTTP/1.0'
-                    ELSE COALESCE(CAST({proto_col} AS VARCHAR), 'Other')
-                END"""
-        if proto_col
-        else ("UPPER(COALESCE(CAST(transport AS VARCHAR), 'TCP'))" if "transport" in actual_cols else None)
-    )
+    proto_expr = protocol_label_expr(actual_cols)
     if proto_expr:
         _t1 = _time.perf_counter()
         proto_sql = f"""

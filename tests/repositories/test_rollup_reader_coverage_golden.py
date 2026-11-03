@@ -995,8 +995,8 @@ def test_pop_health_24h_window_preserves_leading_slice(
         )
         data, approximate, observation = _fetch_pop_health_data(con, source, start, end)
         assert {row.pop: row.requests for row in data} == expected == {"AAA": 2, "BBB": 2}
-        assert approximate is (start_minute == 0)
-        assert observation["section_timings"][-1]["source"] == ("rollup" if approximate else "live")
+        assert approximate is True
+        assert observation["section_timings"][-1]["source"] == "rollup"
 
 
 def test_histogram_records_both_attempts_and_served_outcome(in_memory_duckdb, tmp_path) -> None:

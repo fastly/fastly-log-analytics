@@ -93689,6 +93689,22 @@
             "type": "array",
             "title": "Missing Fields",
             "default": []
+          },
+          "_approx": {
+            "type": "boolean",
+            "title": "Approx",
+            "default": false
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",

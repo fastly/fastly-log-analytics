@@ -54,6 +54,7 @@ from .day_compaction_sql import (  # noqa: F401
     compact_network_quality_closed_days_to_daily,
     compact_network_rtt_closed_days_to_daily,
     compact_network_speed_closed_days_to_daily,
+    compact_network_transport_closed_days_to_daily,
     compact_ngwaf_bots_closed_days_to_daily,
     compact_ngwaf_bots_ts_closed_days_to_daily,
     compact_origin_dims_closed_days_to_daily,

@@ -654,6 +654,14 @@ OVERVIEW_BUNDLE_FILENAME = "overview.parquet"
 
 NETWORK_SUMMARY_BUNDLE_FILENAME = "network_summary.parquet"
 
+# Per-hour transport rollup feeding the Network page's transport card: one row
+# per closed hour with request/byte totals, tcp_rtt percentiles weighted by
+# ``rtt_count`` at read time, and sum/count pairs for the retransmit, packet-loss
+# and delivery-rate averages. The protocol split is a second file (one row per
+# protocol label per hour) so any label the live query would emit round-trips.
+NETWORK_TRANSPORT_BUNDLE_FILENAME = "network_transport.parquet"
+NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME = "network_transport_proto.parquet"
+
 
 def unlink_quiet(path: str) -> None:
     """Remove ``path``, ignoring any OSError (missing file, permissions, ...).

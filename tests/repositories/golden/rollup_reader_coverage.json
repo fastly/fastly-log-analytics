@@ -10,11 +10,10 @@
   "06eaa6435f23": "SELECT bucket, bot_type, CAST(SUM(count) AS BIGINT) AS count FROM (  SELECT time_bucket(INTERVAL '300 seconds', bucket_ts) AS bucket,          bot_type, SUM(count) AS count   FROM read_parquet([<20 paths>])   WHERE bucket_ts >= TIMESTAMPTZ 't-3960m' AND bucket_ts < TIMESTAMPTZ 't+0m'   GROUP BY 1, 2   UNION ALL   SELECT time_bucket(INTERVAL '300 seconds', timestamp) AS bucket,          replace(tag, 'VERIFIED-BOT.', '') AS bot_type, COUNT(*) AS count   FROM (    SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag     FROM tmp     WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'       AND timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+0m'  ) sub   WHERE tag LIKE 'VERIFIED-BOT.%'   GROUP BY 1, 2) GROUP BY bucket, bot_type ORDER BY bucket, bot_type",
   "075b1fcd49c0": "SELECT asn,   SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p95_us,   SUM(p99_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p99_us FROM read_parquet([<71 paths>]) WHERE asn IN (?, ?) GROUP BY asn",
   "079f8c885a06": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<72 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4290m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
-  "08058720095e": "SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms   FROM read_parquet([<72 paths>])   WHERE pop IS NOT NULL AND pop != ''   UNION ALL   SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests,          CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors,          CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits,          CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes,          CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us,          CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms   FROM logs_svc   WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'     AND pop IS NOT NULL AND pop != ''   GROUP BY pop) GROUP BY pop",
   "095be5f1a49e": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<72 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "0a3cd38d32eb": "SELECT url,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<71 paths>]) GROUP BY url HAVING SUM(requests) >= ? ORDER BY p95_us_w DESC LIMIT ?",
-  "0a7768ab73b2": "SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms   FROM read_parquet([<71 paths>])   WHERE pop IS NOT NULL AND pop != ''   UNION ALL   SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests,          CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors,          CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits,          CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes,          CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us,          CAST(approx_quantile(ttfb, 0.95) AS DOUBLE) AS p95_ttfb_ms   FROM logs_svc   WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'     AND pop IS NOT NULL AND pop != ''   GROUP BY pop) GROUP BY pop",
   "0b3bb09320c6": "SELECT * FROM (  SELECT    asn,    hour_ts                                                             AS bucket_ts,    resp_bytes_sum / 3600.0                                            AS throughput_bps,    rtt_p50_us                                                         AS rtt_med_us,    rtt_min_p50_us                                                     AS rtt_baseline_us,    CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,    ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,    rtt_var_p50_us                                                     AS jitter_us,    errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,    CAST(reqs AS BIGINT)                                               AS reqs   FROM read_parquet([<71 paths>])   WHERE hour_ts >= TIMESTAMPTZ 't-4320m' AND hour_ts < TIMESTAMPTZ 't+30m'   UNION ALL    SELECT    asn,    TIMESTAMPTZ 'tACTIVE' AS bucket_ts,    CAST(SUM(resp_bytes) AS DOUBLE) / 1800.0 AS throughput_bps,    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_baseline_us,    0::BIGINT AS rtt_congestion_us,    0::DOUBLE AS avg_ploss,    0::DOUBLE AS jitter_us,    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,    CAST(COUNT(*) AS BIGINT) AS reqs   FROM logs_svc    WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'     AND asn IS NOT NULL   GROUP BY asn) ORDER BY reqs DESC",
+  "0bb1fadabfc5": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<71 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "0bb576f085f2": "SELECT oip,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        ROUND(SUM(ost_5xx_count) * 100.0 / NULLIF(SUM(ost_total_count), 0), 1) AS error_pct FROM read_parquet([<3 paths>]) GROUP BY oip HAVING SUM(requests) >= 10 ORDER BY error_pct DESC LIMIT ?",
   "0bbcd3300430": "SELECT  country,  city,  lat,  lon,  metro,  hour_ts                                           AS bucket_ts,  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,  CAST(reqs AS BIGINT)                             AS reqs FROM read_parquet([<30 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-1800m' AND hour_ts < TIMESTAMPTZ 't+0m' ORDER BY hour_ts, reqs DESC LIMIT 5000",
   "0c6706724116": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv FROM read_parquet([<42 paths>]) GROUP BY bucket ORDER BY mv",
@@ -43,13 +42,14 @@
   "22832facffab": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<20 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "22a2abec9e82": "SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh FROM read_parquet([<72 paths>]) GROUP BY ip ORDER BY mh DESC LIMIT 10",
   "232675c3a233": "SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh FROM read_parquet([<30 paths>]) GROUP BY ip ORDER BY mh DESC LIMIT 10",
-  "233220241b58": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<20 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "24757c598fb6": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv FROM read_parquet([<50 paths>]) GROUP BY bucket ORDER BY mv",
   "251060d30c00": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<42 paths>], hive_partitioning=0) WHERE field = ? GROUP BY value ORDER BY c DESC",
   "25c839fa8bd6": "SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([<72 paths>])",
+  "2691f99ee69e": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<3 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "299ffb428644": "SELECT  asn,  hour_ts                                                             AS bucket_ts,  resp_bytes_sum / 3600.0                                            AS throughput_bps,  rtt_p50_us                                                         AS rtt_med_us,  rtt_min_p50_us                                                     AS rtt_baseline_us,  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,  rtt_var_p50_us                                                     AS jitter_us,  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,  CAST(reqs AS BIGINT)                                               AS reqs FROM read_parquet([<3 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-4320m' AND hour_ts < TIMESTAMPTZ 't+0m' ORDER BY reqs DESC",
   "2a4fed1920fd": "SELECT pop,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<119 paths>]) GROUP BY pop ORDER BY p95_us_w DESC LIMIT ?",
   "2ae35a0c7f5d": "SELECT  country,  city,  CAST('' AS VARCHAR)                                   AS region,  metro,  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs FROM read_parquet([<119 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-7200m' AND hour_ts < TIMESTAMPTZ 't+0m' GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100",
+  "2bb2fa066a39": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<50 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "2c5ba544d144": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS count FROM read_parquet([<71 paths>]) GROUP BY bucket ORDER BY MIN(min_ttl)",
   "2dbe8a5d63a3": "SELECT status,        CAST(SUM(count) AS BIGINT) AS count,        SUM(count) * 100.0 / SUM(SUM(count)) OVER () AS pct FROM (  SELECT CASE            WHEN TRY_CAST(value AS INTEGER) BETWEEN 100 AND 599              THEN TRY_CAST(value AS INTEGER)            ELSE -1          END AS status,          count   FROM read_parquet([<71 paths>])   WHERE field = 'ost' AND value IS NOT NULL) GROUP BY status ORDER BY count DESC",
   "2fd97614c6de": "SELECT edge,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<26 paths>]) GROUP BY edge",
@@ -62,7 +62,6 @@
   "338047d7015a": "SELECT edge,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<42 paths>]) GROUP BY edge",
   "338971e2238f": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<42 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "3550f375b68b": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<1 paths>]) WHERE bucket >= TIMESTAMPTZ 't-60m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
-  "356e6e1f319e": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<72 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "383a360fb323": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<3 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "39b003cc7224": "SELECT bot_name, category, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<3 paths>]) GROUP BY bot_name, category",
   "3a187a3b7d2d": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<71 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1) UNION ALL (SELECT time_bucket(INTERVAL '1 hour', timestamp) AS out_bucket,        COUNT(*) AS num, 0 AS den FROM logs_svc WHERE timestamp >= 't-600m' AND timestamp < 't-540m' AND strftime(timestamp, '%Y-%m-%d-%H') IN ('h-10') GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
@@ -108,11 +107,13 @@
   "611a0119d28e": "SELECT COALESCE(SUM(num), 0) FROM ((SELECT COALESCE(SUM(requests), 0) AS num FROM read_parquet([<71 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+0m') UNION ALL (SELECT COUNT(*) AS num FROM logs_svc WHERE timestamp >= 't-600m' AND timestamp < 't-540m' AND strftime(timestamp, '%Y-%m-%d-%H') IN ('h-10')))",
   "61ad3da5e2d7": "SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt FROM read_parquet([<20 paths>]) WHERE asn IN (?, ?) GROUP BY asn, c_speed ORDER BY asn, cnt DESC",
   "61f2029cfd1e": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<42 paths>], hive_partitioning=0) WHERE field = 'conn_requests' GROUP BY value",
+  "62651e92c6e5": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<72 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "6283dc305313": "SELECT out_bucket, ROUND(SUM(num) * 100.0 / NULLIF(SUM(den), 0), 2) AS value FROM ((SELECT time_bucket(INTERVAL '1 day', bucket) AS out_bucket,        SUM(status_5xx) AS num, SUM(requests) AS den FROM read_parquet([<72 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4290m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
   "62e64944c845": "SELECT   CAST(SUM(requests) AS BIGINT)                                AS requests,   CAST(SUM(total_misses) AS BIGINT)                            AS total_misses,   CAST(SUM(total_passes) AS BIGINT)                            AS total_passes,   SUM(lat_us_count)                                            AS lat_us_count,   SUM(ottfb_p50_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p50_us,   SUM(ottfb_p75_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p75_us,   SUM(ottfb_p95_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p95_us,   SUM(ottfb_p99_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p99_us,   SUM(ottlb_p50_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0)   AS ottlb_p50_us,   SUM(ottlb_p95_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0)   AS ottlb_p95_us,   SUM(cdn_ovh_p50_us * cdn_ovh_count) / NULLIF(SUM(cdn_ovh_count), 0) AS cdn_ovh_p50_us,   SUM(ost_5xx_count) * 1.0 / NULLIF(SUM(ost_total_count), 0)   AS origin_error_rate,   SUM(obytes_p50 * obytes_count) / NULLIF(SUM(obytes_count), 0)  AS obytes_p50 FROM read_parquet([<50 paths>])",
   "63daec78200e": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<30 paths>]) WHERE 1=1 AND country = ? GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "6472a40c38c5": "SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([<50 paths>])",
   "64d01dffab68": "SELECT pop,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<20 paths>]) GROUP BY pop ORDER BY p95_us_w DESC LIMIT ?",
+  "6559fcc7bbbc": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<71 paths>]) WHERE pop IS NOT NULL AND pop != '' UNION ALL SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms FROM logs_svc WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m' AND pop IS NOT NULL AND pop != '' GROUP BY pop) GROUP BY pop",
   "65b65032a370": "SELECT bucket, bot_type, CAST(SUM(count) AS BIGINT) AS count FROM (  SELECT time_bucket(INTERVAL '300 seconds', bucket_ts) AS bucket,          bot_type, SUM(count) AS count   FROM read_parquet([<50 paths>])   WHERE bucket_ts >= TIMESTAMPTZ 't-3000m' AND bucket_ts < TIMESTAMPTZ 't+0m'   GROUP BY 1, 2   UNION ALL   SELECT time_bucket(INTERVAL '300 seconds', timestamp) AS bucket,          replace(tag, 'VERIFIED-BOT.', '') AS bot_type, COUNT(*) AS count   FROM (    SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag     FROM tmp     WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'       AND timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+0m'  ) sub   WHERE tag LIKE 'VERIFIED-BOT.%'   GROUP BY 1, 2) GROUP BY bucket, bot_type ORDER BY bucket, bot_type",
   "65ccdedb9aa4": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<3 paths>]) WHERE 1=1  GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "670b0596f1c3": "SELECT   CAST(SUM(requests) AS BIGINT)                                AS requests,   CAST(SUM(total_misses) AS BIGINT)                            AS total_misses,   CAST(SUM(total_passes) AS BIGINT)                            AS total_passes,   SUM(lat_us_count)                                            AS lat_us_count,   SUM(ottfb_p50_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p50_us,   SUM(ottfb_p75_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p75_us,   SUM(ottfb_p95_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p95_us,   SUM(ottfb_p99_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0) AS ottfb_p99_us,   SUM(ottlb_p50_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0)   AS ottlb_p50_us,   SUM(ottlb_p95_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0)   AS ottlb_p95_us,   SUM(cdn_ovh_p50_us * cdn_ovh_count) / NULLIF(SUM(cdn_ovh_count), 0) AS cdn_ovh_p50_us,   SUM(ost_5xx_count) * 1.0 / NULLIF(SUM(ost_total_count), 0)   AS origin_error_rate,   SUM(obytes_p50 * obytes_count) / NULLIF(SUM(obytes_count), 0)  AS obytes_p50 FROM read_parquet([<3 paths>])",
@@ -126,6 +127,7 @@
   "6c988dd13446": "SELECT  country,  city,  CAST('' AS VARCHAR)                                   AS region,  metro,  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs FROM read_parquet([<20 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-3960m' AND hour_ts < TIMESTAMPTZ 't+0m' GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100",
   "6cd3f3c1d8bd": "SELECT pop,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<50 paths>]) GROUP BY pop ORDER BY p95_us_w DESC LIMIT ?",
   "6d938619483c": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<50 paths>]) WHERE bucket >= TIMESTAMPTZ 't-3000m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
+  "6dade5757961": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<20 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "6ec8bcfea50f": "SELECT url,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<42 paths>]) GROUP BY url HAVING SUM(requests) >= ? ORDER BY p95_us_w DESC LIMIT ?",
   "6f91c15ac45e": "SELECT pop,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<72 paths>]) GROUP BY pop ORDER BY p95_us_w DESC LIMIT ?",
   "6fe16551fa40": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<3 paths>]) WHERE bucket >= TIMESTAMPTZ 't-180m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
@@ -156,13 +158,13 @@
   "82858b645519": "SELECT oip,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        ROUND(SUM(ost_5xx_count) * 100.0 / NULLIF(SUM(ost_total_count), 0), 1) AS error_pct FROM read_parquet([<42 paths>]) GROUP BY oip HAVING SUM(requests) >= 10 ORDER BY error_pct DESC LIMIT ?",
   "829634eb8263": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<50 paths>]) GROUP BY bucket",
   "868dbbdb6c2c": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<72 paths>]) GROUP BY bucket",
+  "875aa69a5403": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<119 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "8871a804fd83": "SELECT oip,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        ROUND(SUM(ost_5xx_count) * 100.0 / NULLIF(SUM(ost_total_count), 0), 1) AS error_pct FROM read_parquet([<50 paths>]) GROUP BY oip HAVING SUM(requests) >= 10 ORDER BY error_pct DESC LIMIT ?",
   "8a6ee60d6021": "SELECT  asn,  hour_ts                                                             AS bucket_ts,  resp_bytes_sum / 3600.0                                            AS throughput_bps,  rtt_p50_us                                                         AS rtt_med_us,  rtt_min_p50_us                                                     AS rtt_baseline_us,  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,  rtt_var_p50_us                                                     AS jitter_us,  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,  CAST(reqs AS BIGINT)                                               AS reqs FROM read_parquet([<30 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-1800m' AND hour_ts < TIMESTAMPTZ 't+0m' ORDER BY reqs DESC",
   "8a96f1835ec1": "SELECT status,        CAST(SUM(count) AS BIGINT) AS count,        SUM(count) * 100.0 / SUM(SUM(count)) OVER () AS pct FROM (  SELECT CASE            WHEN TRY_CAST(value AS INTEGER) BETWEEN 100 AND 599              THEN TRY_CAST(value AS INTEGER)            ELSE -1          END AS status,          count   FROM read_parquet([<72 paths>])   WHERE field = 'ost' AND value IS NOT NULL) GROUP BY status ORDER BY count DESC",
   "8bb0c1377452": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS count FROM read_parquet([<42 paths>]) GROUP BY bucket ORDER BY MIN(min_ttl)",
   "8c81c34042a1": "SELECT asn, c_speed, CAST(SUM(count) AS BIGINT) AS cnt FROM read_parquet([<119 paths>]) WHERE asn IN (?, ?) GROUP BY asn, c_speed ORDER BY asn, cnt DESC",
   "8e92e9ac9ec0": "SELECT COALESCE(SUM(num), 0) FROM ((SELECT COALESCE(SUM(requests), 0) AS num FROM read_parquet([<30 paths>]) WHERE bucket >= TIMESTAMPTZ 't-1800m'   AND bucket < TIMESTAMPTZ 't+0m'))",
-  "9039f55e9663": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<119 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "90578f3f8f54": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<1 paths>], hive_partitioning=0) WHERE field = ? GROUP BY value ORDER BY c DESC",
   "9085c62299d9": "SELECT pop,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<71 paths>]) GROUP BY pop ORDER BY p95_us_w DESC LIMIT ?",
   "908ed0b107b8": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<3 paths>], hive_partitioning=0) WHERE field = 'conn_requests' GROUP BY value",
@@ -187,6 +189,7 @@
   "a227826c41d0": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<119 paths>]) WHERE 1=1  GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "a291b8d45a37": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<3 paths>]) WHERE 1=1 AND country = ? GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "a4bdf4c1b98f": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<72 paths>], hive_partitioning=0) WHERE field = 'conn_requests' GROUP BY value",
+  "a4d5345c02f2": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<26 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "a5cc01d728a3": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<71 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "a61117fb4cb3": "SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([<71 paths>])",
   "a6385da91ec6": "SELECT bucket, bot_type, CAST(SUM(count) AS BIGINT) AS count FROM (  SELECT time_bucket(INTERVAL '300 seconds', bucket_ts) AS bucket,          bot_type, SUM(count) AS count   FROM read_parquet([<119 paths>])   WHERE bucket_ts >= TIMESTAMPTZ 't-7200m' AND bucket_ts < TIMESTAMPTZ 't+0m'   GROUP BY 1, 2   UNION ALL   SELECT time_bucket(INTERVAL '300 seconds', timestamp) AS bucket,          replace(tag, 'VERIFIED-BOT.', '') AS bot_type, COUNT(*) AS count   FROM (    SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag     FROM tmp     WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'       AND timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+0m'  ) sub   WHERE tag LIKE 'VERIFIED-BOT.%'   GROUP BY 1, 2) GROUP BY bucket, bot_type ORDER BY bucket, bot_type",
@@ -194,15 +197,16 @@
   "a8a0b1a9de04": "SELECT  country,  city,  lat,  lon,  metro,  hour_ts                                           AS bucket_ts,  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,  CAST(reqs AS BIGINT)                             AS reqs FROM read_parquet([<72 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-4320m' AND hour_ts < TIMESTAMPTZ 't+0m' ORDER BY hour_ts, reqs DESC LIMIT 5000",
   "abb1e1780171": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<119 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY p95_us_w DESC LIMIT ?",
   "abedd4cb8417": "SELECT  country,  city,  CAST('' AS VARCHAR)                                   AS region,  metro,  SUM(rtt_sum) / NULLIF(SUM(rtt_count), 0)             AS rtt_med_us,  SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0)         AS avg_ploss,  SUM(errors) * 100.0 / NULLIF(SUM(reqs), 0)           AS error_pct,  CAST(SUM(reqs) AS BIGINT)                             AS total_reqs FROM read_parquet([<71 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-4290m' AND hour_ts < TIMESTAMPTZ 't+0m' GROUP BY country, city, metro ORDER BY total_reqs DESC LIMIT 100",
-  "acf174f3c21c": "SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms   FROM read_parquet([<71 paths>])   WHERE pop IS NOT NULL AND pop != ''   UNION ALL   SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests,          CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors,          CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits,          CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes,          CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us,          CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms   FROM logs_svc   WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'     AND pop IS NOT NULL AND pop != ''   GROUP BY pop) GROUP BY pop",
   "ad70f3793482": "SELECT out_bucket,        ROUND(SUM(num) / NULLIF(SUM(den), 0) / 1000.0, 3) AS value,        CAST(SUM(den) AS BIGINT) AS miss_count FROM ((SELECT time_bucket(INTERVAL '5 minutes', bucket_ts) AS out_bucket,        SUM(ttfb_p95_us * ttfb_count) AS num, SUM(ttfb_count) AS den FROM read_parquet([<71 paths>]) WHERE bucket_ts >= TIMESTAMPTZ 't-4320m'   AND bucket_ts <  TIMESTAMPTZ 't+30m' GROUP BY 1) UNION ALL (SELECT time_bucket(INTERVAL '5 minutes', m) AS out_bucket,        SUM(p_us * cnt) AS num, SUM(cnt) AS den FROM (  SELECT date_trunc('minute', timestamp) AS m,          APPROX_QUANTILE(COALESCE(\"ottfb\", \"ttfb\" * 1000000.0), 0.95) AS p_us, COUNT(*) AS cnt   FROM tbl   WHERE 1=1     AND timestamp >= TIMESTAMPTZ 'tACTIVE'     AND timestamp <  TIMESTAMPTZ 't+30m'     AND (COALESCE(\"ottfb\", \"ttfb\" * 1000000.0)) IS NOT NULL   GROUP BY 1) GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
   "af9a33f04377": "SELECT edge,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<72 paths>]) GROUP BY edge",
   "b1f892c70f18": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<71 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+30m' GROUP BY 1) UNION ALL (SELECT time_bucket(INTERVAL '1 hour', timestamp) AS out_bucket,        COUNT(*) AS num, 0 AS den FROM logs_svc WHERE timestamp >= 't-600m' AND timestamp < 't-540m' AND strftime(timestamp, '%Y-%m-%d-%H') IN ('h-10') GROUP BY 1) UNION ALL (SELECT time_bucket(INTERVAL '1 hour', timestamp) AS out_bucket,        COUNT(*) AS num, 0 AS den FROM tbl WHERE 1=1   AND timestamp >= TIMESTAMPTZ 'tACTIVE'   AND timestamp <  TIMESTAMPTZ 't+30m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
   "b2037ce0c492": "SELECT COALESCE(SUM(num), 0) FROM ((SELECT COALESCE(SUM(requests), 0) AS num FROM read_parquet([<72 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+30m'))",
   "b2dd798af4b5": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv FROM read_parquet([<26 paths>]) GROUP BY bucket ORDER BY mv",
   "b5320cae33f0": "SELECT out_bucket,        ROUND(SUM(num) / NULLIF(SUM(den), 0) / 1000.0, 3) AS value,        CAST(SUM(den) AS BIGINT) AS miss_count FROM ((SELECT time_bucket(INTERVAL '5 minutes', bucket_ts) AS out_bucket,        SUM(ttfb_p95_us * ttfb_count) AS num, SUM(ttfb_count) AS den FROM read_parquet([<42 paths>]) WHERE bucket_ts >= TIMESTAMPTZ 't-4320m'   AND bucket_ts <  TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
-  "b880cb68e149": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<3 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
+  "b6d4157e613b": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<72 paths>]) WHERE pop IS NOT NULL AND pop != '' UNION ALL SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms FROM logs_svc WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m' AND pop IS NOT NULL AND pop != '' GROUP BY pop) GROUP BY pop",
+  "b7d59e9fdb62": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<71 paths>]) WHERE pop IS NOT NULL AND pop != '' UNION ALL SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms FROM logs_svc WHERE timestamp >= TIMESTAMPTZ 't-4290m' AND timestamp < TIMESTAMPTZ 't-4260m' AND pop IS NOT NULL AND pop != '' GROUP BY pop) GROUP BY pop",
   "b8ec4e80bd14": "SELECT status,        CAST(SUM(count) AS BIGINT) AS count,        SUM(count) * 100.0 / SUM(SUM(count)) OVER () AS pct FROM (  SELECT CASE            WHEN TRY_CAST(value AS INTEGER) BETWEEN 100 AND 599              THEN TRY_CAST(value AS INTEGER)            ELSE -1          END AS status,          count   FROM read_parquet([<26 paths>])   WHERE field = 'ost' AND value IS NOT NULL) GROUP BY status ORDER BY count DESC",
+  "b9c26bc8d894": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<30 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "b9c2fc8979b6": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<30 paths>]) WHERE bucket >= TIMESTAMPTZ 't-1800m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
   "b9e84e84fe81": "SELECT oip,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        ROUND(SUM(ost_5xx_count) * 100.0 / NULLIF(SUM(ost_total_count), 0), 1) AS error_pct FROM read_parquet([<26 paths>]) GROUP BY oip HAVING SUM(requests) >= 10 ORDER BY error_pct DESC LIMIT ?",
   "bc2d8e0f76ec": "SELECT asn,   SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p95_us,   SUM(p99_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p99_us FROM read_parquet([<20 paths>]) WHERE asn IN (?, ?) GROUP BY asn",
@@ -221,12 +225,10 @@
   "c45a65230af4": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<72 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+30m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
   "c4c40b7f9192": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<71 paths>]) GROUP BY bucket",
   "c4cb6df4813f": "SELECT out_bucket,        ROUND(SUM(num) / NULLIF(SUM(den), 0) / 1000.0, 3) AS value,        CAST(SUM(den) AS BIGINT) AS miss_count FROM ((SELECT time_bucket(INTERVAL '5 minutes', bucket_ts) AS out_bucket,        SUM(ttfb_p95_us * ttfb_count) AS num, SUM(ttfb_count) AS den FROM read_parquet([<18 paths>]) WHERE bucket_ts >= TIMESTAMPTZ 't-3960m'   AND bucket_ts <  TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
-  "c6056d0e258f": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<50 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "c69df53b01e4": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<3 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY p95_us_w DESC LIMIT ?",
   "c7ffbeeda54f": "SELECT bucket, bot_type, CAST(SUM(count) AS BIGINT) AS count FROM (  SELECT time_bucket(INTERVAL '300 seconds', bucket_ts) AS bucket,          bot_type, SUM(count) AS count   FROM read_parquet([<72 paths>])   WHERE bucket_ts >= TIMESTAMPTZ 't-4320m' AND bucket_ts < TIMESTAMPTZ 't+30m'   GROUP BY 1, 2   UNION ALL   SELECT time_bucket(INTERVAL '300 seconds', timestamp) AS bucket,          replace(tag, 'VERIFIED-BOT.', '') AS bot_type, COUNT(*) AS count   FROM (    SELECT timestamp, unnest(string_split(waf_sig, ',')) AS tag     FROM tmp     WHERE waf_sig IS NOT NULL AND waf_sig ILIKE '%VERIFIED-BOT.%'       AND timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'  ) sub   WHERE tag LIKE 'VERIFIED-BOT.%'   GROUP BY 1, 2) GROUP BY bucket, bot_type ORDER BY bucket, bot_type",
   "c8603f8140c6": "SELECT asn,   SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p95_us,   SUM(p99_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p99_us FROM read_parquet([<30 paths>]) WHERE asn IN (?, ?) GROUP BY asn",
   "c870d4b9caff": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<71 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+30m' GROUP BY 1) UNION ALL (SELECT time_bucket(INTERVAL '1 hour', timestamp) AS out_bucket,        COUNT(*) AS num, 0 AS den FROM logs_svc WHERE timestamp >= 't-600m' AND timestamp < 't-540m' AND strftime(timestamp, '%Y-%m-%d-%H') IN ('h-10') GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
-  "ca4210f1202e": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<26 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "cc546dd4a4dc": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<50 paths>], hive_partitioning=0) WHERE field = ? GROUP BY value ORDER BY c DESC",
   "cc5fc80abe9d": "SELECT edge,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w FROM read_parquet([<30 paths>]) GROUP BY edge",
   "cde9c531e313": "SELECT  asn,  hour_ts                                                             AS bucket_ts,  resp_bytes_sum / 3600.0                                            AS throughput_bps,  rtt_p50_us                                                         AS rtt_med_us,  rtt_min_p50_us                                                     AS rtt_baseline_us,  CAST(rtt_p50_us AS BIGINT) - CAST(COALESCE(rtt_min_p50_us, rtt_p50_us) AS BIGINT) AS rtt_congestion_us,  ploss_sum / NULLIF(ploss_count, 0)                                AS avg_ploss,  rtt_var_p50_us                                                     AS jitter_us,  errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,  CAST(reqs AS BIGINT)                                               AS reqs FROM read_parquet([<42 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-4320m' AND hour_ts < TIMESTAMPTZ 't+0m' ORDER BY reqs DESC",
@@ -240,11 +242,11 @@
   "d268a70c9d9b": "SELECT out_bucket, CAST(SUM(num) AS BIGINT) AS value FROM ((SELECT time_bucket(INTERVAL '1 hour', bucket) AS out_bucket,        SUM(requests) AS num, 0 AS den FROM read_parquet([<72 paths>]) WHERE bucket >= TIMESTAMPTZ 't-4320m'   AND bucket < TIMESTAMPTZ 't+0m' GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
   "d2c0e2fc511f": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<119 paths>]) WHERE 1=1 AND country = ? GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "d2d05a0ddfb7": "SELECT asn,   SUM(p95_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p95_us,   SUM(p99_us * rtt_count) / NULLIF(SUM(rtt_count), 0) AS p99_us FROM read_parquet([<119 paths>]) WHERE asn IN (?, ?) GROUP BY asn",
+  "d35593dc9d0f": "SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms FROM read_parquet([<42 paths>]) WHERE pop IS NOT NULL AND pop != '') GROUP BY pop",
   "d45e47642681": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<50 paths>], hive_partitioning=0) WHERE field = 'conn_requests' GROUP BY value",
   "d45e83645d92": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<26 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "d533d9f70643": "SELECT asn, c_speed, CAST(SUM(cnt) AS BIGINT) AS cnt FROM (  SELECT asn, c_speed, count AS cnt   FROM read_parquet([<72 paths>])   WHERE asn IN (?, ?)   UNION ALL   SELECT asn, c_speed, CAST(COUNT(*) AS BIGINT) AS cnt   FROM logs_svc   WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'     AND asn IN (?, ?) AND c_speed IS NOT NULL   GROUP BY asn, c_speed) GROUP BY asn, c_speed ORDER BY asn, cnt DESC",
   "d5f85ebe46e3": "SELECT value, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([<20 paths>], hive_partitioning=0) WHERE field = 'conn_requests' GROUP BY value",
-  "d61dc4a4278f": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<42 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "d66f3eb1fb9e": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<72 paths>]) WHERE 1=1  GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "d766665f6743": "SELECT value,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(elapsed_sum) / NULLIF(SUM(elapsed_count), 0) AS avg_us,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        SUM(p99_us * requests) / NULLIF(SUM(requests), 0) AS p99_us_w FROM read_parquet([<119 paths>]) GROUP BY value HAVING SUM(requests) > ? ORDER BY avg_us DESC LIMIT ?",
   "d79c30ca9ab5": "SELECT oip,        CAST(SUM(requests) AS BIGINT) AS requests,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) AS p50_us_w,        SUM(p95_us * requests) / NULLIF(SUM(requests), 0) AS p95_us_w,        ROUND(SUM(ost_5xx_count) * 100.0 / NULLIF(SUM(ost_total_count), 0), 1) AS error_pct FROM read_parquet([<119 paths>]) GROUP BY oip HAVING SUM(requests) >= 10 ORDER BY error_pct DESC LIMIT ?",
@@ -252,10 +254,7 @@
   "da157cc18bef": "SELECT  country,  city,  lat,  lon,  metro,  hour_ts                                           AS bucket_ts,  rtt_sum / NULLIF(rtt_count, 0)                  AS rtt_med_us,  ploss_sum / NULLIF(ploss_count, 0)              AS avg_ploss,  errors * 100.0 / NULLIF(reqs, 0)                AS error_pct,  CAST(reqs AS BIGINT)                             AS reqs FROM read_parquet([<119 paths>]) WHERE hour_ts >= TIMESTAMPTZ 't-7200m' AND hour_ts < TIMESTAMPTZ 't+0m' ORDER BY hour_ts, reqs DESC LIMIT 5000",
   "daae814880c6": "SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([<26 paths>])",
   "db1d5d6d4590": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS count FROM read_parquet([<119 paths>]) GROUP BY bucket ORDER BY MIN(min_ttl)",
-  "dc1d6ab5583d": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<30 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
-  "dd90707e254b": "SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM (  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms   FROM read_parquet([<72 paths>])   WHERE pop IS NOT NULL AND pop != ''   UNION ALL   SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests,          CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors,          CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits,          CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes,          CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us,          CAST(approx_quantile(ttfb, 0.95) AS DOUBLE) AS p95_ttfb_ms   FROM logs_svc   WHERE timestamp >= TIMESTAMPTZ 'tACTIVE' AND timestamp < TIMESTAMPTZ 't+30m'     AND pop IS NOT NULL AND pop != ''   GROUP BY pop) GROUP BY pop",
   "dd9ced3934ad": "SELECT status,        CAST(SUM(count) AS BIGINT) AS count,        SUM(count) * 100.0 / SUM(SUM(count)) OVER () AS pct FROM (  SELECT CASE            WHEN TRY_CAST(value AS INTEGER) BETWEEN 100 AND 599              THEN TRY_CAST(value AS INTEGER)            ELSE -1          END AS status,          count   FROM read_parquet([<50 paths>])   WHERE field = 'ost' AND value IS NOT NULL) GROUP BY status ORDER BY count DESC",
-  "ddaeb81d5368": "SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT),   CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),   CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM read_parquet([<71 paths>]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop",
   "ddffea186051": "SELECT dim_val as label,        SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms,        SUM(requests) AS reqs FROM read_parquet([<42 paths>]) WHERE 1=1  GROUP BY dim_val ORDER BY reqs DESC LIMIT 25",
   "dfed69b210db": "SELECT bucket, CAST(SUM(count) AS BIGINT) AS c, MIN(min_val) AS mv FROM read_parquet([<72 paths>]) GROUP BY bucket ORDER BY mv",
   "e090bc8b83b3": "SELECT out_bucket,        ROUND(SUM(num) / NULLIF(SUM(den), 0) / 1000.0, 3) AS value,        CAST(SUM(den) AS BIGINT) AS miss_count FROM ((SELECT time_bucket(INTERVAL '5 minutes', bucket_ts) AS out_bucket,        SUM(ttfb_p95_us * ttfb_count) AS num, SUM(ttfb_count) AS den FROM read_parquet([<72 paths>]) WHERE bucket_ts >= TIMESTAMPTZ 't-4320m'   AND bucket_ts <  TIMESTAMPTZ 't+30m' GROUP BY 1) UNION ALL (SELECT time_bucket(INTERVAL '5 minutes', m) AS out_bucket,        SUM(p_us * cnt) AS num, SUM(cnt) AS den FROM (  SELECT date_trunc('minute', timestamp) AS m,          APPROX_QUANTILE(COALESCE(\"ottfb\", \"ttfb\" * 1000000.0), 0.95) AS p_us, COUNT(*) AS cnt   FROM tbl   WHERE 1=1     AND timestamp >= TIMESTAMPTZ 'tACTIVE'     AND timestamp <  TIMESTAMPTZ 't+30m'     AND (COALESCE(\"ottfb\", \"ttfb\" * 1000000.0)) IS NOT NULL   GROUP BY 1) GROUP BY 1)) WHERE out_bucket IS NOT NULL GROUP BY out_bucket ORDER BY out_bucket",
@@ -18773,7 +18772,7 @@
    },
    "raised": null,
    "sql": [
-    "08058720095e"
+    "b6d4157e613b"
    ]
   },
   "active_missing_hour": {
@@ -18802,7 +18801,7 @@
    },
    "raised": null,
    "sql": [
-    "acf174f3c21c"
+    "6559fcc7bbbc"
    ]
   },
   "active_missing_no_marker": {
@@ -18831,7 +18830,7 @@
    },
    "raised": null,
    "sql": [
-    "acf174f3c21c"
+    "6559fcc7bbbc"
    ]
   },
   "active_only_3h": {
@@ -18890,7 +18889,7 @@
    },
    "raised": null,
    "sql": [
-    "d61dc4a4278f"
+    "d35593dc9d0f"
    ]
   },
   "days_alt_flat": {
@@ -18912,7 +18911,7 @@
    },
    "raised": null,
    "sql": [
-    "b880cb68e149"
+    "2691f99ee69e"
    ]
   },
   "days_alt_nested": {
@@ -18934,7 +18933,7 @@
    },
    "raised": null,
    "sql": [
-    "b880cb68e149"
+    "2691f99ee69e"
    ]
   },
   "days_and_hours": {
@@ -18956,7 +18955,7 @@
    },
    "raised": null,
    "sql": [
-    "b880cb68e149"
+    "2691f99ee69e"
    ]
   },
   "days_preferred": {
@@ -18978,7 +18977,7 @@
    },
    "raised": null,
    "sql": [
-    "b880cb68e149"
+    "2691f99ee69e"
    ]
   },
   "days_residual_hours": {
@@ -19007,7 +19006,7 @@
    },
    "raised": null,
    "sql": [
-    "ca4210f1202e"
+    "a4d5345c02f2"
    ]
   },
   "durable_not_ready": {
@@ -19045,7 +19044,7 @@
    },
    "raised": null,
    "sql": [
-    "356e6e1f319e"
+    "62651e92c6e5"
    ]
   },
   "filters_set": {
@@ -19083,7 +19082,7 @@
    },
    "raised": null,
    "sql": [
-    "356e6e1f319e"
+    "62651e92c6e5"
    ]
   },
   "missing_hour_beyond_heal_cap": {
@@ -19112,7 +19111,7 @@
    },
    "raised": null,
    "sql": [
-    "9039f55e9663"
+    "875aa69a5403"
    ]
   },
   "missing_hour_empty_sentinel": {
@@ -19141,7 +19140,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_hour_marker": {
@@ -19170,7 +19169,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_hour_no_marker": {
@@ -19199,7 +19198,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_hour_nonempty_allfields": {
@@ -19228,7 +19227,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_hour_recent_marker": {
@@ -19257,7 +19256,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_hour_recent_no_marker": {
@@ -19286,7 +19285,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_hour_recent_sentinel": {
@@ -19315,7 +19314,7 @@
    },
    "raised": null,
    "sql": [
-    "ddaeb81d5368"
+    "0bb1fadabfc5"
    ]
   },
   "missing_start": {
@@ -19388,20 +19387,37 @@
    },
    "raised": null,
    "sql": [
-    "233220241b58"
+    "6dade5757961"
    ]
   },
   "partial_start_mid_hour": {
-   "executes": 0,
-   "outcome": null,
-   "params": [],
-   "paths": [],
+   "executes": 1,
+   "outcome": [],
+   "params": [
+    null
+   ],
+   "paths": [
+    {
+     "head": [
+      "<R>/rollups/hour_bundled/hour=h-71/pop_health.parquet",
+      "<R>/rollups/hour_bundled/hour=h-70/pop_health.parquet"
+     ],
+     "n": 71,
+     "sha": "2975ede1f0fa",
+     "tail": [
+      "<R>/rollups/hour_bundled/hour=h-2/pop_health.parquet",
+      "<R>/rollups/hour_bundled/hour=h-1/pop_health.parquet"
+     ]
+    }
+   ],
    "probes": {
     "isdir": 1,
     "isfile": 74
    },
    "raised": null,
-   "sql": []
+   "sql": [
+    "b7d59e9fdb62"
+   ]
   },
   "reversed_window": {
    "executes": 0,
@@ -19447,7 +19463,7 @@
    },
    "raised": null,
    "sql": [
-    "dc1d6ab5583d"
+    "b9c26bc8d894"
    ]
   },
   "win_366d": {
@@ -19506,7 +19522,7 @@
    },
    "raised": null,
    "sql": [
-    "c6056d0e258f"
+    "2bb2fa066a39"
    ]
   }
  },

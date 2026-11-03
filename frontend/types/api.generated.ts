@@ -19653,6 +19653,13 @@ export interface components {
              * @default []
              */
             missing_fields: string[];
+            /**
+             * Approx
+             * @default false
+             */
+            _approx: boolean;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** TransportProtocolShare */
         TransportProtocolShare: {

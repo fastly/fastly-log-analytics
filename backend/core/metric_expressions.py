@@ -25,6 +25,23 @@ def column_or_default(actual_cols: Collection[str], col: str, default: str, *, c
     return coalesce(ref, default)
 
 
+def protocol_label_expr(actual_cols: Collection[str]) -> str | None:
+    """Clean HTTP protocol label for network distribution, or ``None`` when no protocol column exists."""
+    col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
+    if col is None:
+        if "transport" in actual_cols:
+            return f"UPPER({coalesce('CAST(transport AS VARCHAR)', repr('TCP'))})"
+        return None
+    raw = f"CAST({col} AS VARCHAR)"
+    return (
+        f"CASE WHEN {raw} IN ('3.0', '3', 'HTTP/3') THEN 'HTTP/3' "
+        f"WHEN {raw} IN ('2.0', '2', 'HTTP/2') THEN 'HTTP/2' "
+        f"WHEN {raw} IN ('1.1', 'HTTP/1.1') THEN 'HTTP/1.1' "
+        f"WHEN {raw} IN ('1.0', 'HTTP/1.0') THEN 'HTTP/1.0' "
+        f"ELSE {coalesce(raw, repr('Other'))} END"
+    )
+
+
 def origin_latency_us(actual_cols: Collection[str], *, absent: str | None = "NULL") -> str | None:
     has_ottfb, has_ttfb = "ottfb" in actual_cols, "ttfb" in actual_cols
     if has_ottfb and has_ttfb:

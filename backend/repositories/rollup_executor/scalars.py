@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 import duckdb
 
 from backend.core import log_fields as metric_expressions
+from backend.core.metric_expressions import protocol_label_expr
 from backend.core.rollups._common import (
     DAY_BUNDLE_FILENAME,
     NETWORK_QUALITY_ASN_FILENAME,
@@ -16,6 +17,8 @@ from backend.core.rollups._common import (
     NETWORK_QUALITY_REGION_FILENAME,
     NETWORK_RTT_BUNDLE_FILENAME,
     NETWORK_SPEED_BUNDLE_FILENAME,
+    NETWORK_TRANSPORT_BUNDLE_FILENAME,
+    NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME,
     ORIGIN_IP_BUNDLE_FILENAME,
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
@@ -35,7 +38,9 @@ from backend.core.rollups._common import (
     SLOW_URLS_BUNDLE_FILENAME,
     TIME_SERIES_BUNDLE_FILENAME,
     quote_path_list,
+    wavg,
 )
+from backend.core.rollups.network_transport import transport_aggregate_columns
 from backend.core.rollups.recompute import (
     collect_day_prefer_paths,
     collect_hour_paths_with_floor,
@@ -1226,31 +1231,109 @@ class _ScalarsRollupMixin:
         if resolved is None:
             return None
         st, et, paths_sql, active_hour_start, base_table = resolved
-        # Whole-hour bundles omit this leading slice; the merge below only restores the live tail.
-        if st != st.replace(minute=0, second=0, microsecond=0):
+        # Whole-hour bundles omit a partial leading hour and the live hour; both come from scoped raw slices.
+        slices = self._boundary_slices(st, et, active_hour_start)
+        if slices and base_table is None:
             return None
-        if et > active_hour_start:
-            ah_iso, et_iso = active_hour_start.isoformat(), et.isoformat()
-            query = (
-                f"SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),"
-                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),"
-                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) FROM ("
-                f"  SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms "
-                f"  FROM read_parquet([{paths_sql}])   WHERE pop IS NOT NULL AND pop != ''   UNION ALL "
-                f"  SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, "
-                f"         CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, "
-                f"         CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, "
-                f"         CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, "
-                f"         CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
-                f"         CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms   FROM {base_table} "
-                f"  WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'     AND pop IS NOT NULL AND pop != '' "
-                f"  GROUP BY pop) GROUP BY pop"
-            )
-        else:
-            query = (
-                f"SELECT   pop,   CAST(SUM(requests) AS BIGINT),   CAST(SUM(errors) AS BIGINT),   CAST(SUM(cache_hits) AS BIGINT), "
-                f"  CAST(SUM(bandwidth_bytes) AS BIGINT),   CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
-                f"  CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
-                f"FROM read_parquet([{paths_sql}]) WHERE pop IS NOT NULL AND pop != '' GROUP BY pop"
-            )
+        parts = [
+            f"SELECT pop, requests, errors, cache_hits, bandwidth_bytes, p50_rtt_us, p95_ttfb_ms "
+            f"FROM read_parquet([{paths_sql}]) WHERE pop IS NOT NULL AND pop != ''"
+        ]
+        parts += [
+            f"SELECT pop, CAST(COUNT(*) AS BIGINT) AS requests, "
+            f"CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS BIGINT) AS errors, "
+            f"CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS cache_hits, "
+            f"CAST(SUM(resp_bytes) AS BIGINT) AS bandwidth_bytes, "
+            f"CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS p50_rtt_us, "
+            f"CAST(approx_quantile(ttfb, 0.95) * 1000.0 AS DOUBLE) AS p95_ttfb_ms FROM {base_table} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{lo}' AND timestamp < TIMESTAMPTZ '{hi}' "
+            f"AND pop IS NOT NULL AND pop != '' GROUP BY pop"
+            for lo, hi in slices
+        ]
+        query = (
+            f"SELECT pop, CAST(SUM(requests) AS BIGINT), CAST(SUM(errors) AS BIGINT), CAST(SUM(cache_hits) AS BIGINT), "
+            f"CAST(SUM(bandwidth_bytes) AS BIGINT), CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE), "
+            f"CAST(SUM(p95_ttfb_ms * requests) / NULLIF(SUM(requests), 0) AS DOUBLE) "
+            f"FROM ({' UNION ALL '.join(parts)}) GROUP BY pop"
+        )
         return self.execute(query).fetchall()
+
+    def _boundary_slices(self, st: datetime, et: datetime, active_hour_start: datetime) -> list[tuple[str, str]]:
+        """Raw ``[lo, hi)`` slices the whole-hour transport bundles do not cover."""
+        slices: list[tuple[str, str]] = []
+        leading_floor = st.replace(minute=0, second=0, microsecond=0)
+        if st != leading_floor:
+            hi = min(leading_floor + timedelta(hours=1), et)
+            slices.append((st.isoformat(), hi.isoformat()))
+        if et > active_hour_start:
+            slices.append((max(active_hour_start, st).isoformat(), et.isoformat()))
+        return slices
+
+    def try_network_transport_from_rollup(
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, actual_cols: set[str] | list[str]
+    ) -> dict | None:
+        resolved = self._rollup_window_and_paths_with_active_hour(
+            start_time, end_time, NETWORK_TRANSPORT_BUNDLE_FILENAME, has_filters=has_filters
+        )
+        if resolved is None:
+            return None
+        st, et, paths_sql, active_hour_start, base_table = resolved
+        cols = set(actual_cols)
+        proto_expr = protocol_label_expr(cols)
+        proto_paths_sql: str | None = None
+        if proto_expr is not None:
+            proto_paths = self._collect_rollup_paths(st, et, NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME)
+            if proto_paths is None:
+                return None
+            proto_paths_sql = quote_path_list(proto_paths)
+        slices = self._boundary_slices(st, et, active_hour_start)
+        if slices and base_table is None:
+            return None
+
+        agg_cols = transport_aggregate_columns(cols)
+        parts = [
+            f"SELECT requests, total_bytes, rtt_count, rtt_p50_us, rtt_p90_us, rtt_p95_us, rtt_p99_us, retrans_sum, "
+            f"retrans_count, ploss_sum, ploss_count, delivery_sum, delivery_count FROM read_parquet([{paths_sql}])"
+        ]
+        parts += [
+            f"SELECT {agg_cols} FROM {base_table} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{lo}' AND timestamp < TIMESTAMPTZ '{hi}'"
+            for lo, hi in slices
+        ]
+        sql = (
+            f"SELECT CAST(SUM(requests) AS BIGINT), CAST(SUM(total_bytes) AS BIGINT), CAST(SUM(rtt_count) AS BIGINT), "
+            f"{wavg('rtt_p50_us', 'rtt_count')}, {wavg('rtt_p90_us', 'rtt_count')}, "
+            f"{wavg('rtt_p95_us', 'rtt_count')}, {wavg('rtt_p99_us', 'rtt_count')}, "
+            f"SUM(retrans_sum) / NULLIF(SUM(retrans_count), 0), SUM(ploss_sum) / NULLIF(SUM(ploss_count), 0), "
+            f"SUM(delivery_sum) / NULLIF(SUM(delivery_count), 0) FROM ({' UNION ALL '.join(parts)})"
+        )
+        row = self._exec_rollup(sql, tag="network_transport_rollup", fetchone=True)
+        if row is None:
+            return None
+
+        proto_rows: list[tuple] = []
+        if proto_expr is not None and proto_paths_sql is not None:
+            proto_parts = [f"SELECT proto_clean, requests FROM read_parquet([{proto_paths_sql}])"]
+            proto_parts += [
+                f"SELECT {proto_expr} AS proto_clean, CAST(COUNT(*) AS BIGINT) AS requests FROM {base_table} "
+                f"WHERE timestamp >= TIMESTAMPTZ '{lo}' AND timestamp < TIMESTAMPTZ '{hi}' GROUP BY proto_clean"
+                for lo, hi in slices
+            ]
+            fetched = self._exec_rollup(
+                f"SELECT proto_clean, CAST(SUM(requests) AS BIGINT) AS reqs FROM ({' UNION ALL '.join(proto_parts)}) "
+                f"GROUP BY proto_clean ORDER BY reqs DESC",
+                tag="network_transport_proto_rollup",
+            )
+            if fetched is None:
+                return None
+            proto_rows = list(fetched)
+
+        return {
+            "total_requests": int(row[0] or 0),
+            "bandwidth_bytes": int(row[1] or 0),
+            "rtt_us": {"p50": row[3], "p90": row[4], "p95": row[5], "p99": row[6]},
+            "avg_retrans": row[7],
+            "avg_ploss": row[8],
+            "avg_delivery_rate": row[9],
+            "protocol_rows": proto_rows,
+        }

@@ -36,6 +36,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ShieldingHelp } from './NetworkHelp'
+import { ApproxBadge } from '@/app/origin/_sections/Aggregates'
 
 const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then((mod) => mod.ShieldingMap), {
   ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" />,
@@ -165,6 +166,7 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-2">
             <NetworkIcon className="h-4 w-4" />
             Edge Transport & TCP Performance
+            {transport?._approx === true && <ApproxBadge message={transport._approx_note ?? ''} />}
           </h2>
           <p className="text-xs text-muted-foreground mt-0.5">
             TCP connection round-trip latency, retransmission overhead, and protocol distribution recorded at the Fastly edge.

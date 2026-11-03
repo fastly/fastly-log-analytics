@@ -61,6 +61,8 @@ from ._common import (
     DAY_BUNDLE_FILENAME,
     DAY_BUNDLE_TOP_K,
     NETWORK_SUMMARY_BUNDLE_FILENAME,
+    NETWORK_TRANSPORT_BUNDLE_FILENAME,
+    NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
     NGWAF_BOTS_TS_BUNDLE_FILENAME,
     ORIGIN_IP_BUNDLE_FILENAME,
@@ -108,6 +110,7 @@ from .day_bundles import (
     compact_network_quality_closed_days_to_daily,
     compact_network_rtt_closed_days_to_daily,
     compact_network_speed_closed_days_to_daily,
+    compact_network_transport_closed_days_to_daily,
     compact_ngwaf_bots_closed_days_to_daily,
     compact_ngwaf_bots_ts_closed_days_to_daily,
     compact_origin_dims_closed_days_to_daily,
@@ -122,6 +125,10 @@ from .day_bundles import (
     compact_time_series_closed_days_to_daily,
     compact_verified_bots_ts_closed_days_to_daily,
     retire_compacted_hour_bundles,
+)
+from .network_transport import (
+    backfill_network_transport_bundles,
+    build_network_transport_bundles,
 )
 from .origin_dims import (
     backfill_network_geo_bundles,
@@ -208,6 +215,11 @@ __all__ = [
     "build_network_geo_bundles",
     "backfill_network_geo_bundles",
     "build_network_summary_bundles",
+    "build_network_transport_bundles",
+    "backfill_network_transport_bundles",
+    "compact_network_transport_closed_days_to_daily",
+    "NETWORK_TRANSPORT_BUNDLE_FILENAME",
+    "NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME",
     "backfill_network_summary_bundles",
     "build_network_speed_bundles",
     "build_network_quality_bundles",

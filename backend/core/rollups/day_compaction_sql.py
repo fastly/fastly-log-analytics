@@ -17,6 +17,8 @@ from ._common import (
     NETWORK_QUALITY_REGION_FILENAME,
     NETWORK_RTT_BUNDLE_FILENAME,
     NETWORK_SPEED_BUNDLE_FILENAME,
+    NETWORK_TRANSPORT_BUNDLE_FILENAME,
+    NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME,
     NGWAF_BOTS_BUNDLE_FILENAME,
     NGWAF_BOTS_TS_BUNDLE_FILENAME,
     ORIGIN_DIMS_BUNDLE_TOP_K,
@@ -443,6 +445,46 @@ def _pop_health_copy_sql(paths_sql: str, tmp_file: str) -> str:
 
 compact_pop_health_closed_days_to_daily = _make_day_compactor(
     [(POP_HEALTH_BUNDLE_FILENAME, ".tmp_ph_", _pop_health_copy_sql)]
+)
+
+
+def _network_transport_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT "
+        f"    MIN(hour_start) AS hour_start, "
+        f"    CAST(SUM(requests) AS BIGINT) AS requests, "
+        f"    CAST(SUM(total_bytes) AS BIGINT) AS total_bytes, "
+        f"    CAST(SUM(rtt_count) AS BIGINT) AS rtt_count, "
+        f"    CAST({wavg('rtt_p50_us', 'rtt_count')} AS DOUBLE) AS rtt_p50_us, "
+        f"    CAST({wavg('rtt_p90_us', 'rtt_count')} AS DOUBLE) AS rtt_p90_us, "
+        f"    CAST({wavg('rtt_p95_us', 'rtt_count')} AS DOUBLE) AS rtt_p95_us, "
+        f"    CAST({wavg('rtt_p99_us', 'rtt_count')} AS DOUBLE) AS rtt_p99_us, "
+        f"    CAST(SUM(retrans_sum) AS DOUBLE) AS retrans_sum, "
+        f"    CAST(SUM(retrans_count) AS BIGINT) AS retrans_count, "
+        f"    CAST(SUM(ploss_sum) AS DOUBLE) AS ploss_sum, "
+        f"    CAST(SUM(ploss_count) AS BIGINT) AS ploss_count, "
+        f"    CAST(SUM(delivery_sum) AS DOUBLE) AS delivery_sum, "
+        f"    CAST(SUM(delivery_count) AS BIGINT) AS delivery_count "
+        f"  FROM read_parquet([{paths_sql}])"
+        f") {parquet_zstd_target(tmp_file)}"
+    )
+
+
+def _network_transport_proto_copy_sql(paths_sql: str, tmp_file: str) -> str:
+    return (
+        f"COPY ("
+        f"  SELECT proto_clean, CAST(SUM(requests) AS BIGINT) AS requests "
+        f"  FROM read_parquet([{paths_sql}]) GROUP BY proto_clean"
+        f") {parquet_zstd_target(tmp_file)}"
+    )
+
+
+compact_network_transport_closed_days_to_daily = _make_day_compactor(
+    [
+        (NETWORK_TRANSPORT_BUNDLE_FILENAME, ".tmp_nt_", _network_transport_copy_sql),
+        (NETWORK_TRANSPORT_PROTO_BUNDLE_FILENAME, ".tmp_ntp_", _network_transport_proto_copy_sql),
+    ]
 )
 
 

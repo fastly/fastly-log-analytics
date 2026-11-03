@@ -169,6 +169,7 @@ EXPECTED_ORDER = (
     "build_ngwaf_bots_ts_bundles",
     "build_overview_bundles",
     "build_network_summary_bundles",
+    "build_network_transport_bundles",
     "recompute_wellknown_bots_rollup",
 )
 

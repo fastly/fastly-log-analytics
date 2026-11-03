@@ -48,6 +48,7 @@ from ._common import (
     shared_rollup_session,
 )
 from .day_bundles import bundle_hours, bundle_hours_ip_spread, stamp_empty_hour_sentinels
+from .network_transport import build_network_transport_bundles  # noqa: F401
 from .origin_dims import (  # noqa: F401
     build_network_geo_bundles,
     build_network_heatmap_bundles,
@@ -148,6 +149,7 @@ HOUR_WRITERS: tuple[RollupSpec, ...] = (
     RollupSpec("ngwaf_bots_ts", "build_ngwaf_bots_ts_bundles", fallback="direct join"),
     RollupSpec("overview", "build_overview_bundles"),
     RollupSpec("network_summary", "build_network_summary_bundles"),
+    RollupSpec("network_transport", "build_network_transport_bundles"),
     RollupSpec("wellknown_bots", "recompute_wellknown_bots_rollup"),
 )
 
@@ -166,6 +168,7 @@ DAY_COMPACTORS: tuple[DayCompactorSpec, ...] = (
     DayCompactorSpec("network_rtt", "compact_network_rtt_closed_days_to_daily", "network_rtt_days"),
     DayCompactorSpec("network_speed", "compact_network_speed_closed_days_to_daily", "network_speed_days"),
     DayCompactorSpec("network_quality", "compact_network_quality_closed_days_to_daily", "network_quality_days"),
+    DayCompactorSpec("network_transport", "compact_network_transport_closed_days_to_daily", "network_transport_days"),
     DayCompactorSpec("verified_bots_ts", "compact_verified_bots_ts_closed_days_to_daily", "verified_bots_ts_days"),
     DayCompactorSpec("perf_latency", "compact_perf_latency_closed_days_to_daily", "perf_latency_days"),
     DayCompactorSpec("origin_dims", "compact_origin_dims_closed_days_to_daily", "origin_dims_days"),
@@ -201,6 +204,7 @@ ADMIN_BACKFILLS: tuple[tuple[str, str], ...] = (
     ("ngwaf_bots_ts", "backfill_ngwaf_bots_ts_bundles"),
     ("overview", "backfill_overview_bundles"),
     ("network_summary", "backfill_network_summary_bundles"),
+    ("network_transport", "backfill_network_transport_bundles"),
 )
 
 
