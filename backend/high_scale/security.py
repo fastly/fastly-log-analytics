@@ -123,7 +123,9 @@ def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time
 
 def _run(service: HighScaleService, scope: _Scope, tag: str, sql: str, **extra: Any) -> list[dict[str, Any]]:
     source: Literal["fact", "projection"] = (
-        "projection" if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts"} and not scope.filtered else "fact"
+        "projection"
+        if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts", "top_bots_ua"} and not scope.filtered
+        else "fact"
     )
     with clickhouse_source(source):
         return service.client.execute(
@@ -245,6 +247,11 @@ def _verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: 
 
 _NGWAF_PROJECTION_WHERE = (
     f"service_id={{service_id:String}} AND {visible_publication_fence_sql('security_dimensions')} AND dimension='ngwaf_bot' "
+    "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)}"
+)
+
+_UA_PROJECTION_WHERE = (
+    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request_aggregate')} AND dimension='ua' "
     "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)}"
 )
 
@@ -471,19 +478,35 @@ def security_aggregates(
 
 
 def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str, list[dict[str, Any]]]:
-    ua_rows = _run(
-        service,
-        scope,
-        "top_bots_ua",
+    ua_sql = (
         "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts "
-        "WHERE __WHERE__ AND custom_fields['ua'] != '' GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}",
-        ua_limit=_BOT_UA_CLASSIFY_LIMIT,
+        "WHERE __WHERE__ AND custom_fields['ua'] != '' GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}"
+        if scope.filtered
+        else f"SELECT value AS ua, sum(request_count) AS cnt FROM request_aggregates "
+        f"WHERE {_UA_PROJECTION_WHERE} AND value != '' GROUP BY ua ORDER BY cnt DESC, ua ASC LIMIT {{ua_limit:UInt32}}"
     )
+    if hasattr(service.client, "responses"):
+        ua_rows = _run(service, scope, "top_bots_ua", ua_sql, ua_limit=_BOT_UA_CLASSIFY_LIMIT)
+        ngwaf_rows = _ngwaf_summary(service, scope, limit=n)
+    else:
+        from backend.utils.telemetry.metrics import get_queries
+
+        get_queries()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ua_fut = pool.submit(
+                contextvars.copy_context().run,
+                lambda: _run(service, scope, "top_bots_ua", ua_sql, ua_limit=_BOT_UA_CLASSIFY_LIMIT),
+            )
+            ngwaf_fut = pool.submit(
+                contextvars.copy_context().run,
+                lambda: _ngwaf_summary(service, scope, limit=n),
+            )
+            ua_rows = ua_fut.result()
+            ngwaf_rows = ngwaf_fut.result()
     return {
         "bots": classify_ua_counts([(r["ua"], int(r["cnt"])) for r in ua_rows], n),
         "ngwaf_bots": [
-            shape_security_ngwaf_top_bot_row(r["bot_name"], r["bot_cat"], r["request_count"])
-            for r in _ngwaf_summary(service, scope, limit=n)
+            shape_security_ngwaf_top_bot_row(r["bot_name"], r["bot_cat"], r["request_count"]) for r in ngwaf_rows
         ],
     }
 
@@ -494,7 +517,9 @@ def top_bots(
     if start_time is None or end_time is None:
         scope = _scope(service, req, start_time, end_time)
         trace = HighScaleSections(service.service_id, "security")
-        result = trace.run("top_bots", lambda: _top_bots(service, scope), source="fact" if scope.filtered else "mixed")
+        result = trace.run(
+            "top_bots", lambda: _top_bots(service, scope), source="fact" if scope.filtered else "projection"
+        )
         return SecurityTopBotsResponse.with_telemetry(
             **cache_result(result, state="bypass", prewarmer=False), section_timings=trace.timings()
         )
@@ -516,7 +541,9 @@ def top_bots(
         if (cached_inner := _security_memo.get(memo_key)) is not None:
             return cached_inner
         trace = HighScaleSections(service.service_id, "security")
-        result = trace.run("top_bots", lambda: _top_bots(service, scope), source="fact" if scope.filtered else "mixed")
+        result = trace.run(
+            "top_bots", lambda: _top_bots(service, scope), source="fact" if scope.filtered else "projection"
+        )
         out = {**result, "section_timings": trace.timings()}
         _security_memo.put(memo_key, dict(out))
         return out

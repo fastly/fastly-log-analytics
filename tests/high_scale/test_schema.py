@@ -811,6 +811,7 @@ def _schema() -> str:
             r"ReplicatedReplacingMergeTree\(([^)]+)\)\s*\('[^']+',\s*'[^']+'\)", r"ReplacingMergeTree(\1)", text
         )
         text = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", text)
+        text = re.sub(r"ReplicatedSummingMergeTree\([^;]*?\)", "SummingMergeTree()", text)
         parts.append(re.sub(r"\nTTL [^;]*;", ";", text))
     return "\n".join(parts)
 
@@ -1953,3 +1954,14 @@ def test_recommendation_is_logged_and_never_writes_config(client: Any, caplog: p
         _TB,
         "request",
     )
+
+
+def test_request_schema_defines_dimension_projection_and_hourly_rollup_mv() -> None:
+    request_sql = (SQL_ROOT / "request_schema.sql").read_text()
+    assert "ALTER TABLE request_aggregates ADD PROJECTION IF NOT EXISTS proj_by_dimension" in request_sql
+    assert "CREATE TABLE IF NOT EXISTS request_aggregates_1h" in request_sql
+    assert "ReplicatedSummingMergeTree" in request_sql
+    assert "ORDER BY (service_id, dimension, bucket_start, value)" in request_sql
+    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS request_aggregates_1h_mv" in request_sql
+    rewritten = _schema()
+    assert "SummingMergeTree()" in rewritten and "ReplicatedSummingMergeTree" not in rewritten

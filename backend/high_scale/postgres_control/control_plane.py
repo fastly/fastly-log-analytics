@@ -248,10 +248,11 @@ class PostgresControlPlane:
         expected_owner: str,
         expected_owner_epoch: int,
         domain: str | None = None,
+        partition_id: str = "default",
         reinspection_cursor: str | None = None,
         forward_pages_since_reinspection: int | None = None,
     ) -> OwnerEpochRecord:
-        _require_texts(source_cursor=source_cursor, expected_owner=expected_owner)
+        _require_texts(source_cursor=source_cursor, expected_owner=expected_owner, partition_id=partition_id)
         if forward_pages_since_reinspection is not None and forward_pages_since_reinspection < 0:
             raise ValueError("forward_pages_since_reinspection cannot be negative")
         with self.transaction() as connection:
@@ -264,6 +265,15 @@ class PostgresControlPlane:
             )
             if domain is not None:
                 _require_text(domain, "domain")
+                if partition_id != "default":
+                    connection.execute(
+                        "INSERT INTO high_scale_partition_cursors (service_id, domain, partition_id, source_cursor, updated_at) "
+                        "VALUES (%s, %s, %s, %s, clock_timestamp()) "
+                        "ON CONFLICT (service_id, domain, partition_id) DO UPDATE "
+                        "SET source_cursor=EXCLUDED.source_cursor, updated_at=clock_timestamp()",
+                        (service_id, domain, partition_id, source_cursor),
+                    )
+                    return current
                 _upsert_domain_cursor(
                     connection,
                     service_id,
@@ -327,10 +337,16 @@ class PostgresControlPlane:
             if getattr(updated, "rowcount", None) == 0:
                 raise RuntimeError("RUM reinspection cursor state disappeared during update")
 
-    def source_cursor_for(self, service_id: str, domain: str) -> str:
+    def source_cursor_for(self, service_id: str, domain: str, *, partition_id: str = "default") -> str:
         """Return this domain's persisted cursor or INITIAL_SOURCE_CURSOR (never the owner-level cursor)."""
-        _require_text(domain, "domain")
+        _require_texts(domain=domain, partition_id=partition_id)
         with self.transaction(read_only=True) as connection:
+            if partition_id != "default":
+                row = connection.execute(
+                    "SELECT source_cursor FROM high_scale_partition_cursors WHERE service_id=%s AND domain=%s AND partition_id=%s",
+                    (service_id, domain, partition_id),
+                ).fetchone()
+                return str(row[0]) if row is not None else INITIAL_SOURCE_CURSOR
             row = connection.execute(
                 "SELECT source_cursor FROM high_scale_source_cursors WHERE service_id=%s AND domain=%s",
                 (service_id, domain),

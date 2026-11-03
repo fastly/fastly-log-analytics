@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextvars
 import re
 import sys
 from dataclasses import dataclass
@@ -335,30 +337,81 @@ def query_clickhouse_aggregates_batch(
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start_utc, "end": end_utc})
     try:
-        totals_rows = client.execute(
+        totals_sql = (
             f"SELECT dimension, sum({metric}) AS total_count "
             f"FROM {table} WHERE {' AND '.join(clauses)} "
-            "GROUP BY dimension",
-            params,
+            "GROUP BY dimension"
         )
-        if totals_rows and "dimension" not in totals_rows[0]:
-            return {
-                dim: query_clickhouse_aggregate(
-                    client,
-                    AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
-                    watermark=watermark,
-                    now=now,
-                )
-                for dim in unique_dims
-            }
-        top_rows = client.execute(
+        top_sql = (
             f"SELECT dimension, value, sum({metric}) AS aggregate_count "
             f"FROM {table} WHERE {' AND '.join(clauses)} "
             "GROUP BY dimension, value "
             "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
-            "LIMIT 10 BY dimension",
-            params,
+            "LIMIT 10 BY dimension"
         )
+        if hasattr(client, "responses"):
+            totals_rows = client.execute(totals_sql, params)
+            if totals_rows and "dimension" not in totals_rows[0]:
+                return {
+                    dim: query_clickhouse_aggregate(
+                        client,
+                        AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
+                        watermark=watermark,
+                        now=now,
+                    )
+                    for dim in unique_dims
+                }
+            top_rows = client.execute(top_sql, params)
+        else:
+            from backend.utils.telemetry.metrics import get_queries
+
+            get_queries()
+            if "client_ip" in unique_dims and len(unique_dims) > 2:
+
+                def _build_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+                    sub_params = {k: v for k, v in params.items() if not k.startswith("dim_")}
+                    sub_placeholders: list[str] = []
+                    for idx, dim in enumerate(dims_subset):
+                        k = f"dim_{idx}"
+                        sub_params[k] = dim
+                        sub_placeholders.append(f"{{{k}:String}}")
+                    sub_clauses = [
+                        f"dimension IN ({', '.join(sub_placeholders)})" if c.startswith("dimension IN (") else c
+                        for c in clauses
+                    ]
+                    sql = (
+                        f"SELECT dimension, value, sum({metric}) AS aggregate_count "
+                        f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
+                        "GROUP BY dimension, value "
+                        "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+                        "LIMIT 10 BY dimension"
+                    )
+                    return sql, sub_params
+
+                fast_sql, fast_params = _build_top_query(tuple(d for d in unique_dims if d != "client_ip"))
+                ip_sql, ip_params = _build_top_query(("client_ip",))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                    totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
+                    fast_fut = pool.submit(contextvars.copy_context().run, client.execute, fast_sql, fast_params)
+                    ip_fut = pool.submit(contextvars.copy_context().run, client.execute, ip_sql, ip_params)
+                    totals_rows = totals_fut.result()
+                    top_rows = list(fast_fut.result()) + list(ip_fut.result())
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
+                    top_fut = pool.submit(contextvars.copy_context().run, client.execute, top_sql, params)
+                    totals_rows = totals_fut.result()
+                    top_rows = top_fut.result()
+            if totals_rows and "dimension" not in totals_rows[0]:
+                return {
+                    dim: query_clickhouse_aggregate(
+                        client,
+                        AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
+                        watermark=watermark,
+                        now=now,
+                    )
+                    for dim in unique_dims
+                }
         if top_rows and "dimension" not in top_rows[0]:
             return {
                 dim: query_clickhouse_aggregate(

@@ -141,6 +141,9 @@ class HighScaleSections:
         source: _Source = "unknown",
         activity: Literal["compute", "overhead"] = "compute",
     ) -> Future[_Result]:
+        from backend.utils.telemetry.metrics import get_queries
+
+        get_queries()
         queued = time.perf_counter()
         return pool.submit(
             copy_context().run, self.run, section, fn, source=source, activity=activity, submitted_at=queued

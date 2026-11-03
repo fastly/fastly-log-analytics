@@ -3265,3 +3265,90 @@ def test_derived_aggregate_or_cmcd_publication_failure_holds_source_acknowledgem
     assert result.derived_publication_complete is False
     ledger_entry = controller._ledger.source("svc", "raw/request/one.gz")
     assert ledger_entry is not None and ledger_entry.status == "discovered" and ledger_entry.last_error
+
+
+def test_sharded_partition_prefix_and_partition_id_cursor_isolation() -> None:
+    from backend.high_scale.ingest_controller.coordinator import S3SourceObjectLister
+
+    captured_requests: list[dict[str, Any]] = []
+
+    class _Paginator:
+        def paginate(self, **kwargs: Any):
+            captured_requests.append(kwargs)
+            prefix = kwargs["Prefix"]
+            return [
+                {
+                    "Contents": [
+                        {
+                            "Key": f"{prefix}obj-1.log.zst",
+                            "ETag": '"etag-1"',
+                            "Size": 64,
+                        }
+                    ]
+                }
+            ]
+
+    class _S3Client:
+        def get_paginator(self, name: str) -> _Paginator:
+            assert name == "list_objects_v2"
+            return _Paginator()
+
+    lister = S3SourceObjectLister(_S3Client(), bucket="test-bucket", prefix="svc-prefix")
+    page_shard0 = lister.list_source_objects("svc", "request", page_size=10, cursor=None, partition_prefix="shard=00/")
+    assert captured_requests[-1]["Prefix"] == "svc-prefix/raw/request/shard=00/"
+    assert page_shard0.objects[0].object_key == "svc-prefix/raw/request/shard=00/obj-1.log.zst"
+
+    class _PartitionControlPlane:
+        def __init__(self) -> None:
+            self.cursors: dict[tuple[str, str, str], str] = {}
+            self.sources: dict[str, Any] = {}
+
+        def owner(self, service_id: str) -> Any:
+            return SimpleNamespace(current_owner="high_scale", owner_epoch=1, source_cursor="__initial__")
+
+        def source_cursor_for(self, service_id: str, domain: str, *, partition_id: str = "default") -> str:
+            return self.cursors.get((service_id, domain, partition_id), "__initial__")
+
+        def discover_source(self, service_id: str, domain: str, object_key: str, checksum: str, **kw: Any) -> Any:
+            rec = SimpleNamespace(object_key=object_key, status="discovered")
+            self.sources[object_key] = rec
+            return rec
+
+        def claim_source(self, service_id: str, object_key: str, worker_id: str, **kw: Any) -> Any:
+            return SimpleNamespace(claimed=True, object_key=object_key)
+
+        def advance_source_cursor(
+            self, service_id: str, cursor: str, *, domain: str = "request", partition_id: str = "default", **kw: Any
+        ) -> None:
+            self.cursors[(service_id, domain, partition_id)] = cursor
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def ingest_batch(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return SimpleNamespace(sources_count=len(kwargs["sources_payloads"]), derived_publication_complete=True)
+
+    class _FakeReader:
+        def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes:
+            return b"{}\n"
+
+    cp = _PartitionControlPlane()
+    ctrl = _FakeController()
+    coord = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=_FakeReader(),
+        controller=ctrl,  # type: ignore[arg-type]
+        ownership=cp,
+        ledger=cp,
+        control_plane=cp,  # type: ignore[arg-type]
+        worker_id="w-1",
+    )
+    run_00 = coord.run_page(service_id="svc", domain="request", partition_id="shard-00", partition_prefix="shard=00/")
+    run_01 = coord.run_page(service_id="svc", domain="request", partition_id="shard-01", partition_prefix="shard=01/")
+    assert run_00.processed == 1 and run_01.processed == 1
+    assert cp.source_cursor_for("svc", "request", partition_id="shard-00").endswith("shard=00/obj-1.log.zst")
+    assert cp.source_cursor_for("svc", "request", partition_id="shard-01").endswith("shard=01/obj-1.log.zst")
+    assert cp.source_cursor_for("svc", "request", partition_id="default") == "__initial__"
+    assert [c["partition_id"] for c in ctrl.calls] == ["shard-00", "shard-01"]

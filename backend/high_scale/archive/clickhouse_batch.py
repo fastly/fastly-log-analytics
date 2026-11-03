@@ -62,6 +62,7 @@ def install_clickhouse_schema() -> None:
             content,
         )
         content = re.sub(r"ReplicatedMergeTree\('/clickhouse/[^']+',\s*'[^']+'\)", "MergeTree()", content)
+        content = re.sub(r"ReplicatedSummingMergeTree\('/clickhouse/[^']+',\s*'[^']+'\)", "SummingMergeTree()", content)
         content = re.sub(
             r"ReplicatedReplacingMergeTree\(([^)]+)\)\n\s*\('[^']+',\s*'[^']+'\)", r"ReplacingMergeTree(\1)", content
         )

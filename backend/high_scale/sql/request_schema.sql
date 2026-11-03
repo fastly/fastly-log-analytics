@@ -36,3 +36,51 @@ ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/request_aggregates', '{
 PARTITION BY toYYYYMMDD(bucket_start)
 ORDER BY (service_id, bucket_start, dimension, value, batch_id)
 TTL bucket_start + INTERVAL 30 DAY;
+
+ALTER TABLE request_aggregates ADD PROJECTION IF NOT EXISTS proj_by_dimension
+(
+    SELECT
+        service_id,
+        dimension,
+        bucket_start,
+        value,
+        batch_id,
+        publication_state,
+        sum(request_count)
+    GROUP BY
+        service_id,
+        dimension,
+        bucket_start,
+        value,
+        batch_id,
+        publication_state
+);
+
+CREATE TABLE IF NOT EXISTS request_aggregates_1h
+(
+    service_id LowCardinality(String),
+    bucket_start DateTime('UTC'),
+    dimension LowCardinality(String),
+    value String,
+    request_count UInt64
+)
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/request_aggregates_1h', '{replica}')
+PARTITION BY toYYYYMM(bucket_start)
+ORDER BY (service_id, dimension, bucket_start, value)
+TTL bucket_start + INTERVAL 90 DAY;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS request_aggregates_1h_mv
+TO request_aggregates_1h
+AS SELECT
+    service_id,
+    toStartOfHour(bucket_start) AS bucket_start,
+    dimension,
+    value,
+    sum(request_count) AS request_count
+FROM request_aggregates
+WHERE publication_state = 'visible'
+GROUP BY
+    service_id,
+    bucket_start,
+    dimension,
+    value;

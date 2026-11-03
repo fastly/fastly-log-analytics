@@ -641,6 +641,7 @@ class SourceObjectLister(Protocol):
         reinspection_cursor: str | None = None,
         reinspect: bool = False,
         forward_pages_since_reinspection: int = 0,
+        partition_prefix: str = "",
     ) -> SourceObjectPage: ...
 
 
@@ -678,6 +679,7 @@ class S3SourceObjectLister:
         reinspection_cursor: str | None = None,
         reinspect: bool = False,
         forward_pages_since_reinspection: int = 0,
+        partition_prefix: str = "",
     ) -> SourceObjectPage:
         del service_id
         if page_size <= 0 or page_size > MAX_SOURCE_PAGE_SIZE:
@@ -689,7 +691,9 @@ class S3SourceObjectLister:
             raise ValueError("only RUM source domains support reinspection")
         if forward_pages_since_reinspection < 0:
             raise ValueError("forward_pages_since_reinspection cannot be negative")
-        resolved_prefix = self._key(domain_prefix)
+        sub_prefix = partition_prefix.lstrip("/")
+        combined_prefix = f"{domain_prefix.rstrip('/')}/{sub_prefix}" if sub_prefix else domain_prefix
+        resolved_prefix = self._key(combined_prefix)
         listing_cursor = (reinspection_cursor or INITIAL_SOURCE_CURSOR) if reinspect else cursor
         request: dict[str, Any] = {
             "Bucket": self._bucket,
@@ -816,7 +820,7 @@ class SourceObjectReader(Protocol):
 
 class SourceControlPlane(Protocol):
     def owner(self, service_id: str) -> Any: ...
-    def source_cursor_for(self, service_id: str, domain: str) -> str: ...
+    def source_cursor_for(self, service_id: str, domain: str, *, partition_id: str = "default") -> str: ...
     def source_reinspection_state_for(self, service_id: str, domain: str) -> tuple[str, int]: ...
     def advance_reinspection_state(
         self,
@@ -905,14 +909,29 @@ class HighScaleWorkerCoordinator:
         self._object_concurrency = object_concurrency
 
     def run_page(
-        self, *, service_id: str, domain: str, cursor: str | None = None, now: datetime | None = None
+        self,
+        *,
+        service_id: str,
+        domain: str,
+        cursor: str | None = None,
+        partition_id: str = "default",
+        partition_prefix: str = "",
+        now: datetime | None = None,
     ) -> PageRun:
         current_owner, epoch, persisted_cursor = _owner_fields(self._owner(service_id))
         self._require_high_scale(current_owner, service_id)
         if cursor is None:
             cursor_reader = self._control if self._control is not None else self._ownership
             if hasattr(cursor_reader, "source_cursor_for"):
-                persisted_cursor = cursor_reader.source_cursor_for(service_id, domain)
+                if partition_id != "default":
+                    try:
+                        persisted_cursor = cursor_reader.source_cursor_for(
+                            service_id, domain, partition_id=partition_id
+                        )
+                    except TypeError:
+                        persisted_cursor = cursor_reader.source_cursor_for(service_id, domain)
+                else:
+                    persisted_cursor = cursor_reader.source_cursor_for(service_id, domain)
         listing_cursor = persisted_cursor if cursor is None else cursor
         has_reinspection = self._control is not None and domain in RUM_SOURCE_DOMAINS
         listing_options: dict[str, Any] = {}
@@ -923,6 +942,8 @@ class HighScaleWorkerCoordinator:
                 "reinspect": fwd_pages >= RUM_REINSPECTION_INTERVAL,
                 "forward_pages_since_reinspection": fwd_pages,
             }
+        if partition_prefix:
+            listing_options["partition_prefix"] = partition_prefix
         page = self._lister.list_source_objects(
             service_id, domain, page_size=self._page_size, cursor=listing_cursor, **listing_options
         )
@@ -1082,6 +1103,9 @@ class HighScaleWorkerCoordinator:
 
                     if valid_payloads:
                         try:
+                            ingest_kwargs: dict[str, Any] = {}
+                            if partition_id != "default":
+                                ingest_kwargs["partition_id"] = partition_id
                             batch_res = self._controller.ingest_batch(
                                 service_id=service_id,
                                 domain=domain,
@@ -1092,6 +1116,7 @@ class HighScaleWorkerCoordinator:
                                     else None
                                 ),
                                 now=now,
+                                **ingest_kwargs,
                             )
                             if getattr(batch_res, "derived_publication_complete", True):
                                 processed += batch_res.sources_count
@@ -1138,6 +1163,7 @@ class HighScaleWorkerCoordinator:
                     next_cursor or (INITIAL_SOURCE_CURSOR if listing_cursor == INITIAL_SOURCE_CURSOR else None),
                     current_owner,
                     epoch,
+                    partition_id=partition_id,
                     reinspection_cursor=page.next_reinspection_cursor if has_reinspection else None,
                     forward_pages_since_reinspection=(
                         page.forward_pages_since_reinspection if has_reinspection else None
@@ -1235,13 +1261,14 @@ class HighScaleWorkerCoordinator:
         owner: str,
         epoch: int,
         *,
+        partition_id: str = "default",
         reinspection_cursor: str | None = None,
         forward_pages_since_reinspection: int | None = None,
     ) -> None:
         if cursor is None:
             return
         if self._control is not None and hasattr(self._control, "advance_source_cursor"):
-            state_kwargs = (
+            state_kwargs: dict[str, Any] = (
                 {
                     "reinspection_cursor": reinspection_cursor,
                     "forward_pages_since_reinspection": forward_pages_since_reinspection,
@@ -1249,6 +1276,8 @@ class HighScaleWorkerCoordinator:
                 if reinspection_cursor is not None and forward_pages_since_reinspection is not None
                 else {}
             )
+            if partition_id != "default":
+                state_kwargs["partition_id"] = partition_id
             self._control.advance_source_cursor(
                 service_id, cursor, expected_owner=owner, expected_owner_epoch=epoch, domain=domain, **state_kwargs
             )

@@ -5,7 +5,7 @@ import re
 import sqlite3
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from threading import Event
+from threading import Event, Lock
 from time import monotonic, sleep
 from types import SimpleNamespace
 from typing import Any
@@ -381,7 +381,7 @@ def test_network_queries_have_named_fact_sections(reader: str, expected_queries:
 def test_bot_component_and_network_bundle_section_attribution() -> None:
     client, net_client = _ScopeClient(), _ScopeClient()
     bot_resp = security.top_bots(SimpleNamespace(service_id="service-test", client=client), SimpleNamespace(filters={}), "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")  # fmt: skip
-    assert bot_resp.section_timings[0]["source"] == "mixed" and [s["source"] for s in client.scopes] == ["fact", "projection"]  # fmt: skip
+    assert bot_resp.section_timings[0]["source"] == "projection" and [s["source"] for s in client.scopes] == ["projection", "projection"]  # fmt: skip
     assert len({s["section_id"] for s in client.scopes}) == 1
     net_resp = network.network_bundle(SimpleNamespace(service_id="service-test", client=net_client), NetworkBundleRequest(sections=["pop_health"]), "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")  # fmt: skip
     assert net_resp.pop_health == [] and len(net_client.scopes) == 1 and len(net_resp.section_timings) == 1
@@ -620,6 +620,7 @@ def test_detail_and_two_phase_session_enrichment() -> None:
 class PredicateClient:
     def __init__(self, timestamps: list[datetime]) -> None:
         self.calls: list[str] = []
+        self._lock = Lock()
         self.db = sqlite3.connect(":memory:", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.create_function("toStartOfMinute", 1, lambda value: value[:16] + ":00.000000")
@@ -649,13 +650,14 @@ class PredicateClient:
         return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
 
     def execute(self, sql: str, params: dict | None = None) -> list[dict]:
-        self.calls.append(sql)
-        sql = re.sub(r"\{(\w+):[^}]+\}", r":\1", sql).replace(" FINAL", "")
-        sql = sql.replace(
-            "toStartOfInterval(bucket_start, INTERVAL :bucket_seconds SECOND)", "toStartOfMinute(bucket_start)"
-        ).replace("LIMIT 10 BY dimension", "")
-        bindings = {k: self.stamp(v) if isinstance(v, datetime) else v for k, v in (params or {}).items()}
-        return [dict(row) for row in self.db.execute(sql, bindings).fetchall()]
+        with self._lock:
+            self.calls.append(sql)
+            sql = re.sub(r"\{(\w+):[^}]+\}", r":\1", sql).replace(" FINAL", "")
+            sql = sql.replace(
+                "toStartOfInterval(bucket_start, INTERVAL :bucket_seconds SECOND)", "toStartOfMinute(bucket_start)"
+            ).replace("LIMIT 10 BY dimension", "")
+            bindings = {k: self.stamp(v) if isinstance(v, datetime) else v for k, v in (params or {}).items()}
+            return [dict(row) for row in self.db.execute(sql, bindings).fetchall()]
 
 
 _WINDOWS = [
@@ -2664,3 +2666,100 @@ def test_request_facts_emulation_paginates_tied_timestamps_without_skipping_rows
         assert sorted(collected_urls) == ["/u1", "/u2", "/u3", "/u4"]
     finally:
         con.close()
+
+
+def test_top_bots_unfiltered_reads_request_aggregates_and_filtered_reads_facts() -> None:
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            self.queries.append(sql)
+            return []
+
+    unfiltered_client = _RecordingClient()
+    security.top_bots(
+        SimpleNamespace(service_id="svc-bot", client=unfiltered_client),
+        SimpleNamespace(filters={}),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    ua_queries = [q for q in unfiltered_client.queries if "hs_security:top_bots_ua" in q]
+    assert len(ua_queries) == 1
+    assert "FROM request_aggregates" in ua_queries[0]
+    assert "dimension='ua'" in ua_queries[0]
+    assert "FROM request_facts" not in ua_queries[0]
+
+    filtered_client = _RecordingClient()
+    security.top_bots(
+        SimpleNamespace(service_id="svc-bot", client=filtered_client),
+        SimpleNamespace(filters={"country": {"mode": "include", "values": ["US"]}}),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    filtered_ua_queries = [q for q in filtered_client.queries if "hs_security:top_bots_ua" in q]
+    assert len(filtered_ua_queries) == 1
+    assert "FROM request_facts" in filtered_ua_queries[0]
+
+
+def test_watermark_and_header_metrics_ttl_caches_reuse_results() -> None:
+    from backend.high_scale.ingest_controller.service import _watermark
+    from backend.utils.bounded_cache import CacheRegistry
+
+    CacheRegistry.clear_all()
+    calls: list[str] = []
+
+    class _CountingClient:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            calls.append(sql)
+            if "coverage_start" in sql:
+                return [{"coverage_start": "2026-01-01T00:00:00Z", "coverage_end": "2026-01-02T00:00:00Z"}]
+            if "last_visible_event_id" in sql:
+                return [{"last_visible_event_id": "evt-1"}]
+            return [
+                {"total_rows": 100, "earliest_log_at": "2026-01-01T00:00:00Z", "latest_log_at": "2026-01-02T00:00:00Z"}
+            ]
+
+    client = _CountingClient()
+    wm1 = _watermark(client, "svc-cache", "request", owner_epoch=1)
+    wm2 = _watermark(client, "svc-cache", "request", owner_epoch=1)
+    assert wm1 == wm2
+    assert len(calls) == 2
+
+    calls.clear()
+    svc = SimpleNamespace(service_id="svc-cache", client=client)
+    hm1 = header_metrics(svc)  # type: ignore[arg-type]
+    hm2 = header_metrics(svc)  # type: ignore[arg-type]
+    assert hm1 == hm2
+    assert len(calls) == 3
+
+
+def test_resolve_window_only_fetches_status_for_auto_range() -> None:
+    from backend.core.request_context import RequestContext
+
+    dummy_ctx = SimpleNamespace(
+        source={"name": "svc-test", "service_id": "svc-test"},
+        clamp=lambda s, e: (s, e),
+    )
+    with patch("backend.config.get_status") as mock_status:
+        mock_status.return_value = {"earliest_log_at": "2026-01-01T00:00:00Z"}
+        RequestContext.resolve_window(
+            dummy_ctx,  # type: ignore[arg-type]
+            SimpleNamespace(
+                range_token="24h",
+                anchor="2026-01-02T00:00:00Z",
+                start_time=None,
+                end_time=None,
+            ),
+        )
+        assert mock_status.call_count == 0
+        RequestContext.resolve_window(
+            dummy_ctx,  # type: ignore[arg-type]
+            SimpleNamespace(
+                range_token="auto",
+                anchor="2026-01-02T00:00:00Z",
+                start_time=None,
+                end_time=None,
+            ),
+        )
+        assert mock_status.call_count == 1

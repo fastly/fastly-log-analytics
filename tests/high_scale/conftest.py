@@ -542,6 +542,7 @@ def clickhouse_single_node_ddl(sql_root: Path = _SQL_ROOT) -> list[str]:
             text,
         )
         text = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", text)
+        text = re.sub(r"ReplicatedSummingMergeTree\([^;]*?\)", "SummingMergeTree()", text)
         text = re.sub(r"\nTTL [^;]*;", ";", text)
         text = re.sub(r"--[^\n]*", "", text)
         statements += [s.strip() for s in text.split(";") if s.strip()]

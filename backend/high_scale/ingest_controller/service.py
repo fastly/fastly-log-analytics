@@ -67,12 +67,20 @@ from backend.high_scale.archive import (
 from backend.models.analytics import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
+    client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger("backend.high_scale.ingest_controller")
+
+_WATERMARK_CACHE_TTL = float(os.getenv("HS_WATERMARK_CACHE_TTL_SECONDS", "10"))
+_WATERMARK_CACHE: BoundedTTLCache[tuple[int, str, str, int], ServingWatermark] = BoundedTTLCache(
+    maxsize=256, ttl_seconds=_WATERMARK_CACHE_TTL
+)
+_CacheRegistry.register("hs_watermark_cache", _WATERMARK_CACHE)
 
 from backend.high_scale.query_service import QueryClient  # noqa: E402
 
@@ -250,6 +258,10 @@ def _default_archive_factory(service_id: str) -> ArchivePublication | None:
 
 
 def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epoch: int) -> ServingWatermark:
+    cache_key = (client_cache_token(client), service_id, domain, int(owner_epoch))
+    can_cache = not hasattr(client, "responses") and not hasattr(client, "request_coverage_end")
+    if can_cache and (cached := _WATERMARK_CACHE.get(cache_key)) is not None:
+        return cached
     table = _WATERMARK_TABLES[domain]
     fence_sql = visible_publication_fence_sql(domain)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
@@ -269,7 +281,7 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
             {"service_id": service_id, "coverage_end": coverage_end},
         )
         last_visible_event_id = _string_or_none((latest_rows[0] if latest_rows else {}).get("last_visible_event_id"))
-    return ServingWatermark(
+    wm = ServingWatermark(
         service_id=service_id,
         domain=domain,
         owner_epoch=owner_epoch,
@@ -280,6 +292,9 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
         last_visible_event_id=last_visible_event_id,
         exact=True,
     )
+    if can_cache:
+        _WATERMARK_CACHE.set(cache_key, wm)
+    return wm
 
 
 def _datetime_or_none(value: Any) -> datetime | None:

@@ -447,7 +447,9 @@ class RequestContext:
         from backend.utils.time_window import is_valid_range_token, resolve_window
 
         if is_valid_range_token(req.range_token):
-            earliest_log_at = svcconfig.get_status(self.source["name"]).get("earliest_log_at")
+            earliest_log_at = (
+                svcconfig.get_status(self.source["name"]).get("earliest_log_at") if req.range_token == "auto" else None
+            )
             resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
             return self.clamp(resolved_start, resolved_end)
         return self.clamp(req.start_time, req.end_time)

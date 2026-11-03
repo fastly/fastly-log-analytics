@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 # ── Folded from backend/high_scale/dashboard.py ──────────────────────────────
 
 import concurrent.futures
+import contextvars
+import copy
 import os
 from functools import partial
 
@@ -59,12 +61,18 @@ from backend.models.analytics import (
 )
 from backend.models.common import ResponseCacheObservation
 from backend.repositories.utils.response_cache import cache_result
-from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import ensure_utc, parse_iso_utc, safe_iso
 
 _HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "30"))
 _dashboard_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_dashboard_aggregates_memo", _dashboard_memo.cache)
+
+_HS_HEADER_METRICS_CACHE_TTL = float(os.getenv("HS_HEADER_METRICS_CACHE_TTL_SECONDS", "15"))
+_header_metrics_cache: BoundedTTLCache[tuple[str, int], dict[str, Any]] = BoundedTTLCache(
+    maxsize=128, ttl_seconds=_HS_HEADER_METRICS_CACHE_TTL
+)
+CacheRegistry.register("hs_header_metrics_cache", _header_metrics_cache)
 
 _HEADER_TABLES = {"request": "request_facts", "rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
 
@@ -122,13 +130,37 @@ def _query_source_extents(
 
 def header_metrics(service: HighScaleService) -> dict[str, Any]:
     """Return visible ClickHouse row counts and event-time extents for the header."""
+    cache_key = (service.service_id, client_cache_token(service.client))
+    use_cache = not hasattr(service.client, "responses")
+    if use_cache and (cached := _header_metrics_cache.get(cache_key)) is not None:
+        return copy.deepcopy(cached)
+
     totals: dict[str, int] = {}
     earliest: dict[str, str | None] = {}
     latest: dict[str, str | None] = {}
-    for domain, table in _HEADER_TABLES.items():
-        totals[domain], earliest[domain], latest[domain] = _query_source_extents(
-            service.client, service.service_id, table, domain=domain
-        )
+    if use_cache:
+        from backend.utils.telemetry.metrics import get_queries
+
+        get_queries()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(_HEADER_TABLES)) as pool:
+            futs = {
+                domain: pool.submit(
+                    contextvars.copy_context().run,
+                    _query_source_extents,
+                    service.client,
+                    service.service_id,
+                    table,
+                    domain=domain,
+                )
+                for domain, table in _HEADER_TABLES.items()
+            }
+            for domain in _HEADER_TABLES:
+                totals[domain], earliest[domain], latest[domain] = futs[domain].result()
+    else:
+        for domain, table in _HEADER_TABLES.items():
+            totals[domain], earliest[domain], latest[domain] = _query_source_extents(
+                service.client, service.service_id, table, domain=domain
+            )
 
     if totals.get("rum_errors", 0) == 0:
         agg_total, agg_earliest, agg_latest = _query_source_extents(
@@ -197,7 +229,7 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
     except Exception:
         pass
 
-    return {
+    result = {
         "request": {
             "earliest_log_at": request_earliest,
             "latest_log_at": request_latest,
@@ -214,6 +246,9 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
         "latest_log_at": request_latest,
         "local_rows": request_total + rum_total,
     }
+    if use_cache:
+        _header_metrics_cache.set(cache_key, copy.deepcopy(result))
+    return result
 
 
 def _aggregate(service: HighScaleService, *, start_time: str | None, end_time: str | None, dimension: str, watermark):
@@ -602,20 +637,60 @@ def dashboard_aggregates(
     all_fields_to_query = list(fields_to_query)
     if "url" not in all_fields_to_query:
         all_fields_to_query.append("url")
-    responses, exact_end_rows = trace.run(
-        "aggregates_batch",
-        lambda: (
-            _aggregates_batch(
+
+    def _run_agg_batch() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if hasattr(service.client, "responses"):
+            return (
+                _aggregates_batch(
+                    service,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fields=all_fields_to_query,
+                    watermark=request_watermark,
+                ),
+                _exact_end_fact_rows(service, start, end, all_fields_to_query),
+            )
+        from backend.utils.telemetry.metrics import get_queries
+
+        get_queries()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_pool:
+            agg_fut = inner_pool.submit(
+                contextvars.copy_context().run,
+                partial(
+                    _aggregates_batch,
+                    service,
+                    start_time=start_time,
+                    end_time=end_time,
+                    fields=all_fields_to_query,
+                    watermark=request_watermark,
+                ),
+            )
+            exact_fut = inner_pool.submit(
+                contextvars.copy_context().run,
+                _exact_end_fact_rows,
                 service,
-                start_time=start_time,
-                end_time=end_time,
-                fields=all_fields_to_query,
-                watermark=request_watermark,
-            ),
-            _exact_end_fact_rows(service, start, end, all_fields_to_query),
-        ),
-        source="projection",
-    )
+                start,
+                end,
+                all_fields_to_query,
+            )
+            return agg_fut.result(), exact_fut.result()
+
+    parallel_projection_ts = want_time_series and not (req.chart_metric and req.chart_metric != "requests")
+    if parallel_projection_ts and not hasattr(service.client, "responses"):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            batch_fut = trace.submit(pool, "aggregates_batch", _run_agg_batch, source="projection")
+            ts_fut = trace.submit(
+                pool,
+                "time_series",
+                partial(_time_series, service, start_time, end_time, norm_interval),
+                source="projection",
+            )
+            responses, exact_end_rows = batch_fut.result()
+            raw_projection_ts = ts_fut.result()
+    else:
+        responses, exact_end_rows = trace.run("aggregates_batch", _run_agg_batch, source="projection")
+        raw_projection_ts = None
+
     extra_end_count = len(exact_end_rows)
     total_request_count = responses["url"].request_count + extra_end_count
 
@@ -664,8 +739,12 @@ def dashboard_aggregates(
             source="fact",
         )
     else:
-        time_series = trace.run(
-            "time_series", lambda: _time_series(service, start_time, end_time, norm_interval), source="projection"
+        time_series = (
+            raw_projection_ts
+            if raw_projection_ts is not None
+            else trace.run(
+                "time_series", lambda: _time_series(service, start_time, end_time, norm_interval), source="projection"
+            )
         )
         if extra_end_count and end is not None:
             end_bucket_dt = _bucket_start_for_interval(end, norm_interval)
@@ -709,8 +788,20 @@ def bundle(
     sections = set(req.sections) if req.sections else None
     want_aggregates = sections is None or bool(sections & {"core", "topten"})
     want_bots = sections is None or "bots" in sections
-    res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
-    res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
+    res_aggregates: AggregatesResponse | None
+    res_top_bots: Any
+    if want_aggregates and want_bots and not hasattr(service.client, "responses"):
+        get_queries()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            agg_fut = pool.submit(contextvars.copy_context().run, aggregates, service, req, start_time, end_time)
+            bots_fut = pool.submit(
+                contextvars.copy_context().run, hs_security.top_bots, service, req, start_time, end_time
+            )
+            res_aggregates = agg_fut.result()
+            res_top_bots = bots_fut.result()
+    else:
+        res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
+        res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
 
     if res_aggregates is not None and hasattr(res_aggregates, "debug_queries"):
         res_aggregates.debug_queries = []
