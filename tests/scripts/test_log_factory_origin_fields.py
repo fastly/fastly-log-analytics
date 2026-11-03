@@ -36,3 +36,11 @@ def test_outage_window_carries_origin_5xx() -> None:
     ost = np.asarray(cols["ost"], dtype=object)
     five_xx = [v for v, c in zip(ost, cache, strict=True) if c in ORIGIN_FETCH and v is not None and v >= 500]
     assert len(five_xx) > 100
+
+
+def test_request_header_size_and_connection_reuse_are_populated_for_security_rollups() -> None:
+    cols = _cols("diurnal")
+    hdr = np.asarray(cols["req_header_bytes"])
+    reqs = np.asarray(cols["conn_requests"])
+    assert hdr.min() >= 120 and len(np.unique(hdr)) > 50
+    assert reqs.min() >= 1 and reqs.max() > 20 and (reqs == 1).any()

@@ -246,6 +246,8 @@ def generate_columns(
 
     resp_bytes = np.clip(rng.lognormal(mean=np.log(8_000), sigma=1.5, size=n).astype(np.int64), 100, 25_000_000)
     req_bytes = np.clip(rng.lognormal(mean=np.log(1_000), sigma=0.8, size=n).astype(np.int64), 40, 500_000)
+    req_header_bytes = np.clip(rng.lognormal(mean=np.log(700), sigma=0.5, size=n).astype(np.int64), 120, 16_000)
+    conn_requests = np.clip(rng.geometric(0.12, size=n), 1, 400).astype(np.int32)
     ttl = rng.choice([0, 300, 3600, 86400], size=n, p=[0.25, 0.35, 0.30, 0.10]).astype(np.int32)
     ja3 = pools["ja3"][ip_int % 250]
     ja4 = pools["ja4"][ip_int % 250]
@@ -272,7 +274,8 @@ def generate_columns(
         "city": city, "metro": metro, "lat": lat, "lon": lon, "region": region,
         "tcp_rtt": tcp_rtt, "rtt_min": rtt_min, "rtt_var": rtt_var, "ploss": ploss,
         "ja3": ja3, "ja4": ja4, "cookie_session": cookie_session, "bot_category": bot_category,
-        "waf_signal": waf_signal, "ost": ost, "oip": oip, "_source_file": np.full(n, f"synthetic://gen/{int(time.time())}", dtype=object),
+        "waf_signal": waf_signal, "ost": ost, "oip": oip,
+        "req_header_bytes": req_header_bytes, "conn_requests": conn_requests, "_source_file": np.full(n, f"synthetic://gen/{int(time.time())}", dtype=object),
     }
 
 
