@@ -62,11 +62,11 @@ from backend.models.analytics import (
     TimeSeriesPoint,
 )
 from backend.models.common import ResponseCacheObservation
-from backend.repositories.utils.response_cache import cache_result
+from backend.repositories.utils.response_cache import cache_result, coalesce
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import ensure_utc, parse_iso_utc, safe_iso
 
-_HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "30"))
+_HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "60"))
 _dashboard_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_dashboard_aggregates_memo", _dashboard_memo.cache)
 
@@ -746,162 +746,175 @@ def dashboard_aggregates(
         if cached is not None:
             return AggregatesResponse.with_telemetry(**cached)
 
-    partial_minutes = (
-        start is not None
-        and end is not None
-        and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
-    )
-    if req.filters or norm_interval == "1 second" or partial_minutes:
-        resp = _filtered_aggregates(
-            service, req, start_time, end_time, trace=trace, request_watermark=request_watermark
+    def _compute_agg() -> AggregatesResponse:
+        if cache_key is not None and (cached_inner := _dashboard_memo.get_with_telemetry(cache_key)) is not None:
+            return AggregatesResponse.with_telemetry(**cached_inner)
+        partial_minutes = (
+            start is not None
+            and end is not None
+            and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
+        )
+        if req.filters or norm_interval == "1 second" or partial_minutes:
+            resp = _filtered_aggregates(
+                service, req, start_time, end_time, trace=trace, request_watermark=request_watermark
+            )
+            return _cache_agg_resp(cache_key, resp)
+
+        want_time_series, want_map, want_top_n = _panels(req)
+        top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
+        all_fields_to_query = list(fields_to_query)
+        if "url" not in all_fields_to_query:
+            all_fields_to_query.append("url")
+
+        def _run_agg_batch() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            if hasattr(service.client, "responses") or (
+                is_real_ch
+                and start is not None
+                and end is not None
+                and (end - start) >= timedelta(hours=24)
+                and end.second == 0
+                and end.microsecond == 0
+            ):
+                return (
+                    _aggregates_batch(
+                        service,
+                        start_time=start_time,
+                        end_time=end_time,
+                        fields=all_fields_to_query,
+                        watermark=request_watermark,
+                    ),
+                    _exact_end_fact_rows(service, start, end, all_fields_to_query, watermark=request_watermark),
+                )
+            from backend.utils.telemetry.metrics import get_queries
+
+            get_queries()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_pool:
+                agg_fut = inner_pool.submit(
+                    contextvars.copy_context().run,
+                    partial(
+                        _aggregates_batch,
+                        service,
+                        start_time=start_time,
+                        end_time=end_time,
+                        fields=all_fields_to_query,
+                        watermark=request_watermark,
+                    ),
+                )
+                exact_fut = inner_pool.submit(
+                    contextvars.copy_context().run,
+                    partial(
+                        _exact_end_fact_rows, service, start, end, all_fields_to_query, watermark=request_watermark
+                    ),
+                )
+                return agg_fut.result(), exact_fut.result()
+
+        parallel_projection_ts = want_time_series and not (req.chart_metric and req.chart_metric != "requests")
+        if parallel_projection_ts and not hasattr(service.client, "responses"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                batch_fut = trace.submit(pool, "aggregates_batch", _run_agg_batch, source="projection")
+                ts_fut = trace.submit(
+                    pool,
+                    "time_series",
+                    partial(_time_series, service, start_time, end_time, norm_interval),
+                    source="projection",
+                )
+                responses, exact_end_rows = batch_fut.result()
+                raw_projection_ts = ts_fut.result()
+        else:
+            responses, exact_end_rows = trace.run("aggregates_batch", _run_agg_batch, source="projection")
+            raw_projection_ts = None
+
+        extra_end_count = len(exact_end_rows)
+        total_request_count = responses["url"].request_count + extra_end_count
+
+        data = {
+            field: FieldAggregate(
+                top=[
+                    FieldTopEntry(value=value, count=count)
+                    for value, count in (
+                        _merge_top_values_with_exact_end(responses[field].top_values, exact_end_rows, field)
+                        if extra_end_count
+                        else responses[field].top_values
+                    )
+                ],
+                total=responses[field].request_count + extra_end_count,
+            )
+            for field in top_fields
+        }
+        map_response = responses.get("country")
+        map_top_values = (
+            _merge_top_values_with_exact_end(map_response.top_values, exact_end_rows, "country")
+            if map_response is not None and extra_end_count
+            else (map_response.top_values if map_response is not None else ())
+        )
+        map_data = (
+            [MapPoint(country=value, count=count) for value, count in map_top_values]
+            if want_map and map_response is not None
+            else []
+        )
+        if not want_time_series:
+            time_series = []
+        elif req.chart_metric and req.chart_metric != "requests":
+            start_ts = _range_value(start_time)
+            end_ts = _range_value(end_time)
+            clauses = list(visible_fact_clauses("request"))
+            params: dict[str, Any] = {"service_id": service.service_id}
+            if start_ts is not None and end_ts is not None:
+                clauses.append("event_timestamp >= {start:DateTime64(3)}")
+                clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
+                params.update({"start": start_ts, "end_upper": end_ts})
+            time_series = trace.run(
+                "time_series",
+                lambda: _facts_time_series(
+                    service, start_time, end_time, norm_interval, req.chart_metric, " AND ".join(clauses), params
+                ),
+                source="fact",
+            )
+        else:
+            time_series = (
+                raw_projection_ts
+                if raw_projection_ts is not None
+                else trace.run(
+                    "time_series",
+                    lambda: _time_series(service, start_time, end_time, norm_interval),
+                    source="projection",
+                )
+            )
+            if extra_end_count and end is not None:
+                end_bucket_dt = _bucket_start_for_interval(end, norm_interval)
+                end_bucket_iso = safe_iso(end_bucket_dt) or end_bucket_dt.isoformat()
+                merged_ts: list[TimeSeriesPoint] = []
+                matched_bucket = False
+                for pt in time_series:
+                    if pt.time == end_bucket_iso:
+                        merged_ts.append(TimeSeriesPoint(time=pt.time, value=float(pt.value) + float(extra_end_count)))
+                        matched_bucket = True
+                    else:
+                        merged_ts.append(pt)
+                if not matched_bucket:
+                    merged_ts.append(TimeSeriesPoint(time=end_bucket_iso, value=float(extra_end_count)))
+                time_series = merged_ts
+        resp = AggregatesResponse.with_telemetry(
+            data=data,
+            time_series=time_series,
+            map_data=map_data,
+            where_clause="high-scale ClickHouse",
+            section_timings=trace.timings(),
+            interval=norm_interval,
+            metric=req.chart_metric,
+            total_rows=total_request_count,
+            total_rows_total=total_request_count,
+            earliest_log_at=_watermark_extent(request_watermark.coverage_start),
+            latest_log_at=_watermark_extent(request_watermark.coverage_end),
         )
         return _cache_agg_resp(cache_key, resp)
 
-    want_time_series, want_map, want_top_n = _panels(req)
-    top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
-    all_fields_to_query = list(fields_to_query)
-    if "url" not in all_fields_to_query:
-        all_fields_to_query.append("url")
-
-    def _run_agg_batch() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        if hasattr(service.client, "responses") or (
-            is_real_ch
-            and start is not None
-            and end is not None
-            and (end - start) >= timedelta(hours=24)
-            and end.second == 0
-            and end.microsecond == 0
-        ):
-            return (
-                _aggregates_batch(
-                    service,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fields=all_fields_to_query,
-                    watermark=request_watermark,
-                ),
-                _exact_end_fact_rows(service, start, end, all_fields_to_query, watermark=request_watermark),
-            )
-        from backend.utils.telemetry.metrics import get_queries
-
-        get_queries()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as inner_pool:
-            agg_fut = inner_pool.submit(
-                contextvars.copy_context().run,
-                partial(
-                    _aggregates_batch,
-                    service,
-                    start_time=start_time,
-                    end_time=end_time,
-                    fields=all_fields_to_query,
-                    watermark=request_watermark,
-                ),
-            )
-            exact_fut = inner_pool.submit(
-                contextvars.copy_context().run,
-                partial(_exact_end_fact_rows, service, start, end, all_fields_to_query, watermark=request_watermark),
-            )
-            return agg_fut.result(), exact_fut.result()
-
-    parallel_projection_ts = want_time_series and not (req.chart_metric and req.chart_metric != "requests")
-    if parallel_projection_ts and not hasattr(service.client, "responses"):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            batch_fut = trace.submit(pool, "aggregates_batch", _run_agg_batch, source="projection")
-            ts_fut = trace.submit(
-                pool,
-                "time_series",
-                partial(_time_series, service, start_time, end_time, norm_interval),
-                source="projection",
-            )
-            responses, exact_end_rows = batch_fut.result()
-            raw_projection_ts = ts_fut.result()
-    else:
-        responses, exact_end_rows = trace.run("aggregates_batch", _run_agg_batch, source="projection")
-        raw_projection_ts = None
-
-    extra_end_count = len(exact_end_rows)
-    total_request_count = responses["url"].request_count + extra_end_count
-
-    data = {
-        field: FieldAggregate(
-            top=[
-                FieldTopEntry(value=value, count=count)
-                for value, count in (
-                    _merge_top_values_with_exact_end(responses[field].top_values, exact_end_rows, field)
-                    if extra_end_count
-                    else responses[field].top_values
-                )
-            ],
-            total=responses[field].request_count + extra_end_count,
-        )
-        for field in top_fields
-    }
-    map_response = responses.get("country")
-    map_top_values = (
-        _merge_top_values_with_exact_end(map_response.top_values, exact_end_rows, "country")
-        if map_response is not None and extra_end_count
-        else (map_response.top_values if map_response is not None else ())
-    )
-    map_data = (
-        [MapPoint(country=value, count=count) for value, count in map_top_values]
-        if want_map and map_response is not None
-        else []
-    )
-    if not want_time_series:
-        time_series = []
-    elif req.chart_metric and req.chart_metric != "requests":
-        start = _range_value(start_time)
-        end = _range_value(end_time)
-        clauses = list(visible_fact_clauses("request"))
-        params: dict[str, Any] = {"service_id": service.service_id}
-        if start is not None and end is not None:
-            end_upper = end
-            clauses.append("event_timestamp >= {start:DateTime64(3)}")
-            clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
-            params.update({"start": start, "end_upper": end_upper})
-        time_series = trace.run(
-            "time_series",
-            lambda: _facts_time_series(
-                service, start_time, end_time, norm_interval, req.chart_metric, " AND ".join(clauses), params
-            ),
-            source="fact",
-        )
-    else:
-        time_series = (
-            raw_projection_ts
-            if raw_projection_ts is not None
-            else trace.run(
-                "time_series", lambda: _time_series(service, start_time, end_time, norm_interval), source="projection"
-            )
-        )
-        if extra_end_count and end is not None:
-            end_bucket_dt = _bucket_start_for_interval(end, norm_interval)
-            end_bucket_iso = safe_iso(end_bucket_dt) or end_bucket_dt.isoformat()
-            merged_ts: list[TimeSeriesPoint] = []
-            matched_bucket = False
-            for pt in time_series:
-                if pt.time == end_bucket_iso:
-                    merged_ts.append(TimeSeriesPoint(time=pt.time, value=float(pt.value) + float(extra_end_count)))
-                    matched_bucket = True
-                else:
-                    merged_ts.append(pt)
-            if not matched_bucket:
-                merged_ts.append(TimeSeriesPoint(time=end_bucket_iso, value=float(extra_end_count)))
-            time_series = merged_ts
-    resp = AggregatesResponse.with_telemetry(
-        data=data,
-        time_series=time_series,
-        map_data=map_data,
-        where_clause="high-scale ClickHouse",
-        section_timings=trace.timings(),
-        interval=norm_interval,
-        metric=req.chart_metric,
-        total_rows=total_request_count,
-        total_rows_total=total_request_count,
-        earliest_log_at=_watermark_extent(request_watermark.coverage_start),
-        latest_log_at=_watermark_extent(request_watermark.coverage_end),
-    )
-    return _cache_agg_resp(cache_key, resp)
+    if is_real_ch and cache_key is not None:
+        resp_out, is_leader = coalesce(f"hs_dashboard_agg:{cache_key}", _compute_agg)
+        if not is_leader:
+            return resp_out.model_copy(update={"is_cached": True})
+        return resp_out
+    return _compute_agg()
 
 
 aggregates = dashboard_aggregates

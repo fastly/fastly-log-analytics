@@ -51,11 +51,11 @@ from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
-_network_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
+_network_memo = ResponseMemo(ttl=60.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("high_scale.network", _network_memo.cache)
-_network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
+_network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.models", _network_model_cache)
-_network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
+_network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.json", _network_json_cache)
 
 
@@ -299,30 +299,39 @@ def origin_shielding_analysis(
         )
         if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
             return OriginShieldingAnalysisResponse.with_telemetry(**cached)
-    trace = HighScaleSections(service.service_id, "origin")
-    analysis = trace.run(
-        "shielding_analysis",
-        lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
-        source="fact",
-    )
-    rows = analysis.rows[:limit]
-    truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
-    payload = {
-        "section_timings": trace.timings(),
-        "has_data": analysis.has_data,
-        "requires_fields": analysis.requires_fields or [],
-        "edge_only": bool(analysis.edge_only),
-        "rows": rows,
-        "total_routes": analysis.total_routes,
-        "truncated": truncated,
-        "error": False,
-    }
+
+    def _compute_shielding() -> dict[str, Any]:
+        if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        trace = HighScaleSections(service.service_id, "origin")
+        analysis = trace.run(
+            "shielding_analysis",
+            lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+            source="fact",
+        )
+        rows = analysis.rows[:limit]
+        truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
+        payload = {
+            "section_timings": trace.timings(),
+            "has_data": analysis.has_data,
+            "requires_fields": analysis.requires_fields or [],
+            "edge_only": bool(analysis.edge_only),
+            "rows": rows,
+            "total_routes": analysis.total_routes,
+            "truncated": truncated,
+            "error": False,
+        }
+        if memo_key is not None:
+            _network_memo.put(memo_key, dict(payload))
+        return payload
+
     if memo_key is not None:
-        _network_memo.put(memo_key, dict(payload))
-        return OriginShieldingAnalysisResponse.with_telemetry(**_network_memo.result(payload, state="miss"))
+        return OriginShieldingAnalysisResponse.with_telemetry(
+            **_network_memo.coalesce(f"hs_origin_shielding:{memo_key}", _compute_shielding)
+        )
     return OriginShieldingAnalysisResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
-        **payload,
+        **_compute_shielding(),
     )
 
 

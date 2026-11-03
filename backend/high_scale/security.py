@@ -57,7 +57,7 @@ from backend.utils.date_utils import safe_iso
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
-_security_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
+_security_memo = ResponseMemo(ttl=60.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_security_aggregates_memo", _security_memo.cache)
 
 _WHERE = "__WHERE__"
@@ -786,34 +786,43 @@ def get_security_threat_intel(service: HighScaleService, start_time: str | None,
         )
         if (cached := _security_memo.get_with_telemetry(memo_key)) is not None:
             return ThreatIntelListResponse.with_telemetry(**cached)
-    rows = _run(
-        service,
-        scope,
-        "threat_intel",
-        f"SELECT multiIf(custom_fields['ja3'] != '', custom_fields['ja3'], custom_fields['ja4']) AS tls_fingerprint, "
-        f"count() AS requests, topK(1)(country)[1] AS top_country, "
-        f"countIf(custom_fields['waf_logged_rules'] != '' OR custom_fields['waf_blocked_rules'] != '') AS matched_waf_rules_count, "
-        f"round(countIf({_IS_BOT}) * 100.0 / count(), 2) AS bot_percentage, "
-        "max(custom_fields['p_type'] != '') AS is_anonymized_proxy FROM request_facts "
-        "WHERE __WHERE__ AND tls_fingerprint != '' GROUP BY tls_fingerprint ORDER BY requests DESC LIMIT 50",
-    )
-    out = {
-        "data": [
-            shape_security_threat_intel_row(
-                r["tls_fingerprint"],
-                r["requests"],
-                r["top_country"],
-                r["matched_waf_rules_count"],
-                r["bot_percentage"],
-                r["is_anonymized_proxy"],
-            )
-            for r in rows
-        ]
-    }
+
+    def _compute_ti() -> dict[str, Any]:
+        if memo_key is not None and (cached_inner := _security_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        rows = _run(
+            service,
+            scope,
+            "threat_intel",
+            f"SELECT multiIf(custom_fields['ja3'] != '', custom_fields['ja3'], custom_fields['ja4']) AS tls_fingerprint, "
+            f"count() AS requests, topK(1)(country)[1] AS top_country, "
+            f"countIf(custom_fields['waf_logged_rules'] != '' OR custom_fields['waf_blocked_rules'] != '') AS matched_waf_rules_count, "
+            f"round(countIf({_IS_BOT}) * 100.0 / count(), 2) AS bot_percentage, "
+            "max(custom_fields['p_type'] != '') AS is_anonymized_proxy FROM request_facts "
+            "WHERE __WHERE__ AND tls_fingerprint != '' GROUP BY tls_fingerprint ORDER BY requests DESC LIMIT 50",
+        )
+        out = {
+            "data": [
+                shape_security_threat_intel_row(
+                    r["tls_fingerprint"],
+                    r["requests"],
+                    r["top_country"],
+                    r["matched_waf_rules_count"],
+                    r["bot_percentage"],
+                    r["is_anonymized_proxy"],
+                )
+                for r in rows
+            ]
+        }
+        if memo_key is not None:
+            _security_memo.put(memo_key, dict(out))
+        return out
+
     if memo_key is not None:
-        _security_memo.put(memo_key, dict(out))
-        return ThreatIntelListResponse.with_telemetry(**_security_memo.result(out, state="miss"))
-    return out
+        return ThreatIntelListResponse.with_telemetry(
+            **_security_memo.coalesce(f"hs_security_ti:{memo_key}", _compute_ti)
+        )
+    return _compute_ti()
 
 
 @dataclass(frozen=True)

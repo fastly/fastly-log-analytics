@@ -34,6 +34,7 @@ from backend.high_scale._common import (
     RELATIVE_ERROR,
     build_clickhouse_filters,
     build_published_facts_where,
+    normalize_cache_bound,
 )
 from backend.high_scale._common import build_published_projection_where as _where
 from backend.high_scale._common import optional_int as _integer
@@ -63,7 +64,7 @@ from backend.repositories.utils.response_shaping import (
 from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
 
-_origin_memo = ResponseMemo(ttl=30.0, maxsize=256, prewarmer=False)
+_origin_memo = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False)
 CacheRegistry.register("high_scale.origin", _origin_memo.cache)
 
 _EMPTY = empty_origin_aggregates(include_has_data=False)
@@ -454,8 +455,8 @@ def origin_aggregates(
             {
                 "ep": "hs_origin_aggregates",
                 "cid": client_cache_token(service.client),
-                "s": str(start_time),
-                "e": str(end_time),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "sec": sorted(sections),
                 "bm": getattr(req, "bucket_minutes", None),
@@ -469,131 +470,141 @@ def origin_aggregates(
         if (cached := _origin_memo.get_with_telemetry(memo_key)) is not None:
             return cached
 
-    filter_sql, _ = build_clickhouse_filters(req.filters)
-    facts = _facts_scope(service, start_time, end_time, req.filters) if filter_sql != "1=1" else None
-    approx = _APPROX if facts is None else _NOT_APPROX
+    def _compute() -> dict[str, Any]:
+        if memo_key is not None and (cached_inner := _origin_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        filter_sql, _ = build_clickhouse_filters(req.filters)
+        facts = _facts_scope(service, start_time, end_time, req.filters) if filter_sql != "1=1" else None
+        approx = _APPROX if facts is None else _NOT_APPROX
 
-    def latency_rows(marker: str, dimension: str, limit: int | None = None, having: str | None = None):
-        if facts is not None:
-            return _facts_latency_dimension(service, facts, marker=marker, dimension=dimension, limit=limit)
-        return _latency_dimension(
-            service,
-            marker=marker,
-            dimension=dimension,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
-            having=having,
-        )
+        def latency_rows(marker: str, dimension: str, limit: int | None = None, having: str | None = None):
+            if facts is not None:
+                return _facts_latency_dimension(service, facts, marker=marker, dimension=dimension, limit=limit)
+            return _latency_dimension(
+                service,
+                marker=marker,
+                dimension=dimension,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+                having=having,
+            )
 
-    def _build_path_breakdown() -> dict[str, Any]:
-        rows = latency_rows("path_breakdown", "edge")
-        return shape_origin_path_breakdown(
-            [
-                shape_origin_path_row(
-                    row["value"] == "true",
-                    row["requests"],
-                    _milliseconds(_quantile(row, "latency", 0)),
-                    _milliseconds(_quantile(row, "latency", 1)),
-                )
+        def _build_path_breakdown() -> dict[str, Any]:
+            rows = latency_rows("path_breakdown", "edge")
+            return shape_origin_path_breakdown(
+                [
+                    shape_origin_path_row(
+                        row["value"] == "true",
+                        row["requests"],
+                        _milliseconds(_quantile(row, "latency", 0)),
+                        _milliseconds(_quantile(row, "latency", 1)),
+                    )
+                    for row in rows
+                ],
+                shielding_detected=any(row["value"] == "false" for row in rows),
+                **approx,
+            )
+
+        def _build_pop_latency() -> dict[str, Any]:
+            pop_limit = getattr(req, "pop_latency_limit", None) or getattr(req, "limit", 30)
+            rows = latency_rows("pop_latency", "pop", limit=pop_limit)
+            shaped_inputs = [
+                {
+                    "pop": row["value"],
+                    "requests": int(row["requests"]),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                }
                 for row in rows
-            ],
-            shielding_detected=any(row["value"] == "false" for row in rows),
-            **approx,
-        )
+            ]
+            return shape_pop_latency_rows(shaped_inputs, include_median_when_empty=True, **approx)
 
-    def _build_pop_latency() -> dict[str, Any]:
-        pop_limit = getattr(req, "pop_latency_limit", None) or getattr(req, "limit", 30)
-        rows = latency_rows("pop_latency", "pop", limit=pop_limit)
-        shaped_inputs = [
-            {
-                "pop": row["value"],
-                "requests": int(row["requests"]),
-                "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
-                "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
-            }
-            for row in rows
-        ]
-        return shape_pop_latency_rows(shaped_inputs, include_median_when_empty=True, **approx)
+        def _build_ip_health() -> dict[str, Any]:
+            ip_limit = getattr(req, "ip_health_limit", None) or getattr(req, "limit", 30)
+            rows = latency_rows(
+                "ip_health", "oip", limit=ip_limit, having="sum(origin_minute_dimensions.requests) >= 10"
+            )
+            return shape_origin_ip_health_response(
+                [
+                    shape_origin_ip_health_row(
+                        row["value"],
+                        row["requests"],
+                        _milliseconds(_quantile(row, "latency", 0)),
+                        _milliseconds(_quantile(row, "latency", 1)),
+                        int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+                    )
+                    for row in rows
+                    if int(row["requests"]) > 0
+                ],
+                has_data=bool(rows),
+                **approx,
+            )
 
-    def _build_ip_health() -> dict[str, Any]:
-        ip_limit = getattr(req, "ip_health_limit", None) or getattr(req, "limit", 30)
-        rows = latency_rows("ip_health", "oip", limit=ip_limit, having="sum(origin_minute_dimensions.requests) >= 10")
-        return shape_origin_ip_health_response(
-            [
-                shape_origin_ip_health_row(
-                    row["value"],
-                    row["requests"],
-                    _milliseconds(_quantile(row, "latency", 0)),
-                    _milliseconds(_quantile(row, "latency", 1)),
-                    int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+        tasks: list[tuple[str, Any]] = []
+        if "summary" in sections:
+            tasks.append(
+                (
+                    "summary",
+                    lambda: (
+                        _origin_summary(service, start_time, end_time)
+                        if facts is None
+                        else _facts_summary(service, facts)
+                    ),
                 )
-                for row in rows
-                if int(row["requests"]) > 0
-            ],
-            has_data=bool(rows),
-            **approx,
-        )
+            )
+        if "timeseries" in sections:
+            tasks.append(
+                (
+                    "timeseries",
+                    lambda: (
+                        _timeseries(service, req, start_time, end_time)
+                        if facts is None
+                        else _facts_timeseries(service, facts, req)
+                    ),
+                )
+            )
+        if "slow_urls" in sections:
+            tasks.append(
+                (
+                    "slow_urls",
+                    lambda: (
+                        _slow_urls(service, req, start_time, end_time)
+                        if facts is None
+                        else _facts_slow_urls(service, facts, req)
+                    ),
+                )
+            )
+        if "status_codes" in sections:
+            tasks.append(
+                (
+                    "status_codes",
+                    lambda: (
+                        _status_codes(service, start_time, end_time)
+                        if facts is None
+                        else _facts_status_codes(service, facts)
+                    ),
+                )
+            )
+        if "path_breakdown" in sections:
+            tasks.append(("path_breakdown", _build_path_breakdown))
+        if "pop_latency" in sections:
+            tasks.append(("pop_latency", _build_pop_latency))
+        if "ip_health" in sections:
+            tasks.append(("ip_health", _build_ip_health))
 
-    tasks: list[tuple[str, Any]] = []
-    if "summary" in sections:
-        tasks.append(
-            (
-                "summary",
-                lambda: (
-                    _origin_summary(service, start_time, end_time) if facts is None else _facts_summary(service, facts)
-                ),
-            )
-        )
-    if "timeseries" in sections:
-        tasks.append(
-            (
-                "timeseries",
-                lambda: (
-                    _timeseries(service, req, start_time, end_time)
-                    if facts is None
-                    else _facts_timeseries(service, facts, req)
-                ),
-            )
-        )
-    if "slow_urls" in sections:
-        tasks.append(
-            (
-                "slow_urls",
-                lambda: (
-                    _slow_urls(service, req, start_time, end_time)
-                    if facts is None
-                    else _facts_slow_urls(service, facts, req)
-                ),
-            )
-        )
-    if "status_codes" in sections:
-        tasks.append(
-            (
-                "status_codes",
-                lambda: (
-                    _status_codes(service, start_time, end_time)
-                    if facts is None
-                    else _facts_status_codes(service, facts)
-                ),
-            )
-        )
-    if "path_breakdown" in sections:
-        tasks.append(("path_breakdown", _build_path_breakdown))
-    if "pop_latency" in sections:
-        tasks.append(("pop_latency", _build_pop_latency))
-    if "ip_health" in sections:
-        tasks.append(("ip_health", _build_ip_health))
+        trace = HighScaleSections(service.service_id, "origin")
+        result = trace.run_parallel(tasks, source="projection" if facts is None else "fact")
 
-    trace = HighScaleSections(service.service_id, "origin")
-    result = trace.run_parallel(tasks, source="projection" if facts is None else "fact")
+        summary = result.get("summary", _EMPTY["summary"])
+        out = {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
+        if memo_key is not None:
+            _origin_memo.put(memo_key, dict(out))
+        return out
 
-    summary = result.get("summary", _EMPTY["summary"])
-    out = {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
     if memo_key is not None:
-        _origin_memo.put(memo_key, dict(out))
-        return _origin_memo.result(out, state="miss")
-    return out
+        return _origin_memo.coalesce(f"hs_origin_agg:{memo_key}", _compute)
+    return _compute()
 
 
 def origin_section(
@@ -623,8 +634,8 @@ def origin_drilldown(
             {
                 "ep": "hs_origin_drilldown",
                 "cid": client_cache_token(service.client),
-                "s": str(start_time),
-                "e": str(end_time),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "dim": dimension,
                 "l": limit,
@@ -633,53 +644,88 @@ def origin_drilldown(
         )
         if (cached := _origin_memo.get_with_telemetry(memo_key)) is not None:
             return cached
-    facts = _facts_scope(service, start_time, end_time, getattr(req, "filters", None))
-    dim_map = {
-        "pop": "pop",
-        "backend": "custom_fields['backend']",
-        "oip": "oip",
-        "origin_ip": "oip",
-        "host": "custom_fields['host']",
-        "url": "url",
-        "country": "country",
-    }
-    col_expr = dim_map.get(dimension, f"custom_fields['{dimension}']")
-    trace = HighScaleSections(service.service_id, "origin")
-    rows = trace.run(
-        "drilldown",
-        lambda: service.client.execute(
-            f"/* origin:drilldown */ SELECT {col_expr} AS key, count() AS requests, "
-            "quantilesExact(0.5, 0.95, 0.99)(latency_us) AS latency_q, "
-            "round(countIf(status >= 500) * 100.0 / nullIf(count(), 0), 2) AS error_rate, "
-            "toInt64(round(median(origin_bytes))) AS bytes "
-            f"FROM {facts.base} WHERE latency_us IS NOT NULL AND {col_expr} != '' "
-            f"GROUP BY key ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
-            {**facts.params, "limit": limit},
-        ),
-        source="fact",
-    )
-    rows_out = [
-        {
-            "key": str(r["key"]),
-            "requests": int(r["requests"]),
-            "p50_ms": _milliseconds(_quantile(r, "latency_q", 0, "requests")),
-            "p95_ms": _milliseconds(_quantile(r, "latency_q", 1, "requests")),
-            "p99_ms": _milliseconds(_quantile(r, "latency_q", 2, "requests")),
-            "error_rate": float(r.get("error_rate") or 0.0),
-            "bytes": int(r["bytes"]) if r.get("bytes") is not None else None,
+
+    def _compute_drilldown() -> dict[str, Any]:
+        if memo_key is not None and (cached_inner := _origin_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        raw_filters = getattr(req, "filters", None)
+        filter_sql, _ = build_clickhouse_filters(raw_filters)
+        trace = HighScaleSections(service.service_id, "origin")
+        if filter_sql == "1=1" and dimension in ("pop", "oip", "origin_ip", "url"):
+            proj_dim = "oip" if dimension == "origin_ip" else dimension
+            rows = trace.run(
+                "drilldown",
+                lambda: _dimension_rows(
+                    service,
+                    marker="drilldown",
+                    dimension=proj_dim,
+                    start_time=start_time,
+                    end_time=end_time,
+                    select=(
+                        "value AS key, "
+                        "sum(origin_minute_dimensions.requests) AS requests, "
+                        "round(sum(origin_5xx) * 100.0 / nullIf(sum(origin_minute_dimensions.requests), 0), 2) AS error_rate, "
+                        "toInt64(round(sum(origin_bytes) / nullIf(sum(origin_minute_dimensions.requests), 0))) AS bytes, "
+                        f"{_sketch_select('latency', 'latency', (0.5, 0.95, 0.99))}"
+                    ),
+                    order_by="latency_q[2] DESC",
+                    limit=limit,
+                ),
+                source="projection",
+            )
+        else:
+            where_sql, params = build_published_facts_where(service.service_id, start_time, end_time, raw_filters)
+            dim_map = {
+                "pop": "custom_fields['pop']",
+                "backend": "custom_fields['backend']",
+                "oip": "custom_fields['oip']",
+                "origin_ip": "custom_fields['oip']",
+                "host": "custom_fields['host']",
+                "url": "url",
+                "country": "country",
+            }
+            col_expr = dim_map.get(dimension, f"custom_fields['{dimension}']")
+            latency_expr = (
+                "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
+            )
+            rows = trace.run(
+                "drilldown",
+                lambda: service.client.execute(
+                    f"/* origin:drilldown */ SELECT {col_expr} AS key, count() AS requests, "
+                    f"quantilesExact(0.5, 0.95, 0.99)({latency_expr}) AS latency_q, "
+                    "round(countIf(toInt32OrZero(custom_fields['ost']) BETWEEN 500 AND 599) * 100.0 / nullIf(count(), 0), 2) AS error_rate, "
+                    "toInt64(round(median(toInt64OrNull(custom_fields['obytes'])))) AS bytes "
+                    f"FROM request_facts WHERE {where_sql} AND {latency_expr} IS NOT NULL AND {col_expr} != '' "
+                    f"GROUP BY key ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
+                    {**params, "limit": limit},
+                ),
+                source="fact",
+            )
+        rows_out = [
+            {
+                "key": str(r["key"]),
+                "requests": int(r["requests"]),
+                "p50_ms": _milliseconds(_quantile(r, "latency_q", 0, "requests")),
+                "p95_ms": _milliseconds(_quantile(r, "latency_q", 1, "requests")),
+                "p99_ms": _milliseconds(_quantile(r, "latency_q", 2, "requests")),
+                "error_rate": float(r.get("error_rate") or 0.0),
+                "bytes": int(r["bytes"]) if r.get("bytes") is not None else None,
+            }
+            for r in rows
+        ]
+        out = {
+            "has_data": bool(rows_out),
+            "dimension": dimension,
+            "rows": rows_out,
+            "section_timings": trace.timings(),
         }
-        for r in rows
-    ]
-    out = {
-        "has_data": bool(rows_out),
-        "dimension": dimension,
-        "rows": rows_out,
-        "section_timings": trace.timings(),
-    }
+        if memo_key is not None:
+            _origin_memo.put(memo_key, dict(out))
+        return out
+
     if memo_key is not None:
-        _origin_memo.put(memo_key, dict(out))
-        return _origin_memo.result(out, state="miss")
-    return out
+        return _origin_memo.coalesce(f"hs_origin_drilldown:{memo_key}", _compute_drilldown)
+    return _compute_drilldown()
 
 
 def _is_elevated(value_us: object, median_p95_ms: float) -> bool:

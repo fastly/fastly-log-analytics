@@ -253,6 +253,25 @@ class DateRangeMixin(BaseModel):
     start_time: str | None = None
     end_time: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_legacy_range_shorthand(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "range_token" in cls.model_fields:
+            return data
+        if data.get("start_time") is not None or data.get("end_time") is not None:
+            return data
+        raw_range = data.get("range_token") or data.get("range")
+        if not isinstance(raw_range, str):
+            return data
+        from backend.utils.time_window import resolve_window
+
+        resolved = resolve_window(raw_range, data.get("anchor") if isinstance(data.get("anchor"), str) else None)
+        if resolved is None:
+            return data
+        out = dict(data)
+        out["start_time"], out["end_time"] = resolved
+        return out
+
 
 class FilteredRequest(DateRangeMixin):
     """Base for POST bodies that carry both a date range and column filters."""

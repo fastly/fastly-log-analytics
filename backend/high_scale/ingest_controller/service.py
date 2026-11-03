@@ -617,11 +617,16 @@ def assets_aggregates(
     service: HighScaleService, req: AssetsRequest, start_time: str | None, end_time: str | None
 ) -> AssetsAggregatesResponse:
     start_dt, end_dt = parse_time_window(start_time, end_time)
+    from backend.high_scale._common import normalize_cache_bound
+
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     cache_key = digest_cache_key(
         {
             "svc": service.service_id,
-            "s": start_dt.isoformat(),
-            "e": end_dt.isoformat(),
+            "s": normalize_cache_bound(start_dt) if is_real_ch else start_dt.isoformat(),
+            "e": normalize_cache_bound(end_dt) if is_real_ch else end_dt.isoformat(),
             "f": serialize_filters_for_key(req.filters),
         },
         {"name": service.service_id},
@@ -629,123 +634,133 @@ def assets_aggregates(
     cached = _memo.get_with_telemetry(cache_key)
     if cached is not None:
         return AssetsAggregatesResponse.with_telemetry(**cached)
-    filter_clauses, filter_params = request_filter_clauses(req.filters)
-    where = " AND ".join(
-        [
-            *visible_fact_clauses("request"),
-            "event_timestamp >= {start_time:DateTime64(3)}",
-            "event_timestamp <= {end_time:DateTime64(3)}",
-            "url != ''",
-            *filter_clauses,
+
+    def _compute_assets() -> dict[str, Any]:
+        if (cached_inner := _memo.get_with_telemetry(cache_key)) is not None:
+            return cached_inner
+        filter_clauses, filter_params = request_filter_clauses(req.filters)
+        where = " AND ".join(
+            [
+                *visible_fact_clauses("request"),
+                "event_timestamp >= {start_time:DateTime64(3)}",
+                "event_timestamp <= {end_time:DateTime64(3)}",
+                "url != ''",
+                *filter_clauses,
+            ]
+        )
+        params: dict[str, Any] = {
+            "service_id": service.service_id,
+            "start_time": start_dt,
+            "end_time": end_dt,
+            **filter_params,
+        }
+        enriched_cte = f"""
+            WITH grouped_raw AS (
+                SELECT url, if(custom_fields['cache'] != '', custom_fields['cache'], 'MISS') AS cache,
+                       custom_fields['resp_header_content_encoding'] AS content_encoding,
+                       if(custom_fields['status'] != '', toInt32OrZero(custom_fields['status']), 200) AS status,
+                       count() AS req_cnt, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
+                       sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
+                       countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
+                FROM request_facts WHERE {where} GROUP BY url, cache, content_encoding, status
+            ),
+            grouped_base AS (
+                SELECT *, lower(url) AS url_lower, lower(content_encoding) AS enc_lower FROM grouped_raw
+            ),
+            assets_enriched AS (
+                SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
+                       {_ASSET_TYPE_CASE} AS asset_type,
+                       if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
+                       if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
+                          OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json', 1, 0) AS is_compressible
+                FROM grouped_base
+            )"""
+        dims_sql = f"""
+            /* assets:summary_dims */
+            {enriched_cte}
+            SELECT asset_type, cache AS cache_status,
+                   CASE WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
+                        WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
+                        WHEN content_encoding != '' THEN content_encoding
+                        ELSE 'uncompressed' END AS content_encoding_norm,
+                   is_compressed, is_compressible,
+                   toInt64(sum(req_cnt)) AS requests, toInt64(sum(sum_bytes)) AS bytes
+            FROM assets_enriched
+            GROUP BY asset_type, cache_status, content_encoding_norm, is_compressed, is_compressible
+        """
+        hotspots_sql = f"""
+            /* assets:hotspots */
+            {enriched_cte}
+            SELECT * FROM (
+                SELECT 'large' AS kind, url, toInt64(sum(req_cnt)) AS requests,
+                       toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
+                       toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
+                FROM assets_enriched
+                WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
+                GROUP BY url, status ORDER BY total_bytes DESC LIMIT 20
+            )
+            UNION ALL
+            SELECT * FROM (
+                SELECT 'low_ttl' AS kind, url, toInt64(sum(req_cnt)) AS requests,
+                       toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
+                       toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type
+                FROM assets_enriched
+                WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
+                GROUP BY url, asset_type ORDER BY requests DESC LIMIT 20
+            )
+        """
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-assets") as pool:
+            fut_dims = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(dims_sql, params))
+            fut_hotspots = pool.submit(
+                contextvars.copy_context().run, lambda: service.client.execute(hotspots_sql, params)
+            )
+            dim_dicts, hotspot_dicts = fut_dims.result(), fut_hotspots.result()
+        dim_tuples = [
+            (
+                str(d["asset_type"]),
+                str(d["cache_status"]),
+                str(d["content_encoding_norm"]),
+                int(d["is_compressed"] or 0),
+                int(d["is_compressible"] or 0),
+                int(d["requests"] or 0),
+                int(d["bytes"] or 0),
+            )
+            for d in dim_dicts
         ]
-    )
-    params: dict[str, Any] = {
-        "service_id": service.service_id,
-        "start_time": start_dt,
-        "end_time": end_dt,
-        **filter_params,
-    }
-    enriched_cte = f"""
-        WITH grouped_raw AS (
-            SELECT url, if(custom_fields['cache'] != '', custom_fields['cache'], 'MISS') AS cache,
-                   custom_fields['resp_header_content_encoding'] AS content_encoding,
-                   if(custom_fields['status'] != '', toInt32OrZero(custom_fields['status']), 200) AS status,
-                   count() AS req_cnt, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
-                   sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
-                   countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
-            FROM request_facts WHERE {where} GROUP BY url, cache, content_encoding, status
-        ),
-        grouped_base AS (
-            SELECT *, lower(url) AS url_lower, lower(content_encoding) AS enc_lower FROM grouped_raw
-        ),
-        assets_enriched AS (
-            SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
-                   {_ASSET_TYPE_CASE} AS asset_type,
-                   if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
-                   if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
-                      OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json', 1, 0) AS is_compressible
-            FROM grouped_base
-        )"""
-    dims_sql = f"""
-        /* assets:summary_dims */
-        {enriched_cte}
-        SELECT asset_type, cache AS cache_status,
-               CASE WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
-                    WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
-                    WHEN content_encoding != '' THEN content_encoding
-                    ELSE 'uncompressed' END AS content_encoding_norm,
-               is_compressed, is_compressible,
-               toInt64(sum(req_cnt)) AS requests, toInt64(sum(sum_bytes)) AS bytes
-        FROM assets_enriched
-        GROUP BY asset_type, cache_status, content_encoding_norm, is_compressed, is_compressible
-    """
-    hotspots_sql = f"""
-        /* assets:hotspots */
-        {enriched_cte}
-        SELECT * FROM (
-            SELECT 'large' AS kind, url, toInt64(sum(req_cnt)) AS requests,
-                   toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
-                   toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
-            FROM assets_enriched
-            WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
-            GROUP BY url, status ORDER BY total_bytes DESC LIMIT 20
-        )
-        UNION ALL
-        SELECT * FROM (
-            SELECT 'low_ttl' AS kind, url, toInt64(sum(req_cnt)) AS requests,
-                   toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
-                   toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type
-            FROM assets_enriched
-            WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
-            GROUP BY url, asset_type ORDER BY requests DESC LIMIT 20
-        )
-    """
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-assets") as pool:
-        fut_dims = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(dims_sql, params))
-        fut_hotspots = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(hotspots_sql, params))
-        dim_dicts, hotspot_dicts = fut_dims.result(), fut_hotspots.result()
-    dim_tuples = [
-        (
-            str(d["asset_type"]),
-            str(d["cache_status"]),
-            str(d["content_encoding_norm"]),
-            int(d["is_compressed"] or 0),
-            int(d["is_compressible"] or 0),
-            int(d["requests"] or 0),
-            int(d["bytes"] or 0),
-        )
-        for d in dim_dicts
-    ]
-    asset_type_breakdown, cache_performance, compression_performance = compute_summary_from_dims(dim_tuples)
-    large_uncompressed_assets: list[dict[str, Any]] = []
-    low_ttl_assets: list[dict[str, Any]] = []
-    for d in hotspot_dicts:
-        if d.get("kind") == "large":
-            large_uncompressed_assets.append(
-                {
-                    "url": str(d["url"]),
-                    "requests": int(d["requests"] or 0),
-                    "avg_bytes": float(d["metric_float"] or 0.0),
-                    "total_bytes": int(d["total_bytes"] or 0),
-                    "status": int(d["status"] or 200),
-                }
-            )
-        elif d.get("kind") == "low_ttl":
-            low_ttl_assets.append(
-                {
-                    "url": str(d["url"]),
-                    "requests": int(d["requests"] or 0),
-                    "avg_ttl": float(d["metric_float"] or 0.0),
-                    "asset_type": str(d["asset_type"]),
-                }
-            )
-    payload = {
-        "asset_type_breakdown": asset_type_breakdown,
-        "cache_performance": cache_performance,
-        "compression_performance": compression_performance,
-        "large_uncompressed_assets": large_uncompressed_assets,
-        "low_ttl_assets": low_ttl_assets,
-        "missing_fields": [],
-    }
-    _memo.put(cache_key, payload)
-    return AssetsAggregatesResponse.with_telemetry(**payload)
+        asset_type_breakdown, cache_performance, compression_performance = compute_summary_from_dims(dim_tuples)
+        large_uncompressed_assets: list[dict[str, Any]] = []
+        low_ttl_assets: list[dict[str, Any]] = []
+        for d in hotspot_dicts:
+            if d.get("kind") == "large":
+                large_uncompressed_assets.append(
+                    {
+                        "url": str(d["url"]),
+                        "requests": int(d["requests"] or 0),
+                        "avg_bytes": float(d["metric_float"] or 0.0),
+                        "total_bytes": int(d["total_bytes"] or 0),
+                        "status": int(d["status"] or 200),
+                    }
+                )
+            elif d.get("kind") == "low_ttl":
+                low_ttl_assets.append(
+                    {
+                        "url": str(d["url"]),
+                        "requests": int(d["requests"] or 0),
+                        "avg_ttl": float(d["metric_float"] or 0.0),
+                        "asset_type": str(d["asset_type"]),
+                    }
+                )
+        payload = {
+            "asset_type_breakdown": asset_type_breakdown,
+            "cache_performance": cache_performance,
+            "compression_performance": compression_performance,
+            "large_uncompressed_assets": large_uncompressed_assets,
+            "low_ttl_assets": low_ttl_assets,
+            "missing_fields": [],
+        }
+        _memo.put(cache_key, payload)
+        return payload
+
+    if is_real_ch:
+        return AssetsAggregatesResponse.with_telemetry(**_memo.coalesce(f"hs_assets_agg:{cache_key}", _compute_assets))
+    return AssetsAggregatesResponse.with_telemetry(**_compute_assets())

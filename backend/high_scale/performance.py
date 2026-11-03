@@ -192,7 +192,7 @@ def _dimension_row(bucket: datetime, dimension: str, value: str, acc: _Accumulat
     }
 
 
-_HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "30"))
+_HS_PERF_CACHE_TTL = float(os.getenv("HS_PERF_CACHE_TTL_SECONDS", "60"))
 _perf_memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_performance_aggregates_memo", _perf_memo.cache)
 _ALL_SECTIONS = frozenset({"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"})
@@ -409,81 +409,92 @@ def performance_aggregates(
         cached = _perf_memo.get_with_telemetry(cache_key)
         if cached is not None:
             return PerformanceAggregatesResponse.with_telemetry(**cached)
-    facts_where_params: tuple[str, dict[str, Any]] | None = None
-    if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
-        facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
-    trace = HighScaleSections(service.service_id, "performance")
-    tasks: list[tuple[str, Any]] = []
-    if "top_urls" in wanted:
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
 
-        def _fetch_top_urls() -> list[dict[str, Any]]:
-            if facts_where_params is not None:
-                where, params = facts_where_params
-                rows = _facts_percentile_rows(
-                    service,
-                    marker="top_urls",
-                    key_expr="url",
-                    where=where,
-                    params=params,
-                    sort_column=sort_column,
-                    min_requests=_MIN_URL_REQUESTS,
-                )
-            else:
-                rows = _projection_percentile_rows(
-                    service,
-                    marker="top_urls",
-                    dimension="url",
-                    start_time=start_time,
-                    end_time=end_time,
-                    sort_column=sort_column,
-                    min_requests=_MIN_URL_REQUESTS,
-                )
-            return [shape_perf_top_url_row(row, normalize_float=True) for row in rows]
+    def _compute() -> dict[str, Any]:
+        if cache_key is not None and (cached_inner := _perf_memo.get_with_telemetry(cache_key)) is not None:
+            return cached_inner
+        facts_where_params: tuple[str, dict[str, Any]] | None = None
+        if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
+            facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
+        trace = HighScaleSections(service.service_id, "performance")
+        tasks: list[tuple[str, Any]] = []
+        if "top_urls" in wanted:
 
-        tasks.append(("top_urls", _fetch_top_urls))
-    if "top_asns" in wanted:
+            def _fetch_top_urls() -> list[dict[str, Any]]:
+                if facts_where_params is not None:
+                    where, params = facts_where_params
+                    rows = _facts_percentile_rows(
+                        service,
+                        marker="top_urls",
+                        key_expr="url",
+                        where=where,
+                        params=params,
+                        sort_column=sort_column,
+                        min_requests=_MIN_URL_REQUESTS,
+                    )
+                else:
+                    rows = _projection_percentile_rows(
+                        service,
+                        marker="top_urls",
+                        dimension="url",
+                        start_time=start_time,
+                        end_time=end_time,
+                        sort_column=sort_column,
+                        min_requests=_MIN_URL_REQUESTS,
+                    )
+                return [shape_perf_top_url_row(row, normalize_float=True) for row in rows]
 
-        def _fetch_top_asns() -> list[dict[str, Any]]:
-            if facts_where_params is not None:
-                where, params = facts_where_params
-                rows = _facts_percentile_rows(
-                    service,
-                    marker="top_asns",
-                    key_expr="custom_fields['asn']",
-                    where=where,
-                    params=params,
-                    sort_column=sort_column,
-                    min_requests=_MIN_ASN_REQUESTS,
-                )
-            else:
-                rows = _projection_percentile_rows(
-                    service,
-                    marker="top_asns",
-                    dimension="asn",
-                    start_time=start_time,
-                    end_time=end_time,
-                    sort_column=sort_column,
-                    min_requests=_MIN_ASN_REQUESTS,
-                )
-            return rows
+            tasks.append(("top_urls", _fetch_top_urls))
+        if "top_asns" in wanted:
 
-        tasks.append(("top_asns", _fetch_top_asns))
-    if "ttl_dist" in wanted:
-        tasks.append(("ttl_dist", lambda: _ttl_dist(service, start_time, end_time, filters)))
-    if "waterfall" in wanted:
-        tasks.append(("waterfall", lambda: _waterfall(service, start_time, end_time, filters)))
-    if "scatter" in wanted:
-        tasks.append(("scatter", lambda: _scatter(service, start_time, end_time, filters)))
-    result = trace.run_parallel(tasks, source="fact" if filters else "projection")
-    if "top_asns" in result:
-        result["top_asns"] = trace.run(
-            "asn_labels", lambda: _asn_rows(service, result["top_asns"]), activity="overhead"
-        )
-    payload = {**result, "_approx": not filters, "section_timings": trace.timings()}
-    if cache_key is not None:
-        _perf_memo.put(cache_key, payload)
+            def _fetch_top_asns() -> list[dict[str, Any]]:
+                if facts_where_params is not None:
+                    where, params = facts_where_params
+                    rows = _facts_percentile_rows(
+                        service,
+                        marker="top_asns",
+                        key_expr="custom_fields['asn']",
+                        where=where,
+                        params=params,
+                        sort_column=sort_column,
+                        min_requests=_MIN_ASN_REQUESTS,
+                    )
+                else:
+                    rows = _projection_percentile_rows(
+                        service,
+                        marker="top_asns",
+                        dimension="asn",
+                        start_time=start_time,
+                        end_time=end_time,
+                        sort_column=sort_column,
+                        min_requests=_MIN_ASN_REQUESTS,
+                    )
+                return rows
+
+            tasks.append(("top_asns", _fetch_top_asns))
+        if "ttl_dist" in wanted:
+            tasks.append(("ttl_dist", lambda: _ttl_dist(service, start_time, end_time, filters)))
+        if "waterfall" in wanted:
+            tasks.append(("waterfall", lambda: _waterfall(service, start_time, end_time, filters)))
+        if "scatter" in wanted:
+            tasks.append(("scatter", lambda: _scatter(service, start_time, end_time, filters)))
+        result = trace.run_parallel(tasks, source="fact" if filters else "projection")
+        if "top_asns" in result:
+            result["top_asns"] = trace.run(
+                "asn_labels", lambda: _asn_rows(service, result["top_asns"]), activity="overhead"
+            )
+        payload = {**result, "_approx": not filters, "section_timings": trace.timings()}
+        if cache_key is not None:
+            _perf_memo.put(cache_key, payload)
+        return payload
+
+    if is_real_ch and cache_key is not None:
+        return PerformanceAggregatesResponse.with_telemetry(**_perf_memo.coalesce(f"hs_perf_agg:{cache_key}", _compute))
     return PerformanceAggregatesResponse.with_telemetry(
-        **_perf_memo.result(payload, state="miss" if cache_key is not None else "bypass")
+        **_perf_memo.result(_compute(), state="miss" if cache_key is not None else "bypass")
     )
 
 

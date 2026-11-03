@@ -2846,3 +2846,51 @@ def test_hourly_rollup_stitching_and_fallback() -> None:
     assert res["country"].request_count == 42
     assert len(queries) == 2
     assert any("FROM request_aggregates_1h" in q and "UNION ALL" in q for q in queries)
+
+
+def test_legacy_range_shorthand_and_origin_drilldown() -> None:
+    from backend.high_scale import origin as hs_origin
+    from backend.models.admin.high_scale import HighScaleRequestFactRequest
+    from backend.models.analytics.origin import OriginDrilldownRequest, OriginShieldingAnalysisRequest
+
+    req_shield = OriginShieldingAnalysisRequest.model_validate({"service_id": "svc-1", "range": "24h"})
+    assert req_shield.start_time is not None and req_shield.end_time is not None
+
+    req_facts = HighScaleRequestFactRequest.model_validate({"service_id": "svc-1", "range": "30d"})
+    assert req_facts.start_time is not None and req_facts.end_time is not None
+
+    queries: list[str] = []
+
+    class _DrilldownClient:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            queries.append(sql)
+            return [
+                {
+                    "key": "DEN",
+                    "requests": 100,
+                    "latency_q": [45000.0, 90000.0, 120000.0],
+                    "error_rate": 2.0,
+                    "bytes": 1024,
+                }
+            ]
+
+    svc = SimpleNamespace(service_id="svc-1", client=_DrilldownClient())
+    resp_pop = hs_origin.origin_drilldown(
+        svc,
+        OriginDrilldownRequest(service_id="svc-1", dimension="pop", limit=10),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    assert len(resp_pop["rows"]) == 1
+    assert resp_pop["rows"][0]["key"] == "DEN"
+    assert any("FROM origin_minute_dimensions" in q for q in queries)
+
+    queries.clear()
+    resp_host = hs_origin.origin_drilldown(
+        svc,
+        OriginDrilldownRequest(service_id="svc-1", dimension="host", limit=10),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    assert len(resp_host["rows"]) == 1
+    assert any("FROM request_facts" in q and "custom_fields['obytes']" in q for q in queries)

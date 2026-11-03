@@ -336,7 +336,7 @@ def _execute_request_facts_query(
     req_start = req.start_time
     req_end = req.end_time
     if default_window_if_missing and (not req_start or not req_end):
-        now_dt = datetime.now(UTC)
+        now_dt = datetime.now(UTC).replace(second=0, microsecond=0)
         if not req_end:
             req_end = iso_z(now_dt)
         if not req_start:
@@ -359,6 +359,8 @@ def _execute_request_facts_query(
         )
 
     import os
+
+    from backend.repositories.utils.response_cache import coalesce
 
     use_cache = "PYTEST_CURRENT_TEST" not in os.environ
     cache_key = (
@@ -386,39 +388,49 @@ def _execute_request_facts_query(
             _REQUEST_FACTS_CACHE[cache_key] = emul_resp
         return emul_resp
 
-    page = query_request_facts(
-        service.client,
-        service_id=ctx.service_id,
-        start=start,
-        end=end,
-        cursor_secret=service.cursor_secret,
-        watermark=service.watermark(),
-        limit=req.limit,
-        cursor=req.cursor,
-        status=req.status,
-        domain_filter=req.domain,
-        pop=req.pop,
-        country=req.country,
-        batch_id=req.batch_id,
-    )
-    rows = [dict(row) for row in page.rows]
-    for row in rows:
-        cf = row.get("custom_fields")
-        if isinstance(cf, dict):
-            for k in ("status", "pop", "host"):
-                if k not in row and cf.get(k) is not None:
-                    row[k] = cf[k]
-    _mask_client_ip_rows(rows, ctx)
+    def _compute_ch() -> HighScaleRequestFactResponse:
+        if use_cache and (cached_inner := _REQUEST_FACTS_CACHE.get(cache_key)) is not None:
+            return cached_inner.model_copy(update={"is_cached": True})
+        page = query_request_facts(
+            service.client,
+            service_id=ctx.service_id,
+            start=start,
+            end=end,
+            cursor_secret=service.cursor_secret,
+            watermark=service.watermark(),
+            limit=req.limit,
+            cursor=req.cursor,
+            status=req.status,
+            domain_filter=req.domain,
+            pop=req.pop,
+            country=req.country,
+            batch_id=req.batch_id,
+        )
+        rows = [dict(row) for row in page.rows]
+        for row in rows:
+            cf = row.get("custom_fields")
+            if isinstance(cf, dict):
+                for k in ("status", "pop", "host"):
+                    if k not in row and cf.get(k) is not None:
+                        row[k] = cf[k]
+        _mask_client_ip_rows(rows, ctx)
 
-    meta = page.metadata
-    resp: HighScaleRequestFactResponse = HighScaleRequestFactResponse.with_telemetry(
-        rows=rows,
-        next_cursor=page.next_cursor,
-        metadata=_build_query_metadata_response(meta, mode="clickhouse"),
-    )
+        meta = page.metadata
+        resp_out: HighScaleRequestFactResponse = HighScaleRequestFactResponse.with_telemetry(
+            rows=rows,
+            next_cursor=page.next_cursor,
+            metadata=_build_query_metadata_response(meta, mode="clickhouse"),
+        )
+        if use_cache:
+            _REQUEST_FACTS_CACHE[cache_key] = resp_out
+        return resp_out
+
     if use_cache:
-        _REQUEST_FACTS_CACHE[cache_key] = resp
-    return resp
+        resp_final, is_leader = coalesce(f"hs_req_facts:{cache_key}", _compute_ch)
+        if not is_leader:
+            return resp_final.model_copy(update={"is_cached": True})
+        return resp_final
+    return _compute_ch()
 
 
 @high_scale_router.get(
