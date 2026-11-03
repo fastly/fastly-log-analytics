@@ -342,11 +342,14 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         ),
         ref_extracted AS (
             SELECT client_ip AS ip,
-                   if((positionCaseInsensitive(custom_fields['ua'], '-user') > 0
-                       OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0)
-                      AND extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
-                      extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
-                      extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
+                   ifNull(
+                       nullIf(
+                           if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                              OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0,
+                              extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
+                              ''),
+                           ''),
+                       extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
             FROM request_facts
             WHERE __WHERE__ AND client_ip != ''
               AND ((custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
@@ -461,7 +464,7 @@ def security_aggregates(
             tasks,
             source=source_for,
             activity=lambda k: "overhead" if k == "ngwaf_configured" else "compute",
-            max_workers=8,
+            max_workers=4,
             thread_name_prefix="hs-sec",
         ).items():
             if k == "_top_bots":

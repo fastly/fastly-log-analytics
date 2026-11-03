@@ -577,7 +577,12 @@ def maintain_clickhouse_system_tables(client: ClickHouseClient) -> None:
 
     for tbl in ("metric_log", "asynchronous_metric_log", "text_log", "query_log", "part_log", "error_log", "trace_log"):
         try:
-            client.execute(f"ALTER TABLE system.{tbl} MODIFY TTL event_date + INTERVAL 1 DAY")
+            sql = (
+                "TRUNCATE TABLE IF EXISTS system.metric_log"
+                if tbl == "metric_log"
+                else f"ALTER TABLE system.{tbl} MODIFY TTL event_date + INTERVAL 1 DAY"
+            )
+            client.execute(sql)
         except Exception as e:
             log.debug("Failed to alter TTL on system.%s: %s", tbl, e)
 

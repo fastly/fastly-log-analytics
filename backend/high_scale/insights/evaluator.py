@@ -64,7 +64,7 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 from .sql_queries import Detection, _base_sql, _detection_for
 
-_MAX_WORKERS = 12
+_MAX_WORKERS = 4
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")

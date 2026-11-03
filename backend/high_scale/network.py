@@ -174,7 +174,7 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     hop_ms = "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
     edge_sub = _ch_fact_query(
         f"custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us",
-        f"{_BASE_WHERE}{filter_sql} AND lower(custom_fields['edge']) IN ('true', '1')",
+        f"{_BASE_WHERE}{filter_sql} AND lower(custom_fields['edge']) IN ('true', '1') AND custom_fields['rid'] != ''",
     )
     shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
     shield_sub = _ch_fact_query(
@@ -309,11 +309,11 @@ def network_health(
             "map",
             _ch_fact_query(
                 "country AS country, custom_fields['city'] AS city, "
-                "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+                "any(toFloat64OrNull(custom_fields['lat'])) AS lat, any(toFloat64OrNull(custom_fields['lon'])) AS lon, "
                 f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
                 f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs",
                 f"{rtt_where} AND country != ''{map_asn_sql}",
-                group_by="country, city, lat, lon, metro, bucket_ts",
+                group_by="country, city, metro, bucket_ts",
                 order_by="bucket_ts ASC, reqs DESC LIMIT 50 BY bucket_ts",
                 limit=15000,
             ),
@@ -336,6 +336,7 @@ def network_health(
                 f"{rtt_where} AND {_ASN} IS NOT NULL AND custom_fields['c_speed'] != ''",
                 group_by="asn, c_speed",
                 order_by="cnt DESC",
+                limit=top_n * 20,
             ),
         ),
         (
@@ -344,6 +345,8 @@ def network_health(
                 f"{_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99",
                 f"{rtt_where} AND {_ASN} IS NOT NULL",
                 group_by="asn",
+                order_by="count() DESC",
+                limit=top_n * 5,
             ),
         ),
     )

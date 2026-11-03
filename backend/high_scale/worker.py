@@ -171,6 +171,7 @@ class HighScaleWorkerLoop:
             self._deletion_sweepers = tuple((service_id, deletion_sweeper) for service_id in resolved_service_ids)
         self._deletion_sweep_limit = deletion_sweep_limit
         self._deletion_thread: Thread | None = None
+        self._last_deletion_sweep = 0.0
         self._last_system_cleanup = 0.0
         pair_list = tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains)
         self._selector = FairPageSelector(
@@ -203,6 +204,11 @@ class HighScaleWorkerLoop:
         targets = self._deletion_targets()
         if not targets or (self._deletion_thread is not None and self._deletion_thread.is_alive()):
             return
+        now = time.time()
+        min_interval = min(30.0, self._interval_seconds * 15.0)
+        if self._last_deletion_sweep > 0.0 and now - self._last_deletion_sweep < min_interval:
+            return
+        self._last_deletion_sweep = now
         self._deletion_thread = Thread(
             target=self._sweep_targets, args=(targets,), name="high-scale-deletion-sweep", daemon=True
         )
@@ -218,6 +224,7 @@ class HighScaleWorkerLoop:
     def wait_for_deletion_sweep(self, timeout: float | None = None) -> None:
         if self._deletion_thread is not None:
             self._deletion_thread.join(timeout)
+        self._last_deletion_sweep = 0.0
 
     def _run_system_cleanups(self) -> None:
         now = time.time()

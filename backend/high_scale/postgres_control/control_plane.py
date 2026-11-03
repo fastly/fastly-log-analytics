@@ -67,6 +67,7 @@ ALTER TABLE high_scale_source_objects ADD CONSTRAINT high_scale_source_objects_s
     'discovered', 'claimed', 'appended', 'archived', 'acknowledged', 'source_deleted', 'source_missing'
 ));
 CREATE INDEX IF NOT EXISTS high_scale_source_objects_claim_idx ON high_scale_source_objects (service_id, status, lease_until);
+CREATE INDEX IF NOT EXISTS high_scale_source_objects_domain_status_idx ON high_scale_source_objects (service_id, domain, status);
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     manifest_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -89,6 +90,9 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
 ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
 ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS archive_expired_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx ON high_scale_archive_manifests (service_id, source_key);
+CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_domain_expiry_idx
+    ON high_scale_archive_manifests (service_id, domain, coverage_end)
+    WHERE state = 'source_deleted' AND archive_expired_at IS NULL;
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id) ON DELETE CASCADE,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -112,6 +116,8 @@ CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
     status TEXT NOT NULL CHECK (status IN ('pending', 'visible')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+CREATE INDEX IF NOT EXISTS high_scale_publication_manifests_domain_status_idx
+    ON high_scale_publication_manifests (service_id, domain, status);
 CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     object_id TEXT NOT NULL REFERENCES high_scale_source_objects(object_id),
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id),
@@ -891,7 +897,7 @@ class PostgresControlPlane:
                 "JOIN high_scale_archive_manifests m ON m.manifest_id = o.archive_manifest_id "
                 "WHERE o.service_id = %s AND o.status IN ('archived', 'acknowledged') "
                 "AND m.state IN ('manifest_committed', 'deletion_eligible') "
-                "AND m.deletion_authorization_deadline <= clock_timestamp() "
+                "AND m.deletion_authorization_deadline <= statement_timestamp() "
                 "ORDER BY o.discovered_at LIMIT %s",
                 (service_id, limit),
             ).fetchall()
@@ -911,7 +917,7 @@ class PostgresControlPlane:
         if not windows:
             return ()
         predicate = " OR ".join(
-            "(domain = %s AND coverage_end < clock_timestamp() - make_interval(days => %s))" for _ in windows
+            "(domain = %s AND coverage_end < statement_timestamp() - make_interval(days => %s))" for _ in windows
         )
         params = [value for window in windows for value in window]
         with self.transaction(read_only=True) as connection:
@@ -934,7 +940,7 @@ class PostgresControlPlane:
                 "SELECT "
                 "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL), 0), "
                 "count(*) FILTER (WHERE archive_expired_at IS NULL), "
-                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > clock_timestamp() - interval '30 days'), 0) "
+                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > statement_timestamp() - interval '30 days'), 0) "
                 "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading'",
                 (service_id,),
             ).fetchone()
