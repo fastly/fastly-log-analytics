@@ -89,6 +89,12 @@ def _safe_table_for(source: dict[str, Any]) -> str | None:
     return _safe_table_name(slug)
 
 
+# Dashboard fields that never render as a top-N card (timestamp, byte counts, coordinates, ids, ...) have one
+# near-unique value per row, so rolling them up is the most expensive part of closing a busy hour and nothing
+# reads the result. These few are read straight from the all-fields bundle by other pages.
+_ROLLED_NON_TOP_N_FIELDS = frozenset({"ost"})
+
+
 def _get_fields(src: dict[str, Any]) -> list[str]:
     """Return the dashboard fields eligible for rollup.
 
@@ -111,7 +117,7 @@ def _get_fields(src: dict[str, Any]) -> list[str]:
     field). See AGENTS.md Trap #40.
     """
     from backend.core.log_fields import try_get
-    from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
+    from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS, NON_TOP_N_FIELDS
 
     def _is_unbacked_derived(code: str) -> bool:
         if code in _VIRTUAL_FIELDS:
@@ -130,7 +136,12 @@ def _get_fields(src: dict[str, Any]) -> list[str]:
             continue
         custom_field_names.append(name)
     actual_fields = [
-        f for f in FIELDS if f not in _VIRTUAL_FIELDS and not _is_unbacked_derived(f) and _is_safe_ident(f)
+        f
+        for f in FIELDS
+        if f not in _VIRTUAL_FIELDS
+        and not _is_unbacked_derived(f)
+        and _is_safe_ident(f)
+        and (f not in NON_TOP_N_FIELDS or f in _ROLLED_NON_TOP_N_FIELDS)
     ]
     virtual_fields = [f for f in _VIRTUAL_FIELDS if f in _VIRTUAL_FIELD_BACKING and _is_safe_ident(f)]
     return actual_fields + virtual_fields + custom_field_names

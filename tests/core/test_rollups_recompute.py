@@ -1158,6 +1158,21 @@ def test_get_fields_excludes_metrics_only_synthetic_fields():
     assert "country" in fields
 
 
+@pytest.mark.usefixtures("frozen_clock")
+def test_get_fields_skips_non_top_n_fields_but_keeps_those_other_pages_read():
+    """Near-unique-per-row fields (timestamp, byte counts, coordinates, request ids) never render as a top-N
+    card, and rolling them up dominates the cost of closing a busy hour. `ost` is read from the all-fields
+    bundle by the Origin status card, so it must stay."""
+    from backend.core.rollups._common import _get_fields
+    from backend.repositories.dashboard import NON_TOP_N_FIELDS
+
+    fields = set(_get_fields({"log_fields": {"custom_fields": []}}))
+
+    assert not {"timestamp", "req_bytes", "lat", "lon", "rid", "waf_req_id", "oip"} & fields
+    assert {"ost", "country", "status", "ua", "ip", "conn_requests", "waf_sig_ind"} <= fields
+    assert (fields & NON_TOP_N_FIELDS) == {"ost"}
+
+
 # ── _build_copy_query and _build_copy_ip_query NULL filters ─────────────────
 
 
