@@ -114,9 +114,15 @@ def _run_rollup_hour_heal(service_id: str, manual: bool = False, run_id: int | N
     from backend.cron.jobs.sync import has_sufficient_disk_space
     from backend.utils.telemetry import should_defer_cron
 
-    if not manual and should_defer_cron("rollup_hour_heal", service_id):
-        logger.info("⏸️  [rollup-heal] %s: deferring due to active user queries", service_id)
-        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+    if not manual:
+        # An hourly job that returns "deferred" is not retried until the next hour, so wait out the gate
+        # (it releases after its max-defer window) instead of skipping the whole hour.
+        waited = 0.0
+        while should_defer_cron("rollup_hour_heal", service_id):
+            if waited == 0.0:
+                logger.info("⏸️  [rollup-heal] %s: waiting for active user queries to clear", service_id)
+            time.sleep(5.0)
+            waited += 5.0
     if (src := get_source_for_service(service_id)) is None:
         return {"status": "error", "service_id": service_id, "summary": "Source not found"}
     ok_disk, msg = has_sufficient_disk_space(_hour_bundled_root(src), "rollup-heal", service_id)

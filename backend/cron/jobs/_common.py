@@ -274,6 +274,10 @@ def _finish_post_ingest_view_and_rollups(
             log_prefix=f"{elapsed_fn()} ",
             progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name=job_name, event=ev),
         )
+    if done_event.get("rows_inserted", 0) > 0:
+        from backend.cron.jobs.sync import queue_unrolled_closed_hours
+
+        queue_unrolled_closed_hours(service_id, src)
     if touched_hours := done_event.get("touched_hours", []):
         from backend.cron.jobs.sync import schedule_post_ingest_rollups
 

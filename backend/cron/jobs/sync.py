@@ -143,11 +143,62 @@ def _post_ingest_rollup_worker(service_id: str) -> None:
             (rollups.recompute_touched_hours, "rollup recompute"),
             (rollups.recompute_wellknown_bots_rollup, "bot rollup"),
         ):
+            started = time.monotonic()
             try:
                 yield_to_api()
                 fn(service_id, src, hours)
+                logger.info(
+                    "[rollups] %s: post-ingest %s done for %d hour(s) (%s..%s) in %.1fs",
+                    service_id,
+                    label,
+                    len(hours),
+                    min(hours),
+                    max(hours),
+                    time.monotonic() - started,
+                )
             except Exception as e:
                 logger.warning("[scheduler] %s: post-sync %s failed: %s", service_id, label, e)
+
+
+_FINALIZE_LOOKBACK_HOURS = 3
+_FINALIZE_GRACE_S = 60
+_FINALIZE_RETRY_S = 600.0
+_finalize_attempted: dict[tuple[str, str], float] = {}
+
+
+def queue_unrolled_closed_hours(service_id: str, src: dict[str, Any], *, now: datetime | None = None) -> set[str]:
+    """Queue recently closed hours that have no all-fields rollup yet.
+
+    The touched-hours hook alone can miss an hour (late file, deferral, failure), and the hourly heal job
+    only retries an hour later. A per-hour cooldown keeps a persistent failure from re-running every tick.
+    """
+    from backend.core.rollups._common import _hour_bundled_root
+
+    if svcconfig.is_durable_serving_mode(src):
+        return set()
+    now = now or datetime.now(UTC)
+    root = _hour_bundled_root(src)
+    hour_floor = now.replace(minute=0, second=0, microsecond=0)
+    queued: set[str] = set()
+    with _rollup_lock:
+        for back in range(1, _FINALIZE_LOOKBACK_HOURS + 1):
+            start = hour_floor - timedelta(hours=back)
+            if now < start + timedelta(hours=1, seconds=_FINALIZE_GRACE_S):
+                continue
+            key = start.strftime("%Y-%m-%d-%H")
+            if os.path.isfile(os.path.join(root, f"hour={key}", "all_fields.parquet")):
+                continue
+            last = _finalize_attempted.get((service_id, key))
+            if last is not None and time.monotonic() - last < _FINALIZE_RETRY_S:
+                continue
+            _finalize_attempted[(service_id, key)] = time.monotonic()
+            queued.add(key)
+    if queued:
+        logger.info(
+            "[rollups] %s: queueing %d closed hour(s) with no rollup: %s", service_id, len(queued), sorted(queued)
+        )
+        schedule_post_ingest_rollups(service_id, src, queued)
+    return queued
 
 
 def schedule_post_ingest_rollups(service_id: str, src: dict[str, Any], hours: set[str]) -> None:

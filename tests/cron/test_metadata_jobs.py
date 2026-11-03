@@ -1473,13 +1473,16 @@ class TestRollupHealContract:
         res_empty = _run_rollup_hour_heal.__wrapped__(sid)
         assert res_empty["stamped_empty"] == 4 and "4 empty hour(s) stamped" in logged2[0][1]["summary"]
 
-        # 3. Politeness gate & manual bypass
+        # 3. Politeness gate waits (an hourly job must not skip its hour) & manual bypass
         sid, heal_mock, _ = self._setup_heal(
             monkeypatch, contract_service_source, heal_return={"missing": 0, "rebuilt_fields": 0, "bundled": 0}
         )
+        gate = iter([True, True, False])
+        monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: next(gate))
+        monkeypatch.setattr("backend.cron.jobs.compaction.time.sleep", lambda s: None)
+        assert _run_rollup_hour_heal.__wrapped__(sid, manual=False)["status"] == "success"
+        heal_mock.assert_called_once()
         monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: True)
-        assert _run_rollup_hour_heal.__wrapped__(sid, manual=False)["status"] == "deferred"
-        heal_mock.assert_not_called()
         assert _run_rollup_hour_heal.__wrapped__(sid, manual=True)["status"] == "success"
         monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: False)
 

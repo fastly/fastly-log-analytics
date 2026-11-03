@@ -74,6 +74,7 @@ def stub_post_ingest(monkeypatch) -> None:
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
     monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs.sync.queue_unrolled_closed_hours", MagicMock(return_value=set()))
     monkeypatch.setattr("backend.repositories.dashboard._dashboard_cache", {}, raising=False)
     monkeypatch.setattr("backend.repositories.dashboard.invalidate_service", MagicMock(), raising=False)
 
@@ -2213,3 +2214,50 @@ def test_is_batch_due_true_only_within_active_flush_window(monkeypatch):
         lambda _sid: {"request": {"latest_log_at": (now - timedelta(seconds=120)).isoformat()}},
     )
     assert sync_mod._is_batch_due("svc-1", {"log_period": 10}) is False
+
+
+class TestQueueUnrolledClosedHours:
+    NOW = datetime(2026, 11, 3, 19, 30, 0, tzinfo=UTC)
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, tmp_path, monkeypatch):
+        sync_mod._finalize_attempted.clear()
+        self.queued: list[set[str]] = []
+        monkeypatch.setattr(
+            sync_mod, "schedule_post_ingest_rollups", lambda sid, src, hours: self.queued.append(set(hours))
+        )
+        monkeypatch.setattr(
+            "backend.core.rollups._common._hour_bundled_root", lambda src: str(tmp_path / "hour_bundled")
+        )
+        monkeypatch.setattr(sync_mod.svcconfig, "is_durable_serving_mode", lambda src=None: False)
+        self.root = tmp_path / "hour_bundled"
+        self.root.mkdir()
+        yield
+        sync_mod._finalize_attempted.clear()
+
+    def _mark_rolled(self, key: str) -> None:
+        d = self.root / f"hour={key}"
+        d.mkdir()
+        (d / "all_fields.parquet").write_bytes(b"x")
+
+    def test_queues_closed_hours_without_a_rollup_and_skips_rolled_ones(self):
+        self._mark_rolled("2026-11-03-17")
+        got = sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=self.NOW)
+        assert got == {"2026-11-03-18", "2026-11-03-16"}
+        assert self.queued == [got]
+
+    def test_hour_inside_the_late_arrival_grace_is_not_queued(self):
+        just_closed = datetime(2026, 11, 3, 19, 0, 30, tzinfo=UTC)
+        got = sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=just_closed)
+        assert "2026-11-03-18" not in got
+
+    def test_cooldown_stops_a_failing_hour_from_requeueing_every_tick(self):
+        first = sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=self.NOW)
+        second = sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=self.NOW)
+        assert first and second == set()
+        assert len(self.queued) == 1
+
+    def test_durable_mode_never_queues(self, monkeypatch):
+        monkeypatch.setattr(sync_mod.svcconfig, "is_durable_serving_mode", lambda src=None: True)
+        assert sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=self.NOW) == set()
+        assert self.queued == []

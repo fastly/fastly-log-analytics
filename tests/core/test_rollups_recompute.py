@@ -2316,3 +2316,18 @@ def test_shared_rollup_session_reuses_slice_across_core_and_feature_writers(
             rows = pq.ParquetFile(root / f"hour={selected_hour}" / filename).read().to_pylist()
             assert sum(row["requests"] for row in rows) == requests
     assert not (root / f"hour={(earlier + timedelta(hours=1)):%Y-%m-%d-%H}").exists()
+
+
+def test_rollup_hour_heal_waits_out_the_activity_gate_instead_of_skipping_the_hour(monkeypatch, tmp_path):
+    from backend.cron.jobs import compaction
+
+    gate = iter([True, True, False])
+    sleeps: list[float] = []
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **k: next(gate))
+    monkeypatch.setattr(compaction.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+
+    res = compaction._run_rollup_hour_heal.__wrapped__("svc-wait", manual=False)
+
+    assert sleeps == [5.0, 5.0]
+    assert res["status"] == "error" and res["summary"] == "Source not found"
