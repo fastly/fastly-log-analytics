@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -18,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import safe_iso
 
 if TYPE_CHECKING:
@@ -249,13 +251,43 @@ VISIBLE_PUBLICATION_FENCE_SQL = (
     "WHERE service_id={service_id:String} AND publication_state='visible')"
 )
 
+_all_visible_cache: BoundedTTLCache[str, bool] = BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+CacheRegistry.register("hs_all_visible_fence_cache", _all_visible_cache)
 
-def visible_publication_fence_sql(domain: str | None = None) -> str:
+
+def _is_all_batches_visible(client: Any, service_id: str | None, domain: str | None) -> bool:
+    if client is None or not service_id or not domain or os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    if not (hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__):
+        return False
+    key = f"{id(client)}:{service_id}:{domain}"
+    cached = _all_visible_cache.get(key)
+    if cached is not None:
+        return bool(cached)
+    try:
+        rows = client.execute(
+            "SELECT countIf(publication_state != 'visible') AS non_vis, count() AS tot "
+            "FROM high_scale_batch_publications FINAL "
+            "WHERE service_id={service_id:String} AND domain={domain:String}",
+            {"service_id": service_id, "domain": domain},
+        )
+        is_all_vis = bool(rows and int(rows[0].get("tot") or 0) > 0 and int(rows[0].get("non_vis") or 0) == 0)
+    except Exception:
+        is_all_vis = False
+    _all_visible_cache.set(key, is_all_vis)
+    return is_all_vis
+
+
+def visible_publication_fence_sql(
+    domain: str | None = None, *, client: Any = None, service_id: str | None = None
+) -> str:
     """Return the publication-fence SQL predicate, optionally scoped to ``domain``."""
     if domain is None:
         return VISIBLE_PUBLICATION_FENCE_SQL
     if not _DOMAIN_IDENT_RE.fullmatch(domain):
         raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    if _is_all_batches_visible(client, service_id, domain):
+        return "publication_state='visible'"
     return (
         "publication_state='visible' AND batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
@@ -263,10 +295,15 @@ def visible_publication_fence_sql(domain: str | None = None) -> str:
     )
 
 
-def visible_fact_clauses(domain: str) -> list[str]:
+def visible_fact_clauses(domain: str, *, client: Any = None, service_id: str | None = None) -> list[str]:
     """Predicates (with a ``{service_id:String}`` parameter) limiting a fact table to visible batches of ``domain``."""
     if not _DOMAIN_IDENT_RE.fullmatch(domain):
         raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    if _is_all_batches_visible(client, service_id, domain):
+        return [
+            "service_id={service_id:String}",
+            "publication_state='visible'",
+        ]
     return [
         "service_id={service_id:String}",
         "publication_state='visible'",

@@ -106,8 +106,9 @@ class _Scope:
 def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> _Scope:
     start, end = parse_time_window(start_time, end_time)
     filter_sql, filter_params = _build_clickhouse_filters(getattr(req, "filters", None) or {})
+    fence_sql = visible_publication_fence_sql("request", client=service.client, service_id=service.service_id)
     where = (
-        f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
+        f"service_id={{service_id:String}} AND {fence_sql} "
         "AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)} "
         f"AND {filter_sql}"
     )

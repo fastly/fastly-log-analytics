@@ -408,6 +408,49 @@ def _facts_time_series(
     ]
 
 
+def _facts_time_series_with_count(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    norm_interval: str,
+    metric: str,
+    where_clause: str,
+    params: dict[str, Any],
+) -> tuple[list[TimeSeriesPoint], int]:
+    interval_sql = "toStartOfMinute(event_timestamp)"
+    if norm_interval == "1 second":
+        interval_sql = "toStartOfSecond(event_timestamp)"
+    elif norm_interval == "5 minutes":
+        interval_sql = "toStartOfFiveMinutes(event_timestamp)"
+    elif norm_interval == "1 hour":
+        interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
+    elif norm_interval == "1 day":
+        interval_sql = "toStartOfDay(event_timestamp)"
+
+    if metric == "5xx":
+        metric_sql = "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')"
+    elif metric == "4xx":
+        metric_sql = "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')"
+    elif metric == "hit_rate":
+        metric_sql = "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)"
+    else:
+        metric_sql = "count()"
+
+    ts_rows = service.client.execute(
+        f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value, count() AS _bucket_cnt FROM request_facts "
+        f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
+        params,
+    )
+    total_cnt = sum(int(r.get("_bucket_cnt") or r.get("value") or 0) for r in ts_rows)
+    return (
+        [
+            TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
+            for r in ts_rows
+        ],
+        total_cnt,
+    )
+
+
 def _filtered_aggregates(
     service: HighScaleService,
     req: AggregatesRequest,
@@ -433,7 +476,7 @@ def _filtered_aggregates(
         filter_dict = req.filters
     filter_clauses, filter_params = request_filter_clauses(filter_dict)
 
-    clauses = [*visible_fact_clauses("request"), *filter_clauses]
+    clauses = [*visible_fact_clauses("request", client=service.client, service_id=service.service_id), *filter_clauses]
     params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
 
     if start is not None and end is not None:
@@ -445,6 +488,8 @@ def _filtered_aggregates(
     where_clause = " AND ".join(clauses)
 
     top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
+    ua_bot_rows: list[tuple[str, int]] = []
+    ngwaf_bot_rows: list[tuple[str, int]] = []
 
     def fetch_field(field: str):
         sql_col = _field_sql_column(field)
@@ -455,20 +500,42 @@ def _filtered_aggregates(
         )
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
-    def fetch_field_chunk(chunk: list[str]) -> dict[str, list[tuple[str, int]]]:
-        pairs_sql = ", ".join(f"('{f}', {_field_sql_column(f)})" for f in chunk)
-        rows = service.client.execute(
-            f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
-            f"FROM request_facts ARRAY JOIN [{pairs_sql}] AS pair "
-            f"WHERE {where_clause} AND v != '' "
-            "GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT 10 BY field_name",
-            params,
-        )
+    def fetch_field_chunk(chunk: list[str], *, include_bots: bool = False) -> dict[str, list[tuple[str, int]]]:
+        pair_exprs = [f"('{f}', {_field_sql_column(f)})" for f in chunk]
+        if include_bots:
+            pair_exprs.append(
+                "('__ngwaf_bot__', if(custom_fields['ngwaf_bot'] != '', "
+                "concat(custom_fields['ngwaf_bot'], '\x1f', custom_fields['ngwaf_bot_category']), ''))"
+            )
+        pairs_sql = ", ".join(pair_exprs)
+        limit_by = 1000 if include_bots else 10
+        if "SELECT" not in where_clause:
+            sql = (
+                f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
+                f"FROM (SELECT [{pairs_sql}] AS pairs FROM request_facts PREWHERE {where_clause}) "
+                f"ARRAY JOIN pairs AS pair WHERE v != '' "
+                f"GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT {limit_by} BY field_name"
+            )
+        else:
+            sql = (
+                f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
+                f"FROM request_facts ARRAY JOIN [{pairs_sql}] AS pair "
+                f"WHERE {where_clause} AND v != '' "
+                f"GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT {limit_by} BY field_name"
+            )
+        rows = service.client.execute(sql, params)
         out: dict[str, list[tuple[str, int]]] = {f: [] for f in chunk}
         for r in rows:
             fn = str(r.get("field_name") or "")
+            val_str = str(r["v"])
+            cnt_int = int(r["c"])
             if fn in out and len(out[fn]) < 10:
-                out[fn].append((str(r["v"]), int(r["c"])))
+                out[fn].append((val_str, cnt_int))
+            if include_bots:
+                if fn == "ua":
+                    ua_bot_rows.append((val_str, cnt_int))
+                elif fn == "__ngwaf_bot__":
+                    ngwaf_bot_rows.append((val_str, cnt_int))
         return out
 
     is_real_ch = (
@@ -477,23 +544,37 @@ def _filtered_aggregates(
     norm_interval = _normalize_chart_interval(req.chart_interval)
 
     if is_real_ch and len(fields_to_query) > 2:
-        chunks = [fields_to_query[i : i + 10] for i in range(0, len(fields_to_query), 10)]
+        ordered_fields = [f for f in fields_to_query if f != "ua"]
+        if "ua" in fields_to_query:
+            ordered_fields.append("ua")
+        chunks = [ordered_fields[i : i + 10] for i in range(0, len(ordered_fields), 10)]
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             chunk_futs = [
-                trace.submit(ex, f"top_n_chunk.{idx}", partial(fetch_field_chunk, c), source="fact")
+                trace.submit(
+                    ex,
+                    f"top_n_chunk.{idx}",
+                    partial(fetch_field_chunk, c, include_bots=("ua" in c)),
+                    source="fact",
+                )
                 for idx, c in enumerate(chunks)
             ]
-            cnt_fut = trace.submit(
-                ex,
-                "count",
-                lambda: service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params),
-                source="fact",
+            cnt_fut = (
+                None
+                if want_time_series
+                else trace.submit(
+                    ex,
+                    "count",
+                    lambda: service.client.execute(
+                        f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params
+                    ),
+                    source="fact",
+                )
             )
             ts_fut = (
                 trace.submit(
                     ex,
                     "time_series",
-                    lambda: _facts_time_series(
+                    lambda: _facts_time_series_with_count(
                         service,
                         start_time,
                         end_time,
@@ -510,8 +591,48 @@ def _filtered_aggregates(
             field_results: dict[str, list[tuple[str, int]]] = {}
             for cf in chunk_futs:
                 field_results.update(cf.result())
-            total_rows_result = cnt_fut.result()
-            time_series = ts_fut.result() if ts_fut is not None else []
+            if ts_fut is not None:
+                time_series, total_count = ts_fut.result()
+            else:
+                time_series = []
+                total_rows_result = cnt_fut.result() if cnt_fut is not None else []
+                total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
+        if "ua" in fields_to_query and start_time is not None and end_time is not None:
+            from backend.high_scale import security as hs_security
+
+            sec_scope = hs_security._scope(service, req, start_time, end_time)
+            bot_memo_key = digest_cache_key(
+                {
+                    "ep": "hs_sec_top_bots_inner",
+                    "cid": client_cache_token(service.client),
+                    "s": sec_scope.start.isoformat(),
+                    "e": sec_scope.end.isoformat(),
+                    "n": 10,
+                    "w": sec_scope.where,
+                    "p": sorted((k, str(v)) for k, v in sec_scope.params.items()),
+                },
+                {"name": service.service_id, "service_id": service.service_id},
+            )
+            ngwaf_counts: dict[str, int] = {}
+            ngwaf_cats: dict[str, str] = {}
+            for raw_v, cnt in ngwaf_bot_rows:
+                bot_name, _, bot_cat = raw_v.partition("\x1f")
+                if not bot_name:
+                    continue
+                ngwaf_counts[bot_name] = ngwaf_counts.get(bot_name, 0) + cnt
+                if bot_cat and not ngwaf_cats.get(bot_name):
+                    ngwaf_cats[bot_name] = bot_cat
+            sorted_ngwaf = sorted(ngwaf_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+            hs_security._security_memo.put(
+                bot_memo_key,
+                {
+                    "bots": hs_security.classify_ua_counts(ua_bot_rows, 10),
+                    "ngwaf_bots": [
+                        hs_security.shape_security_ngwaf_top_bot_row(b_name, ngwaf_cats.get(b_name, ""), b_cnt)
+                        for b_name, b_cnt in sorted_ngwaf
+                    ],
+                },
+            )
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             futs = [trace.submit(ex, f"top_n.{f}", partial(fetch_field, f), source="fact") for f in fields_to_query]
@@ -534,7 +655,7 @@ def _filtered_aggregates(
             else []
         )
 
-    total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
+        total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
 
     data = {
         field: FieldAggregate(
@@ -929,9 +1050,12 @@ def bundle(
     sections = set(req.sections) if req.sections else None
     want_aggregates = sections is None or bool(sections & {"core", "topten"})
     want_bots = sections is None or "bots" in sections
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     res_aggregates: AggregatesResponse | None
     res_top_bots: Any
-    if want_aggregates and want_bots and not hasattr(service.client, "responses"):
+    if want_aggregates and want_bots and not hasattr(service.client, "responses") and not (is_real_ch and req.filters):
         get_queries()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             agg_fut = pool.submit(contextvars.copy_context().run, aggregates, service, req, start_time, end_time)

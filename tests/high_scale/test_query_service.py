@@ -2894,3 +2894,120 @@ def test_legacy_range_shorthand_and_origin_drilldown() -> None:
     )
     assert len(resp_host["rows"]) == 1
     assert any("FROM request_facts" in q and "custom_fields['obytes']" in q for q in queries)
+
+
+def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimizations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.high_scale import _common as hs_common
+    from backend.high_scale import dashboard as hs_dashboard
+    from backend.models.analytics import AggregatesRequest
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    hs_common._all_visible_cache.clear()
+
+    class _RealTransport:
+        pass
+
+    class _RealHttp:
+        _transport = _RealTransport()
+
+    queries: list[str] = []
+
+    class _RealClient:
+        _http = _RealHttp()
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            queries.append(sql)
+            if "countIf(publication_state != 'visible')" in sql:
+                return [{"non_vis": 0, "tot": 100}]
+            if "SELECT pair.1 AS field_name" in sql:
+                return [
+                    {"field_name": "url", "v": "/home", "c": 50},
+                    {"field_name": "country", "v": "US", "c": 50},
+                    {"field_name": "ua", "v": "Googlebot/2.1", "c": 20},
+                    {"field_name": "__ngwaf_bot__", "v": "googlebot\x1fsearch", "c": 20},
+                ]
+            if "_bucket_cnt" in sql:
+                return [{"bucket_start": datetime(2026, 1, 1, 12, 0, tzinfo=UTC), "value": 50, "_bucket_cnt": 50}]
+            if "sessions:page" in sql:
+                return [
+                    {
+                        "ip": "203.0.113.7",
+                        "ja4": "t13d",
+                        "session_start": datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+                        "session_end": datetime(2026, 1, 1, 10, 5, tzinfo=UTC),
+                        "req_count": 10,
+                        "reqs_4xx": 0,
+                        "reqs_5xx": 0,
+                        "total_bytes": 0,
+                        "edge_count": 1,
+                        "shield_count": 0,
+                        "has_rtt_row": 1,
+                        "has_edge_sid_row": 1,
+                        "streaming_reqs": 1,
+                        "sid": 1,
+                        "flagged": False,
+                        "is_streaming": True,
+                        "total_sessions": 1,
+                        "any_rtt": 1,
+                        "any_ja4": 1,
+                        "any_edge": 1,
+                        "any_edge_sid": 1,
+                        "any_cmcd": 1,
+                    }
+                ]
+            if "sessions:enrich" in sql:
+                return [
+                    {
+                        "row_idx": 0,
+                        "en_asn": 15169,
+                        "en_country": "US",
+                        "en_unique_urls": 5,
+                        "en_ua": "Mozilla/5.0",
+                        "en_median_rtt_ms": 12.5,
+                        "en_edge_sid": "es-1",
+                        "en_reqs_4xx": 5,
+                        "en_reqs_5xx": 1,
+                        "en_total_bytes": 4096,
+                        "en_edge_count": 8,
+                        "en_shield_count": 2,
+                        "en_streaming_reqs": 3,
+                    }
+                ]
+            return []
+
+    client = _RealClient()
+    clauses = hs_common.visible_fact_clauses("request", client=client, service_id="svc-fast")
+    assert clauses == ["service_id={service_id:String}", "publication_state='visible'"]
+    assert (
+        hs_common.visible_publication_fence_sql("request", client=client, service_id="svc-fast")
+        == "publication_state='visible'"
+    )
+
+    wm = SimpleNamespace(
+        coverage_start=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        coverage_end=datetime(2026, 1, 2, 0, 0, tzinfo=UTC),
+        last_visible_event_id="evt-1",
+    )
+    svc = SimpleNamespace(service_id="svc-fast", client=client, watermark_for=lambda _d: wm)
+    queries.clear()
+    bundle_res = hs_dashboard.bundle(
+        svc,  # type: ignore[arg-type]
+        AggregatesRequest(filters={"country": ["US"]}, fields=["url", "country", "ua"]),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    assert bundle_res["aggregates"].total_rows == 50
+    assert any("PREWHERE" in q for q in queries)
+    assert not any("/* hs_security:top_bots_ua */" in q for q in queries)
+
+    queries.clear()
+    sess_res = sessions_endpoint(
+        svc,  # type: ignore[arg-type]
+        SessionsRequest(sort_by="req_count", sort_dir="desc", min_reqs_flag=100, min_4xx_pct_flag=20.0),
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+    )
+    s0 = sess_res["sessions"][0]
+    assert s0["reqs_4xx"] == 5 and s0["total_bytes"] == 4096 and s0["flagged"] is True and s0["is_streaming"] is True

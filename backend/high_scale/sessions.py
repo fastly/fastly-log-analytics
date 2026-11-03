@@ -54,6 +54,81 @@ _HELPER_COLUMNS = (
 )
 _DETAIL_LIMIT = 500
 _FULL_CTE_SORTS = frozenset({"unique_urls", "median_rtt_ms"})
+_INDEX_FAST_SORTS = frozenset({"req_count", "session_start", "session_end", "ip", "ja4"})
+_SESSIONS_INDEX_FAST_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            toUInt64(toUnixTimestamp64Milli(event_timestamp)) AS ts_ms,
+            custom_fields['edge'] AS edge,
+            toUInt8(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL) AS has_rtt,
+            toUInt8(lower(edge) IN ('1', 'true') OR lower(edge) IN ('0', 'false')) AS has_edge,
+            toUInt8(custom_fields['edge_sid'] != '') AS has_esid,
+            toUInt8(cmcd['sid'] != '') AS has_cmcd
+        FROM request_facts
+        WHERE {where}
+    ),
+    pair_sessions AS (
+        SELECT
+            ip,
+            ja4,
+            min(ts_ms) AS p_min_ms,
+            max(ts_ms) AS p_max_ms,
+            count() AS p_reqs,
+            max(has_rtt) AS p_rtt,
+            max(has_edge) AS p_edge,
+            max(has_esid) AS p_esid,
+            max(has_cmcd) AS p_cmcd,
+            groupArray(ts_ms) AS raw_ts,
+            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort(raw_ts), []) AS sorted_ts,
+            if(
+                intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
+                [toUInt32(1)],
+                arrayFilter(
+                    i -> i = 1 OR intDiv(sorted_ts[i], 1000) - intDiv(sorted_ts[i - 1], 1000) > 1800,
+                    arrayEnumerate(sorted_ts)
+                )
+            ) AS starts
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, sorted_ts[starts[sess_idx]]))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(
+                sess_idx = 0,
+                p_max_ms,
+                sorted_ts[if(sess_idx < length(starts), starts[sess_idx + 1] - 1, length(sorted_ts))]
+            ))) AS session_end,
+            if(
+                sess_idx = 0,
+                p_reqs,
+                toUInt64(if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_ts) - starts[sess_idx] + 1))
+            ) AS req_count,
+            toUInt64(0) AS reqs_4xx,
+            toUInt64(0) AS reqs_5xx,
+            toUInt64(0) AS total_bytes,
+            toUInt64(p_edge) AS edge_count,
+            toUInt64(0) AS shield_count,
+            p_rtt AS has_rtt_row,
+            p_esid AS has_edge_sid_row,
+            toUInt64(p_cmcd) AS streaming_reqs,
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+        FROM pair_sessions
+        ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
 _SESSIONS_FAST_CTE = """
     WITH raw_events AS (
         SELECT
@@ -335,7 +410,13 @@ def _enrich_paginated_sessions(
         "    uniq(url) AS en_unique_urls, "
         "    min(custom_fields['ua']) AS en_ua, "
         "    median(toFloat64OrNull(custom_fields['tcp_rtt'])) / 1000.0 AS en_median_rtt_ms, "
-        "    max(custom_fields['edge_sid']) AS en_edge_sid "
+        "    max(custom_fields['edge_sid']) AS en_edge_sid, "
+        "    sum(if(toInt32OrZero(custom_fields['status']) >= 400 AND toInt32OrZero(custom_fields['status']) < 500, 1, 0)) AS en_reqs_4xx, "
+        "    sum(if(toInt32OrZero(custom_fields['status']) >= 500, 1, 0)) AS en_reqs_5xx, "
+        "    sum(greatest(toInt64OrZero(custom_fields['resp_bytes']), 0)) AS en_total_bytes, "
+        "    sum(if(lower(custom_fields['edge']) IN ('1', 'true'), 1, 0)) AS en_edge_count, "
+        "    sum(if(lower(custom_fields['edge']) IN ('0', 'false'), 1, 0)) AS en_shield_count, "
+        "    sum(if(cmcd['sid'] != '', 1, 0)) AS en_streaming_reqs "
         "FROM request_facts "
         "INNER JOIN page_keys AS pk "
         "    ON client_ip = pk.pk_ip AND custom_fields['ja4'] = pk.pk_ja4 "
@@ -355,6 +436,22 @@ def _enrich_paginated_sessions(
             rows[idx]["ua"] = en_row.get("en_ua", en_row.get("ua")) or ""
             rows[idx]["median_rtt_ms"] = en_row.get("en_median_rtt_ms", en_row.get("median_rtt_ms"))
             rows[idx]["edge_sid"] = en_row.get("en_edge_sid", en_row.get("edge_sid")) or ""
+            if "en_reqs_4xx" in en_row:
+                r_cnt = int(rows[idx].get("req_count") or 0)
+                r_4xx = int(en_row.get("en_reqs_4xx") or 0)
+                r_stream = int(en_row.get("en_streaming_reqs") or 0)
+                min_reqs = int(params.get("min_reqs_flag") or _DEFAULT_MIN_REQS_FLAG)
+                min_4xx_pct = float(params.get("min_4xx_pct_flag") or _DEFAULT_MIN_4XX_PCT_FLAG)
+                rows[idx]["reqs_4xx"] = r_4xx
+                rows[idx]["reqs_5xx"] = int(en_row.get("en_reqs_5xx") or 0)
+                rows[idx]["total_bytes"] = int(en_row.get("en_total_bytes") or 0)
+                rows[idx]["edge_count"] = int(en_row.get("en_edge_count") or 0)
+                rows[idx]["shield_count"] = int(en_row.get("en_shield_count") or 0)
+                rows[idx]["streaming_reqs"] = r_stream
+                rows[idx]["flagged"] = bool(
+                    (r_cnt >= min_reqs) or (r_cnt > 0 and (r_4xx * 100.0 / r_cnt) >= min_4xx_pct)
+                )
+                rows[idx]["is_streaming"] = bool(r_stream > 0)
 
 
 def sessions_endpoint(
@@ -366,7 +463,7 @@ def sessions_endpoint(
     filter_clauses, filter_params = request_filter_clauses(req.filters)
     where = " AND ".join(
         [
-            *visible_fact_clauses("request"),
+            *visible_fact_clauses("request", client=service.client, service_id=service.service_id),
             "event_timestamp >= {start_time:DateTime64(3)}",
             "event_timestamp <= {end_time:DateTime64(3)}",
             *filter_clauses,
@@ -383,7 +480,8 @@ def sessions_endpoint(
         **filter_params,
     }
     sort_by, sort_dir = normalize_sessions_sort(req.sort_by, str(req.sort_dir))
-    fast_cte = _SESSIONS_FAST_CTE.format(where=where)
+    use_index_fast = not req.flagged_only and not req.streaming_only and sort_by in _INDEX_FAST_SORTS
+    fast_cte = (_SESSIONS_INDEX_FAST_CTE if use_index_fast else _SESSIONS_FAST_CTE).format(where=where)
     cte = _SESSIONS_CTE.format(where=where) if sort_by in _FULL_CTE_SORTS else fast_cte
     memo_key = digest_cache_key(
         {
