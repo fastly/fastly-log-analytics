@@ -49,6 +49,7 @@ from backend.models.analytics import (
 from backend.repositories.rollup_executor.exact_window import has_subminute_bounds, retained_window_requires_exact
 from backend.repositories.rollup_executor.top_n import CANONICAL_METRICS
 from backend.repositories.utils.response_shaping import us_to_ms as _us_to_ms
+from backend.utils.telemetry import log_once_per
 
 _logger = logging.getLogger("backend.repositories._base")
 
@@ -341,7 +342,8 @@ class _ScalarsRollupMixin:
         except duckdb.InterruptException:
             raise
         except duckdb.Error as e:
-            _logger.debug("[%s] read failed, falling back to raw: %s", tag, e)
+            if log_once_per(f"rollup_read_failed:{tag}:{type(e).__name__}", 60):
+                _logger.warning("[%s] rollup read failed (%s), falling back to raw: %s", tag, type(e).__name__, e)
             return None
 
     def try_origin_summary_from_rollup(
