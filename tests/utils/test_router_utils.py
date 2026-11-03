@@ -226,6 +226,36 @@ def test_query_errors_maps_unknown_exception_to_configured_status_without_trace(
     )
 
 
+@pytest.mark.parametrize("is_async", [False, True])
+def test_query_errors_maps_duckdb_out_of_memory_to_retryable_503_without_leaking_internals(caplog, is_async):
+    """A heavy scan that exhausts DuckDB memory or its temp-spill cap used to surface as an opaque 500
+    ``unhandled_error``. It must be a 503 with a stable code and actionable guidance, and must not echo the
+    engine message (which carries server paths)."""
+    oom = duckdb.OutOfMemoryException(
+        "Out of Memory Error: failed to offload data block of size 96.0 KiB (9.3 GiB/9.3 GiB used). /app/data/.tmp/x.tmp"
+    )
+
+    @router_utils.query_errors(status_code=500)
+    def sync_handler():
+        raise oom
+
+    @router_utils.query_errors(status_code=500)
+    async def async_handler():
+        raise oom
+
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
+        if is_async:
+            asyncio.run(async_handler())
+        else:
+            sync_handler()
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"] == "query_resource_limit"
+    assert "time range" in exc.value.detail["message"]
+    assert "/app/data" not in str(exc.value.detail) and "GiB" not in str(exc.value.detail)
+    assert exc.value.detail.get("error_id"), "the failure must stay correlatable with the server-side log"
+    assert any("query_resource_limit" in r.getMessage() for r in caplog.records)
+
+
 def test_query_errors_preserves_function_metadata_and_forwards_args():
     """``functools.wraps`` keeps __name__ and __doc__ for FastAPI OpenAPI op IDs
     and forwards positional/keyword arguments unchanged."""

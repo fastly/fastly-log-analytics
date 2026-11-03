@@ -10,6 +10,7 @@ from functools import wraps
 from logging import Logger
 from typing import NoReturn
 
+import duckdb
 from fastapi import HTTPException, Request
 
 from backend.utils.pii_masking import (
@@ -114,6 +115,16 @@ def _handle_query_error(
         raise HTTPException(status_code=400, detail=make_error("bad_request", redact_error_text(e))) from e
     if isinstance(e, LookupError):
         raise HTTPException(status_code=404, detail=make_error("not_found", redact_error_text(e))) from e
+    if isinstance(e, duckdb.OutOfMemoryException):
+        # A scan that exhausts DuckDB memory or the temp-spill cap is a capacity limit, not a server bug: tell the user
+        # how to get unstuck. The engine message carries server paths, so it stays in the log.
+        raise_internal(
+            logger_obj,
+            e,
+            code="query_resource_limit",
+            status=503,
+            message="This query needed more memory than is available. Narrow the time range or add a filter, then retry.",
+        )
     raise_internal(logger_obj, e, code=code, status=status_code)
 
 
