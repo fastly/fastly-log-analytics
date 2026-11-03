@@ -2,7 +2,6 @@ import concurrent.futures
 import contextvars
 import hashlib
 import logging
-import math
 import os
 import tempfile
 import time
@@ -15,6 +14,7 @@ from backend.core import metadata as metadata_db
 from backend.core import storage
 from backend.core.duckdb import (
     _DEFAULT_SOURCE,
+    INGEST_CHUNK_MAX_BYTES,
     INGEST_CHUNK_SIZE,
     _ensure_source_registered,
     _execute_query_with_retry,
@@ -81,6 +81,29 @@ _REWRITE_STAGING_FILENAME_SQL = (
 def _export_staging_arrow(mem_con: Any) -> Any:
     fetched = mem_con.execute("SELECT * FROM _ingest_staging WHERE timestamp IS NOT NULL").to_arrow_table()
     return fetched.read_all() if hasattr(fetched, "read_all") else fetched
+
+
+def _plan_chunks(
+    files: list[str], file_sizes: dict[str, int | None], max_files: int, max_bytes: int
+) -> list[list[str]]:
+    """Group consecutive files into ingest chunks bounded by file count and compressed bytes.
+
+    A chunk always holds at least one file, so a single oversized file is processed alone rather than dropped. Files
+    without a known size count as zero bytes, which leaves only the file-count cap for them.
+    """
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_bytes = 0
+    for path in files:
+        size = file_sizes.get(path) or 0
+        if current and (len(current) >= max_files or current_bytes + size > max_bytes):
+            chunks.append(current)
+            current, current_bytes = [], 0
+        current.append(path)
+        current_bytes += size
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _deterministic_buffer_name(chunk: list[str]) -> str:
@@ -265,7 +288,7 @@ def _ingest_unlocked(  # fmt: skip
             "message": msg,
         }
         return
-    chunk_size = INGEST_CHUNK_SIZE
+    chunks = _plan_chunks(new_files, file_sizes, INGEST_CHUNK_SIZE, INGEST_CHUNK_MAX_BYTES)
     total_inserted = total_corrupt = total_quarantined = processed_count = deleted = 0
     corrupt_containers = quarantine_capture_failures = cap_evictions = 0
     total_corrupt_details: list[str] = []
@@ -303,17 +326,16 @@ def _ingest_unlocked(  # fmt: skip
         except Exception as _fd_err:
             logger.debug("force_download not supported on this DuckDB build: %s", _fd_err)
         failed_paths: set[str] = set()
-        for chunk_start in range(0, len(new_files), chunk_size):
+        for chunk_idx, chunk in enumerate(chunks):
             yield_to_api()
-            if chunk_start > 0 and max_seconds and (time.time() - start_time_exec) > max_seconds:
+            if chunk_idx > 0 and max_seconds and (time.time() - start_time_exec) > max_seconds:
                 yield {
                     "type": "status",
                     "message": f"{elapsed()} Time limit of {max_seconds}s reached. Stopping batch early.",
                 }
                 break
-            chunk = new_files[chunk_start : chunk_start + chunk_size]
             outcome_counters["objects_processed"] += len(chunk)
-            chunk_num, total_chunks = (chunk_start // chunk_size) + 1, math.ceil(len(new_files) / chunk_size)
+            chunk_num, total_chunks = chunk_idx + 1, len(chunks)
             yield {
                 "type": "status",
                 "message": f"{elapsed()} Processing {len(chunk)} files in batch {chunk_num}/{total_chunks} ({len(new_files):} files total)...",

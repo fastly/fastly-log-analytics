@@ -27,6 +27,7 @@ from backend.core import metadata as metadata_db
 from backend.core import storage
 from backend.core.duckdb import (
     _DEFAULT_SOURCE,
+    INGEST_CHUNK_MAX_BYTES,
     INGEST_CHUNK_SIZE,
     _configure_fos,  # noqa: F401  re-exported for test monkey-patching
     _ensure_source_registered,
@@ -326,6 +327,7 @@ _ShimModule = install_shim_module(
 _IngestModule = _ShimModule
 
 __all__ = [
+    "INGEST_CHUNK_MAX_BYTES",
     "INGEST_CHUNK_SIZE",
     "LEDGER_CONVERT_BATCH_SIZE",
     "LEDGER_MAX_ATTEMPTS",

@@ -138,6 +138,9 @@ DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
 DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")
 DUCKDB_THREADS = os.getenv("DUCKDB_THREADS", "")
 INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
+# A chunk is also capped by compressed bytes: at tens of thousands of RPS 500 files is millions of rows, and the
+# staging tables plus the Arrow export for one chunk pushed the backend past its container memory limit.
+INGEST_CHUNK_MAX_BYTES = int(os.getenv("INGEST_CHUNK_MAX_BYTES", str(128 * 1024 * 1024)))
 DUCKDB_PATH = "logs.duckdb"
 _cached_n_threads: int | None = None
 _cached_mem_limit_gb: int | None = None
