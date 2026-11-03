@@ -506,7 +506,69 @@ def _filtered_aggregates(
         )
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
-    def fetch_field_chunk(chunk: list[str], *, include_bots: bool = False) -> dict[str, list[tuple[str, int]]]:
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    norm_interval = _normalize_chart_interval(req.chart_interval)
+    eff_where = (
+        service.client.rewrite_publication_fence(where_clause, params)
+        if is_real_ch and hasattr(service.client, "rewrite_publication_fence")
+        else where_clause
+    )
+    use_approx_top_k = is_real_ch and "SELECT" not in eff_where
+    inline_ts_buckets: list[TimeSeriesPoint] = []
+    chunk_total_counts: list[int] = []
+
+    def fetch_field_chunk(
+        chunk: list[str], *, include_bots: bool = False, include_ts: bool = False
+    ) -> dict[str, list[tuple[str, int]]]:
+        if use_approx_top_k:
+            exprs: list[str] = ["count() AS __total_count__"]
+            for f in chunk:
+                col = _field_sql_column(f)
+                if include_bots and f == "ua":
+                    exprs.append(f"approx_top_kIf(1000, 3000)({col}, {col} != '') AS `{f}`")
+                else:
+                    exprs.append(f"approx_top_kIf(15, 250)({col}, {col} != '') AS `{f}`")
+            if include_bots:
+                exprs.append(
+                    "approx_top_kIf(200, 1000)("
+                    "concat(custom_fields['ngwaf_bot'], '\x1f', custom_fields['ngwaf_bot_category']), "
+                    "custom_fields['ngwaf_bot'] != '') AS `__ngwaf_bot__`"
+                )
+            if include_ts:
+                interval_sql = "toStartOfMinute(event_timestamp)"
+                if norm_interval == "5 minutes":
+                    interval_sql = "toStartOfFiveMinutes(event_timestamp)"
+                elif norm_interval == "1 hour":
+                    interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
+                elif norm_interval == "1 day":
+                    interval_sql = "toStartOfDay(event_timestamp)"
+                exprs.append(f"approx_top_k(1500, 3000)({interval_sql}) AS `__ts_buckets__`")
+            sql = f"SELECT {', '.join(exprs)} FROM request_facts PREWHERE {eff_where}"
+            rows = service.client.execute(sql, params)
+            row = rows[0] if rows else {}
+            if "__total_count__" in row:
+                chunk_total_counts.append(int(row["__total_count__"] or 0))
+            out: dict[str, list[tuple[str, int]]] = {}
+            for f in chunk:
+                items = row.get(f) or []
+                sorted_items = sorted(items, key=lambda x: (-int(x["count"]), str(x["item"])))
+                out[f] = [(str(x["item"]), int(x["count"])) for x in sorted_items[:10]]
+                if include_bots and f == "ua":
+                    for x in sorted_items:
+                        ua_bot_rows.append((str(x["item"]), int(x["count"])))
+            if include_bots:
+                for x in row.get("__ngwaf_bot__") or []:
+                    ngwaf_bot_rows.append((str(x["item"]), int(x["count"])))
+            if include_ts:
+                ts_items = row.get("__ts_buckets__") or []
+                sorted_ts = sorted(ts_items, key=lambda x: str(x["item"]))
+                for x in sorted_ts:
+                    b_str = safe_iso(x["item"]) or str(x["item"])
+                    inline_ts_buckets.append(TimeSeriesPoint(time=b_str, value=float(x["count"])))
+            return out
+
         pair_exprs = [f"('{f}', {_field_sql_column(f)})" for f in chunk]
         if include_bots:
             pair_exprs.append(
@@ -515,11 +577,6 @@ def _filtered_aggregates(
             )
         pairs_sql = ", ".join(pair_exprs)
         limit_by = 1000 if include_bots else 10
-        eff_where = (
-            service.client.rewrite_publication_fence(where_clause, params)
-            if hasattr(service.client, "rewrite_publication_fence")
-            else where_clause
-        )
         if "SELECT" not in eff_where:
             sql = (
                 f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
@@ -536,7 +593,7 @@ def _filtered_aggregates(
                 f"GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT {limit_by} BY field_name"
             )
         rows = service.client.execute(sql, params)
-        out: dict[str, list[tuple[str, int]]] = {f: [] for f in chunk}
+        out = {f: [] for f in chunk}
         for r in rows:
             fn = str(r.get("field_name") or "")
             val_str = str(r["v"])
@@ -550,29 +607,90 @@ def _filtered_aggregates(
                     ngwaf_bot_rows.append((val_str, cnt_int))
         return out
 
-    is_real_ch = (
-        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
-    )
-    norm_interval = _normalize_chart_interval(req.chart_interval)
-
     if is_real_ch and len(fields_to_query) > 2:
-        ordered_fields = [f for f in fields_to_query if f != "ua"]
-        if "ua" in fields_to_query:
-            ordered_fields.append("ua")
-        chunks = [ordered_fields[i : i + 14] for i in range(0, len(ordered_fields), 14)]
+        # Group custom_fields that share the same ClickHouse Map bucket (cityHash64(key) % 64)
+        # into the same chunk so no Map bucket is decompressed across multiple chunks:
+        #   bucket 9: pop, ttl, ua  |  bucket 25: digest, hits  |  bucket 28: city, waf_ms  |  bucket 39: ja3, proto
+        bucket_groups = (
+            (
+                "ip",
+                "country",
+                "url",
+                "digest",
+                "hits",
+                "city",
+                "waf_ms",
+                "ja3",
+                "proto",
+                "method",
+                "status",
+                "cache",
+                "tls",
+                "tls_cipher",
+            ),
+            (
+                "asn",
+                "region",
+                "conn_speed",
+                "host",
+                "content_type",
+                "shield",
+                "edge",
+                "h2_stream",
+                "error_code",
+                "beresp",
+                "waf_action",
+                "waf_block",
+                "waf_failures",
+                "waf_tags",
+            ),
+            (
+                "pop",
+                "ttl",
+                "ua",
+                "age",
+                "ja4",
+                "ja4h",
+                "ddos_action",
+                "bot_score",
+                "edge_score_action",
+                "edge_score_reason",
+                "edge_sid",
+                "ngwaf_bot_category",
+            ),
+        )
+        req_set = set(fields_to_query)
+        chunks = [[f for f in grp if f in req_set] for grp in bucket_groups]
+        assigned = {f for c in chunks for f in c}
+        leftover = [f for f in fields_to_query if f not in assigned]
+        for idx_l, f in enumerate(leftover):
+            chunks[idx_l % len(chunks)].append(f)
+        chunks = [c for c in chunks if c]
+
+        can_inline_ts = (
+            use_approx_top_k
+            and want_time_series
+            and (req.chart_metric or "requests") == "requests"
+            and norm_interval in {"1 minute", "5 minutes", "1 hour", "1 day"}
+        )
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             chunk_futs = [
                 trace.submit(
                     ex,
                     f"top_n_chunk.{idx}",
-                    partial(fetch_field_chunk, c, include_bots=("ua" in c)),
+                    partial(
+                        fetch_field_chunk,
+                        c,
+                        include_bots=("ua" in c),
+                        include_ts=(can_inline_ts and idx == len(chunks) - 1),
+                    ),
                     source="fact",
                 )
                 for idx, c in enumerate(chunks)
             ]
             cnt_fut = (
                 None
-                if want_time_series
+                if (want_time_series or use_approx_top_k)
                 else trace.submit(
                     ex,
                     "count",
@@ -597,7 +715,7 @@ def _filtered_aggregates(
                     ),
                     source="fact",
                 )
-                if want_time_series
+                if (want_time_series and not can_inline_ts)
                 else None
             )
             field_results: dict[str, list[tuple[str, int]]] = {}
@@ -605,6 +723,12 @@ def _filtered_aggregates(
                 field_results.update(cf.result())
             if ts_fut is not None:
                 time_series, total_count = ts_fut.result()
+            elif can_inline_ts:
+                time_series = inline_ts_buckets
+                total_count = chunk_total_counts[0] if chunk_total_counts else int(sum(p.value for p in time_series))
+            elif use_approx_top_k and chunk_total_counts:
+                time_series = []
+                total_count = chunk_total_counts[0]
             else:
                 time_series = []
                 total_rows_result = cnt_fut.result() if cnt_fut is not None else []

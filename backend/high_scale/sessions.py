@@ -129,6 +129,71 @@ _SESSIONS_INDEX_FAST_CTE = """
         FROM sessions_agg
     )
 """
+_SESSIONS_SLIM_INDEX_FAST_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            toUInt64(toUnixTimestamp64Milli(event_timestamp)) AS ts_ms
+        FROM request_facts
+        PREWHERE {where}
+    ),
+    pair_sessions AS (
+        SELECT
+            ip,
+            ja4,
+            min(ts_ms) AS p_min_ms,
+            max(ts_ms) AS p_max_ms,
+            count() AS p_reqs,
+            groupArray(ts_ms) AS raw_ts,
+            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort(raw_ts), []) AS sorted_ts,
+            if(
+                intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
+                [toUInt32(1)],
+                arrayFilter(
+                    i -> i = 1 OR intDiv(sorted_ts[i], 1000) - intDiv(sorted_ts[i - 1], 1000) > 1800,
+                    arrayEnumerate(sorted_ts)
+                )
+            ) AS starts
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, sorted_ts[starts[sess_idx]]))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(
+                sess_idx = 0,
+                p_max_ms,
+                sorted_ts[if(sess_idx < length(starts), starts[sess_idx + 1] - 1, length(sorted_ts))]
+            ))) AS session_end,
+            if(
+                sess_idx = 0,
+                p_reqs,
+                toUInt64(if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_ts) - starts[sess_idx] + 1))
+            ) AS req_count,
+            toUInt64(0) AS reqs_4xx,
+            toUInt64(0) AS reqs_5xx,
+            toUInt64(0) AS total_bytes,
+            toUInt64(0) AS edge_count,
+            toUInt64(0) AS shield_count,
+            toUInt8(0) AS has_rtt_row,
+            toUInt8(0) AS has_edge_sid_row,
+            toUInt64(0) AS streaming_reqs,
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+        FROM pair_sessions
+        ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
 _SESSIONS_FAST_CTE = """
     WITH raw_events AS (
         SELECT
@@ -479,9 +544,22 @@ def sessions_endpoint(
         "streaming_only": 1 if req.streaming_only else 0,
         **filter_params,
     }
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     sort_by, sort_dir = normalize_sessions_sort(req.sort_by, str(req.sort_dir))
     use_index_fast = not req.flagged_only and not req.streaming_only and sort_by in _INDEX_FAST_SORTS
-    fast_cte = (_SESSIONS_INDEX_FAST_CTE if use_index_fast else _SESSIONS_FAST_CTE).format(where=where)
+    eff_where = (
+        service.client.rewrite_publication_fence(where, params)
+        if is_real_ch and hasattr(service.client, "rewrite_publication_fence")
+        else where
+    )
+    use_slim_index = is_real_ch and use_index_fast and "SELECT" not in eff_where
+    fast_cte = (
+        _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
+        if use_slim_index
+        else (_SESSIONS_INDEX_FAST_CTE if use_index_fast else _SESSIONS_FAST_CTE).format(where=where)
+    )
     cte = _SESSIONS_CTE.format(where=where) if sort_by in _FULL_CTE_SORTS else fast_cte
     memo_key = digest_cache_key(
         {
@@ -530,7 +608,7 @@ def sessions_endpoint(
             )
         ]
         if rows and "unique_urls" not in rows[0]:
-            _enrich_paginated_sessions(service, rows, where, params)
+            _enrich_paginated_sessions(service, rows, eff_where if use_slim_index else where, params)
         if rows:
             total = int(rows[0]["total_sessions"])
         elif req.page > 1:
@@ -549,16 +627,37 @@ def sessions_endpoint(
             session["flagged"] = bool(session.get("flagged"))
             session["is_streaming"] = bool(session.get("is_streaming"))
             sessions.append(session)
+        has_rtt = bool(first.get("any_rtt")) or (
+            use_slim_index and any(r.get("median_rtt_ms") is not None for r in rows)
+        )
+        has_ja4 = bool(first.get("any_ja4"))
+        has_edge = bool(first.get("any_edge")) or (
+            use_slim_index and any((int(r.get("edge_count") or 0) + int(r.get("shield_count") or 0)) > 0 for r in rows)
+        )
+        has_edge_sid = bool(first.get("any_edge_sid")) or (
+            use_slim_index and any(bool(r.get("edge_sid")) for r in rows)
+        )
+        has_cmcd = bool(first.get("any_cmcd")) or (
+            use_slim_index and any(int(r.get("streaming_reqs") or 0) > 0 for r in rows)
+        )
+        if use_slim_index and rows and not has_cmcd:
+            cmcd_probe = service.client.execute(
+                "SELECT 1 AS c FROM cmcd_projection_facts WHERE service_id = {service_id:String} "
+                "AND event_timestamp >= {start_time:DateTime64(3)} "
+                "AND event_timestamp <= {end_time:DateTime64(3)} AND sid != '' LIMIT 1",
+                params,
+            )
+            has_cmcd = bool(cmcd_probe)
         result = shape_sessions_envelope(
             sessions,
             total=total,
             page=req.page,
             limit=req.limit,
-            has_rtt=bool(first.get("any_rtt")),
-            has_ja4=bool(first.get("any_ja4")),
-            has_edge=bool(first.get("any_edge")),
-            has_edge_sid=bool(first.get("any_edge_sid")),
-            has_cmcd=bool(first.get("any_cmcd")),
+            has_rtt=has_rtt,
+            has_ja4=has_ja4,
+            has_edge=has_edge,
+            has_edge_sid=has_edge_sid,
+            has_cmcd=has_cmcd,
             min_reqs_flag=min_reqs_flag,
             min_4xx_pct_flag=min_4xx_pct_flag,
             service_id=service.service_id,

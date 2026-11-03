@@ -85,6 +85,16 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
+_DOMAIN_TABLES: dict[str, tuple[str, ...]] = {
+    "request": ("request_facts",),
+    "request_aggregate": ("request_aggregates",),
+    "cmcd": ("cmcd_projection_facts",),
+    "network_dimensions": ("network_minute_dimensions",),
+    "performance_dimensions": ("performance_minute_dimensions",),
+    "rum": ("rum_vitals_facts",),
+}
+
+
 class ClickHouseClient:
     """One reusable HTTP pool; bounded admission also applies to injected transports."""
 
@@ -97,6 +107,7 @@ class ClickHouseClient:
         self._closed = False
         self._active = 0
         self._pub_fence_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
+        self._empty_stale_batches: set[tuple[str, str, str]] = set()
         self._pub_fence_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=httpx.URL(
@@ -112,6 +123,34 @@ class ClickHouseClient:
             trust_env=False,
         )
 
+    def _is_stale_batch_empty(self, service_id: str, domain: str, batch_id: str) -> bool:
+        cache_key = (service_id, domain, batch_id)
+        if cache_key in self._empty_stale_batches:
+            return True
+        tables = _DOMAIN_TABLES.get(domain)
+        if not tables:
+            return False
+        try:
+            for tbl in tables:
+                cnt_rows = self._request(
+                    "execute",
+                    data={
+                        "query": (
+                            f"SELECT count() AS c FROM `{tbl}` "
+                            "WHERE service_id = {service_id:String} AND batch_id = {batch_id:String}"
+                        ),
+                        "param_service_id": _parameter(service_id),
+                        "param_batch_id": _parameter(batch_id),
+                    },
+                    settings=None,
+                )
+                if not cnt_rows or int(cnt_rows[0].get("c") or 0) > 0:
+                    return False
+            self._empty_stale_batches.add(cache_key)
+            return True
+        except Exception:
+            return False
+
     def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
         if isinstance(self._http._transport, httpx.MockTransport):
             return None
@@ -124,7 +163,7 @@ class ClickHouseClient:
             try:
                 check_form = {
                     "query": (
-                        "SELECT domain, batch_id "
+                        "SELECT domain, batch_id, toUInt8(updated_at < now() - INTERVAL 5 MINUTE) AS is_stale "
                         "FROM high_scale_batch_publications FINAL "
                         "WHERE service_id = {service_id:String} AND publication_state != 'visible'"
                     ),
@@ -136,6 +175,8 @@ class ClickHouseClient:
                     dom = str(r.get("domain") or "")
                     bid = str(r.get("batch_id") or "")
                     if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
+                        if int(r.get("is_stale") or 0) == 1 and self._is_stale_batch_empty(service_id, dom, bid):
+                            continue
                         by_dom.setdefault(dom, []).append(bid)
                 pending_map = {k: tuple(v) for k, v in by_dom.items()}
             except Exception:
@@ -233,9 +274,10 @@ class ClickHouseClient:
             raise ValueError("invalid ClickHouse insert value") from None
         quoted_columns = ", ".join(f"`{c}`" for c in columns)
         sql = f"INSERT INTO `{table}` ({quoted_columns}) FORMAT JSONCompactEachRow"
-        if table == "high_scale_batch_publications":
+        if table == "high_scale_batch_publications" or table in CLICKHOUSE_HIGH_SCALE_TABLES:
             with self._pub_fence_lock:
                 self._pub_fence_cache.clear()
+                self._empty_stale_batches.clear()
         self._request("insert", sql=sql, content=content, rows_written=len(rows))
 
     def delete_batch_rows(self, table: str, batch_id: str) -> None:
