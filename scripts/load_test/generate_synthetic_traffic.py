@@ -76,6 +76,17 @@ def _step_pacing(
     return 0, "MAX"
 
 
+def _wave_window_ms(now_ms: int, log_period: int, live_timestamps: bool, run_window: tuple[int, int]) -> tuple[int, int]:
+    """Event-time window (ms) for one POP wave.
+
+    A live feed stamps events inside the last ``log_period`` seconds, as real Fastly delivery does, so only the current
+    hour is touched. The default keeps the run window stretched up to now, which suits backfills.
+    """
+    if live_timestamps:
+        return now_ms - log_period * 1000, now_ms
+    return run_window[0], max(run_window[1], now_ms)
+
+
 def _sleep_for_rate(n: int, target_rps: int, b_t0: float) -> None:
     if target_rps > 0:
         target_batch_sec = n / target_rps
@@ -319,6 +330,7 @@ def run_target_fos(
     pop_count: int = 20,
     log_period: int = 10,
     rum_ratio: float = 0.0,
+    live_timestamps: bool = False,
 ) -> int:
     """Generates compressed NDJSON (.log.zst or .log.gz) and uploads to FOS with optional POP-wave simulation."""
     _validate_generation_args(
@@ -408,7 +420,9 @@ def run_target_fos(
             b_t0 = time.monotonic()
             target_rps, mode_str = _step_pacing(b_t0 - t0, rate_rps, burst_rps, burst_duration, burst_interval)
             now_utc = datetime.now(UTC)
-            end_ms = max(end_ms, int(now_utc.timestamp() * 1000))
+            wave_start_ms, wave_end_ms = _wave_window_ms(
+                int(now_utc.timestamp() * 1000), log_period, live_timestamps, (start_ms, end_ms)
+            )
             prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
             min_prefix = minute_list_prefix(now_utc)
             base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
@@ -423,8 +437,8 @@ def run_target_fos(
                 specs = [
                     (
                         chunk_rows,
-                        start_ms,
-                        end_ms,
+                        wave_start_ms,
+                        wave_end_ms,
                         scenario,
                         seed + file_idx + idx + 1,
                         compression,
@@ -440,7 +454,7 @@ def run_target_fos(
                     take = min(batch_size, rem_loop)
                     if take <= 0:
                         break
-                    specs.append((take, start_ms, end_ms, scenario, seed + file_idx + idx + 1, compression, None))
+                    specs.append((take, wave_start_ms, wave_end_ms, scenario, seed + file_idx + idx + 1, compression, None))
                     rem_loop -= take
 
             if gen_pool is not None and len(specs) > 1:
@@ -660,6 +674,7 @@ def main() -> int:
     parser.add_argument("--gen-workers", type=int, default=1, help="Parallel generation worker processes for --target fos (default: 1).")
     parser.add_argument("--compression", choices=["zstd", "gzip"], default="zstd", help="Compression format for --target fos: 'zstd' (.log.zst, default) or 'gzip' (.log.gz).")
     parser.add_argument("--simulate-pops", action="store_true", help="Simulate Fastly edge POP-wave log batching across --pop-count POPs every --log-period seconds.")
+    parser.add_argument("--live-timestamps", action="store_true", help="For --target fos: stamp each wave's events inside the last --log-period seconds (a realistic live feed) instead of spreading them across the run window.")
     parser.add_argument("--pop-count", type=int, default=20, help="Number of simulated edge POPs when --simulate-pops is enabled (default: 20).")
     parser.add_argument("--log-period", type=int, default=10, help="Fastly edge log flush period in seconds when --simulate-pops is enabled (default: 10s).")
     parser.add_argument("--rum-ratio", type=float, default=0.0, help="Optional fraction of RUM beacon events to emit alongside request logs for --target fos (0.0 to 1.0).")
@@ -720,7 +735,7 @@ def main() -> int:
             burst_rps=args.burst_rps, burst_duration=args.burst_duration, burst_interval=args.burst_interval,
             upload_workers=args.upload_workers, compression=args.compression, gen_workers=args.gen_workers,
             simulate_pops=args.simulate_pops, pop_count=args.pop_count, log_period=args.log_period,
-            rum_ratio=args.rum_ratio,
+            rum_ratio=args.rum_ratio, live_timestamps=args.live_timestamps,
         )
     elif args.target == "clickhouse":
         res = run_target_clickhouse(

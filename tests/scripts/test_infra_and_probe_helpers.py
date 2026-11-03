@@ -2683,3 +2683,16 @@ def test_generate_synthetic_traffic_fos_zstd_and_pop_wave_simulation(
     assert len(rum_uploads) >= 1
     assert all(u["Key"].endswith(".log.zst") for u in uploaded)
     assert all(u["ContentType"] == "application/zstd" for u in uploaded)
+
+
+def test_wave_window_is_the_last_log_period_when_live_and_the_run_window_otherwise():
+    from scripts.load_test.generate_synthetic_traffic import _wave_window_ms
+
+    now = 1_800_000_000_000
+    run_window = (now - 3_600_000, now - 5_000)
+    # Live feed: event times sit inside the last log period, as in real Fastly delivery, so only the current hour is
+    # touched and closed-hour rollups are not re-run on every tick.
+    assert _wave_window_ms(now, 10, True, run_window) == (now - 10_000, now)
+    # Backfill keeps the run window, stretched up to now (the previous behaviour).
+    assert _wave_window_ms(now, 10, False, run_window) == (now - 3_600_000, now)
+    assert _wave_window_ms(now, 10, False, (now - 3_600_000, now + 5_000)) == (now - 3_600_000, now + 5_000)
