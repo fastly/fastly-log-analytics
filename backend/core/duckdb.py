@@ -14,6 +14,7 @@ import multiprocessing
 import os
 import re
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -135,6 +136,27 @@ logger = logging.getLogger(__name__)
 _db_main = sys.modules[__name__]
 _duckdb_status = _duckdb_status_mod
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
+
+_MIN_TEMP_DIRECTORY_GB = 10
+_TEMP_DIRECTORY_FREE_FRACTION = 0.5
+
+
+def _max_temp_directory_size(path: str | None) -> str:
+    """Spill-directory cap: ``DUCKDB_MAX_TEMP_DIRECTORY_SIZE``, else half the free disk (never below 10 GB).
+
+    A fixed 10 GB cap is exhausted by closed-hour rollups of a busy hour (high-cardinality per-field
+    aggregates spill far more), which DuckDB reports as "failed to offload data block (9.3 GiB/9.3 GiB used)".
+    """
+    if configured := os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE"):
+        return configured
+    probe = path if path and os.path.isdir(path) else os.path.dirname(path or "") or "."
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError:
+        return f"{_MIN_TEMP_DIRECTORY_GB}GB"
+    return f"{max(_MIN_TEMP_DIRECTORY_GB, int(free * _TEMP_DIRECTORY_FREE_FRACTION / 1e9))}GB"
+
+
 DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")
 DUCKDB_THREADS = os.getenv("DUCKDB_THREADS", "")
 INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
@@ -799,7 +821,7 @@ def get_connection(
             else:
                 logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
     try:
-        con.execute(f"SET max_temp_directory_size = '{os.getenv('DUCKDB_MAX_TEMP_DIRECTORY_SIZE', '10GB')}';")
+        con.execute(f"SET max_temp_directory_size = '{_max_temp_directory_size(_service_temp_dir or db_path)}';")
     except Exception as e:
         err_lower = str(e).lower()
         is_active = "cannot switch temporary directory" in err_lower or "cannot change" in err_lower
