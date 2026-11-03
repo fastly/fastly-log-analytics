@@ -346,7 +346,8 @@ def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int
 _COLUMNS = {"client_ip": "client_ip", "ip": "client_ip", "country": "country", "url": "url"}
 _ROUNDED = frozenset({"age", "ttl"})
 _BOOLEAN = frozenset({"edge", "is_ipv6", "waf"})
-_UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"})
+_VIRTUAL_CSV_COLUMNS = {"waf_sig_ind": "waf_sig", "edge_score_reason_ind": "edge_score_reason"}
+_UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests"})
 
 
 def _column(key: str, params: dict[str, Any], param: str) -> str:
@@ -368,6 +369,8 @@ def request_filter_clauses(
     clauses: list[str] = []
     params: dict[str, Any] = {}
     for i, (raw_key, spec) in enumerate((filters or {}).items()):
+        if raw_key == "filter_mode":
+            continue
         key = normalize_filter_key(raw_key)
         mode = str(filter_spec_attr(spec, "mode") or "include")
         raw_values = filter_spec_attr(spec, "values") or []
@@ -376,7 +379,6 @@ def request_filter_clauses(
             continue
         if key in _UNSUPPORTED or not key:
             raise ValueError(f"high-scale request readers do not support filtering on {raw_key!r}")
-        column = _column(key, params, f"{prefix}_k{i}")
         concrete = [v for v in values if v is not None]
         names: list[str] = []
         for j, value in enumerate(concrete):
@@ -391,7 +393,23 @@ def request_filter_clauses(
             params[name] = str_val
             names.append(f"{{{name}:String}}")
         include = mode != "exclude"
-        parts: list[str] = []
+        if key in _VIRTUAL_CSV_COLUMNS:
+            backing_key = _VIRTUAL_CSV_COLUMNS[key]
+            key_param = f"{prefix}_k{i}"
+            params[key_param] = backing_key
+            lookup = f"custom_fields[{{{key_param}:String}}]"
+            parts: list[str] = []
+            if names:
+                arr_expr = f"arrayExists(x -> trimBoth(x) IN ({', '.join(names)}), splitByChar(',', {lookup}))"
+                parts.append(arr_expr if include else f"NOT {arr_expr}")
+            if len(concrete) != len(values):
+                eq_op = "=" if include else "!="
+                parts.append(f"{lookup} {eq_op} ''")
+            joiner = " OR " if include else " AND "
+            clauses.append(f"({joiner.join(parts)})")
+            continue
+        column = _column(key, params, f"{prefix}_k{i}")
+        parts = []
         if names:
             op = "IN" if include else "NOT IN"
             parts.append(f"{column} {op} ({', '.join(names)})")

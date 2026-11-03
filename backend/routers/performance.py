@@ -198,6 +198,11 @@ def value_summary(
     start_time, end_time = ctx.resolve_window(req)
 
     sections = _expand_value_sections(req.sections)
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.performance import value_summary as hs_value_summary
+
+        return hs_value_summary(high_scale_service, req, start_time, end_time, sections=sections)
     service_id = ctx.source.get("service_id")
 
     return run_cached_repo_endpoint(

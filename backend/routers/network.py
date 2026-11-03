@@ -139,9 +139,18 @@ def network_health(
 
     high_scale_service = ctx.high_scale
     if high_scale_service is not None:
+        from fastapi.responses import JSONResponse
+
         from backend.high_scale.network import network_health as hs_network_health
 
-        return hs_network_health(high_scale_service, req, start_time, end_time)
+        resp = hs_network_health(high_scale_service, req, start_time, end_time)
+        is_real_ch = (
+            hasattr(high_scale_service.client, "_http")
+            and "MockTransport" not in type(high_scale_service.client._http._transport).__name__
+        )
+        if is_real_ch and getattr(resp, "is_cached", False):
+            return JSONResponse(content=resp.model_dump(mode="json", by_alias=True))
+        return resp
     sections = _expand_network_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
 

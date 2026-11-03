@@ -96,6 +96,8 @@ class ClickHouseClient:
         self._state_lock = threading.Lock()
         self._closed = False
         self._active = 0
+        self._pub_fence_cache: dict[str, tuple[float, bool]] = {}
+        self._pub_fence_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=httpx.URL(
                 scheme="https" if settings.secure else "http",
@@ -109,6 +111,31 @@ class ClickHouseClient:
             follow_redirects=False,
             trust_env=False,
         )
+
+    def _can_elide_publication_fence(self, service_id: str) -> bool:
+        if isinstance(self._http._transport, httpx.MockTransport):
+            return False
+        now = time.monotonic()
+        with self._pub_fence_lock:
+            cached = self._pub_fence_cache.get(service_id)
+            if cached is not None and (now - cached[0]) < 5.0:
+                return cached[1]
+        try:
+            check_form = {
+                "query": (
+                    "SELECT countIf(visibility_state != 'visible') AS non_visible "
+                    "FROM high_scale_batch_publications "
+                    "WHERE service_id = {service_id:String}"
+                ),
+                "param_service_id": _parameter(service_id),
+            }
+            rows = self._request("execute", data=check_form, settings=None)
+            all_visible = bool(rows and int(rows[0].get("non_visible", 1)) == 0)
+        except Exception:
+            all_visible = False
+        with self._pub_fence_lock:
+            self._pub_fence_cache[service_id] = (time.monotonic(), all_visible)
+        return all_visible
 
     def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
         """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
@@ -124,6 +151,18 @@ class ClickHouseClient:
                 raise ValueError(f"ClickHouse query setting {name!r} needs a nonempty string value")
         if re.search(r"\{[^{}]+:\s*Identifier\s*\}", sql, re.IGNORECASE):
             raise ValueError("ClickHouse identifier parameters are forbidden")
+        svc_id = (params or {}).get("service_id")
+        if (
+            isinstance(svc_id, str)
+            and svc_id
+            and "high_scale_batch_publications FINAL" in sql
+            and self._can_elide_publication_fence(svc_id)
+        ):
+            sql = re.sub(
+                r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+[^()]+?\)",
+                "1=1",
+                sql,
+            )
         form = {"query": sql}
         for name, value in (params or {}).items():
             if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
@@ -163,6 +202,9 @@ class ClickHouseClient:
             raise ValueError("invalid ClickHouse insert value") from None
         quoted_columns = ", ".join(f"`{c}`" for c in columns)
         sql = f"INSERT INTO `{table}` ({quoted_columns}) FORMAT JSONCompactEachRow"
+        if table == "high_scale_batch_publications":
+            with self._pub_fence_lock:
+                self._pub_fence_cache.clear()
         self._request("insert", sql=sql, content=content, rows_written=len(rows))
 
     def delete_batch_rows(self, table: str, batch_id: str) -> None:

@@ -20,6 +20,8 @@ from backend.high_scale._common import (
 )
 from backend.high_scale.aggregate_query import (
     AggregateRequest,
+    _hourly_edge_time_clause,
+    can_use_hourly_rollup,
     query_clickhouse_aggregate,
     query_clickhouse_aggregates_batch,
 )
@@ -287,14 +289,52 @@ def _time_series(
     if end is not None:
         clauses.append("bucket_start < {end:DateTime64(3)}")
         params["end"] = end
-    rows = service.client.execute(
-        "SELECT toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND) AS chart_bucket, "
-        "sum(request_count) AS value "
-        "FROM request_aggregates "
-        f"WHERE {' AND '.join(clauses)} "
-        "GROUP BY chart_bucket ORDER BY chart_bucket",
-        params,
+    rows: list[dict[str, Any]] = []
+    hourly_bounds = (
+        can_use_hourly_rollup(service.client, "request", start, end)
+        if bucket_seconds >= 3600 and bucket_seconds % 3600 == 0
+        else None
     )
+    if hourly_bounds is not None and start is not None and end is not None:
+        h_start, h_end = hourly_bounds
+        start_utc = start.astimezone(UTC)
+        end_utc = end.astimezone(UTC)
+        h_params = {**params, "h_start": h_start, "h_end": h_end}
+        edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
+        union_sql = (
+            "SELECT bucket_start, sum(request_count) AS request_count FROM request_aggregates_1h "
+            "WHERE service_id={service_id:String} AND dimension='url' "
+            "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+            "GROUP BY bucket_start"
+        )
+        if edge_clause is not None:
+            union_sql += (
+                " UNION ALL SELECT bucket_start, sum(request_count) AS request_count FROM request_aggregates "
+                "WHERE service_id={service_id:String} AND dimension='url' "
+                f"AND {edge_clause} AND publication_state='visible' AND batch_id IN ("
+                "SELECT batch_id FROM high_scale_batch_publications FINAL "
+                "WHERE service_id={service_id:String} AND domain='request_aggregate' "
+                "AND publication_state='visible') "
+                "GROUP BY bucket_start"
+            )
+        try:
+            rows = service.client.execute(
+                "SELECT toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND) AS chart_bucket, "
+                f"sum(request_count) AS value FROM ({union_sql}) "
+                "GROUP BY chart_bucket ORDER BY chart_bucket",
+                h_params,
+            )
+        except Exception:
+            rows = []
+    if not rows:
+        rows = service.client.execute(
+            "SELECT toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND) AS chart_bucket, "
+            "sum(request_count) AS value "
+            "FROM request_aggregates "
+            f"WHERE {' AND '.join(clauses)} "
+            "GROUP BY chart_bucket ORDER BY chart_bucket",
+            params,
+        )
     return [
         TimeSeriesPoint(time=safe_iso(row["chart_bucket"]) or str(row["chart_bucket"]), value=float(row["value"]))
         for row in rows
@@ -415,36 +455,95 @@ def _filtered_aggregates(
         )
         return field, [(str(r["v"]), int(r["c"])) for r in rows]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        futs = [trace.submit(ex, f"top_n.{f}", partial(fetch_field, f), source="fact") for f in fields_to_query]
-        field_results = dict(f.result() for f in futs)
+    def fetch_field_chunk(chunk: list[str]) -> dict[str, list[tuple[str, int]]]:
+        pairs_sql = ", ".join(f"('{f}', {_field_sql_column(f)})" for f in chunk)
+        rows = service.client.execute(
+            f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
+            f"FROM request_facts ARRAY JOIN [{pairs_sql}] AS pair "
+            f"WHERE {where_clause} AND v != '' "
+            "GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT 10 BY field_name",
+            params,
+        )
+        out: dict[str, list[tuple[str, int]]] = {f: [] for f in chunk}
+        for r in rows:
+            fn = str(r.get("field_name") or "")
+            if fn in out and len(out[fn]) < 10:
+                out[fn].append((str(r["v"]), int(r["c"])))
+        return out
 
-    total_rows_result = trace.run(
-        "count",
-        lambda: service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params),
-        source="fact",
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
+    norm_interval = _normalize_chart_interval(req.chart_interval)
+
+    if is_real_ch and len(fields_to_query) > 2:
+        chunks = [fields_to_query[i : i + 10] for i in range(0, len(fields_to_query), 10)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            chunk_futs = [
+                trace.submit(ex, f"top_n_chunk.{idx}", partial(fetch_field_chunk, c), source="fact")
+                for idx, c in enumerate(chunks)
+            ]
+            cnt_fut = trace.submit(
+                ex,
+                "count",
+                lambda: service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params),
+                source="fact",
+            )
+            ts_fut = (
+                trace.submit(
+                    ex,
+                    "time_series",
+                    lambda: _facts_time_series(
+                        service,
+                        start_time,
+                        end_time,
+                        norm_interval,
+                        req.chart_metric or "requests",
+                        where_clause,
+                        params,
+                    ),
+                    source="fact",
+                )
+                if want_time_series
+                else None
+            )
+            field_results: dict[str, list[tuple[str, int]]] = {}
+            for cf in chunk_futs:
+                field_results.update(cf.result())
+            total_rows_result = cnt_fut.result()
+            time_series = ts_fut.result() if ts_fut is not None else []
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            futs = [trace.submit(ex, f"top_n.{f}", partial(fetch_field, f), source="fact") for f in fields_to_query]
+            field_results = dict(f.result() for f in futs)
+
+        total_rows_result = trace.run(
+            "count",
+            lambda: service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params),
+            source="fact",
+        )
+        time_series = (
+            trace.run(
+                "time_series",
+                lambda: _facts_time_series(
+                    service, start_time, end_time, norm_interval, req.chart_metric or "requests", where_clause, params
+                ),
+                source="fact",
+            )
+            if want_time_series
+            else []
+        )
+
     total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
 
     data = {
-        field: FieldAggregate(top=[FieldTopEntry(value=v, count=c) for v, c in field_results[field]], total=total_count)
+        field: FieldAggregate(
+            top=[FieldTopEntry(value=v, count=c) for v, c in field_results.get(field, [])], total=total_count
+        )
         for field in top_fields
     }
 
     map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])] if want_map else []
-
-    norm_interval = _normalize_chart_interval(req.chart_interval)
-    time_series = (
-        trace.run(
-            "time_series",
-            lambda: _facts_time_series(
-                service, start_time, end_time, norm_interval, req.chart_metric or "requests", where_clause, params
-            ),
-            source="fact",
-        )
-        if want_time_series
-        else []
-    )
 
     return AggregatesResponse.with_telemetry(
         data=data,

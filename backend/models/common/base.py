@@ -15,6 +15,7 @@ from pydantic import (
     Field,
     PlainSerializer,
     model_serializer,
+    model_validator,
 )
 
 
@@ -258,6 +259,34 @@ class FilteredRequest(DateRangeMixin):
 
     filters: FiltersDict = {}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_list_filters(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw_filters = data.get("filters")
+        if not isinstance(raw_filters, dict) or not raw_filters:
+            return data
+        default_mode = raw_filters.get("filter_mode") or data.get("filter_mode") or "include"
+        if default_mode not in ("include", "exclude"):
+            default_mode = "include"
+        needs_normalization = "filter_mode" in raw_filters or any(
+            isinstance(v, (list, tuple)) for k, v in raw_filters.items() if k != "filter_mode"
+        )
+        if not needs_normalization:
+            return data
+        normalized: dict[str, Any] = {}
+        for k, v in raw_filters.items():
+            if k == "filter_mode":
+                continue
+            if isinstance(v, (list, tuple)):
+                normalized[k] = {"mode": default_mode, "values": list(v)}
+            else:
+                normalized[k] = v
+        out = dict(data)
+        out["filters"] = normalized
+        return out
+
 
 class RangeKeyedRequest(FilteredRequest):
     """``FilteredRequest`` plus the relative-range wire contract (additive, optional).
@@ -274,6 +303,15 @@ class RangeKeyedRequest(FilteredRequest):
 
     range_token: str | None = None
     anchor: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_range_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("range_token") is None and isinstance(data.get("range"), str):
+            out = dict(data)
+            out["range_token"] = out["range"]
+            return out
+        return data
 
 
 class LimitedRequest(FilteredRequest):

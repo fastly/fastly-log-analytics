@@ -38,6 +38,12 @@ from backend.high_scale._common import (
 from backend.high_scale._common import build_published_projection_where as _where
 from backend.high_scale._common import optional_int as _integer
 from backend.high_scale._common import sketch as _sketch
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    client_cache_token,
+    digest_cache_key,
+    serialize_filters_for_key,
+)
 from backend.repositories.utils.response_shaping import (
     empty_origin_aggregates,
     empty_origin_summary,
@@ -54,7 +60,11 @@ from backend.repositories.utils.response_shaping import (
     shape_status_code_rows,
     us_to_ms,
 )
+from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
+
+_origin_memo = ResponseMemo(ttl=30.0, maxsize=256, prewarmer=False)
+CacheRegistry.register("high_scale.origin", _origin_memo.cache)
 
 _EMPTY = empty_origin_aggregates(include_has_data=False)
 
@@ -434,6 +444,31 @@ def _float_or_none(value: object) -> float | None:
 def origin_aggregates(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None, *, sections: set[str] | None
 ) -> dict[str, Any]:
+    sections = sections or set(_EMPTY)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_origin_aggregates",
+                "cid": client_cache_token(service.client),
+                "s": str(start_time),
+                "e": str(end_time),
+                "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                "sec": sorted(sections),
+                "bm": getattr(req, "bucket_minutes", None),
+                "tm": getattr(req, "timeseries_metric", None) or getattr(req, "metric", None),
+                "tp": getattr(req, "timeseries_percentile", None) or getattr(req, "percentile", None),
+                "sl": getattr(req, "slow_urls_limit", None) or getattr(req, "limit", None),
+                "sm": getattr(req, "slow_urls_min_requests", None) or getattr(req, "min_requests", None),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _origin_memo.get_with_telemetry(memo_key)) is not None:
+            return cached
+
     filter_sql, _ = build_clickhouse_filters(req.filters)
     facts = _facts_scope(service, start_time, end_time, req.filters) if filter_sql != "1=1" else None
     approx = _APPROX if facts is None else _NOT_APPROX
@@ -450,8 +485,6 @@ def origin_aggregates(
             limit=limit,
             having=having,
         )
-
-    sections = sections or set(_EMPTY)
 
     def _build_path_breakdown() -> dict[str, Any]:
         rows = latency_rows("path_breakdown", "edge")
@@ -556,7 +589,11 @@ def origin_aggregates(
     result = trace.run_parallel(tasks, source="projection" if facts is None else "fact")
 
     summary = result.get("summary", _EMPTY["summary"])
-    return {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
+    out = {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
+    if memo_key is not None:
+        _origin_memo.put(memo_key, dict(out))
+        return _origin_memo.result(out, state="miss")
+    return out
 
 
 def origin_section(
@@ -564,7 +601,85 @@ def origin_section(
 ) -> dict[str, Any]:
     agg = origin_aggregates(service, req, start_time, end_time, sections={section})
     sec = {k: v for k, v in agg[section].items() if k not in ("_approx", "_approx_note")}
-    return {**sec, "section_timings": agg.get("section_timings", [])}
+    out: dict[str, Any] = {**sec, "section_timings": agg.get("section_timings", [])}
+    if "_is_cached" in agg:
+        out["_is_cached"] = agg["_is_cached"]
+    if "_response_cache" in agg:
+        out["_response_cache"] = agg["_response_cache"]
+    return out
+
+
+def origin_drilldown(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+) -> dict[str, Any]:
+    dimension = str(getattr(req, "dimension", "pop") or "pop")
+    limit = int(getattr(req, "limit", 25) or 25)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_origin_drilldown",
+                "cid": client_cache_token(service.client),
+                "s": str(start_time),
+                "e": str(end_time),
+                "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                "dim": dimension,
+                "l": limit,
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _origin_memo.get_with_telemetry(memo_key)) is not None:
+            return cached
+    facts = _facts_scope(service, start_time, end_time, getattr(req, "filters", None))
+    dim_map = {
+        "pop": "pop",
+        "backend": "custom_fields['backend']",
+        "oip": "oip",
+        "origin_ip": "oip",
+        "host": "custom_fields['host']",
+        "url": "url",
+        "country": "country",
+    }
+    col_expr = dim_map.get(dimension, f"custom_fields['{dimension}']")
+    trace = HighScaleSections(service.service_id, "origin")
+    rows = trace.run(
+        "drilldown",
+        lambda: service.client.execute(
+            f"/* origin:drilldown */ SELECT {col_expr} AS key, count() AS requests, "
+            "quantilesExact(0.5, 0.95, 0.99)(latency_us) AS latency_q, "
+            "round(countIf(status >= 500) * 100.0 / nullIf(count(), 0), 2) AS error_rate, "
+            "toInt64(round(median(origin_bytes))) AS bytes "
+            f"FROM {facts.base} WHERE latency_us IS NOT NULL AND {col_expr} != '' "
+            f"GROUP BY key ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
+            {**facts.params, "limit": limit},
+        ),
+        source="fact",
+    )
+    rows_out = [
+        {
+            "key": str(r["key"]),
+            "requests": int(r["requests"]),
+            "p50_ms": _milliseconds(_quantile(r, "latency_q", 0, "requests")),
+            "p95_ms": _milliseconds(_quantile(r, "latency_q", 1, "requests")),
+            "p99_ms": _milliseconds(_quantile(r, "latency_q", 2, "requests")),
+            "error_rate": float(r.get("error_rate") or 0.0),
+            "bytes": int(r["bytes"]) if r.get("bytes") is not None else None,
+        }
+        for r in rows
+    ]
+    out = {
+        "has_data": bool(rows_out),
+        "dimension": dimension,
+        "rows": rows_out,
+        "section_timings": trace.timings(),
+    }
+    if memo_key is not None:
+        _origin_memo.put(memo_key, dict(out))
+        return _origin_memo.result(out, state="miss")
+    return out
 
 
 def _is_elevated(value_us: object, median_p95_ms: float) -> bool:

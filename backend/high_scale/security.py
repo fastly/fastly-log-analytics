@@ -464,7 +464,7 @@ def security_aggregates(
             tasks,
             source=source_for,
             activity=lambda k: "overhead" if k == "ngwaf_configured" else "compute",
-            max_workers=4,
+            max_workers=8,
             thread_name_prefix="hs-sec",
         ).items():
             if k == "_top_bots":
@@ -481,15 +481,65 @@ def security_aggregates(
 
 
 def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str, list[dict[str, Any]]]:
-    ua_sql = (
-        "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts "
-        "WHERE __WHERE__ AND custom_fields['ua'] != '' GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}"
-        if scope.filtered
-        else f"SELECT value AS ua, sum(request_count) AS cnt FROM request_aggregates "
-        f"WHERE {_UA_PROJECTION_WHERE} AND value != '' GROUP BY ua ORDER BY cnt DESC, ua ASC LIMIT {{ua_limit:UInt32}}"
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
+    memo_key: str | None = None
+    if is_real_ch and scope.start is not None and scope.end is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_sec_top_bots_inner",
+                "cid": client_cache_token(service.client),
+                "s": scope.start.isoformat(),
+                "e": scope.end.isoformat(),
+                "n": n,
+                "w": scope.where,
+                "p": sorted((k, str(v)) for k, v in scope.params.items()),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _security_memo.get(memo_key)) is not None:
+            return cached
+
+    from backend.high_scale.aggregate_query import _hourly_edge_time_clause, can_use_hourly_rollup
+
+    hourly_bounds = (
+        can_use_hourly_rollup(service.client, "request", scope.start, scope.end) if not scope.filtered else None
+    )
+    if scope.filtered:
+        ua_sql = (
+            "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts "
+            "WHERE __WHERE__ AND custom_fields['ua'] != '' GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}"
+        )
+        ua_extra_params: dict[str, Any] = {}
+    elif hourly_bounds is not None and scope.start is not None and scope.end is not None:
+        h_start, h_end = hourly_bounds
+        edge_clause = _hourly_edge_time_clause(scope.start, scope.end, h_start, h_end)
+        union_sql = (
+            "SELECT value AS ua, sum(request_count) AS cnt FROM request_aggregates_1h "
+            "WHERE service_id={service_id:String} AND dimension='ua' AND value != '' "
+            "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+            "GROUP BY ua"
+        )
+        if edge_clause is not None:
+            union_sql += (
+                " UNION ALL SELECT value AS ua, sum(request_count) AS cnt FROM request_aggregates "
+                f"WHERE service_id={{service_id:String}} AND dimension='ua' AND value != '' AND {edge_clause} "
+                "AND publication_state='visible' AND batch_id IN ("
+                "SELECT batch_id FROM high_scale_batch_publications FINAL "
+                "WHERE service_id={service_id:String} AND domain='request_aggregate' AND publication_state='visible') "
+                "GROUP BY ua"
+            )
+        ua_sql = f"SELECT ua, sum(cnt) AS cnt FROM ({union_sql}) GROUP BY ua ORDER BY cnt DESC, ua ASC LIMIT {{ua_limit:UInt32}}"
+        ua_extra_params = {"h_start": h_start, "h_end": h_end}
+    else:
+        ua_sql = (
+            f"SELECT value AS ua, sum(request_count) AS cnt FROM request_aggregates "
+            f"WHERE {_UA_PROJECTION_WHERE} AND value != '' GROUP BY ua ORDER BY cnt DESC, ua ASC LIMIT {{ua_limit:UInt32}}"
+        )
+        ua_extra_params = {}
     if hasattr(service.client, "responses"):
-        ua_rows = _run(service, scope, "top_bots_ua", ua_sql, ua_limit=_BOT_UA_CLASSIFY_LIMIT)
+        ua_rows = _run(service, scope, "top_bots_ua", ua_sql, ua_limit=_BOT_UA_CLASSIFY_LIMIT, **ua_extra_params)
         ngwaf_rows = _ngwaf_summary(service, scope, limit=n)
     else:
         from backend.utils.telemetry.metrics import get_queries
@@ -498,7 +548,7 @@ def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str
         with ThreadPoolExecutor(max_workers=2) as pool:
             ua_fut = pool.submit(
                 contextvars.copy_context().run,
-                lambda: _run(service, scope, "top_bots_ua", ua_sql, ua_limit=_BOT_UA_CLASSIFY_LIMIT),
+                lambda: _run(service, scope, "top_bots_ua", ua_sql, ua_limit=_BOT_UA_CLASSIFY_LIMIT, **ua_extra_params),
             )
             ngwaf_fut = pool.submit(
                 contextvars.copy_context().run,
@@ -506,12 +556,15 @@ def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str
             )
             ua_rows = ua_fut.result()
             ngwaf_rows = ngwaf_fut.result()
-    return {
+    out = {
         "bots": classify_ua_counts([(r["ua"], int(r["cnt"])) for r in ua_rows], n),
         "ngwaf_bots": [
             shape_security_ngwaf_top_bot_row(r["bot_name"], r["bot_cat"], r["request_count"]) for r in ngwaf_rows
         ],
     }
+    if memo_key is not None:
+        _security_memo.put(memo_key, out)
+    return out
 
 
 def top_bots(
@@ -660,9 +713,26 @@ def get_proxies_data(
 def get_security_threat_intel(
     service: HighScaleService, start_time: str | None, end_time: str | None
 ) -> dict[str, Any]:
+    scope = _scope(service, None, start_time, end_time)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and scope.start is not None and scope.end is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_security_threat_intel",
+                "cid": client_cache_token(service.client),
+                "s": scope.start.isoformat(),
+                "e": scope.end.isoformat(),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _security_memo.get(memo_key)) is not None:
+            return cached
     rows = _run(
         service,
-        _scope(service, None, start_time, end_time),
+        scope,
         "threat_intel",
         f"SELECT multiIf(custom_fields['ja3'] != '', custom_fields['ja3'], custom_fields['ja4']) AS tls_fingerprint, "
         f"count() AS requests, topK(1)(country)[1] AS top_country, "
@@ -671,7 +741,7 @@ def get_security_threat_intel(
         "max(custom_fields['p_type'] != '') AS is_anonymized_proxy FROM request_facts "
         "WHERE __WHERE__ AND tls_fingerprint != '' GROUP BY tls_fingerprint ORDER BY requests DESC LIMIT 50",
     )
-    return {
+    out = {
         "data": [
             shape_security_threat_intel_row(
                 r["tls_fingerprint"],
@@ -684,6 +754,9 @@ def get_security_threat_intel(
             for r in rows
         ]
     }
+    if memo_key is not None:
+        _security_memo.put(memo_key, out)
+    return out
 
 
 @dataclass(frozen=True)

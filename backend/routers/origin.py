@@ -283,6 +283,12 @@ def origin_drilldown(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
+    if (high_scale_service := ctx.high_scale) is not None:
+        from backend.high_scale.origin import origin_drilldown as hs_origin_drilldown
+
+        return OriginDrilldownResponse.with_telemetry(
+            **hs_origin_drilldown(high_scale_service, req, start_time, end_time)
+        )
     res = origin_repo.get_drilldown(
         con=ctx.con,
         src=ctx.source,

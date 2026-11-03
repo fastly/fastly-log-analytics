@@ -125,16 +125,17 @@ def _spec(config: Any) -> tuple[str, list[Any]]:
 
 
 def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, Any]]:
-    unsupported = sorted(name for name, config in filters.items() if _spec(config)[1] and name not in _FILTER_COLUMNS)
-    if unsupported:
-        raise ValueError(
-            f"high-scale CMCD projections cannot filter on: {', '.join(unsupported)} (supported: country, asn)"
-        )
     clauses: list[str] = []
     params: dict[str, Any] = {}
+    request_filters: dict[str, Any] = {}
     for i, (name, config) in enumerate(filters.items()):
+        if name == "filter_mode":
+            continue
         mode, values = _spec(config)
         if not values:
+            continue
+        if name not in _FILTER_COLUMNS:
+            request_filters[name] = config
             continue
         keys: list[str] = []
         for j, value in enumerate(values):
@@ -149,6 +150,22 @@ def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, An
                 keys.append(f"{{{param}:String}}")
         operator = "NOT IN" if mode == "exclude" else "IN"
         clauses.append(f"{_FILTER_COLUMNS[name]} {operator} ({', '.join(keys)})")
+    if request_filters:
+        from ._common import VISIBLE_PUBLICATION_FENCE_SQL, request_filter_clauses
+
+        req_clauses, req_params = request_filter_clauses(request_filters, prefix="cmcd_req_flt")
+        if req_clauses:
+            params.update(req_params)
+            req_where = " AND ".join(
+                [
+                    "service_id = {service_id:String}",
+                    "event_timestamp >= {start:DateTime64(3)}",
+                    "event_timestamp <= {end:DateTime64(3)}",
+                    VISIBLE_PUBLICATION_FENCE_SQL,
+                    *req_clauses,
+                ]
+            )
+            clauses.append(f"request_event_id IN (SELECT event_id FROM request_facts WHERE {req_where})")
     return clauses, params
 
 

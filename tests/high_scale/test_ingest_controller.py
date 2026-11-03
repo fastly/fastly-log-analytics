@@ -2972,8 +2972,15 @@ def test_country_and_asn_filters_are_applied_not_dropped() -> None:
 
 @pytest.mark.usefixtures("_asn_names")
 def test_filters_the_projection_cannot_honour_raise_instead_of_being_ignored() -> None:
-    with pytest.raises(ValueError, match="url"):
-        _run(_Client_cmcd(), _request(filters={"url": {"mode": "include", "values": ["/a"]}}))
+    with pytest.raises(ValueError, match="_bot_name"):
+        _run(_Client_cmcd(), _request(filters={"_bot_name": {"mode": "include", "values": ["bot"]}}))
+
+
+@pytest.mark.usefixtures("_asn_names")
+def test_cmcd_delegates_request_facts_filters_via_event_id_subquery() -> None:
+    client = _Client_cmcd()
+    _run(client, _request(filters={"url": {"mode": "include", "values": ["/a"]}}), sections={"overview"})
+    assert any("request_event_id IN (SELECT event_id FROM request_facts WHERE" in sql for sql, _ in client.calls)
 
 
 @pytest.mark.usefixtures("_asn_names")

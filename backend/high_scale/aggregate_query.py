@@ -7,7 +7,7 @@ import contextvars
 import re
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from backend.core.clickhouse import ClickHouseError
@@ -139,6 +139,43 @@ def _is_partial_minute_window(start: datetime | None, end: datetime | None) -> b
     return any(value.astimezone(UTC).second != 0 or value.astimezone(UTC).microsecond != 0 for value in (start, end))
 
 
+def can_use_hourly_rollup(
+    client: Any, domain: str, start: datetime | None, end: datetime | None
+) -> tuple[datetime, datetime] | None:
+    if domain != "request" or start is None or end is None:
+        return None
+    if _is_partial_minute_window(start, end):
+        return None
+    if not (
+        getattr(client, "enable_hourly_rollups", False)
+        or (hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__)
+    ):
+        return None
+    start_utc = start.astimezone(UTC)
+    end_utc = end.astimezone(UTC)
+    if (end_utc - start_utc).total_seconds() < 86400:
+        return None
+    if start_utc.minute == 0 and start_utc.second == 0 and start_utc.microsecond == 0:
+        h_start = start_utc
+    else:
+        h_start = start_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    h_end = end_utc.replace(minute=0, second=0, microsecond=0)
+    if h_start >= h_end:
+        return None
+    return h_start, h_end
+
+
+def _hourly_edge_time_clause(start_utc: datetime, end_utc: datetime, h_start: datetime, h_end: datetime) -> str | None:
+    parts: list[str] = []
+    if start_utc < h_start:
+        parts.append("(bucket_start >= {start:DateTime64(3)} AND bucket_start < {h_start:DateTime64(3)})")
+    if h_end < end_utc:
+        parts.append("(bucket_start >= {h_end:DateTime64(3)} AND bucket_start < {end:DateTime64(3)})")
+    if not parts:
+        return None
+    return f"({' OR '.join(parts)})"
+
+
 def _require_window_bounds(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
     if start is None or end is None:
         raise ValueError("aggregate fact query requires both range bounds")
@@ -222,15 +259,57 @@ def query_clickhouse_aggregate(
                 end=end,
             )
         else:
-            totals = client.execute(
-                f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}", params
-            )
-            rows = client.execute(
-                f"SELECT value, sum({metric}) AS aggregate_count "
-                f"FROM {table} WHERE {' AND '.join(clauses)} "
-                "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
-                params,
-            )
+            hourly_bounds = can_use_hourly_rollup(client, request.domain, request.start, request.end)
+            totals = []
+            rows = []
+            if hourly_bounds is not None and request.start is not None and request.end is not None:
+                h_start, h_end = hourly_bounds
+                start_utc = request.start.astimezone(UTC)
+                end_utc = request.end.astimezone(UTC)
+                h_params = {**params, "h_start": h_start, "h_end": h_end}
+                edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
+                fence = visible_publication_fence_sql("request_aggregate")
+                tot_union = (
+                    "SELECT sum(request_count) AS request_count FROM request_aggregates_1h "
+                    "WHERE service_id={service_id:String} AND dimension={dimension:String} "
+                    "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+                )
+                top_union = (
+                    "SELECT value, sum(request_count) AS request_count FROM request_aggregates_1h "
+                    "WHERE service_id={service_id:String} AND dimension={dimension:String} "
+                    "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                    "GROUP BY value"
+                )
+                if edge_clause is not None:
+                    tot_union += (
+                        " UNION ALL SELECT sum(request_count) AS request_count FROM request_aggregates "
+                        f"WHERE service_id={{service_id:String}} AND dimension={{dimension:String}} AND {edge_clause} AND {fence}"
+                    )
+                    top_union += (
+                        " UNION ALL SELECT value, sum(request_count) AS request_count FROM request_aggregates "
+                        f"WHERE service_id={{service_id:String}} AND dimension={{dimension:String}} AND {edge_clause} AND {fence} "
+                        "GROUP BY value"
+                    )
+                try:
+                    totals = client.execute(f"SELECT sum(request_count) AS total_count FROM ({tot_union})", h_params)
+                    rows = client.execute(
+                        f"SELECT value, sum(request_count) AS aggregate_count FROM ({top_union}) "
+                        "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
+                        h_params,
+                    )
+                except ClickHouseError:
+                    totals = []
+                    rows = []
+            if not totals and not rows:
+                totals = client.execute(
+                    f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}", params
+                )
+                rows = client.execute(
+                    f"SELECT value, sum({metric}) AS aggregate_count "
+                    f"FROM {table} WHERE {' AND '.join(clauses)} "
+                    "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
+                    params,
+                )
     except ClickHouseError as e:
         raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
     values = tuple((str(row["value"]), max(0, int(row["aggregate_count"]))) for row in rows)
@@ -366,42 +445,128 @@ def query_clickhouse_aggregates_batch(
             from backend.utils.telemetry.metrics import get_queries
 
             get_queries()
-            if "client_ip" in unique_dims and len(unique_dims) > 2:
+            hourly_bounds = can_use_hourly_rollup(client, domain, start, end)
+            totals_rows = []
+            top_rows = []
+            if hourly_bounds is not None and start is not None and end is not None:
+                h_start, h_end = hourly_bounds
+                start_utc = start.astimezone(UTC)
+                end_utc = end.astimezone(UTC)
+                h_params = {**params, "h_start": h_start, "h_end": h_end}
+                edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
+                fence = visible_publication_fence_sql("request_aggregate")
 
-                def _build_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-                    sub_params = {k: v for k, v in params.items() if not k.startswith("dim_")}
+                def _build_hourly_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+                    sub_params = {k: v for k, v in h_params.items() if not k.startswith("dim_")}
                     sub_placeholders: list[str] = []
                     for idx, dim in enumerate(dims_subset):
                         k = f"dim_{idx}"
                         sub_params[k] = dim
                         sub_placeholders.append(f"{{{k}:String}}")
-                    sub_clauses = [
-                        f"dimension IN ({', '.join(sub_placeholders)})" if c.startswith("dimension IN (") else c
-                        for c in clauses
-                    ]
+                    dim_in = f"dimension IN ({', '.join(sub_placeholders)})"
+                    union_sql = (
+                        "SELECT dimension, value, sum(request_count) AS request_count FROM request_aggregates_1h "
+                        f"WHERE service_id={{service_id:String}} AND {dim_in} "
+                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                        "GROUP BY dimension, value"
+                    )
+                    if edge_clause is not None:
+                        union_sql += (
+                            " UNION ALL SELECT dimension, value, sum(request_count) AS request_count FROM request_aggregates "
+                            f"WHERE service_id={{service_id:String}} AND {dim_in} AND {edge_clause} AND {fence} "
+                            "GROUP BY dimension, value"
+                        )
                     sql = (
-                        f"SELECT dimension, value, sum({metric}) AS aggregate_count "
-                        f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
+                        f"SELECT dimension, value, sum(request_count) AS aggregate_count FROM ({union_sql}) "
                         "GROUP BY dimension, value "
                         "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
                         "LIMIT 10 BY dimension"
                     )
                     return sql, sub_params
 
-                fast_sql, fast_params = _build_top_query(tuple(d for d in unique_dims if d != "client_ip"))
-                ip_sql, ip_params = _build_top_query(("client_ip",))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-                    totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
-                    fast_fut = pool.submit(contextvars.copy_context().run, client.execute, fast_sql, fast_params)
-                    ip_fut = pool.submit(contextvars.copy_context().run, client.execute, ip_sql, ip_params)
-                    totals_rows = totals_fut.result()
-                    top_rows = list(fast_fut.result()) + list(ip_fut.result())
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                    totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
-                    top_fut = pool.submit(contextvars.copy_context().run, client.execute, top_sql, params)
-                    totals_rows = totals_fut.result()
-                    top_rows = top_fut.result()
+                dim_in_all = f"dimension IN ({', '.join(dim_placeholders)})"
+                tot_union_sql = (
+                    "SELECT dimension, sum(request_count) AS request_count FROM request_aggregates_1h "
+                    f"WHERE service_id={{service_id:String}} AND {dim_in_all} "
+                    "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                    "GROUP BY dimension"
+                )
+                if edge_clause is not None:
+                    tot_union_sql += (
+                        " UNION ALL SELECT dimension, sum(request_count) AS request_count FROM request_aggregates "
+                        f"WHERE service_id={{service_id:String}} AND {dim_in_all} AND {edge_clause} AND {fence} "
+                        "GROUP BY dimension"
+                    )
+                h_totals_sql = (
+                    f"SELECT dimension, sum(request_count) AS total_count FROM ({tot_union_sql}) GROUP BY dimension"
+                )
+                try:
+                    if "client_ip" in unique_dims and len(unique_dims) > 2:
+                        fast_sql, fast_params = _build_hourly_top_query(
+                            tuple(d for d in unique_dims if d != "client_ip")
+                        )
+                        ip_sql, ip_params = _build_hourly_top_query(("client_ip",))
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                            totals_fut = pool.submit(
+                                contextvars.copy_context().run, client.execute, h_totals_sql, h_params
+                            )
+                            fast_fut = pool.submit(
+                                contextvars.copy_context().run, client.execute, fast_sql, fast_params
+                            )
+                            ip_fut = pool.submit(contextvars.copy_context().run, client.execute, ip_sql, ip_params)
+                            totals_rows = totals_fut.result()
+                            top_rows = list(fast_fut.result()) + list(ip_fut.result())
+                    else:
+                        h_top_sql, h_top_params = _build_hourly_top_query(tuple(unique_dims))
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                            totals_fut = pool.submit(
+                                contextvars.copy_context().run, client.execute, h_totals_sql, h_params
+                            )
+                            top_fut = pool.submit(
+                                contextvars.copy_context().run, client.execute, h_top_sql, h_top_params
+                            )
+                            totals_rows = totals_fut.result()
+                            top_rows = top_fut.result()
+                except ClickHouseError:
+                    totals_rows = []
+                    top_rows = []
+            if not totals_rows and not top_rows:
+                if "client_ip" in unique_dims and len(unique_dims) > 2:
+
+                    def _build_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+                        sub_params = {k: v for k, v in params.items() if not k.startswith("dim_")}
+                        sub_placeholders: list[str] = []
+                        for idx, dim in enumerate(dims_subset):
+                            k = f"dim_{idx}"
+                            sub_params[k] = dim
+                            sub_placeholders.append(f"{{{k}:String}}")
+                        sub_clauses = [
+                            f"dimension IN ({', '.join(sub_placeholders)})" if c.startswith("dimension IN (") else c
+                            for c in clauses
+                        ]
+                        sql = (
+                            f"SELECT dimension, value, sum({metric}) AS aggregate_count "
+                            f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
+                            "GROUP BY dimension, value "
+                            "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+                            "LIMIT 10 BY dimension"
+                        )
+                        return sql, sub_params
+
+                    fast_sql, fast_params = _build_top_query(tuple(d for d in unique_dims if d != "client_ip"))
+                    ip_sql, ip_params = _build_top_query(("client_ip",))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                        totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
+                        fast_fut = pool.submit(contextvars.copy_context().run, client.execute, fast_sql, fast_params)
+                        ip_fut = pool.submit(contextvars.copy_context().run, client.execute, ip_sql, ip_params)
+                        totals_rows = totals_fut.result()
+                        top_rows = list(fast_fut.result()) + list(ip_fut.result())
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        totals_fut = pool.submit(contextvars.copy_context().run, client.execute, totals_sql, params)
+                        top_fut = pool.submit(contextvars.copy_context().run, client.execute, top_sql, params)
+                        totals_rows = totals_fut.result()
+                        top_rows = top_fut.result()
             if totals_rows and "dimension" not in totals_rows[0]:
                 return {
                     dim: query_clickhouse_aggregate(

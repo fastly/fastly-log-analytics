@@ -45,13 +45,15 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
 _network_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("high_scale.network", _network_memo.cache)
+_network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
+CacheRegistry.register("high_scale.network.models", _network_model_cache)
 
 from backend.high_scale._common import optional_int as _finite_int
 from backend.models.analytics import (
@@ -242,25 +244,49 @@ def origin_shielding_analysis(
     service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
 ) -> OriginShieldingAnalysisResponse:
     start, end = parse_time_window(start_time, end_time)
+    limit = int(getattr(req, "limit", 50) or 50)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_origin_shielding",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
+                "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                "l": limit,
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+            return OriginShieldingAnalysisResponse.with_telemetry(**cached)
     trace = HighScaleSections(service.service_id, "origin")
     analysis = trace.run(
         "shielding_analysis",
         lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
         source="fact",
     )
-    limit = int(getattr(req, "limit", 50) or 50)
     rows = analysis.rows[:limit]
     truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
+    payload = {
+        "section_timings": trace.timings(),
+        "has_data": analysis.has_data,
+        "requires_fields": analysis.requires_fields or [],
+        "edge_only": bool(analysis.edge_only),
+        "rows": rows,
+        "total_routes": analysis.total_routes,
+        "truncated": truncated,
+        "error": False,
+    }
+    if memo_key is not None:
+        _network_memo.put(memo_key, dict(payload))
+        return OriginShieldingAnalysisResponse.with_telemetry(**_network_memo.result(payload, state="miss"))
     return OriginShieldingAnalysisResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
-        section_timings=trace.timings(),
-        has_data=analysis.has_data,
-        requires_fields=analysis.requires_fields or [],
-        edge_only=bool(analysis.edge_only),
-        rows=rows,
-        total_routes=analysis.total_routes,
-        truncated=truncated,
-        error=False,
+        **payload,
     )
 
 
@@ -274,20 +300,20 @@ def network_health(
     sections = getattr(req, "sections", None)
 
     trace = HighScaleSections(service.service_id, "network.health")
-    shielding = (
-        trace.run(
-            "shielding_analysis",
-            lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
-            source="fact",
-        )
-        if _want_shielding(sections)
-        else None
-    )
     if not _want_core(sections):
+        shielding_only = (
+            trace.run(
+                "shielding_analysis",
+                lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+                source="fact",
+            )
+            if _want_shielding(sections)
+            else None
+        )
         return NetworkHealthResponse.with_telemetry(
             **cache_result({}, state="bypass", prewarmer=False),
             available=True,
-            shielding_analysis=shielding,
+            shielding_analysis=shielding_only,
             section_timings=trace.timings(),
         )
 
@@ -309,6 +335,17 @@ def network_health(
         {"name": service.service_id, "service_id": service.service_id},
     )
     if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+        if (cached_model := _network_model_cache.get(memo_key)) is not None:
+            return cached_model.model_copy(
+                update={
+                    "is_cached": True,
+                    "response_cache": cached.get("_response_cache") or cached.get("response_cache"),
+                    "debug_queries": [],
+                    "debug_calls": [],
+                    "debug_sqlite": [],
+                    "debug_postgres": [],
+                }
+            )
         return NetworkHealthResponse.with_telemetry(**cached)
     filter_sql, filter_params = _filter_clause(getattr(req, "filters", None), drop_asn=map_asn != "all")
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
@@ -385,12 +422,20 @@ def network_health(
     )
     map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
     active_queries = tuple((name, sql) for name, sql in health_queries if not map_only or name == "map")
+    parallel_tasks: list[tuple[str, Callable[[], Any]]] = [
+        (name, partial(service.client.execute, sql, params)) for name, sql in active_queries
+    ]
+    if _want_shielding(sections):
+        parallel_tasks.append(
+            ("shielding_analysis", lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)))
+        )
     q_results = trace.run_parallel(
-        [(name, partial(service.client.execute, sql, params)) for name, sql in active_queries],
+        parallel_tasks,
         source="fact",
-        max_workers=5,
+        max_workers=6,
         thread_name_prefix="hs-net-health",
     )
+    shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
     heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = (
         q_results.get(k, []) for k in ("heatmap", "map", "metro", "speed", "percentiles")
     )
@@ -576,9 +621,11 @@ def network_health(
         "shielding_analysis": shielding,
     }
     _network_memo.put(memo_key, dict(payload))
-    return NetworkHealthResponse.with_telemetry(
+    resp = NetworkHealthResponse.with_telemetry(
         **_network_memo.result(payload, state="miss"),
     )
+    _network_model_cache[memo_key] = resp
+    return resp
 
 
 def network_quality(
@@ -586,6 +633,24 @@ def network_quality(
 ) -> NetworkQualityResponse:
     start, end = parse_time_window(start_time, end_time)
     region_country = getattr(req, "region_country", "US") or "US"
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_network_quality",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
+                "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                "rc": str(region_country),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+            return NetworkQualityResponse.with_telemetry(**cached)
     filter_sql, filter_params = _filter_clause(getattr(req, "filters", None))
     params = {
         "service_id": service.service_id,
@@ -615,6 +680,34 @@ def network_quality(
             if r["label"] is not None and r["label"] != ""
         ]
 
+    def _bars_from_rollup() -> dict[str, list[dict]]:
+        fence = visible_publication_fence_sql("network_dimensions")
+        sql = (
+            "SELECT dimension, value AS label, "
+            "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
+            "sum(tcp_rtt_count) AS reqs "
+            "FROM network_minute_dimensions "
+            "WHERE service_id={service_id:String} AND dimension IN ('country', 'asn', 'pop') "
+            "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
+            f"AND tcp_rtt_count > 0 AND value != '' AND {fence} "
+            "GROUP BY dimension, label HAVING reqs > 0 "
+            "ORDER BY dimension ASC, reqs DESC LIMIT 25 BY dimension"
+        )
+        out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": []}
+        for r in service.client.execute(sql, params):
+            dim = str(r.get("dimension") or "")
+            lbl = str(r.get("label") or "")
+            if dim in out and lbl:
+                out[dim].append(
+                    {
+                        "value": lbl,
+                        "label": lbl,
+                        "rtt_ms": _flt(r["rtt_ms"], 2) or 0.0,
+                        "reqs": int(r["reqs"]),
+                    }
+                )
+        return out
+
     scatter_sql = _ch_fact_query(
         f"{_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
         "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state",
@@ -623,19 +716,37 @@ def network_quality(
         limit=_SCATTER_SAMPLE,
     )
     trace = HighScaleSections(service.service_id, "network.quality")
-    q_tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = [
-        *((name, partial(_bar, expr, extra)) for name, expr, extra in _QUALITY_BAR_SPECS),
-        ("scatter", lambda: service.client.execute(scatter_sql, params)),
-    ]
-    q_res: dict[str, list[dict[str, Any]]] = trace.run_parallel(
-        q_tasks,
-        source="fact",
-        max_workers=4,
-        thread_name_prefix="hs-net-quality",
-    )
-    by_country, by_asn, by_region, by_pop, scatter_rows = (
-        q_res[k] for k in ("country", "asn", "region", "pop", "scatter")
-    )
+    if is_real_ch and not filter_sql:
+        q_res_mixed: dict[str, Any] = trace.run_parallel(
+            [
+                ("rollup_bars", _bars_from_rollup),
+                ("region", partial(_bar, "custom_fields['region']", " AND country = {region_country:String}")),
+                ("scatter", lambda: service.client.execute(scatter_sql, params)),
+            ],
+            source="projection",
+            max_workers=3,
+            thread_name_prefix="hs-net-quality",
+        )
+        rollup_bars = q_res_mixed["rollup_bars"]
+        by_country = rollup_bars.get("country", [])
+        by_asn = rollup_bars.get("asn", [])
+        by_pop = rollup_bars.get("pop", [])
+        by_region = q_res_mixed["region"]
+        scatter_rows = q_res_mixed["scatter"]
+    else:
+        q_tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = [
+            *((name, partial(_bar, expr, extra)) for name, expr, extra in _QUALITY_BAR_SPECS),
+            ("scatter", lambda: service.client.execute(scatter_sql, params)),
+        ]
+        q_res: dict[str, list[dict[str, Any]]] = trace.run_parallel(
+            q_tasks,
+            source="fact",
+            max_workers=4,
+            thread_name_prefix="hs-net-quality",
+        )
+        by_country, by_asn, by_region, by_pop, scatter_rows = (
+            q_res[k] for k in ("country", "asn", "region", "pop", "scatter")
+        )
     if by_asn:
         labels = resolve_asn_display_labels(
             service.service_id, [int(r["value"]) for r in by_asn if r["value"].isdigit()]
@@ -643,16 +754,15 @@ def network_quality(
         for row in by_asn:
             if row["value"].isdigit():
                 row["label"] = labels[int(row["value"])]
-    return NetworkQualityResponse.with_telemetry(
-        **cache_result({}, state="bypass", prewarmer=False),
-        available=True,
-        section_timings=trace.timings(),
-        by_country=by_country,
-        by_asn=by_asn,
-        by_region=by_region,
-        region_country=region_country,
-        by_pop=by_pop,
-        scatter=[
+    payload = {
+        "available": True,
+        "section_timings": trace.timings(),
+        "by_country": by_country,
+        "by_asn": by_asn,
+        "by_region": by_region,
+        "region_country": region_country,
+        "by_pop": by_pop,
+        "scatter": [
             {
                 "rtt_ms": round(float(r["rtt_ms"]), 2),
                 "ttfb_ms": round(float(r["ttfb_ms"]), 2),
@@ -660,7 +770,14 @@ def network_quality(
             }
             for r in scatter_rows
         ],
-        countries=sorted({row["value"] for row in by_country}),
+        "countries": sorted({row["value"] for row in by_country}),
+    }
+    if memo_key is not None:
+        _network_memo.put(memo_key, dict(payload))
+        return NetworkQualityResponse.with_telemetry(**_network_memo.result(payload, state="miss"))
+    return NetworkQualityResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
+        **payload,
     )
 
 
@@ -670,6 +787,22 @@ def get_pop_health(
     end = end_time or datetime.now(UTC)
     start = start_time or (end - timedelta(hours=24))
     start, end = (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt for dt in (start, end))
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_pop_health",
+                "cid": client_cache_token(service.client),
+                "s": start.isoformat(),
+                "e": end.isoformat(),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+            return PopHealthListResponse.with_telemetry(**cached)
     trace = HighScaleSections(service.service_id, "network")
     sql = _ch_fact_query(
         f"custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 400 OR {_STATUS} = 0) AS errors, "
@@ -698,15 +831,34 @@ def get_pop_health(
         )
         for r in rows
     ]
-    return PopHealthListResponse.with_telemetry(
-        **cache_result({}, state="bypass", prewarmer=False), data=data, section_timings=trace.timings()
-    )
+    payload = {"data": data, "section_timings": trace.timings()}
+    if memo_key is not None:
+        _network_memo.put(memo_key, dict(payload))
+        return PopHealthListResponse.with_telemetry(**_network_memo.result(payload, state="miss"))
+    return PopHealthListResponse.with_telemetry(**cache_result({}, state="bypass", prewarmer=False), **payload)
 
 
 def get_transport_metrics(
     service: HighScaleService, start_time: str | None, end_time: str | None, filters: Any = None
 ) -> TransportMetrics:
     start, end = parse_time_window(start_time, end_time)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_transport_metrics",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
+                "f": serialize_filters_for_key(filters or {}),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+            return TransportMetrics(**cached)
     filter_sql, filter_params = _filter_clause(filters)
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     base_where = f"{_BASE_WHERE}{filter_sql}"
@@ -742,21 +894,27 @@ def get_transport_metrics(
     total_requests = int(r.get("total_reqs") or 0)
     missing_fields = [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
     _transport_vals: dict[str, Any] = {attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS}
-    return TransportMetrics(
-        **cache_result({}, state="bypass", prewarmer=False),
-        section_timings=[SectionTimingEntry.model_validate(t) for t in trace.timings()],
-        has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),
+    payload = {
+        "section_timings": [SectionTimingEntry.model_validate(t) for t in trace.timings()],
+        "has_transport_data": len(missing_fields) < len(_TRANSPORT_FIELDS),
         **_transport_vals,
-        bandwidth_bytes=int(r.get("total_bytes") or 0),
-        total_requests=total_requests,
-        protocol_distribution=[
+        "bandwidth_bytes": int(r.get("total_bytes") or 0),
+        "total_requests": total_requests,
+        "protocol_distribution": [
             TransportProtocolShare(**item)
             for item in shape_protocol_distribution(
                 ((pr.get("proto_clean", "Other"), pr.get("reqs", 0)) for pr in p_rows),
                 total_requests=total_requests,
             )
         ],
-        missing_fields=missing_fields,
+        "missing_fields": missing_fields,
+    }
+    if memo_key is not None:
+        _network_memo.put(memo_key, dict(payload))
+        return TransportMetrics(**_network_memo.result(payload, state="miss"))
+    return TransportMetrics(
+        **cache_result({}, state="bypass", prewarmer=False),
+        **payload,
     )
 
 

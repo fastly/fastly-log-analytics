@@ -209,10 +209,22 @@ def test_request_filter_clauses_translation_and_safety() -> None:
     assert f_params["flt_k0"] == "ttl"
 
 
-@pytest.mark.parametrize("key", ["_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind"])
+@pytest.mark.parametrize("key", ["_bot_name", "_ngwaf_bot_name", "_tunnel_requests"])
 def test_filters_the_fact_table_cannot_express_raise(key: str) -> None:
     with pytest.raises(ValueError, match="do not support filtering"):
         request_filter_clauses({key: {"mode": "include", "values": ["x"]}})
+
+
+@pytest.mark.parametrize(
+    ("key", "backing"),
+    [("waf_sig_ind", "waf_sig"), ("edge_score_reason_ind", "edge_score_reason")],
+)
+def test_virtual_csv_filters_expand_via_array_exists(key: str, backing: str) -> None:
+    clauses, params = request_filter_clauses({key: {"mode": "include", "values": ["SQLI", "XSS"]}})
+    assert len(clauses) == 1
+    assert "arrayExists(x -> trimBoth(x) IN (" in clauses[0]
+    assert params["flt_k0"] == backing
+    assert params["flt_0_0"] == "SQLI" and params["flt_0_1"] == "XSS"
 
 
 def test_high_scale_cache_observations_do_not_execute_the_repeat() -> None:
@@ -2763,3 +2775,74 @@ def test_resolve_window_only_fetches_status_for_auto_range() -> None:
             ),
         )
         assert mock_status.call_count == 1
+
+
+def test_filtered_request_normalizes_list_shorthand_and_range_alias() -> None:
+    from backend.models.analytics import AggregatesRequest
+
+    req = AggregatesRequest.model_validate(
+        {
+            "range": "24h",
+            "filters": {
+                "country": ["US"],
+                "cache": ["HIT"],
+                "filter_mode": "exclude",
+            },
+        }
+    )
+    assert req.range_token == "24h"
+    assert req.filters["country"].mode == "exclude"
+    assert req.filters["country"].values == ["US"]
+    assert req.filters["cache"].mode == "exclude"
+    assert req.filters["cache"].values == ["HIT"]
+    assert "filter_mode" not in req.filters
+
+
+def test_hourly_rollup_stitching_and_fallback() -> None:
+    from datetime import UTC, datetime
+
+    from backend.high_scale.aggregate_query import (
+        can_use_hourly_rollup,
+        query_clickhouse_aggregates_batch,
+    )
+
+    queries: list[str] = []
+
+    class _HourlyClient:
+        enable_hourly_rollups = True
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            queries.append(sql)
+            if "AS aggregate_count" in sql:
+                return [{"dimension": "country", "value": "US", "aggregate_count": 42}]
+            return [{"dimension": "country", "total_count": 42}]
+
+    client = _HourlyClient()
+    st = datetime(2026, 1, 1, 0, 15, tzinfo=UTC)
+    et = datetime(2026, 1, 2, 0, 45, tzinfo=UTC)
+    wm = ServingWatermark(
+        "svc-1h",
+        "request",
+        1,
+        datetime(2025, 12, 31, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 3, 0, 0, tzinfo=UTC),
+        "cursor",
+        "evt-1",
+        "evt-1",
+        True,
+    )
+    assert can_use_hourly_rollup(client, "request", st, et) is not None
+    assert can_use_hourly_rollup(client, "request", st, datetime(2026, 1, 1, 6, 0, tzinfo=UTC)) is None
+
+    res = query_clickhouse_aggregates_batch(
+        client,
+        service_id="svc-1h",
+        domain="request",
+        dimensions=["country", "pop"],
+        start=st,
+        end=et,
+        watermark=wm,
+    )
+    assert res["country"].request_count == 42
+    assert len(queries) == 2
+    assert any("FROM request_aggregates_1h" in q and "UNION ALL" in q for q in queries)

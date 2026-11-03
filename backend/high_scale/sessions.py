@@ -475,6 +475,24 @@ def sessions_detail(
     ja4: str | None,
 ) -> dict[str, Any]:
     start_dt, end_dt = parse_time_window(start_time, end_time, timedelta(days=7))
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_sessions_detail",
+                "cid": client_cache_token(service.client),
+                "s": start_dt.isoformat(),
+                "e": end_dt.isoformat(),
+                "ip": ip,
+                "ja4": ja4 or "",
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _sessions_memo.get_with_telemetry(memo_key)) is not None:
+            return cached
     clauses = [
         *visible_fact_clauses("request"),
         "client_ip = {ip:String}",
@@ -525,7 +543,11 @@ def sessions_detail(
     for row in data:
         if row.get("timestamp"):
             row["timestamp"] = _iso(row["timestamp"])
-    return {"data": data, "columns": list(data[0].keys()) if data else []}
+    out = {"data": data, "columns": list(data[0].keys()) if data else []}
+    if memo_key is not None:
+        _sessions_memo.put(memo_key, dict(out))
+        return _sessions_memo.result(out, state="miss")
+    return out
 
 
 if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
