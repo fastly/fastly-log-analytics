@@ -81,7 +81,7 @@ _SESSIONS_INDEX_FAST_CTE = """
             max(has_esid) AS p_esid,
             max(has_cmcd) AS p_cmcd,
             groupArray(ts_ms) AS raw_ts,
-            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort(raw_ts), []) AS sorted_ts,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ts, [])) AS sorted_ts,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
@@ -146,7 +146,7 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
             max(ts_ms) AS p_max_ms,
             count() AS p_reqs,
             groupArray(ts_ms) AS raw_ts,
-            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort(raw_ts), []) AS sorted_ts,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ts, [])) AS sorted_ts,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
@@ -231,8 +231,8 @@ _SESSIONS_FAST_CTE = """
             sum(bitAnd(packed_ev, 1)) AS p_stream,
             groupArray(packed_ev) AS raw_ev,
             groupArray(resp_bytes) AS raw_bytes,
-            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort(raw_ev), []) AS sorted_ev,
-            if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, arraySort((b, e) -> e, raw_bytes, raw_ev), []) AS sorted_bytes,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ev, [])) AS sorted_ev,
+            arraySort((b, e) -> e, if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_bytes, []), if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ev, [])) AS sorted_bytes,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],

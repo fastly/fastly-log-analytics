@@ -80,8 +80,16 @@ def _pop_coord(index: int, default: float) -> str:
     return f"multiIf({arms}, {default})"
 
 
+def _pop_coord_transform(index: int, default: float) -> str:
+    keys = ", ".join(f"'{name}'" for name, _, _ in _POP_COORDS)
+    vals = ", ".join(f"{(lat, lon)[index]}" for _, lat, lon in _POP_COORDS)
+    return f"transform(custom_fields['pop'], [{keys}], [{vals}], {default})"
+
+
 _POP_LAT = _pop_coord(0, _POP_DEFAULT[0])
 _POP_LON = _pop_coord(1, _POP_DEFAULT[1])
+_POP_LAT_FAST = _pop_coord_transform(0, _POP_DEFAULT[0])
+_POP_LON_FAST = _pop_coord_transform(1, _POP_DEFAULT[1])
 _DISTANCE_KM = (
     "6371 * 2 * asin(sqrt(pow(sin(radians(lat - pop_lat) / 2), 2) "
     "+ cos(radians(pop_lat)) * cos(radians(lat)) * pow(sin(radians(lon - pop_lon) / 2), 2)))"
@@ -673,54 +681,119 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
         if (cached := _security_memo.cache.get(memo_key)) is not None:
             return cached
 
-    def _q_stats():
-        return _run(
-            service,
-            scope,
-            "proxy_stats",
-            f"SELECT uniqExactIf(ip, {_TUNNEL} OR {_IMPOSSIBLE_DISTANCE}) AS active_proxies_count, "
-            f"countIf({_TUNNEL} OR {_IMPOSSIBLE_DISTANCE}) AS total_requests_count, "
-            f"uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count {_PROXY_SOURCE}",
-        )
+    if is_real_ch:
 
-    def _q_quality():
-        return _run(
-            service,
-            scope,
-            "traffic_quality",
-            "SELECT multiIf(rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection', "
-            "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy', "
-            "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile', 'Direct Connection') AS type, count() AS count "
-            "FROM (SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-            "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt FROM request_facts WHERE __WHERE__) "
-            "GROUP BY type ORDER BY count DESC",
-        )
+        def _q_stats():
+            return _run(
+                service,
+                scope,
+                "proxy_stats",
+                f"SELECT uniqExactIf(ip, is_tunnel OR is_imp) AS active_proxies_count, "
+                f"countIf(is_tunnel OR is_imp) AS total_requests_count, "
+                f"uniqExactIf(ip, is_imp) AS distance_mismatches_count "
+                f"FROM (SELECT ip, {_TUNNEL} AS is_tunnel, {_IMPOSSIBLE_DISTANCE} AS is_imp "
+                f"FROM (SELECT client_ip AS ip, toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+                f"toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+                f"toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+                f"{_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
+                f"FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != ''))",
+            )
 
-    def _q_isps():
-        return _run(
-            service,
-            scope,
-            "suspicious_isps",
-            "SELECT asn, count() AS count FROM ("
-            "SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-            "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-            "toInt64OrNull(custom_fields['asn']) AS asn "
-            "FROM request_facts WHERE __WHERE__ AND custom_fields['rtt_min'] != ''"
-            f") WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10",
-        )
+        def _q_quality():
+            return _run(
+                service,
+                scope,
+                "traffic_quality",
+                "SELECT multiIf(rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection', "
+                "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy', "
+                "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile', 'Direct Connection') AS type, count() AS count "
+                "FROM (SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt FROM request_facts PREWHERE __WHERE__) "
+                "GROUP BY type ORDER BY count DESC",
+            )
 
-    def _q_clients():
-        return _run(
-            service,
-            scope,
-            "active_clients",
-            f"SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, {_DISTANCE_KM} AS distance_km, "
-            f"pop, lat AS client_lat, lon AS client_lon, pop_lat, pop_lon, {_IMPOSSIBLE_DISTANCE} AS impossible_distance, "
-            f"multiIf({_IMPOSSIBLE_DISTANCE}, 'High', {_TUNNEL}, 'High', "
-            "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium', 'Low') AS risk_level, country, city "
-            f"{_PROXY_SOURCE} WHERE rtt_min IS NOT NULL AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0)) "
-            "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
-        )
+        def _q_isps():
+            return _run(
+                service,
+                scope,
+                "suspicious_isps",
+                "SELECT asn, count() AS count FROM ("
+                "SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+                "toInt64OrNull(custom_fields['asn']) AS asn "
+                "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '' AND custom_fields['tcp_rtt'] != ''"
+                f") WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10",
+            )
+
+        def _q_clients():
+            return _run(
+                service,
+                scope,
+                "active_clients",
+                "SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, distance_km, "
+                "pop, lat AS client_lat, lon AS client_lon, pop_lat, pop_lon, impossible_distance, "
+                "multiIf(impossible_distance, 'High', is_tunnel, 'High', is_med, 'Medium', 'Low') AS risk_level, country, city "
+                f"FROM (SELECT ip, asn, rtt_min, tcp_rtt, pop, lat, lon, pop_lat, pop_lon, country, city, "
+                f"{_DISTANCE_KM} AS distance_km, {_IMPOSSIBLE_DISTANCE} AS impossible_distance, "
+                f"{_TUNNEL} AS is_tunnel, ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
+                f"FROM (SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
+                f"toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+                f"toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+                f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
+                f"FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != '') WHERE rtt_min IS NOT NULL) "
+                "WHERE impossible_distance OR is_med "
+                "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
+            )
+    else:
+
+        def _q_stats():
+            return _run(
+                service,
+                scope,
+                "proxy_stats",
+                f"SELECT uniqExactIf(ip, {_TUNNEL} OR {_IMPOSSIBLE_DISTANCE}) AS active_proxies_count, "
+                f"countIf({_TUNNEL} OR {_IMPOSSIBLE_DISTANCE}) AS total_requests_count, "
+                f"uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count {_PROXY_SOURCE}",
+            )
+
+        def _q_quality():
+            return _run(
+                service,
+                scope,
+                "traffic_quality",
+                "SELECT multiIf(rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection', "
+                "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy', "
+                "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile', 'Direct Connection') AS type, count() AS count "
+                "FROM (SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt FROM request_facts WHERE __WHERE__) "
+                "GROUP BY type ORDER BY count DESC",
+            )
+
+        def _q_isps():
+            return _run(
+                service,
+                scope,
+                "suspicious_isps",
+                "SELECT asn, count() AS count FROM ("
+                "SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+                "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+                "toInt64OrNull(custom_fields['asn']) AS asn "
+                "FROM request_facts WHERE __WHERE__ AND custom_fields['rtt_min'] != ''"
+                f") WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10",
+            )
+
+        def _q_clients():
+            return _run(
+                service,
+                scope,
+                "active_clients",
+                f"SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, {_DISTANCE_KM} AS distance_km, "
+                f"pop, lat AS client_lat, lon AS client_lon, pop_lat, pop_lon, {_IMPOSSIBLE_DISTANCE} AS impossible_distance, "
+                f"multiIf({_IMPOSSIBLE_DISTANCE}, 'High', {_TUNNEL}, 'High', "
+                "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium', 'Low') AS risk_level, country, city "
+                f"{_PROXY_SOURCE} WHERE rtt_min IS NOT NULL AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0)) "
+                "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
+            )
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
         stats, quality_rows, isp_rows, client_rows = [

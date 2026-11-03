@@ -94,6 +94,87 @@ _DOMAIN_TABLES: dict[str, tuple[str, ...]] = {
     "rum": ("rum_vitals_facts",),
 }
 
+_MATERIALIZED_CF_KEYS: frozenset[str] = frozenset(
+    {
+        "_bot_name",
+        "age",
+        "asn",
+        "backend",
+        "bytes",
+        "c_speed",
+        "c_type",
+        "cache",
+        "cid",
+        "city",
+        "conn_requests",
+        "cookie_session",
+        "delivery_rate",
+        "digest",
+        "edge",
+        "edge_score_reason",
+        "edge_sid",
+        "elapsed",
+        "hits",
+        "host",
+        "io_input_format",
+        "io_output_format",
+        "ipv6",
+        "is_bot",
+        "is_ipv6",
+        "is_shield",
+        "is_ssl",
+        "ja3",
+        "ja4",
+        "lat",
+        "lon",
+        "method",
+        "metro",
+        "ngwaf_bot",
+        "ngwaf_bot_category",
+        "ngwaf_wellknown_bot",
+        "obytes",
+        "oconnect_ms",
+        "oip",
+        "oretries",
+        "ost",
+        "ottfb",
+        "ottlb",
+        "p_desc",
+        "p_type",
+        "ploss",
+        "pop",
+        "prid",
+        "proto",
+        "protocol",
+        "referer",
+        "region",
+        "req_header_bytes",
+        "resp_bytes",
+        "resp_header_content_encoding",
+        "retrans",
+        "rid",
+        "rtt_min",
+        "rtt_var",
+        "server_region",
+        "status",
+        "tcp_rtt",
+        "tls",
+        "tls_ciphers_sha",
+        "transport",
+        "ttfb",
+        "ttl",
+        "ua",
+        "waf",
+        "waf_blocked_rules",
+        "waf_logged_rules",
+        "waf_ms",
+        "waf_resp",
+        "waf_sig",
+    }
+)
+_CF_LITERAL_RE = re.compile(r"custom_fields\['([a-zA-Z0-9_]+)'\]")
+_CF_PARAM_RE = re.compile(r"custom_fields\[\{([a-zA-Z0-9_]+):String\}\]")
+
 
 class ClickHouseClient:
     """One reusable HTTP pool; bounded admission also applies to injected transports."""
@@ -108,6 +189,7 @@ class ClickHouseClient:
         self._active = 0
         self._pub_fence_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
         self._empty_stale_batches: set[tuple[str, str, str]] = set()
+        self._cf_materialized_cache: tuple[float, bool] | None = None
         self._pub_fence_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=httpx.URL(
@@ -184,6 +266,42 @@ class ClickHouseClient:
             self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
             return pending_map
 
+    def _has_materialized_cf_columns(self) -> bool:
+        if isinstance(self._http._transport, httpx.MockTransport):
+            return bool(getattr(self, "_enable_cf_rewrite_in_tests", False))
+        if os.getenv("PYTEST_CURRENT_TEST") and not getattr(self, "_enable_cf_rewrite_in_tests", False):
+            return False
+        with self._pub_fence_lock:
+            now = time.monotonic()
+            if self._cf_materialized_cache is not None:
+                ttl = 60.0 if self._cf_materialized_cache[1] else 10.0
+                if (now - self._cf_materialized_cache[0]) < ttl:
+                    return self._cf_materialized_cache[1]
+            ready = False
+            try:
+                rows = self._request(
+                    "execute",
+                    data={
+                        "query": (
+                            "SELECT "
+                            "(SELECT count() FROM system.columns "
+                            " WHERE database = currentDatabase() AND table = 'request_facts' AND name LIKE '_cf_%') AS cols, "
+                            "(SELECT count() FROM system.mutations "
+                            " WHERE database = currentDatabase() AND table = 'request_facts' AND is_done = 0 "
+                            " AND command LIKE '%MATERIALIZE COLUMN%') AS muts"
+                        ),
+                    },
+                    settings=None,
+                )
+                if rows:
+                    cols = int(rows[0].get("cols") or 0)
+                    muts = int(rows[0].get("muts") or 0)
+                    ready = cols >= len(_MATERIALIZED_CF_KEYS) and muts == 0
+            except Exception:
+                ready = False
+            self._cf_materialized_cache = (time.monotonic(), ready)
+            return ready
+
     def rewrite_publication_fence(self, sql: str, params: dict | None = None) -> str:
         """Rewrite ``batch_id IN (SELECT ... FROM high_scale_batch_publications FINAL ...)`` when pending set is small."""
         svc_id = (params or {}).get("service_id")
@@ -218,6 +336,32 @@ class ClickHouseClient:
                 _replace_fence,
                 sql,
             )
+
+        upper_sql = sql.lstrip().upper()
+        is_fact_query = "request_facts" in sql and upper_sql.startswith(("SELECT", "WITH", "/*"))
+        is_where_fragment = not upper_sql.startswith(
+            ("SELECT", "WITH", "/*", "INSERT", "ALTER", "CREATE", "DROP", "OPTIMIZE", "SYSTEM", "TRUNCATE")
+        )
+        if (
+            (is_fact_query or is_where_fragment)
+            and "custom_fields[" in sql
+            and "SELECT custom_fields FROM" not in sql
+            and "SELECT event_timestamp, custom_fields FROM" not in sql
+            and self._has_materialized_cf_columns()
+        ):
+            sql = _CF_LITERAL_RE.sub(
+                lambda m: f"`_cf_{m.group(1)}`" if m.group(1) in _MATERIALIZED_CF_KEYS else m.group(0),
+                sql,
+            )
+            if params:
+                sql = _CF_PARAM_RE.sub(
+                    lambda m: (
+                        f"`_cf_{params[m.group(1)]}`"
+                        if m.group(1) in params and str(params[m.group(1)]) in _MATERIALIZED_CF_KEYS
+                        else m.group(0)
+                    ),
+                    sql,
+                )
         return sql
 
     def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:

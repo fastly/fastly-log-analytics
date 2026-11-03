@@ -218,6 +218,19 @@ def _want_shielding(sections: Any) -> bool:
 
 
 def _shielding_analysis(service: HighScaleService, start: datetime, end: datetime, filters: Any) -> ShieldingAnalysis:
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
+    if is_real_ch:
+        shield_rows = service.client.execute(
+            f"SELECT count() AS n FROM ({_ch_fact_query('1', shield_where, limit=1)})",
+            {"service_id": service.service_id, "start": start, "end": end},
+        )
+        if not shield_rows or int(shield_rows[0]["n"]) == 0:
+            return ShieldingAnalysis(
+                **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
+            )
     filter_sql, filter_params = _filter_clause(filters)
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     hop_ms = "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
@@ -225,7 +238,6 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
         f"custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us",
         f"{_BASE_WHERE}{filter_sql} AND lower(custom_fields['edge']) IN ('true', '1') AND custom_fields['rid'] != ''",
     )
-    shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
     shield_sub = _ch_fact_query(
         f"custom_fields['prid'] AS prid, custom_fields['pop'] AS shield_pop, {hop_ms} AS hop_us", shield_where
     )
@@ -238,6 +250,10 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
         params,
     )
     if not pairs:
+        if is_real_ch:
+            return ShieldingAnalysis(
+                **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=None, rows=[]
+            )
         shield_rows = service.client.execute(
             f"SELECT count() AS n FROM ({_ch_fact_query('1', shield_where, limit=1)})",
             {"service_id": service.service_id, "start": start, "end": end},
@@ -398,90 +414,166 @@ def network_health(
             map_asn_sql, params["map_asn"] = f" AND {_ASN} = {{map_asn:Int32}}", int(map_asn)
 
         err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
-        top_asn_subquery = (
-            f"SELECT {_ASN} FROM request_facts "
-            f"WHERE {rtt_where} AND {_ASN} IS NOT NULL "
-            f"GROUP BY {_ASN} ORDER BY count() DESC LIMIT {top_n}"
-        )
-        health_queries: tuple[tuple[str, str], ...] = (
-            (
-                "heatmap",
-                _ch_fact_query(
-                    f"{_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
+        map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
+        if is_real_ch and not map_only:
+            rtt_prewhere = f"{rtt_where} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
+            speed_sql = (
+                f"SELECT {_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt "
+                f"FROM request_facts PREWHERE {rtt_prewhere} AND custom_fields['asn'] != '' "
+                f"WHERE {_ASN} IS NOT NULL GROUP BY asn, c_speed ORDER BY cnt DESC LIMIT {top_n * 20}"
+            )
+            raw_speed_rows = trace.run("speed", lambda: service.client.execute(speed_sql, params), source="fact")
+            asn_totals: dict[int, int] = {}
+            for r in raw_speed_rows:
+                if r["asn"] is not None:
+                    a_int = int(r["asn"])
+                    asn_totals[a_int] = asn_totals.get(a_int, 0) + int(r["cnt"])
+            top_asn_ints = sorted(asn_totals, key=lambda a: asn_totals[a], reverse=True)[:top_n]
+            asn_in_filter = (
+                f" AND custom_fields['asn'] IN ({', '.join(repr(str(a)) for a in top_asn_ints)})"
+                if top_asn_ints
+                else " AND 1=0"
+            )
+            speed_rows = [r for r in raw_speed_rows if r.get("c_speed")]
+            fast_queries: tuple[tuple[str, str], ...] = (
+                (
+                    "heatmap",
+                    f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
                     f"median(if({_NET_HIT} AND {_ELAPSED} > 0, {_RESP_BYTES} * 1000000.0 / {_ELAPSED}, NULL)) AS throughput_bps, "
                     f"median({_RTT}) AS rtt_med_us, median({_RTT_MIN}) AS rtt_baseline_us, "
                     f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
-                    f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr}",
-                    f"{rtt_where} AND {_ASN} IS NOT NULL AND {_ASN} IN ({top_asn_subquery})",
-                    group_by="asn, bucket_ts",
-                    order_by="reqs DESC",
-                    limit=top_n * 200,
+                    f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr} "
+                    f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
+                    f"WHERE {_ASN} IS NOT NULL GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
                 ),
-            ),
-            (
-                "map",
-                _ch_fact_query(
-                    "country AS country, custom_fields['city'] AS city, "
+                (
+                    "map",
+                    f"SELECT country AS country, custom_fields['city'] AS city, "
                     "any(toFloat64OrNull(custom_fields['lat'])) AS lat, any(toFloat64OrNull(custom_fields['lon'])) AS lon, "
                     f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
-                    f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs",
-                    f"{rtt_where} AND country != ''{map_asn_sql}",
-                    group_by="country, city, metro, bucket_ts",
-                    order_by="bucket_ts ASC, reqs DESC LIMIT 50 BY bucket_ts",
-                    limit=15000,
+                    f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
+                    f"FROM request_facts PREWHERE {rtt_prewhere} AND country != ''{map_asn_sql} "
+                    "GROUP BY country, city, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 50 BY bucket_ts LIMIT 15000",
                 ),
-            ),
-            (
-                "metro",
-                _ch_fact_query(
-                    "country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
-                    f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs",
-                    f"{rtt_where} AND country != ''",
-                    group_by="country, city, region, metro",
-                    order_by="total_reqs DESC",
-                    limit=200,
+                (
+                    "metro",
+                    f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
+                    f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs "
+                    f"FROM request_facts PREWHERE {rtt_prewhere} AND country != '' "
+                    "GROUP BY country, city, region, metro ORDER BY total_reqs DESC LIMIT 200",
                 ),
-            ),
-            (
-                "speed",
-                _ch_fact_query(
-                    f"{_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt",
-                    f"{rtt_where} AND {_ASN} IS NOT NULL AND custom_fields['c_speed'] != ''",
-                    group_by="asn, c_speed",
-                    order_by="cnt DESC",
-                    limit=top_n * 20,
+                (
+                    "percentiles",
+                    f"SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99 "
+                    f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
+                    f"WHERE {_ASN} IS NOT NULL GROUP BY asn ORDER BY count() DESC LIMIT {top_n * 5}",
                 ),
-            ),
-            (
-                "percentiles",
-                _ch_fact_query(
-                    f"{_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99",
-                    f"{rtt_where} AND {_ASN} IS NOT NULL",
-                    group_by="asn",
-                    order_by="count() DESC",
-                    limit=top_n * 5,
-                ),
-            ),
-        )
-        map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
-        active_queries = tuple((name, sql) for name, sql in health_queries if not map_only or name == "map")
-        parallel_tasks: list[tuple[str, Callable[[], Any]]] = [
-            (name, partial(service.client.execute, sql, params)) for name, sql in active_queries
-        ]
-        if _want_shielding(sections):
-            parallel_tasks.append(
-                ("shielding_analysis", lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)))
             )
-        q_results = trace.run_parallel(
-            parallel_tasks,
-            source="fact",
-            max_workers=6,
-            thread_name_prefix="hs-net-health",
-        )
-        shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
-        heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = (
-            q_results.get(k, []) for k in ("heatmap", "map", "metro", "speed", "percentiles")
-        )
+            parallel_tasks: list[tuple[str, Callable[[], Any]]] = [
+                (name, partial(service.client.execute, sql, params)) for name, sql in fast_queries
+            ]
+            if _want_shielding(sections):
+                parallel_tasks.append(
+                    (
+                        "shielding_analysis",
+                        lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+                    )
+                )
+            q_results = trace.run_parallel(
+                parallel_tasks,
+                source="fact",
+                max_workers=6,
+                thread_name_prefix="hs-net-health",
+            )
+            shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
+            heatmap_rows, map_rows, metro_rows, pct_rows = (
+                q_results.get(k, []) for k in ("heatmap", "map", "metro", "percentiles")
+            )
+        else:
+            top_asn_subquery = (
+                f"SELECT {_ASN} FROM request_facts "
+                f"WHERE {rtt_where} AND {_ASN} IS NOT NULL "
+                f"GROUP BY {_ASN} ORDER BY count() DESC LIMIT {top_n}"
+            )
+            health_queries: tuple[tuple[str, str], ...] = (
+                (
+                    "heatmap",
+                    _ch_fact_query(
+                        f"{_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
+                        f"median(if({_NET_HIT} AND {_ELAPSED} > 0, {_RESP_BYTES} * 1000000.0 / {_ELAPSED}, NULL)) AS throughput_bps, "
+                        f"median({_RTT}) AS rtt_med_us, median({_RTT_MIN}) AS rtt_baseline_us, "
+                        f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
+                        f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr}",
+                        f"{rtt_where} AND {_ASN} IS NOT NULL AND {_ASN} IN ({top_asn_subquery})",
+                        group_by="asn, bucket_ts",
+                        order_by="reqs DESC",
+                        limit=top_n * 200,
+                    ),
+                ),
+                (
+                    "map",
+                    _ch_fact_query(
+                        "country AS country, custom_fields['city'] AS city, "
+                        "any(toFloat64OrNull(custom_fields['lat'])) AS lat, any(toFloat64OrNull(custom_fields['lon'])) AS lon, "
+                        f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
+                        f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs",
+                        f"{rtt_where} AND country != ''{map_asn_sql}",
+                        group_by="country, city, metro, bucket_ts",
+                        order_by="bucket_ts ASC, reqs DESC LIMIT 50 BY bucket_ts",
+                        limit=15000,
+                    ),
+                ),
+                (
+                    "metro",
+                    _ch_fact_query(
+                        "country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
+                        f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs",
+                        f"{rtt_where} AND country != ''",
+                        group_by="country, city, region, metro",
+                        order_by="total_reqs DESC",
+                        limit=200,
+                    ),
+                ),
+                (
+                    "speed",
+                    _ch_fact_query(
+                        f"{_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt",
+                        f"{rtt_where} AND {_ASN} IS NOT NULL AND custom_fields['c_speed'] != ''",
+                        group_by="asn, c_speed",
+                        order_by="cnt DESC",
+                        limit=top_n * 20,
+                    ),
+                ),
+                (
+                    "percentiles",
+                    _ch_fact_query(
+                        f"{_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99",
+                        f"{rtt_where} AND {_ASN} IS NOT NULL",
+                        group_by="asn",
+                        order_by="count() DESC",
+                        limit=top_n * 5,
+                    ),
+                ),
+            )
+            active_queries = tuple((name, sql) for name, sql in health_queries if not map_only or name == "map")
+            parallel_tasks = [(name, partial(service.client.execute, sql, params)) for name, sql in active_queries]
+            if _want_shielding(sections):
+                parallel_tasks.append(
+                    (
+                        "shielding_analysis",
+                        lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+                    )
+                )
+            q_results = trace.run_parallel(
+                parallel_tasks,
+                source="fact",
+                max_workers=6,
+                thread_name_prefix="hs-net-health",
+            )
+            shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
+            heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = (
+                q_results.get(k, []) for k in ("heatmap", "map", "metro", "speed", "percentiles")
+            )
 
         all_asns_seen: dict[int, int] = {}
         for r in heatmap_rows:

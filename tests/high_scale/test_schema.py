@@ -1963,5 +1963,42 @@ def test_request_schema_defines_dimension_projection_and_hourly_rollup_mv() -> N
     assert "ReplicatedSummingMergeTree" in request_sql
     assert "ORDER BY (service_id, dimension, bucket_start, value)" in request_sql
     assert "CREATE MATERIALIZED VIEW IF NOT EXISTS request_aggregates_1h_mv" in request_sql
+    assert (
+        "ADD COLUMN IF NOT EXISTS `_cf_cache` LowCardinality(String) MATERIALIZED custom_fields['cache']" in request_sql
+    )
     rewritten = _schema()
     assert "SummingMergeTree()" in rewritten and "ReplicatedSummingMergeTree" not in rewritten
+
+
+def test_clickhouse_client_rewrites_materialized_custom_fields_in_select_and_where() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8", errors="ignore")
+        if "FROM system.columns" in body:
+            return httpx.Response(200, json={"data": [{"cnt": 74}]})
+        if "FROM system.mutations" in body:
+            return httpx.Response(200, json={"data": [{"cnt": 0}]})
+        return httpx.Response(200, json={"data": []})
+
+    ch = ClickHouseClient(
+        ClickHouseConfig(host="localhost", port=8123, database="fastly_log_analytics", user="default", password=""),
+        transport=httpx.MockTransport(_handler),
+    )
+    ch._enable_cf_rewrite_in_tests = True
+    ch._mat_cf_ready_override = True
+
+    rewritten_q = ch.rewrite_publication_fence(
+        "SELECT custom_fields['ua'] AS ua, count() FROM request_facts "
+        "WHERE service_id={service_id:String} AND custom_fields[{f0_k:String}] IN {f0_v:Array(String)} GROUP BY ua",
+        {"service_id": "svc", "f0_k": "cache", "f0_v": ["MISS"]},
+    )
+    assert "`_cf_ua` AS ua" in rewritten_q
+    assert "`_cf_cache` IN {f0_v:Array(String)}" in rewritten_q
+
+    rewritten_where = ch.rewrite_publication_fence(
+        "service_id = {service_id:String} AND custom_fields[{f0_k:String}] IN {f0_v:Array(String)}",
+        {"service_id": "svc", "f0_k": "status", "f0_v": ["500", "502"]},
+    )
+    assert "`_cf_status` IN {f0_v:Array(String)}" in rewritten_where
+
+    raw_map_select = "SELECT custom_fields FROM request_facts WHERE service_id={service_id:String}"
+    assert ch.rewrite_publication_fence(raw_map_select, {"service_id": "svc"}) == raw_map_select
