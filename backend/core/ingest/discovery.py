@@ -384,10 +384,6 @@ def _discover_prefix_common(
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
-    from backend.high_scale.ingest_controller import get_high_scale_service_registry
-
-    if get_high_scale_service_registry().resolve(service_id) is not None:
-        return 0
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:

@@ -148,6 +148,29 @@ def _run_insights_prewarmer(service_id: str) -> None:
             window_hours, baseline_hours = pick_insights_default(
                 history_hours_from_earliest(cached_status.get("earliest_log_at"))
             )
+            try:
+                from backend.high_scale.ingest_controller import get_high_scale_service_registry
+                from backend.high_scale.insights import insights_endpoint as hs_insights
+                from backend.models.analytics import InsightsRequest
+
+                hs_service = get_high_scale_service_registry().resolve(service_id)
+                if hs_service is not None:
+                    hs_req = InsightsRequest(
+                        window_size_hrs=window_hours,
+                        baseline_hours=baseline_hours,
+                        force_refresh=True,
+                    )
+                    hs_insights(
+                        hs_service,
+                        hs_req,
+                        None,
+                        None,
+                        False,
+                        clamp_cache_key=None,
+                        force_refresh=True,
+                    )
+            except Exception as hs_exc:
+                logger.debug("[insights-prewarmer] %s: high-scale prewarm skipped/failed: %s", service_id, hs_exc)
             con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
             yield_to_api(max_wait_secs=1.0)
             get_insights(

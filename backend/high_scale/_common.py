@@ -260,6 +260,12 @@ def _is_all_batches_visible(client: Any, service_id: str | None, domain: str | N
         return False
     if not (hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__):
         return False
+    if hasattr(client, "_get_pending_batches"):
+        try:
+            pending_map = client._get_pending_batches(service_id)
+            return pending_map is not None and len(pending_map.get(domain, ())) == 0
+        except Exception:
+            return False
     key = f"{id(client)}:{service_id}:{domain}"
     cached = _all_visible_cache.get(key)
     if cached is not None:

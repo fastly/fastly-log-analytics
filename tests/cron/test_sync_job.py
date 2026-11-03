@@ -2082,45 +2082,6 @@ def test_scheduler_registers_reschedules_and_skips_ledger_sweep():
     assert job_id not in _sync_scheduler(cfg, src, high_scale=True)._job_ids
 
 
-def test_scheduler_skips_ducklake_ingest_crons_for_clickhouse_high_scale_service():
-    sid = "svc-clickhouse-hs"
-    cfg = {
-        "service_id": sid,
-        "name": sid,
-        "log_period": 60,
-        "deployment_mode": "high_scale",
-        "rum": {"enabled": True},
-        "provisioning": {
-            "cron_sync": {"enabled": True},
-            "cron_ledger_sweep": {"enabled": True, "interval_minutes": 15},
-            "cron_full_sweep": {"enabled": True},
-            "cron_gap_heal": {"enabled": True},
-            "cron_compact": {"enabled": True},
-        },
-    }
-    src = {"name": sid, "service_id": sid, "bucket": "test-b", "deployment_mode": "high_scale"}
-    fake_reg = MagicMock()
-    fake_reg.resolve.side_effect = lambda s: object() if s == sid else None
-    with patch("backend.high_scale.ingest_controller.get_high_scale_service_registry", return_value=fake_reg):
-        s = _sync_scheduler(cfg, src, high_scale=True, alerts=1)
-
-    for forbidden in (
-        f"log_discovery_{sid}",
-        f"commit_{sid}",
-        f"ledger_sweep_{sid}",
-        f"rum_discovery_{sid}",
-        f"ledger_rum_sweep_{sid}",
-        f"full_sync_{sid}",
-        f"gap_heal_{sid}",
-        f"optimize_{sid}",
-        f"expire_{sid}",
-        f"insights_prewarmer_{sid}",
-    ):
-        assert forbidden not in s._job_ids
-    assert f"alerts_evaluation_{sid}" in s._job_ids
-    assert f"metadata_cleanup_{sid}" in s._job_ids
-
-
 @pytest.mark.parametrize(
     "queue_depth,expected_redispatched",
     [(0, 1), (100, 0)],

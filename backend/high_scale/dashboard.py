@@ -509,10 +509,15 @@ def _filtered_aggregates(
             )
         pairs_sql = ", ".join(pair_exprs)
         limit_by = 1000 if include_bots else 10
-        if "SELECT" not in where_clause:
+        eff_where = (
+            service.client.rewrite_publication_fence(where_clause, params)
+            if hasattr(service.client, "rewrite_publication_fence")
+            else where_clause
+        )
+        if "SELECT" not in eff_where:
             sql = (
                 f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
-                f"FROM (SELECT [{pairs_sql}] AS pairs FROM request_facts PREWHERE {where_clause}) "
+                f"FROM (SELECT [{pairs_sql}] AS pairs FROM request_facts PREWHERE {eff_where}) "
                 f"ARRAY JOIN pairs AS pair WHERE v != '' "
                 f"GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT {limit_by} BY field_name"
             )
@@ -520,7 +525,7 @@ def _filtered_aggregates(
             sql = (
                 f"SELECT pair.1 AS field_name, pair.2 AS v, count() AS c "
                 f"FROM request_facts ARRAY JOIN [{pairs_sql}] AS pair "
-                f"WHERE {where_clause} AND v != '' "
+                f"WHERE {eff_where} AND v != '' "
                 f"GROUP BY field_name, v ORDER BY field_name ASC, c DESC, v ASC LIMIT {limit_by} BY field_name"
             )
         rows = service.client.execute(sql, params)
@@ -547,7 +552,7 @@ def _filtered_aggregates(
         ordered_fields = [f for f in fields_to_query if f != "ua"]
         if "ua" in fields_to_query:
             ordered_fields.append("ua")
-        chunks = [ordered_fields[i : i + 10] for i in range(0, len(ordered_fields), 10)]
+        chunks = [ordered_fields[i : i + 14] for i in range(0, len(ordered_fields), 14)]
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             chunk_futs = [
                 trace.submit(

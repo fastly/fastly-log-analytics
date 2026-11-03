@@ -115,49 +115,36 @@ class ClickHouseClient:
     def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
         if isinstance(self._http._transport, httpx.MockTransport):
             return None
-        now = time.monotonic()
         with self._pub_fence_lock:
+            now = time.monotonic()
             cached = self._pub_fence_cache.get(service_id)
             if cached is not None and (now - cached[0]) < 10.0:
                 return cached[1]
-        pending_map: dict[str, tuple[str, ...]] | None
-        try:
-            check_form = {
-                "query": (
-                    "SELECT domain, batch_id "
-                    "FROM high_scale_batch_publications FINAL "
-                    "WHERE service_id = {service_id:String} AND publication_state != 'visible'"
-                ),
-                "param_service_id": _parameter(service_id),
-            }
-            rows = self._request("execute", data=check_form, settings=None)
-            by_dom: dict[str, list[str]] = {}
-            for r in rows or []:
-                dom = str(r.get("domain") or "")
-                bid = str(r.get("batch_id") or "")
-                if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
-                    by_dom.setdefault(dom, []).append(bid)
-            pending_map = {k: tuple(v) for k, v in by_dom.items()}
-        except Exception:
-            pending_map = None
-        with self._pub_fence_lock:
+            pending_map: dict[str, tuple[str, ...]] | None
+            try:
+                check_form = {
+                    "query": (
+                        "SELECT domain, batch_id "
+                        "FROM high_scale_batch_publications FINAL "
+                        "WHERE service_id = {service_id:String} AND publication_state != 'visible'"
+                    ),
+                    "param_service_id": _parameter(service_id),
+                }
+                rows = self._request("execute", data=check_form, settings=None)
+                by_dom: dict[str, list[str]] = {}
+                for r in rows or []:
+                    dom = str(r.get("domain") or "")
+                    bid = str(r.get("batch_id") or "")
+                    if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
+                        by_dom.setdefault(dom, []).append(bid)
+                pending_map = {k: tuple(v) for k, v in by_dom.items()}
+            except Exception:
+                pending_map = None
             self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
-        return pending_map
+            return pending_map
 
-    def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
-        """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
-
-        ``settings`` adds allow-listed per-query ClickHouse settings (see ``_QUERY_SETTINGS``).
-        """
-        if not isinstance(sql, str) or not sql.strip():
-            raise ValueError("ClickHouse SQL must be nonempty")
-        for name, value in (settings or {}).items():
-            if name not in _QUERY_SETTINGS:
-                raise ValueError(f"ClickHouse query setting {name!r} is not allowed")
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"ClickHouse query setting {name!r} needs a nonempty string value")
-        if re.search(r"\{[^{}]+:\s*Identifier\s*\}", sql, re.IGNORECASE):
-            raise ValueError("ClickHouse identifier parameters are forbidden")
+    def rewrite_publication_fence(self, sql: str, params: dict | None = None) -> str:
+        """Rewrite ``batch_id IN (SELECT ... FROM high_scale_batch_publications FINAL ...)`` when pending set is small."""
         svc_id = (params or {}).get("service_id")
         if (
             isinstance(svc_id, str)
@@ -190,6 +177,23 @@ class ClickHouseClient:
                 _replace_fence,
                 sql,
             )
+        return sql
+
+    def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
+        """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
+
+        ``settings`` adds allow-listed per-query ClickHouse settings (see ``_QUERY_SETTINGS``).
+        """
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError("ClickHouse SQL must be nonempty")
+        for name, value in (settings or {}).items():
+            if name not in _QUERY_SETTINGS:
+                raise ValueError(f"ClickHouse query setting {name!r} is not allowed")
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"ClickHouse query setting {name!r} needs a nonempty string value")
+        if re.search(r"\{[^{}]+:\s*Identifier\s*\}", sql, re.IGNORECASE):
+            raise ValueError("ClickHouse identifier parameters are forbidden")
+        sql = self.rewrite_publication_fence(sql, params)
         form = {"query": sql}
         for name, value in (params or {}).items():
             if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
