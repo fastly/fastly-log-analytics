@@ -1061,6 +1061,11 @@ class _TopNRollupMixin:
             _logger.debug("[top_n_rollups] missing-hour live heal failed", exc_info=True)
         return heal_res
 
+    def _partial_hour_carries_virtual_fields(self, active_token: str) -> bool:
+        from backend.core.rollups.day_bundles import partial_hour_has_virtual_fields
+
+        return partial_hour_has_virtual_fields(self.src, active_token)
+
     def try_virtual_field_top_n_from_rollup(
         self,
         virtual_id: str,
@@ -1083,14 +1088,31 @@ class _TopNRollupMixin:
         _active_dt, live_start, live_end = _active_hour_overlap(st, et)
         rows: list[tuple] | None = None
         used_combined_live = False
+        partial_counts: dict[str, int] = {}
         if live_start < live_end:
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if backing_col in cols:
+                active_token = _active_dt.strftime("%Y-%m-%d-%H")
+                if self._partial_hour_carries_virtual_fields(active_token):
+                    # The 30 s accumulator already holds the virtual counts up to its watermark, so only the
+                    # tail since then is exploded from raw rows.
+                    live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
+                        live_start, active_token, et
+                    )
+                    for field, value, count in partial_rows:
+                        if field == virtual_id:
+                            partial_counts[str(value)] = partial_counts.get(str(value), 0) + int(count)
+            if backing_col in cols and live_start < live_end:
                 tmp = self._create_active_hour_temp_direct([backing_col], cols, live_start, live_end)
                 if tmp == "__empty__":
-                    return {"top": [], "total": 0}
-                if tmp is None:
+                    if not partial_counts:
+                        return {"top": [], "total": 0}
+                    tmp = None
+                elif tmp is None:
                     return None
+            else:
+                tmp = None
+            if tmp is not None:
                 try:
                     rows = self._exec_rollup(
                         "SELECT value, CAST(SUM(c) AS BIGINT) AS total_c FROM ("
@@ -1119,6 +1141,11 @@ class _TopNRollupMixin:
             )
         if rows is None:
             return None
+        if partial_counts:
+            merged = dict(partial_counts)
+            for value, count in rows:
+                merged[str(value)] = merged.get(str(value), 0) + int(count or 0)
+            rows = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)
         total = 0
         top: list[dict[str, Any]] = []
         for value, count in rows:

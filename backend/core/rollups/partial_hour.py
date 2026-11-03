@@ -18,8 +18,10 @@ if TYPE_CHECKING:
     import duckdb
 
 from ._common import (
+    _VIRTUAL_FIELD_BACKING,
     TOP_K,
     _build_copy_query,
+    _build_virtual_field_copy_query,
     _is_safe_ident,
     parquet_zstd_target,
     parse_hour_token,
@@ -42,6 +44,27 @@ def partial_hour_dir(source: dict, hour: str) -> str:
 
 def _watermark_path(source: dict, hour: str) -> str:
     return os.path.join(partial_hour_dir(source, hour), ".watermark")
+
+
+def _virtual_marker_path(source: dict, hour: str) -> str:
+    return os.path.join(partial_hour_dir(source, hour), ".virtual_fields")
+
+
+def partial_hour_has_virtual_fields(source: dict, hour: str) -> bool:
+    """True when this hour's accumulator has carried the virtual fields since its first merge."""
+    return os.path.isfile(_virtual_marker_path(source, hour))
+
+
+def _increment_selects(
+    table_ident: str, available_fields: list[str], actual_cols: set[str], where_sql: str
+) -> list[str]:
+    selects = [_build_copy_query(table_ident, f, where_sql) for f in available_fields]
+    selects += [
+        _build_virtual_field_copy_query(table_ident, virtual, backing, where_sql)
+        for virtual, backing in _VIRTUAL_FIELD_BACKING.items()
+        if backing in actual_cols
+    ]
+    return selects
 
 
 def _all_fields_path(source: dict, hour: str) -> str:
@@ -234,8 +257,8 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
         total_select = (
             f"SELECT '{TOTAL_FIELD}' AS field, '' AS value, COUNT(*) AS count FROM {table_ident} WHERE {where_sql}"
         )
-        if available_fields:
-            per_field_selects = [_build_copy_query(table_ident, f, where_sql) for f in available_fields]
+        per_field_selects = _increment_selects(table_ident, available_fields, actual_cols, where_sql)
+        if per_field_selects:
             increment_sql = " UNION ALL ".join(f"({s})" for s in per_field_selects)
             increment_source = f"SELECT field, value, count FROM ({increment_sql})"
             select_sources = f"{increment_source}{existing_sql} UNION ALL ({total_select})"
@@ -273,8 +296,8 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
                     actual_cols = {row[0] for row in desc_rows}
                     available_fields = [f for f in safe_fields if f in actual_cols]
                     total_select = f"SELECT '{TOTAL_FIELD}' AS field, '' AS value, COUNT(*) AS count FROM {table_ident} WHERE {where_sql}"
-                    if available_fields:
-                        per_field_selects = [_build_copy_query(table_ident, f, where_sql) for f in available_fields]
+                    per_field_selects = _increment_selects(table_ident, available_fields, actual_cols, where_sql)
+                    if per_field_selects:
                         increment_sql = " UNION ALL ".join(f"({s})" for s in per_field_selects)
                         increment_source = f"SELECT field, value, count FROM ({increment_sql})"
                         select_sources = f"{increment_source}{existing_sql} UNION ALL ({total_select})"
@@ -298,6 +321,10 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
     finally:
         con.close()
     max_mtime = max((os.path.getmtime(p) for p in new_files if os.path.exists(p)), default=watermark)
+    if watermark == 0.0:
+        # A fresh accumulator carries the virtual fields from its first merge; older ones never did.
+        with open(_virtual_marker_path(source, active_hour), "w") as marker:
+            marker.write("1")
     _write_partial_hour_watermark(source, active_hour, max_mtime)
     duration_ms = (time.perf_counter() - t0) * 1000
     logger.debug(

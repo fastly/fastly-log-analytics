@@ -49,7 +49,7 @@ Fastly Log Analytics supports two primary deployment topologies sized for differ
 
 | Architecture | Intended Throughput (requests/sec at your VCL service, 100% logged) | Backend Engine | Ingest Topology | Best For |
 |---|---|---|---|---|
-| **Standard Architecture** | **Up to 5,000 – 10,000 RPS** | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
+| **Standard Architecture** | **Up to ~1,000 RPS comfortable on 4 vCPU / 16 GB** (ingest keeps pace to 10,000 RPS, but dashboard pages degrade above ~2,000 RPS — see [measured capacity](#measured-standard-mode-capacity-4-vcpu--16-gb)) | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
 | **High-Scale Architecture** | **50,000 sustained RPS** *(bursts to 100,000+ RPS)* | ClickHouse | High-Scale micro-batching workers + PostgreSQL control plane + FOS Archive Parquet | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
 
 > [!NOTE]
@@ -59,6 +59,42 @@ Fastly Log Analytics supports two primary deployment topologies sized for differ
 > - **Conditional Logging:** Log only requests meeting specific criteria (e.g., HTTP errors `resp.status >= 400`, backend origin fetches, requests with origin latency above a threshold, or security/WAF events).
 >
 > As performance optimizations continue to evolve, these throughput guidelines will be updated with each release.
+
+### Measured Standard-mode capacity (4 vCPU / 16 GB)
+
+Tested on a fresh install (no history) with a live synthetic feed stepped up without clearing data, log period 10 s, one analyst loading the pages every 30 s. Page times are API time-to-last-byte measured on the server; a browser adds network and render time (about 1–5 s usable at 1,000 RPS in our browser pass). Larger machines are not yet measured.
+
+| Log rate | Ingest | Lag p95 | Dashboard | Network | Origin / Security / Performance |
+|---|---|---|---|---|---|
+| 500 RPS | keeps pace | 3–4 s | under 2 s | under 2 s | under 1 s |
+| 1,000 RPS | keeps pace | 4–5 s | 1.8–2.6 s | 1.2–1.5 s | under 1 s |
+| 2,000 RPS | keeps pace | 6–9 s | 3–8 s | 2.4–4 s | under 1 s |
+| 5,000 RPS | keeps pace | 6–55 s | 8–30 s | 5–18 s | under 15 s |
+| 10,000 RPS | keeps pace on average | 12–36 s | 24–48 s | 5–16 s | under 15 s |
+
+What drives page time:
+
+- **The live hour is read raw** and grows through the hour, so pages that read it slow down until the top of the hour (Network fell from 16 s to 0.2 s at the rollover). The dashboard top-N is accelerated by a 30 s speed layer; Network, Origin and Security are not yet.
+- **A just-closed hour needs its rollups built.** A busy hour takes minutes of CPU (about 9 minutes for ~9M rows on 4 vCPUs) and is read raw until then.
+- **Ingest and rollup builds share the same CPUs as page queries**, so pages are slowest during commit and rollup bursts.
+
+Above ~2,000 RPS use a larger machine, sample or conditionally log at the edge (see the note above), or use the High-Scale architecture.
+
+### Storage sizing
+
+Local disk holds the DuckLake Parquet data, the incoming buffer, rollups, Postgres, and DuckDB's temporary spill space. Measured on synthetic traffic after 24M rows: Parquet data about 40 bytes/row, rollups about 2 bytes/row, buffer 155 MB, Postgres 193 MB. Synthetic data is low-cardinality; **plan for 50–150 bytes/row** on real traffic (long URLs, user agents and many distinct IPs compress worse).
+
+| Log rate (100% logged) | Rows/day | Parquet per day | 7 days retained |
+|---|---|---|---|
+| 500 RPS | 43M | 2–6 GB | 15–45 GB |
+| 1,000 RPS | 86M | 4–13 GB | 30–90 GB |
+| 2,000 RPS | 173M | 9–26 GB | 60–180 GB |
+| 5,000 RPS | 432M | 22–65 GB | 150–450 GB |
+| 10,000 RPS | 864M | 43–130 GB | 300–900 GB |
+
+Add **10–50 GB for temporary spill** and about 20% headroom. Disk needed is roughly `retention_days × RPS × 86,400 × bytes_per_row`, plus those two allowances. Put the data volume on its own disk where possible so a spill or a full buffer cannot starve Postgres or the OS.
+
+**Spill space.** DuckDB writes large intermediate results (closed-hour rollups of a busy hour) to `data/services/.tmp`. The cap defaults to a quarter of the free disk, kept between 10 GB and 50 GB; set `DUCKDB_MAX_TEMP_DIRECTORY_SIZE` (for example `30GB`) to choose your own. At 5,000 RPS the folder reached 8–9 GB within minutes of a restart, so a cap below 10 GB makes busy-hour rollups fail with `failed to offload data block`.
 
 ---
 

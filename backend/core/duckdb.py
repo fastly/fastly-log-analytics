@@ -138,14 +138,16 @@ _duckdb_status = _duckdb_status_mod
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
 
 _MIN_TEMP_DIRECTORY_GB = 10
-_TEMP_DIRECTORY_FREE_FRACTION = 0.5
+_MAX_DEFAULT_TEMP_DIRECTORY_GB = 50
+_TEMP_DIRECTORY_FREE_FRACTION = 0.25
 
 
 def _max_temp_directory_size(path: str | None) -> str:
-    """Spill-directory cap: ``DUCKDB_MAX_TEMP_DIRECTORY_SIZE``, else half the free disk (never below 10 GB).
+    """Spill-directory cap: ``DUCKDB_MAX_TEMP_DIRECTORY_SIZE``, else a quarter of the free disk, kept within 10-50 GB.
 
     A fixed 10 GB cap is exhausted by closed-hour rollups of a busy hour (high-cardinality per-field
     aggregates spill far more), which DuckDB reports as "failed to offload data block (9.3 GiB/9.3 GiB used)".
+    The upper bound keeps a runaway spill from crowding out data on a shared disk; set the env var to go higher.
     """
     if configured := os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE"):
         return configured
@@ -154,7 +156,8 @@ def _max_temp_directory_size(path: str | None) -> str:
         free = shutil.disk_usage(probe).free
     except OSError:
         return f"{_MIN_TEMP_DIRECTORY_GB}GB"
-    return f"{max(_MIN_TEMP_DIRECTORY_GB, int(free * _TEMP_DIRECTORY_FREE_FRACTION / 1e9))}GB"
+    gb = int(free * _TEMP_DIRECTORY_FREE_FRACTION / 1e9)
+    return f"{min(_MAX_DEFAULT_TEMP_DIRECTORY_GB, max(_MIN_TEMP_DIRECTORY_GB, gb))}GB"
 
 
 DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")

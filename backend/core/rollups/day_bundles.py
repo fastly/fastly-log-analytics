@@ -81,6 +81,7 @@ from .partial_hour import (  # noqa: F401
     gc_stale_partial_hours,
     merge_partial_hour,
     partial_hour_dir,
+    partial_hour_has_virtual_fields,
     partial_hour_root,
     read_partial_hour_all_fields,
     read_partial_hour_total,

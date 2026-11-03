@@ -38,6 +38,15 @@ Implemented in [`backend/core/storage/compaction.py`](../backend/core/storage/co
 
 Use local compaction for hot-tier dashboard performance; use `optimize` ([`docs/cron/jobs/optimize.md`](cron/jobs/optimize.md)) when compaction must also be reflected in FOS. Code that walks the local cache and deletes files not in a catalog must skip `compacted_*.parquet`, `daily/`, and `weekly/`.
 
+### Live-hour cost, closed-hour rollups and spill space (Standard mode)
+
+How page latency behaves as traffic grows (measurements in the README's "Measured Standard-mode capacity"):
+
+- **Closed hours** are served from per-hour rollups (`rollups/hour_bundled/hour=H/`). **The active hour** is read from the local buffer and DuckLake, so its cost grows with the hour's row count and resets at the UTC hour boundary. The partial-hour accumulator (`rollups/partial_hour/`, merged about every 30 s) lets dashboard top-N, including the virtual `waf_sig_ind` / `edge_score_reason_ind` fields on accumulators that started after the marker file `.virtual_fields` was written, scan only the rows since its watermark. Network, Origin and Security live-hour slices are still raw.
+- **A just-closed hour must be rolled up before its pages are fast.** `schedule_post_ingest_rollups` builds touched hours; `queue_unrolled_closed_hours` also queues any of the last three closed hours that have no `all_fields.parquet` (60 s after close, 10 minute retry cooldown) so a missed hour no longer waits for the hourly `rollup_hour_heal` job. That job now waits out the active-request gate instead of returning "deferred" and skipping its hour. A busy hour takes minutes of CPU, during which readers that need it fall back to raw reads.
+- **Spill space.** DuckDB spills large aggregates to `data/services/.tmp` (non-durable mode). When the spill cap (`DUCKDB_MAX_TEMP_DIRECTORY_SIZE`, default a quarter of free disk within 10-50 GB) is reached, DuckDB reports `failed to offload data block ... (9.3 GiB/9.3 GiB used)`, which looks like a memory error but is a disk-cap error; a 10 GB cap equals 9.3 GiB. Size the data disk for it (README "Storage sizing").
+- **Rollup fallbacks are logged.** A rollup read that fails logs the reason (`rollup read failed (<ExceptionType>)`, throttled); a fully covered but empty rollup is served as "no data" and never triggers a raw scan.
+
 ### Health probe
 `GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness (`max(ingested_at) FROM ingested_files` and the latest terminal `log_discovery` cron run) and returns 503 when any service is `degraded`: last ingest older than `stale_minutes` (default 30, widened per service to its own historical p95 gap between non-empty ingests so a low-traffic service's quiet periods don't false-positive), last discovery errored, a discovery row stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS`, or the latest `commit` errored. Celery mode additionally derives freshness from `ingest_ledger` ([ADR-16](adr/16-ingest-ledger.md)). Postgres-only, never FOS or Fastly; safe for a load balancer. Deep health requires authentication when `ADMIN_GATEWAY_REQUIRED=1`.
 

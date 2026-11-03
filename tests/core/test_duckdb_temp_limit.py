@@ -16,10 +16,16 @@ def _free(monkeypatch: pytest.MonkeyPatch, free_bytes: int) -> None:
     monkeypatch.setattr(shutil, "disk_usage", lambda _p: _Usage(0, 0, free_bytes))
 
 
-def test_cap_is_half_of_free_disk(monkeypatch, tmp_path):
+def test_cap_is_a_quarter_of_free_disk(monkeypatch, tmp_path):
     monkeypatch.delenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", raising=False)
-    _free(monkeypatch, 176 * 10**9)
-    assert core_duckdb._max_temp_directory_size(str(tmp_path)) == "88GB"
+    _free(monkeypatch, 120 * 10**9)
+    assert core_duckdb._max_temp_directory_size(str(tmp_path)) == "30GB"
+
+
+def test_default_cap_is_bounded_so_a_runaway_spill_cannot_fill_a_big_shared_disk(monkeypatch, tmp_path):
+    monkeypatch.delenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", raising=False)
+    _free(monkeypatch, 2000 * 10**9)
+    assert core_duckdb._max_temp_directory_size(str(tmp_path)) == "50GB"
 
 
 def test_cap_never_drops_below_ten_gb(monkeypatch, tmp_path):
