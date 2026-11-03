@@ -65,3 +65,12 @@ def test_rtts_respect_geography_so_proxy_rollups_are_not_flooded(scenario: str) 
     flagged = (distance_km > rtt_min_ms * 100.0 + 150.0) | ((tcp > 0) & (np.asarray(cols["rtt_min"]) / tcp < 0.2))
     assert flagged.mean() < 0.01
     assert (tcp >= np.asarray(cols["rtt_min"])).all()
+
+
+def test_client_geography_and_networks_have_realistic_cardinality() -> None:
+    cols = _cols("diurnal", n=60_000)
+    cells = {(la, lo) for la, lo in zip(cols["lat"], cols["lon"], strict=True)}
+    asns, counts = np.unique(np.asarray(cols["asn"]), return_counts=True)
+    assert len(cells) <= 40 * 24
+    assert len(asns) <= 3000
+    assert np.sort(counts)[::-1][:200].sum() / counts.sum() > 0.5

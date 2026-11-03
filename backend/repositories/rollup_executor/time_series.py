@@ -12,6 +12,8 @@ from backend.core.rollups import recompute as rollup_coverage
 from backend.core.rollups._common import (
     NETWORK_GEO_BUNDLE_FILENAME,
     NETWORK_HEATMAP_BUNDLE_FILENAME,
+    NETWORK_HEATMAP_BUNDLE_MIN_REQUESTS_PER_HOUR,
+    NETWORK_HEATMAP_BUNDLE_TOP_K,
     NGWAF_BOTS_TS_BUNDLE_FILENAME,
     ORIGIN_LATENCY_TS_BUNDLE_FILENAME,
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
@@ -697,13 +699,14 @@ class _TimeSeriesRollupMixin:
                 f"    errors * 100.0 / NULLIF(reqs, 0)                                  AS error_pct,"
                 f"    CAST(reqs AS BIGINT)                                               AS reqs"
                 f"   FROM read_parquet([{paths_sql}])   WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}'"
-                f"   UNION ALL    SELECT    asn,    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
+                f"   UNION ALL    (SELECT    asn,    TIMESTAMPTZ '{ah_iso}' AS bucket_ts,"
                 f"    CAST(SUM(resp_bytes) AS DOUBLE) / {active_duration_secs} AS throughput_bps,"
                 f"    CAST(approx_quantile(tcp_rtt, 0.5) AS DOUBLE) AS rtt_med_us,    {rtt_base} AS rtt_baseline_us,"
                 f"    {rtt_cong} AS rtt_congestion_us,    {ploss_expr} AS avg_ploss,    {jitter_expr} AS jitter_us,"
                 f"    CAST(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS DOUBLE) * 100.0 / NULLIF(COUNT(*), 0) AS error_pct,"
                 f"    CAST(COUNT(*) AS BIGINT) AS reqs   FROM {base_table} "
-                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'     AND asn IS NOT NULL   GROUP BY asn) ORDER BY reqs DESC"
+                f"   WHERE timestamp >= TIMESTAMPTZ '{ah_iso}' AND timestamp < TIMESTAMPTZ '{et_iso}'     AND asn IS NOT NULL   GROUP BY asn"
+                f"   HAVING COUNT(*) >= {NETWORK_HEATMAP_BUNDLE_MIN_REQUESTS_PER_HOUR}   ORDER BY reqs DESC   LIMIT {NETWORK_HEATMAP_BUNDLE_TOP_K})) ORDER BY reqs DESC"
             )
         else:
             sql = (

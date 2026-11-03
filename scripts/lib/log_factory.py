@@ -59,6 +59,8 @@ POP_WAVE_POPS = [
     "SJC", "EWR",
 ]
 _IP_POOL_SIZE = 254 * 254
+ASN_POOL_SIZE = 3000
+GEO_CELLS_PER_COUNTRY = 24
 _VECTOR_POOLS: dict[str, Any] = {}
 
 
@@ -92,6 +94,9 @@ def _ensure_vector_pools() -> dict[str, Any]:
         _VECTOR_POOLS["lats"] = np.array([COUNTRY_GEO_MAP[c]["lat"] for c in COUNTRIES], dtype=np.float64)
         _VECTOR_POOLS["lons"] = np.array([COUNTRY_GEO_MAP[c]["lon"] for c in COUNTRIES], dtype=np.float64)
         _VECTOR_POOLS["regions"] = np.array([COUNTRY_GEO_MAP[c]["region"] for c in COUNTRIES], dtype=object)
+        _VECTOR_POOLS["asns"] = np.arange(1000, 1000 + ASN_POOL_SIZE, dtype=np.int32)
+        zipf = 1.0 / np.arange(1, ASN_POOL_SIZE + 1) ** 1.1
+        _VECTOR_POOLS["asn_weights"] = zipf / zipf.sum()
         _VECTOR_POOLS["urls"] = np.array(URL_PATHS, dtype=object)
         _VECTOR_POOLS["uas"] = np.array(USER_AGENTS, dtype=object)
     return _VECTOR_POOLS
@@ -188,8 +193,9 @@ def generate_columns(
 
     city = pools["cities"][country_idx]
     metro = pools["metros"][country_idx]
-    lat = pools["lats"][country_idx] + rng.uniform(-0.15, 0.15, size=n)
-    lon = pools["lons"][country_idx] + rng.uniform(-0.15, 0.15, size=n)
+    geo_cell = rng.integers(0, GEO_CELLS_PER_COUNTRY, size=n)
+    lat = pools["lats"][country_idx] + (geo_cell % 6 - 2.5) * 0.4
+    lon = pools["lons"][country_idx] + (geo_cell // 6 - 1.5) * 0.4
     region = pools["regions"][country_idx]
 
     url_idx = rng.integers(0, len(URL_PATHS), size=n)
@@ -198,7 +204,7 @@ def generate_columns(
     ip = pools["ip"][ip_int]
     ua_idx = rng.integers(0, len(USER_AGENTS), size=n)
     ua = pools["uas"][ua_idx]
-    asn = rng.integers(1000, 65000, size=n, dtype=np.int32)
+    asn = rng.choice(pools["asns"], size=n, p=pools["asn_weights"])
 
     if scenario == "origin-5xx-outage":
         in_outage = (ts_ms >= outage_start) & (ts_ms <= outage_end)
