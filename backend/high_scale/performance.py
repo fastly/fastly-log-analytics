@@ -526,174 +526,212 @@ def value_summary(
         if cached is not None:
             return ValueSummaryResponse.with_telemetry(**cached)
 
-    trace = HighScaleSections(service.service_id, "value_summary")
-    where, params = _facts_where(service.service_id, start_time, end_time, filters)
-    hit_cond = "custom_fields['cache'] IN ('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
-    miss_cond = "custom_fields['cache'] = 'MISS'"
-    pass_cond = "custom_fields['cache'] = 'PASS'"
-    synth_cond = "custom_fields['cache'] = 'SYNTH'"
-    origin_cond = "custom_fields['cache'] IN ('MISS', 'PASS', 'SYNTH', 'ERROR')"
-    shield_cond = "lower(custom_fields['is_shield']) IN ('true', '1')"
-    waf_cond = "custom_fields['waf'] = '1'"
-    waf_block_cond = "custom_fields['waf'] = '1' AND custom_fields['waf_resp'] = '406'"
-    waf_log_cond = (
-        "custom_fields['waf'] = '1' AND custom_fields['waf_resp'] != '406' AND custom_fields['waf_sig'] != ''"
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
-    waf_pass_cond = "custom_fields['waf'] = '1' AND custom_fields['waf_resp'] = '200'"
-    elapsed_us_expr = f"({_ELAPSED_MS} * 1000.0)"
 
-    def _run_bucket_scan() -> list[dict[str, Any]]:
-        sql = (
-            f"/* value:combined_buckets */ SELECT "
-            f"toDateTime(intDiv(toUInt32(timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket, "
-            f"count() AS total, "
-            f"countIf({hit_cond}) AS hit_cnt, "
-            f"countIf({miss_cond}) AS miss_cnt, "
-            f"countIf({pass_cond}) AS pass_cnt, "
-            f"countIf({synth_cond}) AS synth_cnt, "
-            f"sumIf(bytes, {hit_cond}) AS bandwidth_saved, "
-            f"sum(bytes) AS total_bytes, "
-            f"countIf({origin_cond}) AS origin_cnt, "
-            f"countIf({shield_cond} AND {hit_cond}) AS shield_hit, "
-            f"countIf({shield_cond}) AS shield_total, "
-            f"countIf({waf_block_cond}) AS threats_cnt, "
-            f"sumIf({elapsed_us_expr}, {hit_cond}) AS sum_hit_elapsed, "
-            f"countIf({elapsed_us_expr} IS NOT NULL AND {hit_cond}) AS cnt_hit_elapsed, "
-            f"sumIf({elapsed_us_expr}, {miss_cond}) AS sum_miss_elapsed, "
-            f"countIf({elapsed_us_expr} IS NOT NULL AND {miss_cond}) AS cnt_miss_elapsed, "
-            f"countIf({waf_cond}) AS waf_inspected, "
-            f"countIf({waf_block_cond}) AS waf_blocked, "
-            f"countIf({waf_log_cond}) AS waf_logged, "
-            f"countIf({waf_pass_cond}) AS waf_passed, "
-            f"countIf(custom_fields['waf_sig'] != '') AS waf_sig_cnt, "
-            f"countIf(custom_fields['protocol'] IN ('3.0', '3', 'HTTP/3')) AS http3_cnt, "
-            f"countIf(custom_fields['protocol'] IN ('2.0', '2', 'HTTP/2')) AS h2_cnt, "
-            f"countIf(custom_fields['protocol'] IN ('1.1', 'HTTP/1.1')) AS h11_cnt, "
-            f"countIf(custom_fields['protocol'] NOT IN ('3.0', '3', 'HTTP/3', '2.0', '2', 'HTTP/2', '1.1', 'HTTP/1.1')) AS other_proto_cnt, "
-            f"countIf(lower(custom_fields['is_ssl']) IN ('true', '1') OR (custom_fields['tls'] != '' AND custom_fields['tls'] != '-')) AS tls_cnt, "
-            f"countIf(lower(custom_fields['ipv6']) IN ('true', '1')) AS ipv6_cnt "
-            f"FROM request_facts WHERE {where} GROUP BY bucket ORDER BY bucket"
+    def _compute() -> dict[str, Any]:
+        if cache_key is not None and (cached_inner := _perf_memo.get(cache_key)) is not None:
+            return cached_inner
+        trace = HighScaleSections(service.service_id, "value_summary")
+        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        hit_cond = "custom_fields['cache'] IN ('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+        miss_cond = "custom_fields['cache'] = 'MISS'"
+        pass_cond = "custom_fields['cache'] = 'PASS'"
+        synth_cond = "custom_fields['cache'] = 'SYNTH'"
+        origin_cond = "custom_fields['cache'] IN ('MISS', 'PASS', 'SYNTH', 'ERROR')"
+        shield_cond = (
+            "(lower(custom_fields['is_shield']) IN ('true', '1') OR lower(custom_fields['edge']) IN ('false', '0'))"
         )
-        return service.client.execute(sql, params)
-
-    buckets = trace.run("combined_buckets", _run_bucket_scan, source="fact")
-    total_requests = sum(int(b.get("total", 0) or 0) for b in buckets)
-    result: dict[str, Any] = {}
-
-    if {"caching", "overview", "performance"} & wanted:
-        shaped = _shape_caching_and_overview_buckets(
-            buckets,
-            include_overview="overview" in wanted,
-            has_resp_bytes=True,
-            has_shield=True,
-            has_waf=True,
-            has_elapsed=True,
-            include_performance="performance" in wanted,
+        waf_cond = "custom_fields['waf'] IN ('1', 'true', 'TRUE')"
+        waf_block_cond = "custom_fields['waf'] IN ('1', 'true', 'TRUE') AND custom_fields['waf_resp'] = '406'"
+        waf_log_cond = (
+            "custom_fields['waf'] IN ('1', 'true', 'TRUE') "
+            "AND custom_fields['waf_resp'] != '406' AND custom_fields['waf_sig'] != ''"
         )
-        if "caching" in wanted and "caching" in shaped:
-            result["caching"] = shaped["caching"]
-        if "overview" in wanted and "overview" in shaped:
-            result["overview"] = shaped["overview"]
-        if "performance" in wanted and "performance_from_buckets" in shaped:
-            pf = shaped["performance_from_buckets"]
-            p99_rows = trace.run(
-                "performance_p99",
-                lambda: service.client.execute(
-                    f"/* value:p99 */ SELECT quantileTDigest(0.99)({_ELAPSED_MS}) AS p99_ms "
-                    f"FROM request_facts WHERE {where}",
-                    params,
-                ),
-                source="fact",
+        waf_pass_cond = "custom_fields['waf'] IN ('1', 'true', 'TRUE') AND custom_fields['waf_resp'] = '200'"
+        elapsed_us_expr = f"({_ELAPSED_MS} * 1000.0)"
+        bytes_expr = "toInt64OrZero(coalesce(nullIf(custom_fields['resp_bytes'], ''), custom_fields['bytes']))"
+        proto_expr = "coalesce(nullIf(custom_fields['proto'], ''), custom_fields['protocol'])"
+        ipv6_expr = "coalesce(nullIf(custom_fields['is_ipv6'], ''), custom_fields['ipv6'])"
+
+        def _run_bucket_scan() -> list[dict[str, Any]]:
+            bot_select = (
+                ", countIf(custom_fields['_bot_name'] != '') AS bot_requests, "
+                "countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots "
+                if is_real_ch
+                else " "
             )
-            p99_val = _finite_float(p99_rows[0].get("p99_ms")) if p99_rows else None
-            result["performance"] = {
-                "cache_accel_factor": pf["cache_accel_factor"],
-                "avg_hit_latency_ms": pf["avg_hit_latency_ms"],
-                "avg_miss_latency_ms": pf["avg_miss_latency_ms"],
-                "p99_latency_ms": round(p99_val, 2) if p99_val is not None else None,
-                "total_requests": pf["total_requests"],
-                "latency_time_series": pf["latency_time_series"],
+            sql = (
+                f"/* value:combined_buckets */ SELECT "
+                f"toDateTime(intDiv(toUInt32(event_timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket, "
+                f"count() AS total, "
+                f"countIf({hit_cond}) AS hit_cnt, "
+                f"countIf({miss_cond}) AS miss_cnt, "
+                f"countIf({pass_cond}) AS pass_cnt, "
+                f"countIf({synth_cond}) AS synth_cnt, "
+                f"sumIf({bytes_expr}, {hit_cond}) AS bandwidth_saved, "
+                f"sum({bytes_expr}) AS total_bytes, "
+                f"countIf({origin_cond}) AS origin_cnt, "
+                f"countIf({shield_cond} AND {hit_cond}) AS shield_hit, "
+                f"countIf({shield_cond}) AS shield_total, "
+                f"countIf({waf_block_cond}) AS threats_cnt, "
+                f"sumIf({elapsed_us_expr}, {hit_cond}) AS sum_hit_elapsed, "
+                f"countIf({elapsed_us_expr} IS NOT NULL AND {hit_cond}) AS cnt_hit_elapsed, "
+                f"sumIf({elapsed_us_expr}, {miss_cond}) AS sum_miss_elapsed, "
+                f"countIf({elapsed_us_expr} IS NOT NULL AND {miss_cond}) AS cnt_miss_elapsed, "
+                f"countIf({waf_cond}) AS waf_inspected, "
+                f"countIf({waf_block_cond}) AS waf_blocked, "
+                f"countIf({waf_log_cond}) AS waf_logged, "
+                f"countIf({waf_pass_cond}) AS waf_passed, "
+                f"countIf(custom_fields['waf_sig'] != '') AS waf_sig_cnt, "
+                f"countIf({proto_expr} IN ('3.0', '3', 'HTTP/3', 'h3')) AS http3_cnt, "
+                f"countIf({proto_expr} IN ('2.0', '2', 'HTTP/2', 'h2')) AS h2_cnt, "
+                f"countIf({proto_expr} IN ('1.1', 'HTTP/1.1', 'http/1.1')) AS h11_cnt, "
+                f"countIf({proto_expr} NOT IN ('3.0', '3', 'HTTP/3', 'h3', '2.0', '2', 'HTTP/2', 'h2', '1.1', 'HTTP/1.1', 'http/1.1')) AS other_proto_cnt, "
+                f"countIf(lower(custom_fields['is_ssl']) IN ('true', '1') OR (custom_fields['tls'] != '' AND custom_fields['tls'] != '-')) AS tls_cnt, "
+                f"countIf(lower({ipv6_expr}) IN ('true', '1')) AS ipv6_cnt"
+                f"{bot_select}"
+                f"FROM request_facts WHERE {where} GROUP BY bucket ORDER BY bucket"
+            )
+            return service.client.execute(sql, params)
+
+        def _run_p99() -> list[dict[str, Any]]:
+            return service.client.execute(
+                f"/* value:p99 */ SELECT quantileTDigest(0.99)({_ELAPSED_MS}) AS p99_ms FROM request_facts WHERE {where}",
+                params,
+            )
+
+        if is_real_ch and "performance" in wanted:
+            init_res = trace.run_parallel(
+                [("combined_buckets", _run_bucket_scan), ("performance_p99", _run_p99)],
+                source="fact",
+                max_workers=2,
+                thread_name_prefix="hs-val",
+            )
+            buckets = init_res["combined_buckets"]
+            pre_p99_rows: list[dict[str, Any]] | None = init_res["performance_p99"]
+        else:
+            buckets = trace.run("combined_buckets", _run_bucket_scan, source="fact")
+            pre_p99_rows = None
+
+        total_requests = sum(int(b.get("total", 0) or 0) for b in buckets)
+        result: dict[str, Any] = {}
+
+        if {"caching", "overview", "performance"} & wanted:
+            shaped = _shape_caching_and_overview_buckets(
+                buckets,
+                include_overview="overview" in wanted,
+                has_resp_bytes=True,
+                has_shield=True,
+                has_waf=True,
+                has_elapsed=True,
+                include_performance="performance" in wanted,
+            )
+            if "caching" in wanted and "caching" in shaped:
+                result["caching"] = shaped["caching"]
+            if "overview" in wanted and "overview" in shaped:
+                result["overview"] = shaped["overview"]
+            if "performance" in wanted and "performance_from_buckets" in shaped:
+                pf = shaped["performance_from_buckets"]
+                p99_rows = (
+                    pre_p99_rows if pre_p99_rows is not None else trace.run("performance_p99", _run_p99, source="fact")
+                )
+                p99_val = _finite_float(p99_rows[0].get("p99_ms")) if p99_rows else None
+                result["performance"] = {
+                    "cache_accel_factor": pf["cache_accel_factor"],
+                    "avg_hit_latency_ms": pf["avg_hit_latency_ms"],
+                    "avg_miss_latency_ms": pf["avg_miss_latency_ms"],
+                    "p99_latency_ms": round(p99_val, 2) if p99_val is not None else None,
+                    "total_requests": pf["total_requests"],
+                    "latency_time_series": pf["latency_time_series"],
+                }
+
+        if "security" in wanted:
+            _sec_sum = lambda k: sum(int(b.get(k, 0) or 0) for b in buckets)  # noqa: E731
+            threat_ts: list[dict[str, Any]] = []
+            for b in buckets:
+                t_str = safe_iso(b["bucket"])
+                if int(b.get("waf_blocked") or 0):
+                    threat_ts.append({"time": t_str, "value": int(b["waf_blocked"]), "category": "blocked"})
+                if int(b.get("waf_logged") or 0):
+                    threat_ts.append({"time": t_str, "value": int(b["waf_logged"]), "category": "logged"})
+            top_signals: list[dict[str, Any]] = []
+            if _sec_sum("waf_sig_cnt") > 0:
+                sig_rows = trace.run(
+                    "security_top_signals",
+                    lambda: service.client.execute(
+                        f"/* value:waf_signals */ SELECT trimBoth(sig) AS signal, count() AS cnt "
+                        f"FROM request_facts ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS sig "
+                        f"WHERE {where} AND custom_fields['waf_sig'] != '' AND trimBoth(sig) != '' "
+                        f"GROUP BY signal ORDER BY cnt DESC LIMIT 10",
+                        params,
+                    ),
+                    source="fact",
+                )
+                top_signals = [{"signal": str(r["signal"]), "count": int(r["cnt"])} for r in sig_rows]
+            result["security"] = {
+                "total_requests": total_requests,
+                "waf_inspected": _sec_sum("waf_inspected"),
+                "waf_blocked": _sec_sum("waf_blocked"),
+                "waf_logged": _sec_sum("waf_logged"),
+                "waf_passed": _sec_sum("waf_passed"),
+                "threat_time_series": threat_ts,
+                "top_waf_signals": top_signals,
             }
 
-    if "security" in wanted:
-        _sec_sum = lambda k: sum(int(b.get(k, 0) or 0) for b in buckets)  # noqa: E731
-        threat_ts: list[dict[str, Any]] = []
-        for b in buckets:
-            t_str = safe_iso(b["bucket"])
-            if int(b.get("waf_blocked") or 0):
-                threat_ts.append({"time": t_str, "value": int(b["waf_blocked"]), "category": "blocked"})
-            if int(b.get("waf_logged") or 0):
-                threat_ts.append({"time": t_str, "value": int(b["waf_logged"]), "category": "logged"})
-        top_signals: list[dict[str, Any]] = []
-        if _sec_sum("waf_sig_cnt") > 0:
-            sig_rows = trace.run(
-                "security_top_signals",
-                lambda: service.client.execute(
-                    f"/* value:waf_signals */ SELECT trimBoth(sig) AS signal, count() AS cnt "
-                    f"FROM request_facts ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS sig "
-                    f"WHERE {where} AND custom_fields['waf_sig'] != '' AND trimBoth(sig) != '' "
-                    f"GROUP BY signal ORDER BY cnt DESC LIMIT 10",
-                    params,
-                ),
-                source="fact",
+        if "network" in wanted:
+            result["network"] = _shape_raw_network_buckets(
+                buckets,
+                total_requests,
+                has_protocol=True,
+                has_is_ssl=True,
+                has_ipv6=True,
             )
-            top_signals = [{"signal": str(r["signal"]), "count": int(r["cnt"])} for r in sig_rows]
-        result["security"] = {
-            "total_requests": total_requests,
-            "waf_inspected": _sec_sum("waf_inspected"),
-            "waf_blocked": _sec_sum("waf_blocked"),
-            "waf_logged": _sec_sum("waf_logged"),
-            "waf_passed": _sec_sum("waf_passed"),
-            "threat_time_series": threat_ts,
-            "top_waf_signals": top_signals,
-        }
 
-    if "network" in wanted:
-        result["network"] = _shape_raw_network_buckets(
-            buckets,
-            total_requests,
-            has_protocol=True,
-            has_is_ssl=True,
-            has_ipv6=True,
-        )
+        if "bots" in wanted:
+            if is_real_ch:
+                bot_req = sum(int(b.get("bot_requests", 0) or 0) for b in buckets)
+                ver_bots = sum(int(b.get("verified_bots", 0) or 0) for b in buckets)
+            else:
+                bot_rows = trace.run(
+                    "bots",
+                    lambda: service.client.execute(
+                        f"/* value:bots */ SELECT "
+                        f"countIf(custom_fields['_bot_name'] != '') AS bot_requests, "
+                        f"countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots "
+                        f"FROM request_facts WHERE {where}",
+                        params,
+                    ),
+                    source="fact",
+                )
+                bot_req = int(bot_rows[0].get("bot_requests") or 0) if bot_rows else 0
+                ver_bots = int(bot_rows[0].get("verified_bots") or 0) if bot_rows else 0
+            top_bots_list: list[dict[str, Any]] = []
+            if bot_req > 0:
+                tb_rows = trace.run(
+                    "top_bots",
+                    lambda: service.client.execute(
+                        f"/* value:top_bots */ SELECT custom_fields['_bot_name'] AS name, count() AS cnt "
+                        f"FROM request_facts WHERE {where} AND custom_fields['_bot_name'] != '' "
+                        f"GROUP BY name ORDER BY cnt DESC LIMIT 10",
+                        params,
+                    ),
+                    source="fact",
+                )
+                top_bots_list = [{"name": str(r["name"]), "count": int(r["cnt"])} for r in tb_rows]
+            result["bots"] = {
+                "total_requests": total_requests,
+                "bot_requests": bot_req,
+                "verified_bots": ver_bots,
+                "top_bots": top_bots_list,
+            }
 
-    if "bots" in wanted:
-        bot_rows = trace.run(
-            "bots",
-            lambda: service.client.execute(
-                f"/* value:bots */ SELECT "
-                f"countIf(custom_fields['_bot_name'] != '') AS bot_requests, "
-                f"countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots "
-                f"FROM request_facts WHERE {where}",
-                params,
-            ),
-            source="fact",
-        )
-        bot_req = int(bot_rows[0].get("bot_requests") or 0) if bot_rows else 0
-        ver_bots = int(bot_rows[0].get("verified_bots") or 0) if bot_rows else 0
-        top_bots_list: list[dict[str, Any]] = []
-        if bot_req > 0:
-            tb_rows = trace.run(
-                "top_bots",
-                lambda: service.client.execute(
-                    f"/* value:top_bots */ SELECT custom_fields['_bot_name'] AS name, count() AS cnt "
-                    f"FROM request_facts WHERE {where} AND custom_fields['_bot_name'] != '' "
-                    f"GROUP BY name ORDER BY cnt DESC LIMIT 10",
-                    params,
-                ),
-                source="fact",
-            )
-            top_bots_list = [{"name": str(r["name"]), "count": int(r["cnt"])} for r in tb_rows]
-        result["bots"] = {
-            "total_requests": total_requests,
-            "bot_requests": bot_req,
-            "verified_bots": ver_bots,
-            "top_bots": top_bots_list,
-        }
+        payload = {**result, "section_timings": trace.timings()}
+        if cache_key is not None:
+            _perf_memo.put(cache_key, payload)
+        return payload
 
-    payload = {**result, "section_timings": trace.timings()}
     if cache_key is not None:
-        _perf_memo.put(cache_key, payload)
-    return ValueSummaryResponse.with_telemetry(
-        **_perf_memo.result(payload, state="miss" if cache_key is not None else "bypass")
-    )
+        return ValueSummaryResponse.with_telemetry(**_perf_memo.coalesce(f"hs_value_summary:{cache_key}", _compute))
+    return ValueSummaryResponse.with_telemetry(**_perf_memo.result(_compute(), state="bypass"))

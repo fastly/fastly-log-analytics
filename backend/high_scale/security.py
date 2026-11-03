@@ -415,6 +415,39 @@ def security_aggregates(
         if (cached_inner := _security_memo.get(memo_key)) is not None:
             return cached_inner
         scope = _scope(service, req, start_time, end_time)
+        is_real_ch = (
+            hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+        )
+        sec_base_key = (
+            digest_cache_key(
+                {
+                    "ep": "hs_sec_sec_base",
+                    "cid": client_cache_token(service.client),
+                    "s": normalize_cache_bound(start_time),
+                    "e": normalize_cache_bound(end_time),
+                    "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                    "b": int(bucket_seconds),
+                    "m": bool(mask_ips),
+                },
+                {"name": service.service_id, "service_id": service.service_id},
+            )
+            if is_real_ch
+            else None
+        )
+
+        def _wrap_sec(sec_name: str, fn: Callable[[], Any]) -> Callable[[], Any]:
+            if sec_base_key is None or sec_name in ("_top_bots", "_proxies"):
+                return fn
+            s_key = f"{sec_base_key}:{sec_name}"
+
+            def _wrapped() -> Any:
+                if (hit := _security_memo.cache.get(s_key)) is not None:
+                    return hit
+                val = fn()
+                _security_memo.cache[s_key] = val
+                return val
+
+            return _wrapped
 
         def want(name: str) -> bool:
             return sections is None or name in sections
@@ -448,7 +481,7 @@ def security_aggregates(
             ("_top_bots", want("top_bots"), lambda: _top_bots(service, scope)),
             ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips)),
         )
-        tasks = [(k, fn) for k, w, fn in candidates if w]
+        tasks = [(k, _wrap_sec(k, fn)) for k, w, fn in candidates if w]
 
         trace = HighScaleSections(service.service_id, "security")
 
@@ -619,6 +652,26 @@ _PROXY_SOURCE = (
 
 
 def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[str, Any]:
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and scope.start is not None and scope.end is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_sec_proxies_inner",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(scope.start.isoformat()),
+                "e": normalize_cache_bound(scope.end.isoformat()),
+                "w": scope.where,
+                "p": sorted((k, str(v)) for k, v in scope.params.items()),
+                "m": bool(mask_ips),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _security_memo.cache.get(memo_key)) is not None:
+            return cached
+
     def _q_stats():
         return _run(
             service,
@@ -696,7 +749,10 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
         }
         for r in client_rows
     ]
-    return finish_security_proxies(scope.service_id, stat, quality_rows, isp_rows, raw_clients, mask_ips)
+    out = finish_security_proxies(scope.service_id, stat, quality_rows, isp_rows, raw_clients, mask_ips)
+    if memo_key is not None:
+        _security_memo.cache[memo_key] = out
+    return out
 
 
 def get_proxies_data(

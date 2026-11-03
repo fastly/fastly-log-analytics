@@ -405,13 +405,17 @@ def sessions_endpoint(
     )
     cached = _sessions_memo.get_with_telemetry(memo_key)
     if cached is not None:
-        return cached
-    rows = [
-        dict(r)
-        for r in service.client.execute(
-            "/* sessions:page */ "
-            + cte
-            + """
+        return {**cached, "sessions": [dict(r) for r in cached.get("sessions", [])]}
+
+    def _compute() -> dict[str, Any]:
+        if (cached_inner := _sessions_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        rows = [
+            dict(r)
+            for r in service.client.execute(
+                "/* sessions:page */ "
+                + cte
+                + """
     SELECT *,
            count() OVER () AS total_sessions,
            max(has_rtt_row) OVER () AS any_rtt,
@@ -423,47 +427,50 @@ def sessions_endpoint(
     WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
     """
-            + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
-            {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
+                + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
+                {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
+            )
+        ]
+        if rows and "unique_urls" not in rows[0]:
+            _enrich_paginated_sessions(service, rows, where, params)
+        if rows:
+            total = int(rows[0]["total_sessions"])
+        elif req.page > 1:
+            counted = service.client.execute(
+                "/* sessions:count */ " + fast_cte + "SELECT count() AS total_sessions" + _FILTERED, params
+            )
+            total = int(counted[0]["total_sessions"]) if counted else 0
+        else:
+            total = 0
+        first = rows[0] if rows else {}
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            session = {key: value for key, value in row.items() if key not in _HELPER_COLUMNS}
+            session["session_start"] = _iso(session.get("session_start"))
+            session["session_end"] = _iso(session.get("session_end"))
+            session["flagged"] = bool(session.get("flagged"))
+            session["is_streaming"] = bool(session.get("is_streaming"))
+            sessions.append(session)
+        result = shape_sessions_envelope(
+            sessions,
+            total=total,
+            page=req.page,
+            limit=req.limit,
+            has_rtt=bool(first.get("any_rtt")),
+            has_ja4=bool(first.get("any_ja4")),
+            has_edge=bool(first.get("any_edge")),
+            has_edge_sid=bool(first.get("any_edge_sid")),
+            has_cmcd=bool(first.get("any_cmcd")),
+            min_reqs_flag=min_reqs_flag,
+            min_4xx_pct_flag=min_4xx_pct_flag,
+            service_id=service.service_id,
+            asn_label_resolver=_asn_label_map,
         )
-    ]
-    if rows and "unique_urls" not in rows[0]:
-        _enrich_paginated_sessions(service, rows, where, params)
-    if rows:
-        total = int(rows[0]["total_sessions"])
-    elif req.page > 1:
-        counted = service.client.execute(
-            "/* sessions:count */ " + fast_cte + "SELECT count() AS total_sessions" + _FILTERED, params
-        )
-        total = int(counted[0]["total_sessions"]) if counted else 0
-    else:
-        total = 0
-    first = rows[0] if rows else {}
-    sessions: list[dict[str, Any]] = []
-    for row in rows:
-        session = {key: value for key, value in row.items() if key not in _HELPER_COLUMNS}
-        session["session_start"] = _iso(session.get("session_start"))
-        session["session_end"] = _iso(session.get("session_end"))
-        session["flagged"] = bool(session.get("flagged"))
-        session["is_streaming"] = bool(session.get("is_streaming"))
-        sessions.append(session)
-    result = shape_sessions_envelope(
-        sessions,
-        total=total,
-        page=req.page,
-        limit=req.limit,
-        has_rtt=bool(first.get("any_rtt")),
-        has_ja4=bool(first.get("any_ja4")),
-        has_edge=bool(first.get("any_edge")),
-        has_edge_sid=bool(first.get("any_edge_sid")),
-        has_cmcd=bool(first.get("any_cmcd")),
-        min_reqs_flag=min_reqs_flag,
-        min_4xx_pct_flag=min_4xx_pct_flag,
-        service_id=service.service_id,
-        asn_label_resolver=_asn_label_map,
-    )
-    _sessions_memo.put(memo_key, result)
-    return result
+        _sessions_memo.put(memo_key, result)
+        return result
+
+    out = _sessions_memo.coalesce(f"hs_sessions:{memo_key}", _compute)
+    return {**out, "sessions": [dict(r) for r in out.get("sessions", [])]}
 
 
 def sessions_detail(
