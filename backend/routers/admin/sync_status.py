@@ -162,6 +162,14 @@ def log_extents(
     return resp
 
 
+async def _safe_sample_sync_status(service_id: str) -> dict[str, Any] | None:
+    try:
+        res: dict[str, Any] | None = await asyncio.to_thread(_resolve_compute_sync_status_cached(), service_id)
+        return res
+    except Exception:
+        return None
+
+
 @meta_router.get("/log-extents/stream")
 async def log_extents_stream(
     request: Request,
@@ -188,28 +196,31 @@ async def log_extents_stream(
             yield json.dumps(initial)
         last_projected = initial
 
-        out_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=16)
+        out_q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=16)
 
         async def _sub_feeder() -> None:
-            async for payload in sync_status_publisher.subscribe(service_id):
-                projected = _project(payload)
-                if projected is not None:
-                    await out_q.put(projected)
+            try:
+                async for payload in sync_status_publisher.subscribe(service_id):
+                    projected = _project(payload)
+                    if projected is not None:
+                        await out_q.put(projected)
+            finally:
+                await out_q.put(None)
 
         async def _poll_feeder() -> None:
             while True:
                 await asyncio.sleep(5.0)
-                try:
-                    snap = await asyncio.to_thread(_resolve_compute_sync_status_cached(), service_id)
-                except Exception:
-                    continue
+                snap = await _safe_sample_sync_status(service_id)
                 projected = _project(snap)
                 if projected is not None:
                     await out_q.put(projected)
 
         async def _q_iter() -> AsyncIterator[dict[str, Any]]:
             while True:
-                yield await out_q.get()
+                item = await out_q.get()
+                if item is None:
+                    break
+                yield item
 
         tasks = [asyncio.ensure_future(_sub_feeder()), asyncio.ensure_future(_poll_feeder())]
         try:

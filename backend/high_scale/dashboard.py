@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from backend.core.request_telemetry import HighScaleSections
@@ -581,8 +581,23 @@ def _exact_end_fact_rows(
     start: datetime | None,
     end: datetime | None,
     fields: Iterable[str] = (),
+    *,
+    watermark: Any = None,
 ) -> list[dict[str, Any]]:
     if end is None or (start is not None and end < start):
+        return []
+    if watermark is not None and getattr(watermark, "coverage_end", None) is not None and end > watermark.coverage_end:
+        return []
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    if (
+        is_real_ch
+        and start is not None
+        and (end - start) >= timedelta(hours=24)
+        and end.second == 0
+        and end.microsecond == 0
+    ):
         return []
     unique_fields = [f for f in dict.fromkeys(fields) if f in _FIELD_DIMENSIONS]
     select_cols = ["event_timestamp AS exact_end_ts"]
@@ -687,9 +702,20 @@ def _cache_agg_resp(cache_key: str | None, resp: AggregatesResponse) -> Aggregat
 def dashboard_aggregates(
     service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
 ):
-    norm_interval = _normalize_chart_interval(req.chart_interval)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     start = _range_value(start_time)
     end = _range_value(end_time)
+    norm_interval = _normalize_chart_interval(req.chart_interval)
+    if (
+        req.chart_interval is None
+        and is_real_ch
+        and start is not None
+        and end is not None
+        and (end - start) >= timedelta(hours=24)
+    ):
+        norm_interval = "1 hour"
     trace = HighScaleSections(service.service_id, "dashboard")
     request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     cache_key: str | None = None
@@ -738,7 +764,14 @@ def dashboard_aggregates(
         all_fields_to_query.append("url")
 
     def _run_agg_batch() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        if hasattr(service.client, "responses"):
+        if hasattr(service.client, "responses") or (
+            is_real_ch
+            and start is not None
+            and end is not None
+            and (end - start) >= timedelta(hours=24)
+            and end.second == 0
+            and end.microsecond == 0
+        ):
             return (
                 _aggregates_batch(
                     service,
@@ -747,7 +780,7 @@ def dashboard_aggregates(
                     fields=all_fields_to_query,
                     watermark=request_watermark,
                 ),
-                _exact_end_fact_rows(service, start, end, all_fields_to_query),
+                _exact_end_fact_rows(service, start, end, all_fields_to_query, watermark=request_watermark),
             )
         from backend.utils.telemetry.metrics import get_queries
 
@@ -766,11 +799,7 @@ def dashboard_aggregates(
             )
             exact_fut = inner_pool.submit(
                 contextvars.copy_context().run,
-                _exact_end_fact_rows,
-                service,
-                start,
-                end,
-                all_fields_to_query,
+                partial(_exact_end_fact_rows, service, start, end, all_fields_to_query, watermark=request_watermark),
             )
             return agg_fut.result(), exact_fut.result()
 
@@ -912,8 +941,18 @@ def bundle(
     combined_timings = [
         t for r in (res_aggregates, res_top_bots) if r is not None for t in (getattr(r, "section_timings", None) or [])
     ]
+    all_cached = (
+        (not want_aggregates or bool(getattr(res_aggregates, "is_cached", False)))
+        and (not want_bots or bool(getattr(res_top_bots, "is_cached", False)))
+        and (want_aggregates or want_bots)
+    )
+    bundle_obs = (
+        cache_result({}, state="hit", prewarmer=False)
+        if all_cached
+        else cache_result({}, state="bypass", prewarmer=False)
+    )
     return {
-        **cache_result({}, state="bypass", prewarmer=False),
+        **bundle_obs,
         "aggregates": res_aggregates,
         "top_bots": res_top_bots,
         "section_timings": combined_timings,

@@ -501,32 +501,12 @@ def query_clickhouse_aggregates_batch(
                     f"SELECT dimension, sum(request_count) AS total_count FROM ({tot_union_sql}) GROUP BY dimension"
                 )
                 try:
-                    if "client_ip" in unique_dims and len(unique_dims) > 2:
-                        fast_sql, fast_params = _build_hourly_top_query(
-                            tuple(d for d in unique_dims if d != "client_ip")
-                        )
-                        ip_sql, ip_params = _build_hourly_top_query(("client_ip",))
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-                            totals_fut = pool.submit(
-                                contextvars.copy_context().run, client.execute, h_totals_sql, h_params
-                            )
-                            fast_fut = pool.submit(
-                                contextvars.copy_context().run, client.execute, fast_sql, fast_params
-                            )
-                            ip_fut = pool.submit(contextvars.copy_context().run, client.execute, ip_sql, ip_params)
-                            totals_rows = totals_fut.result()
-                            top_rows = list(fast_fut.result()) + list(ip_fut.result())
-                    else:
-                        h_top_sql, h_top_params = _build_hourly_top_query(tuple(unique_dims))
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                            totals_fut = pool.submit(
-                                contextvars.copy_context().run, client.execute, h_totals_sql, h_params
-                            )
-                            top_fut = pool.submit(
-                                contextvars.copy_context().run, client.execute, h_top_sql, h_top_params
-                            )
-                            totals_rows = totals_fut.result()
-                            top_rows = top_fut.result()
+                    h_top_sql, h_top_params = _build_hourly_top_query(tuple(unique_dims))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        totals_fut = pool.submit(contextvars.copy_context().run, client.execute, h_totals_sql, h_params)
+                        top_fut = pool.submit(contextvars.copy_context().run, client.execute, h_top_sql, h_top_params)
+                        totals_rows = totals_fut.result()
+                        top_rows = top_fut.result()
                 except ClickHouseError:
                     totals_rows = []
                     top_rows = []

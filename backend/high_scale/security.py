@@ -710,9 +710,9 @@ def get_proxies_data(
     }
 
 
-def get_security_threat_intel(
-    service: HighScaleService, start_time: str | None, end_time: str | None
-) -> dict[str, Any]:
+def get_security_threat_intel(service: HighScaleService, start_time: str | None, end_time: str | None) -> Any:
+    from backend.models.analytics import ThreatIntelListResponse
+
     scope = _scope(service, None, start_time, end_time)
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
@@ -723,13 +723,13 @@ def get_security_threat_intel(
             {
                 "ep": "hs_security_threat_intel",
                 "cid": client_cache_token(service.client),
-                "s": scope.start.isoformat(),
-                "e": scope.end.isoformat(),
+                "s": int(scope.start.timestamp()) // 60,
+                "e": int(scope.end.timestamp()) // 60,
             },
             {"name": service.service_id, "service_id": service.service_id},
         )
-        if (cached := _security_memo.get(memo_key)) is not None:
-            return cached
+        if (cached := _security_memo.get_with_telemetry(memo_key)) is not None:
+            return ThreatIntelListResponse.with_telemetry(**cached)
     rows = _run(
         service,
         scope,
@@ -755,7 +755,8 @@ def get_security_threat_intel(
         ]
     }
     if memo_key is not None:
-        _security_memo.put(memo_key, out)
+        _security_memo.put(memo_key, dict(out))
+        return ThreatIntelListResponse.with_telemetry(**_security_memo.result(out, state="miss"))
     return out
 
 

@@ -144,12 +144,8 @@ def network_health(
         from backend.high_scale.network import network_health as hs_network_health
 
         resp = hs_network_health(high_scale_service, req, start_time, end_time)
-        is_real_ch = (
-            hasattr(high_scale_service.client, "_http")
-            and "MockTransport" not in type(high_scale_service.client._http._transport).__name__
-        )
-        if is_real_ch and getattr(resp, "is_cached", False):
-            return JSONResponse(content=resp.model_dump(mode="json", by_alias=True))
+        if (cached_json := getattr(resp, "_cached_json_dict", None)) is not None:
+            return JSONResponse(content=cached_json)
         return resp
     sections = _expand_network_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
@@ -296,15 +292,20 @@ def get_pop_health(
 def _network_bundle_impl(
     req: NetworkBundleRequest,
     ctx: RequestContext,
-) -> NetworkBundleResponse:
+) -> Any:
     with process_context_scope("network:bundle"):
         start_time, end_time, keyed_range_token, keyed_anchor, invite_fp = _resolve_network_window(req, ctx)
 
         high_scale_service = ctx.high_scale
         if high_scale_service is not None:
+            from fastapi.responses import JSONResponse
+
             from backend.high_scale.network import network_bundle as hs_network_bundle
 
-            return hs_network_bundle(high_scale_service, req, start_time, end_time)
+            bundle_resp = hs_network_bundle(high_scale_service, req, start_time, end_time)
+            if (cached_json := getattr(bundle_resp, "_cached_json_dict", None)) is not None:
+                return JSONResponse(content=cached_json)
+            return bundle_resp
 
         sections = _expand_network_sections(req.sections) if req.sections else None
         mask_ips = mask_ips_for(ctx.analyst_session)

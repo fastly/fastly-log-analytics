@@ -74,6 +74,15 @@ def _resolve_metrics_sampler() -> Any:
     return sample_system_metrics_cached
 
 
+async def _safe_sample_sync_status(service_id: str) -> dict[str, Any] | None:
+    try:
+        res: dict[str, Any] | None = await asyncio.to_thread(_resolve_sync_status_fn(), service_id)
+        return res
+    except Exception:
+        logger.exception("sync-status sample failed; will retry next tick")
+        return None
+
+
 async def _sync_status_feeder(q: asyncio.Queue[dict[str, Any]], service_id: str) -> None:
     fn = _resolve_sync_status_fn()
     initial = await asyncio.to_thread(fn, service_id)
@@ -85,11 +94,7 @@ async def _sync_status_feeder(q: asyncio.Queue[dict[str, Any]], service_id: str)
         nonlocal last_payload
         while True:
             await asyncio.sleep(_SYNC_STATUS_SAMPLE_INTERVAL_SECONDS)
-            try:
-                payload = await asyncio.to_thread(_resolve_sync_status_fn(), service_id)
-            except Exception:
-                logger.exception("sync-status sample failed; will retry next tick")
-                continue
+            payload = await _safe_sample_sync_status(service_id)
             if payload is not None and payload != last_payload:
                 _offer(q, {"channel": "sync-status", "data": payload})
                 last_payload = payload

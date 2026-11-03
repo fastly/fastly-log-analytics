@@ -2214,7 +2214,7 @@ def test_backfill_recognizes_valid_retired_daily_coverage(tmp_path, monkeypatch,
         class WindowNow(datetime):
             @classmethod
             def now(cls, tz=None):
-                return end.astimezone(tz or UTC)
+                return (end + timedelta(minutes=10)).astimezone(tz or UTC)
 
         monkeypatch.setattr("backend.core.rollups.recompute.datetime", WindowNow)
     monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a: None)

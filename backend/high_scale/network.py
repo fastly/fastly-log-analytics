@@ -54,6 +54,8 @@ _network_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("high_scale.network", _network_memo.cache)
 _network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
 CacheRegistry.register("high_scale.network.models", _network_model_cache)
+_network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
+CacheRegistry.register("high_scale.network.json", _network_json_cache)
 
 from backend.high_scale._common import optional_int as _finite_int
 from backend.models.analytics import (
@@ -336,7 +338,7 @@ def network_health(
     )
     if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
         if (cached_model := _network_model_cache.get(memo_key)) is not None:
-            return cached_model.model_copy(
+            hit_resp = cached_model.model_copy(
                 update={
                     "is_cached": True,
                     "response_cache": cached.get("_response_cache") or cached.get("response_cache"),
@@ -346,6 +348,21 @@ def network_health(
                     "debug_postgres": [],
                 }
             )
+            if (cached_json := _network_json_cache.get(memo_key)) is not None:
+                object.__setattr__(
+                    hit_resp,
+                    "_cached_json_dict",
+                    {
+                        **cached_json,
+                        "_is_cached": True,
+                        "_response_cache": cached.get("_response_cache") or cached.get("response_cache"),
+                        "_debug_queries": [],
+                        "_debug_calls": [],
+                        "_debug_sqlite": [],
+                        "_debug_postgres": [],
+                    },
+                )
+            return hit_resp
         return NetworkHealthResponse.with_telemetry(**cached)
     filter_sql, filter_params = _filter_clause(getattr(req, "filters", None), drop_asn=map_asn != "all")
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
@@ -625,6 +642,13 @@ def network_health(
         **_network_memo.result(payload, state="miss"),
     )
     _network_model_cache[memo_key] = resp
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    if is_real_ch:
+        dumped = resp.model_dump(mode="json", by_alias=True)
+        _network_json_cache[memo_key] = dumped
+        object.__setattr__(resp, "_cached_json_dict", dumped)
     return resp
 
 
@@ -791,13 +815,13 @@ def get_pop_health(
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
     memo_key: str | None = None
-    if is_real_ch and start_time is not None and end_time is not None:
+    if is_real_ch:
         memo_key = digest_cache_key(
             {
                 "ep": "hs_pop_health",
                 "cid": client_cache_token(service.client),
-                "s": start.isoformat(),
-                "e": end.isoformat(),
+                "s": int(start.timestamp()) // 60,
+                "e": int(end.timestamp()) // 60,
             },
             {"name": service.service_id, "service_id": service.service_id},
         )
@@ -922,6 +946,54 @@ def network_bundle(
     service: HighScaleService, req: NetworkBundleRequest, start_time: str | None, end_time: str | None
 ) -> NetworkBundleResponse:
     sections = set(req.sections) if req.sections else None
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_network_bundle",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
+                "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                "bs": int(getattr(req, "bucket_seconds", 300) or 300),
+                "tn": int(getattr(req, "top_n", 30) or 30),
+                "ma": str(getattr(req, "map_asn", "all") or "all"),
+                "rc": str(getattr(req, "region_country", "US") or "US"),
+                "sec": sorted(sections) if sections is not None else None,
+                "m": str(getattr(req, "metric", "health_score") or "health_score"),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+            if (cached_model := _network_model_cache.get(memo_key)) is not None:
+                hit_resp = cached_model.model_copy(
+                    update={
+                        "is_cached": True,
+                        "response_cache": cached.get("_response_cache") or cached.get("response_cache"),
+                        "debug_queries": [],
+                        "debug_calls": [],
+                        "debug_sqlite": [],
+                        "debug_postgres": [],
+                    }
+                )
+                if (cached_json := _network_json_cache.get(memo_key)) is not None:
+                    object.__setattr__(
+                        hit_resp,
+                        "_cached_json_dict",
+                        {
+                            **cached_json,
+                            "_is_cached": True,
+                            "_response_cache": cached.get("_response_cache") or cached.get("response_cache"),
+                            "_debug_queries": [],
+                            "_debug_calls": [],
+                            "_debug_sqlite": [],
+                            "_debug_postgres": [],
+                        },
+                    )
+                return hit_resp
     q_req = NetworkQualityRequest(
         region_country=req.region_country, filters=req.filters, start_time=start_time, end_time=end_time
     )
@@ -962,15 +1034,26 @@ def network_bundle(
         if r is not None
         for t in (getattr(r, "section_timings", None) or [])
     ]
+    payload: dict[str, Any] = {
+        "available": True,
+        "section_timings": combined_timings,
+        "component_observations": {"pop_health": pop_response} if pop_response is not None else None,
+        "health": health_resp,
+        "quality": quality_resp,
+        "pop_health": pop_response.data if pop_response is not None else None,
+        "transport": transport_resp,
+    }
+    if memo_key is not None:
+        _network_memo.put(memo_key, dict(payload))
+        bundle_resp = NetworkBundleResponse.with_telemetry(**_network_memo.result(payload, state="miss"))
+        _network_model_cache[memo_key] = bundle_resp
+        dumped = bundle_resp.model_dump(mode="json", by_alias=True)
+        _network_json_cache[memo_key] = dumped
+        object.__setattr__(bundle_resp, "_cached_json_dict", dumped)
+        return bundle_resp
     return NetworkBundleResponse.with_telemetry(
         **cache_result({}, state="bypass", prewarmer=False),
-        available=True,
-        section_timings=combined_timings,
-        component_observations={"pop_health": pop_response} if pop_response is not None else None,
-        health=health_resp,
-        quality=quality_resp,
-        pop_health=pop_response.data if pop_response is not None else None,
-        transport=transport_resp,
+        **payload,
     )
 
 
