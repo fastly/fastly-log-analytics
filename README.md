@@ -75,7 +75,7 @@ Tested on a fresh install (no history) with a live synthetic feed stepped up wit
 What drives page time:
 
 - **The live hour is read raw** and grows through the hour, so pages that read it slow down until the top of the hour (Network fell from 16 s to 0.2 s at the rollover). The dashboard top-N is accelerated by a 30 s speed layer; Network, Origin and Security are not yet.
-- **A just-closed hour needs its rollups built.** A busy hour takes minutes of CPU: about 9 minutes for ~9M rows on an idle 4 vCPU machine, and about 22 minutes for an hour of ~18M rows (5,000 RPS) while serving traffic. Pages that read that hour fall back to raw scans, and ingest and page queries slow down, until it finishes.
+- **A just-closed hour needs its rollups built.** A busy hour takes minutes of CPU: about 33 seconds per million rows on an idle 4 vCPU machine (roughly 10 minutes for an hour at 5,000 RPS), and about twice that while serving traffic. Pages that read that hour fall back to raw scans, and ingest and page queries slow down, until it finishes.
 - **Ingest and rollup builds share the same CPUs as page queries**, so pages are slowest during commit and rollup bursts.
 
 Above ~2,000 RPS use a larger machine, sample or conditionally log at the edge (see the note above), or use the High-Scale architecture.
