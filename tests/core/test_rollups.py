@@ -3068,17 +3068,32 @@ class TestRollupsPartialHour:
         assert ph.read_partial_hour_total(src, active_hour) == 3
         assert all(field != ph.TOTAL_FIELD for field, _, _ in per_field_rows)
 
-    def test_merge_partial_hour_accumulates_virtual_fields_and_marks_a_fresh_accumulator(self, tmp_path):
+    def _merge_waf_rows_at(self, tmp_path, minute: int):
+        import time_machine
+
         src, active_hour, hourly_dir, now = self._setup_active_hour(tmp_path)
+        at = now.replace(minute=minute, second=30, microsecond=0)
         _write_hourly_parquet(
             os.path.join(hourly_dir, "batch1.parquet"),
-            [(now, "A,B"), (now, "B"), (now, None)],
+            [(at, "A,B"), (at, "B"), (at, None)],
             schema="timestamp TIMESTAMP, waf_sig VARCHAR",
         )
-        ph.merge_partial_hour("svc-a", src, [])
+        with time_machine.travel(at, tick=False):
+            ph.merge_partial_hour("svc-a", src, [])
         counts = {v: c for f, v, c in ph.read_partial_hour_all_fields(src, active_hour) if f == "waf_sig_ind"}
+        return src, active_hour, counts
+
+    def test_merge_partial_hour_accumulates_virtual_fields_and_marks_an_accumulator_started_at_the_top_of_the_hour(
+        self, tmp_path
+    ):
+        src, active_hour, counts = self._merge_waf_rows_at(tmp_path, minute=0)
         assert counts == {"A": 1, "B": 2}
         assert ph.partial_hour_has_virtual_fields(src, active_hour)
+
+    def test_merge_partial_hour_does_not_vouch_for_virtual_fields_when_it_starts_mid_hour(self, tmp_path):
+        src, active_hour, counts = self._merge_waf_rows_at(tmp_path, minute=20)
+        assert counts == {"A": 1, "B": 2}
+        assert not ph.partial_hour_has_virtual_fields(src, active_hour)
 
     def test_merge_partial_hour_does_not_claim_virtual_fields_for_an_older_accumulator(self, tmp_path):
         src, active_hour, hourly_dir, now = self._setup_active_hour(tmp_path)

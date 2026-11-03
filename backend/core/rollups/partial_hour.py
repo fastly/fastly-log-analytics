@@ -31,6 +31,8 @@ from ._common import (
 
 logger = logging.getLogger(__name__)
 
+_VIRTUAL_MARKER_MAX_START_AGE_S = 180
+
 
 def partial_hour_root(source: dict) -> str:
     from backend.core.duckdb import _cache_dir
@@ -321,8 +323,9 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
     finally:
         con.close()
     max_mtime = max((os.path.getmtime(p) for p in new_files if os.path.exists(p)), default=watermark)
-    if watermark == 0.0:
-        # A fresh accumulator carries the virtual fields from its first merge; older ones never did.
+    if watermark == 0.0 and (datetime.now(UTC) - hour_start).total_seconds() <= _VIRTUAL_MARKER_MAX_START_AGE_S:
+        # Only an accumulator that began at the top of the hour has seen every buffer file (committed files leave
+        # the buffer), so only it can vouch for complete virtual-field counts. Older or restarted ones never did.
         with open(_virtual_marker_path(source, active_hour), "w") as marker:
             marker.write("1")
     _write_partial_hour_watermark(source, active_hour, max_mtime)
