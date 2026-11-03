@@ -2257,6 +2257,18 @@ class TestQueueUnrolledClosedHours:
         assert first and second == set()
         assert len(self.queued) == 1
 
+    def test_an_hour_already_pending_or_being_rebuilt_is_not_queued_again(self):
+        with sync_mod._rollup_lock:
+            sync_mod._rollup_pending["svc-q"] = {"2026-11-03-18"}
+            sync_mod._rollup_active["svc-q"] = {"2026-11-03-17"}
+        try:
+            got = sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=self.NOW)
+        finally:
+            with sync_mod._rollup_lock:
+                sync_mod._rollup_pending.pop("svc-q", None)
+                sync_mod._rollup_active.pop("svc-q", None)
+        assert got == {"2026-11-03-16"}
+
     def test_durable_mode_never_queues(self, monkeypatch):
         monkeypatch.setattr(sync_mod.svcconfig, "is_durable_serving_mode", lambda src=None: True)
         assert sync_mod.queue_unrolled_closed_hours("svc-q", {"name": "svc-q"}, now=self.NOW) == set()

@@ -124,6 +124,7 @@ _rollup_lock = threading.Lock()
 _rollup_pending: dict[str, set[str]] = {}
 _rollup_sources: dict[str, dict[str, Any]] = {}
 _rollup_workers: dict[str, threading.Thread] = {}
+_rollup_active: dict[str, set[str]] = {}
 
 
 def _post_ingest_rollup_worker(service_id: str) -> None:
@@ -135,8 +136,10 @@ def _post_ingest_rollup_worker(service_id: str) -> None:
             hours = _rollup_pending.pop(service_id, set())
             src = _rollup_sources.get(service_id)
             if not hours or src is None:
+                _rollup_active.pop(service_id, None)
                 _rollup_workers.pop(service_id, None)
                 return
+            _rollup_active[service_id] = set(hours)
         # Wellknown-bots rollup is best-effort: the security reader has a
         # live-SQL fallback for any hour without one.
         for fn, label in (
@@ -181,12 +184,13 @@ def queue_unrolled_closed_hours(service_id: str, src: dict[str, Any], *, now: da
     hour_floor = now.replace(minute=0, second=0, microsecond=0)
     queued: set[str] = set()
     with _rollup_lock:
+        in_flight = _rollup_pending.get(service_id, set()) | _rollup_active.get(service_id, set())
         for back in range(1, _FINALIZE_LOOKBACK_HOURS + 1):
             start = hour_floor - timedelta(hours=back)
             if now < start + timedelta(hours=1, seconds=_FINALIZE_GRACE_S):
                 continue
             key = start.strftime("%Y-%m-%d-%H")
-            if os.path.isfile(os.path.join(root, f"hour={key}", "all_fields.parquet")):
+            if key in in_flight or os.path.isfile(os.path.join(root, f"hour={key}", "all_fields.parquet")):
                 continue
             last = _finalize_attempted.get((service_id, key))
             if last is not None and time.monotonic() - last < _FINALIZE_RETRY_S:
