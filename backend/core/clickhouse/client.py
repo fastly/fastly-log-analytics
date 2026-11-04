@@ -208,33 +208,33 @@ class ClickHouseClient:
             trust_env=False,
         )
 
-    def _is_stale_batch_empty(self, service_id: str, domain: str, batch_id: str) -> bool:
-        cache_key = (service_id, domain, batch_id)
-        if cache_key in self._empty_stale_batches:
-            return True
-        tables = _DOMAIN_TABLES.get(domain)
-        if not tables:
-            return False
-        try:
-            for tbl in tables:
-                cnt_rows = self._request(
-                    "execute",
-                    data={
-                        "query": (
-                            f"SELECT count() AS c FROM `{tbl}` "
-                            "WHERE service_id = {service_id:String} AND batch_id = {batch_id:String}"
-                        ),
-                        "param_service_id": _parameter(service_id),
-                        "param_batch_id": _parameter(batch_id),
-                    },
-                    settings=None,
-                )
-                if not cnt_rows or int(cnt_rows[0].get("c") or 0) > 0:
-                    return False
-            self._empty_stale_batches.add(cache_key)
-            return True
-        except Exception:
-            return False
+    def _filter_empty_stale_batches(self, service_id: str, domain: str, stale_bids: list[str]) -> set[str]:
+        uncached = [bid for bid in stale_bids if (service_id, domain, bid) not in self._empty_stale_batches]
+        if uncached and (tables := _DOMAIN_TABLES.get(domain)):
+            try:
+                quoted = ", ".join(f"'{bid}'" for bid in uncached)
+                non_empty: set[str] = set()
+                for tbl in tables:
+                    rows = self._request(
+                        "execute",
+                        data={
+                            "query": (
+                                f"SELECT DISTINCT batch_id FROM `{tbl}` "
+                                f"WHERE service_id = {{service_id:String}} AND batch_id IN ({quoted})"
+                            ),
+                            "param_service_id": _parameter(service_id),
+                        },
+                        settings=None,
+                    )
+                    for r in rows or []:
+                        if b := str(r.get("batch_id") or ""):
+                            non_empty.add(b)
+                for bid in uncached:
+                    if bid not in non_empty:
+                        self._empty_stale_batches.add((service_id, domain, bid))
+            except Exception:
+                pass
+        return {bid for bid in stale_bids if (service_id, domain, bid) in self._empty_stale_batches}
 
     def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
         if isinstance(self._http._transport, httpx.MockTransport):
@@ -262,14 +262,25 @@ class ClickHouseClient:
                     "param_service_id": _parameter(service_id),
                 }
                 rows = self._request("execute", data=check_form, settings=None)
-                by_dom: dict[str, list[str]] = {}
+                candidates_by_dom: dict[str, list[tuple[str, bool]]] = {}
+                stale_by_dom: dict[str, list[str]] = {}
                 for r in rows or []:
                     dom = str(r.get("domain") or "")
                     bid = str(r.get("batch_id") or "")
                     if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
-                        if int(r.get("is_stale") or 0) == 1 and self._is_stale_batch_empty(service_id, dom, bid):
-                            continue
-                        by_dom.setdefault(dom, []).append(bid)
+                        is_stale = int(r.get("is_stale") or 0) == 1
+                        candidates_by_dom.setdefault(dom, []).append((bid, is_stale))
+                        if is_stale:
+                            stale_by_dom.setdefault(dom, []).append(bid)
+                empty_stale_by_dom = {
+                    dom: self._filter_empty_stale_batches(service_id, dom, bids) for dom, bids in stale_by_dom.items()
+                }
+                by_dom: dict[str, list[str]] = {}
+                for dom, cands in candidates_by_dom.items():
+                    empty_set = empty_stale_by_dom.get(dom, set())
+                    kept = [bid for bid, is_stale in cands if not (is_stale and bid in empty_set)]
+                    if kept:
+                        by_dom[dom] = kept
                 pending_map = {k: tuple(v) for k, v in by_dom.items()}
             except Exception:
                 pending_map = None

@@ -430,7 +430,8 @@ def network_health(
         err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch and not map_only:
-            sample_stride = 4 if start is not None and end is not None and (end - start).total_seconds() >= 21600 else 1
+            nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+            sample_stride = 6 if nh_span_s >= 43200 else (4 if nh_span_s >= 21600 else 1)
             stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
@@ -1057,17 +1058,16 @@ def network_quality(
             q_res_mixed: dict[str, Any] = trace.run_parallel(
                 [
                     ("rollup_bars", _bars_from_rollup),
-                    ("asn", partial(_bar, _ASN, "")),
                     ("region", partial(_bar, "custom_fields['region']", " AND country = {region_country:String}")),
                     ("scatter", _run_scatter),
                 ],
                 source="projection",
-                max_workers=4,
+                max_workers=3,
                 thread_name_prefix="hs-net-quality",
             )
             rollup_bars = q_res_mixed["rollup_bars"]
             by_country = rollup_bars.get("country", [])
-            by_asn = rollup_bars.get("asn", []) or q_res_mixed["asn"]
+            by_asn = rollup_bars.get("asn") or _bar(_ASN, "")
             by_pop = rollup_bars.get("pop", [])
             by_region = q_res_mixed["region"]
             scatter_rows = q_res_mixed["scatter"]

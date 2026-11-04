@@ -371,19 +371,32 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             )
         if ua_rollup_rows:
             matcher = build_well_known_bots_matcher()
-            matching_uas = [str(r["ua"]) for r in ua_rollup_rows if r.get("ua") and matcher(str(r["ua"])) is not None]
+            matching_uas = [str(r["ua"]) for r in ua_rollup_rows if r.get("ua") and matcher(str(r["ua"]))]
             if not matching_uas:
                 return []
             in_list = ", ".join(repr(u) for u in matching_uas[:500])
+            wk_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
+            wk_stride = 4 if wk_span_s >= 21600 else 1
+            wk_stride_sql = f" AND toMinute(event_timestamp) % {wk_stride} = 0" if wk_stride > 1 else ""
             rows = _run(
                 service,
                 scope,
                 "wellknown_bots",
                 f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
-                f"PREWHERE __WHERE__ AND custom_fields['ua'] IN ({in_list}) AND client_ip != '' "
+                f"PREWHERE __WHERE__{wk_stride_sql} AND custom_fields['ua'] IN ({in_list}) AND client_ip != '' "
                 "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
             )
-            return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"])) for r in rows])
+            if not rows and wk_stride > 1:
+                wk_stride = 1
+                rows = _run(
+                    service,
+                    scope,
+                    "wellknown_bots_fallback",
+                    f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
+                    f"PREWHERE __WHERE__ AND custom_fields['ua'] IN ({in_list}) AND client_ip != '' "
+                    "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
+                )
+            return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"]) * wk_stride) for r in rows])
     pattern = get_bot_regex_pattern(500)
     prefilter = " AND match(custom_fields['ua'], {bot_pattern:String})" if pattern else ""
     where_kw = "PREWHERE" if is_real_ch else "WHERE"
@@ -408,30 +421,31 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     )
     where_kw = "PREWHERE" if is_real_ch else "WHERE"
     uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
-    ref_clause = (
-        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' AND ("
-        "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
-        ") WHERE "
-        if is_real_ch
-        else "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
-        "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
-        ") AND "
-    )
-    rows = _run(
-        service,
-        scope,
-        "bot_efficiency",
-        f"""
+    span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
+    sample_stride = (6 if span_s >= 43200 else (4 if span_s >= 21600 else 1)) if is_real_ch else 1
+    stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+
+    def _build_bot_eff_sql(s_sql: str) -> str:
+        ref_clause = (
+            f"FROM request_facts PREWHERE __WHERE__{s_sql} AND client_ip != '' AND ("
+            "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+            ") WHERE "
+            if is_real_ch
+            else "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
+            "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+            ") AND "
+        )
+        return f"""
         WITH ua_all AS (
             SELECT custom_fields['ua'] AS key, count() AS cnt,
                    ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
                    sum(count()) OVER () AS site_cnt,
                    ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
-            FROM request_facts {where_kw} __WHERE__ GROUP BY key
+            FROM request_facts {where_kw} __WHERE__{s_sql} GROUP BY key
         ),
         ua_agg AS (
             SELECT 'ua' AS kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes
@@ -456,16 +470,33 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         )
         SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ua_agg
         UNION ALL SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
-        """,
-    )
+        """
+
+    rows = _run(service, scope, "bot_efficiency", _build_bot_eff_sql(stride_sql))
+    if not rows and sample_stride > 1:
+        sample_stride = 1
+        rows = _run(service, scope, "bot_efficiency_fallback", _build_bot_eff_sql(""))
     tagged: list[tuple[str, str, int, int]] = []
     if not any(str(r.get("kind") or "") == "site" for r in rows):
         for r in rows:
             if str(r.get("kind") or "") == "ua" and ("site_cnt" in r or "site_resp_bytes" in r):
-                tagged.append(("site", "", int(r.get("site_cnt") or 0), int(r.get("site_resp_bytes") or 0)))
+                tagged.append(
+                    (
+                        "site",
+                        "",
+                        int(r.get("site_cnt") or 0) * sample_stride,
+                        int(r.get("site_resp_bytes") or 0) * sample_stride,
+                    )
+                )
                 break
     tagged.extend(
-        (str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)) for r in rows
+        (
+            str(r["kind"] or ""),
+            str(r["key"] or ""),
+            int(r["cnt"] or 0) * (sample_stride if str(r.get("kind") or "") in ("ua", "site") else 1),
+            int(r["resp_bytes"] or 0) * sample_stride,
+        )
+        for r in rows
     )
     return summarize_bot_efficiency_rows(tagged)
 
@@ -496,7 +527,8 @@ def _sec_combined_overview(
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
-    sample_stride = 4 if is_real_ch and (scope.end - scope.start).total_seconds() >= 21600 else 1
+    ov_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
+    sample_stride = (6 if ov_span_s >= 43200 else (4 if ov_span_s >= 21600 else 1)) if is_real_ch else 1
     stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
     base_sql = (
         f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
@@ -910,9 +942,10 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             return cached
 
     if is_real_ch:
-        use_min_slice = (scope.end - scope.start).total_seconds() >= 21600
-        min_slice_clause = " AND toMinute(event_timestamp) % 4 = 0" if use_min_slice else ""
-        scale_factor = 4 if use_min_slice else 1
+        px_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
+        scale_factor = 6 if px_span_s >= 43200 else (4 if px_span_s >= 21600 else 1)
+        use_min_slice = scale_factor > 1
+        min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
         proxies_sql = (
             "SELECT "
             "uniqCombined64If(ip, is_tunnel OR is_imp) AS active_proxies_count, "

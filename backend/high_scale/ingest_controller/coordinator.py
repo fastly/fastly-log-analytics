@@ -84,7 +84,7 @@ from backend.high_scale.query_service import DecodeResult, decode_source_object 
 # ── Ingest Controller ─────────────────────────────────────────────────────────
 HIGH_SCALE_PAGE_MAX_BYTES = 64 * 1024 * 1024  # 64 MB in-flight byte guard
 HIGH_SCALE_DEFAULT_MAX_BATCH_OBJECTS = 50
-HIGH_SCALE_DEFAULT_MAX_BATCH_BYTES = 12 * 1024 * 1024  # 12 MB compressed sub-batch target
+HIGH_SCALE_DEFAULT_MAX_BATCH_BYTES = 2 * 1024 * 1024  # 2 MB compressed sub-batch target
 HIGH_SCALE_MAX_DEAD_LETTER_RATIO = 0.05  # 5% dead-letter limit
 _RUM_SIBLING_DOMAIN = {"rum_vitals": "rum_errors", "rum_errors": "rum_vitals"}
 

@@ -808,10 +808,13 @@ def get_connection(
     if limit:
         _exec_quietly(con, f"SET max_memory = '{limit}';", "get_connection: step failed (ignored)")
     _exec_quietly(con, "SET preserve_insertion_order = false;", "get_connection: preserve_insertion_order failed")
-    if durable_serving:
-        _service_temp_dir: str | None = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    _env_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY")
+    if _env_temp_dir:
+        _service_temp_dir: str | None = _env_temp_dir
     elif db_path and not db_path.startswith(":memory:"):
         _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+    elif durable_serving:
+        _service_temp_dir = "/tmp/duckdb"
     else:
         _service_temp_dir = None
     if _service_temp_dir:

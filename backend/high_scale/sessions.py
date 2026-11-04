@@ -147,12 +147,12 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
             min(ts_ms) AS p_min_ms,
             max(ts_ms) AS p_max_ms,
             count() AS p_reqs,
-            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, groupArray(ts_ms), [])) AS sorted_ts,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, groupArray(toUInt32(intDiv(ts_ms, 1000))), [])) AS sorted_ts,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
                 arrayFilter(
-                    i -> i = 1 OR intDiv(sorted_ts[i], 1000) - intDiv(sorted_ts[i - 1], 1000) > 1800,
+                    i -> i = 1 OR sorted_ts[i] - sorted_ts[i - 1] > 1800,
                     arrayEnumerate(sorted_ts)
                 )
             ) AS starts
@@ -163,11 +163,11 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
         SELECT
             ip,
             ja4,
-            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, sorted_ts[starts[sess_idx]]))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, toUInt64(sorted_ts[starts[sess_idx]]) * 1000))) AS session_start,
             fromUnixTimestamp64Milli(toInt64(if(
                 sess_idx = 0,
                 p_max_ms,
-                sorted_ts[if(sess_idx < length(starts), starts[sess_idx + 1] - 1, length(sorted_ts))]
+                toUInt64(sorted_ts[if(sess_idx < length(starts), starts[sess_idx + 1] - 1, length(sorted_ts))]) * 1000
             ))) AS session_end,
             if(
                 sess_idx = 0,
@@ -463,6 +463,20 @@ def _enrich_paginated_sessions(
     for i, ip_val in enumerate(unique_ips):
         enrich_params[f"en_uip_{i}"] = ip_val
         ip_placeholders.append(f"{{en_uip_{i}:String}}")
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    use_prewhere = is_real_ch and "SELECT" not in where
+    enrich_filter_sql = (
+        f"PREWHERE {where} AND client_ip IN ({', '.join(ip_placeholders)}) "
+        "WHERE event_timestamp >= pk.pk_start "
+        "  AND event_timestamp <= pk.pk_end "
+        if use_prewhere
+        else f"WHERE {where} "
+        f"  AND client_ip IN ({', '.join(ip_placeholders)}) "
+        "  AND event_timestamp >= pk.pk_start "
+        "  AND event_timestamp <= pk.pk_end "
+    )
     enrich_sql = (
         "/* sessions:enrich */ "
         "WITH page_keys AS ("
@@ -486,10 +500,7 @@ def _enrich_paginated_sessions(
         "FROM request_facts "
         "INNER JOIN page_keys AS pk "
         "    ON client_ip = pk.pk_ip AND custom_fields['ja4'] = pk.pk_ja4 "
-        f"WHERE {where} "
-        f"  AND client_ip IN ({', '.join(ip_placeholders)}) "
-        "  AND event_timestamp >= pk.pk_start "
-        "  AND event_timestamp <= pk.pk_end "
+        f"{enrich_filter_sql}"
         "GROUP BY pk.pk_idx"
     )
     enriched_rows = service.client.execute(enrich_sql, enrich_params)
