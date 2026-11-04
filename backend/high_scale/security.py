@@ -94,6 +94,7 @@ _DISTANCE_KM = (
     "6371 * 2 * asin(sqrt(pow(sin(radians(lat - pop_lat) / 2), 2) "
     "+ cos(radians(pop_lat)) * cos(radians(lat)) * pow(sin(radians(lon - pop_lon) / 2), 2)))"
 )
+_DISTANCE_KM_FAST = "greatCircleDistance(lon, lat, pop_lon, pop_lat) / 1000.0"
 _IMPOSSIBLE_DISTANCE = (
     f"multiIf(rtt_min IS NULL OR rtt_min >= 200000 OR lat IS NULL OR lon IS NULL, 0, "
     f"ifNull({_DISTANCE_KM} > (rtt_min / 1000.0 * 100.0 + 150.0), 0))"
@@ -159,11 +160,15 @@ def _bucket_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
     rows = _run(
         service,
         scope,
         "tls_fingerprints",
-        "SELECT custom_fields['tls_ciphers_sha'] AS fingerprint, uniqExact(client_ip) AS ip_count, count() AS request_count "
+        f"SELECT custom_fields['tls_ciphers_sha'] AS fingerprint, {uniq_fn}(client_ip) AS ip_count, count() AS request_count "
         "FROM request_facts WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
         "GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20",
     )
@@ -318,11 +323,67 @@ def _ngwaf_configured(service: HighScaleService) -> bool:
 
 
 def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
-    from backend.utils.bot_sources import get_bot_regex_pattern
+    from backend.utils.bot_sources import build_well_known_bots_matcher, get_bot_regex_pattern
 
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
+    if is_real_ch and not scope.filtered and scope.start is not None and scope.end is not None:
+        from backend.high_scale.aggregate_query import _hourly_edge_time_clause, can_use_hourly_rollup
+
+        hourly_bounds = can_use_hourly_rollup(service.client, "request", scope.start, scope.end)
+        if hourly_bounds is not None:
+            h_start, h_end = hourly_bounds
+            edge_clause = _hourly_edge_time_clause(scope.start, scope.end, h_start, h_end)
+            ua_union = (
+                "SELECT DISTINCT value AS ua FROM request_aggregates_1h "
+                "WHERE service_id={service_id:String} AND dimension='ua' AND value != '' "
+                "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+            )
+            if edge_clause is not None:
+                agg_fence = visible_publication_fence_sql(
+                    "request_aggregate", client=service.client, service_id=service.service_id
+                )
+                ua_union += (
+                    " UNION ALL SELECT DISTINCT value AS ua FROM request_aggregates "
+                    f"WHERE service_id={{service_id:String}} AND dimension='ua' AND value != '' AND {edge_clause} AND {agg_fence}"
+                )
+            ua_rollup_rows = _run(
+                service,
+                scope,
+                "wellknown_bots_uas",
+                f"SELECT DISTINCT ua FROM ({ua_union}) LIMIT 5000",
+                h_start=h_start,
+                h_end=h_end,
+            )
+        else:
+            agg_fence = visible_publication_fence_sql(
+                "request_aggregate", client=service.client, service_id=service.service_id
+            )
+            ua_rollup_rows = _run(
+                service,
+                scope,
+                "wellknown_bots_uas",
+                "SELECT DISTINCT value AS ua FROM request_aggregates "
+                "WHERE service_id={service_id:String} AND dimension='ua' AND value != '' "
+                "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)} "
+                f"AND {agg_fence} LIMIT 5000",
+            )
+        if ua_rollup_rows:
+            matcher = build_well_known_bots_matcher()
+            matching_uas = [str(r["ua"]) for r in ua_rollup_rows if r.get("ua") and matcher(str(r["ua"])) is not None]
+            if not matching_uas:
+                return []
+            in_list = ", ".join(repr(u) for u in matching_uas[:500])
+            rows = _run(
+                service,
+                scope,
+                "wellknown_bots",
+                f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
+                f"PREWHERE __WHERE__ AND custom_fields['ua'] IN ({in_list}) AND client_ip != '' "
+                "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
+            )
+            return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"])) for r in rows])
     pattern = get_bot_regex_pattern(500)
     prefilter = " AND match(custom_fields['ua'], {bot_pattern:String})" if pattern else ""
     where_kw = "PREWHERE" if is_real_ch else "WHERE"
@@ -345,10 +406,20 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
+    where_kw = "PREWHERE" if is_real_ch else "WHERE"
+    uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
     ref_clause = (
-        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' WHERE "
+        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' AND ("
+        "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+        "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+        "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+        ") WHERE "
         if is_real_ch
-        else "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND "
+        else "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
+        "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+        "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+        "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+        ") AND "
     )
     rows = _run(
         service,
@@ -360,7 +431,7 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                    ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
                    sum(count()) OVER () AS site_cnt,
                    ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
-            FROM request_facts WHERE __WHERE__ GROUP BY key
+            FROM request_facts {where_kw} __WHERE__ GROUP BY key
         ),
         ua_agg AS (
             SELECT 'ua' AS kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes
@@ -376,13 +447,10 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                               ''),
                            ''),
                        extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
-            {ref_clause}((custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
-                   OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
-                   OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0)
-              AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
+            {ref_clause}NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
         ),
         ref_agg AS (
-            SELECT 'ref' AS kind, ref_stem AS key, uniqExact(ip) AS cnt,
+            SELECT 'ref' AS kind, ref_stem AS key, {uniq_fn}(ip) AS cnt,
                    toInt64(0) AS resp_bytes, toUInt64(0) AS site_cnt, toInt64(0) AS site_resp_bytes
             FROM ref_extracted WHERE ref_stem != '' GROUP BY ref_stem
         )
@@ -413,13 +481,16 @@ def _unpack_summap(val: Any) -> list[tuple[Any, int]]:
 _COMBINED_OVERVIEW_KEYS = (
     "fingerprint_coverage",
     "req_size_dist",
+    "top_ips_header",
     "ipv6_adoption",
     "proxy_dist",
     "conn_reuse_dist",
 )
 
 
-def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_key: str | None) -> dict[str, Any]:
+def _sec_combined_overview(
+    service: HighScaleService, scope: _Scope, sec_base_key: str | None, mask_ips: bool = False
+) -> dict[str, Any]:
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
     rows = _run(
@@ -432,8 +503,9 @@ def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_ke
         f"countIf({_IS_IPV6}) AS ipv6_rows, "
         "sumMap(if(h IS NOT NULL, [h_b], []), if(h IS NOT NULL, [toUInt64(1)], [])) AS h_map, "
         "sumMap(if(c IS NOT NULL AND c > 0, [c_b], []), if(c IS NOT NULL AND c > 0, [toUInt64(1)], [])) AS c_map, "
-        "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map "
-        "FROM (SELECT event_timestamp, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
+        "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map, "
+        "groupArraySortedIf(15)(tuple(-toInt64(h), client_ip), h IS NOT NULL AND client_ip != '') AS top_hdr_ips "
+        "FROM (SELECT event_timestamp, client_ip, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
         "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
         f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b "
         "FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts",
@@ -444,6 +516,7 @@ def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_ke
     h_counts: dict[str, int] = defaultdict(int)
     c_counts: dict[str, int] = defaultdict(int)
     p_counts: dict[str, int] = defaultdict(int)
+    ip_max_hdr: dict[str, int] = {}
     for r in rows:
         tr = int(r.get("total_rows") or 0)
         total_rows += tr
@@ -459,11 +532,20 @@ def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_ke
         for k, v in _unpack_summap(r.get("p_map")):
             if k:
                 p_counts[str(k)] += v
+        for item in r.get("top_hdr_ips") or []:
+            seq = list(item.values()) if isinstance(item, Mapping) else item
+            if len(seq) >= 2 and seq[1]:
+                ip_s = str(seq[1])
+                h_val = abs(int(seq[0]))
+                if h_val > ip_max_hdr.get(ip_s, -1):
+                    ip_max_hdr[ip_s] = h_val
     h_order = [*(lbl for _, lbl in _REQ_HEADER_BUCKETS), _REQ_HEADER_LAST]
     c_order = [*(lbl for _, lbl in _CONN_REUSE_BUCKETS), _CONN_REUSE_LAST]
+    top_ips_raw = sorted(ip_max_hdr.items(), key=lambda kv: kv[1], reverse=True)[:10]
     bundle = {
         "fingerprint_coverage": {"tls_ciphers_sha": (tls_pop / total_rows) if total_rows > 0 else 0.0},
         "req_size_dist": [{"bucket": b, "count": h_counts[b]} for b in h_order if h_counts.get(b, 0) > 0],
+        "top_ips_header": [shape_security_top_ip_header_row(ip, max_h, mask_ips=mask_ips) for ip, max_h in top_ips_raw],
         "conn_reuse_dist": [{"bucket": b, "count": c_counts[b]} for b in c_order if c_counts.get(b, 0) > 0],
         "ipv6_adoption": ipv6_list,
         "proxy_dist": [
@@ -561,7 +643,7 @@ def security_aggregates(
             (
                 "_combined_overview",
                 use_combined_overview,
-                lambda: _sec_combined_overview(service, scope, sec_base_key),
+                lambda: _sec_combined_overview(service, scope, sec_base_key, mask_ips),
             ),
             (
                 "fingerprint_coverage",
@@ -573,7 +655,11 @@ def security_aggregates(
                 want("req_size_dist") and not use_combined_overview,
                 lambda: _req_size_dist(service, scope),
             ),
-            ("top_ips_header", want("top_ips_header"), lambda: _top_ips_header(service, scope, mask_ips)),
+            (
+                "top_ips_header",
+                want("top_ips_header") and not use_combined_overview,
+                lambda: _top_ips_header(service, scope, mask_ips),
+            ),
             (
                 "ipv6_adoption",
                 want("ipv6_adoption") and not use_combined_overview,
@@ -814,9 +900,9 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             scope,
             "proxies_combined",
             "SELECT "
-            "uniqExactIf(ip, is_tunnel OR is_imp) AS active_proxies_count, "
+            "uniqCombined64If(ip, is_tunnel OR is_imp) AS active_proxies_count, "
             "countIf(is_tunnel OR is_imp) AS total_requests_count, "
-            "uniqExactIf(ip, is_imp) AS distance_mismatches_count, "
+            "uniqCombined64If(ip, is_imp) AS distance_mismatches_count, "
             "countIf(is_tunnel) AS q_tunnel, "
             "countIf(NOT is_tunnel AND tcp_rtt > 0 AND rtt_min IS NOT NULL AND rtt_min / tcp_rtt < 0.7) AS q_wifi, "
             "count() AS q_total, "
@@ -836,7 +922,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "FROM ("
             "SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
             "rtt_min, tcp_rtt, lat, lon, asn, pop_lat, pop_lon, "
-            f"if(rtt_min IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2)), {_DISTANCE_KM}, NULL) AS distance_km, "
+            f"if(rtt_min IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2)), {_DISTANCE_KM_FAST}, NULL) AS distance_km, "
             f"{_TUNNEL} AS is_tunnel, "
             "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
             "FROM ("
