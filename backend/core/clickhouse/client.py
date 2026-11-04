@@ -174,6 +174,9 @@ _MATERIALIZED_CF_KEYS: frozenset[str] = frozenset(
 )
 _CF_LITERAL_RE = re.compile(r"custom_fields\['([a-zA-Z0-9_]+)'\]")
 _CF_PARAM_RE = re.compile(r"custom_fields\[\{([a-zA-Z0-9_]+):String\}\]")
+_PUB_FENCE_RE = re.compile(
+    r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+([^()]+?)\)"
+)
 
 
 class ClickHouseClient:
@@ -245,9 +248,16 @@ class ClickHouseClient:
             try:
                 check_form = {
                     "query": (
-                        "SELECT domain, batch_id, toUInt8(updated_at < now() - INTERVAL 5 MINUTE) AS is_stale "
-                        "FROM high_scale_batch_publications FINAL "
+                        "SELECT domain, batch_id, "
+                        "toUInt8(argMax(updated_at, manifest_version) < now() - INTERVAL 5 MINUTE) AS is_stale "
+                        "FROM high_scale_batch_publications "
+                        "WHERE service_id = {service_id:String} "
+                        "AND (domain, generation, batch_id) IN ("
+                        "SELECT domain, generation, batch_id FROM high_scale_batch_publications "
                         "WHERE service_id = {service_id:String} AND publication_state != 'visible'"
+                        ") "
+                        "GROUP BY domain, generation, batch_id "
+                        "HAVING argMax(publication_state, manifest_version) != 'visible'"
                     ),
                     "param_service_id": _parameter(service_id),
                 }
@@ -309,6 +319,7 @@ class ClickHouseClient:
             isinstance(svc_id, str)
             and svc_id
             and "high_scale_batch_publications FINAL" in sql
+            and _PUB_FENCE_RE.search(sql)
             and (pending_map := self._get_pending_batches(svc_id)) is not None
         ):
 
@@ -331,11 +342,7 @@ class ClickHouseClient:
                     return f"batch_id NOT IN ({quoted})"
                 return match.group(0)
 
-            sql = re.sub(
-                r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+([^()]+?)\)",
-                _replace_fence,
-                sql,
-            )
+            sql = _PUB_FENCE_RE.sub(_replace_fence, sql)
 
         upper_sql = sql.lstrip().upper()
         is_fact_query = "request_facts" in sql and upper_sql.startswith(("SELECT", "WITH", "/*"))
@@ -418,10 +425,20 @@ class ClickHouseClient:
             raise ValueError("invalid ClickHouse insert value") from None
         quoted_columns = ", ".join(f"`{c}`" for c in columns)
         sql = f"INSERT INTO `{table}` ({quoted_columns}) FORMAT JSONCompactEachRow"
-        if table == "high_scale_batch_publications" or table in CLICKHOUSE_HIGH_SCALE_TABLES:
+        if table == "high_scale_batch_publications":
             with self._pub_fence_lock:
                 self._pub_fence_cache.clear()
-                self._empty_stale_batches.clear()
+        elif table in CLICKHOUSE_HIGH_SCALE_TABLES and "batch_id" in columns:
+            b_idx = columns.index("batch_id")
+            inserted_bids = {str(r[b_idx]) for r in rows}
+            with self._pub_fence_lock:
+                if self._empty_stale_batches:
+                    before = len(self._empty_stale_batches)
+                    self._empty_stale_batches = {
+                        item for item in self._empty_stale_batches if item[2] not in inserted_bids
+                    }
+                    if len(self._empty_stale_batches) != before:
+                        self._pub_fence_cache.clear()
         self._request("insert", sql=sql, content=content, rows_written=len(rows))
 
     def delete_batch_rows(self, table: str, batch_id: str) -> None:

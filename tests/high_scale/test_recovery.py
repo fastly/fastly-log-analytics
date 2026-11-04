@@ -1070,3 +1070,56 @@ def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
     svc_id, keys, err, epoch = failed_calls[0]
     assert svc_id == "svc" and keys == ("raw/rum_vitals/obj1.log",) and epoch == 7
     assert "rum_errors" in err
+
+
+def test_clickhouse_batch_adapter_count_rows_prunes_by_timestamp_bounds() -> None:
+    from backend.high_scale.archive.clickhouse_batch import ClickHouseBatchAdapter
+
+    class _RecordingClickHouse:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, dict]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.queries.append((sql, dict(params or {})))
+            if "SELECT count()" in sql:
+                return [{"row_count": 0}]
+            return []
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            pass
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            pass
+
+    ch = _RecordingClickHouse()
+    adapter = ClickHouseBatchAdapter(ch)
+    now_dt = datetime(2026, 9, 14, 12, 0, 0, tzinfo=UTC)
+    later_dt = datetime(2026, 9, 14, 12, 5, 0, tzinfo=UTC)
+
+    count_facts = adapter._count_rows(
+        "request_facts",
+        type("B", (), {"service_id": "svc"})(),
+        "00000000-0000-0000-0000-000000000001",
+        columns=["service_id", "batch_id", "event_timestamp"],
+        mapped_rows=[("svc", "b1", now_dt), ("svc", "b1", later_dt)],
+    )
+    assert count_facts == 0
+    sql_facts, params_facts = ch.queries[-1]
+    assert "event_timestamp >= {min_ts:DateTime64(3, 'UTC')}" in sql_facts
+    assert "event_timestamp <= {max_ts:DateTime64(3, 'UTC')}" in sql_facts
+    assert params_facts["min_ts"] == now_dt
+    assert params_facts["max_ts"] == later_dt
+
+    count_aggs = adapter._count_rows(
+        "request_aggregates",
+        type("B", (), {"service_id": "svc"})(),
+        "00000000-0000-0000-0000-000000000002",
+        columns=["service_id", "batch_id", "bucket_start"],
+        mapped_rows=[("svc", "b2", now_dt), ("svc", "b2", later_dt)],
+    )
+    assert count_aggs == 0
+    sql_aggs, params_aggs = ch.queries[-1]
+    assert "bucket_start >= {min_ts:DateTime('UTC')}" in sql_aggs
+    assert "bucket_start <= {max_ts:DateTime('UTC')}" in sql_aggs
+    assert params_aggs["min_ts"] == now_dt
+    assert params_aggs["max_ts"] == later_dt

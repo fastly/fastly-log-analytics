@@ -130,7 +130,7 @@ class BaseClickHouseBatchAdapter:
             version = 1
 
         expected = len(batch.rows)
-        existing_rows = self._count_rows(table, batch, batch_uuid)
+        existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows not in (0, expected):
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
@@ -148,7 +148,7 @@ class BaseClickHouseBatchAdapter:
                     except Exception:
                         logger.debug("cleanup after chunked insert failure failed", exc_info=True)
                 raise
-            existing_rows = self._count_rows(table, batch, batch_uuid)
+            existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows != expected:
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
@@ -175,11 +175,30 @@ class BaseClickHouseBatchAdapter:
             raise ValueError("ClickHouse publication receipt is ambiguous")
         return rows[0]
 
-    def _count_rows(self, table: str, batch: HighScaleBatch, batch_uuid: str) -> int:
+    def _count_rows(
+        self,
+        table: str,
+        batch: HighScaleBatch,
+        batch_uuid: str,
+        *,
+        columns: Sequence[str] = (),
+        mapped_rows: Sequence[tuple[Any, ...]] = (),
+    ) -> int:
+        where_sql = "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}"
+        params: dict[str, Any] = {"service_id": batch.service_id, "batch_id": batch_uuid}
+        if mapped_rows:
+            for ts_col, ch_type in (("event_timestamp", "DateTime64(3, 'UTC')"), ("bucket_start", "DateTime('UTC')")):
+                if ts_col in columns:
+                    idx = columns.index(ts_col)
+                    ts_vals = [r[idx] for r in mapped_rows if isinstance(r[idx], datetime)]
+                    if ts_vals:
+                        where_sql += f" AND {ts_col} >= {{min_ts:{ch_type}}} AND {ts_col} <= {{max_ts:{ch_type}}}"
+                        params["min_ts"] = min(ts_vals)
+                        params["max_ts"] = max(ts_vals)
+                    break
         rows = self._client.execute(
-            f"SELECT count() AS row_count FROM `{table}` "
-            "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}",
-            {"service_id": batch.service_id, "batch_id": batch_uuid},
+            f"SELECT count() AS row_count FROM `{table}` {where_sql}",
+            params,
         )
         if len(rows) != 1 or not isinstance(rows[0].get("row_count"), int):
             raise ValueError("ClickHouse insert receipt is invalid")
