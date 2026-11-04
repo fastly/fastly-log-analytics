@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -638,7 +637,8 @@ IDENTITY_FIELDS = (
 
 
 def _sha256_uuid(payload: str) -> str:
-    return str(uuid.UUID(bytes=hashlib.sha256(payload.encode("utf-8")).digest()[:16]))
+    h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
 def build_event_id(row: Mapping[str, Any], *, domain: str | None = None) -> str:

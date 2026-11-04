@@ -146,6 +146,8 @@ def _add_waterfall_and_scatter(
     if edge_ms < 0:
         return
     sample_key = _sample_key(row, index)
+    if len(scatter_candidates) >= SCATTER_SAMPLE_SIZE and sample_key > scatter_candidates[0][0]:
+        return
     scatter_candidates.append(
         (
             sample_key,
@@ -159,6 +161,8 @@ def _add_waterfall_and_scatter(
             },
         )
     )
+    if len(scatter_candidates) in (SCATTER_SAMPLE_SIZE, SCATTER_SAMPLE_SIZE * 2):
+        scatter_candidates[:] = heapq.nsmallest(SCATTER_SAMPLE_SIZE, scatter_candidates, key=lambda c: c[:2])[::-1]
 
 
 def _sample_key(row: Mapping[str, Any], index: int) -> int:

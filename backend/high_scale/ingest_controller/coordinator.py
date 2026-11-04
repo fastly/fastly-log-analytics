@@ -444,53 +444,99 @@ class HighScaleIngestController:
             return True, None
         try:
             event_tuple: tuple[dict[str, Any], ...] = tuple(events)
-            counts = compute_dimension_counts(domain, event_tuple)
-            if counts:
-                agg_id = build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate")
-                self._aggregates.publish(
-                    HighScaleBatch(agg_id, service_id, f"{domain}_aggregate", str(owner_epoch), counts)
-                )
-            if domain == "request":
-                origin_proj = build_origin_projection_rows(event_tuple)
+            batches_to_publish: list[HighScaleBatch] = []
+            epoch_str = str(owner_epoch)
+            if domain == "request" and len(event_tuple) >= 2000:
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    fut_counts = pool.submit(compute_dimension_counts, domain, event_tuple)
+                    fut_origin = pool.submit(build_origin_projection_rows, event_tuple)
+                    fut_perf = pool.submit(build_performance_projection_rows, event_tuple)
+                    fut_sec = pool.submit(build_security_projection_rows, event_tuple)
+                    fut_net = pool.submit(build_network_projection_rows, event_tuple)
+                    counts = fut_counts.result()
+                    origin_proj = fut_origin.result()
+                    perf_proj = fut_perf.result()
+                    security_proj = fut_sec.result()
+                    network_proj = fut_net.result()
+                if counts:
+                    agg_id = build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate")
+                    batches_to_publish.append(
+                        HighScaleBatch(agg_id, service_id, f"{domain}_aggregate", epoch_str, counts)
+                    )
                 for sub_domain, rows in (
                     ("origin_summary", origin_proj.summary_rows),
                     ("origin_dimensions", origin_proj.dimension_rows),
-                ):
-                    if rows:
-                        sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
-                        self._aggregates.publish(HighScaleBatch(sub_id, service_id, sub_domain, str(owner_epoch), rows))
-                del origin_proj
-
-                perf_proj = build_performance_projection_rows(event_tuple)
-                for sub_domain, rows in (
                     ("performance_dimensions", perf_proj.dimension_rows),
                     ("performance_summary", perf_proj.summary_rows),
                     ("performance_scatter", perf_proj.scatter_rows),
+                    ("security_dimensions", security_proj.dimension_rows),
+                    ("network_dimensions", network_proj.dimension_rows),
                 ):
                     if rows:
                         sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
-                        self._aggregates.publish(HighScaleBatch(sub_id, service_id, sub_domain, str(owner_epoch), rows))
-                del perf_proj
-
-                security_proj = build_security_projection_rows(event_tuple)
-                if security_proj.dimension_rows:
-                    sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:security_dimensions")
-                    self._aggregates.publish(
-                        HighScaleBatch(
-                            sub_id, service_id, "security_dimensions", str(owner_epoch), security_proj.dimension_rows
-                        )
+                        batches_to_publish.append(HighScaleBatch(sub_id, service_id, sub_domain, epoch_str, rows))
+                del origin_proj, perf_proj, security_proj, network_proj
+            else:
+                counts = compute_dimension_counts(domain, event_tuple)
+                if counts:
+                    agg_id = build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate")
+                    batches_to_publish.append(
+                        HighScaleBatch(agg_id, service_id, f"{domain}_aggregate", epoch_str, counts)
                     )
-                del security_proj
+                if domain == "request":
+                    origin_proj = build_origin_projection_rows(event_tuple)
+                    for sub_domain, rows in (
+                        ("origin_summary", origin_proj.summary_rows),
+                        ("origin_dimensions", origin_proj.dimension_rows),
+                    ):
+                        if rows:
+                            sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
+                            batches_to_publish.append(HighScaleBatch(sub_id, service_id, sub_domain, epoch_str, rows))
+                    del origin_proj
 
-                network_proj = build_network_projection_rows(event_tuple)
-                if network_proj.dimension_rows:
-                    sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:network_dimensions")
-                    self._aggregates.publish(
-                        HighScaleBatch(
-                            sub_id, service_id, "network_dimensions", str(owner_epoch), network_proj.dimension_rows
+                    perf_proj = build_performance_projection_rows(event_tuple)
+                    for sub_domain, rows in (
+                        ("performance_dimensions", perf_proj.dimension_rows),
+                        ("performance_summary", perf_proj.summary_rows),
+                        ("performance_scatter", perf_proj.scatter_rows),
+                    ):
+                        if rows:
+                            sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
+                            batches_to_publish.append(HighScaleBatch(sub_id, service_id, sub_domain, epoch_str, rows))
+                    del perf_proj
+
+                    security_proj = build_security_projection_rows(event_tuple)
+                    if security_proj.dimension_rows:
+                        sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:security_dimensions")
+                        batches_to_publish.append(
+                            HighScaleBatch(
+                                sub_id, service_id, "security_dimensions", epoch_str, security_proj.dimension_rows
+                            )
                         )
-                    )
-                del network_proj
+                    del security_proj
+
+                    network_proj = build_network_projection_rows(event_tuple)
+                    if network_proj.dimension_rows:
+                        sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:network_dimensions")
+                        batches_to_publish.append(
+                            HighScaleBatch(
+                                sub_id, service_id, "network_dimensions", epoch_str, network_proj.dimension_rows
+                            )
+                        )
+                    del network_proj
+            can_parallel_publish = (
+                len(batches_to_publish) > 1
+                and len(event_tuple) >= 2000
+                and "InMemory" not in type(getattr(self._aggregates, "_manifests", None)).__name__
+            )
+            if can_parallel_publish:
+                with ThreadPoolExecutor(max_workers=min(4, len(batches_to_publish))) as pub_pool:
+                    futs = [pub_pool.submit(self._aggregates.publish, b) for b in batches_to_publish]
+                    for fut in futs:
+                        fut.result()
+            else:
+                for b in batches_to_publish:
+                    self._aggregates.publish(b)
             return True, None
         except Exception as exc:
             logger.exception(

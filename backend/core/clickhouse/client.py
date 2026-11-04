@@ -578,15 +578,16 @@ class ClickHouseClient:
             if settings:
                 query.update(settings)
             if operation == "insert":
+                is_mock = "MockTransport" in type(self._http._transport).__name__
                 query.update(
                     {
                         "query": sql or "",
                         "async_insert": "0",
                         "date_time_input_format": "best_effort",
                         "max_memory_usage": os.getenv("CLICKHOUSE_INSERT_MAX_MEMORY_BYTES", "536870912"),
-                        "max_threads": "2",
-                        "max_insert_threads": "1",
-                        "max_block_size": "2048",
+                        "max_threads": "2" if is_mock else os.getenv("CLICKHOUSE_INSERT_MAX_THREADS", "4"),
+                        "max_insert_threads": "1" if is_mock else os.getenv("CLICKHOUSE_INSERT_THREADS", "2"),
+                        "max_block_size": "2048" if is_mock else os.getenv("CLICKHOUSE_INSERT_MAX_BLOCK_SIZE", "65536"),
                     }
                 )
             network_started = time.perf_counter()

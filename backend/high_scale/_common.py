@@ -13,6 +13,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol, overload
 
 import pyarrow as pa
@@ -44,6 +45,26 @@ def sketch(values: list[float]) -> tuple[list[float], list[int]]:
     return centroids, [histogram[centroid] for centroid in centroids]
 
 
+@lru_cache(maxsize=8192)
+def _parse_iso_cached(stripped: str) -> datetime:
+    return datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+
+
+@lru_cache(maxsize=8192)
+def _parse_iso_utc_cached(stripped: str) -> datetime:
+    dt = _parse_iso_cached(stripped)
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+@lru_cache(maxsize=8192)
+def _bucket_str_cached(value: str) -> datetime | None:
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+    return timestamp.replace(second=0, microsecond=0)
+
+
 @overload
 def range_value(value: str | datetime) -> datetime: ...
 @overload
@@ -54,10 +75,10 @@ def range_value(value: str | datetime | None) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value
-    stripped = str(value).strip()
+    stripped = value.strip() if isinstance(value, str) else str(value).strip()
     if not stripped:
         return None
-    return datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    return _parse_iso_cached(stripped)
 
 
 def normalize_cache_bound(value: str | datetime | None) -> str | None:
@@ -78,16 +99,11 @@ def normalize_cache_bound(value: str | datetime | None) -> str | None:
 
 def bucket(value: object) -> datetime | None:
     """Floor a datetime or ISO string to its UTC minute; ``None`` when unparseable."""
+    if isinstance(value, str):
+        return _bucket_str_cached(value)
     if isinstance(value, datetime):
-        timestamp = value.astimezone(UTC)
-    elif isinstance(value, str):
-        try:
-            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-        except ValueError:
-            return None
-    else:
-        return None
-    return timestamp.replace(second=0, microsecond=0)
+        return value.astimezone(UTC).replace(second=0, microsecond=0)
+    return None
 
 
 _bucket = bucket
@@ -237,10 +253,11 @@ def raw_query_producer(
 
 def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
     value = row.get("timestamp")
+    if isinstance(value, str):
+        stripped = value.strip()
+        return _parse_iso_utc_cached(stripped) if stripped else None
     if isinstance(value, datetime):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    if isinstance(value, str) and value.strip():
-        return range_value(value).astimezone(UTC)
     return None
 
 

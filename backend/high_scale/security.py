@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import os
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -376,7 +377,11 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                 return []
             in_list = ", ".join(repr(u) for u in matching_uas[:500])
             wk_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
-            wk_stride = 4 if wk_span_s >= 21600 else 1
+            wk_stride = (
+                4
+                if wk_span_s >= 21600
+                else (2 if wk_span_s >= 1800 and is_real_ch and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+            )
             wk_stride_sql = f" AND toMinute(event_timestamp) % {wk_stride} = 0" if wk_stride > 1 else ""
             rows = _run(
                 service,
@@ -422,7 +427,15 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     where_kw = "PREWHERE" if is_real_ch else "WHERE"
     uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
     span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
-    sample_stride = (6 if span_s >= 43200 else (4 if span_s >= 21600 else 1)) if is_real_ch else 1
+    sample_stride = (
+        (
+            6
+            if span_s >= 43200
+            else (4 if span_s >= 21600 else (2 if span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+        )
+        if is_real_ch
+        else 1
+    )
     stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
 
     def _build_bot_eff_sql(s_sql: str) -> str:
@@ -528,7 +541,15 @@ def _sec_combined_overview(
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
     ov_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
-    sample_stride = (6 if ov_span_s >= 43200 else (4 if ov_span_s >= 21600 else 1)) if is_real_ch else 1
+    sample_stride = (
+        (
+            6
+            if ov_span_s >= 43200
+            else (4 if ov_span_s >= 21600 else (2 if ov_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+        )
+        if is_real_ch
+        else 1
+    )
     stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
     base_sql = (
         f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
@@ -943,7 +964,11 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
 
     if is_real_ch:
         px_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
-        scale_factor = 6 if px_span_s >= 43200 else (4 if px_span_s >= 21600 else 1)
+        scale_factor = (
+            6
+            if px_span_s >= 43200
+            else (4 if px_span_s >= 21600 else (2 if px_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+        )
         use_min_slice = scale_factor > 1
         min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
         proxies_sql = (

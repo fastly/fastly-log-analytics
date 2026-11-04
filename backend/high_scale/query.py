@@ -108,7 +108,7 @@ def decode_source_object(
                     event["event_id"] = _event_id(event, selected_domain, sub_ordinal=sub_ordinal)
                     events.append(event)
             else:
-                event = dict(value)
+                event = value if selected_domain == "request" else dict(value)
                 event.update(base_meta)
                 _normalize_serving_fields(event, selected_domain)
                 if selected_domain in {"rum_vitals", "rum_errors"} and not row_matches_serving_domain(
@@ -218,7 +218,7 @@ def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
         custom_fields = event.setdefault("custom_fields", {})
         cmcd = event.setdefault("cmcd", {})
         key_actions = _REQUEST_KEY_ACTION
-        for k, val in list(event.items()):
+        for k, val in event.items():
             action = key_actions.get(k)
             if action is None:
                 action = _get_request_key_action(k)

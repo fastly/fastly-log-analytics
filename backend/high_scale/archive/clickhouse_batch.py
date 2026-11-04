@@ -28,7 +28,7 @@ from backend.core.clickhouse import ClickHouseClient as HttpClickHouseClient
 
 logger = structlog.get_logger("backend.high_scale.archive")
 
-from backend.high_scale._common import range_value
+from backend.high_scale._common import _parse_iso_utc_cached
 from backend.high_scale.archive.manifests import PublicationResult, build_cmcd_projection_key
 
 _SCHEMA_FILES = [
@@ -135,7 +135,7 @@ class BaseClickHouseBatchAdapter:
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
         if existing_rows == 0:
-            chunk_size = max(1, int(os.getenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "25000")))
+            chunk_size = max(1, int(os.getenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "50000")))
             inserted_any = False
             try:
                 for chunk in itertools.batched(mapped_rows, chunk_size) if mapped_rows else ((),):
@@ -471,15 +471,18 @@ def _required_nonnegative_int(row: Mapping[str, Any], field: str) -> int:
 
 def _timestamp(row: Mapping[str, Any], field: str) -> datetime:
     value = row.get(field)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            raise ValueError(f"{field} must be an ISO timestamp")
+        try:
+            return _parse_iso_utc_cached(s)
+        except ValueError:
+            raise ValueError(f"{field} must be an ISO timestamp") from None
     if isinstance(value, datetime):
         parsed = value
     elif isinstance(value, date):
         parsed = datetime.combine(value, datetime.min.time())
-    elif isinstance(value, str):
-        try:
-            parsed = range_value(value)
-        except ValueError:
-            raise ValueError(f"{field} must be an ISO timestamp") from None
     else:
         raise ValueError(f"{field} must be an ISO timestamp")
     return (parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed).astimezone(UTC)

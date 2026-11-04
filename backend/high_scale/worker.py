@@ -275,7 +275,7 @@ class HighScaleWorkerLoop:
         self._stop_event.set()
 
 
-def build_worker_from_environment() -> HighScaleWorkerLoop:
+def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoop:
     """Build the durable FOS → archive → ClickHouse worker from process config."""
     from backend.core.duckdb import _get_fos_client, get_source_for_service
     from backend.high_scale.ingest_controller import (
@@ -309,11 +309,12 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         )
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS is required (none found in configs/)")
-    worker_id = (
+    base_worker_id = (
         os.getenv("HIGH_SCALE_WORKER_ID", "").strip()
         or os.getenv("POD_NAME", "").strip()
         or f"high-scale-{os.getpid()}"
     )
+    worker_id = f"{base_worker_id}{worker_suffix}"
     page_size = int(os.getenv("HIGH_SCALE_PAGE_SIZE", "100"))
     lease_seconds = float(os.getenv("HIGH_SCALE_LEASE_SECONDS", "300"))
     object_concurrency = int(os.getenv("HIGH_SCALE_OBJECT_CONCURRENCY", "4"))
@@ -420,6 +421,16 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="process one bounded page per service and domain")
     parser.add_argument("--iterations", type=int, default=None)
     args = parser.parse_args()
+    worker_threads = max(1, int(os.getenv("HIGH_SCALE_WORKER_THREADS", "1") or "1"))
+    if worker_threads > 1 and not args.once and args.iterations is None:
+        bg_threads: list[Thread] = []
+        for idx in range(1, worker_threads):
+            loop_worker = build_worker_from_environment(worker_suffix=f"-t{idx}")
+            t = Thread(target=loop_worker.run, name=f"hs-worker-{idx}", daemon=True)
+            t.start()
+            bg_threads.append(t)
+        build_worker_from_environment(worker_suffix="-t0").run()
+        return 0
     build_worker_from_environment().run(max_iterations=1 if args.once else args.iterations)
     return 0
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import os
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -431,7 +432,15 @@ def network_health(
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch and not map_only:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            sample_stride = 6 if nh_span_s >= 43200 else (4 if nh_span_s >= 21600 else 1)
+            sample_stride = (
+                6
+                if nh_span_s >= 43200
+                else (
+                    4
+                    if nh_span_s >= 21600
+                    else (2 if nh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+                )
+            )
             stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []

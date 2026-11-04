@@ -159,7 +159,8 @@ def _build_fos_chunk_worker(
 ) -> tuple[bytes, int, str, str]:
     """Generate and compress a single FOS request-log NDJSON chunk (picklable for ProcessPoolExecutor)."""
     rng = np.random.default_rng(seed)
-    cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng, pop_override=pop_override)
+    template_n = min(n, 4096)
+    cols = _generate_batch_data(template_n, start_ms, end_ms, scenario, rng, pop_override=pop_override)
     ts_iso = np.datetime_as_string(
         (cols["timestamp"] // 1_000_000).astype("datetime64[s]"),
         unit="s",
@@ -168,11 +169,19 @@ def _build_fos_chunk_worker(
     keys = [k for k in cols if k not in ("_source_file", "timestamp")]
     cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in keys}
     line_buffers = []
-    for i in range(n):
+    for i in range(template_n):
         rec = {k: cols_py[k][i] for k in keys}
         rec["timestamp"] = ts_iso[i]
         line_buffers.append(_serialize_record_bytes(rec))
-    raw_bytes = b"\n".join(line_buffers)
+    if n <= template_n:
+        raw_bytes = b"\n".join(line_buffers)
+    else:
+        block_bytes = b"\n".join(line_buffers)
+        full_reps, rem = divmod(n, template_n)
+        parts = [block_bytes] * full_reps
+        if rem > 0:
+            parts.append(b"\n".join(line_buffers[:rem]))
+        raw_bytes = b"\n".join(parts)
     compressed, ext, content_type = _compress_ndjson(raw_bytes, compression)
     return compressed, n, ext, content_type
 
@@ -433,7 +442,8 @@ def run_target_fos(
                     wave_rows = min(rows_remaining, max(1, target_rps * log_period))
                 else:
                     wave_rows = min(rows_remaining, max(batch_size, batch_size * min(pop_count, max(1, gen_workers))))
-                pop_chunks = _allocate_pop_wave_chunks(wave_rows, pop_count, batch_size)
+                effective_batch_size = max(batch_size, math.ceil(wave_rows / max(pop_count * 2, 64)))
+                pop_chunks = _allocate_pop_wave_chunks(wave_rows, pop_count, effective_batch_size)
                 specs = [
                     (
                         chunk_rows,

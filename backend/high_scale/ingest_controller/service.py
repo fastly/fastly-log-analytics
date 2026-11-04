@@ -374,6 +374,23 @@ def compute_dimension_counts(domain: str, rows: tuple[Mapping[str, Any], ...]) -
     if domain not in DIMENSIONS_BY_DOMAIN:
         raise ValueError(f"unsupported aggregate write domain: {domain}")
     dimensions = DIMENSIONS_BY_DOMAIN[domain]
+    if len(rows) >= 500:
+        rows_by_bkt: dict[datetime, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in rows:
+            bkt = _bucket(row.get("timestamp"))
+            if bkt is not None:
+                rows_by_bkt[bkt].append(row)
+        dim_pairs = tuple((dim, _SOURCE_FIELD_OVERRIDES.get(dim, dim)) for dim in dimensions)
+        out: list[dict[str, Any]] = []
+        for bkt, bkt_rows in rows_by_bkt.items():
+            bkt_iso = bkt.isoformat()
+            for dimension, src_key in dim_pairs:
+                col_counts = Counter(v if type(v := r.get(src_key, "")) is str else str(v) for r in bkt_rows)
+                out.extend(
+                    {"dimension": dimension, "value": val, "bucket_start": bkt_iso, "count": cnt}
+                    for val, cnt in col_counts.items()
+                )
+        return tuple(out)
     counts: Counter[tuple[str, str, datetime]] = Counter()
     for row in rows:
         bkt = _bucket(row.get("timestamp"))
