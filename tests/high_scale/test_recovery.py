@@ -1119,7 +1119,7 @@ def test_clickhouse_batch_adapter_count_rows_prunes_by_timestamp_bounds() -> Non
     )
     assert count_aggs == 0
     sql_aggs, params_aggs = ch.queries[-1]
-    assert "bucket_start >= {min_ts:DateTime('UTC')}" in sql_aggs
-    assert "bucket_start <= {max_ts:DateTime('UTC')}" in sql_aggs
+    assert "bucket_start >= toDateTime({min_ts:DateTime64(3, 'UTC')})" in sql_aggs
+    assert "bucket_start <= toDateTime({max_ts:DateTime64(3, 'UTC')})" in sql_aggs
     assert params_aggs["min_ts"] == now_dt
     assert params_aggs["max_ts"] == later_dt

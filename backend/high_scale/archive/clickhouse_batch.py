@@ -187,12 +187,21 @@ class BaseClickHouseBatchAdapter:
         where_sql = "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}"
         params: dict[str, Any] = {"service_id": batch.service_id, "batch_id": batch_uuid}
         if mapped_rows:
-            for ts_col, ch_type in (("event_timestamp", "DateTime64(3, 'UTC')"), ("bucket_start", "DateTime('UTC')")):
+            for ts_col in ("event_timestamp", "bucket_start"):
                 if ts_col in columns:
                     idx = columns.index(ts_col)
                     ts_vals = [r[idx] for r in mapped_rows if isinstance(r[idx], datetime)]
                     if ts_vals:
-                        where_sql += f" AND {ts_col} >= {{min_ts:{ch_type}}} AND {ts_col} <= {{max_ts:{ch_type}}}"
+                        if ts_col == "bucket_start":
+                            where_sql += (
+                                " AND bucket_start >= toDateTime({min_ts:DateTime64(3, 'UTC')})"
+                                " AND bucket_start <= toDateTime({max_ts:DateTime64(3, 'UTC')})"
+                            )
+                        else:
+                            where_sql += (
+                                f" AND {ts_col} >= {{min_ts:DateTime64(3, 'UTC')}}"
+                                f" AND {ts_col} <= {{max_ts:DateTime64(3, 'UTC')}}"
+                            )
                         params["min_ts"] = min(ts_vals)
                         params["max_ts"] = max(ts_vals)
                     break
