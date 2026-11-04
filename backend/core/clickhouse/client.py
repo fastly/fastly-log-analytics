@@ -191,6 +191,7 @@ class ClickHouseClient:
         self._closed = False
         self._active = 0
         self._pub_fence_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
+        self._pub_fence_refreshing: set[str] = set()
         self._empty_stale_batches: set[tuple[str, str, str]] = set()
         self._non_empty_stale_batches: set[tuple[str, str, str]] = set()
         self._cf_materialized_cache: tuple[float, bool] | None = None
@@ -221,12 +222,17 @@ class ClickHouseClient:
                 quoted = ", ".join(f"'{bid}'" for bid in uncached)
                 non_empty: set[str] = set()
                 for tbl in tables:
+                    prewhere = (
+                        f"PREWHERE dimension = 'status' AND batch_id IN ({quoted})"
+                        if tbl == "request_aggregates"
+                        else f"PREWHERE batch_id IN ({quoted})"
+                    )
                     rows = self._request(
                         "execute",
                         data={
                             "query": (
                                 f"SELECT DISTINCT batch_id FROM `{tbl}` "
-                                f"WHERE service_id = {{service_id:String}} AND batch_id IN ({quoted})"
+                                f"{prewhere} WHERE service_id = {{service_id:String}}"
                             ),
                             "param_service_id": _parameter(service_id),
                         },
@@ -244,54 +250,73 @@ class ClickHouseClient:
                 structlog.get_logger(__name__).debug("clickhouse_empty_stale_batch_probe_failed", error=str(exc))
         return {bid for bid in stale_bids if (service_id, domain, bid) in self._empty_stale_batches}
 
+    def _compute_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
+        try:
+            check_form = {
+                "query": (
+                    "SELECT domain, batch_id, "
+                    "toUInt8(argMax(updated_at, manifest_version) < now() - INTERVAL 5 MINUTE) AS is_stale "
+                    "FROM high_scale_batch_publications "
+                    "PREWHERE (domain, generation, batch_id) IN ("
+                    "SELECT domain, generation, batch_id FROM high_scale_batch_publications "
+                    "PREWHERE publication_state != 'visible' "
+                    "WHERE service_id = {service_id:String}"
+                    ") "
+                    "WHERE service_id = {service_id:String} "
+                    "GROUP BY domain, generation, batch_id "
+                    "HAVING argMax(publication_state, manifest_version) != 'visible'"
+                ),
+                "param_service_id": _parameter(service_id),
+            }
+            rows = self._request("execute", data=check_form, settings=None)
+            candidates_by_dom: dict[str, list[tuple[str, bool]]] = {}
+            stale_by_dom: dict[str, list[str]] = {}
+            for r in rows or []:
+                dom = str(r.get("domain") or "")
+                bid = str(r.get("batch_id") or "")
+                if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
+                    is_stale = int(r.get("is_stale") or 0) == 1
+                    candidates_by_dom.setdefault(dom, []).append((bid, is_stale))
+                    if is_stale:
+                        stale_by_dom.setdefault(dom, []).append(bid)
+            empty_stale_by_dom = {
+                dom: self._filter_empty_stale_batches(service_id, dom, bids)
+                for dom, bids in stale_by_dom.items()
+                if len(candidates_by_dom.get(dom, ())) > 50
+            }
+            by_dom: dict[str, list[str]] = {}
+            for dom, cands in candidates_by_dom.items():
+                empty_set = empty_stale_by_dom.get(dom, set())
+                kept = [bid for bid, is_stale in cands if not (is_stale and bid in empty_set)]
+                if kept:
+                    by_dom[dom] = kept
+            return {k: tuple(v) for k, v in by_dom.items()}
+        except Exception:
+            return None
+
+    def _refresh_pending_batches_bg(self, service_id: str) -> None:
+        try:
+            pending_map = self._compute_pending_batches(service_id)
+            with self._pub_fence_lock:
+                self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
+        finally:
+            with self._pub_fence_lock:
+                self._pub_fence_refreshing.discard(service_id)
+
     def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
         if isinstance(self._http._transport, httpx.MockTransport):
             return None
         with self._pub_fence_lock:
             now = time.monotonic()
             cached = self._pub_fence_cache.get(service_id)
-            if cached is not None and (now - cached[0]) < 10.0:
+            if cached is not None:
+                if (now - cached[0]) < 30.0:
+                    return cached[1]
+                if service_id not in self._pub_fence_refreshing:
+                    self._pub_fence_refreshing.add(service_id)
+                    threading.Thread(target=self._refresh_pending_batches_bg, args=(service_id,), daemon=True).start()
                 return cached[1]
-            pending_map: dict[str, tuple[str, ...]] | None
-            try:
-                check_form = {
-                    "query": (
-                        "SELECT domain, batch_id, "
-                        "toUInt8(argMax(updated_at, manifest_version) < now() - INTERVAL 5 MINUTE) AS is_stale "
-                        "FROM high_scale_batch_publications "
-                        "WHERE service_id = {service_id:String} "
-                        "AND (domain, generation, batch_id) IN ("
-                        "SELECT domain, generation, batch_id FROM high_scale_batch_publications "
-                        "WHERE service_id = {service_id:String} AND publication_state != 'visible'"
-                        ") "
-                        "GROUP BY domain, generation, batch_id "
-                        "HAVING argMax(publication_state, manifest_version) != 'visible'"
-                    ),
-                    "param_service_id": _parameter(service_id),
-                }
-                rows = self._request("execute", data=check_form, settings=None)
-                candidates_by_dom: dict[str, list[tuple[str, bool]]] = {}
-                stale_by_dom: dict[str, list[str]] = {}
-                for r in rows or []:
-                    dom = str(r.get("domain") or "")
-                    bid = str(r.get("batch_id") or "")
-                    if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
-                        is_stale = int(r.get("is_stale") or 0) == 1
-                        candidates_by_dom.setdefault(dom, []).append((bid, is_stale))
-                        if is_stale:
-                            stale_by_dom.setdefault(dom, []).append(bid)
-                empty_stale_by_dom = {
-                    dom: self._filter_empty_stale_batches(service_id, dom, bids) for dom, bids in stale_by_dom.items()
-                }
-                by_dom: dict[str, list[str]] = {}
-                for dom, cands in candidates_by_dom.items():
-                    empty_set = empty_stale_by_dom.get(dom, set())
-                    kept = [bid for bid, is_stale in cands if not (is_stale and bid in empty_set)]
-                    if kept:
-                        by_dom[dom] = kept
-                pending_map = {k: tuple(v) for k, v in by_dom.items()}
-            except Exception:
-                pending_map = None
+            pending_map = self._compute_pending_batches(service_id)
             self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
             return pending_map
 
@@ -356,7 +381,7 @@ class ClickHouseClient:
                 )
                 if not pending_ids:
                     return "1=1"
-                if len(pending_ids) <= 100:
+                if len(pending_ids) <= 250:
                     quoted = ", ".join(f"'{bid}'" for bid in pending_ids)
                     return f"batch_id NOT IN ({quoted})"
                 return match.group(0)

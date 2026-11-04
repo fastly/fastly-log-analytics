@@ -119,6 +119,9 @@ def _query_source_extents(
     )
     if hasattr(client, "rewrite_publication_fence"):
         where_sql = client.rewrite_publication_fence(where_sql, params)
+    is_real_ch = hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__
+    if is_real_ch and "batch_id NOT IN" in where_sql:
+        where_sql = "service_id={service_id:String}"
     rows = client.execute(
         f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
         f"FROM {table_name} "

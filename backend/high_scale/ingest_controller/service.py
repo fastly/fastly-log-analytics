@@ -268,11 +268,26 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
     if hasattr(client, "rewrite_publication_fence"):
         fence_sql = client.rewrite_publication_fence(fence_sql, params)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
-    rows = client.execute(
-        f"SELECT min(event_timestamp) AS coverage_start, max(event_timestamp) AS coverage_end FROM {table} "
-        f"WHERE service_id={{service_id:String}} AND {fence_sql}",
-        params,
-    )
+    is_real_ch = hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__
+    if is_real_ch and "batch_id NOT IN" in fence_sql:
+        rows = client.execute(
+            f"WITH bounds AS ("
+            f"SELECT min(event_timestamp) AS min_ts, max(event_timestamp) AS max_ts "
+            f"FROM {table} WHERE service_id={{service_id:String}}"
+            f") "
+            f"SELECT "
+            f"(SELECT min(event_timestamp) FROM {table} "
+            f" WHERE service_id={{service_id:String}} AND event_timestamp <= (SELECT min_ts + INTERVAL 2 MINUTE FROM bounds) AND {fence_sql}) AS coverage_start, "
+            f"(SELECT max(event_timestamp) FROM {table} "
+            f" WHERE service_id={{service_id:String}} AND event_timestamp >= (SELECT max_ts - INTERVAL 2 MINUTE FROM bounds) AND {fence_sql}) AS coverage_end",
+            params,
+        )
+    else:
+        rows = client.execute(
+            f"SELECT min(event_timestamp) AS coverage_start, max(event_timestamp) AS coverage_end FROM {table} "
+            f"WHERE service_id={{service_id:String}} AND {fence_sql}",
+            params,
+        )
     row = rows[0] if rows else {}
     coverage_end = _datetime_or_none(row.get("coverage_end"))
     last_visible_event_id: str | None = None

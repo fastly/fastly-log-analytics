@@ -160,6 +160,12 @@ def can_use_hourly_rollup(
     else:
         h_start = start_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     h_end = end_utc.replace(minute=0, second=0, microsecond=0)
+    if (
+        not getattr(client, "enable_hourly_rollups", False)
+        and end_utc.minute != 0
+        and end_utc >= datetime.now(UTC) - timedelta(minutes=5)
+    ):
+        h_end = h_end + timedelta(hours=1)
     if h_start >= h_end:
         return None
     return h_start, h_end
