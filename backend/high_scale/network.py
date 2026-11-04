@@ -25,6 +25,7 @@ from backend.high_scale._common import (
     finite_float as _finite_float,
 )
 from backend.high_scale._common import (
+    minute_stride_sql,
     normalize_cache_bound,
     parse_time_window,
     resolve_asn_display_labels,
@@ -237,7 +238,7 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
     if is_real_ch:
         sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-        sh_probe_stride = " AND toMinute(event_timestamp) % 15 = 0" if sh_span_s >= 21600 else ""
+        sh_probe_stride = minute_stride_sql(start, end, 15) if sh_span_s >= 21600 else ""
         shield_prewhere = f"{_BASE_WHERE}{sh_probe_stride} AND custom_fields['prid'] != ''"
         shield_rows = service.client.execute(
             f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} "
@@ -443,7 +444,7 @@ def network_health(
         if is_real_ch and not map_only:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             raw_stride = (
-                60
+                30
                 if nh_span_s >= 43200
                 else (
                     15
@@ -452,7 +453,7 @@ def network_health(
                 )
             )
             sample_stride = min(raw_stride, max(1, bs // 60)) if raw_stride > 1 else 1
-            stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+            stride_sql = minute_stride_sql(start, end, sample_stride) if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
@@ -979,9 +980,9 @@ def network_quality(
 
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = (60 if q_span_s >= 43200 else (15 if q_span_s >= 21600 else 1)) if is_real_ch else 1
+            scale_factor = (30 if q_span_s >= 43200 else (15 if q_span_s >= 21600 else 1)) if is_real_ch else 1
             use_min_slice = scale_factor > 1
-            min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
+            min_slice_clause = minute_stride_sql(start, end, scale_factor) if use_min_slice else ""
             if is_real_ch and group_expr != _ASN:
                 sql = (
                     f"SELECT {group_expr} AS label, median({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
@@ -1176,9 +1177,9 @@ def get_pop_health(
                 "network_dimensions", client=service.client, service_id=service.service_id
             )
             pop_span_s = (end - start).total_seconds()
-            pop_stride = 60 if pop_span_s >= 43200 else (15 if pop_span_s >= 21600 else 1)
+            pop_stride = 30 if pop_span_s >= 43200 else (15 if pop_span_s >= 21600 else 1)
             use_min_slice = pop_stride > 1
-            min_slice_clause = f" AND toMinute(event_timestamp) % {pop_stride} = 0" if use_min_slice else ""
+            min_slice_clause = minute_stride_sql(start, end, pop_stride) if use_min_slice else ""
             rollup_sql = (
                 "SELECT value AS pop, sum(requests) AS exact_requests, "
                 "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
@@ -1329,9 +1330,9 @@ def get_transport_metrics(
         trace = HighScaleSections(service.service_id, "network.transport")
         if is_real_ch:
             tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = 60 if tr_span_s >= 43200 else (15 if tr_span_s >= 21600 else 1)
+            scale_factor = 30 if tr_span_s >= 43200 else (15 if tr_span_s >= 21600 else 1)
             use_min_slice = scale_factor > 1
-            min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
+            min_slice_clause = minute_stride_sql(start, end, scale_factor) if use_min_slice else ""
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantiles(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "

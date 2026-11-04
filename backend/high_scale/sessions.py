@@ -11,6 +11,7 @@ from backend.high_scale._common import (
     format_iso_utc_or_empty as _iso,
 )
 from backend.high_scale._common import (
+    minute_stride_sql,
     parse_time_window,
     range_value,
     request_filter_clauses,
@@ -202,7 +203,7 @@ _SESSIONS_SLIM_INDEX_SAMPLED_CTE = """
             custom_fields['ja4'] AS ja4,
             event_timestamp AS ts
         FROM request_facts
-        PREWHERE {where} AND toMinute(event_timestamp) % {stride} = 0
+        PREWHERE {where}{stride_clause}
     ),
     flagged_sessions AS (
         SELECT
@@ -506,9 +507,7 @@ def _enrich_paginated_sessions(
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
     use_prewhere = is_real_ch and "SELECT" not in where
-    stride_clause = (
-        f" AND toMinute(event_timestamp) % {enrich_stride} = 0" if (use_prewhere and enrich_stride > 1) else ""
-    )
+    stride_clause = minute_stride_sql(min_start, max_end, enrich_stride) if (use_prewhere and enrich_stride > 1) else ""
     enrich_filter_sql = (
         f"PREWHERE {where}{stride_clause} AND client_ip IN ({', '.join(ip_placeholders)}) "
         "WHERE event_timestamp >= pk.pk_start "
@@ -626,9 +625,12 @@ def sessions_endpoint(
     use_slim_index = is_real_ch and use_index_fast and "SELECT" not in eff_where
     sess_span_s = (end_dt - start_dt).total_seconds()
     slim_stride = (30 if sess_span_s >= 43200 else (10 if sess_span_s >= 21600 else 1)) if use_slim_index else 1
+    slim_stride_clause = minute_stride_sql(start_dt, end_dt, slim_stride) if slim_stride > 1 else ""
     fast_cte = (
         (
-            _SESSIONS_SLIM_INDEX_SAMPLED_CTE.format(where=eff_where, stride=slim_stride)
+            _SESSIONS_SLIM_INDEX_SAMPLED_CTE.format(
+                where=eff_where, stride=slim_stride, stride_clause=slim_stride_clause
+            )
             if slim_stride > 1
             else _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
         )

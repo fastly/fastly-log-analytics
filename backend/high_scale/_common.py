@@ -537,6 +537,33 @@ def build_published_facts_where(
     return " AND ".join(clauses), params
 
 
+def minute_stride_sql(start: datetime | None, end: datetime | None, stride: int) -> str:
+    """Return a ClickHouse primary-key-prunable minute-sampling filter for ``[start, end)``.
+
+    ``toMinute(event_timestamp) % stride = 0`` is non-monotonic so ClickHouse's
+    ``MergeTree`` index analyzer cannot prune granules on ``event_timestamp``.
+    ``toStartOfMinute(event_timestamp) IN (...)`` is monotonic and prunes ~98%
+    of granules via the primary key index.
+    """
+    if stride <= 1:
+        return ""
+    if start is None or end is None:
+        return f" AND toMinute(event_timestamp) % {stride} = 0"
+    s = start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
+    e = end.astimezone(UTC) if end.tzinfo is not None else end.replace(tzinfo=UTC)
+    cur = s.replace(second=0, microsecond=0)
+    rem = cur.minute % stride
+    if rem != 0:
+        cur = cur + timedelta(minutes=stride - rem)
+    pts: list[str] = []
+    while cur < e and len(pts) <= 512:
+        pts.append(f"toDateTime('{cur.strftime('%Y-%m-%d %H:%M:%S')}', 'UTC')")
+        cur += timedelta(minutes=stride)
+    if not pts or len(pts) > 512:
+        return f" AND toMinute(event_timestamp) % {stride} = 0"
+    return f" AND toStartOfMinute(event_timestamp) IN ({', '.join(pts)})"
+
+
 _FIELD_DIMENSIONS: dict[str, str] = {
     "url": "url",
     "country": "country",

@@ -16,6 +16,7 @@ from backend.core.request_telemetry import HighScaleSections, clickhouse_source
 from backend.core.share_db import mask_ip
 from backend.high_scale._common import (
     _bucket_case,
+    minute_stride_sql,
     normalize_cache_bound,
     parse_time_window,
     visible_publication_fence_sql,
@@ -168,14 +169,14 @@ def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str
     span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
     sample_stride = (
         (
-            60
+            30
             if span_s >= 43200
             else (15 if span_s >= 21600 else (2 if span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
         )
         if is_real_ch
         else 1
     )
-    stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+    stride_sql = minute_stride_sql(scope.start, scope.end, sample_stride) if sample_stride > 1 else ""
     rows = _run(
         service,
         scope,
@@ -402,7 +403,7 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             in_list = ", ".join(repr(u) for u in matching_uas[:500])
             wk_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
             wk_stride = (
-                60
+                30
                 if wk_span_s >= 43200
                 else (
                     15
@@ -410,7 +411,7 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                     else (2 if wk_span_s >= 1800 and is_real_ch and not os.getenv("PYTEST_CURRENT_TEST") else 1)
                 )
             )
-            wk_stride_sql = f" AND toMinute(event_timestamp) % {wk_stride} = 0" if wk_stride > 1 else ""
+            wk_stride_sql = minute_stride_sql(scope.start, scope.end, wk_stride) if wk_stride > 1 else ""
             rows = _run(
                 service,
                 scope,
@@ -457,14 +458,14 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
     sample_stride = (
         (
-            60
+            30
             if span_s >= 43200
             else (15 if span_s >= 21600 else (2 if span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
         )
         if is_real_ch
         else 1
     )
-    stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+    stride_sql = minute_stride_sql(scope.start, scope.end, sample_stride) if sample_stride > 1 else ""
 
     def _build_bot_eff_sql(s_sql: str) -> str:
         ref_clause = (
@@ -571,7 +572,7 @@ def _sec_combined_overview(
     ov_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
     sample_stride = (
         (
-            60
+            30
             if ov_span_s >= 43200
             else (
                 15 if ov_span_s >= 21600 else (2 if ov_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
@@ -580,7 +581,7 @@ def _sec_combined_overview(
         if is_real_ch
         else 1
     )
-    stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+    stride_sql = minute_stride_sql(scope.start, scope.end, sample_stride) if sample_stride > 1 else ""
     base_sql = (
         f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
         "count() AS total_rows, "
@@ -995,14 +996,14 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
     if is_real_ch:
         px_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
         scale_factor = (
-            60
+            30
             if px_span_s >= 43200
             else (
                 15 if px_span_s >= 21600 else (2 if px_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
             )
         )
         use_min_slice = scale_factor > 1
-        min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
+        min_slice_clause = minute_stride_sql(scope.start, scope.end, scale_factor) if use_min_slice else ""
         need_geo = "rtt_min IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2))"
         proxies_sql = (
             "SELECT "
