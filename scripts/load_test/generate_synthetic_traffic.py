@@ -457,21 +457,36 @@ def run_target_fos(
                     specs.append((take, wave_start_ms, wave_end_ms, scenario, seed + file_idx + idx + 1, compression, None))
                     rem_loop -= take
 
-            if gen_pool is not None and len(specs) > 1:
-                gen_futures = [gen_pool.submit(_build_fos_chunk_worker, *sp) for sp in specs]
-                results = [fut.result() for fut in gen_futures]
-            else:
-                results = [_build_fos_chunk_worker(*sp) for sp in specs]
-
             step_rows = 0
             step_bytes = 0
-            for sp, (payload, n_chunk, ext, content_type) in zip(specs, results, strict=True):
-                pop_label = sp[6] or "EDGE"
-                s3_key = f"{base_dir}{ts_slug}-{service_id}-{pop_label}-{file_idx:05d}.log.{ext}"
-                _enqueue_upload(s3_key, payload, content_type, n_chunk, mode_str)
-                step_rows += n_chunk
-                step_bytes += len(payload)
-                file_idx += 1
+            if gen_pool is not None and len(specs) > 1:
+                max_in_flight = max(2, gen_workers * 2)
+                spec_iter = iter(specs)
+                in_flight: list[tuple[tuple[Any, ...], Any]] = []
+                for _ in range(min(len(specs), max_in_flight)):
+                    sp = next(spec_iter)
+                    in_flight.append((sp, gen_pool.submit(_build_fos_chunk_worker, *sp)))
+                while in_flight:
+                    sp, fut = in_flight.pop(0)
+                    payload, n_chunk, ext, content_type = fut.result()
+                    nxt = next(spec_iter, None)
+                    if nxt is not None:
+                        in_flight.append((nxt, gen_pool.submit(_build_fos_chunk_worker, *nxt)))
+                    pop_label = sp[6] or "EDGE"
+                    s3_key = f"{base_dir}{ts_slug}-{service_id}-{pop_label}-{file_idx:05d}.log.{ext}"
+                    _enqueue_upload(s3_key, payload, content_type, n_chunk, mode_str)
+                    step_rows += n_chunk
+                    step_bytes += len(payload)
+                    file_idx += 1
+            else:
+                for sp in specs:
+                    payload, n_chunk, ext, content_type = _build_fos_chunk_worker(*sp)
+                    pop_label = sp[6] or "EDGE"
+                    s3_key = f"{base_dir}{ts_slug}-{service_id}-{pop_label}-{file_idx:05d}.log.{ext}"
+                    _enqueue_upload(s3_key, payload, content_type, n_chunk, mode_str)
+                    step_rows += n_chunk
+                    step_bytes += len(payload)
+                    file_idx += 1
 
             if rum_ratio > 0.0 and step_rows > 0:
                 rum_rows = max(1, int(round(step_rows * rum_ratio)))

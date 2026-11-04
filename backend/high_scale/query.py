@@ -156,68 +156,102 @@ _FIELD_ALIASES: dict[str, str] = {
     "client_ip": "ip",
 }
 
+_SKIP_REQUEST_KEYS: frozenset[str] = frozenset(
+    {
+        "service_id",
+        "domain",
+        "source_object_key",
+        "source_object_version",
+        "line_ordinal",
+        "transform_version",
+        "raw_json",
+        "event_id",
+        "custom_fields",
+        "cmcd",
+    }
+)
+_PASSTHROUGH_NON_CATALOG_KEYS: frozenset[str] = frozenset(
+    {"timestamp", "time_stamp", "client_ip", "ip", "url", "fastly_pop"}
+)
+_INT_DUCK_TYPES: frozenset[DuckType] = frozenset(
+    {
+        DuckType.UTINYINT,
+        DuckType.USMALLINT,
+        DuckType.UINTEGER,
+        DuckType.UBIGINT,
+        DuckType.BIGINT,
+        DuckType.INTEGER,
+    }
+)
+_FLOAT_DUCK_TYPES: frozenset[DuckType] = frozenset({DuckType.FLOAT, DuckType.DOUBLE})
+_REQUEST_KEY_ACTION: dict[str, int] = {}
+
+
+def _get_request_key_action(k: str) -> int:
+    if k in _SKIP_REQUEST_KEYS:
+        action = 0
+    elif k.startswith("cmcd_") or k.startswith("cmcd."):
+        action = 5
+    else:
+        field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
+        if field is not None:
+            if field.duck_type in _INT_DUCK_TYPES:
+                action = 1
+            elif field.duck_type in _FLOAT_DUCK_TYPES:
+                action = 2
+            elif field.duck_type == DuckType.BOOLEAN:
+                action = 3
+            elif field.duck_type == DuckType.VARCHAR:
+                action = 4
+            else:
+                action = 0
+        elif k in _PASSTHROUGH_NON_CATALOG_KEYS:
+            action = 0
+        else:
+            action = 6
+    _REQUEST_KEY_ACTION[k] = action
+    return action
+
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     if domain == "request":
         custom_fields = event.setdefault("custom_fields", {})
         cmcd = event.setdefault("cmcd", {})
-        keys_to_check = [
-            k
-            for k in list(event.keys())
-            if k
-            not in {
-                "service_id",
-                "domain",
-                "source_object_key",
-                "source_object_version",
-                "line_ordinal",
-                "transform_version",
-                "raw_json",
-                "event_id",
-                "custom_fields",
-                "cmcd",
-            }
-        ]
-        for k in keys_to_check:
-            val = event[k]
-            if k.startswith("cmcd_") or k.startswith("cmcd."):
-                cmcd[k] = str(val) if val is not None else ""
-                short_k = k[5:]
-                if short_k:
-                    cmcd[short_k] = str(val) if val is not None else ""
+        key_actions = _REQUEST_KEY_ACTION
+        for k, val in list(event.items()):
+            action = key_actions.get(k)
+            if action is None:
+                action = _get_request_key_action(k)
+            if action == 0:
                 continue
-            field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
-            if field is not None:
-                if field.duck_type in (
-                    DuckType.UTINYINT,
-                    DuckType.USMALLINT,
-                    DuckType.UINTEGER,
-                    DuckType.UBIGINT,
-                    DuckType.BIGINT,
-                    DuckType.INTEGER,
-                ):
-                    if val not in (None, ""):
-                        try:
-                            event[k] = int(val)
-                        except (ValueError, TypeError):
-                            pass
-                elif field.duck_type in (DuckType.FLOAT, DuckType.DOUBLE):
-                    if val not in (None, ""):
-                        try:
-                            event[k] = float(val)
-                        except (ValueError, TypeError):
-                            pass
-                elif field.duck_type == DuckType.BOOLEAN:
+            if action == 4:
+                if val is not None and type(val) is not str:
+                    event[k] = str(val)
+            elif action == 1:
+                if type(val) is not int and val not in (None, ""):
+                    try:
+                        event[k] = int(val)
+                    except (ValueError, TypeError):
+                        pass
+            elif action == 2:
+                if type(val) is not float and val not in (None, ""):
+                    try:
+                        event[k] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+            elif action == 3:
+                if type(val) is not bool:
                     if isinstance(val, str):
                         event[k] = val.lower() in ("true", "1", "t", "yes")
                     elif val is not None:
                         event[k] = bool(val)
-                elif field.duck_type == DuckType.VARCHAR:
-                    if val is not None and not isinstance(val, str):
-                        event[k] = str(val)
+            elif action == 5:
+                s_val = str(val) if val is not None else ""
+                cmcd[k] = s_val
+                short_k = k[5:]
+                if short_k:
+                    cmcd[short_k] = s_val
             else:
-                if k in {"timestamp", "time_stamp", "client_ip", "ip", "url", "fastly_pop"}:
-                    continue
                 custom_fields[k] = str(val) if val is not None else ""
     elif domain == "rum_vitals":
         client_id = event.get("rum_cid") or event.get("client_id") or ""

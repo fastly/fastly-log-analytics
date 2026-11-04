@@ -447,6 +447,9 @@ def _sha256(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+_PRIMITIVE_PARQUET_TYPES = (str, int, float, bool, type(None))
+
+
 def _canonical_json_bytes(event: Mapping[str, Any]) -> bytes:
     try:
         return orjson.dumps(event, option=orjson.OPT_SORT_KEYS)
@@ -454,12 +457,39 @@ def _canonical_json_bytes(event: Mapping[str, Any]) -> bytes:
         return json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def _sorted_canonical_events(
+    events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    if not events:
+        return []
+    keys: set[str] = set(events[0].keys())
+    for event in events[1:]:
+        ek = event.keys()
+        if len(ek) != len(keys) or ek != keys:
+            keys.update(ek)
+    sorted_keys = tuple(sorted(keys))
+    prim_types = _PRIMITIVE_PARQUET_TYPES
+    safe_val = _parquet_safe_value
+    return [
+        {
+            key: (
+                v if type(v := event.get(key)) in prim_types else (None if type(v) is dict and not v else safe_val(v))
+            )
+            for key in sorted_keys
+        }
+        for event in events
+    ]
+
+
 def event_digest(events: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
-    keys = set().union(*(event.keys() for event in events))
     digest = hashlib.sha256()
-    for event in events:
-        canonical = {key: _parquet_safe_value(event.get(key)) for key in keys}
-        digest.update(_canonical_json_bytes(canonical))
+    dumps = orjson.dumps
+    for canonical in _sorted_canonical_events(events):
+        try:
+            encoded = dumps(canonical)
+        except (TypeError, ValueError):
+            encoded = _canonical_json_bytes(canonical)
+        digest.update(encoded)
         digest.update(b"\n")
     return f"sha256:{digest.hexdigest()}"
 
@@ -514,12 +544,15 @@ def write_batch_archive_checkpoint(
         current_offset += row_count
         all_events.extend(events)
 
-    keys = set().union(*(event.keys() for event in all_events))
-    canonical_events = [{key: _parquet_safe_value(event.get(key)) for key in keys} for event in all_events]
+    canonical_events = _sorted_canonical_events(all_events)
     digest_hasher = hashlib.sha256()
     byte_count = 0
+    dumps = orjson.dumps
     for event in canonical_events:
-        encoded = _canonical_json_bytes(event)
+        try:
+            encoded = dumps(event)
+        except (TypeError, ValueError):
+            encoded = _canonical_json_bytes(event)
         byte_count += len(encoded)
         digest_hasher.update(encoded)
         digest_hasher.update(b"\n")
@@ -577,12 +610,18 @@ def write_batch_archive_checkpoint(
 
 
 def _parquet_safe_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _parquet_safe_value(item) for key, item in value.items()} if value else None
+    if type(value) in _PRIMITIVE_PARQUET_TYPES:
+        return value
+    if isinstance(value, dict):
+        if not value:
+            return None
+        return {key: _parquet_safe_value(value[key]) for key in sorted(value)}
     if isinstance(value, list):
         return [_parquet_safe_value(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_parquet_safe_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return {key: _parquet_safe_value(value[key]) for key in sorted(value)} if value else None
     return value
 
 
@@ -603,17 +642,24 @@ def _sha256_uuid(payload: str) -> str:
 
 
 def build_event_id(row: Mapping[str, Any], *, domain: str | None = None) -> str:
-    values = dict(row)
-    if domain is not None:
-        values["domain"] = domain
-    missing = [fld for fld in IDENTITY_FIELDS if fld not in values]
+    effective_domain = domain if domain is not None else row.get("domain")
+    missing = [fld for fld in IDENTITY_FIELDS if (effective_domain is None if fld == "domain" else fld not in row)]
     if missing:
         raise ValueError(f"event identity missing fields: {', '.join(missing)}")
-    if not isinstance(values["line_ordinal"], int) or values["line_ordinal"] < 0:
+    line_ordinal = row["line_ordinal"]
+    if not isinstance(line_ordinal, int) or line_ordinal < 0:
         raise ValueError("line_ordinal must be a non-negative integer")
-    if not all(isinstance(values[fld], str) and values[fld] for fld in IDENTITY_FIELDS if fld != "line_ordinal"):
-        raise ValueError("event identity string fields must be non-empty strings")
-    return _sha256_uuid("|".join(f"{len(str(values[fld]))}:{values[fld]}" for fld in IDENTITY_FIELDS))
+    parts: list[str] = []
+    for fld in IDENTITY_FIELDS:
+        if fld == "line_ordinal":
+            s_val = str(line_ordinal)
+            parts.append(f"{len(s_val)}:{s_val}")
+        else:
+            val = effective_domain if fld == "domain" else row[fld]
+            if not isinstance(val, str) or not val:
+                raise ValueError("event identity string fields must be non-empty strings")
+            parts.append(f"{len(val)}:{val}")
+    return _sha256_uuid("|".join(parts))
 
 
 def build_request_event_id(row: Mapping[str, Any]) -> str:
