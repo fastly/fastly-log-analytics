@@ -195,6 +195,37 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
         FROM sessions_agg
     )
 """
+_SESSIONS_SLIM_INDEX_SAMPLED_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            event_timestamp AS ts
+        FROM request_facts
+        PREWHERE {where} AND toMinute(event_timestamp) % {stride} = 0
+    ),
+    flagged_sessions AS (
+        SELECT
+            ip,
+            ja4,
+            min(ts) AS session_start,
+            max(ts) AS session_end,
+            toUInt64(count() * {stride}) AS req_count,
+            toUInt64(0) AS reqs_4xx,
+            toUInt64(0) AS reqs_5xx,
+            toUInt64(0) AS total_bytes,
+            toUInt64(0) AS edge_count,
+            toUInt64(0) AS shield_count,
+            toUInt8(0) AS has_rtt_row,
+            toUInt8(0) AS has_edge_sid_row,
+            toUInt64(0) AS streaming_reqs,
+            toUInt32(1) AS sid,
+            toUInt8(0) AS flagged,
+            toUInt8(0) AS is_streaming
+        FROM raw_events
+        GROUP BY ip, ja4
+    )
+"""
 _SESSIONS_FAST_CTE = """
     WITH raw_events AS (
         SELECT
@@ -417,7 +448,12 @@ def _as_dt(val: Any) -> datetime | None:
 
 
 def _enrich_paginated_sessions(
-    service: HighScaleService, rows: list[dict[str, Any]], where: str, params: dict[str, Any]
+    service: HighScaleService,
+    rows: list[dict[str, Any]],
+    where: str,
+    params: dict[str, Any],
+    sampled_window: tuple[datetime, datetime] | None = None,
+    enrich_stride: int = 1,
 ) -> None:
     tuples_sql_parts: list[str] = []
     enrich_params: dict[str, Any] = dict(params)
@@ -432,8 +468,11 @@ def _enrich_paginated_sessions(
         row.setdefault("ua", "")
         row.setdefault("median_rtt_ms", None)
         row.setdefault("edge_sid", "")
-        s_dt = _as_dt(row.get("session_start"))
-        e_dt = _as_dt(row.get("session_end"))
+        s_dt, e_dt = (
+            sampled_window
+            if sampled_window is not None
+            else (_as_dt(row.get("session_start")), _as_dt(row.get("session_end")))
+        )
         if s_dt is None or e_dt is None:
             continue
         if min_start is None or s_dt < min_start:
@@ -467,8 +506,11 @@ def _enrich_paginated_sessions(
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
     use_prewhere = is_real_ch and "SELECT" not in where
+    stride_clause = (
+        f" AND toMinute(event_timestamp) % {enrich_stride} = 0" if (use_prewhere and enrich_stride > 1) else ""
+    )
     enrich_filter_sql = (
-        f"PREWHERE {where} AND client_ip IN ({', '.join(ip_placeholders)}) "
+        f"PREWHERE {where}{stride_clause} AND client_ip IN ({', '.join(ip_placeholders)}) "
         "WHERE event_timestamp >= pk.pk_start "
         "  AND event_timestamp <= pk.pk_end "
         if use_prewhere
@@ -485,6 +527,9 @@ def _enrich_paginated_sessions(
         ") "
         "SELECT "
         "    pk.pk_idx AS row_idx, "
+        "    count() AS en_req_count, "
+        "    min(event_timestamp) AS en_session_start, "
+        "    max(event_timestamp) AS en_session_end, "
         "    min(toInt32OrNull(custom_fields['asn'])) AS en_asn, "
         "    min(country) AS en_country, "
         "    uniq(url) AS en_unique_urls, "
@@ -503,10 +548,22 @@ def _enrich_paginated_sessions(
         f"{enrich_filter_sql}"
         "GROUP BY pk.pk_idx"
     )
+    scale = enrich_stride if stride_clause else 1
     enriched_rows = service.client.execute(enrich_sql, enrich_params)
+    if not enriched_rows and stride_clause:
+        scale = 1
+        enriched_rows = service.client.execute(enrich_sql.replace(stride_clause, ""), enrich_params)
     for en_row in enriched_rows:
         idx = int(en_row["row_idx"])
         if 0 <= idx < len(rows):
+            row_scale = scale if "en_req_count" in en_row else 1
+            if sampled_window is not None:
+                if en_row.get("en_session_start") is not None:
+                    rows[idx]["session_start"] = en_row["en_session_start"]
+                if en_row.get("en_session_end") is not None:
+                    rows[idx]["session_end"] = en_row["en_session_end"]
+                if en_row.get("en_req_count") is not None:
+                    rows[idx]["req_count"] = int(en_row["en_req_count"]) * row_scale
             rows[idx]["asn"] = en_row.get("en_asn", en_row.get("asn"))
             rows[idx]["country"] = en_row.get("en_country", en_row.get("country")) or ""
             rows[idx]["unique_urls"] = int(en_row.get("en_unique_urls", en_row.get("unique_urls")) or 0)
@@ -515,15 +572,15 @@ def _enrich_paginated_sessions(
             rows[idx]["edge_sid"] = en_row.get("en_edge_sid", en_row.get("edge_sid")) or ""
             if "en_reqs_4xx" in en_row:
                 r_cnt = int(rows[idx].get("req_count") or 0)
-                r_4xx = int(en_row.get("en_reqs_4xx") or 0)
-                r_stream = int(en_row.get("en_streaming_reqs") or 0)
+                r_4xx = int(en_row.get("en_reqs_4xx") or 0) * row_scale
+                r_stream = int(en_row.get("en_streaming_reqs") or 0) * row_scale
                 min_reqs = int(params.get("min_reqs_flag") or _DEFAULT_MIN_REQS_FLAG)
                 min_4xx_pct = float(params.get("min_4xx_pct_flag") or _DEFAULT_MIN_4XX_PCT_FLAG)
                 rows[idx]["reqs_4xx"] = r_4xx
-                rows[idx]["reqs_5xx"] = int(en_row.get("en_reqs_5xx") or 0)
-                rows[idx]["total_bytes"] = int(en_row.get("en_total_bytes") or 0)
-                rows[idx]["edge_count"] = int(en_row.get("en_edge_count") or 0)
-                rows[idx]["shield_count"] = int(en_row.get("en_shield_count") or 0)
+                rows[idx]["reqs_5xx"] = int(en_row.get("en_reqs_5xx") or 0) * row_scale
+                rows[idx]["total_bytes"] = int(en_row.get("en_total_bytes") or 0) * row_scale
+                rows[idx]["edge_count"] = int(en_row.get("en_edge_count") or 0) * row_scale
+                rows[idx]["shield_count"] = int(en_row.get("en_shield_count") or 0) * row_scale
                 rows[idx]["streaming_reqs"] = r_stream
                 rows[idx]["flagged"] = bool(
                     (r_cnt >= min_reqs) or (r_cnt > 0 and (r_4xx * 100.0 / r_cnt) >= min_4xx_pct)
@@ -567,8 +624,14 @@ def sessions_endpoint(
         else where
     )
     use_slim_index = is_real_ch and use_index_fast and "SELECT" not in eff_where
+    sess_span_s = (end_dt - start_dt).total_seconds()
+    slim_stride = (30 if sess_span_s >= 43200 else (10 if sess_span_s >= 21600 else 1)) if use_slim_index else 1
     fast_cte = (
-        _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
+        (
+            _SESSIONS_SLIM_INDEX_SAMPLED_CTE.format(where=eff_where, stride=slim_stride)
+            if slim_stride > 1
+            else _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
+        )
         if use_slim_index
         else (_SESSIONS_INDEX_FAST_CTE if use_index_fast else _SESSIONS_FAST_CTE).format(where=where)
     )
@@ -630,16 +693,33 @@ def sessions_endpoint(
             + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}"
         )
         page_params = {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit}
+        used_sampled_slim = slim_stride > 1 and cte is fast_cte
         if is_real_ch:
             with _sessions_ch_sem:
                 if (cached_sem := _sessions_memo.get_with_telemetry(memo_key)) is not None:
                     return cached_sem
                 raw_page_rows = service.client.execute(page_sql, page_params)
+                if not raw_page_rows and used_sampled_slim:
+                    used_sampled_slim = False
+                    fallback_sql = (
+                        "/* sessions:page */ "
+                        + _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
+                        + outer_select
+                        + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}"
+                    )
+                    raw_page_rows = service.client.execute(fallback_sql, page_params)
         else:
             raw_page_rows = service.client.execute(page_sql, page_params)
         rows = [dict(r) for r in raw_page_rows]
         if rows and "unique_urls" not in rows[0]:
-            _enrich_paginated_sessions(service, rows, eff_where if use_slim_index else where, params)
+            _enrich_paginated_sessions(
+                service,
+                rows,
+                eff_where if use_slim_index else where,
+                params,
+                sampled_window=(start_dt, end_dt) if used_sampled_slim else None,
+                enrich_stride=slim_stride if used_sampled_slim else 1,
+            )
         if rows:
             total = int(rows[0]["total_sessions"])
         elif req.page > 1:

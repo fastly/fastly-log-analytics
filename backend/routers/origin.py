@@ -62,7 +62,9 @@ async def origin_aggregates(
         res = await asyncio.to_thread(
             high_scale_aggregates, high_scale_service, req, start_time, end_time, sections=sections
         )
-        return OriginAggregatesResponse.with_telemetry(**cache_result(res, state="bypass", prewarmer=False))
+        return OriginAggregatesResponse.with_telemetry(
+            **(res if "_response_cache" in res else cache_result(res, state="bypass", prewarmer=False))
+        )
 
     await ctx.prewarm_con()
     res = await origin_repo.get_aggregates(
@@ -81,7 +83,9 @@ async def origin_aggregates(
         pop_latency_limit=req.pop_latency_limit,
         sections=sections,
     )
-    return OriginAggregatesResponse.with_telemetry(**cache_result(res, state="bypass", prewarmer=False))
+    return OriginAggregatesResponse.with_telemetry(
+        **(res if "_response_cache" in res else cache_result(res, state="bypass", prewarmer=False))
+    )
 
 
 @router.post("/summary", response_model=OriginSummaryResponse)

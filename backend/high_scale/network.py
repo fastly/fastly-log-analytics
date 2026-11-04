@@ -236,7 +236,9 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     )
     shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
     if is_real_ch:
-        shield_prewhere = f"{_BASE_WHERE} AND custom_fields['prid'] != ''"
+        sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+        sh_probe_stride = " AND toMinute(event_timestamp) % 15 = 0" if sh_span_s >= 21600 else ""
+        shield_prewhere = f"{_BASE_WHERE}{sh_probe_stride} AND custom_fields['prid'] != ''"
         shield_rows = service.client.execute(
             f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} "
             "WHERE lower(custom_fields['edge']) IN ('false', '0') LIMIT 1)",
@@ -376,24 +378,7 @@ def network_health(
     sections = getattr(req, "sections", None)
 
     trace = HighScaleSections(service.service_id, "network.health")
-    if not _want_core(sections):
-        shielding_only = (
-            trace.run(
-                "shielding_analysis",
-                lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
-                source="fact",
-            )
-            if _want_shielding(sections)
-            else None
-        )
-        return NetworkHealthResponse.with_telemetry(
-            **cache_result({}, state="bypass", prewarmer=False),
-            available=True,
-            shielding_analysis=shielding_only,
-            section_timings=trace.timings(),
-        )
-
-    if start is not None and end is not None:
+    if start is not None and end is not None and _want_core(sections):
         bs = clamp_bucket_seconds(bs, start, end) or bs
     memo_key = digest_cache_key(
         {
@@ -421,6 +406,31 @@ def network_health(
     def _compute_health() -> NetworkHealthResponse:
         if (inner_hit := _fast_model_hit(memo_key)) is not None:
             return inner_hit
+        if not _want_core(sections):
+            shielding_only = (
+                trace.run(
+                    "shielding_analysis",
+                    lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+                    source="fact",
+                )
+                if _want_shielding(sections)
+                else None
+            )
+            sh_payload: dict[str, Any] = {
+                "available": True,
+                "shielding_analysis": shielding_only,
+                "section_timings": trace.timings(),
+            }
+            _network_memo.put(memo_key, dict(sh_payload))
+            sh_resp = NetworkHealthResponse.with_telemetry(
+                **_network_memo.result(sh_payload, state="miss"),
+            )
+            _network_model_cache[memo_key] = sh_resp
+            if is_real_ch:
+                sh_dumped = sh_resp.model_dump(mode="json", by_alias=True)
+                _network_json_cache[memo_key] = sh_dumped
+                object.__setattr__(sh_resp, "_cached_json_dict", sh_dumped)
+            return sh_resp
         filter_sql, filter_params = _filter_clause(getattr(req, "filters", None), drop_asn=map_asn != "all")
         params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
         rtt_where, bucket_expr = f"{_RTT_FILTER}{filter_sql}", _ch_bucket_expr(bs)
@@ -432,15 +442,16 @@ def network_health(
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch and not map_only:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            sample_stride = (
-                6
+            raw_stride = (
+                60
                 if nh_span_s >= 43200
                 else (
-                    4
+                    15
                     if nh_span_s >= 21600
                     else (2 if nh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
                 )
             )
+            sample_stride = min(raw_stride, max(1, bs // 60)) if raw_stride > 1 else 1
             stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
@@ -521,18 +532,12 @@ def network_health(
                     "map",
                     f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
                     f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
+                    "anyIf(toFloat64OrNull(custom_fields['lat']), custom_fields['lat'] != '') AS lat, "
+                    "anyIf(toFloat64OrNull(custom_fields['lon']), custom_fields['lon'] != '') AS lon, "
                     f"avg({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
                     f"FROM request_facts PREWHERE {rtt_prewhere} AND country != ''{map_asn_sql} "
                     f"WHERE {_RTT} > 0 "
                     "GROUP BY country, city, region, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 100 BY bucket_ts LIMIT 20000",
-                ),
-                (
-                    "city_coords",
-                    "SELECT country, city, any(toFloat64OrNull(lat_s)) AS lat, any(toFloat64OrNull(lon_s)) AS lon "
-                    "FROM ("
-                    "SELECT country, custom_fields['city'] AS city, custom_fields['lat'] AS lat_s, custom_fields['lon'] AS lon_s "
-                    f"FROM request_facts PREWHERE {rtt_prewhere} AND country != '' AND custom_fields['lat'] != '' LIMIT 50000"
-                    ") GROUP BY country, city",
                 ),
                 (
                     "percentiles",
@@ -571,21 +576,25 @@ def network_health(
                 thread_name_prefix="hs-net-health",
             )
             shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
-            heatmap_rows, raw_map_rows, pct_rows, city_coord_rows = (
-                q_results.get(k, []) for k in ("heatmap", "map", "percentiles", "city_coords")
-            )
+            heatmap_rows, raw_map_rows, pct_rows = (q_results.get(k, []) for k in ("heatmap", "map", "percentiles"))
             if sample_stride > 1:
                 heatmap_rows = [{**r, "reqs": int(r.get("reqs") or 0) * sample_stride} for r in heatmap_rows]
                 raw_map_rows = [{**mr, "reqs": int(mr.get("reqs") or 0) * sample_stride} for mr in raw_map_rows]
-            coord_lookup: dict[tuple[str, str], tuple[Any, Any]] = {
-                (str(cr.get("country") or ""), str(cr.get("city") or "")): (cr.get("lat"), cr.get("lon"))
-                for cr in city_coord_rows
-            }
+            coord_lookup: dict[tuple[str, str], tuple[Any, Any]] = {}
+            for mr in raw_map_rows:
+                if mr.get("lat") is not None and mr.get("lon") is not None:
+                    ckey = (str(mr.get("country") or ""), str(mr.get("city") or ""))
+                    if ckey not in coord_lookup:
+                        coord_lookup[ckey] = (mr.get("lat"), mr.get("lon"))
             map_rows = [
                 {
                     **mr,
-                    "lat": coord_lookup.get((str(mr.get("country") or ""), str(mr.get("city") or "")), (None, None))[0],
-                    "lon": coord_lookup.get((str(mr.get("country") or ""), str(mr.get("city") or "")), (None, None))[1],
+                    "lat": mr.get("lat")
+                    if mr.get("lat") is not None
+                    else coord_lookup.get((str(mr.get("country") or ""), str(mr.get("city") or "")), (None, None))[0],
+                    "lon": mr.get("lon")
+                    if mr.get("lon") is not None
+                    else coord_lookup.get((str(mr.get("country") or ""), str(mr.get("city") or "")), (None, None))[1],
                 }
                 for mr in raw_map_rows
             ]
@@ -969,9 +978,10 @@ def network_quality(
         rtt_where = f"{_RTT_FILTER}{filter_sql}"
 
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
-            use_min_slice = is_real_ch and (end - start).total_seconds() >= 21600
-            min_slice_clause = " AND toMinute(event_timestamp) % 6 = 0" if use_min_slice else ""
-            scale_factor = 6 if use_min_slice else 1
+            q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+            scale_factor = (60 if q_span_s >= 43200 else (15 if q_span_s >= 21600 else 1)) if is_real_ch else 1
+            use_min_slice = scale_factor > 1
+            min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
             if is_real_ch and group_expr != _ASN:
                 sql = (
                     f"SELECT {group_expr} AS label, median({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
@@ -1165,8 +1175,10 @@ def get_pop_health(
             fence = visible_publication_fence_sql(
                 "network_dimensions", client=service.client, service_id=service.service_id
             )
-            use_min_slice = (end - start).total_seconds() >= 21600
-            min_slice_clause = " AND toMinute(event_timestamp) % 6 = 0" if use_min_slice else ""
+            pop_span_s = (end - start).total_seconds()
+            pop_stride = 60 if pop_span_s >= 43200 else (15 if pop_span_s >= 21600 else 1)
+            use_min_slice = pop_stride > 1
+            min_slice_clause = f" AND toMinute(event_timestamp) % {pop_stride} = 0" if use_min_slice else ""
             rollup_sql = (
                 "SELECT value AS pop, sum(requests) AS exact_requests, "
                 "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
@@ -1216,7 +1228,7 @@ def get_pop_health(
                 r_entry = rollup_by_pop.get(pop_key, (0, None, None))
                 sampled_reqs = max(1, int(r.get("requests") or 0))
                 if use_min_slice:
-                    exact_reqs = r_entry[0] if r_entry[0] > 0 else sampled_reqs * 6
+                    exact_reqs = r_entry[0] if r_entry[0] > 0 else sampled_reqs * pop_stride
                     scale = exact_reqs / sampled_reqs
                     row_reqs = exact_reqs
                     row_errors = min(exact_reqs, int(round(int(r.get("errors") or 0) * scale)))
@@ -1316,9 +1328,10 @@ def get_transport_metrics(
         )
         trace = HighScaleSections(service.service_id, "network.transport")
         if is_real_ch:
-            use_min_slice = (end - start).total_seconds() >= 21600
-            min_slice_clause = " AND toMinute(event_timestamp) % 6 = 0" if use_min_slice else ""
-            scale_factor = 6 if use_min_slice else 1
+            tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+            scale_factor = 60 if tr_span_s >= 43200 else (15 if tr_span_s >= 21600 else 1)
+            use_min_slice = scale_factor > 1
+            min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantiles(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "

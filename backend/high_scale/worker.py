@@ -409,6 +409,7 @@ def _csv_env(name: str) -> tuple[str, ...]:
 
 
 def main() -> int:
+    os.environ.setdefault("METADATA_PG_POOL_MAX", "8")
     if os.environ.get("OTEL_EXPORTER") == "prometheus":
         try:
             from prometheus_client import start_http_server

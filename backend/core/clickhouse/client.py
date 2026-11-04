@@ -192,6 +192,7 @@ class ClickHouseClient:
         self._active = 0
         self._pub_fence_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
         self._empty_stale_batches: set[tuple[str, str, str]] = set()
+        self._non_empty_stale_batches: set[tuple[str, str, str]] = set()
         self._cf_materialized_cache: tuple[float, bool] | None = None
         self._pub_fence_lock = threading.Lock()
         self._http = httpx.Client(
@@ -209,7 +210,12 @@ class ClickHouseClient:
         )
 
     def _filter_empty_stale_batches(self, service_id: str, domain: str, stale_bids: list[str]) -> set[str]:
-        uncached = [bid for bid in stale_bids if (service_id, domain, bid) not in self._empty_stale_batches]
+        uncached = [
+            bid
+            for bid in stale_bids
+            if (service_id, domain, bid) not in self._empty_stale_batches
+            and (service_id, domain, bid) not in self._non_empty_stale_batches
+        ]
         if uncached and (tables := _DOMAIN_TABLES.get(domain)):
             try:
                 quoted = ", ".join(f"'{bid}'" for bid in uncached)
@@ -232,8 +238,10 @@ class ClickHouseClient:
                 for bid in uncached:
                     if bid not in non_empty:
                         self._empty_stale_batches.add((service_id, domain, bid))
-            except Exception:
-                pass
+                    else:
+                        self._non_empty_stale_batches.add((service_id, domain, bid))
+            except Exception as exc:
+                structlog.get_logger(__name__).debug("clickhouse_empty_stale_batch_probe_failed", error=str(exc))
         return {bid for bid in stale_bids if (service_id, domain, bid) in self._empty_stale_batches}
 
     def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:

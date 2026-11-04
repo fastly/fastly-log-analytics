@@ -165,15 +165,39 @@ def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
     uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
+    span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
+    sample_stride = (
+        (
+            60
+            if span_s >= 43200
+            else (15 if span_s >= 21600 else (2 if span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+        )
+        if is_real_ch
+        else 1
+    )
+    stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
     rows = _run(
         service,
         scope,
         "tls_fingerprints",
         f"SELECT custom_fields['tls_ciphers_sha'] AS fingerprint, {uniq_fn}(client_ip) AS ip_count, count() AS request_count "
-        "FROM request_facts WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
+        f"FROM request_facts WHERE __WHERE__{stride_sql} AND custom_fields['tls_ciphers_sha'] != '' "
         "GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20",
     )
-    return [shape_security_fingerprint_row(r["fingerprint"], r["ip_count"], r["request_count"]) for r in rows]
+    if not rows and sample_stride > 1:
+        sample_stride = 1
+        rows = _run(
+            service,
+            scope,
+            "tls_fingerprints_fallback",
+            f"SELECT custom_fields['tls_ciphers_sha'] AS fingerprint, {uniq_fn}(client_ip) AS ip_count, count() AS request_count "
+            "FROM request_facts WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
+            "GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20",
+        )
+    return [
+        shape_security_fingerprint_row(r["fingerprint"], r["ip_count"], int(r["request_count"]) * sample_stride)
+        for r in rows
+    ]
 
 
 def _fingerprint_coverage(service: HighScaleService, scope: _Scope) -> dict[str, float]:
@@ -378,9 +402,13 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             in_list = ", ".join(repr(u) for u in matching_uas[:500])
             wk_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
             wk_stride = (
-                4
-                if wk_span_s >= 21600
-                else (2 if wk_span_s >= 1800 and is_real_ch and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+                60
+                if wk_span_s >= 43200
+                else (
+                    15
+                    if wk_span_s >= 21600
+                    else (2 if wk_span_s >= 1800 and is_real_ch and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+                )
             )
             wk_stride_sql = f" AND toMinute(event_timestamp) % {wk_stride} = 0" if wk_stride > 1 else ""
             rows = _run(
@@ -429,9 +457,9 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
     sample_stride = (
         (
-            6
+            60
             if span_s >= 43200
-            else (4 if span_s >= 21600 else (2 if span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+            else (15 if span_s >= 21600 else (2 if span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
         )
         if is_real_ch
         else 1
@@ -543,9 +571,11 @@ def _sec_combined_overview(
     ov_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
     sample_stride = (
         (
-            6
+            60
             if ov_span_s >= 43200
-            else (4 if ov_span_s >= 21600 else (2 if ov_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+            else (
+                15 if ov_span_s >= 21600 else (2 if ov_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+            )
         )
         if is_real_ch
         else 1
@@ -965,12 +995,15 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
     if is_real_ch:
         px_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
         scale_factor = (
-            6
+            60
             if px_span_s >= 43200
-            else (4 if px_span_s >= 21600 else (2 if px_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1))
+            else (
+                15 if px_span_s >= 21600 else (2 if px_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+            )
         )
         use_min_slice = scale_factor > 1
         min_slice_clause = f" AND toMinute(event_timestamp) % {scale_factor} = 0" if use_min_slice else ""
+        need_geo = "rtt_min IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2))"
         proxies_sql = (
             "SELECT "
             "uniqCombined64If(ip, is_tunnel OR is_imp) AS active_proxies_count, "
@@ -995,16 +1028,18 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "FROM ("
             "SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
             "rtt_min, tcp_rtt, lat, lon, asn, pop_lat, pop_lon, "
-            f"if(rtt_min IS NOT NULL AND lat IS NOT NULL AND lon IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2)), {_DISTANCE_KM_FAST}, NULL) AS distance_km, "
+            f"if({need_geo} AND lat IS NOT NULL AND lon IS NOT NULL, {_DISTANCE_KM_FAST}, NULL) AS distance_km, "
             f"{_TUNNEL} AS is_tunnel, "
             "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0) AS is_med "
             "FROM ("
             "SELECT client_ip, custom_fields['pop'], country, custom_fields['city'], "
             "toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
             "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
-            "toFloat64OrNull(custom_fields['lat']) AS lat, "
-            "toFloat64OrNull(custom_fields['lon']) AS lon, "
-            f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
+            f"if({need_geo}, toFloat64OrNull(custom_fields['lat']), NULL) AS lat, "
+            f"if({need_geo}, toFloat64OrNull(custom_fields['lon']), NULL) AS lon, "
+            f"if({need_geo}, toInt64OrNull(custom_fields['asn']), NULL) AS asn, "
+            f"if({need_geo}, {_POP_LAT_FAST}, NULL) AS pop_lat, "
+            f"if({need_geo}, {_POP_LON_FAST}, NULL) AS pop_lon "
             f"FROM request_facts PREWHERE __WHERE__{min_slice_clause}"
             ")))"
         )

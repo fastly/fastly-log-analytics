@@ -50,7 +50,7 @@ Fastly Log Analytics supports two primary deployment topologies sized for differ
 | Architecture | Intended Throughput (requests/sec at your VCL service, 100% logged) | Backend Engine | Ingest Topology | Best For |
 |---|---|---|---|---|
 | **Standard Architecture** | **Up to ~1,000 RPS comfortable on 4 vCPU / 16 GB** (ingest keeps pace to 10,000 RPS, but dashboard pages degrade above ~2,000 RPS — see [measured capacity](#measured-standard-mode-capacity-4-vcpu--16-gb)) | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
-| **High-Scale Architecture** | **50,000 sustained RPS** *(bursts to 100,000+ RPS)* | ClickHouse | High-Scale micro-batching workers + PostgreSQL control plane + FOS Archive Parquet | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
+| **High-Scale Architecture** | **~13,000–28,000+ sustained ingest RPS on 6–12 worker pods** *(absorbs bursts to 1,000,000 RPS via Fastly Object Storage — see [measured High-Scale capacity](#measured-high-scale-capacity))* | ClickHouse | High-Scale micro-batching workers + PostgreSQL control plane + FOS Archive Parquet | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
 
 > [!NOTE]
 > **Requests per second at your VCL service:**
@@ -79,6 +79,60 @@ What drives page time:
 - **Ingest and rollup builds share the same CPUs as page queries**, so pages are slowest during commit and rollup bursts.
 
 Above ~2,000 RPS use a larger machine, sample or conditionally log at the edge (see the note above), or use the High-Scale architecture.
+
+### Measured capacity matrix (machine size × log period)
+
+We ran the same stepped test on two machine sizes, two settings profiles and three log periods (10 s, 60 s, 300 s). Each cell starts from an empty install and steps the synthetic feed up through 500, 1,000, 2,000, 5,000 and 10,000 RPS, running each step for 10 minutes without clearing data. One analyst loads the Dashboard, Network, Security, Origin and Performance pages every 30 s the whole time.
+
+"Scaled" raises DuckDB's threads and memory limit to fit the machine (6 threads and 14 GB on the 8 vCPU box, against 2 threads and 6 GB shipped).
+
+A step is viable when ingest lag stays inside the period-based limit (lag p95 at most 2 × period + 30 s, and end-of-step behind-live at most 2 × period + 60 s) and the p95 of Dashboard, Network and Security is at or under 3 s (or 5 s). Each cell shows the highest viable step for the 3 s / 5 s tier. Ingest kept pace at every step on every machine, so these are page-latency limits, not ingest limits. "None" means even the 500 RPS step missed the 3 s tier, which happened on the 4 vCPU box at a 300 s period (Dashboard p95 4.8 s). At 10,000 RPS the achieved ingest was 7,400 to 9,900 RPS.
+
+| Machine | Settings | 10 s period | 60 s period | 300 s period |
+|---|---|---|---|---|
+| 4 vCPU / 16 GB | Shipped | see table above | 500 / 1,000 RPS | none / 1,000 RPS |
+| 8 vCPU / 32 GB | Shipped | 2,000 / 2,000 RPS | 2,000 / 2,000 RPS | 1,000 / 2,000 RPS |
+| 8 vCPU / 32 GB | Scaled | 2,000 / 2,000 RPS | 1,000 / 5,000 RPS | 2,000 / 5,000 RPS |
+
+### Measured High-Scale capacity
+
+Tested on a Kubernetes deployment running a single ClickHouse replica (6 vCPU / 8 GB RAM), PostgreSQL 16 metadata plane, one backend API replica, and stateless High-Scale ingest workers with all background crons enabled. Using the same synthetic traffic generator and step-up harness, we stepped load from 500 RPS to 1,000,000 RPS across 34 stages without clearing data between stages, growing the live `request_facts` table to **101.1 million rows**. Every stage ingested **100% of expected rows** with zero data loss.
+
+#### 6 worker pods (`500` → `30,000` RPS across `10 s`, `60 s`, and `300 s` periods)
+
+Each worker pod sustains **~2,175 rows/s** end-to-end (Fastly Object Storage download, gzip + JSON decode, canonical Parquet archive checkpoint + FOS upload, and 50,000-row micro-batched ClickHouse insert), giving a 6-pod cluster a steady-state ingest ceiling of **~13,050 rows/s**. When edge traffic exceeds the steady-state worker drain rate during a burst, Fastly Object Storage buffers the `.log.gz` objects cleanly until the workers catch up.
+
+| Log rate | `10 s` period (`lag_p50` / `lag_p95`) | `60 s` period (`lag_p50` / `lag_p95`) | `300 s` period (`lag_p50` / `lag_p95`) | Warm page load p50 (Dash / Origin / Perf / Net / Sec) | Cold 24 h page load p50 (Dash / Origin / Perf) |
+|---|---|---|---|---|---|
+| 500–2,000 RPS | 3.8–4.5 s / 4.9–6.4 s ✅ | 7.5–19.1 s / 18.2–20.9 s ✅ | 18.2–22.0 s / 58.9–67.0 s ✅ | 9–35 ms | 560–870 ms / 240–350 ms / 610–935 ms |
+| 5,000 RPS | 5.3 s / 9.9 s ✅ | 18.2 s / 24.8 s ✅ | 23.8 s / 92.2 s ✅ | 9–29 ms | 560–675 ms / 225–265 ms / 705–720 ms |
+| 10,000 RPS | 8.5 s / 20.9 s ✅ | 21.0 s / 75.7 s ✅ | 29.6 s / 186.3 s ✅ | 10–70 ms | 645–1,115 ms / 225–335 ms / 750–1,045 ms |
+| 15,000 RPS | 14.7 s / 27.9 s ✅ | 27.6 s / 75.7 s ✅ | 89.9 s / 343.7 s ✅ | 10–935 ms | 1,255–1,815 ms / 330–355 ms / 850–1,455 ms |
+| 20,000 RPS | 20.5 s / 46.8 s ✅ | 55.3 s / 102.4 s ✅ | 114.2 s / 402.6 s ✅ | 10–1,125 ms | 1,230–3,480 ms / 320–620 ms / 1,085–2,545 ms |
+| 25,000 RPS | 29.8 s / 65.0 s (drains backlog) | 62.2 s / 125.7 s ✅ | 222.2 s / 505.6 s ✅ | 11–2,635 ms | 855–5,320 ms / 275–580 ms / 900–1,985 ms |
+| 30,000 RPS | 40.8 s / 78.2 s (drains backlog) | 83.7 s / 149.1 s ✅ | 277.2 s / 615.0 s (drains backlog) | 11–1,755 ms | 1,220–6,980 ms / 355–600 ms / 1,385–2,235 ms |
+
+#### 12 worker pods / 24 worker threads (`50,000` → `1,000,000` RPS bursts, up to `101.1M` rows)
+
+Scaling the ingest deployment to 12 pods (`HIGH_SCALE_WORKER_THREADS=2`, 24 concurrent worker threads) raises sustained cluster ingest throughput to **27,500–28,250 rows/s** and lets the cluster absorb multi-million-row edge bursts up to **1,000,000 RPS** without dropping a single log line:
+
+| Period | Target RPS | Rows Ingested | Peak Window Ingest Rate | `lag_p50` / `lag_p95` | `lag_ok` | Notes |
+|---|---|---|---|---|---|---|
+| `10 s` | 50,000 RPS | 1,000,000 / 1,000,000 | 9,804 rows/s | 10.3 s / 21.6 s | ✅ | 1M rows drained in 25 s |
+| `10 s` | 100,000 RPS | 2,000,000 / 2,000,000 | 13,158 rows/s | 21.1 s / 38.2 s | ✅ | 2M rows drained in 50 s; full Dashboard 1.07 s, Origin 0.73 s |
+| `10 s` | 250,000 RPS | 2,500,000 / 2,500,000 | 17,361 rows/s | 26.2 s / 48.3 s | ✅ | 2.5M rows drained in 50 s |
+| `10 s` | 500,000 RPS | 5,000,000 / 5,000,000 | **28,249 rows/s** | 13.0 s / 20.1 s | ✅ | 5M rows drained in 65 s; cold Dashboard 1.32 s, Origin 0.27 s |
+| `10 s` | **1,000,000 RPS** | **10,000,000 / 10,000,000** | 13,175 rows/s | 117.6 s / 256.4 s | Drains in ~6 m | 10M rows in 10 s; Dashboard 1.48 s warm / 3.03 s cold, Origin 0.28 s warm / 0.36 s cold |
+| `60 s` | 50,000 RPS | 3,000,000 / 3,000,000 | 18,868 rows/s | 27.1 s / 62.7 s | ✅ | 3M rows drained in 60 s |
+| `60 s` | 100,000 RPS | 6,000,000 / 6,000,000 | **27,523 rows/s** | 30.2 s / 138.3 s | ✅ | 6M rows drained in 85 s; full Dashboard 2.23 s, Origin 0.40 s |
+
+#### Page load latencies at `102.5M` rows in ClickHouse
+
+Measured against the **102,484,916-row** ClickHouse dataset on a single 6 vCPU / 8 GB ClickHouse replica:
+
+- **Warm (30 s response cache hit):** **13–21 ms** for Dashboard (`57 ms` SSR HTML), Origin, Performance, Security (`42 ms` full waterfall), and Sessions (`62 ms`); **25 ms** (`170 ms` full 5-endpoint waterfall) for Network.
+- **Cold (uncached arbitrary 24 h window across 102.5M rows):** **219–407 ms** for Origin, **261–449 ms** for Dashboard, **490–491 ms** for Performance, **882–1,052 ms** for Sessions, **1,603–1,617 ms** for Security, and **2,178–2,358 ms** for Network (all 6 full-page waterfalls complete in **under 2.4 seconds**).
+- **Scaling out:** Ingest throughput scales linearly with `high-scale-worker` replicas (~2,175–2,350 rows/s per worker pod). When scaling worker pods, keep `METADATA_PG_POOL_MAX=64` (the default) on the `backend` API deployment so its 40 FastAPI worker threads and APScheduler crons never wait on a metadata connection, and set `METADATA_PG_POOL_MAX=6` on `high-scale-worker` pods so horizontal worker scaling stays well inside PostgreSQL's `max_connections`.
 
 ### Storage sizing
 
