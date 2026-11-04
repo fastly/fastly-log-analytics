@@ -1402,19 +1402,14 @@ def get_transport_metrics(
         start_time, end_time, filters or {}, list(actual_cols), inline_params=True
     )
 
-    _rtt_quants = (("0.50", "rtt_p50"), ("0.90", "rtt_p90"), ("0.95", "rtt_p95"), ("0.99", "rtt_p99"))
     bytes_col = "resp_bytes" if "resp_bytes" in actual_cols else ("bytes" if "bytes" in actual_cols else None)
+    proto_expr = protocol_label_expr(actual_cols)
     select_parts = [
         "COUNT(*) AS total_reqs",
         f"{sum_or_zero(bytes_col)} AS total_bytes" if bytes_col else "0 AS total_bytes",
-        *(
-            (
-                f"approx_quantile(CAST(tcp_rtt AS DOUBLE), {q}) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS {alias}"
-                if "tcp_rtt" in actual_cols
-                else f"NULL AS {alias}"
-            )
-            for q, alias in _rtt_quants
-        ),
+        "approx_quantile(CAST(tcp_rtt AS DOUBLE), [0.50, 0.90, 0.95, 0.99]) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) AS rtt_quants"
+        if "tcp_rtt" in actual_cols
+        else "NULL AS rtt_quants",
         "AVG(CAST(retrans AS DOUBLE)) FILTER (WHERE retrans IS NOT NULL) AS avg_retrans"
         if "retrans" in actual_cols
         else "NULL AS avg_retrans",
@@ -1424,19 +1419,35 @@ def get_transport_metrics(
         "AVG(CAST(delivery_rate AS DOUBLE)) FILTER (WHERE delivery_rate IS NOT NULL AND delivery_rate > 0) * 8.0 / 1e6 AS avg_del_rate_mbps"
         if "delivery_rate" in actual_cols
         else "NULL AS avg_del_rate_mbps",
+        f"histogram({proto_expr}) AS proto_hist" if proto_expr else "NULL AS proto_hist",
     ]
 
     main_sql = f"SELECT {', '.join(select_parts)} FROM {table_name} WHERE {where_clause}"
     _t0 = _time.perf_counter()
+    protocol_distribution: list[dict[str, Any]] = []
     try:
         row = get_runner().execute(main_sql, params).fetchone()
         timer.mark("transport_aggregates", _t0, source="live", activity="compute", current_execution=True)
         if row:
             total_requests = int(row[0] or 0)
             bandwidth_bytes = int(row[1] or 0)
-            tcp_rtt_p50, tcp_rtt_p90, tcp_rtt_p95, tcp_rtt_p99 = (_opt_float(v, 2) for v in row[2:6])
-            retrans_rate, packet_loss = _opt_float(row[6], 3), _opt_float(row[7], 3)
-            delivery_rate = _opt_float(row[8], 2)
+            raw_quants = row[2]
+            if isinstance(raw_quants, (list, tuple)) and len(raw_quants) == 4:
+                tcp_rtt_p50, tcp_rtt_p90, tcp_rtt_p95, tcp_rtt_p99 = (
+                    _opt_float(v / 1000.0 if v is not None else None, 2) for v in raw_quants
+                )
+            else:
+                tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
+            retrans_rate, packet_loss = _opt_float(row[3], 3), _opt_float(row[4], 3)
+            delivery_rate = _opt_float(row[5], 2)
+            raw_hist = row[6]
+            if proto_expr and isinstance(raw_hist, dict):
+                timer.mark("protocol_distribution", _t0, source="live", activity="compute", current_execution=True)
+                sorted_proto = sorted(raw_hist.items(), key=lambda kv: int(kv[1]), reverse=True)
+                protocol_distribution = shape_protocol_distribution(
+                    ((str(k), int(v)) for k, v in sorted_proto),
+                    total_requests=total_requests,
+                )
         else:
             total_requests = bandwidth_bytes = 0
             tcp_rtt_p50 = tcp_rtt_p90 = tcp_rtt_p95 = tcp_rtt_p99 = None
@@ -1444,29 +1455,6 @@ def get_transport_metrics(
     except Exception as e:
         logger.warning("Failed to query transport aggregates: %s", e)
         return default_resp
-
-    protocol_distribution: list[dict[str, Any]] = []
-    proto_expr = protocol_label_expr(actual_cols)
-    if proto_expr:
-        _t1 = _time.perf_counter()
-        proto_sql = f"""
-            SELECT
-                {proto_expr} AS proto_clean,
-                COUNT(*) AS reqs
-            FROM {table_name}
-            WHERE {where_clause}
-            GROUP BY proto_clean
-            ORDER BY reqs DESC
-        """
-        try:
-            proto_rows = get_runner().execute(proto_sql, params).fetchall()
-            timer.mark("protocol_distribution", _t1, source="live", activity="compute", current_execution=True)
-            protocol_distribution = shape_protocol_distribution(
-                ((r[0], r[1]) for r in proto_rows),
-                total_requests=total_requests,
-            )
-        except Exception as e:
-            logger.warning("Failed to query protocol distribution: %s", e)
 
     return {
         **default_resp,

@@ -895,10 +895,10 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             return cached
 
     if is_real_ch:
-        comb_rows = _run(
-            service,
-            scope,
-            "proxies_combined",
+        use_min_slice = (scope.end - scope.start).total_seconds() >= 21600
+        min_slice_clause = " AND toMinute(event_timestamp) % 4 = 0" if use_min_slice else ""
+        scale_factor = 4 if use_min_slice else 1
+        proxies_sql = (
             "SELECT "
             "uniqCombined64If(ip, is_tunnel OR is_imp) AS active_proxies_count, "
             "countIf(is_tunnel OR is_imp) AS total_requests_count, "
@@ -932,18 +932,27 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "toFloat64OrNull(custom_fields['lat']) AS lat, "
             "toFloat64OrNull(custom_fields['lon']) AS lon, "
             f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT_FAST} AS pop_lat, {_POP_LON_FAST} AS pop_lon "
-            "FROM request_facts PREWHERE __WHERE__"
-            ")))",
+            f"FROM request_facts PREWHERE __WHERE__{min_slice_clause}"
+            ")))"
         )
+        comb_rows = _run(service, scope, "proxies_combined", proxies_sql)
+        if use_min_slice and (not comb_rows or int(comb_rows[0].get("q_total") or 0) == 0):
+            scale_factor = 1
+            comb_rows = _run(
+                service,
+                scope,
+                "proxies_combined_fallback",
+                proxies_sql.replace(min_slice_clause, ""),
+            )
         comb = comb_rows[0] if comb_rows else {}
         stat = {
             "active_proxies_count": int(comb.get("active_proxies_count") or 0),
-            "total_requests_count": int(comb.get("total_requests_count") or 0),
+            "total_requests_count": int(comb.get("total_requests_count") or 0) * scale_factor,
             "distance_mismatches_count": int(comb.get("distance_mismatches_count") or 0),
         }
-        q_tunnel = int(comb.get("q_tunnel") or 0)
-        q_wifi = int(comb.get("q_wifi") or 0)
-        q_total = int(comb.get("q_total") or 0)
+        q_tunnel = int(comb.get("q_tunnel") or 0) * scale_factor
+        q_wifi = int(comb.get("q_wifi") or 0) * scale_factor
+        q_total = int(comb.get("q_total") or 0) * scale_factor
         q_direct = max(0, q_total - q_tunnel - q_wifi)
         q_candidates: list[dict[str, Any]] = [
             {"type": "Direct Connection", "count": q_direct},
@@ -956,7 +965,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             reverse=True,
         )
         isp_rows = [
-            {"asn": None if int(a) == -1 else int(a), "count": int(cnt)}
+            {"asn": None if int(a) == -1 else int(a), "count": int(cnt) * scale_factor}
             for a, cnt in sorted(_unpack_summap(comb.get("isp_map")), key=lambda kv: kv[1], reverse=True)[:10]
             if cnt > 0
         ]
