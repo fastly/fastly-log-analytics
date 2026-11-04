@@ -430,9 +430,9 @@ def network_health(
         err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch and not map_only:
-            rtt_prewhere = (
-                f"{_BASE_WHERE}{filter_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
-            )
+            sample_stride = 4 if start is not None and end is not None and (end - start).total_seconds() >= 21600 else 1
+            stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+            rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
             if not filter_sql and start is not None and end is not None:
@@ -564,6 +564,9 @@ def network_health(
             heatmap_rows, raw_map_rows, pct_rows, city_coord_rows = (
                 q_results.get(k, []) for k in ("heatmap", "map", "percentiles", "city_coords")
             )
+            if sample_stride > 1:
+                heatmap_rows = [{**r, "reqs": int(r.get("reqs") or 0) * sample_stride} for r in heatmap_rows]
+                raw_map_rows = [{**mr, "reqs": int(mr.get("reqs") or 0) * sample_stride} for mr in raw_map_rows]
             coord_lookup: dict[tuple[str, str], tuple[Any, Any]] = {
                 (str(cr.get("country") or ""), str(cr.get("city") or "")): (cr.get("lat"), cr.get("lon"))
                 for cr in city_coord_rows
@@ -577,7 +580,9 @@ def network_health(
                 for mr in raw_map_rows
             ]
             if raw_speed_rows is not None:
-                speed_rows = [r for r in raw_speed_rows if r.get("c_speed")]
+                speed_rows = [
+                    {**r, "cnt": int(r.get("cnt") or 0) * sample_stride} for r in raw_speed_rows if r.get("c_speed")
+                ]
             else:
                 speed_rows = []
                 for pr in pct_rows:
@@ -591,7 +596,7 @@ def network_health(
                         pairs = []
                     for cs, cnt in pairs:
                         if cs:
-                            speed_rows.append({"asn": pr["asn"], "c_speed": str(cs), "cnt": int(cnt)})
+                            speed_rows.append({"asn": pr["asn"], "c_speed": str(cs), "cnt": int(cnt) * sample_stride})
             metro_rows: list[dict[str, Any]]
             if combine_metro_in_map:
                 metro_acc: dict[tuple[str, str, str, str], list[float]] = {}
@@ -623,7 +628,10 @@ def network_health(
                     for k, v in sorted(metro_acc.items(), key=lambda kv: kv[1][0], reverse=True)[:200]
                 ]
             else:
-                metro_rows = q_results.get("metro", [])
+                metro_rows = [
+                    {**r, "total_reqs": int(r.get("total_reqs") or 0) * sample_stride}
+                    for r in q_results.get("metro", [])
+                ]
         else:
             top_asn_subquery = (
                 f"SELECT {_ASN} FROM request_facts "

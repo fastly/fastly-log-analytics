@@ -493,10 +493,12 @@ def _sec_combined_overview(
 ) -> dict[str, Any]:
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
-    rows = _run(
-        service,
-        scope,
-        "overview_5in1",
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    sample_stride = 4 if is_real_ch and (scope.end - scope.start).total_seconds() >= 21600 else 1
+    stride_sql = f" AND toMinute(event_timestamp) % {sample_stride} = 0" if sample_stride > 1 else ""
+    base_sql = (
         f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
         "count() AS total_rows, "
         "countIf(custom_fields['tls_ciphers_sha'] != '') AS tls_populated, "
@@ -508,8 +510,21 @@ def _sec_combined_overview(
         "FROM (SELECT event_timestamp, client_ip, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
         "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
         f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b "
-        "FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts",
     )
+    rows = _run(
+        service,
+        scope,
+        "overview_5in1",
+        f"{base_sql}FROM request_facts PREWHERE __WHERE__{stride_sql}) GROUP BY bucket_ts ORDER BY bucket_ts",
+    )
+    if not rows and sample_stride > 1:
+        sample_stride = 1
+        rows = _run(
+            service,
+            scope,
+            "overview_5in1_fallback",
+            f"{base_sql}FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts",
+        )
     total_rows = 0
     tls_pop = 0
     ipv6_list: list[dict[str, Any]] = []
@@ -525,13 +540,13 @@ def _sec_combined_overview(
             ipv6_list.append({"time": _sec_iso(r["bucket_ts"]), "pct": float(r.get("ipv6_rows") or 0) * 100.0 / tr})
         for k, v in _unpack_summap(r.get("h_map")):
             if k:
-                h_counts[str(k)] += v
+                h_counts[str(k)] += v * sample_stride
         for k, v in _unpack_summap(r.get("c_map")):
             if k:
-                c_counts[str(k)] += v
+                c_counts[str(k)] += v * sample_stride
         for k, v in _unpack_summap(r.get("p_map")):
             if k:
-                p_counts[str(k)] += v
+                p_counts[str(k)] += v * sample_stride
         for item in r.get("top_hdr_ips") or []:
             seq = list(item.values()) if isinstance(item, Mapping) else item
             if len(seq) >= 2 and seq[1]:
