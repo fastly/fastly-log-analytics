@@ -127,6 +127,12 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q backend.high_scale.worker /proc/[0-9]*/cmdline"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
       - app-network
 
