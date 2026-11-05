@@ -55,14 +55,16 @@ export default async function RootLayout({
   // initializer (which reads the cookie in the browser) would flip the
   // sidebar from expanded → collapsed during hydration, producing a
   // visible flash on every page load for users with a collapsed pref.
-  const initialSidebarCollapsed =
-    (await cookies()).get(SIDEBAR_COLLAPSED_COOKIE)?.value === "1";
+  const isStaticExport = process.env.STATIC_EXPORT === "1";
+  const initialSidebarCollapsed = isStaticExport
+    ? false
+    : (await cookies()).get(SIDEBAR_COLLAPSED_COOKIE)?.value === "1";
 
   // Per-request CSP nonce, set by proxy.ts. Next.js auto-applies it to
   // its own injected <script>/<link> tags; we have to pass it manually to
   // next-themes (its theme-bootstrap inline script doesn't read the
   // header) so the strict script-src nonce policy doesn't drop it.
-  const requestHeaders = await headers();
+  const requestHeaders = isStaticExport ? new Headers() : await headers();
   const nonce = requestHeaders.get("x-nonce") ?? undefined;
 
   // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so

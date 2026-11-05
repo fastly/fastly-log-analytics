@@ -1,7 +1,10 @@
-.PHONY: test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit test-frontend-ci openapi-drift test-browser-measurements e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
+.PHONY: help test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit compute-test compute-lint compute-audit cloud-sync-catalog cloud-test cloud-lint cloud-audit cloud-soak cloud-build cloud-deploy cloud-deploy-check cloud-loadtest-campaign admin-reset trim-target test-frontend-ci openapi-drift test-browser-measurements e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
+
+help:
+	@echo "Targets: make test, make ci, make cloud-test, make admin-reset [NAME=flp] [VERBOSE=1]"
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -18,11 +21,11 @@ install-hooks:
 dev:
 	./run.sh --dev
 
-# ── Scorer (Fastly Compute) ─────────────────────────────────────────────────
+# ── Scorer & Cloud (Fastly Compute Workspace) ─────────────────────────────────
 
 # Rebuild the matrix-less scorer Wasm package and refresh the committed
 # artifact the backend ships + deploys via the Fastly API. Run this off-VM
-# (needs rustup-pinned Rust 1.90 + the Fastly CLI) whenever compute/scorer/src
+# (needs rustup-pinned Rust + the Fastly CLI) whenever compute/scorer/src
 # changes, then commit compute/scorer/pkg/session-scorer.tar.gz. The matrix is
 # NOT embedded — it's served from the scoring_matrix KV Store at runtime.
 # --auto-yes auto-approves the fastly.toml post_build (wasm-opt) script prompt;
@@ -33,18 +36,68 @@ scorer-package:
 
 # Run the Rust scorer's native unit tests (normalize/cookie/matrix
 # cross-language parity, session-expiry boundaries, wire-format round-trips).
-# These run at native speed (the dev profile builds for the host, not Wasm), so
-# `cargo test` needs no Fastly CLI — just the rust-toolchain.toml-pinned Rust.
-# Skips with a warning if cargo isn't on PATH (mirrors vcl-test / secret-scan);
-# the Scorer CI job hard-requires it. The pre-push hook runs it when
-# compute/scorer/ changes.
 scorer-test:
 	@if command -v cargo > /dev/null || [ -x "$$HOME/.cargo/bin/cargo" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/scorer/Cargo.toml --locked; \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/Cargo.toml -p fastly-bot-scorer --locked; \
 	else \
 		echo "⚠️  Skipping scorer-test: cargo not on PATH."; \
 		echo "    Install: https://rustup.rs   (rust-toolchain.toml pins the version)"; \
 	fi
+
+compute-test:
+	@if command -v cargo-nextest > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-nextest" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --manifest-path compute/Cargo.toml --workspace --locked --all-targets --no-fail-fast; \
+	else \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/Cargo.toml --workspace --locked --all-targets; \
+	fi
+
+compute-lint:
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo fmt --manifest-path compute/Cargo.toml --all -- --check
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --manifest-path compute/Cargo.toml --workspace --locked --all-targets --all-features -- -D warnings
+
+compute-audit:
+	@if command -v cargo-audit > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-audit" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo audit --file compute/Cargo.lock; \
+	else \
+		echo "⚠️  Skipping compute-audit: cargo-audit not on PATH (cargo install cargo-audit --locked)."; \
+	fi
+
+NAME ?= flp
+VERBOSE ?= 0
+
+cloud-sync-catalog:
+	PYTHONPATH=. uv run python compute/cloud/tools/generator_fixtures.py --write
+
+cloud-test:
+	$(MAKE) -C compute/cloud test
+
+cloud-lint:
+	$(MAKE) -C compute/cloud lint
+
+cloud-audit: compute-audit
+	uv run python scripts/check_secret_values.py
+
+cloud-soak:
+	$(MAKE) -C compute/cloud soak
+
+cloud-build:
+	$(MAKE) -C compute/cloud build
+
+cloud-deploy:
+	$(MAKE) -C compute/cloud deploy
+
+cloud-deploy-check:
+	$(MAKE) -C compute/cloud deploy-check
+
+cloud-loadtest-campaign:
+	$(MAKE) -C compute/cloud loadtest-campaign CAMPAIGN=$(CAMPAIGN)
+
+admin-reset:
+	@$(MAKE) --no-print-directory -C compute/cloud admin-reset NAME="$(NAME)" VERBOSE="$(VERBOSE)"
+
+trim-target:
+	$(MAKE) -C compute/cloud trim-target
+
 
 # ── Backend ───────────────────────────────────────────────────────────────────
 
@@ -172,7 +225,9 @@ verify-deps:
 
 vcl-test:
 	@if command -v falco > /dev/null; then \
-		uv run pytest tests/core/test_vcl_semantics.py; \
+		uv run pytest tests/core/test_vcl_semantics.py && \
+		falco lint -I compute/cloud/vcl/front -I compute/cloud/vcl/front/tests compute/cloud/vcl/front/tests/main.vcl && \
+		falco test -I compute/cloud/vcl/front -I compute/cloud/vcl/front/tests compute/cloud/vcl/front/tests/main.vcl; \
 	else \
 		echo "Skipping VCL tests: falco linter not found in PATH"; \
 	fi
@@ -233,12 +288,7 @@ test-frontend-ci:
 
 # RustSec advisory scan (ci.yml scorer "Audit dependencies"). cargo test
 # does NOT check advisories. Skips with a warning if cargo-audit is absent.
-scorer-audit:
-	@if command -v cargo-audit > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-audit" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo audit --file compute/scorer/Cargo.lock; \
-	else \
-		echo "⚠️  Skipping scorer-audit: cargo-audit not on PATH (cargo install cargo-audit --locked)."; \
-	fi
+scorer-audit: compute-audit
 
 # OpenAPI type-drift guard (ci.yml frontend "Detect drift in generated
 # OpenAPI types"). Regenerates then fails if the tracked output changed.

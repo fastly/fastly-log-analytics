@@ -254,7 +254,10 @@ pub fn normalize(url: &str) -> Route {
     // requests.
     let stripped: String;
     let url = if url.bytes().any(|b| matches!(b, b'\t' | b'\n' | b'\r')) {
-        stripped = url.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+        stripped = url
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+            .collect();
         stripped.as_str()
     } else {
         url
@@ -351,7 +354,11 @@ mod tests {
         // Encoded `%2F` stays data (finding 014): the slash never separates, so
         // the literal `..` survives inside the segment and the FIRST real
         // segment drives the category — no auth→product evasion.
-        ("/auth/login%2F..%2F..%2Fproduct", "/auth/login/../../product", "auth"),
+        (
+            "/auth/login%2F..%2F..%2Fproduct",
+            "/auth/login/../../product",
+            "auth",
+        ),
         ("/items/%2e%2e%2fsecret", "/items/../secret", "product"),
         ("/a/b/%2e%2e%2f%2e%2e%2fc", "/a/b/../../c", "other"),
     ];
@@ -389,7 +396,11 @@ mod tests {
     #[test]
     fn cross_lang_category_golden_rust_side() {
         for (url, want_cat) in CATEGORY_GOLDEN {
-            assert_eq!(&normalize(url).category, want_cat, "{url:?}: category drifted");
+            assert_eq!(
+                &normalize(url).category,
+                want_cat,
+                "{url:?}: category drifted"
+            );
         }
     }
 
@@ -440,10 +451,7 @@ mod tests {
 
     #[test]
     fn hex_hash_collapse() {
-        assert_eq!(
-            normalize("/jobs/64bc89ff1a2b3c4d5e6f7081").path,
-            "/jobs/*"
-        );
+        assert_eq!(normalize("/jobs/64bc89ff1a2b3c4d5e6f7081").path, "/jobs/*");
     }
 
     #[test]
@@ -524,8 +532,14 @@ mod tests {
         // crafting paths like /admin/delete/http://x/. Now we only strip
         // the prefix when what precedes "://" looks like a valid RFC 3986
         // scheme (starts ascii-alpha, then ascii-alnum/+/-/.).
-        assert_eq!(normalize("/admin/delete/http://x/").path, "/admin/delete/http:/x");
-        assert_eq!(normalize("/api/v2/orders/file://x/").path, "/api/v2/orders/file:/x");
+        assert_eq!(
+            normalize("/admin/delete/http://x/").path,
+            "/admin/delete/http:/x"
+        );
+        assert_eq!(
+            normalize("/api/v2/orders/file://x/").path,
+            "/api/v2/orders/file:/x"
+        );
         // Real absolute URLs still strip correctly.
         assert_eq!(
             normalize("https://www.example.com/api/v1/users/777").path,

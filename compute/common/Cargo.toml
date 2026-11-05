@@ -1,0 +1,22 @@
+[package]
+name = "compute-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "compute_common"
+path = "src/lib.rs"
+
+[dependencies]
+base64.workspace = true
+cookie.workspace = true
+fastly.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+time.workspace = true

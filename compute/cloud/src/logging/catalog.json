@@ -1,0 +1,3694 @@
+{
+  "fields": [
+    {
+      "id": "timestamp",
+      "name": "timestamp",
+      "group": null,
+      "label": "Timestamp",
+      "description": "UTC timestamp of the request start time (ISO 8601 with timezone).",
+      "vcl": "\"timestamp\":\"%{strftime(\\{\"%Y-%m-%dT%H:%M:%S%z\"\\},time.start)}V\"",
+      "vcl_format": "\"timestamp\":\"%{strftime(\\{\"%Y-%m-%dT%H:%M:%S%z\"\\},time.start)}V\"",
+      "duckdb_type": "TIMESTAMP",
+      "typical_bytes": 40,
+      "required_by": []
+    },
+    {
+      "id": "ts_ms",
+      "name": "ts_ms",
+      "group": null,
+      "label": "Timestamp (ms)",
+      "description": "Request start time in milliseconds since the Unix epoch. Routes rows into windows and orders window files.",
+      "vcl": "\"ts_ms\":%{time.start.msec}V",
+      "vcl_format": "\"ts_ms\":%{time.start.msec}V",
+      "duckdb_type": "TIMESTAMP",
+      "typical_bytes": 22,
+      "required_by": []
+    },
+    {
+      "id": "ip",
+      "name": "ip",
+      "group": null,
+      "label": "Client IP",
+      "description": "Client IP address. Captured at the real edge via x-fos-edge-data header; falls back to client.ip for requests answered before capture ran (e.g. redirects).",
+      "vcl": "\"ip\":\"%{json.escape(if(req.http.x-fos-edge-data:ip != \"\", req.http.x-fos-edge-data:ip, if(req.http.Fastly-Client-IP != \"\", req.http.Fastly-Client-IP, client.ip)))}V\"",
+      "vcl_format": "\"ip\":\"%{json.escape(if(req.http.x-fos-edge-data:ip != \"\", req.http.x-fos-edge-data:ip, if(req.http.Fastly-Client-IP != \"\", req.http.Fastly-Client-IP, client.ip)))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 22,
+      "required_by": [
+        "low_and_slow",
+        "credential_enumeration",
+        "content_discovery",
+        "botnet_grouping"
+      ]
+    },
+    {
+      "id": "status",
+      "name": "status",
+      "group": null,
+      "label": "Response Status",
+      "description": "HTTP response status code (e.g. 200, 404, 503).",
+      "formatter": "status",
+      "vcl": "\"status\":%{if(resp.status > 0, \"\" + resp.status, \"null\")}V",
+      "vcl_format": "\"status\":%{if(resp.status > 0, \"\" + resp.status, \"null\")}V",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 17,
+      "required_by": [
+        "error_spikes",
+        "city_error_spikes",
+        "credential_enumeration",
+        "content_discovery",
+        "waf_signal_spikes",
+        "image_optimization_opportunities"
+      ]
+    },
+    {
+      "id": "elapsed",
+      "name": "elapsed",
+      "group": null,
+      "label": "Elapsed Time (µs)",
+      "description": "Total request processing time in microseconds.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"elapsed\":%{if(time.elapsed.usec != \"\", time.elapsed.usec, \"null\")}V",
+      "vcl_format": "\"elapsed\":%{if(time.elapsed.usec != \"\", time.elapsed.usec, \"null\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 18,
+      "required_by": [
+        "latency_regression",
+        "city_latency_regressions",
+        "network_asn_health",
+        "tail_latency",
+        "region_latency"
+      ]
+    },
+    {
+      "id": "cache",
+      "name": "cache",
+      "group": null,
+      "label": "Cache State",
+      "description": "Fastly cache state: HIT, MISS, PASS, SYNTH, etc.",
+      "vcl": "\"cache\":\"%{json.escape(fastly_info.state)}V\"",
+      "vcl_format": "\"cache\":\"%{json.escape(fastly_info.state)}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_collapse",
+        "cache_hit_cliff",
+        "cache_pressure"
+      ]
+    },
+    {
+      "id": "resp_bytes",
+      "name": "resp_bytes",
+      "group": null,
+      "label": "Response Bytes",
+      "description": "Bytes delivered to the client in the response body.",
+      "formatter": "bytes",
+      "vcl": "\"resp_bytes\":%{if(resp.bytes_written > 0, \"\" + resp.bytes_written, \"0\")}V",
+      "vcl_format": "\"resp_bytes\":%{if(resp.bytes_written > 0, \"\" + resp.bytes_written, \"0\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_pressure",
+        "network_asn_health",
+        "image_optimization_opportunities"
+      ]
+    },
+    {
+      "id": "host",
+      "name": "host",
+      "group": "A",
+      "label": "Host",
+      "description": "HTTP Host header (domain name) captured at the true client edge before any rewrites.",
+      "vcl": "\"host\":\"%{json.escape(substr(if(req.http.x-fos-edge-data:host != \"\", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V\"",
+      "vcl_format": "\"host\":\"%{json.escape(substr(if(req.http.x-fos-edge-data:host != \"\", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 22,
+      "required_by": [
+        "new_probe_urls"
+      ]
+    },
+    {
+      "id": "url",
+      "name": "url",
+      "group": "A",
+      "label": "URL",
+      "description": "Request URL path and query string. Average ~30 bytes; varies widely.",
+      "vcl": "\"url\":\"%{json.escape(substr(req.url, 0, 2000))}V\"",
+      "vcl_format": "\"url\":\"%{json.escape(substr(req.url, 0, 2000))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 37,
+      "required_by": [
+        "error_spikes",
+        "latency_regression",
+        "new_probe_urls",
+        "low_and_slow",
+        "credential_enumeration",
+        "content_discovery",
+        "tail_latency",
+        "image_optimization_opportunities"
+      ]
+    },
+    {
+      "id": "method",
+      "name": "method",
+      "group": "A",
+      "label": "HTTP Method",
+      "description": "Request method: GET, POST, HEAD, PUT, DELETE, etc.",
+      "vcl": "\"method\":\"%{json.escape(substr(req.method, 0, 128))}V\"",
+      "vcl_format": "\"method\":\"%{json.escape(substr(req.method, 0, 128))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 19,
+      "required_by": [
+        "method_drift"
+      ]
+    },
+    {
+      "id": "proto",
+      "name": "proto",
+      "group": "A",
+      "label": "HTTP Version",
+      "description": "HTTP protocol version: 1.0, 1.1, 2.0, or 3.0.",
+      "formatter": "number",
+      "precision": 1,
+      "vcl": "\"proto\":\"%{if(req.proto != \"\", regsub(req.proto, \"^HTTP/\", \"\"), \"\")}V\"",
+      "vcl_format": "\"proto\":\"%{if(req.proto != \"\", regsub(req.proto, \"^HTTP/\", \"\"), \"\")}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 15,
+      "required_by": []
+    },
+    {
+      "id": "ua",
+      "name": "ua",
+      "group": "A",
+      "label": "User-Agent",
+      "description": "Client browser or bot identifier. Largest single field — bots inflate this significantly.",
+      "note": "Largest single field — bots tend to have verbose user-agents.",
+      "vcl": "\"ua\":\"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != \"\", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 1000))}V\"",
+      "vcl_format": "\"ua\":\"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != \"\", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 1000))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 90,
+      "individually_toggleable": true,
+      "required_by": [
+        "ua_monoculture",
+        "botnet_grouping",
+        "image_optimization_opportunities"
+      ]
+    },
+    {
+      "id": "referer",
+      "name": "referer",
+      "group": "A",
+      "label": "Referer",
+      "description": "Referring URL. Often empty; useful for traffic source analysis.",
+      "vcl": "\"referer\":\"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != \"\", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 1000))}V\"",
+      "vcl_format": "\"referer\":\"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != \"\", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 1000))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 44,
+      "individually_toggleable": true,
+      "required_by": [
+        "referer_monoculture"
+      ]
+    },
+    {
+      "id": "req_bytes",
+      "name": "req_bytes",
+      "group": "A",
+      "label": "Request Body Size",
+      "description": "Request body size in bytes from Content-Length header. Zero for GET/HEAD or any request without Content-Length.",
+      "formatter": "bytes",
+      "vcl": "\"req_bytes\":%{if(req.http.Content-Length ~ \"^[0-9]+$\", req.http.Content-Length, \"0\")}V",
+      "vcl_format": "\"req_bytes\":%{if(req.http.Content-Length ~ \"^[0-9]+$\", req.http.Content-Length, \"0\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 13,
+      "required_by": [
+        "request_size_anomaly"
+      ]
+    },
+    {
+      "id": "req_header_bytes",
+      "name": "req_header_bytes",
+      "group": "A",
+      "label": "Request Header Size",
+      "description": "Total bytes in the request headers. Large values are an injection or WAF bypass signal.",
+      "formatter": "bytes",
+      "vcl": "\"req_header_bytes\":%{if(req.header_bytes_read > 0, \"\" + req.header_bytes_read, \"0\")}V",
+      "vcl_format": "\"req_header_bytes\":%{if(req.header_bytes_read > 0, \"\" + req.header_bytes_read, \"0\")}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 20,
+      "required_by": [
+        "request_size_anomaly"
+      ]
+    },
+    {
+      "id": "resp_header_content_encoding",
+      "name": "resp_header_content_encoding",
+      "group": "A",
+      "label": "Response Content-Encoding",
+      "description": "Content-Encoding of the response served to the client (gzip / br / zstd, or empty when the response was sent uncompressed). Low-cardinality. Read directly from the final response at log time — no edge capture needed.",
+      "vcl": "\"resp_header_content_encoding\":\"%{json.escape(resp.http.Content-Encoding)}V\"",
+      "vcl_format": "\"resp_header_content_encoding\":\"%{json.escape(resp.http.Content-Encoding)}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 38,
+      "individually_toggleable": true,
+      "required_by": [
+        "payload_compression_regression"
+      ]
+    },
+    {
+      "id": "ttl",
+      "name": "ttl",
+      "group": "B",
+      "label": "Object TTL",
+      "description": "Time-to-live assigned by origin headers. Null when object is not cacheable.",
+      "formatter": "number",
+      "precision": 0,
+      "unit": "s",
+      "vcl": "\"ttl\":%{if(obj.ttl > 0s, regsub(\"\" + obj.ttl, \"(\\.[0-9]+)?s$\", \"\"), \"null\")}V",
+      "vcl_format": "\"ttl\":%{if(obj.ttl > 0s, regsub(\"\" + obj.ttl, \"(\\.[0-9]+)?s$\", \"\"), \"null\")}V",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_pressure",
+        "cache_ttl_mismatch"
+      ]
+    },
+    {
+      "id": "age",
+      "name": "age",
+      "group": "B",
+      "label": "Object Age",
+      "description": "How long the object has been in the Fastly cache (seconds).",
+      "formatter": "number",
+      "precision": 0,
+      "unit": "s",
+      "vcl": "\"age\":%{if(obj.age > 0s, regsub(\"\" + obj.age, \"(\\.[0-9]+)?s$\", \"\"), \"null\")}V",
+      "vcl_format": "\"age\":%{if(obj.age > 0s, regsub(\"\" + obj.age, \"(\\.[0-9]+)?s$\", \"\"), \"null\")}V",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 17,
+      "required_by": [
+        "cache_pressure",
+        "cache_ttl_mismatch"
+      ]
+    },
+    {
+      "id": "hits",
+      "name": "hits",
+      "group": "B",
+      "label": "Object Hit Count",
+      "description": "Number of times this cached object has been served.",
+      "vcl": "\"hits\":%{if(obj.hits > 0, \"\" + obj.hits, \"null\")}V",
+      "vcl_format": "\"hits\":%{if(obj.hits > 0, \"\" + obj.hits, \"null\")}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 14,
+      "required_by": [
+        "cache_ttl_mismatch"
+      ]
+    },
+    {
+      "id": "digest",
+      "name": "digest",
+      "group": "B",
+      "label": "Content Digest",
+      "description": "Content hash for exact object identity. Required for Cache Pressure Analysis.",
+      "note": "Required for Cache Pressure Analysis (eviction detection).",
+      "vcl": "\"digest\":\"%{req.digest}V\"",
+      "vcl_format": "\"digest\":\"%{req.digest}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 47,
+      "required_by": [
+        "cache_pressure",
+        "pop_latency_regression"
+      ]
+    },
+    {
+      "id": "pop",
+      "name": "pop",
+      "group": "C",
+      "label": "Edge PoP",
+      "description": "Fastly Point of Presence code (e.g. JFK, LHR, SYD).",
+      "formatter": "pop",
+      "vcl": "\"pop\":\"%{server.datacenter}V\"",
+      "vcl_format": "\"pop\":\"%{server.datacenter}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_pressure"
+      ]
+    },
+    {
+      "id": "backend",
+      "name": "backend",
+      "group": "C",
+      "label": "Backend",
+      "description": "Origin backend name as configured in Fastly.",
+      "vcl": "\"backend\":\"%{json.escape(req.backend)}V\"",
+      "vcl_format": "\"backend\":\"%{json.escape(req.backend)}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 21,
+      "required_by": []
+    },
+    {
+      "id": "edge",
+      "name": "edge",
+      "group": "C",
+      "label": "Edge Hit",
+      "description": "True when the request hit the real edge (not a shield or restart).",
+      "vcl": "\"edge\":%{if(fastly.ff.visits_this_service == 0, \"1\", \"0\")}V",
+      "vcl_format": "\"edge\":%{if(fastly.ff.visits_this_service == 0, \"1\", \"0\")}V",
+      "duckdb_type": "BOOLEAN",
+      "typical_bytes": 9,
+      "required_by": []
+    },
+    {
+      "id": "ttfb",
+      "name": "ttfb",
+      "group": "C",
+      "label": "Time to First Byte (s)",
+      "description": "Seconds from request receipt to first byte of response from origin. Subtract from elapsed to isolate Fastly processing time.",
+      "formatter": "number",
+      "precision": 3,
+      "unit": "s",
+      "vcl": "\"ttfb\":%{if(time.to_first_byte > 0s, regsub(\"\" + time.to_first_byte, \"s$\", \"\"), \"null\")}V",
+      "vcl_format": "\"ttfb\":%{if(time.to_first_byte > 0s, regsub(\"\" + time.to_first_byte, \"s$\", \"\"), \"null\")}V",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 14,
+      "required_by": [
+        "region_latency"
+      ]
+    },
+    {
+      "id": "server_region",
+      "name": "server_region",
+      "group": "C",
+      "label": "Server Region",
+      "description": "Fastly billing region of the serving PoP (e.g. NA, EU, APAC). Captured at edge for accurate attribution through shields.",
+      "vcl": "\"server_region\":\"%{json.escape(if(req.http.x-fos-edge-data:srv_region != \"\", req.http.x-fos-edge-data:srv_region, server.region))}V\"",
+      "vcl_format": "\"server_region\":\"%{json.escape(if(req.http.x-fos-edge-data:srv_region != \"\", req.http.x-fos-edge-data:srv_region, server.region))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 20,
+      "required_by": [
+        "region_latency"
+      ]
+    },
+    {
+      "id": "is_ipv6",
+      "name": "is_ipv6",
+      "group": "C",
+      "label": "IPv6",
+      "description": "True when the client connected over IPv6. IPv6 clients can have different routing and latency profiles.",
+      "vcl": "\"is_ipv6\":%{if(req.http.x-fos-edge-data:is_ipv6 ~ \"^[0-9]+$\", req.http.x-fos-edge-data:is_ipv6, if(req.is_ipv6, \"1\", \"0\"))}V",
+      "vcl_format": "\"is_ipv6\":%{if(req.http.x-fos-edge-data:is_ipv6 ~ \"^[0-9]+$\", req.http.x-fos-edge-data:is_ipv6, if(req.is_ipv6, \"1\", \"0\"))}V",
+      "duckdb_type": "BOOLEAN",
+      "typical_bytes": 12,
+      "required_by": []
+    },
+    {
+      "id": "conn_requests",
+      "name": "conn_requests",
+      "group": "C",
+      "label": "Conn. Request Count",
+      "description": "Number of requests made on this TCP/QUIC connection. High values indicate HTTP/2 keep-alive multiplexing.",
+      "vcl": "\"conn_requests\":%{if(req.http.x-fos-edge-data:conn_reqs ~ \"^[0-9]+$\", req.http.x-fos-edge-data:conn_reqs, if(client.requests > 0, \"\" + client.requests, \"null\"))}V",
+      "vcl_format": "\"conn_requests\":%{if(req.http.x-fos-edge-data:conn_reqs ~ \"^[0-9]+$\", req.http.x-fos-edge-data:conn_reqs, if(client.requests > 0, \"\" + client.requests, \"null\"))}V",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 20,
+      "required_by": [
+        "connection_abuse"
+      ]
+    },
+    {
+      "id": "tls",
+      "name": "tls",
+      "group": "C",
+      "label": "TLS Version",
+      "description": "TLS protocol version as a float: 1.2 or 1.3.",
+      "formatter": "number",
+      "precision": 1,
+      "vcl": "\"tls\":\"%{json.escape(if(req.http.x-fos-edge-data:tls != \"\", req.http.x-fos-edge-data:tls, if(tls.client.protocol != \"\", regsub(tls.client.protocol, \"^TLSv\", \"\"), \"\")))}V\"",
+      "vcl_format": "\"tls\":\"%{json.escape(if(req.http.x-fos-edge-data:tls != \"\", req.http.x-fos-edge-data:tls, if(tls.client.protocol != \"\", regsub(tls.client.protocol, \"^TLSv\", \"\"), \"\")))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 10,
+      "required_by": []
+    },
+    {
+      "id": "country",
+      "name": "country",
+      "group": "D",
+      "label": "Country",
+      "description": "ISO 3166-1 alpha-2 country code (e.g. US, DE, JP). Enables world map.",
+      "formatter": "country",
+      "vcl": "\"country\":\"%{json.escape(if(req.http.x-fos-edge-data:country != \"\", req.http.x-fos-edge-data:country, client.geo.country_code))}V\"",
+      "vcl_format": "\"country\":\"%{json.escape(if(req.http.x-fos-edge-data:country != \"\", req.http.x-fos-edge-data:country, client.geo.country_code))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 15,
+      "individually_toggleable": true,
+      "required_by": [
+        "new_country_traffic",
+        "city_surges",
+        "city_error_spikes",
+        "city_latency_regressions",
+        "new_city_traffic"
+      ]
+    },
+    {
+      "id": "city",
+      "name": "city",
+      "group": "D",
+      "label": "City",
+      "description": "City name from Fastly geo-IP. Variable length.",
+      "formatter": "city",
+      "vcl": "\"city\":\"%{json.escape(if(req.http.x-fos-edge-data:city != \"\", req.http.x-fos-edge-data:city, client.geo.city))}V\"",
+      "vcl_format": "\"city\":\"%{json.escape(if(req.http.x-fos-edge-data:city != \"\", req.http.x-fos-edge-data:city, client.geo.city))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "individually_toggleable": true,
+      "required_by": [
+        "city_surges",
+        "city_error_spikes",
+        "city_latency_regressions",
+        "new_city_traffic"
+      ]
+    },
+    {
+      "id": "region",
+      "name": "region",
+      "group": "D",
+      "label": "Region",
+      "description": "ISO 3166-2 region/state/province code.",
+      "formatter": "region",
+      "vcl": "\"region\":\"%{json.escape(if(req.http.x-fos-edge-data:region != \"\", req.http.x-fos-edge-data:region, if(client.geo.region == \"?\", \"\", client.geo.region)))}V\"",
+      "vcl_format": "\"region\":\"%{json.escape(if(req.http.x-fos-edge-data:region != \"\", req.http.x-fos-edge-data:region, if(client.geo.region == \"?\", \"\", client.geo.region)))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 14,
+      "individually_toggleable": true,
+      "required_by": []
+    },
+    {
+      "id": "lat",
+      "name": "lat",
+      "group": "E",
+      "label": "Latitude",
+      "description": "Client latitude (-90 to 90). Null for unresolvable IPs.",
+      "formatter": "number",
+      "precision": 4,
+      "vcl": "\"lat\":%{if(req.http.x-fos-edge-data:lat ~ \"^-?[0-9]+(\\.[0-9]+)?$\", req.http.x-fos-edge-data:lat, if(client.geo.country_code != \"?\", \"\" + client.geo.latitude, \"null\"))}V",
+      "vcl_format": "\"lat\":%{if(req.http.x-fos-edge-data:lat ~ \"^-?[0-9]+(\\.[0-9]+)?$\", req.http.x-fos-edge-data:lat, if(client.geo.country_code != \"?\", \"\" + client.geo.latitude, \"null\"))}V",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 12,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "lon",
+      "name": "lon",
+      "group": "E",
+      "label": "Longitude",
+      "description": "Client longitude (-180 to 180). Null for unresolvable IPs.",
+      "formatter": "number",
+      "precision": 4,
+      "vcl": "\"lon\":%{if(req.http.x-fos-edge-data:lon ~ \"^-?[0-9]+(\\.[0-9]+)?$\", req.http.x-fos-edge-data:lon, if(client.geo.country_code != \"?\", \"\" + client.geo.longitude, \"null\"))}V",
+      "vcl_format": "\"lon\":%{if(req.http.x-fos-edge-data:lon ~ \"^-?[0-9]+(\\.[0-9]+)?$\", req.http.x-fos-edge-data:lon, if(client.geo.country_code != \"?\", \"\" + client.geo.longitude, \"null\"))}V",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 13,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "metro",
+      "name": "metro",
+      "group": "E",
+      "label": "Metro Code",
+      "description": "US DMA metro area code (e.g. 501 = New York City). Empty for non-US.",
+      "vcl": "\"metro\":%{if(req.http.x-fos-edge-data:metro ~ \"^[0-9]+$\", req.http.x-fos-edge-data:metro, if(client.geo.metro_code > 0, \"\" + client.geo.metro_code, \"null\"))}V",
+      "vcl_format": "\"metro\":%{if(req.http.x-fos-edge-data:metro ~ \"^[0-9]+$\", req.http.x-fos-edge-data:metro, if(client.geo.metro_code > 0, \"\" + client.geo.metro_code, \"null\"))}V",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 14,
+      "required_by": [
+        "metro_delivery_degradation"
+      ]
+    },
+    {
+      "id": "asn",
+      "name": "asn",
+      "group": "F",
+      "label": "ASN",
+      "description": "Client Autonomous System Number (ISP identity). Enables ASN-level analysis.",
+      "vcl": "\"asn\":%{if(req.http.x-fos-edge-data:asn ~ \"^[0-9]+$\", req.http.x-fos-edge-data:asn, if(client.as.number > 0, \"\" + client.as.number, \"null\"))}V",
+      "vcl_format": "\"asn\":%{if(req.http.x-fos-edge-data:asn ~ \"^[0-9]+$\", req.http.x-fos-edge-data:asn, if(client.as.number > 0, \"\" + client.as.number, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 11,
+      "required_by": [
+        "asn_concentration",
+        "asn_hosting_shift",
+        "new_asn_traffic",
+        "network_asn_health",
+        "region_latency"
+      ]
+    },
+    {
+      "id": "tcp_rtt",
+      "name": "tcp_rtt",
+      "group": "F",
+      "label": "TCP RTT (µs)",
+      "description": "TCP round-trip time in microseconds at the Fastly edge.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"tcp_rtt\":%{if(req.http.x-fos-edge-data:rtt ~ \"^[0-9]+$\", req.http.x-fos-edge-data:rtt, if(client.socket.tcpi_rtt > 0, \"\" + client.socket.tcpi_rtt, \"null\"))}V",
+      "vcl_format": "\"tcp_rtt\":%{if(req.http.x-fos-edge-data:rtt ~ \"^[0-9]+$\", req.http.x-fos-edge-data:rtt, if(client.socket.tcpi_rtt > 0, \"\" + client.socket.tcpi_rtt, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "transport",
+      "name": "transport",
+      "group": "F",
+      "label": "Transport Protocol",
+      "description": "Transport protocol: 'tcp' or 'quic'. Low-cardinality; essentially free in Parquet.",
+      "vcl": "\"transport\":\"%{json.escape(if(req.http.x-fos-edge-data:transport != \"\", req.http.x-fos-edge-data:transport, transport.type))}V\"",
+      "vcl_format": "\"transport\":\"%{json.escape(if(req.http.x-fos-edge-data:transport != \"\", req.http.x-fos-edge-data:transport, transport.type))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "network_asn_health",
+        "http3_fallback"
+      ]
+    },
+    {
+      "id": "ploss",
+      "name": "ploss",
+      "group": "G",
+      "label": "Packet Loss",
+      "description": "Packet loss fraction (0.0–1.0). Direct indicator of network congestion.",
+      "formatter": "percent",
+      "precision": 4,
+      "vcl": "\"ploss\":%{if(req.http.x-fos-edge-data:ploss ~ \"^-?[0-9]+(\\.[0-9]+)?$\", req.http.x-fos-edge-data:ploss, if(client.socket.ploss > 0, \"\" + client.socket.ploss, \"null\"))}V",
+      "vcl_format": "\"ploss\":%{if(req.http.x-fos-edge-data:ploss ~ \"^-?[0-9]+(\\.[0-9]+)?$\", req.http.x-fos-edge-data:ploss, if(client.socket.ploss > 0, \"\" + client.socket.ploss, \"null\"))}V",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 18,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "rtt_min",
+      "name": "rtt_min",
+      "group": "G",
+      "label": "Minimum RTT (µs)",
+      "description": "Minimum RTT seen on this TCP connection (geography baseline). Delta from tcp_rtt isolates congestion.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"rtt_min\":%{if(req.http.x-fos-edge-data:rtt_min ~ \"^[0-9]+$\", req.http.x-fos-edge-data:rtt_min, if(client.socket.tcpi_min_rtt > 0, \"\" + client.socket.tcpi_min_rtt, \"null\"))}V",
+      "vcl_format": "\"rtt_min\":%{if(req.http.x-fos-edge-data:rtt_min ~ \"^[0-9]+$\", req.http.x-fos-edge-data:rtt_min, if(client.socket.tcpi_min_rtt > 0, \"\" + client.socket.tcpi_min_rtt, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "rtt_var",
+      "name": "rtt_var",
+      "group": "G",
+      "label": "RTT Variance / Jitter (µs)",
+      "description": "RTT variance in microseconds. Jitter causes streaming buffer stalls more than raw latency.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"rtt_var\":%{if(req.http.x-fos-edge-data:rtt_var ~ \"^[0-9]+$\", req.http.x-fos-edge-data:rtt_var, if(client.socket.tcpi_rttvar > 0, \"\" + client.socket.tcpi_rttvar, \"null\"))}V",
+      "vcl_format": "\"rtt_var\":%{if(req.http.x-fos-edge-data:rtt_var ~ \"^[0-9]+$\", req.http.x-fos-edge-data:rtt_var, if(client.socket.tcpi_rttvar > 0, \"\" + client.socket.tcpi_rttvar, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 18,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "retrans",
+      "name": "retrans",
+      "group": "G",
+      "label": "TCP Retransmissions",
+      "description": "TCP retransmission delta since previous sample. Direct congestion signal.",
+      "formatter": "number",
+      "vcl": "\"retrans\":%{if(req.http.x-fos-edge-data:retrans ~ \"^[0-9]+$\", req.http.x-fos-edge-data:retrans, if(client.socket.tcpi_delta_retrans > 0, \"\" + client.socket.tcpi_delta_retrans, \"null\"))}V",
+      "vcl_format": "\"retrans\":%{if(req.http.x-fos-edge-data:retrans ~ \"^[0-9]+$\", req.http.x-fos-edge-data:retrans, if(client.socket.tcpi_delta_retrans > 0, \"\" + client.socket.tcpi_delta_retrans, \"null\"))}V",
+      "duckdb_type": "UTINYINT",
+      "typical_bytes": 15,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "bw",
+      "name": "bw",
+      "group": "K",
+      "label": "Bandwidth Estimate",
+      "description": "Fastly's estimated bandwidth for this connection (bytes/sec or bits/sec — see note). Only applicable for QUIC; TCP connections should use delivery_rate instead.",
+      "formatter": "bytes",
+      "vcl": "\"bw\":%{if(req.http.x-fos-edge-data:bw ~ \"^[0-9]+$\", req.http.x-fos-edge-data:bw, if(transport.bw_estimate > 0, \"\" + transport.bw_estimate, \"null\"))}V",
+      "vcl_format": "\"bw\":%{if(req.http.x-fos-edge-data:bw ~ \"^[0-9]+$\", req.http.x-fos-edge-data:bw, if(transport.bw_estimate > 0, \"\" + transport.bw_estimate, \"null\"))}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 17,
+      "required_by": []
+    },
+    {
+      "id": "c_speed",
+      "name": "c_speed",
+      "group": "G",
+      "label": "Connection Speed Class",
+      "description": "Geo-IP speed classification: broadband, cable, dsl, mobile, satellite, dialup. Low-cardinality.",
+      "vcl": "\"c_speed\":\"%{json.escape(if(req.http.x-fos-edge-data:c_speed != \"\", req.http.x-fos-edge-data:c_speed, if(client.geo.conn_speed == \"?\", \"\", client.geo.conn_speed)))}V\"",
+      "vcl_format": "\"c_speed\":\"%{json.escape(if(req.http.x-fos-edge-data:c_speed != \"\", req.http.x-fos-edge-data:c_speed, if(client.geo.conn_speed == \"?\", \"\", client.geo.conn_speed)))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 14,
+      "required_by": [
+        "network_asn_health",
+        "connection_type_mix"
+      ]
+    },
+    {
+      "id": "c_type",
+      "name": "c_type",
+      "group": "G",
+      "label": "Connection Type",
+      "description": "Geo-IP connection type: residential, commercial, cellular, corporate. Low-cardinality.",
+      "vcl": "\"c_type\":\"%{json.escape(if(req.http.x-fos-edge-data:c_type != \"\", req.http.x-fos-edge-data:c_type, if(client.geo.conn_type == \"?\", \"\", client.geo.conn_type)))}V\"",
+      "vcl_format": "\"c_type\":\"%{json.escape(if(req.http.x-fos-edge-data:c_type != \"\", req.http.x-fos-edge-data:c_type, if(client.geo.conn_type == \"?\", \"\", client.geo.conn_type)))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 27,
+      "required_by": [
+        "network_asn_health",
+        "connection_type_mix"
+      ]
+    },
+    {
+      "id": "delivery_rate",
+      "name": "delivery_rate",
+      "group": "G",
+      "label": "TCP Delivery Rate",
+      "description": "Actual TCP delivery rate in bytes/sec measured by the kernel. More reliable than bandwidth estimate for TCP connections.",
+      "formatter": "bytes",
+      "vcl": "\"delivery_rate\":%{if(req.http.x-fos-edge-data:del_rate ~ \"^[0-9]+$\", req.http.x-fos-edge-data:del_rate, if(client.socket.tcpi_delivery_rate > 0, \"\" + client.socket.tcpi_delivery_rate, \"null\"))}V",
+      "vcl_format": "\"delivery_rate\":%{if(req.http.x-fos-edge-data:del_rate ~ \"^[0-9]+$\", req.http.x-fos-edge-data:del_rate, if(client.socket.tcpi_delivery_rate > 0, \"\" + client.socket.tcpi_delivery_rate, \"null\"))}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 22,
+      "required_by": [
+        "network_asn_health",
+        "metro_delivery_degradation"
+      ]
+    },
+    {
+      "id": "data_segs_out",
+      "name": "data_segs_out",
+      "group": "G",
+      "label": "TCP Data Segments Out",
+      "description": "Total TCP data segments sent on this connection. Enables retransmit ratio: retrans / data_segs_out.",
+      "formatter": "number",
+      "vcl": "\"data_segs_out\":%{if(req.http.x-fos-edge-data:data_segs ~ \"^[0-9]+$\", req.http.x-fos-edge-data:data_segs, if(client.socket.tcpi_data_segs_out > 0, \"\" + client.socket.tcpi_data_segs_out, \"null\"))}V",
+      "vcl_format": "\"data_segs_out\":%{if(req.http.x-fos-edge-data:data_segs ~ \"^[0-9]+$\", req.http.x-fos-edge-data:data_segs, if(client.socket.tcpi_data_segs_out > 0, \"\" + client.socket.tcpi_data_segs_out, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 21,
+      "required_by": [
+        "network_asn_health"
+      ]
+    },
+    {
+      "id": "ja3",
+      "name": "ja3",
+      "group": "H",
+      "label": "JA3 Fingerprint",
+      "description": "MD5 TLS client fingerprint. Older standard; widely supported. 41 bytes avg.",
+      "vcl": "\"ja3\":\"%{json.escape(if(req.http.x-fos-edge-data:ja3 != \"\", req.http.x-fos-edge-data:ja3, tls.client.ja3_md5))}V\"",
+      "vcl_format": "\"ja3\":\"%{json.escape(if(req.http.x-fos-edge-data:ja3 != \"\", req.http.x-fos-edge-data:ja3, tls.client.ja3_md5))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 41,
+      "individually_toggleable": true,
+      "required_by": [
+        "botnet_grouping"
+      ]
+    },
+    {
+      "id": "ja4",
+      "name": "ja4",
+      "group": "H",
+      "label": "JA4 Fingerprint",
+      "description": "Newer, richer TLS fingerprint standard. 43 bytes avg.",
+      "vcl": "\"ja4\":\"%{json.escape(if(req.http.x-fos-edge-data:ja4 != \"\", req.http.x-fos-edge-data:ja4, tls.client.ja4))}V\"",
+      "vcl_format": "\"ja4\":\"%{json.escape(if(req.http.x-fos-edge-data:ja4 != \"\", req.http.x-fos-edge-data:ja4, tls.client.ja4))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 43,
+      "individually_toggleable": true,
+      "required_by": [
+        "botnet_grouping"
+      ]
+    },
+    {
+      "id": "tls_ciphers_sha",
+      "name": "tls_ciphers_sha",
+      "group": "H",
+      "label": "TLS Cipher Suite SHA",
+      "description": "SHA fingerprint of the client's offered cipher suite list. Evasion-resistant complement to JA3/JA4 for bot farm detection.",
+      "vcl": "\"tls_ciphers_sha\":\"%{json.escape(if(req.http.x-fos-edge-data:tls_csha != \"\", req.http.x-fos-edge-data:tls_csha, tls.client.ciphers_list_sha))}V\"",
+      "vcl_format": "\"tls_ciphers_sha\":\"%{json.escape(if(req.http.x-fos-edge-data:tls_csha != \"\", req.http.x-fos-edge-data:tls_csha, tls.client.ciphers_list_sha))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 48,
+      "individually_toggleable": true,
+      "required_by": [
+        "cipher_spread"
+      ]
+    },
+    {
+      "id": "p_type",
+      "name": "p_type",
+      "group": "I",
+      "label": "Proxy Type",
+      "description": "Anonymizing proxy type: VPN, Tor, DCH (data center), etc.",
+      "vcl": "\"p_type\":\"%{json.escape(if(req.http.x-fos-edge-data:p_type != \"\", req.http.x-fos-edge-data:p_type, if(client.geo.proxy_type == \"?\", \"\", client.geo.proxy_type)))}V\"",
+      "vcl_format": "\"p_type\":\"%{json.escape(if(req.http.x-fos-edge-data:p_type != \"\", req.http.x-fos-edge-data:p_type, if(client.geo.proxy_type == \"?\", \"\", client.geo.proxy_type)))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 10,
+      "required_by": [
+        "asn_hosting_shift",
+        "proxy_surge"
+      ]
+    },
+    {
+      "id": "p_desc",
+      "name": "p_desc",
+      "group": "I",
+      "label": "Proxy Description",
+      "description": "Anonymizing proxy provider name.",
+      "vcl": "\"p_desc\":\"%{json.escape(if(req.http.x-fos-edge-data:p_desc != \"\", req.http.x-fos-edge-data:p_desc, if(client.geo.proxy_description == \"?\", \"\", client.geo.proxy_description)))}V\"",
+      "vcl_format": "\"p_desc\":\"%{json.escape(if(req.http.x-fos-edge-data:p_desc != \"\", req.http.x-fos-edge-data:p_desc, if(client.geo.proxy_description == \"?\", \"\", client.geo.proxy_description)))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 10,
+      "required_by": [
+        "proxy_surge"
+      ]
+    },
+    {
+      "id": "waf",
+      "name": "waf",
+      "group": "J",
+      "label": "WAF Executed",
+      "description": "Whether NGWAF inspected this request (waf.inspection.verdict is set). NGWAF runs only on cache misses and passes, so hits are false.",
+      "vcl": "\"waf\":%{if(waf.inspection.verdict != \"\", \"1\", \"0\")}V",
+      "vcl_format": "\"waf\":%{if(waf.inspection.verdict != \"\", \"1\", \"0\")}V",
+      "duckdb_type": "BOOLEAN",
+      "typical_bytes": 8,
+      "required_by": [
+        "waf_signal_spikes"
+      ]
+    },
+    {
+      "id": "waf_resp",
+      "name": "waf_resp",
+      "group": "J",
+      "label": "WAF Agent Response",
+      "description": "NGWAF decision code: waf.inspection.agentresponse when set, else the response status for a block verdict or 200 for allow (the edge integration leaves agentresponse 0); null when uninspected.",
+      "formatter": "status",
+      "vcl": "\"waf_resp\":%{if(waf.inspection.verdict != \"\" && waf.inspection.agentresponse > 0, std.itoa(waf.inspection.agentresponse), if(waf.inspection.verdict == \"block\", std.itoa(resp.status), if(waf.inspection.verdict == \"allow\", \"200\", \"null\")))}V",
+      "vcl_format": "\"waf_resp\":%{if(waf.inspection.verdict != \"\" && waf.inspection.agentresponse > 0, std.itoa(waf.inspection.agentresponse), if(waf.inspection.verdict == \"block\", std.itoa(resp.status), if(waf.inspection.verdict == \"allow\", \"200\", \"null\")))}V",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 16,
+      "required_by": [
+        "waf_signal_spikes"
+      ]
+    },
+    {
+      "id": "waf_ms",
+      "name": "waf_ms",
+      "group": "J",
+      "label": "WAF Latency (ms)",
+      "description": "NGWAF inspection decision time in ms (waf.inspection.decision_ms); null when uninspected.",
+      "formatter": "number",
+      "unit": "ms",
+      "vcl": "\"waf_ms\":%{if(waf.inspection.verdict != \"\" && waf.inspection.decision_ms >= 0, std.itoa(waf.inspection.decision_ms), \"null\")}V",
+      "vcl_format": "\"waf_ms\":%{if(waf.inspection.verdict != \"\" && waf.inspection.decision_ms >= 0, std.itoa(waf.inspection.decision_ms), \"null\")}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 13,
+      "required_by": []
+    },
+    {
+      "id": "waf_sig",
+      "name": "waf_sig",
+      "group": "J",
+      "label": "WAF Signal Tags",
+      "description": "NGWAF signal tags from waf.inspection.tags (e.g. SQLI, XSS, TRAVERSAL).",
+      "vcl": "\"waf_sig\":\"%{json.escape(waf.inspection.tags)}V\"",
+      "vcl_format": "\"waf_sig\":\"%{json.escape(waf.inspection.tags)}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 13,
+      "required_by": [
+        "waf_signal_spikes"
+      ]
+    },
+    {
+      "id": "waf_req_id",
+      "name": "waf_req_id",
+      "group": "J",
+      "label": "WAF Request ID",
+      "description": "NGWAF request correlation ID header, when the edge integration sets one.",
+      "vcl": "\"waf_req_id\":\"%{if(req.http.x-fastly-ngwaf:requestid != \"\", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != \"\", json.escape(req.http.x-sigsci-requestid), \"\"))}V\"",
+      "vcl_format": "\"waf_req_id\":\"%{if(waf.inspection.request_id != \"\", json.escape(waf.inspection.request_id), if(req.http.x-fastly-ngwaf:requestid != \"\", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != \"\", json.escape(req.http.x-sigsci-requestid), \"\")))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 16,
+      "required_by": []
+    },
+    {
+      "id": "q_rtt",
+      "name": "q_rtt",
+      "group": "K",
+      "label": "QUIC Smoothed RTT (µs)",
+      "description": "QUIC smoothed RTT in microseconds. Null for TCP connections.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"q_rtt\":%{if(req.http.x-fos-edge-data:q_rtt ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_rtt, if(transport.type == \"quic\", \"\" + quic.rtt.smoothed, \"null\"))}V",
+      "vcl_format": "\"q_rtt\":%{if(req.http.x-fos-edge-data:q_rtt ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_rtt, if(transport.type == \"quic\", \"\" + quic.rtt.smoothed, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": []
+    },
+    {
+      "id": "q_rtt_var",
+      "name": "q_rtt_var",
+      "group": "K",
+      "label": "QUIC RTT Variance (µs)",
+      "description": "QUIC RTT variance in microseconds. Null for TCP connections.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"q_rtt_var\":%{if(req.http.x-fos-edge-data:q_rtt_var ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_rtt_var, if(transport.type == \"quic\", \"\" + quic.rtt.variance, \"null\"))}V",
+      "vcl_format": "\"q_rtt_var\":%{if(req.http.x-fos-edge-data:q_rtt_var ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_rtt_var, if(transport.type == \"quic\", \"\" + quic.rtt.variance, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": []
+    },
+    {
+      "id": "q_lost",
+      "name": "q_lost",
+      "group": "K",
+      "label": "QUIC Packets Lost",
+      "description": "QUIC packets lost counter. Null for TCP connections.",
+      "formatter": "number",
+      "vcl": "\"q_lost\":%{if(req.http.x-fos-edge-data:q_lost ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_lost, if(transport.type == \"quic\", \"\" + quic.num_packets.lost, \"null\"))}V",
+      "vcl_format": "\"q_lost\":%{if(req.http.x-fos-edge-data:q_lost ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_lost, if(transport.type == \"quic\", \"\" + quic.num_packets.lost, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 17,
+      "required_by": []
+    },
+    {
+      "id": "q_cwnd",
+      "name": "q_cwnd",
+      "group": "K",
+      "label": "QUIC Congestion Window",
+      "description": "QUIC congestion window size. Null for TCP connections.",
+      "formatter": "number",
+      "vcl": "\"q_cwnd\":%{if(req.http.x-fos-edge-data:q_cwnd ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_cwnd, if(transport.type == \"quic\", \"\" + quic.cc.cwnd, \"null\"))}V",
+      "vcl_format": "\"q_cwnd\":%{if(req.http.x-fos-edge-data:q_cwnd ~ \"^[0-9]+$\", req.http.x-fos-edge-data:q_cwnd, if(transport.type == \"quic\", \"\" + quic.cc.cwnd, \"null\"))}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 16,
+      "required_by": []
+    },
+    {
+      "id": "ottfb",
+      "name": "ottfb",
+      "group": "L",
+      "label": "Origin TTFB (µs)",
+      "description": "µs from fetch start to first byte of origin/shield response headers. Null on HITs.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"ottfb\":%{if(req.http.x-of-ttfb ~ \"^[0-9]+$\", req.http.x-of-ttfb, \"null\")}V",
+      "vcl_format": "\"ottfb\":%{if(req.http.x-of-ttfb ~ \"^[0-9]+$\", req.http.x-of-ttfb, \"null\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 16,
+      "required_by": [
+        "origin_latency_spike",
+        "region_latency"
+      ]
+    },
+    {
+      "id": "ottlb",
+      "name": "ottlb",
+      "group": "L",
+      "label": "Origin TTLB (µs)",
+      "description": "µs from fetch start to full response body received. Null on HITs.",
+      "formatter": "number",
+      "unit": "µs",
+      "vcl": "\"ottlb\":%{if(req.http.x-of-ttlb ~ \"^[0-9]+$\", req.http.x-of-ttlb, \"null\")}V",
+      "vcl_format": "\"ottlb\":%{if(req.http.x-of-ttlb ~ \"^[0-9]+$\", req.http.x-of-ttlb, \"null\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 16,
+      "required_by": [
+        "origin_latency_spike"
+      ]
+    },
+    {
+      "id": "oconnect_ms",
+      "name": "oconnect_ms",
+      "group": "L",
+      "label": "Origin Connect (ms)",
+      "description": "Milliseconds to establish the connection (TCP + TLS handshake) to origin/shield, from beresp.handshake_time_to_origin_ms. Distinct from ottfb (first byte). Null on HITs and on failed fetches that never connected — connection timeouts land in vcl_error, where beresp (and therefore the handshake timing) is unavailable.",
+      "formatter": "number",
+      "unit": "ms",
+      "vcl": "\"oconnect_ms\":%{if(req.http.x-of-connect ~ \"^[0-9]+$\", req.http.x-of-connect, \"null\")}V",
+      "vcl_format": "\"oconnect_ms\":%{if(req.http.x-of-connect ~ \"^[0-9]+$\", req.http.x-of-connect, \"null\")}V",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 16,
+      "required_by": [
+        "timeout_split"
+      ]
+    },
+    {
+      "id": "ost",
+      "name": "ost",
+      "group": "L",
+      "label": "Origin Status",
+      "description": "HTTP status returned by origin or shield. Null on HITs.",
+      "formatter": "status",
+      "vcl": "\"ost\":%{if(req.http.x-of-status ~ \"^[0-9]+$\", req.http.x-of-status, \"null\")}V",
+      "vcl_format": "\"ost\":%{if(req.http.x-of-status ~ \"^[0-9]+$\", req.http.x-of-status, \"null\")}V",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 10,
+      "required_by": [
+        "origin_error_rate",
+        "origin_ip_failure"
+      ]
+    },
+    {
+      "id": "obytes",
+      "name": "obytes",
+      "group": "L",
+      "label": "Origin Bytes",
+      "description": "Bytes written in the response (resp.bytes_written). Null on HITs. Same variable as resp_bytes but null-on-HIT makes it queryable as 'total bytes fetched from origin'.",
+      "vcl": "\"obytes\":%{if(req.http.x-of-start ~ \"^[0-9]+$\", \"\" + resp.bytes_written, \"null\")}V",
+      "vcl_format": "\"obytes\":%{if(req.http.x-of-start ~ \"^[0-9]+$\", \"\" + resp.bytes_written, \"null\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 15,
+      "required_by": []
+    },
+    {
+      "id": "oip",
+      "name": "oip",
+      "group": "L",
+      "label": "Origin IP",
+      "description": "IP address of the backend server that handled the fetch. Null on HITs.",
+      "vcl": "\"oip\":\"%{json.escape(if(req.http.x-of-oip, req.http.x-of-oip, \"\"))}V\"",
+      "vcl_format": "\"oip\":\"%{json.escape(if(req.http.x-of-oip, req.http.x-of-oip, \"\"))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 15,
+      "required_by": [
+        "origin_ip_failure"
+      ]
+    },
+    {
+      "id": "oretries",
+      "name": "oretries",
+      "group": "L",
+      "label": "Origin Retries",
+      "description": "Backend connection retry count before success or failure. Null on HITs.",
+      "formatter": "number",
+      "vcl": "\"oretries\":%{if(req.http.x-of-oretries ~ \"^[0-9]+$\", req.http.x-of-oretries, \"null\")}V",
+      "vcl_format": "\"oretries\":%{if(req.http.x-of-oretries ~ \"^[0-9]+$\", req.http.x-of-oretries, \"null\")}V",
+      "duckdb_type": "UTINYINT",
+      "typical_bytes": 13,
+      "required_by": [
+        "origin_retries"
+      ]
+    },
+    {
+      "id": "rid",
+      "name": "rid",
+      "group": "L",
+      "label": "Request ID",
+      "description": "8-char random ID generated at this POP. Always set. Use with prid to correlate edge + shield log lines.",
+      "vcl": "\"rid\":\"%{req.http.x-req-id}V\"",
+      "vcl_format": "\"rid\":\"%{req.http.x-req-id}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 16,
+      "required_by": []
+    },
+    {
+      "id": "prid",
+      "name": "prid",
+      "group": "L",
+      "label": "Parent Request ID",
+      "description": "Edge POP's rid forwarded to the shield. Non-null only on shield log lines (edge=0, cache=MISS).",
+      "vcl": "\"prid\":\"%{json.escape(req.http.x-edge-req-id)}V\"",
+      "vcl_format": "\"prid\":\"%{json.escape(req.http.x-edge-req-id)}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 16,
+      "required_by": []
+    },
+    {
+      "id": "io_input_bytes",
+      "name": "io_input_bytes",
+      "group": "M",
+      "label": "IO Input Bytes",
+      "description": "Original image size in bytes before IO processing, from Fastly-Io-Transform-Stats ifsz field.",
+      "formatter": "bytes",
+      "vcl": "\"io_input_bytes\":%{if(req.http.x-fos-io-ifsz ~ \"^[0-9]+$\", req.http.x-fos-io-ifsz, \"null\")}V",
+      "vcl_format": "\"io_input_bytes\":%{if(req.http.x-fos-io-ifsz ~ \"^[0-9]+$\", req.http.x-fos-io-ifsz, \"null\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 20,
+      "required_by": []
+    },
+    {
+      "id": "io_output_bytes",
+      "name": "io_output_bytes",
+      "group": "M",
+      "label": "IO Output Bytes",
+      "description": "Optimized image size in bytes after IO processing, from Fastly-Io-Transform-Stats ofsz field.",
+      "formatter": "bytes",
+      "vcl": "\"io_output_bytes\":%{if(req.http.x-fos-io-ofsz ~ \"^[0-9]+$\", req.http.x-fos-io-ofsz, \"null\")}V",
+      "vcl_format": "\"io_output_bytes\":%{if(req.http.x-fos-io-ofsz ~ \"^[0-9]+$\", req.http.x-fos-io-ofsz, \"null\")}V",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 20,
+      "required_by": []
+    },
+    {
+      "id": "io_input_format",
+      "name": "io_input_format",
+      "group": "M",
+      "label": "IO Input Format",
+      "description": "Original image format before IO processing, from Fastly-Io-Transform-Stats ifmt field.",
+      "vcl": "\"io_input_format\":\"%{json.escape(if(req.http.x-fos-io-ifmt != \"\", req.http.x-fos-io-ifmt, \"\"))}V\"",
+      "vcl_format": "\"io_input_format\":\"%{json.escape(if(req.http.x-fos-io-ifmt != \"\", req.http.x-fos-io-ifmt, \"\"))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 20,
+      "required_by": []
+    },
+    {
+      "id": "io_output_format",
+      "name": "io_output_format",
+      "group": "M",
+      "label": "IO Output Format",
+      "description": "Output image format after IO processing, from Fastly-Io-Transform-Stats ofmt field.",
+      "vcl": "\"io_output_format\":\"%{json.escape(if(req.http.x-fos-io-ofmt != \"\", req.http.x-fos-io-ofmt, \"\"))}V\"",
+      "vcl_format": "\"io_output_format\":\"%{json.escape(if(req.http.x-fos-io-ofmt != \"\", req.http.x-fos-io-ofmt, \"\"))}V\"",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 20,
+      "required_by": []
+    },
+    {
+      "id": "requests",
+      "name": "requests",
+      "group": "METRICS",
+      "label": "Requests",
+      "description": "Total number of requests.",
+      "formatter": "number",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "BIGINT",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "hit_rate",
+      "name": "hit_rate",
+      "group": "METRICS",
+      "label": "Cache Hit Rate",
+      "description": "Percentage of requests served from cache (HIT or HIT-STALE).",
+      "formatter": "percent",
+      "unit": "%",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "5xx",
+      "name": "5xx",
+      "group": "METRICS",
+      "label": "5xx Errors",
+      "description": "Percentage of requests with 5xx status codes.",
+      "formatter": "percent",
+      "unit": "%",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "4xx",
+      "name": "4xx",
+      "group": "METRICS",
+      "label": "4xx Errors",
+      "description": "Percentage of requests with 4xx status codes.",
+      "formatter": "percent",
+      "unit": "%",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "p50_latency",
+      "name": "p50_latency",
+      "group": "METRICS",
+      "label": "P50 Latency",
+      "description": "Median request processing time (milliseconds).",
+      "formatter": "number",
+      "unit": "ms",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "p95_latency",
+      "name": "p95_latency",
+      "group": "METRICS",
+      "label": "P95 Latency",
+      "description": "95th percentile request processing time (milliseconds).",
+      "formatter": "number",
+      "unit": "ms",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "p99_latency",
+      "name": "p99_latency",
+      "group": "METRICS",
+      "label": "P99 Latency",
+      "description": "99th percentile request processing time (milliseconds).",
+      "formatter": "number",
+      "unit": "ms",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "throughput",
+      "name": "throughput",
+      "group": "METRICS",
+      "label": "Throughput",
+      "description": "Estimated bandwidth delivered for cache hits (bytes/second).",
+      "formatter": "bytes",
+      "unit": "B/s",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "req_size",
+      "name": "req_size",
+      "group": "METRICS",
+      "label": "Request Size",
+      "description": "Median total request size (headers + body).",
+      "formatter": "bytes",
+      "unit": "B",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "ttfb_ms",
+      "name": "ttfb_ms",
+      "group": "METRICS",
+      "label": "TTFB",
+      "description": "Median time to first byte (milliseconds).",
+      "formatter": "number",
+      "unit": "ms",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "_bot_name",
+      "name": "_bot_name",
+      "group": "VIRTUAL",
+      "label": "Fastly Bots",
+      "description": "Virtual field derived from User-Agent and IP to identify known bots.",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "_ngwaf_bot_name",
+      "name": "_ngwaf_bot_name",
+      "group": "VIRTUAL",
+      "label": "NGWAF Verified Bots",
+      "description": "Virtual field enriched with NGWAF bot signal data.",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "waf_sig_ind",
+      "name": "waf_sig_ind",
+      "group": "VIRTUAL",
+      "label": "NGWAF Signals",
+      "description": "Individual NGWAF signals extracted from the waf_sig list.",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "edge_score_reason_ind",
+      "name": "edge_score_reason_ind",
+      "group": "VIRTUAL",
+      "label": "Score Reasons",
+      "description": "Individual scoring reasons extracted from the comma-separated edge_score_reason field (e.g. 'cookie-missing', 'impossibly-fast', 'robotic-consistency', 'rare-transition'). Lets the dashboard show top-N reason breakdowns and filter by a single reason even when one request triggers multiple.",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": []
+    },
+    {
+      "id": "_source_file",
+      "name": "_source_file",
+      "group": "INTERNAL",
+      "label": "Source File",
+      "description": "Original raw log file in Fastly Object Storage.",
+      "vcl": null,
+      "vcl_format": null,
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 60,
+      "required_by": []
+    }
+  ],
+  "api_fields": [
+    {
+      "id": "timestamp",
+      "group": null,
+      "label": "Timestamp",
+      "description": "UTC timestamp of the request start time (ISO 8601 with timezone).",
+      "duckdb_type": "TIMESTAMP",
+      "typical_bytes": 40,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "ts_ms",
+      "group": null,
+      "label": "Timestamp (ms)",
+      "description": "Request start time in milliseconds since the Unix epoch. Routes rows into windows and orders window files.",
+      "duckdb_type": "TIMESTAMP",
+      "typical_bytes": 22,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "ip",
+      "group": null,
+      "label": "Client IP",
+      "description": "Client IP address. Captured at the real edge via x-fos-edge-data header; falls back to client.ip for requests answered before capture ran (e.g. redirects).",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 22,
+      "required_by": [
+        "low_and_slow",
+        "credential_enumeration",
+        "content_discovery",
+        "botnet_grouping"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "status",
+      "group": null,
+      "label": "Response Status",
+      "description": "HTTP response status code (e.g. 200, 404, 503).",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 17,
+      "required_by": [
+        "error_spikes",
+        "city_error_spikes",
+        "credential_enumeration",
+        "content_discovery",
+        "waf_signal_spikes",
+        "image_optimization_opportunities"
+      ],
+      "formatter": "status",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "elapsed",
+      "group": null,
+      "label": "Elapsed Time (µs)",
+      "description": "Total request processing time in microseconds.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 18,
+      "required_by": [
+        "latency_regression",
+        "city_latency_regressions",
+        "network_asn_health",
+        "tail_latency",
+        "region_latency"
+      ],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "cache",
+      "group": null,
+      "label": "Cache State",
+      "description": "Fastly cache state: HIT, MISS, PASS, SYNTH, etc.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_collapse",
+        "cache_hit_cliff",
+        "cache_pressure"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "resp_bytes",
+      "group": null,
+      "label": "Response Bytes",
+      "description": "Bytes delivered to the client in the response body.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_pressure",
+        "network_asn_health",
+        "image_optimization_opportunities"
+      ],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "host",
+      "group": "A",
+      "label": "Host",
+      "description": "HTTP Host header (domain name) captured at the true client edge before any rewrites.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 22,
+      "required_by": [
+        "new_probe_urls"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "url",
+      "group": "A",
+      "label": "URL",
+      "description": "Request URL path and query string. Average ~30 bytes; varies widely.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 37,
+      "required_by": [
+        "error_spikes",
+        "latency_regression",
+        "new_probe_urls",
+        "low_and_slow",
+        "credential_enumeration",
+        "content_discovery",
+        "tail_latency",
+        "image_optimization_opportunities"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "limit": 2000,
+      "has_limit": true
+    },
+    {
+      "id": "method",
+      "group": "A",
+      "label": "HTTP Method",
+      "description": "Request method: GET, POST, HEAD, PUT, DELETE, etc.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 19,
+      "required_by": [
+        "method_drift"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "proto",
+      "group": "A",
+      "label": "HTTP Version",
+      "description": "HTTP protocol version: 1.0, 1.1, 2.0, or 3.0.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 15,
+      "required_by": [],
+      "formatter": "number",
+      "unit": null,
+      "precision": 1
+    },
+    {
+      "id": "ua",
+      "group": "A",
+      "label": "User-Agent",
+      "description": "Client browser or bot identifier. Largest single field — bots inflate this significantly.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 90,
+      "required_by": [
+        "ua_monoculture",
+        "botnet_grouping",
+        "image_optimization_opportunities"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true,
+      "note": "Largest single field — bots tend to have verbose user-agents.",
+      "limit": 1000,
+      "has_limit": true
+    },
+    {
+      "id": "referer",
+      "group": "A",
+      "label": "Referer",
+      "description": "Referring URL. Often empty; useful for traffic source analysis.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 44,
+      "required_by": [
+        "referer_monoculture"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true,
+      "limit": 1000,
+      "has_limit": true
+    },
+    {
+      "id": "req_bytes",
+      "group": "A",
+      "label": "Request Body Size",
+      "description": "Request body size in bytes from Content-Length header. Zero for GET/HEAD or any request without Content-Length.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 13,
+      "required_by": [
+        "request_size_anomaly"
+      ],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "req_header_bytes",
+      "group": "A",
+      "label": "Request Header Size",
+      "description": "Total bytes in the request headers. Large values are an injection or WAF bypass signal.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 20,
+      "required_by": [
+        "request_size_anomaly"
+      ],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "resp_header_content_encoding",
+      "group": "A",
+      "label": "Response Content-Encoding",
+      "description": "Content-Encoding of the response served to the client (gzip / br / zstd, or empty when the response was sent uncompressed). Low-cardinality. Read directly from the final response at log time — no edge capture needed.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 38,
+      "required_by": [
+        "payload_compression_regression"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "ttl",
+      "group": "B",
+      "label": "Object TTL",
+      "description": "Time-to-live assigned by origin headers. Null when object is not cacheable.",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_pressure",
+        "cache_ttl_mismatch"
+      ],
+      "formatter": "number",
+      "unit": "s",
+      "precision": 0
+    },
+    {
+      "id": "age",
+      "group": "B",
+      "label": "Object Age",
+      "description": "How long the object has been in the Fastly cache (seconds).",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 17,
+      "required_by": [
+        "cache_pressure",
+        "cache_ttl_mismatch"
+      ],
+      "formatter": "number",
+      "unit": "s",
+      "precision": 0
+    },
+    {
+      "id": "hits",
+      "group": "B",
+      "label": "Object Hit Count",
+      "description": "Number of times this cached object has been served.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 14,
+      "required_by": [
+        "cache_ttl_mismatch"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "digest",
+      "group": "B",
+      "label": "Content Digest",
+      "description": "Content hash for exact object identity. Required for Cache Pressure Analysis.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 47,
+      "required_by": [
+        "cache_pressure",
+        "pop_latency_regression"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "note": "Required for Cache Pressure Analysis (eviction detection)."
+    },
+    {
+      "id": "pop",
+      "group": "C",
+      "label": "Edge PoP",
+      "description": "Fastly Point of Presence code (e.g. JFK, LHR, SYD).",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "cache_pressure"
+      ],
+      "formatter": "pop",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "backend",
+      "group": "C",
+      "label": "Backend",
+      "description": "Origin backend name as configured in Fastly.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 21,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "edge",
+      "group": "C",
+      "label": "Edge Hit",
+      "description": "True when the request hit the real edge (not a shield or restart).",
+      "duckdb_type": "BOOLEAN",
+      "typical_bytes": 9,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "ttfb",
+      "group": "C",
+      "label": "Time to First Byte (s)",
+      "description": "Seconds from request receipt to first byte of response from origin. Subtract from elapsed to isolate Fastly processing time.",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 14,
+      "required_by": [
+        "region_latency"
+      ],
+      "formatter": "number",
+      "unit": "s",
+      "precision": 3
+    },
+    {
+      "id": "server_region",
+      "group": "C",
+      "label": "Server Region",
+      "description": "Fastly billing region of the serving PoP (e.g. NA, EU, APAC). Captured at edge for accurate attribution through shields.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 20,
+      "required_by": [
+        "region_latency"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "is_ipv6",
+      "group": "C",
+      "label": "IPv6",
+      "description": "True when the client connected over IPv6. IPv6 clients can have different routing and latency profiles.",
+      "duckdb_type": "BOOLEAN",
+      "typical_bytes": 12,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "conn_requests",
+      "group": "C",
+      "label": "Conn. Request Count",
+      "description": "Number of requests made on this TCP/QUIC connection. High values indicate HTTP/2 keep-alive multiplexing.",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 20,
+      "required_by": [
+        "connection_abuse"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "tls",
+      "group": "C",
+      "label": "TLS Version",
+      "description": "TLS protocol version as a float: 1.2 or 1.3.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 10,
+      "required_by": [],
+      "formatter": "number",
+      "unit": null,
+      "precision": 1
+    },
+    {
+      "id": "country",
+      "group": "D",
+      "label": "Country",
+      "description": "ISO 3166-1 alpha-2 country code (e.g. US, DE, JP). Enables world map.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 15,
+      "required_by": [
+        "new_country_traffic",
+        "city_surges",
+        "city_error_spikes",
+        "city_latency_regressions",
+        "new_city_traffic"
+      ],
+      "formatter": "country",
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "city",
+      "group": "D",
+      "label": "City",
+      "description": "City name from Fastly geo-IP. Variable length.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "city_surges",
+        "city_error_spikes",
+        "city_latency_regressions",
+        "new_city_traffic"
+      ],
+      "formatter": "city",
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "region",
+      "group": "D",
+      "label": "Region",
+      "description": "ISO 3166-2 region/state/province code.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 14,
+      "required_by": [],
+      "formatter": "region",
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "lat",
+      "group": "E",
+      "label": "Latitude",
+      "description": "Client latitude (-90 to 90). Null for unresolvable IPs.",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 12,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": null,
+      "precision": 4
+    },
+    {
+      "id": "lon",
+      "group": "E",
+      "label": "Longitude",
+      "description": "Client longitude (-180 to 180). Null for unresolvable IPs.",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 13,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": null,
+      "precision": 4
+    },
+    {
+      "id": "metro",
+      "group": "E",
+      "label": "Metro Code",
+      "description": "US DMA metro area code (e.g. 501 = New York City). Empty for non-US.",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 14,
+      "required_by": [
+        "metro_delivery_degradation"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "asn",
+      "group": "F",
+      "label": "ASN",
+      "description": "Client Autonomous System Number (ISP identity). Enables ASN-level analysis.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 11,
+      "required_by": [
+        "asn_concentration",
+        "asn_hosting_shift",
+        "new_asn_traffic",
+        "network_asn_health",
+        "region_latency"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "tcp_rtt",
+      "group": "F",
+      "label": "TCP RTT (µs)",
+      "description": "TCP round-trip time in microseconds at the Fastly edge.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "transport",
+      "group": "F",
+      "label": "Transport Protocol",
+      "description": "Transport protocol: 'tcp' or 'quic'. Low-cardinality; essentially free in Parquet.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 18,
+      "required_by": [
+        "network_asn_health",
+        "http3_fallback"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "ploss",
+      "group": "G",
+      "label": "Packet Loss",
+      "description": "Packet loss fraction (0.0–1.0). Direct indicator of network congestion.",
+      "duckdb_type": "FLOAT",
+      "typical_bytes": 18,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "percent",
+      "unit": null,
+      "precision": 4
+    },
+    {
+      "id": "rtt_min",
+      "group": "G",
+      "label": "Minimum RTT (µs)",
+      "description": "Minimum RTT seen on this TCP connection (geography baseline). Delta from tcp_rtt isolates congestion.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "rtt_var",
+      "group": "G",
+      "label": "RTT Variance / Jitter (µs)",
+      "description": "RTT variance in microseconds. Jitter causes streaming buffer stalls more than raw latency.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 18,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "retrans",
+      "group": "G",
+      "label": "TCP Retransmissions",
+      "description": "TCP retransmission delta since previous sample. Direct congestion signal.",
+      "duckdb_type": "UTINYINT",
+      "typical_bytes": 15,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "bw",
+      "group": "K",
+      "label": "Bandwidth Estimate",
+      "description": "Fastly's estimated bandwidth for this connection (bytes/sec or bits/sec — see note). Only applicable for QUIC; TCP connections should use delivery_rate instead.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 17,
+      "required_by": [],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "c_speed",
+      "group": "G",
+      "label": "Connection Speed Class",
+      "description": "Geo-IP speed classification: broadband, cable, dsl, mobile, satellite, dialup. Low-cardinality.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 14,
+      "required_by": [
+        "network_asn_health",
+        "connection_type_mix"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "c_type",
+      "group": "G",
+      "label": "Connection Type",
+      "description": "Geo-IP connection type: residential, commercial, cellular, corporate. Low-cardinality.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 27,
+      "required_by": [
+        "network_asn_health",
+        "connection_type_mix"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "delivery_rate",
+      "group": "G",
+      "label": "TCP Delivery Rate",
+      "description": "Actual TCP delivery rate in bytes/sec measured by the kernel. More reliable than bandwidth estimate for TCP connections.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 22,
+      "required_by": [
+        "network_asn_health",
+        "metro_delivery_degradation"
+      ],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "data_segs_out",
+      "group": "G",
+      "label": "TCP Data Segments Out",
+      "description": "Total TCP data segments sent on this connection. Enables retransmit ratio: retrans / data_segs_out.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 21,
+      "required_by": [
+        "network_asn_health"
+      ],
+      "formatter": "number",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "ja3",
+      "group": "H",
+      "label": "JA3 Fingerprint",
+      "description": "MD5 TLS client fingerprint. Older standard; widely supported. 41 bytes avg.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 41,
+      "required_by": [
+        "botnet_grouping"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "ja4",
+      "group": "H",
+      "label": "JA4 Fingerprint",
+      "description": "Newer, richer TLS fingerprint standard. 43 bytes avg.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 43,
+      "required_by": [
+        "botnet_grouping"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "tls_ciphers_sha",
+      "group": "H",
+      "label": "TLS Cipher Suite SHA",
+      "description": "SHA fingerprint of the client's offered cipher suite list. Evasion-resistant complement to JA3/JA4 for bot farm detection.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 48,
+      "required_by": [
+        "cipher_spread"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null,
+      "individually_toggleable": true
+    },
+    {
+      "id": "p_type",
+      "group": "I",
+      "label": "Proxy Type",
+      "description": "Anonymizing proxy type: VPN, Tor, DCH (data center), etc.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 10,
+      "required_by": [
+        "asn_hosting_shift",
+        "proxy_surge"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "p_desc",
+      "group": "I",
+      "label": "Proxy Description",
+      "description": "Anonymizing proxy provider name.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 10,
+      "required_by": [
+        "proxy_surge"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "waf",
+      "group": "J",
+      "label": "WAF Executed",
+      "description": "Whether NGWAF inspected this request (waf.inspection.verdict is set). NGWAF runs only on cache misses and passes, so hits are false.",
+      "duckdb_type": "BOOLEAN",
+      "typical_bytes": 8,
+      "required_by": [
+        "waf_signal_spikes"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "waf_resp",
+      "group": "J",
+      "label": "WAF Agent Response",
+      "description": "NGWAF decision code: waf.inspection.agentresponse when set, else the response status for a block verdict or 200 for allow (the edge integration leaves agentresponse 0); null when uninspected.",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 16,
+      "required_by": [
+        "waf_signal_spikes"
+      ],
+      "formatter": "status",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "waf_ms",
+      "group": "J",
+      "label": "WAF Latency (ms)",
+      "description": "NGWAF inspection decision time in ms (waf.inspection.decision_ms); null when uninspected.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 13,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "ms",
+      "precision": null
+    },
+    {
+      "id": "waf_sig",
+      "group": "J",
+      "label": "WAF Signal Tags",
+      "description": "NGWAF signal tags from waf.inspection.tags (e.g. SQLI, XSS, TRAVERSAL).",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 13,
+      "required_by": [
+        "waf_signal_spikes"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "waf_req_id",
+      "group": "J",
+      "label": "WAF Request ID",
+      "description": "NGWAF request correlation ID header, when the edge integration sets one.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 16,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "q_rtt",
+      "group": "K",
+      "label": "QUIC Smoothed RTT (µs)",
+      "description": "QUIC smoothed RTT in microseconds. Null for TCP connections.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "q_rtt_var",
+      "group": "K",
+      "label": "QUIC RTT Variance (µs)",
+      "description": "QUIC RTT variance in microseconds. Null for TCP connections.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 19,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "q_lost",
+      "group": "K",
+      "label": "QUIC Packets Lost",
+      "description": "QUIC packets lost counter. Null for TCP connections.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 17,
+      "required_by": [],
+      "formatter": "number",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "q_cwnd",
+      "group": "K",
+      "label": "QUIC Congestion Window",
+      "description": "QUIC congestion window size. Null for TCP connections.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 16,
+      "required_by": [],
+      "formatter": "number",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "ottfb",
+      "group": "L",
+      "label": "Origin TTFB (µs)",
+      "description": "µs from fetch start to first byte of origin/shield response headers. Null on HITs.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 16,
+      "required_by": [
+        "origin_latency_spike",
+        "region_latency"
+      ],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "ottlb",
+      "group": "L",
+      "label": "Origin TTLB (µs)",
+      "description": "µs from fetch start to full response body received. Null on HITs.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 16,
+      "required_by": [
+        "origin_latency_spike"
+      ],
+      "formatter": "number",
+      "unit": "µs",
+      "precision": null
+    },
+    {
+      "id": "oconnect_ms",
+      "group": "L",
+      "label": "Origin Connect (ms)",
+      "description": "Milliseconds to establish the connection (TCP + TLS handshake) to origin/shield, from beresp.handshake_time_to_origin_ms. Distinct from ottfb (first byte). Null on HITs and on failed fetches that never connected — connection timeouts land in vcl_error, where beresp (and therefore the handshake timing) is unavailable.",
+      "duckdb_type": "UINTEGER",
+      "typical_bytes": 16,
+      "required_by": [
+        "timeout_split"
+      ],
+      "formatter": "number",
+      "unit": "ms",
+      "precision": null
+    },
+    {
+      "id": "ost",
+      "group": "L",
+      "label": "Origin Status",
+      "description": "HTTP status returned by origin or shield. Null on HITs.",
+      "duckdb_type": "USMALLINT",
+      "typical_bytes": 10,
+      "required_by": [
+        "origin_error_rate",
+        "origin_ip_failure"
+      ],
+      "formatter": "status",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "obytes",
+      "group": "L",
+      "label": "Origin Bytes",
+      "description": "Bytes written in the response (resp.bytes_written). Null on HITs. Same variable as resp_bytes but null-on-HIT makes it queryable as 'total bytes fetched from origin'.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 15,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "oip",
+      "group": "L",
+      "label": "Origin IP",
+      "description": "IP address of the backend server that handled the fetch. Null on HITs.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 15,
+      "required_by": [
+        "origin_ip_failure"
+      ],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "oretries",
+      "group": "L",
+      "label": "Origin Retries",
+      "description": "Backend connection retry count before success or failure. Null on HITs.",
+      "duckdb_type": "UTINYINT",
+      "typical_bytes": 13,
+      "required_by": [
+        "origin_retries"
+      ],
+      "formatter": "number",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "rid",
+      "group": "L",
+      "label": "Request ID",
+      "description": "8-char random ID generated at this POP. Always set. Use with prid to correlate edge + shield log lines.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 16,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "prid",
+      "group": "L",
+      "label": "Parent Request ID",
+      "description": "Edge POP's rid forwarded to the shield. Non-null only on shield log lines (edge=0, cache=MISS).",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 16,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "io_input_bytes",
+      "group": "M",
+      "label": "IO Input Bytes",
+      "description": "Original image size in bytes before IO processing, from Fastly-Io-Transform-Stats ifsz field.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 20,
+      "required_by": [],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "io_output_bytes",
+      "group": "M",
+      "label": "IO Output Bytes",
+      "description": "Optimized image size in bytes after IO processing, from Fastly-Io-Transform-Stats ofsz field.",
+      "duckdb_type": "UBIGINT",
+      "typical_bytes": 20,
+      "required_by": [],
+      "formatter": "bytes",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "io_input_format",
+      "group": "M",
+      "label": "IO Input Format",
+      "description": "Original image format before IO processing, from Fastly-Io-Transform-Stats ifmt field.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 20,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "io_output_format",
+      "group": "M",
+      "label": "IO Output Format",
+      "description": "Output image format after IO processing, from Fastly-Io-Transform-Stats ofmt field.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 20,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "requests",
+      "group": "METRICS",
+      "label": "Requests",
+      "description": "Total number of requests.",
+      "duckdb_type": "BIGINT",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "number",
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "hit_rate",
+      "group": "METRICS",
+      "label": "Cache Hit Rate",
+      "description": "Percentage of requests served from cache (HIT or HIT-STALE).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "percent",
+      "unit": "%",
+      "precision": null
+    },
+    {
+      "id": "5xx",
+      "group": "METRICS",
+      "label": "5xx Errors",
+      "description": "Percentage of requests with 5xx status codes.",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "percent",
+      "unit": "%",
+      "precision": null
+    },
+    {
+      "id": "4xx",
+      "group": "METRICS",
+      "label": "4xx Errors",
+      "description": "Percentage of requests with 4xx status codes.",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "percent",
+      "unit": "%",
+      "precision": null
+    },
+    {
+      "id": "p50_latency",
+      "group": "METRICS",
+      "label": "P50 Latency",
+      "description": "Median request processing time (milliseconds).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "ms",
+      "precision": null
+    },
+    {
+      "id": "p95_latency",
+      "group": "METRICS",
+      "label": "P95 Latency",
+      "description": "95th percentile request processing time (milliseconds).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "ms",
+      "precision": null
+    },
+    {
+      "id": "p99_latency",
+      "group": "METRICS",
+      "label": "P99 Latency",
+      "description": "99th percentile request processing time (milliseconds).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "ms",
+      "precision": null
+    },
+    {
+      "id": "throughput",
+      "group": "METRICS",
+      "label": "Throughput",
+      "description": "Estimated bandwidth delivered for cache hits (bytes/second).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "bytes",
+      "unit": "B/s",
+      "precision": null
+    },
+    {
+      "id": "req_size",
+      "group": "METRICS",
+      "label": "Request Size",
+      "description": "Median total request size (headers + body).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "bytes",
+      "unit": "B",
+      "precision": null
+    },
+    {
+      "id": "ttfb_ms",
+      "group": "METRICS",
+      "label": "TTFB",
+      "description": "Median time to first byte (milliseconds).",
+      "duckdb_type": "DOUBLE",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": "number",
+      "unit": "ms",
+      "precision": null
+    },
+    {
+      "id": "_bot_name",
+      "group": "VIRTUAL",
+      "label": "Fastly Bots",
+      "description": "Virtual field derived from User-Agent and IP to identify known bots.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "_ngwaf_bot_name",
+      "group": "VIRTUAL",
+      "label": "NGWAF Verified Bots",
+      "description": "Virtual field enriched with NGWAF bot signal data.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "waf_sig_ind",
+      "group": "VIRTUAL",
+      "label": "NGWAF Signals",
+      "description": "Individual NGWAF signals extracted from the waf_sig list.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "edge_score_reason_ind",
+      "group": "VIRTUAL",
+      "label": "Score Reasons",
+      "description": "Individual scoring reasons extracted from the comma-separated edge_score_reason field (e.g. 'cookie-missing', 'impossibly-fast', 'robotic-consistency', 'rare-transition'). Lets the dashboard show top-N reason breakdowns and filter by a single reason even when one request triggers multiple.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 0,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    },
+    {
+      "id": "_source_file",
+      "group": "INTERNAL",
+      "label": "Source File",
+      "description": "Original raw log file in Fastly Object Storage.",
+      "duckdb_type": "VARCHAR",
+      "typical_bytes": 60,
+      "required_by": [],
+      "formatter": null,
+      "unit": null,
+      "precision": null
+    }
+  ],
+  "groups": [
+    {
+      "id": null,
+      "label": "Core Delivery",
+      "description": "Always-on fields required for basic metrics: error rates, latency, hit rates, throughput.",
+      "locked": true,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 155,
+      "fields": [
+        "timestamp",
+        "ts_ms",
+        "ip",
+        "status",
+        "elapsed",
+        "cache",
+        "resp_bytes"
+      ]
+    },
+    {
+      "id": "A",
+      "label": "Request Identity",
+      "description": "Host, URL, HTTP method/version, User-Agent, Referer, request body size, and response Content-Encoding.",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 298,
+      "fields": [
+        "host",
+        "url",
+        "method",
+        "proto",
+        "ua",
+        "referer",
+        "req_bytes",
+        "req_header_bytes",
+        "resp_header_content_encoding"
+      ]
+    },
+    {
+      "id": "B",
+      "label": "Cache Deep-Dive",
+      "description": "TTL, age, hit count, and content digest. Enable for cache pressure analysis.",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 96,
+      "fields": [
+        "ttl",
+        "age",
+        "hits",
+        "digest"
+      ]
+    },
+    {
+      "id": "C",
+      "label": "Infrastructure",
+      "description": "Edge PoP, backend, edge/shield flag, TTFB, TLS version, billing region, IPv6 flag, and connection request count.",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 124,
+      "fields": [
+        "pop",
+        "backend",
+        "edge",
+        "ttfb",
+        "server_region",
+        "is_ipv6",
+        "conn_requests",
+        "tls"
+      ]
+    },
+    {
+      "id": "D",
+      "label": "Geolocation — Basic",
+      "description": "Country, city, and region. Country alone enables the world map.",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 47,
+      "fields": [
+        "country",
+        "city",
+        "region"
+      ]
+    },
+    {
+      "id": "E",
+      "label": "Geolocation — Precision",
+      "description": "Latitude, longitude, and US metro code. Requires Basic Geolocation.",
+      "locked": false,
+      "requires": "D",
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 39,
+      "fields": [
+        "lat",
+        "lon",
+        "metro"
+      ]
+    },
+    {
+      "id": "F",
+      "label": "Network Quality — Core",
+      "description": "ASN (ISP identity), TCP RTT, and transport protocol.",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 48,
+      "fields": [
+        "asn",
+        "tcp_rtt",
+        "transport"
+      ]
+    },
+    {
+      "id": "G",
+      "label": "Network Quality — Deep",
+      "description": "Packet loss, RTT variance/jitter, retransmissions, TCP delivery rate, data segments, and connection type. Requires Network Core.",
+      "locked": false,
+      "requires": "F",
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 154,
+      "fields": [
+        "ploss",
+        "rtt_min",
+        "rtt_var",
+        "retrans",
+        "c_speed",
+        "c_type",
+        "delivery_rate",
+        "data_segs_out"
+      ]
+    },
+    {
+      "id": "H",
+      "label": "Security: TLS Fingerprinting",
+      "description": "JA3, JA4, cipher suite fingerprints, and a hashed session-cookie id for botnet grouping, scanner detection, and session-harvesting analysis.",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 132,
+      "fields": [
+        "ja3",
+        "ja4",
+        "tls_ciphers_sha"
+      ]
+    },
+    {
+      "id": "I",
+      "label": "Security: Proxy Detection",
+      "description": "Anonymizing proxy type and provider name (VPN, Tor, DCH).",
+      "locked": false,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 20,
+      "fields": [
+        "p_type",
+        "p_desc"
+      ]
+    },
+    {
+      "id": "J",
+      "label": "WAF / NGWAF",
+      "description": "NGWAF fields from the vcl_log-only waf.inspection.* variables. Null/empty if NGWAF is not deployed on this service.",
+      "locked": false,
+      "requires": null,
+      "note": "All fields are null/empty if NGWAF is not deployed on this service.",
+      "recommended_with": null,
+      "total_bytes": 66,
+      "fields": [
+        "waf",
+        "waf_resp",
+        "waf_ms",
+        "waf_sig",
+        "waf_req_id"
+      ]
+    },
+    {
+      "id": "K",
+      "label": "QUIC / HTTP3",
+      "description": "QUIC-specific RTT, variance, packet loss, congestion window, and bandwidth estimate. All null for TCP connections.",
+      "locked": false,
+      "requires": null,
+      "note": "All fields are null for TCP connections. Only useful if your service has meaningful HTTP/3 traffic.",
+      "recommended_with": null,
+      "total_bytes": 88,
+      "fields": [
+        "bw",
+        "q_rtt",
+        "q_rtt_var",
+        "q_lost",
+        "q_cwnd"
+      ]
+    },
+    {
+      "id": "L",
+      "label": "Origin Metrics",
+      "description": "Origin/shield fetch timing, bytes, IP, and retries on cache misses and passes. VCL hooks applied automatically. ottfb/ottlb/oconnect_ms/ost/obytes/oip/oretries are null on HITs; rid is always set; prid set only on shield log lines.",
+      "locked": false,
+      "requires": null,
+      "note": "Enabling this group deploys additional VCL timing snippets to your service automatically.",
+      "recommended_with": [
+        "C"
+      ],
+      "total_bytes": 133,
+      "fields": [
+        "ottfb",
+        "ottlb",
+        "oconnect_ms",
+        "ost",
+        "obytes",
+        "oip",
+        "oretries",
+        "rid",
+        "prid"
+      ]
+    },
+    {
+      "id": "M",
+      "label": "Image Optimizer Metrics",
+      "description": "Per-request IO input/output sizes and formats from Fastly-Io-Transform-Stats. Enables actual compression ratio and format conversion analysis.",
+      "locked": false,
+      "requires": null,
+      "note": "Enabling this group deploys additional VCL snippets to your service. All fields are null for non-IO requests.",
+      "recommended_with": [
+        "A"
+      ],
+      "total_bytes": 80,
+      "fields": [
+        "io_input_bytes",
+        "io_output_bytes",
+        "io_input_format",
+        "io_output_format"
+      ]
+    },
+    {
+      "id": "METRICS",
+      "label": "Aggregate Metrics",
+      "description": "Computed aggregate metrics used for charts and dashboards.",
+      "locked": true,
+      "requires": null,
+      "note": null,
+      "recommended_with": null,
+      "total_bytes": 0,
+      "fields": [
+        "requests",
+        "hit_rate",
+        "5xx",
+        "4xx",
+        "p50_latency",
+        "p95_latency",
+        "p99_latency",
+        "throughput",
+        "req_size",
+        "ttfb_ms"
+      ]
+    }
+  ],
+  "insights": [
+    {
+      "id": "error_spikes",
+      "category": "origin",
+      "title": "Error Spikes",
+      "description": "URLs with abnormally elevated 5xx error rates in the window vs. baseline",
+      "required_fields": [
+        "status",
+        "url"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "botnet_grouping",
+      "category": "security",
+      "title": "Botnet Grouping",
+      "description": "TLS fingerprints (JA3/JA4) using far more distinct IPs than their baseline — attackers rotate IPs but rarely change TLS stacks",
+      "required_fields": [
+        "ja3",
+        "ja4"
+      ],
+      "required_groups": [
+        "H"
+      ]
+    },
+    {
+      "id": "low_and_slow",
+      "category": "security",
+      "title": "Low and Slow Scans",
+      "description": "IPs probing many sensitive / vulnerability paths at a deliberately low request rate spread over a long span — designed to evade rate limits",
+      "required_fields": [
+        "ip",
+        "url"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "credential_enumeration",
+      "category": "security",
+      "title": "Credential Enumeration / Brute Force",
+      "description": "IPs generating a spike of 401/403 responses on authentication paths (login, auth, OAuth, password reset) — credential stuffing or brute force",
+      "required_fields": [
+        "ip",
+        "url",
+        "status"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "content_discovery",
+      "category": "security",
+      "title": "Content-Discovery Scanning",
+      "description": "IPs generating a burst of 404s across many distinct URLs — directory / endpoint enumeration probing for hidden or vulnerable paths",
+      "required_fields": [
+        "ip",
+        "url",
+        "status"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "city_surges",
+      "category": "traffic",
+      "title": "City Traffic Surges",
+      "description": "Cities with traffic volumes significantly higher than their historical baseline",
+      "required_fields": [
+        "city",
+        "country"
+      ],
+      "required_groups": [
+        "D"
+      ]
+    },
+    {
+      "id": "city_error_spikes",
+      "category": "origin",
+      "title": "City Error Spikes",
+      "description": "Cities experiencing abnormally high error rates compared to their own baseline",
+      "required_fields": [
+        "city",
+        "status"
+      ],
+      "required_groups": [
+        "D"
+      ]
+    },
+    {
+      "id": "city_latency_regressions",
+      "category": "edge",
+      "title": "City Latency Regressions",
+      "description": "Cities where response times (P95) have significantly slowed down compared to their baseline",
+      "required_fields": [
+        "city",
+        "elapsed"
+      ],
+      "required_groups": [
+        "D"
+      ]
+    },
+    {
+      "id": "new_city_traffic",
+      "category": "traffic",
+      "title": "New City Traffic",
+      "description": "Cities with zero baseline presence now sending traffic",
+      "required_fields": [
+        "city"
+      ],
+      "required_groups": [
+        "D"
+      ]
+    },
+    {
+      "id": "new_country_traffic",
+      "category": "traffic",
+      "title": "New Country Traffic",
+      "description": "Countries with zero baseline presence now sending traffic",
+      "required_fields": [
+        "country"
+      ],
+      "required_groups": [
+        "D"
+      ]
+    },
+    {
+      "id": "latency_regression",
+      "category": "edge",
+      "title": "URL Latency Regressions",
+      "description": "URLs where response times (P95) have significantly slowed down compared to their baseline",
+      "required_fields": [
+        "url",
+        "elapsed"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "asn_concentration",
+      "category": "network",
+      "title": "ASN Concentration",
+      "description": "ISPs (ASNs) with a disproportionately large share of total traffic compared to the baseline",
+      "required_fields": [
+        "asn"
+      ],
+      "required_groups": [
+        "F"
+      ]
+    },
+    {
+      "id": "proxy_surge",
+      "category": "security",
+      "title": "Proxy Traffic Surge",
+      "description": "Significant increase in traffic from known anonymizing proxies (VPN, Tor, etc.)",
+      "required_fields": [
+        "p_type"
+      ],
+      "required_groups": [
+        "I"
+      ]
+    },
+    {
+      "id": "ua_monoculture",
+      "category": "traffic",
+      "title": "User-Agent Monoculture",
+      "description": "A single User-Agent string responsible for a massive percentage of traffic — typical for scraping or DDoS bots",
+      "required_fields": [
+        "ua"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "request_size_anomaly",
+      "category": "security",
+      "title": "Request Size Anomalies",
+      "description": "Drastic increase in average request body or header size — signal for data exfiltration or buffer overflow attempts",
+      "required_fields": [
+        "req_bytes",
+        "req_header_bytes"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "cache_ttl_mismatch",
+      "category": "edge",
+      "title": "Cache TTL Mismatches",
+      "description": "Objects being served from cache with very low hits and low TTLs — indicates inefficient caching strategy",
+      "required_fields": [
+        "cache",
+        "ttl",
+        "age",
+        "hits"
+      ],
+      "required_groups": [
+        "B"
+      ]
+    },
+    {
+      "id": "waf_signal_spikes",
+      "category": "security",
+      "title": "WAF Signal Spikes",
+      "description": "Abnormal increase in specific NGWAF signals (e.g. SQLi, XSS) across multiple IPs",
+      "required_fields": [
+        "waf",
+        "waf_sig",
+        "waf_resp",
+        "status"
+      ],
+      "required_groups": [
+        "J"
+      ]
+    },
+    {
+      "id": "network_asn_health",
+      "category": "network",
+      "title": "Network Path (ASN) Health",
+      "description": "ASNs experiencing elevated packet loss, jitter, or TCP retransmissions vs. their baseline",
+      "required_fields": [
+        "asn",
+        "ploss",
+        "rtt_var",
+        "retrans"
+      ],
+      "required_groups": [
+        "F",
+        "G"
+      ]
+    },
+    {
+      "id": "region_latency",
+      "category": "network",
+      "title": "Billing Region Latency",
+      "description": "Fastly regions showing elevated edge latency or TTFB spikes",
+      "required_fields": [
+        "server_region",
+        "elapsed",
+        "ttfb",
+        "asn",
+        "ottfb"
+      ],
+      "required_groups": [
+        "C",
+        "F",
+        "L"
+      ]
+    },
+    {
+      "id": "repeated_patterns",
+      "category": "security",
+      "title": "Scripted Traffic Patterns",
+      "description": "IPs demonstrating highly regular request intervals — automated scrapers, pollers, or cron-scheduled scripts that evade volumetric rate limits",
+      "required_fields": [
+        "ip"
+      ],
+      "required_groups": []
+    },
+    {
+      "id": "repeated_patterns_fp",
+      "category": "security",
+      "title": "Scripted Traffic Patterns (by TLS Fingerprint)",
+      "description": "TLS fingerprints sending requests on a highly regular cadence — catches IP-rotating scrapers sharing a stable TLS stack",
+      "required_fields": [
+        "ip"
+      ],
+      "required_groups": []
+    },
+    {
+      "id": "new_probe_urls",
+      "category": "security",
+      "title": "New Probe URLs",
+      "description": "Common attack patterns and sensitive paths appearing for the first time",
+      "required_fields": [
+        "url",
+        "status"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "cipher_spread",
+      "category": "security",
+      "title": "Cipher Fingerprint Clustering",
+      "description": "TLS cipher suites being used by a suspiciously large and spiking number of distinct IPs",
+      "required_fields": [
+        "tls_ciphers_sha"
+      ],
+      "required_groups": [
+        "H"
+      ]
+    },
+    {
+      "id": "impossible_distance",
+      "category": "security",
+      "title": "Impossible Distance / Spoofing",
+      "description": "Traffic where the network latency (RTT) is physically too low for the reported client distance",
+      "required_fields": [
+        "pop",
+        "lat",
+        "lon",
+        "tcp_rtt"
+      ],
+      "required_groups": [
+        "C",
+        "E",
+        "F"
+      ]
+    },
+    {
+      "id": "connection_abuse",
+      "category": "security",
+      "title": "Connection Reuse Anomaly",
+      "description": "IPs making an unusually high number of requests per single TCP connection",
+      "required_fields": [
+        "conn_requests"
+      ],
+      "required_groups": [
+        "C"
+      ]
+    },
+    {
+      "id": "origin_latency_spike",
+      "category": "origin",
+      "title": "Origin Latency Spike",
+      "description": "Sudden and significant increase in P95 response time from the origin server",
+      "required_fields": [
+        "ottfb"
+      ],
+      "required_groups": [
+        "L"
+      ]
+    },
+    {
+      "id": "origin_error_rate",
+      "category": "origin",
+      "title": "Origin Error Rate",
+      "description": "Significant increase in 5xx errors returned by the origin server",
+      "required_fields": [
+        "ost"
+      ],
+      "required_groups": [
+        "L"
+      ]
+    },
+    {
+      "id": "origin_retries",
+      "category": "origin",
+      "title": "Origin Retries Elevated",
+      "description": "URLs experiencing frequent retries when fetching from origin, indicating backend instability",
+      "required_fields": [
+        "oretries"
+      ],
+      "required_groups": [
+        "L"
+      ]
+    },
+    {
+      "id": "origin_ip_failure",
+      "category": "origin",
+      "title": "Specific Origin IP Failing",
+      "description": "One or more origin IP addresses are returning significantly more errors than their peers",
+      "required_fields": [
+        "oip",
+        "ost"
+      ],
+      "required_groups": [
+        "L"
+      ]
+    },
+    {
+      "id": "shield_path_degradation",
+      "category": "origin",
+      "title": "Shield Path Degradation",
+      "description": "Increased latency on the network path between edge POPs and shield POPs",
+      "required_fields": [
+        "rid",
+        "prid",
+        "edge",
+        "pop",
+        "ottfb"
+      ],
+      "required_groups": [
+        "C",
+        "L"
+      ]
+    },
+    {
+      "id": "cache_collapse",
+      "category": "edge",
+      "title": "Cache Efficiency Collapse",
+      "description": "URLs whose cacheable hit ratio (HIT/(HIT+MISS)) dropped sharply vs. their baseline",
+      "required_fields": [
+        "url",
+        "cache"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "cacheability_regression",
+      "category": "edge",
+      "title": "Cacheability Regression",
+      "description": "URLs that flipped from cacheable to mostly PASS (uncacheable) vs. their baseline",
+      "required_fields": [
+        "url",
+        "cache"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "tail_latency",
+      "category": "edge",
+      "title": "Tail Latency Anomaly",
+      "description": "Endpoints where P99 latency is more than 5× higher than P50, indicating major outliers",
+      "required_fields": [
+        "url",
+        "elapsed"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "image_optimization_opportunities",
+      "category": "edge",
+      "title": "Image Optimization Opportunities",
+      "description": "Large images being served without modern compression (WebP/AVIF), especially to mobile users",
+      "required_fields": [
+        "url",
+        "ua",
+        "resp_bytes"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "asn_metro_performance",
+      "category": "network",
+      "title": "ASN/Metro Performance Regressions",
+      "description": "Specific ISP/Metro combinations showing significantly higher network latency than baseline",
+      "required_fields": [
+        "asn",
+        "metro",
+        "tcp_rtt",
+        "country"
+      ],
+      "required_groups": [
+        "D",
+        "E",
+        "F"
+      ]
+    },
+    {
+      "id": "referer_monoculture",
+      "category": "traffic",
+      "title": "Referer Monoculture",
+      "description": "A single Referer driving an outsized, spiking share of total traffic — scraping, hotlinking, or a spoofed-referer flood",
+      "required_fields": [
+        "referer"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "method_drift",
+      "category": "traffic",
+      "title": "HTTP Method Drift",
+      "description": "A write method (POST/PUT/DELETE/…) surging to an outsized share of traffic vs a read-dominated baseline — API abuse or form/credential floods",
+      "required_fields": [
+        "method"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "new_asn_traffic",
+      "category": "network",
+      "title": "New ASN Traffic",
+      "description": "An ASN (ISP/datacenter) with zero baseline presence now sending meaningful traffic — a new botnet source, proxy pool, or datacenter range",
+      "required_fields": [
+        "asn"
+      ],
+      "required_groups": [
+        "F"
+      ]
+    },
+    {
+      "id": "asn_hosting_shift",
+      "category": "network",
+      "title": "ASN Hosting Shift",
+      "description": "An ASN's traffic composition shifting from consumer to datacenter/hosting — bot pools or scrapers spinning up on hosting infrastructure",
+      "required_fields": [
+        "asn",
+        "p_type"
+      ],
+      "required_groups": [
+        "F",
+        "I"
+      ]
+    },
+    {
+      "id": "metro_delivery_degradation",
+      "category": "network",
+      "title": "Metro Delivery-Rate Degradation",
+      "description": "US metro areas whose median TCP delivery rate (throughput) collapsed vs. baseline — regional last-mile or peering degradation",
+      "required_fields": [
+        "metro",
+        "delivery_rate"
+      ],
+      "required_groups": [
+        "E",
+        "G"
+      ]
+    },
+    {
+      "id": "connection_type_mix",
+      "category": "network",
+      "title": "Connection-Type Mix Shift",
+      "description": "A client connection type/speed combo (e.g. cellular, datacenter) surging to an outsized share of traffic vs. baseline — a bot pool or routing shift",
+      "required_fields": [
+        "c_type",
+        "c_speed"
+      ],
+      "required_groups": [
+        "G"
+      ]
+    },
+    {
+      "id": "pop_latency_regression",
+      "category": "edge",
+      "title": "PoP Latency Regression",
+      "description": "Individual Fastly PoPs (datacenters) whose P95 edge latency regressed sharply vs. baseline — finer-grained than region or city latency",
+      "required_fields": [
+        "pop",
+        "elapsed"
+      ],
+      "required_groups": [
+        "C"
+      ]
+    },
+    {
+      "id": "http3_fallback",
+      "category": "network",
+      "title": "HTTP/3 → TCP Fallback Spike",
+      "description": "A service-wide drop in QUIC (HTTP/3) share vs. baseline — clients failing to sustain QUIC and falling back to TCP (middlebox/UDP throttling)",
+      "required_fields": [
+        "transport"
+      ],
+      "required_groups": [
+        "F"
+      ]
+    },
+    {
+      "id": "cache_hit_cliff",
+      "category": "edge",
+      "title": "Cache HIT-Ratio Cliff",
+      "description": "The whole service's edge cache HIT ratio (HIT/(HIT+MISS)) fell off a cliff vs. baseline — a purge storm, TTL change, or origin Cache-Control regression",
+      "required_fields": [
+        "cache"
+      ],
+      "required_groups": []
+    },
+    {
+      "id": "payload_compression_regression",
+      "category": "edge",
+      "title": "Payload Compression Regression",
+      "description": "Compressible responses (JS/CSS/HTML/JSON/SVG/XML) that flipped from compressed (gzip/br) to served uncompressed vs. baseline — a broken Accept-Encoding path or origin regression inflating egress and TTFB",
+      "required_fields": [
+        "url",
+        "resp_header_content_encoding",
+        "resp_bytes",
+        "status"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "session_harvesting",
+      "category": "security",
+      "title": "Session-ID Harvesting",
+      "description": "A single IP presenting a large, spiking number of distinct session cookies vs. baseline — session-token brute forcing, cookie replay, or credential stuffing that mints a fresh session per attempt",
+      "required_fields": [
+        "ip",
+        "cookie_session"
+      ],
+      "required_groups": [
+        "H"
+      ]
+    },
+    {
+      "id": "timeout_split",
+      "category": "origin",
+      "title": "Origin Connect vs Read Timeout Split",
+      "description": "Splits origin slowness into connect (TCP+TLS handshake) vs read (processing to first byte) phases and flags whichever P95 regressed — slow-connect points at origin/LB saturation, slow-read at app/DB processing",
+      "required_fields": [
+        "oconnect_ms",
+        "ottfb"
+      ],
+      "required_groups": [
+        "L"
+      ]
+    },
+    {
+      "id": "crawler_disparity",
+      "category": "security",
+      "title": "Bot & Crawler Referral & Bandwidth Disparity",
+      "description": "Identifies bots, scrapers, and search/AI crawlers consuming high request volume and egress bandwidth while driving negligible human referral traffic back to the platform",
+      "required_fields": [
+        "ua",
+        "referer",
+        "ip",
+        "resp_bytes",
+        "timestamp"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "stale_browser_version",
+      "category": "security",
+      "title": "Stale Headless Browser",
+      "description": "Detects anomalous clusters of request traffic using stale Chrome major versions, a standard fingerprint for un-updated Puppeteer/Playwright headless bots",
+      "required_fields": [
+        "ua",
+        "ip",
+        "timestamp"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "orphaned_deep_crawl",
+      "category": "security",
+      "title": "Orphaned Deep Crawl",
+      "description": "Flags client IPs performing direct, deep scans of nested catalog/database resource routes with empty HTTP referer headers",
+      "required_fields": [
+        "ip",
+        "url",
+        "referer",
+        "timestamp"
+      ],
+      "required_groups": [
+        "A"
+      ]
+    },
+    {
+      "id": "residential_fingerprint_dispersion",
+      "category": "security",
+      "title": "Residential Fingerprint Dispersion",
+      "description": "Identifies identical TLS/TCP client handshakes distributed across multiple residential ASNs, signaling rotated botnet scans evading ASN blocks",
+      "required_fields": [
+        "ja4",
+        "ip",
+        "asn",
+        "p_type",
+        "timestamp"
+      ],
+      "required_groups": [
+        "H",
+        "I"
+      ]
+    }
+  ],
+  "presets": {
+    "minimal": {
+      "label": "Minimal",
+      "description": "Always-on fields only. Error rates, latency, hit rates, throughput.",
+      "groups": []
+    },
+    "standard": {
+      "label": "Standard",
+      "description": "Recommended for most sites. Request details, infrastructure, basic geo, proxy detection.",
+      "groups": [
+        "A",
+        "C",
+        "D",
+        "I"
+      ]
+    },
+    "security": {
+      "label": "Security",
+      "description": "Standard + TLS fingerprinting and WAF. For security monitoring.",
+      "groups": [
+        "A",
+        "C",
+        "D",
+        "H",
+        "I",
+        "J"
+      ],
+      "field_overrides": {
+        "tls_ciphers_sha": true
+      }
+    },
+    "performance": {
+      "label": "Performance",
+      "description": "Standard + cache deep-dive, network quality core, and origin metrics. For delivery optimization.",
+      "groups": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "F",
+        "L"
+      ]
+    },
+    "streaming": {
+      "label": "Streaming",
+      "description": "Standard + precision geo and full network telemetry. For streaming video analysis.",
+      "groups": [
+        "A",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G"
+      ]
+    },
+    "full": {
+      "label": "Full",
+      "description": "All groups enabled. Maximum data collection.",
+      "groups": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F",
+        "G",
+        "H",
+        "I",
+        "J",
+        "K",
+        "L",
+        "M"
+      ]
+    }
+  },
+  "reserved": [
+    "add",
+    "all",
+    "alter",
+    "and",
+    "as",
+    "between",
+    "bigint",
+    "boolean",
+    "by",
+    "case",
+    "cast",
+    "column",
+    "create",
+    "date",
+    "delete",
+    "distinct",
+    "double",
+    "drop",
+    "dt",
+    "else",
+    "end",
+    "exists",
+    "extract",
+    "false",
+    "float",
+    "from",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "index",
+    "insert",
+    "integer",
+    "interval",
+    "into",
+    "is",
+    "join",
+    "like",
+    "limit",
+    "list",
+    "map",
+    "not",
+    "null",
+    "offset",
+    "on",
+    "or",
+    "order",
+    "select",
+    "set",
+    "struct",
+    "table",
+    "then",
+    "time",
+    "timestamp",
+    "timestamp_hour",
+    "true",
+    "try_cast",
+    "union",
+    "update",
+    "values",
+    "varchar",
+    "view",
+    "when",
+    "where",
+    "with"
+  ],
+  "CONN_SPEED_ENCODE": {
+    "broadband": "B",
+    "cable": "C",
+    "dialup": "D",
+    "mobile": "M",
+    "oc12": "2",
+    "oc3": "3",
+    "t1": "1",
+    "t3": "T",
+    "satellite": "S",
+    "wireless": "W",
+    "xdsl": "X"
+  },
+  "PROXY_TYPE_ENCODE": {
+    "anonymous": "A",
+    "aol": "O",
+    "blackberry": "K",
+    "consumer-privacy": "P",
+    "corporate": "C",
+    "edu": "E",
+    "hosting": "H",
+    "public": "U",
+    "transparent": "T"
+  },
+  "PROXY_DESC_ENCODE": {
+    "apple": "a",
+    "cloud": "c",
+    "cloud-security": "s",
+    "dns": "d",
+    "google": "g",
+    "tor-exit": "x",
+    "tor-relay": "r",
+    "vpn": "v",
+    "web-browser": "w"
+  },
+  "c_speed_encode": {
+    "broadband": "B",
+    "cable": "C",
+    "dialup": "D",
+    "mobile": "M",
+    "oc12": "2",
+    "oc3": "3",
+    "t1": "1",
+    "t3": "T",
+    "satellite": "S",
+    "wireless": "W",
+    "xdsl": "X"
+  },
+  "p_type_encode": {
+    "anonymous": "A",
+    "aol": "O",
+    "blackberry": "K",
+    "consumer-privacy": "P",
+    "corporate": "C",
+    "edu": "E",
+    "hosting": "H",
+    "public": "U",
+    "transparent": "T"
+  },
+  "p_desc_encode": {
+    "apple": "a",
+    "cloud": "c",
+    "cloud-security": "s",
+    "dns": "d",
+    "google": "g",
+    "tor-exit": "x",
+    "tor-relay": "r",
+    "vpn": "v",
+    "web-browser": "w"
+  },
+  "fos_regions": {
+    "us-east-1": "iad-va-us",
+    "us-west": "bfi-wa-us",
+    "us-central-1": "chi-il-us",
+    "eu-central-1": "frankfurt-de",
+    "eu-south-1": "mxp-milan-it",
+    "eu-west-1": "mxp-paris-fr",
+    "uk-east-1": "london-uk",
+    "jp-central-1": "nrt-tokyo-jp",
+    "au-east-1": "sydney-au"
+  }
+}

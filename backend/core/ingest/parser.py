@@ -151,7 +151,7 @@ def _corrupt_gzip_error(local_file: str) -> BaseException | None:
 
 def get_ingest_type_hints(log_fields_config: dict | None = None) -> dict[str, str]:
     hints = {
-        f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else f["sql_type"])
+        f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else ("BIGINT" if f["id"] == "ts_ms" else f["sql_type"]))
         for f in LOG_FIELD_CATALOG
         if f.get("group") not in _INGEST_EXCLUDED_GROUPS and f.get("vcl") is not None
     }

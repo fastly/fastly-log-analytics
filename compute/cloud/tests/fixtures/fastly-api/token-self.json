@@ -1,0 +1,15 @@
+{
+  "provenance": "recorded authenticated GET; allowlisted/redacted response",
+  "recorded_at": "2026-10-28T23:10:21.479854+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/tokens/self"
+  },
+  "status": 200,
+  "redaction": "IDs, names, credentials and identifying hosts removed; token endpoint only scope/expiry/services retained; generated VCL only ERL pragma retained",
+  "response": {
+    "scope": "global",
+    "expires_at": "2026-11-03T00:00:00Z",
+    "services": []
+  }
+}

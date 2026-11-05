@@ -9,6 +9,7 @@ import hmac
 import io
 import tarfile
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,7 +19,29 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 REGISTRY_URL = "https://registry.npmjs.org/@grafana/faro-web-sdk"
 _BUNDLE_MEMBER_NAME = "package/dist/bundle/faro-web-sdk.iife.js"
-DEFAULT_FARO_VERSION = "2.10.0"
+DEFAULT_FARO_VERSION = "2.13.0"
+LEGACY_FARO_VERSION = "2.10.0"
+SUPPORTED_FARO_VERSIONS: tuple[str, ...] = ("2.13.0", "2.10.0")
+FARO_BUNDLE_SHA256: dict[str, str] = {
+    "2.13.0": "85741c45fd1fd4875c5f25a95a7940e1171ea11e308a83d88fd5f3a5dcab8c1c",
+    "2.10.0": "cd02768dda8e6dc88b558bc288e1ec2ec416f6ec8f7cce04782d52e70c478b69",
+}
+VENDORED_FARO_DIR = Path(__file__).resolve().parents[2] / "compute" / "cloud" / "src" / "logging"
+
+
+def read_vendored_faro_bundle(version: str = DEFAULT_FARO_VERSION) -> bytes:
+    """Return the vendored Faro IIFE bundle for ``version`` after verifying its SHA-256 digest."""
+    if version not in FARO_BUNDLE_SHA256:
+        raise ValueError(f"Unsupported vendored Faro version {version!r}; expected one of {SUPPORTED_FARO_VERSIONS}")
+    bundle_path = VENDORED_FARO_DIR / f"faro-web-sdk-v{version}.iife.js"
+    data = bundle_path.read_bytes()
+    actual = hashlib.sha256(data).hexdigest()
+    expected = FARO_BUNDLE_SHA256[version]
+    if actual != expected:
+        raise ValueError(f"Vendored Faro bundle {bundle_path} SHA-256 mismatch: {actual} != {expected}")
+    return data
+
+
 _TIMEOUT = 10.0
 _TARBALL_TIMEOUT = 20.0
 _TARBALL_MAX_BYTES = 10 * 1024 * 1024

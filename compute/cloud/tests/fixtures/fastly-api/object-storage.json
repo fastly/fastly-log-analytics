@@ -1,0 +1,20 @@
+{
+  "provenance": "recorded authenticated GET; allowlisted/redacted response",
+  "recorded_at": "2026-10-28T23:10:21.479854+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/enabled-products/v1/object_storage"
+  },
+  "status": 200,
+  "redaction": "IDs, names, credentials and identifying hosts removed; token endpoint only scope/expiry/services retained; generated VCL only ERL pragma retained",
+  "response": {
+    "product": {
+      "id": "object_storage",
+      "object": "product"
+    },
+    "customer": {
+      "id": "REDACTED_ID",
+      "object": "customer"
+    }
+  }
+}

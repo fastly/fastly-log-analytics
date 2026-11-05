@@ -18,7 +18,7 @@ export default async function AssetsShieldPage({
     filters?: string | string[]
   }>
 }) {
-  const params = await searchParams
+  const params = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
   const serviceId = await resolvePageServiceId(params)
   const isDefaultView =
     !params.start_time && !params.end_time && !params.range && !params.filters

@@ -1,10 +1,10 @@
 [package]
 name = "session-scorer"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 authors = ["drew.michael"]
 description = "Edge session-anomaly scoring service for Fastly Compute"
-license = "Apache-2.0"
+license.workspace = true
 publish = false
 
 [[bin]]
@@ -12,34 +12,9 @@ name = "session-scorer"
 path = "src/main.rs"
 
 [dependencies]
-# Compute SDK — Wasm runtime + req/resp helpers.
-fastly = "0.11"
-# Authenticated encryption. aes-gcm = pure-Rust, audited; ships in Wasm cleanly.
-aes-gcm = "0.10"
-# Matrix is loaded from the KV Store in a hand-rolled binary format (FSM1, see
-# matrix.rs) — no serde/serde_json dependency, which keeps the .wasm small for
-# fast cold-start instantiation (Fastly Compute is instance-per-request).
-# Cookie wire format.
-base64 = "0.22"
-# Hex-encode the raw session id bytes for the X-Edge-Sid response header.
-# Promoted from dev-deps once main.rs needed it for live emission.
-hex = "0.4"
-# Real entropy for SID generation. Without this the placeholder loop in
-# getrandom_fallback produces the same 6-byte sid for every cookieless
-# visitor (07 26 45 64 83 a2), which collapses every uncookied request
-# to one "session" in the labels table. getrandom 0.2 auto-selects the
-# WASI random_get import on wasm32-wasip1 — no extra features needed.
-getrandom = "0.2"
-
-[profile.release]
-# Optimize for size + execution speed. Wasm runtimes pay for both.
-opt-level = "s"
-lto = true
-codegen-units = 1
-strip = "symbols"
-panic = "abort"
-
-[profile.dev]
-# Faster local builds — we test logic at native speed and only build Wasm
-# for the actual deploy.
-opt-level = 0
+aes-gcm.workspace = true
+base64.workspace = true
+compute-common = { path = "../common" }
+fastly.workspace = true
+getrandom.workspace = true
+hex.workspace = true

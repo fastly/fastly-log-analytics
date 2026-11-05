@@ -438,10 +438,12 @@ def generate_capture_vcl(
             )
 
         if group_m:
+            # Group M IO extraction: Fastly-Io-Transform-Stats & Fastly-Io-Info (ifmt= / dc_fmt=)
+            # with NULL-safe guard (!req.http.x-fos-io-ifmt / !req.http.x-fos-edge-data:io)
             _m_stats = (("ifsz", "[0-9]+"), ("ofsz", "[0-9]+"), ("ifmt", "[a-zA-Z0-9]+"), ("ofmt", "[a-zA-Z0-9]+"))
             _m_hdrs = tuple(f"x-fos-io-{s}" for s, _ in _m_stats)
             _m_promote = "\n".join(
-                f'if (req.http.{h} == "" && resp.http.{h} != "") {{ set req.http.{h} = resp.http.{h}; }}'
+                f'if ((!req.http.{h} || req.http.{h} == "") && resp.http.{h} != "") {{ set req.http.{h} = resp.http.{h}; }}'
                 for h in _m_hdrs
             )
             _m_extract = "\n".join(
@@ -459,6 +461,9 @@ def generate_capture_vcl(
                 f"{_m_promote}\n"
                 'if (resp.http.Fastly-Io-Transform-Stats != "") {\n'
                 f"{_m_extract}\n"
+                "}\n"
+                'if ((!req.http.x-fos-io-ifmt || req.http.x-fos-io-ifmt == "") && resp.http.Fastly-Io-Info ~ "ifmt=") {\n'
+                '  set req.http.x-fos-io-ifmt = regsub(resp.http.Fastly-Io-Info, ".*ifmt=([a-zA-Z0-9]+).*", "\\1");\n'
                 "}\n"
                 'if (req.http.x-is-cluster-fetch != "1") {\n'
                 f"{_m_unset}\n"

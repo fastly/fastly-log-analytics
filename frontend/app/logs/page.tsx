@@ -23,7 +23,7 @@ export default async function LogsPage({
 }: {
   searchParams: Promise<{ service?: string | string[]; tab?: string | string[] }>
 }) {
-  const params = await searchParams
+  const params = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
   const serviceId = await resolvePageServiceId(params)
   const tab = firstParam(params.tab)
 

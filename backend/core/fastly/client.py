@@ -418,6 +418,12 @@ def validate_rum_custom_condition(condition: str) -> str | None:
     cond = (condition or "").strip()
     if not cond:
         return None
+    if len(cond) > 2048:
+        return "custom_condition exceeds maximum length of 2048 characters"
+    if any(ch in cond for ch in ("\n", "\r", ";", "{", "}")):
+        return "custom_condition contains forbidden characters"
+    if "'" in cond:
+        return "VCL string literals use double quotes, not single quotes."
     if _RUM_PATH_PREDICATE.search(cond):
         return (
             "A condition on req.url / req.url.path cannot work here: it is AND-ed onto "
@@ -426,8 +432,28 @@ def validate_rum_custom_condition(condition: str) -> str | None:
             "beacons by page URL, filter in the tracker — the page URL is in the beacon's "
             "POST body, which VCL cannot read."
         )
-    if "'" in cond:
-        return "VCL string literals use double quotes, not single quotes."
+    depth = 0
+    in_quotes = False
+    escaped = False
+    for ch in cond:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_quotes = not in_quotes
+            continue
+        if not in_quotes:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return "custom_condition has unbalanced parentheses"
+    if in_quotes or depth != 0:
+        return "custom_condition has unbalanced quotes or parentheses"
     return None
 
 

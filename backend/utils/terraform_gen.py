@@ -299,4 +299,33 @@ provider "aws" {{
 3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_s3`, `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `{service_id}`.
 4. Run `terraform init` and `terraform apply` to deploy the changes.
 """
+    if cfg.get("deployment_mode") == "cloud":
+        install_name = _terraform_template_escape(cfg.get("install_name", "flp"))
+        files["cloud_compute.tf.json"] = _dump(
+            {
+                "resource": {
+                    "fastly_service_compute": {
+                        "flp": {
+                            "name": install_name,
+                            "domain": [{"name": f"{install_name}.edgecompute.app"}],
+                        },
+                        "flp_worker": {
+                            "name": f"{install_name}-worker",
+                            "domain": [{"name": f"{install_name}-worker.edgecompute.app"}],
+                        },
+                    },
+                    "fastly_service_vcl": {
+                        "flp_front": {
+                            "name": f"{install_name}-front",
+                            "domain": [{"name": f"{install_name}.global.ssl.fastly.net"}],
+                        }
+                    },
+                }
+            }
+        )
     return files
+
+
+def generate_cloud_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
+    """Generate Terraform .tf.json including Cloud flp-front + flp/flp-worker resources."""
+    return generate_terraform({**cfg, "deployment_mode": "cloud"}, fos_access_key, fos_secret_key)

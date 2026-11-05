@@ -112,7 +112,7 @@ impl SessionState {
 pub fn quantize_score(raw: f64) -> u8 {
     let clamped = raw.clamp(0.0, 100.0);
     let bucket = SCORE_BUCKET as f64;
-    let rounded = (clamped / bucket).round_ties_even() * bucket;
+    let rounded = compute_common::num::round_ties_even(clamped / bucket) * bucket;
     rounded as u8
 }
 
@@ -120,19 +120,10 @@ fn pack_payload(state: &SessionState) -> Vec<u8> {
     // Layout: 30-byte fixed head + 1-byte length prefix + N bytes of
     // UTF-8 path. The length prefix is always emitted, even when the
     // path is empty.
-    // Largest char boundary <= PREV_ROUTE_MAX_BYTES so we never split a
-    // multi-byte UTF-8 sequence. Equivalent to the unstable
-    // `str::floor_char_boundary`, written with stable `is_char_boundary` so
-    // the crate builds on the pinned rustc (rust-toolchain.toml = 1.90).
-    let path_len = {
-        let s = &state.prev_route_path;
-        let mut i = PREV_ROUTE_MAX_BYTES.min(s.len());
-        while i > 0 && !s.is_char_boundary(i) {
-            i -= 1;
-        }
-        i
-    };
-    let path_bytes = state.prev_route_path.as_bytes();
+    let truncated =
+        compute_common::str::truncate_utf8(&state.prev_route_path, PREV_ROUTE_MAX_BYTES);
+    let path_len = truncated.len();
+    let path_bytes = truncated.as_bytes();
     let mut out = Vec::with_capacity(HEAD_PLAINTEXT_BYTES + 1 + path_len);
     out.push(state.v);
     out.extend_from_slice(&state.sid);
@@ -258,7 +249,10 @@ pub fn decode(
         cipher
             .decrypt(
                 Nonce::from_slice(nonce),
-                Payload { msg: ciphertext, aad: &aad_bytes },
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad_bytes,
+                },
             )
             .ok()
     };
@@ -444,7 +438,10 @@ mod tests {
         let cookie = encode(&state(), &KEY_A, &NONCE_FIXED, SVC, SCHEMA_VERSION).unwrap();
         let raw = URL_SAFE_NO_PAD.decode(&cookie).unwrap();
         assert_eq!(raw.len(), ENVELOPE_BYTES);
-        assert_eq!(raw.len(), NONCE_BYTES + HEAD_PLAINTEXT_BYTES + 1 + GCM_TAG_BYTES);
+        assert_eq!(
+            raw.len(),
+            NONCE_BYTES + HEAD_PLAINTEXT_BYTES + 1 + GCM_TAG_BYTES
+        );
     }
 
     #[test]
@@ -473,7 +470,7 @@ mod tests {
         let mut s = state();
         // A multi-byte character (🦀 is 4 bytes). Place it right at the boundary.
         let mut path = "a".repeat(PREV_ROUTE_MAX_BYTES - 1);
-        path.push_str("🦀"); // Total: 254 + 4 = 258 bytes
+        path.push('🦀'); // Total: 254 + 4 = 258 bytes
         s.prev_route_path = path;
 
         let cookie = encode(&s, &KEY_A, &NONCE_FIXED, SVC, SCHEMA_VERSION).unwrap();
@@ -482,9 +479,11 @@ mod tests {
         // Assert that the decoded path has exactly PREV_ROUTE_MAX_BYTES - 1 bytes,
         // dropping the whole straddling emoji cleanly instead of splitting its raw bytes.
         assert_eq!(decoded.prev_route_path.len(), PREV_ROUTE_MAX_BYTES - 1);
-        assert_eq!(decoded.prev_route_path, "a".repeat(PREV_ROUTE_MAX_BYTES - 1));
+        assert_eq!(
+            decoded.prev_route_path,
+            "a".repeat(PREV_ROUTE_MAX_BYTES - 1)
+        );
     }
-
 
     #[test]
     fn decode_rejects_tampered_ciphertext() {
@@ -545,7 +544,10 @@ mod tests {
         let ciphertext = cipher
             .encrypt(
                 Nonce::from_slice(&NONCE_FIXED),
-                Payload { msg: &plaintext, aad: &aad_bytes },
+                Payload {
+                    msg: &plaintext,
+                    aad: &aad_bytes,
+                },
             )
             .unwrap();
         let mut raw = NONCE_FIXED.to_vec();
@@ -578,8 +580,7 @@ mod tests {
     fn dual_key_decrypts_via_previous_during_grace() {
         let cookie_under_old = encode(&state(), &KEY_A, &NONCE_FIXED, SVC, SCHEMA_VERSION).unwrap();
         // Encode under A, decode via codec that holds B as current + A as previous.
-        let decoded =
-            decode(&cookie_under_old, &KEY_B, Some(&KEY_A), SVC, SCHEMA_VERSION).unwrap();
+        let decoded = decode(&cookie_under_old, &KEY_B, Some(&KEY_A), SVC, SCHEMA_VERSION).unwrap();
         assert_eq!(decoded, state());
     }
 

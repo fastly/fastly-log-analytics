@@ -1,0 +1,27 @@
+{
+  "provenance": "recorded authenticated GET of CLI-created install; redacted readback",
+  "recording_group": "install",
+  "recorded_at": "2026-10-28T23:24:48.558414+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/service/INSTALL_FRONT_ID/version"
+  },
+  "status": 200,
+  "redaction": "IDs consistently pseudonymized; fixed resource aliases preserved; identifying hosts/names/credentials removed; dictionary values never fetched",
+  "response": [
+    {
+      "deployed": false,
+      "deleted_at": null,
+      "locked": false,
+      "environments": [],
+      "number": 1,
+      "updated_at": "2026-10-28T23:20:05Z",
+      "created_at": "2026-10-28T23:19:34Z",
+      "testing": false,
+      "comment": "",
+      "staging": false,
+      "active": false,
+      "service_id": "INSTALL_FRONT_ID"
+    }
+  ]
+}

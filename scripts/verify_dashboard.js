@@ -1,7 +1,13 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const { adminGatewayContextOptions } = require('./lib/admin_gateway_client.cjs');
-const { collectResponseMeasurements, budgets } = require('./lib/section_measurements.cjs');
+const {
+  collectResponseMeasurements,
+  budgets,
+  WEB_VITALS_INIT_SCRIPT,
+  collectUiHealth,
+  attachApiWaterfallRecorder,
+} = require('./lib/section_measurements.cjs');
 const { isTransientConsoleBlip, logPagePerf = async () => {} } = require('./lib/console_blip');
 const { execSync } = require('child_process');
 // Usage: node verify_dashboard.js URL COMMIT ARCH ENV [--no-traffic]

@@ -372,12 +372,14 @@ export function AppLayout({
             {!hideFilterBar && <FilterBar />}
             {hideFilterBar && <ActiveFiltersBanner />}
 
-            <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
+                <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
               {isLoading && !bootstrapData ? (
                 <CenteredSpinner label="Loading app configuration…" />
               ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login']) ? (
                 <CenteredSpinner label="Setting up your workspace…" />
-              ) : children}
+              ) : (
+                <React.Suspense fallback={null}>{children}</React.Suspense>
+              )}
               {debugEnabled && <DebugPanel />}
               {serverFooter && !isAnalyst && serverFooter}
             </main>

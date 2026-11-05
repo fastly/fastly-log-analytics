@@ -22,6 +22,19 @@ from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 
+COMPACT_RUM_KEYS: tuple[str, ...] = (
+    "ts_ms",
+    "service_id",
+    "fastly_req_id",
+    "url",
+    "city",
+    "region",
+    "country",
+    "pop",
+    "tls",
+    "ttfb",
+)
+
 
 def _resolve_ingest_hook(attr_name: str, current: Any, orig: Any) -> Any:
     if current is not orig:

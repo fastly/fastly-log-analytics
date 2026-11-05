@@ -29,6 +29,7 @@ _SQL_RESERVED = frozenset(
     "between like ilike cast try_cast extract interval timestamp date time integer "
     "varchar boolean double bigint float struct list map dt timestamp_hour".split()
 )
+_DUCKDB_RESERVED = _SQL_RESERVED
 
 _SQL_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
     "VARCHAR": {"string", "ip", "url"},
@@ -37,6 +38,70 @@ _SQL_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
     "DOUBLE": {"numeric"},
     "BOOLEAN": {"boolean"},
 }
+
+
+class _CatalogEntry(dict[str, Any]):
+    """Dict-backed catalog entry that also exposes attribute access and cloud key aliases."""
+
+    _vcl_format_override: str | None = None
+
+    @property
+    def name(self) -> str:
+        return str(super().__getitem__("id"))
+
+    @property
+    def group(self) -> str | None:
+        return super().get("group")
+
+    @property
+    def vcl_format(self) -> str | None:
+        if self._vcl_format_override is not None:
+            return self._vcl_format_override
+        val = super().get("vcl")
+        return None if val is None else str(val)
+
+    @property
+    def sql_type(self) -> str:
+        return str(super().__getitem__("sql_type"))
+
+    @property
+    def duckdb_type(self) -> str:
+        return str(super().__getitem__("sql_type"))
+
+    def __getitem__(self, key: str) -> Any:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key == "name":
+            return super().__getitem__("id")
+        if key == "vcl_format":
+            return self.vcl_format
+        if key == "duckdb_type":
+            return super().__getitem__("sql_type")
+        raise KeyError(key)
+
+
+class _CatalogList(list[dict[str, Any]]):
+    """List of catalog entries that also supports string field-ID membership and key lookup."""
+
+    def __contains__(self, item: object) -> bool:
+        if isinstance(item, str):
+            return any(entry["id"] == item for entry in self)
+        return super().__contains__(item)
+
+    def __getitem__(self, index: Any) -> Any:
+        if isinstance(index, str):
+            for entry in self:
+                if entry["id"] == index:
+                    return entry
+            raise KeyError(index)
+        return super().__getitem__(index)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        for entry in self:
+            if entry["id"] == key:
+                return entry
+        return default
+
 
 # fmt: off
 
@@ -47,8 +112,9 @@ def _f(
     formatter: str | None = None, precision: int | None = None, unit: str | None = None,
     note: str | None = None, individually_toggleable: bool | None = None,
     pii: bool | None = None, default_off: bool | None = None,
-) -> dict[str, Any]:
-    d: dict[str, Any] = {"id": id, "group": group, "label": label, "description": description}
+    vcl_format: str | None = None,
+) -> _CatalogEntry:
+    d = _CatalogEntry({"id": id, "group": group, "label": label, "description": description})
     for k, v in (("formatter", formatter), ("precision", precision), ("unit", unit), ("note", note)):
         if v is not None:
             d[k] = v
@@ -57,14 +123,16 @@ def _f(
         if v is not None:
             d[k] = v
     d["required_by"] = list(required_by) if required_by is not None else []
+    if vcl_format is not None:
+        d._vcl_format_override = vcl_format
     return d
 
 
-def _m(id: str, label: str, description: str, formatter: str, sql_type: str = "DOUBLE", unit: str | None = None) -> dict[str, Any]:
+def _m(id: str, label: str, description: str, formatter: str, sql_type: str = "DOUBLE", unit: str | None = None) -> _CatalogEntry:
     return _f(id, "METRICS", label, description, None, sql_type, 0, formatter=formatter, unit=unit)
 
 
-def _v(id: str, label: str, description: str) -> dict[str, Any]:
+def _v(id: str, label: str, description: str) -> _CatalogEntry:
     return _f(id, "VIRTUAL", label, description, None, "VARCHAR", 0)
 
 
@@ -77,8 +145,9 @@ def _g(label: str, description: str, *, locked: bool = False, requires: str | No
     return d
 
 
-LOG_FIELD_CATALOG: list[dict[str, Any]] = [
+LOG_FIELD_CATALOG: list[dict[str, Any]] = _CatalogList([
     _f('timestamp', None, 'Timestamp', 'UTC timestamp of the request start time (ISO 8601 with timezone).', '"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V"', 'TIMESTAMP', 40),
+    _f('ts_ms', None, 'Timestamp (ms)', 'Request start time in milliseconds since the Unix epoch. Routes rows into windows and orders window files.', '"ts_ms":%{time.start.msec}V', 'TIMESTAMP', 22),
     _f('ip', None, 'Client IP', 'Client IP address. Captured at the real edge via x-fos-edge-data header; falls back to client.ip for requests answered before capture ran (e.g. redirects).', '"ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, client.ip)))}V"', 'VARCHAR', 22, ['low_and_slow', 'credential_enumeration', 'content_discovery', 'botnet_grouping']),
     _f('status', None, 'Response Status', 'HTTP response status code (e.g. 200, 404, 503).', '"status":%{if(resp.status > 0, "" + resp.status, "null")}V', 'USMALLINT', 17, ['error_spikes', 'city_error_spikes', 'credential_enumeration', 'content_discovery', 'waf_signal_spikes', 'image_optimization_opportunities'], formatter='status'),
     _f('elapsed', None, 'Elapsed Time (µs)', 'Total request processing time in microseconds.', '"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V', 'UBIGINT', 18, ['latency_regression', 'city_latency_regressions', 'network_asn_health', 'tail_latency', 'region_latency'], formatter='number', unit='µs'),
@@ -129,11 +198,11 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
     _f('cookie_session', 'H', 'Session Cookie (hashed)', "SHA-256 hash of the client's session cookie — the FIRST present among a common framework allowlist (sessionid, PHPSESSID, JSESSIONID, ASP.NET_SessionId, connect.sid, session, sid). Hashed AT THE EDGE via digest.hash_sha256, so the raw cookie value is never logged or forwarded past Fastly. Empty when no session cookie is present. PRIVACY: this is a stable per-session client identifier — it MUST be masked for analysts exactly like the client IP (see mask_ips policy).", '"cookie_session":"%{json.escape(req.http.x-fos-edge-data:cookie_session)}V"', 'VARCHAR', 40, ['session_harvesting'], individually_toggleable=True, pii=True, default_off=True),
     _f('p_type', 'I', 'Proxy Type', 'Anonymizing proxy type: VPN, Tor, DCH (data center), etc.', '"p_type":"%{json.escape(if(req.http.x-fos-edge-data:p_type != "", req.http.x-fos-edge-data:p_type, if(client.geo.proxy_type == "?", "", client.geo.proxy_type)))}V"', 'VARCHAR', 10, ['asn_hosting_shift', 'proxy_surge']),
     _f('p_desc', 'I', 'Proxy Description', 'Anonymizing proxy provider name.', '"p_desc":"%{json.escape(if(req.http.x-fos-edge-data:p_desc != "", req.http.x-fos-edge-data:p_desc, if(client.geo.proxy_description == "?", "", client.geo.proxy_description)))}V"', 'VARCHAR', 10, ['proxy_surge']),
-    _f('waf', 'J', 'WAF Executed', 'Whether NGWAF (Signal Sciences) processed this request.', '"waf":%{if(waf.executed, "1", "0")}V', 'BOOLEAN', 8, ['waf_signal_spikes']),
-    _f('waf_resp', 'J', 'WAF Agent Response', 'NGWAF agent decision code (HTTP status equivalent).', '"waf_resp":%{if(waf.executed, if(req.http.x-sigsci-agentresponse ~ "^[0-9]+$", req.http.x-sigsci-agentresponse, "null"), "null")}V', 'USMALLINT', 16, ['waf_signal_spikes'], formatter='status'),
-    _f('waf_ms', 'J', 'WAF Latency (ms)', 'Milliseconds the NGWAF inspection added to the request.', '"waf_ms":%{if(waf.executed, if(req.http.x-sigsci-decision-ms ~ "^[0-9]+$", req.http.x-sigsci-decision-ms, "null"), "null")}V', 'UINTEGER', 13, formatter='number', unit='ms'),
-    _f('waf_sig', 'J', 'WAF Signal Tags', 'NGWAF signal tags (e.g. SQLI, XSS, CMDEXE).', '"waf_sig":"%{if(waf.executed, if(req.http.x-sigsci-tags != "", json.escape(req.http.x-sigsci-tags), ""), "")}V"', 'VARCHAR', 13, ['waf_signal_spikes']),
-    _f('waf_req_id', 'J', 'WAF Request ID', 'NGWAF request correlation ID for cross-referencing with Signal Sciences.', '"waf_req_id":"%{if(waf.executed, if(req.http.x-fastly-ngwaf:requestid != "", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != "", json.escape(req.http.x-sigsci-requestid), "")), "")}V"', 'VARCHAR', 16),
+    _f('waf', 'J', 'WAF Executed', 'Whether NGWAF inspected this request (waf.inspection.verdict is set). NGWAF runs only on cache misses and passes, so hits are false.', '"waf":%{if(waf.inspection.verdict != "", "1", "0")}V', 'BOOLEAN', 8, ['waf_signal_spikes']),
+    _f('waf_resp', 'J', 'WAF Agent Response', 'NGWAF decision code: waf.inspection.agentresponse when set, else the response status for a block verdict or 200 for allow (the edge integration leaves agentresponse 0); null when uninspected.', '"waf_resp":%{if(waf.inspection.verdict != "" && waf.inspection.agentresponse > 0, std.itoa(waf.inspection.agentresponse), if(waf.inspection.verdict == "block", std.itoa(resp.status), if(waf.inspection.verdict == "allow", "200", "null")))}V', 'USMALLINT', 16, ['waf_signal_spikes'], formatter='status'),
+    _f('waf_ms', 'J', 'WAF Latency (ms)', 'NGWAF inspection decision time in ms (waf.inspection.decision_ms); null when uninspected.', '"waf_ms":%{if(waf.inspection.verdict != "" && waf.inspection.decision_ms >= 0, std.itoa(waf.inspection.decision_ms), "null")}V', 'UINTEGER', 13, formatter='number', unit='ms'),
+    _f('waf_sig', 'J', 'WAF Signal Tags', 'NGWAF signal tags from waf.inspection.tags (e.g. SQLI, XSS, TRAVERSAL).', '"waf_sig":"%{json.escape(waf.inspection.tags)}V"', 'VARCHAR', 13, ['waf_signal_spikes']),
+    _f('waf_req_id', 'J', 'WAF Request ID', 'NGWAF request correlation ID header, when the edge integration sets one.', '"waf_req_id":"%{if(req.http.x-fastly-ngwaf:requestid != "", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != "", json.escape(req.http.x-sigsci-requestid), ""))}V"', 'VARCHAR', 16, vcl_format='"waf_req_id":"%{if(waf.inspection.request_id != "", json.escape(waf.inspection.request_id), if(req.http.x-fastly-ngwaf:requestid != "", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != "", json.escape(req.http.x-sigsci-requestid), "")))}V"'),
     _f('q_rtt', 'K', 'QUIC Smoothed RTT (µs)', 'QUIC smoothed RTT in microseconds. Null for TCP connections.', '"q_rtt":%{if(req.http.x-fos-edge-data:q_rtt ~ "^[0-9]+$", req.http.x-fos-edge-data:q_rtt, if(transport.type == "quic", "" + quic.rtt.smoothed, "null"))}V', 'UINTEGER', 19, formatter='number', unit='µs'),
     _f('q_rtt_var', 'K', 'QUIC RTT Variance (µs)', 'QUIC RTT variance in microseconds. Null for TCP connections.', '"q_rtt_var":%{if(req.http.x-fos-edge-data:q_rtt_var ~ "^[0-9]+$", req.http.x-fos-edge-data:q_rtt_var, if(transport.type == "quic", "" + quic.rtt.variance, "null"))}V', 'UINTEGER', 19, formatter='number', unit='µs'),
     _f('q_lost', 'K', 'QUIC Packets Lost', 'QUIC packets lost counter. Null for TCP connections.', '"q_lost":%{if(req.http.x-fos-edge-data:q_lost ~ "^[0-9]+$", req.http.x-fos-edge-data:q_lost, if(transport.type == "quic", "" + quic.num_packets.lost, "null"))}V', 'UINTEGER', 17, formatter='number'),
@@ -166,7 +235,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
     _v("waf_sig_ind", "NGWAF Signals", "Individual NGWAF signals extracted from the waf_sig list."),
     _v('edge_score_reason_ind', 'Score Reasons', "Individual scoring reasons extracted from the comma-separated edge_score_reason field (e.g. 'cookie-missing', 'impossibly-fast', 'robotic-consistency', 'rare-transition'). Lets the dashboard show top-N reason breakdowns and filter by a single reason even when one request triggers multiple."),
     _f('_source_file', 'INTERNAL', 'Source File', 'Original raw log file in Fastly Object Storage.', None, 'VARCHAR', 60),
-]
+])
 
 GROUP_INFO: dict[str | None, dict[str, Any]] = {
     None: _g('Core Delivery', 'Always-on fields required for basic metrics: error rates, latency, hit rates, throughput.', locked=True),
@@ -179,7 +248,7 @@ GROUP_INFO: dict[str | None, dict[str, Any]] = {
     "G": _g('Network Quality — Deep', 'Packet loss, RTT variance/jitter, retransmissions, TCP delivery rate, data segments, and connection type. Requires Network Core.', requires='F'),
     "H": _g('Security: TLS Fingerprinting', 'JA3, JA4, cipher suite fingerprints, and a hashed session-cookie id for botnet grouping, scanner detection, and session-harvesting analysis.'),
     "I": _g("Security: Proxy Detection", "Anonymizing proxy type and provider name (VPN, Tor, DCH)."),
-    "J": _g('WAF / NGWAF', 'Signal Sciences / NGWAF fields. All null if NGWAF is not deployed on this service.', note='All fields are null/empty if NGWAF is not deployed on this service.'),
+    "J": _g('WAF / NGWAF', 'NGWAF fields from the vcl_log-only waf.inspection.* variables. Null/empty if NGWAF is not deployed on this service.', note='All fields are null/empty if NGWAF is not deployed on this service.'),
     "K": _g('QUIC / HTTP3', 'QUIC-specific RTT, variance, packet loss, congestion window, and bandwidth estimate. All null for TCP connections.', note='All fields are null for TCP connections. Only useful if your service has meaningful HTTP/3 traffic.'),
     "L": _g('Origin Metrics', 'Origin/shield fetch timing, bytes, IP, and retries on cache misses and passes. VCL hooks applied automatically. ottfb/ottlb/oconnect_ms/ost/obytes/oip/oretries are null on HITs; rid is always set; prid set only on shield log lines.', note='Enabling this group deploys additional VCL timing snippets to your service automatically.', recommended_with=['C']),
     "M": _g('Image Optimizer Metrics', 'Per-request IO input/output sizes and formats from Fastly-Io-Transform-Stats. Enables actual compression ratio and format conversion analysis.', note='Enabling this group deploys additional VCL snippets to your service. All fields are null for non-IO requests.', recommended_with=['A']),
@@ -486,6 +555,13 @@ class Group(StrEnum):
     @classmethod
     def from_legacy(cls, raw: str | None) -> Group:
         return cls.CORE if raw is None else cls(raw)
+
+
+import sys as _sys
+import types as _types
+
+if __name__ not in _sys.modules:
+    _sys.modules[__name__] = _types.ModuleType(__name__)
 
 
 @dataclass(frozen=True, slots=True)

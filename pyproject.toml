@@ -181,7 +181,7 @@ packages = ["backend"]
 # Treat ``backend`` as first-party so ``from backend.X import Y`` doesn't
 # show as DEP003 (transitive — which it isn't; it's our own package).
 known_first_party = ["backend"]
-extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*"]
+extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*", "compute/cloud/infra/.*", "compute/cloud/tools/.*"]
 
 [tool.deptry.per_rule_ignores]
 # DEP002 — declared but not directly imported. All four are runtime/CLI
@@ -286,7 +286,7 @@ disallow_untyped_defs = false
 check_untyped_defs = false
 ignore_missing_imports = true
 implicit_optional = true
-exclude = ["frontend/", "docs/", "scripts/"]
+exclude = ["frontend/", "docs/", "scripts/", "compute/cloud/infra/", "compute/cloud/tools/"]
 
 # ignore_errors burndown — Phase 10.13.
 #
@@ -366,6 +366,8 @@ ignore = [
 # CLI tools and one-off scripts legitimately print to stdout.
 "scripts/*" = ["T201"]
 "backend/provision/cli.py" = ["T201"]
+"compute/cloud/infra/*" = ["T201"]
+"compute/cloud/tools/*" = ["T201"]
 # Tests can print benchmark timings, debug dumps, etc. — not production code.
 "tests/*" = ["T201"]
 

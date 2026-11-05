@@ -22,6 +22,10 @@ dist/
 .claude/
 .agents/
 .trail/
+!.trail/
+.trail/*
+!.trail/learnings/
+!.trail/learnings/**
 gemini.md
 SYSTEM.md
 DEPLOYMENT.md
@@ -29,6 +33,10 @@ local-docs/*
 pending-docs/*
 .superpowers/
 docs/superpowers/
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+!docs/superpowers/plans/**
 docs/plans/
 node_modules/
 .coverage
@@ -83,9 +91,18 @@ compute/scorer/matrix.json
 compute/scorer/matrix_*.json
 
 # Rust build artifacts.
+compute/target/
 compute/scorer/target/
 compute/scorer/bin/
 compute/scorer/pkg/
+compute/cloud/target/
+compute/cloud/bin/
+compute/cloud/pkg/
+target/release-cache/
+/target/
+frontend/public/duckdb/
+frontend/out/
+/.worktrees/
 
 # Per-deployment secrets: AES cookie keys, deploy-time IDs the service files
 # might reference. NEVER commit.

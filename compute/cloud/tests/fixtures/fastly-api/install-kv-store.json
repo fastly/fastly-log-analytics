@@ -1,0 +1,17 @@
+{
+  "provenance": "recorded authenticated GET of CLI-created install; redacted readback",
+  "recording_group": "install",
+  "recorded_at": "2026-10-28T23:24:48.558414+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/resources/stores/kv/STORE_KV_ID"
+  },
+  "status": 200,
+  "redaction": "IDs consistently pseudonymized; fixed resource aliases preserved; identifying hosts/names/credentials removed; dictionary values never fetched",
+  "response": {
+    "id": "STORE_KV_ID",
+    "name": "flp_state",
+    "created_at": "2026-10-28 23:19:37",
+    "updated_at": "2026-10-28 23:19:37"
+  }
+}

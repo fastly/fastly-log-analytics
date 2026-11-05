@@ -242,17 +242,28 @@ fn fetch_matrix_bytes() -> Vec<u8> {
         Ok(Some(store)) => match store.lookup(MATRIX_KEY) {
             Ok(mut resp) => return resp.take_body_bytes(),
             Err(KVStoreError::ItemNotFound) => {
-                eprintln!("[scoring/dbg] [ERROR] Matrix item not found in KVStore under key '{}'", MATRIX_KEY);
+                eprintln!(
+                    "[scoring/dbg] [ERROR] Matrix item not found in KVStore under key '{}'",
+                    MATRIX_KEY
+                );
             }
             Err(e) => {
-                eprintln!("[scoring/dbg] [ERROR] KVStore lookup error for key '{}': {:?}", MATRIX_KEY, e);
+                eprintln!(
+                    "[scoring/dbg] [ERROR] KVStore lookup error for key '{}': {:?}",
+                    MATRIX_KEY, e
+                );
             }
         },
         Ok(None) => {
-            eprintln!("[scoring/dbg] [ERROR] KVStore matrix_store is None (unlinked or unavailable)");
+            eprintln!(
+                "[scoring/dbg] [ERROR] KVStore matrix_store is None (unlinked or unavailable)"
+            );
         }
         Err(e) => {
-            eprintln!("[scoring/dbg] [ERROR] Failed to open KVStore '{}': {:?}", MATRIX_STORE, e);
+            eprintln!(
+                "[scoring/dbg] [ERROR] Failed to open KVStore '{}': {:?}",
+                MATRIX_STORE, e
+            );
         }
     }
     Vec::new()
@@ -315,7 +326,12 @@ mod test_support {
             }
         }
         let sorted: Vec<Vec<u8>> = routes.into_keys().collect();
-        let rid = |s: &str| sorted.iter().position(|r| r.as_slice() == s.as_bytes()).unwrap() as u32;
+        let rid = |s: &str| {
+            sorted
+                .iter()
+                .position(|r| r.as_slice() == s.as_bytes())
+                .unwrap() as u32
+        };
         let n = sorted.len();
 
         let mut out = Vec::new();

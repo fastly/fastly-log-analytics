@@ -64,6 +64,7 @@ export async function fetchSsrRangePost(options: {
   timeoutMs?: number
   body?: Record<string, unknown>
 }): Promise<SsrRangeSeed | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const { rangeToken, anchor } = resolveDefaultSsrRangeKey(options.now)
   if (!options.serviceId) return null
 
@@ -274,6 +275,7 @@ export async function fetchInsightsServerSide(
   initialWindow?: string | null,
   initialBaseline?: string | null,
 ): Promise<InsightsSsrSeed | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const defaults = resolveInsightsDefault(
     earliestFromLogExtents(logExtents),
   )
@@ -323,6 +325,7 @@ function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapRe
 }
 
 export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const [hdrs, cookieJar] = await Promise.all([headers(), cookies()])
   const { admin: isAdmin } = classifySsrRequest(hdrs)
   const serviceId = hdrs.get('x-service-id')
@@ -402,6 +405,7 @@ export async function resolvePageServiceId(
 // ── Admin Gateway SSR Fetchers ────────────────────────────────────────────────
 
 export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   return parseSsrJson(
     await ssrUpstreamGet({
       path: '/api/admin/metric-history/batch?since=1h',
@@ -416,6 +420,7 @@ type AlertListResponse = components['schemas']['AlertListResponse']
 export async function fetchAlertsServerSide(
   serviceId: string | undefined,
 ): Promise<AlertListResponse | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const path = serviceId
     ? `/api/alerts/${encodeURIComponent(serviceId)}`
     : '/api/alerts/'
@@ -429,6 +434,7 @@ export async function fetchAlertsServerSide(
 export async function fetchCronRunsServerSide(
   serviceId: string | undefined,
 ): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   if (!serviceId) return null
 
   return parseSsrJson(
@@ -444,6 +450,7 @@ export async function fetchCronRunsServerSide(
 export async function fetchCronScheduleServerSide(
   serviceId: string | undefined,
 ): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   if (!serviceId) return null
 
   return parseSsrJson(
@@ -460,6 +467,7 @@ type TosPayload = components['schemas']['TosDocument']
 type TosResult = TosPayload | 'unauthenticated' | null
 
 export async function fetchTosServerSide(): Promise<TosResult> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const resp = await ssrUpstreamGet({ path: '/api/share/tos', logPrefix: 'ssr/tos' })
   if (resp?.statusCode === 401) return 'unauthenticated'
   return parseSsrJson<TosPayload>(resp, 'ssr/tos')
@@ -476,6 +484,7 @@ interface UsageLogSsrArgs {
 }
 
 export async function fetchUsageLogServerSide(args: UsageLogSsrArgs): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const query = new URLSearchParams({
     service_id: args.serviceId || '',
     start: args.start,

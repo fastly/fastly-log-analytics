@@ -29,9 +29,11 @@ description = "fastly-log-analytics — tracked test fixtures, Rust lockfile, pu
 paths = [
     # Rust dependency lockfile — sha256 checksums look like generic
     # API keys to gitleaks. Not covered by the built-in lockfile allowlist.
+    '''^compute/Cargo\.lock$''',
     '''^compute/scorer/Cargo\.lock$''',
 
     # Tracked, intentional test fixtures
+    '''^compute/cloud/tests/fixtures/''',
     '''^compute/scorer/fixtures/local-dictionary\.json$''',      # placeholder AES key = 0x00..0x1f
     '''^compute/scorer/src/cookie\.rs$''',                       # test-mode constants
     '''^tests/scoring/.*\.py$''',                                # cookie/scoring test fixtures

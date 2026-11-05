@@ -1,5 +1,6 @@
 import * as os from 'os'
 import { headers } from 'next/headers'
+import { CloudVersionFooter } from './CloudVersionFooter'
 
 async function fetchGceMetadata(path: string): Promise<string | null> {
   try {
@@ -17,6 +18,13 @@ async function fetchGceMetadata(path: string): Promise<string | null> {
 }
 
 export async function ServerFooter() {
+  if (
+    process.env.STATIC_EXPORT === '1' ||
+    process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === 'cloud'
+  ) {
+    // Static export / Cloud mode: client fetches /version (build_sha)
+    return <CloudVersionFooter />
+  }
   // The root layout renders this server-side for EVERY request, so the
   // analyst/public check can't live only in the client AppLayout — the footer
   // would already be in the HTML/RSC payload. Requests through Caddy (the

@@ -1,0 +1,25 @@
+app = "flp"
+install = "flp-g2-live-20261029"
+checkout = "."
+base_url = "https://flp-g2-live-20261029.global.ssl.fastly.net"
+destination = "dmichael-log-streaming-stead.global.ssl.fastly.net"
+estimator = "frontend/lib/cloud-engine/usage/estimate.ts"
+total_selector = '[data-testid="total-requests"]'
+scenarios_file = "~/Projects/fastly-distributed-load-tester/scenarios/fastly-log-analytics.toml"
+
+[services]
+monitored = "xa20dYfOsL4MhjIo66mVhh"
+app = "yjFRqPBrgp7jt8BcXzq8hk"
+worker = "sEG8eK9doIBv2oDEbOpdJd"
+front = "386rW1xfyBWZaSoVqxHRoi"
+
+# Same token as the Elevation high-scale service (ZEZ4mcAjoSFDTg7tpkDKV2), same account as the monitored service.
+[fastly_token]
+env = "FASTLY_API_KEY"
+env_file = "~/Projects/fastly-log-analytics/.env"
+
+[settings]
+state_dir = "~/.flp-state/flp-g2-live-20261029"
+env_file = ".env"
+log_endpoint_name = "Fastly Object Storage Logs"
+raw_bucket = "fos-xa20dyfosl4mhjio66mvhh-logs"

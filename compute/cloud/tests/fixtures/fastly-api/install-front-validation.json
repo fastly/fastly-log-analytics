@@ -1,0 +1,31 @@
+{
+  "provenance": "recorded authenticated GET of CLI-created install; redacted readback",
+  "recording_group": "install",
+  "recorded_at": "2026-10-28T23:24:48.558414+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/service/INSTALL_FRONT_ID/version/1/validate"
+  },
+  "status": 200,
+  "redaction": "IDs consistently pseudonymized; fixed resource aliases preserved; identifying hosts/names/credentials removed; dictionary values never fetched",
+  "response": {
+    "status": "ok",
+    "warnings": [
+      "Warning: Unused table `flp_fos_buckets`\nat: (input Line 120 Pos 7)\ntable flp_fos_buckets {\n------###############--\n\nWarning: Unused table `flp_fos_credentials`\nat: (input Line 123 Pos 7)\ntable flp_fos_credentials {\n------###################--\n\n"
+    ],
+    "messages": [
+      {
+        "type": "warning",
+        "warning": true,
+        "message": "Unused table `flp_fos_buckets`"
+      },
+      {
+        "message": "Unused table `flp_fos_credentials`",
+        "type": "warning",
+        "warning": true
+      }
+    ],
+    "errors": [],
+    "msg": "Warning: Unused table `flp_fos_buckets`\nat: (input Line 120 Pos 7)\ntable flp_fos_buckets {\n------###############--\n\nWarning: Unused table `flp_fos_credentials`\nat: (input Line 123 Pos 7)\ntable flp_fos_credentials {\n------###################--"
+  }
+}

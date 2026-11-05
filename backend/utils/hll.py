@@ -119,6 +119,17 @@ class HyperLogLog:
     def to_bytes(self) -> bytes:
         return bytes([SERIALIZATION_VERSION, self._p]) + bytes(self._buckets)
 
+    def serialize(self) -> bytes:
+        return bytes([SERIALIZATION_VERSION]) + bytes(self._buckets)
+
+    @classmethod
+    def deserialize(cls, blob: bytes | bytearray) -> HyperLogLog:
+        if len(blob) == 1 + (1 << DEFAULT_PRECISION) and blob[0] == SERIALIZATION_VERSION:
+            sketch = cls(precision=DEFAULT_PRECISION)
+            sketch._buckets = bytearray(blob[1:])
+            return sketch
+        return cls.from_bytes(blob)
+
     @classmethod
     def from_bytes(cls, blob: bytes | bytearray) -> HyperLogLog:
         if len(blob) < 2:
