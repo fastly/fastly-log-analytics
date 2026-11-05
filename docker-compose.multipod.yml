@@ -63,7 +63,6 @@ services:
     # (ADR-22).
     - &metadata-dsn METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@postgres:5432/fla
     - &clickhouse-url CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
-    - &high-scale-clickhouse-url HIGH_SCALE_CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
     - CLICKHOUSE_ENABLED=true
     - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
     - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
@@ -236,7 +235,6 @@ services:
     - HIGH_SCALE_MAX_BATCH_OBJECTS=10
     - *metadata-dsn
     - *clickhouse-url
-    - *high-scale-clickhouse-url
     - CLICKHOUSE_ENABLED=true
     - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
     - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}

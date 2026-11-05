@@ -93,8 +93,6 @@ plus ClickHouse analytical store settings.
 {{- if .Values.config.clickhouseUrl }}
 - name: CLICKHOUSE_URL
   value: {{ .Values.config.clickhouseUrl | quote }}
-- name: HIGH_SCALE_CLICKHOUSE_URL
-  value: {{ .Values.config.clickhouseUrl | quote }}
 {{- end }}
 {{- if .Values.config.clickhouseHost }}
 - name: CLICKHOUSE_HOST

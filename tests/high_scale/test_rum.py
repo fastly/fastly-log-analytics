@@ -2090,3 +2090,60 @@ def test_rum_beacon_health_enforces_15m_recency_and_counts_error_only_beacons() 
     assert "rum_vitals_facts" in facts_sql and "rum_error_facts" in facts_sql
     assert "domain='rum_vitals'" in facts_sql and "domain='rum_errors'" in facts_sql
     assert facts_params["cutoff"] == expected_cutoff
+
+
+def test_truncated_rum_body_falls_back_to_query_or_top_level_vcl_fields() -> None:
+    from backend.high_scale.archive import ArchiveSourceObject
+    from backend.high_scale.query import decode_source_object
+
+    src = ArchiveSourceObject(
+        service_id="TestRum",
+        domain="rum_vitals",
+        object_key="2026-09-01/truncated.log",
+        checksum="sha256:truncated",
+        size_bytes=256,
+        version="v1",
+    )
+    line_qparam = json.dumps(
+        {
+            "timestamp": "2026-09-01T12:00:00Z",
+            "url": "/_fos/b?rum_metric_name=TTFB&rum_metric_value=110&cid=c-qparam",
+            "rum_body": '{"meta":{"sdk":',
+        }
+    )
+    line_top_level = json.dumps(
+        {
+            "timestamp": "2026-09-01T12:00:01Z",
+            "url": "/_fos/b",
+            "rum_cid": "c-top",
+            "rum_metric_name": "TTFB",
+            "rum_metric_value": 110,
+            "rum_body": '{"meta":{"sdk":',
+        }
+    )
+    decoded_ok = decode_source_object(
+        src,
+        f"{line_qparam}\n{line_top_level}\n".encode(),
+        transform_version="v1",
+        domain="rum_vitals",
+    )
+    assert decoded_ok.accepted_rows == 2
+    assert decoded_ok.quarantined_rows == 0
+    assert [e["metric_name"] for e in decoded_ok.events] == ["TTFB", "TTFB"]
+    assert [e["metric_value"] for e in decoded_ok.events] == [110.0, 110.0]
+
+    line_no_fallback = json.dumps(
+        {
+            "timestamp": "2026-09-01T12:00:02Z",
+            "rum_body": "{not json",
+        }
+    )
+    decoded_dead = decode_source_object(
+        src,
+        f"{line_no_fallback}\n".encode(),
+        transform_version="v1",
+        domain="rum_vitals",
+    )
+    assert decoded_dead.accepted_rows == 0
+    assert decoded_dead.quarantined_rows == 1
+    assert decoded_dead.dead_letters[0].reason == "invalid Faro RUM body"

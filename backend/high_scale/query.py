@@ -335,7 +335,10 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
     raw_body = log_data.get("rum_body")
     extracted: list[dict[str, Any]] = []
     if raw_body:
-        from backend.core.rum_ingest import extract_metrics_from_faro_payload
+        from backend.core.rum_ingest import (
+            extract_metrics_from_faro_payload,
+            extract_metrics_from_query_params,
+        )
 
         try:
             payload = json.loads(raw_body) if isinstance(raw_body, str) else raw_body
@@ -345,7 +348,30 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
                 raise ValueError("Faro RUM body must be an object")
             extracted = extract_metrics_from_faro_payload(payload, log_data)
         except (ValueError, TypeError, AttributeError) as exc:
-            raise ValueError("invalid Faro RUM body") from exc
+            qparams = _rum_querystring_params(log_data)
+            if qparams:
+                extracted = extract_metrics_from_query_params(qparams, log_data)
+            if not extracted:
+                has_fallback_fields = bool(
+                    (log_data.get("rum_metric_name") and log_data.get("rum_metric_value") not in (None, ""))
+                    or log_data.get("rum_error_message")
+                    or log_data.get("rum_error_file")
+                    or log_data.get("rum_error_stack")
+                    or (
+                        qparams
+                        and (
+                            (
+                                _first_qparam(qparams, "rum_metric_name")
+                                and _first_qparam(qparams, "rum_metric_value") not in (None, "")
+                            )
+                            or _first_qparam(qparams, "rum_error_message")
+                            or _first_qparam(qparams, "rum_error_file")
+                        )
+                    )
+                )
+                if has_fallback_fields:
+                    return []
+                raise ValueError("invalid Faro RUM body") from exc
     else:
         qparams = _rum_querystring_params(log_data)
         if qparams:

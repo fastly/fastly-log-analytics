@@ -154,7 +154,7 @@ def from_environment(env: Mapping[str, str] | None = None) -> HighScaleConfig:
         )
     metadata_dsn = source.get("METADATA_DSN")
     config = HighScaleConfig(
-        clickhouse_url=source.get("HIGH_SCALE_CLICKHOUSE_URL") or source.get("CLICKHOUSE_URL"),
+        clickhouse_url=source.get("CLICKHOUSE_URL"),
         fos_bucket=fos_bucket,
         archive_manifest_dsn=source.get("HIGH_SCALE_ARCHIVE_MANIFEST_DSN") or metadata_dsn,
         worker_queue_url=source.get("HIGH_SCALE_WORKER_QUEUE_URL") or source.get("CELERY_BROKER_URL") or metadata_dsn,

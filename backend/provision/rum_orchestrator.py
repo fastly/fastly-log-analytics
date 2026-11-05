@@ -37,6 +37,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 22,
+        "byte_limit": 180,
         "enabled": True,
     },
     {
@@ -47,7 +48,8 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "collection_stage": "beacon",
         "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 12,
+        "bytes_estimate": 36,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -58,7 +60,8 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "collection_stage": "beacon",
         "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 12,
+        "bytes_estimate": 36,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -70,6 +73,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 12,
+        "byte_limit": 108,
         "enabled": True,
     },
     {
@@ -92,6 +96,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 18,
+        "byte_limit": 108,
         "enabled": True,
     },
     {
@@ -102,8 +107,8 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "collection_stage": "beacon",
         "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 200,
-        "byte_limit": 500,
+        "bytes_estimate": 150,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -114,8 +119,8 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "collection_stage": "beacon",
         "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 400,
-        "byte_limit": 2000,
+        "bytes_estimate": 200,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -127,7 +132,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 32,
-        "byte_limit": 40,
+        "byte_limit": 204,
         "enabled": True,
     },
     {
@@ -139,7 +144,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 16,
-        "byte_limit": 24,
+        "byte_limit": 108,
         "enabled": True,
     },
     {
@@ -150,7 +155,8 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "collection_stage": "beacon",
         "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 256,
+        "bytes_estimate": 128,
+        "byte_limit": 240,
         "enabled": True,
     },
     {
@@ -162,6 +168,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 10,
+        "byte_limit": 60,
         "enabled": True,
     },
     {
@@ -216,8 +223,8 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "collection_stage": "beacon",
         "sql_type": "VARCHAR",
         "value_type": "string",
-        "bytes_estimate": 800,
-        "byte_limit": 8192,
+        "bytes_estimate": 300,
+        "byte_limit": 300,
         "enabled": True,
     },
     {
@@ -229,7 +236,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 1024,
-        "byte_limit": 8192,
+        "byte_limit": 9600,
         "enabled": True,
     },
 ]

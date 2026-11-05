@@ -58,17 +58,29 @@ def generate_log_format(log_fields_config: dict) -> str:
             )
         parts.append(vcl)
 
-    for cf in sorted(custom_fields, key=lambda x: x["name"]):
+    sorted_cfs = sorted(custom_fields, key=lambda x: x["name"])
+    custom_reqs: list[tuple[int, int, str]] = []
+    for idx, cf in enumerate(sorted_cfs):
         name = cf["name"]
-        stage = cf.get("collection_stage", "edge")
         value_type = cf.get("value_type", "string")
         estimate = cf.get("bytes_estimate")
         default_limit = min(max((estimate or 0) * 4, 40), 2000) if estimate else 2000
-        cf_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
+        req_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
         if value_type in ("numeric", "boolean"):
-            cf_limit = min(cf_limit, _NUMERIC_FIELD_MAX_LEN)
-        cf_limit = max(0, min(cf_limit, budget))
+            req_limit = min(req_limit, _NUMERIC_FIELD_MAX_LEN)
+        custom_reqs.append((idx, req_limit, name))
+
+    allocated_limits: dict[int, int] = {}
+    for idx, req_limit, _ in sorted(custom_reqs, key=lambda item: (item[1], item[2], item[0])):
+        cf_limit = max(0, min(req_limit, budget))
         budget -= cf_limit
+        allocated_limits[idx] = cf_limit
+
+    for idx, cf in enumerate(sorted_cfs):
+        name = cf["name"]
+        stage = cf.get("collection_stage", "edge")
+        value_type = cf.get("value_type", "string")
+        cf_limit = allocated_limits[idx]
 
         if stage == "deliver":
             raw_expr = cf.get("vcl_log_expression") or f"req.http.x-fos-edge-data:{name}"

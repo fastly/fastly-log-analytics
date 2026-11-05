@@ -182,7 +182,7 @@ def test_validation_follows_the_topology_module_not_a_duplicated_name_list() -> 
 
 def test_from_environment_applies_the_profile_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in {
-        "HIGH_SCALE_CLICKHOUSE_URL": "http://clickhouse",
+        "CLICKHOUSE_URL": "http://clickhouse",
         "HIGH_SCALE_FOS_BUCKET": "archive",
         "HIGH_SCALE_ARCHIVE_MANIFEST_DSN": "postgresql://manifest",
         "HIGH_SCALE_WORKER_QUEUE_URL": "redis://queue",

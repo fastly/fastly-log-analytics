@@ -3382,3 +3382,54 @@ def test_watermark_rewrites_publication_fence_when_client_supports_it() -> None:
     assert wm.last_visible_event_id == "evt-1"
     assert len(client.calls) == 2
     assert all("high_scale_batch_publications" not in sql for sql, _ in client.calls)
+
+
+def test_ingest_batch_isolates_poison_pill_source_object_in_multi_object_batch() -> None:
+    ownership = OwnershipStore()
+    ownership.initialize("svc-poison", owner="high_scale", source_cursor="cursor-0")
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=ArchivePublication(objects),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+    )
+
+    healthy_lines = "".join(
+        f'{{"timestamp":"2026-10-09T12:00:{i:02d}Z","url":"/ok/{i}","status":200}}\n' for i in range(10)
+    ).encode()
+    poison_lines = b"{not-json-1\n{not-json-2\n"
+
+    healthy_desc = SourceObjectDescriptor(
+        object_key="raw/request/healthy.log",
+        checksum="sha256:healthy",
+        size_bytes=len(healthy_lines),
+        version="v1",
+    )
+    poison_desc = SourceObjectDescriptor(
+        object_key="raw/request/poison.log",
+        checksum="sha256:poison",
+        size_bytes=len(poison_lines),
+        version="v1",
+    )
+
+    res = controller.ingest_batch(
+        service_id="svc-poison",
+        domain="request",
+        sources_payloads=[(healthy_desc, healthy_lines), (poison_desc, poison_lines)],
+        max_dead_letter_ratio=0.05,
+    )
+    assert res.total_events == 10
+    assert res.quarantined_events == 0
+    assert res.sources_count == 1
+    assert res.publication.status == PublicationStatus.VISIBLE
+    assert res.publication.rows_visible == 10
+    healthy_rec = ledger.source("svc-poison", "raw/request/healthy.log")
+    poison_rec = ledger.source("svc-poison", "raw/request/poison.log")
+    assert healthy_rec is not None and healthy_rec.status == "acknowledged"
+    assert poison_rec is not None and poison_rec.status == "discovered"
+    assert poison_rec.last_error is not None and "poison-pill" in poison_rec.last_error
+    assert poison_rec.malformed_rows == 2

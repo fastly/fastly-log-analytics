@@ -558,15 +558,11 @@ def test_private_helm_receivers_are_bounded_persistent_and_have_no_grafana() -> 
 def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_duplicate_env() -> None:
     docs = _minimal_observability_chart(
         "--set",
-        "highScale.enabled=true",
-        "--set",
-        "highScale.sharedState.existingClaim=test-app-state",
-        "--set",
         "secrets.existingSecret=fixture-secret",
     )
     deployments = [doc for doc in docs if doc["kind"] == "Deployment"]
-    selected = [doc for doc in deployments if doc["metadata"]["name"].endswith(("-backend", "-worker", "-ingest"))]
-    assert len(selected) == 3
+    selected = [doc for doc in deployments if doc["metadata"]["name"].endswith(("-backend", "-worker"))]
+    assert len(selected) == 2
     for doc in selected:
         entries = doc["spec"]["template"]["spec"]["containers"][0]["env"]
         env = {entry["name"]: entry.get("value") for entry in entries}
@@ -574,8 +570,6 @@ def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_du
         assert env["OTEL_EXPORTER"] == "otlp"
         assert env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] == "http://prometheus:9090/api/v1/otlp/v1/metrics"
         assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == "http://tempo:4318/v1/traces"
-    policy = next(doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].endswith("-ingest"))
-    assert {9090, 4318} <= {port["port"] for rule in policy["spec"]["egress"] for port in rule.get("ports", [])}
 
 
 @pytest.mark.parametrize(
@@ -583,16 +577,7 @@ def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_du
     [
         ["--set", "observability.enabled=true"],
         ["--set", "otel.exporter=none"],
-        [
-            "--set",
-            "highScale.enabled=true",
-            "--set",
-            "highScale.sharedState.existingClaim=fixture",
-            "--set",
-            "highScale.env[0].name=OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-            "--set",
-            "highScale.env[0].value=https://external.example.test/v1/metrics",
-        ],
+        ["--set", "otel.exporter=otlp"],
     ],
 )
 def test_private_helm_rejects_mixed_profiles_and_conflicting_sdk_configuration(extra) -> None:

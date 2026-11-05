@@ -44,16 +44,6 @@ kubectl create secret generic fla-connections \
 
 Run `scripts/setup_pg_schema.py` against the metadata database before first boot.
 
-## Optional high-scale application plane subchart
-
-The chart also contains an opt-in `highScale` application subchart for multi-workload policies (PodDisruptionBudget, NetworkPolicy, anti-affinity, and dedicated ServiceAccount):
-
-```sh
-helm install fla ./deploy/chart/fastly-log-analytics \
-  --set highScale.enabled=true \
-  --set highScale.secret.existingName=fla-high-scale-connections
-```
-
 ## Persistence
 
 `persistence.enabled: false` swaps the PVC for an `emptyDir`, which loses

@@ -1533,3 +1533,29 @@ def test_bare_identifier_regex_has_one_owner() -> None:
         if any(n in text for n in needles):
             offenders.append(str(path.relative_to(BACKEND)))
     assert offenders == [], f"use backend.core.sql_validator instead of a private identifier regex: {offenders}"
+
+
+def test_rum_custom_fields_budget_allocation_no_zero_clamping_and_char_caps() -> None:
+    """Verify _RUM_CUSTOM_FIELDS has no field clamped to 0 and preserves required char caps."""
+    from backend.provision.fastly_api import load_log_format
+    from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS
+
+    for fmt in (
+        lf.generate_log_format({"custom_fields": _RUM_CUSTOM_FIELDS}),
+        load_log_format({"custom_fields": _RUM_CUSTOM_FIELDS}),
+    ):
+        assert ", 0, 0)" not in fmt
+        str_caps = {
+            m.group(1): int(m.group(2))
+            for m in re.finditer(r'"([a-z0-9_]+)":"%\{json\.escape\(substr\([^,]+, 0, (\d+)\)\)\}V"', fmt)
+        }
+        num_caps = {
+            m.group(1): int(m.group(2)) for m in re.finditer(r'"([a-z0-9_]+)":%\{if\(substr\([^,]+, 0, (\d+)\)', fmt)
+        }
+        assert str_caps["rum_cid"] >= 36
+        assert str_caps["fastly_req_id"] >= 36
+        assert str_caps["rum_trace_id"] >= 32
+        assert str_caps["rum_span_id"] >= 16
+        assert str_caps["rum_body"] >= 1500
+        assert all(v > 0 for v in str_caps.values())
+        assert all(v > 0 for v in num_caps.values())

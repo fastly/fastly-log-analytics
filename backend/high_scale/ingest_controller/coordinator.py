@@ -227,6 +227,17 @@ class HighScaleIngestController:
             or "record_source_counts_batch" in vars(self._control)
         )
         batch_counts: list[tuple[str, int, int]] = []
+        per_source_decoded: list[
+            tuple[
+                SourceObjectDescriptor,
+                bytes,
+                ArchiveSourceObject,
+                DecodeResult,
+                list[dict[str, Any]],
+                list[dict[str, Any]],
+                int,
+            ]
+        ] = []
         for descriptor, payload in sources_payloads:
             if self._control is None:
                 src_obj = self._ledger.discover(
@@ -293,6 +304,8 @@ class HighScaleIngestController:
             source_batches.append((archive_source, archive_rows))
             all_events.extend(decoded.events)
             sibling = _RUM_SIBLING_DOMAIN.get(domain)
+            src_sibling_events: list[dict[str, Any]] = []
+            src_sibling_quarantined = 0
             if sibling is not None:
                 sibling_decoded = decode_source_object(
                     replace(archive_source, domain=sibling),
@@ -300,12 +313,71 @@ class HighScaleIngestController:
                     transform_version=self._transform_version,
                     domain=sibling,
                 )
-                sibling_quarantined += sibling_decoded.quarantined_rows
-                sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
+                src_sibling_quarantined = sibling_decoded.quarantined_rows
+                src_sibling_events = [e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e)]
+                sibling_quarantined += src_sibling_quarantined
+                sibling_events.extend(src_sibling_events)
+            per_source_decoded.append(
+                (
+                    descriptor,
+                    payload,
+                    archive_source,
+                    decoded,
+                    archive_rows,
+                    src_sibling_events,
+                    src_sibling_quarantined,
+                )
+            )
         if use_batch_counts and batch_counts and self._control is not None:
             getattr(self._control, "record_source_counts_batch")(
                 service_id, batch_counts, expected_owner_epoch=owner.owner_epoch
             )
+        total_rows = total_accepted + total_quarantined
+        if total_rows > 0 and (total_quarantined / total_rows) > max_dead_letter_ratio:
+            isolated_healthy = False
+            if len(per_source_decoded) > 1:
+                healthy_items = []
+                poison_items = []
+                for item in per_source_decoded:
+                    src_dec = item[3]
+                    src_total = src_dec.accepted_rows + src_dec.quarantined_rows
+                    if src_total > 0 and (src_dec.quarantined_rows / src_total) > max_dead_letter_ratio:
+                        poison_items.append(item)
+                    else:
+                        healthy_items.append(item)
+                if healthy_items:
+                    h_acc = sum(it[3].accepted_rows for it in healthy_items)
+                    h_quar = sum(it[3].quarantined_rows for it in healthy_items)
+                    h_tot = h_acc + h_quar
+                    if h_tot == 0 or (h_quar / h_tot) <= max_dead_letter_ratio:
+                        isolated_healthy = True
+                        poison_keys = tuple(it[0].object_key for it in poison_items)
+                        poison_err = (
+                            f"high-scale poison-pill source isolated: dead letter ratio exceeds {max_dead_letter_ratio}"
+                        )
+                        if self._control is not None and hasattr(self._control, "fail_sources_batch"):
+                            self._control.fail_sources_batch(
+                                service_id,
+                                poison_keys,
+                                expected_owner_epoch=owner.owner_epoch,
+                                error=poison_err,
+                            )
+                        elif self._control is None and hasattr(self._ledger, "mark_failed"):
+                            for p_key in poison_keys:
+                                cur_src = self._ledger.source(service_id, p_key)
+                                if cur_src is not None and cur_src.status == "claimed":
+                                    self._ledger.mark_failed(service_id, p_key, cur_src.lease_generation, poison_err)
+                        sources_payloads = [(it[0], it[1]) for it in healthy_items]
+                        source_batches = [(it[2], it[4]) for it in healthy_items]
+                        all_events = [e for it in healthy_items for e in it[3].events]
+                        sibling_events = [e for it in healthy_items for e in it[5]]
+                        sibling_quarantined = sum(it[6] for it in healthy_items)
+                        total_accepted = h_acc
+                        total_quarantined = h_quar
+            if not isolated_healthy:
+                raise ValueError(
+                    f"high-scale dead letter ratio {total_quarantined}/{total_rows} exceeds maximum {max_dead_letter_ratio}"
+                )
         if sibling_quarantined:
             logger.warning(
                 "high-scale RUM sibling decode rejected retained source records",
@@ -315,11 +387,6 @@ class HighScaleIngestController:
             source_batches = [(replace(src, domain=domain), rows) for src, rows in source_batches]
         elif len(source_batches) == 1 and source_batches[0][0].domain != domain:
             source_batches = [(replace(source_batches[0][0], domain=domain), source_batches[0][1])]
-        total_rows = total_accepted + total_quarantined
-        if total_rows > 0 and (total_quarantined / total_rows) > max_dead_letter_ratio:
-            raise ValueError(
-                f"high-scale dead letter ratio {total_quarantined}/{total_rows} exceeds maximum {max_dead_letter_ratio}"
-            )
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         with tempfile.TemporaryDirectory(prefix="high-scale-archive-") as root:
             local_manifest = write_batch_archive_checkpoint(
