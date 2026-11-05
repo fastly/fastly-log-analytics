@@ -508,12 +508,11 @@ Invoke standalone diagnostics from the repository root as modules:
 
 ```sh
 python3 -m scripts.dev.audit_environments --env remote-high-scale
-python3 -m scripts.dev.scale_harness --help
 python3 -m scripts.dev.measure_e2e_freshness --env remote-hs
 ```
 
 Existing direct-path invocations such as
-`uv run python scripts/dev/scale_harness.py --help` remain supported; each
+`uv run python scripts/dev/audit_environments.py --help` remain supported; each
 standalone dev script explicitly bootstraps the repository root for imports.
 
 The canonical harness now passes direct configured origins throughout commit

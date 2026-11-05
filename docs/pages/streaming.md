@@ -33,4 +33,4 @@ The ClickHouse reader ([`backend/high_scale/cmcd.py`](../../backend/high_scale/c
 
 - Frontend unit: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx)
 - E2E: `Streaming (CMCD) Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts) (populated render, not-available state, accessibility and layout stability on a warm reload). The e2e dataset has no CMCD columns, so the isolated contract backend ([`scripts/run_contract_backend.py`](../../scripts/run_contract_backend.py)) serves a per-browser fixture when `CONTRACT_STREAMING_FIXTURES=1`.
-- Traffic: `scripts/dev/scale_harness.py` can send CMCD playback traffic (see its `--help`).
+- Traffic: the shared load-testing tool (`make loadtest-campaign`, see [scripts/README.md](../../scripts/README.md)) sends CMCD playback traffic through fdlt's `fla_video_cmcd` scenario.

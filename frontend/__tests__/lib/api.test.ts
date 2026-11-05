@@ -1058,6 +1058,18 @@ describe('ssrUpstreamGet — debug-responses cookie propagation & ECONNRESET ret
     })
   })
 
+  it.each([
+    { tag: 'camp-p10-s3-pg04-cold', expected: 'camp-p10-s3-pg04-cold' },
+    { tag: 'bad tag;drop', expected: undefined },
+  ])('forwards a valid x-fla-harness tag upstream ($tag)', async ({ tag, expected }) => {
+    setCookies('')
+    inbound({ host: 'localhost:3001', 'x-fla-harness': tag })
+    await withJsonServer({}, async (srv) => {
+      expect(await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })).not.toBeNull()
+      expect(srv.lastRequest?.headers['x-fla-harness']).toBe(expected)
+    })
+  })
+
   it('disables keep-alive socket reuse (connection: close) and retries once on ECONNRESET', async () => {
     let attempts = 0
     let secondConnHeader: string | string[] | undefined

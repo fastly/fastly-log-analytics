@@ -286,6 +286,9 @@ async function resolveSsrHeaders(): Promise<SsrHeadersProvider> {
   return (await import(/* webpackIgnore: true */ pkg)) as SsrHeadersProvider;
 }
 
+// Load-test harness attribution tag; mirrors the backend validation in root_system.py.
+const HARNESS_TAG_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
 export async function ssrUpstreamGet({
   path,
   logPrefix,
@@ -315,6 +318,8 @@ export async function ssrUpstreamGet({
     if (ua) upstreamHeaders["user-agent"] = ua;
     const platform = headerBag.get("sec-ch-ua-platform");
     if (platform) upstreamHeaders["sec-ch-ua-platform"] = platform;
+    const harnessTag = headerBag.get("x-fla-harness");
+    if (harnessTag && HARNESS_TAG_RE.test(harnessTag)) upstreamHeaders["X-FLA-Harness"] = harnessTag;
     if (extraHeaders) {
       const trustHeaders = new Set(["host", "x-remote-analyst", "x-admin-gateway-token"]);
       for (const [key, value] of Object.entries(extraHeaders)) {

@@ -1,4 +1,4 @@
-"""Canonical synthetic request-log factory (`generate_synthetic_traffic.py` and `scale_harness.py`)."""
+"""Canonical synthetic request-log factory (`generate_synthetic_traffic.py`)."""
 
 from __future__ import annotations
 

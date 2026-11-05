@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 
@@ -23,6 +24,9 @@ from backend.utils.remote_access import RemoteAccessMiddleware
 from backend.utils.telemetry import TelemetryResponseBodyMiddleware
 
 logger = logging.getLogger("backend.main")
+
+HARNESS_HEADER = "X-FLA-Harness"
+_HARNESS_TAG_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 router = APIRouter()
 
 
@@ -140,10 +144,13 @@ async def telemetry_middleware(request: Request, call_next):
     set_page_load_id(page_load_id)
 
     # Modify process context to include the page_load_id suffix so proxy reads match
+    ctx_name = f"api:{request.method} {request.url.path}"
+    # Load-test harness traffic tags its usage so cost measurements can subtract it.
+    harness_tag = request.headers.get(HARNESS_HEADER) or ""
+    if harness_tag and _HARNESS_TAG_RE.fullmatch(harness_tag):
+        ctx_name += f" @harness={harness_tag}"
     if page_load_id:
-        ctx_name = f"api:{request.method} {request.url.path}#{page_load_id}"
-    else:
-        ctx_name = f"api:{request.method} {request.url.path}"
+        ctx_name += f"#{page_load_id}"
 
     # Best-effort attribution: analyst_session is set by RemoteAccessMiddleware
     # (which now sits OUTSIDE this middleware). Falls back to admin when

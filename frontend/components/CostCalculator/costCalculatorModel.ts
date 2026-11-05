@@ -175,6 +175,30 @@ export interface CalcResults {
   costRum: number
 }
 
+export interface MonthlyQuantities {
+  classAPerMonth: number
+  classBPerMonth: number
+  gbMonthsStored: number
+  cdnEgressGB: number
+}
+
+export interface PricedQuantities {
+  costA: number
+  costB: number
+  costStorage: number
+  costEgress: number
+  totalCost: number
+}
+
+// Single pricing step shared by calculate() and the shared load-testing tool (the load-test config's `estimator`).
+export function priceQuantities(s: CalcState, q: MonthlyQuantities): PricedQuantities {
+  const costA = (q.classAPerMonth / 1000) * s.rateA
+  const costB = (q.classBPerMonth / 1000) * s.rateB
+  const costStorage = q.gbMonthsStored * s.rateStorage
+  const costEgress = q.cdnEgressGB * s.rateEgress
+  return { costA, costB, costStorage, costEgress, totalCost: costA + costB + costStorage + costEgress }
+}
+
 export function calculate(s: CalcState): CalcResults {
   const baseReqs = s.edgeOnly ? s.edgeReqDay : s.reqDay
   const reqDayEffective = baseReqs * (s.sampleRate / 100)
@@ -250,11 +274,9 @@ export function calculate(s: CalcState): CalcResults {
   // With a CDN fronting FOS, the raw .zst objects read during ingest are the egress.
   const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / (1024 * 1024 * 1024) : 0
 
-  const costA = (classAPerMonth / 1000) * s.rateA
-  const costB = (classBPerMonth / 1000) * s.rateB
-  const costStorage = totalGBStored * s.rateStorage
-  const costEgress = cdnEgressGB * s.rateEgress
-  const totalCost = costA + costB + costStorage + costEgress
+  const { costA, costB, costStorage, costEgress, totalCost } = priceQuantities(s, {
+    classAPerMonth, classBPerMonth, gbMonthsStored: totalGBStored, cdnEgressGB,
+  })
   const costRum = (rumBeaconsMonth / 1000) * s.rateA + ((rumParquetGBMonths + rumArchiveGBMonths) * s.rateStorage)
 
   return {
