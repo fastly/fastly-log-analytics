@@ -8,19 +8,18 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import stat
+import string
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
-from authlib.common.security import generate_token
-from authlib.integrations.base_client.errors import OAuthError
-from authlib.integrations.httpx_client import OAuth2Client
-from authlib.oauth2.rfc7636 import create_s256_code_challenge
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from joserfc import jwt
@@ -373,71 +372,91 @@ def get_jwks(provider: OAuthProvider, metadata: dict[str, Any], *, force_refetch
         return ks
 
 
+_TOKEN_ALPHABET = string.ascii_letters + string.digits
+
+
+def _generate_token(length: int) -> str:
+    return "".join(secrets.choice(_TOKEN_ALPHABET) for _ in range(length))
+
+
 def make_pkce_verifier() -> str:
     """RFC 7636 §4.1 code_verifier (64 characters in [A-Za-z0-9-._~])."""
-    return generate_token(64)
+    return _generate_token(64)
 
 
 def pkce_challenge(verifier: str) -> str:
     """RFC 7636 §4.2 S256 code_challenge = BASE64URL-NOPAD(SHA256(ASCII(verifier)))."""
-    return create_s256_code_challenge(verifier)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 def make_state_token() -> str:
     """256-bit CSRF state / OIDC nonce token."""
-    return generate_token(43)
+    return _generate_token(43)
 
 
 def build_authorize_url(
     provider: OAuthProvider, metadata: dict[str, Any], *, redirect_uri: str, state: str, nonce: str, code_challenge: str
 ) -> str:
     """Construct the IdP authorization URL with PKCE S256 + state + nonce."""
-    oauth = OAuth2Client(
-        client_id=provider.client_id,
-        client_secret=provider.client_secret,
-        scope=provider.scopes,
-        redirect_uri=redirect_uri,
-        code_challenge_method="S256",
-    )
-    url, _ = oauth.create_authorization_url(
-        metadata["authorization_endpoint"],
-        state=state,
-        nonce=nonce,
-        code_challenge=code_challenge,
-        code_challenge_method="S256",
-        prompt="select_account",
-    )
-    return url
+    params = {
+        "response_type": "code",
+        "client_id": provider.client_id,
+        "redirect_uri": redirect_uri,
+        "scope": provider.scopes,
+        "state": state,
+        "nonce": nonce,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "prompt": "select_account",
+    }
+    sep = "&" if "?" in metadata["authorization_endpoint"] else "?"
+    return f"{metadata['authorization_endpoint']}{sep}{urllib.parse.urlencode(params)}"
 
 
 def exchange_code(
     provider: OAuthProvider, metadata: dict[str, Any], *, code: str, code_verifier: str, redirect_uri: str
 ) -> dict[str, Any]:
     """POST the authorization code + PKCE ``code_verifier`` to ``token_endpoint``."""
+    form = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+        "client_id": provider.client_id,
+        "client_secret": provider.client_secret,
+    }
     try:
-        with OAuth2Client(
-            client_id=provider.client_id,
-            client_secret=provider.client_secret,
-            token_endpoint_auth_method="client_secret_post",
-            timeout=HTTP_TIMEOUT_S,
-            follow_redirects=False,
-            transport=_test_transport,
-        ) as oauth:
-            token = oauth.fetch_token(
+        with _http_client() as client:
+            resp = client.post(
                 metadata["token_endpoint"],
-                grant_type="authorization_code",
-                code=code,
-                redirect_uri=redirect_uri,
-                code_verifier=code_verifier,
+                data=form,
+                headers={"Accept": "application/json"},
             )
-    except OAuthError as exc:
-        raise OIDCError("pkce_failed", f"token endpoint rejected exchange ({exc.error})") from exc
+            if resp.status_code >= 400:
+                err_code: str | None = None
+                try:
+                    err_body = resp.json()
+                    if isinstance(err_body, dict) and isinstance(err_body.get("error"), str):
+                        err_code = err_body["error"]
+                except Exception:
+                    err_code = None
+                if err_code:
+                    raise OIDCError("pkce_failed", f"token endpoint rejected exchange ({err_code})")
+                raise OIDCError("pkce_failed", f"token endpoint HTTP {resp.status_code}")
+            token = resp.json()
+    except OIDCError:
+        raise
     except httpx.HTTPStatusError as exc:
         raise OIDCError("pkce_failed", f"token endpoint HTTP {exc.response.status_code}") from exc
     except Exception as exc:
         logger.warning("[oauth.client] token exchange transport error for %s: %s", provider.id, type(exc).__name__)
         raise OIDCError("idp_unavailable", "token endpoint unreachable") from exc
-    if not isinstance(token, dict) or not isinstance(token.get("id_token"), str) or not token["id_token"]:
+    if not isinstance(token, dict):
+        raise OIDCError("pkce_failed", "token response missing id_token")
+    if isinstance(token.get("error"), str) and token["error"]:
+        raise OIDCError("pkce_failed", f"token endpoint rejected exchange ({token['error']})")
+    if not isinstance(token.get("id_token"), str) or not token["id_token"]:
         raise OIDCError("pkce_failed", "token response missing id_token")
     return dict(token)
 
