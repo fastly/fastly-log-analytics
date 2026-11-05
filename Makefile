@@ -333,6 +333,20 @@ retry-guard:
 coalesce-guard:
 	bash scripts/check_no_inline_metric_coalesce.sh
 
+# ── Load testing (shared tool) ───────────────────────────────────────────────
+# Live, billed traffic through ~/Projects/fastly-log-analytics-load-testing:
+# run only with explicit approval. LT_ARGS passes extra flags, e.g. --dry-run.
+.PHONY: loadtest-deploy-check loadtest-campaign
+LT_REPO ?= $(HOME)/Projects/fastly-log-analytics-load-testing
+LT_CONFIG ?= $(LT_REPO)/local/fla.toml
+
+loadtest-deploy-check:
+	uv run --project $(LT_REPO) lt deploy-check --config $(LT_CONFIG) $(LT_ARGS)
+
+loadtest-campaign:
+	$(if $(strip $(CAMPAIGN)),,$(error CAMPAIGN is required, e.g. make loadtest-campaign CAMPAIGN=c1))
+	uv run --project $(LT_REPO) lt campaign --config $(LT_CONFIG) --campaign $(CAMPAIGN) $(LT_ARGS)
+
 # ── Local multipod stack ──────────────────────────────────────────────────────
 # The local stack is BOTH compose files; omitting the observability one drops
 # Grafana/Prometheus/Tempo and their exporters.

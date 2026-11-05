@@ -825,25 +825,3 @@ wait_for_remote_image() {
   echo -e "${RED}❌ Timeout after ${max_wait}s waiting for $image to appear in registry (CI build may not have started or finished).${RESET}"
   return 1
 }
-
-run_seeded_traffic() {
-  local label="$1" url="$2" service_id="$3" backend="$4" log_file="$5" started_at finished_at exit_code
-  started_at=$(date +%s)
-  echo -e "\n${CYAN}[${label}] Starting traffic seeding${RESET}\n  Fastly URL: ${url}\n  Service ID: ${service_id}\n  Checkpoint backend: ${backend}\n  Load stages: 500 requests/second for 15 seconds\n  Max in-flight requests: 20\n  RUM ratio: 0.30, CMCD ratio: 0.35 (diversified paths/UAs)\n  Harness log: ${log_file}"
-  set +e
-  python3 -m scripts.dev.scale_harness run --url "${url}" --service-id "${service_id}" --backend "${backend}" --stages "500:15" --max-in-flight 20 --rum-ratio 0.30 --cmcd-ratio 0.35 --diversify >"${log_file}" 2>&1
-  exit_code=$?
-  set -e
-  finished_at=$(date +%s)
-  if [[ "${exit_code}" -eq 0 ]]; then
-    echo -e "${GREEN}[${label}] Traffic seeding completed successfully (exit=${exit_code}, elapsed=$((finished_at - started_at))s)${RESET}"
-  else
-    echo -e "${RED}[${label}] Traffic seeding failed (exit=${exit_code}, elapsed=$((finished_at - started_at))s)${RESET}\n  Review harness log: ${log_file}" >&2
-  fi
-  return "${exit_code}"
-}
-
-start_continuous_seed() {
-  python3 -m scripts.dev.scale_harness run --url "$2" --service-id "$3" --backend "$4" --stages "5:$6" --max-in-flight 10 --rum-ratio 0.30 --cmcd-ratio 0.35 --diversify --settle-seconds 0 >"$5" 2>&1 &
-  echo "$!"
-}

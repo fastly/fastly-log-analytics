@@ -45,27 +45,28 @@ from env vars or config, never hard-coded infra.
 | `dev/audit_environments.py` | Read-only environment parity and configuration audit. |
 | `dev/measure_e2e_freshness.py` | End-to-end ingestion freshness probe across environments. |
 | `dev/verify_observability.py` | Diagnostic CLI verifying OTel traces, Prometheus metrics, and structured log delivery. |
-| `dev/scale_harness.py` | Bounded staged edge-load runner with FOS freshness, cron, pool, OTel, and analytics checkpoints. |
 | `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for FOS and ClickHouse. |
 
-The scale harness defaults to `100:10,500:10,1000:10` stages. It measures
-achieved RPS separately from the requested target and writes JSON plus
-Markdown output. Stages above 1,000 RPS require `--allow-high-rate`; use
-`--max-in-flight` to keep client pressure bounded:
+### Live load tests (shared tool)
+
+Live load tests run through the shared tool in
+`~/Projects/fastly-log-analytics-load-testing` (override with `LT_REPO=...`),
+configured by a private config, `local/fla.toml` in that repo (git-ignored; override with
+`LT_CONFIG=...`). It drives
+fdlt against the monitored service, reconciles every request id against the
+logged rows, and prices the run with FLA's own cost model (`priceQuantities`):
 
 ```bash
-uv run python scripts/dev/scale_harness.py run \
-  --url "$LOADTEST_URL" \
-  --service-id "$FASTLY_SERVICE_ID" \
-  --stages 100:30,500:30,1000:30 \
-  --start-time "$START_UTC" --end-time "$END_UTC" \
-  --output performance-report/scale-harness.json
+make loadtest-deploy-check                      # one short stage at the current log period
+make loadtest-campaign CAMPAIGN=c1              # the full ladder at each log period
+make loadtest-campaign CAMPAIGN=c1 LT_ARGS=--dry-run   # print the plan and fdlt commands; send nothing
 ```
 
-The harness waits 60 seconds after the last stage by default before taking a
-final checkpoint, allowing delayed FOS delivery to be distinguished from
-conversion/commit latency. Override with `--settle-seconds 0` only when a
-post-run freshness checkpoint is not needed.
+Both targets send billed live traffic, so run them only with explicit approval.
+FLA keeps only the hooks the tool reads: the `X-FLA-Harness` tag that
+`backend/routers/root_system.py` adds to the usage process context (and
+`frontend/lib/apiSsrProxy.ts` forwards from SSR), and the `DEBUG_RESPONSES`
+envelope behind the page sweep's per-page backend work.
 
 > Local-only artifacts (e.g. a deployed-`restart.sh` snapshot) are gitignored and
 > not listed here.

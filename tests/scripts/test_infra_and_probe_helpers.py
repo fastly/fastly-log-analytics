@@ -18,17 +18,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from scripts.dev import scale_harness
-from scripts.dev.scale_harness import (
-    TrafficProfile,
-    build_request,
-    build_request_url,
-    freshness_lag_seconds,
-    parse_stages,
-    render_report,
-)
 from scripts.lib import log_factory as lf
-from scripts.lib.log_factory import BOT_USER_AGENTS, build_cmcd_request, build_cmcd_sessions
 
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "scripts" / "lib" / "gce_ssh.sh"
@@ -347,17 +337,6 @@ def test_source_ip_is_seeded_and_in_range() -> None:
         assert 12 <= a <= 223 and all(1 <= x <= 254 for x in (b, c, d))
 
 
-def test_scale_harness_build_request_url_uses_injected_rng() -> None:
-    assert scale_harness.build_request_url("https://x.example.com", 0.0, random.Random(1)) == "https://x.example.com"
-    seeded = [scale_harness.build_request_url("https://x.example.com", 1.0, random.Random(4)) for _ in range(2)]
-    assert seeded[0] == seeded[1] and "/rum-beacon?" in seeded[0]
-    rng = random.Random(11)
-    beacons = sum(
-        "/rum-beacon?" in scale_harness.build_request_url("https://x.example.com", 0.5, rng) for _ in range(200)
-    )
-    assert 60 < beacons < 140
-
-
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_global_random_state_is_untouched_when_rng_is_injected(seed: int) -> None:
     random.seed(1234)
@@ -366,122 +345,6 @@ def test_global_random_state_is_untouched_when_rng_is_injected(seed: int) -> Non
     lf.generate_rum_records("svc", 50, NOW, random.Random(seed))
     lf.build_rum_beacon_url("https://x.example.com", random.Random(seed))
     assert random.random() == expected
-
-
-# ── Merged from test_scale_harness.py ──────────────────────────────────────────────────────
-
-
-def test_parse_stages_and_high_rate_gate() -> None:
-    stages = parse_stages("100:10,500:2")
-    assert [(stage.target_rps, stage.duration_s) for stage in stages] == [(100, 10), (500, 2)]
-    with pytest.raises(ValueError, match="allow-high-rate"):
-        parse_stages("2500:10")
-    assert parse_stages("2500:10", allow_high_rate=True)[0].target_rps == 2500
-
-
-def test_rum_urls_and_freshness_lag_and_render_report() -> None:
-    url = build_request_url("https://logs.example.com", 1.0)
-    query = parse_qs(urlparse(url).query)
-    assert query["cid"][0] == query["rum_cid"][0]
-    assert query["req"][0].startswith("req-") and query["req"][0] != query["cid"][0]
-
-    now = datetime(2026, 9, 6, 17, 42, 35, tzinfo=UTC)
-    assert freshness_lag_seconds("2026-09-06T17:32:08Z", now) == 627.0 and freshness_lag_seconds(None, now) is None
-
-    report = {
-        "started_at": "2026-09-06T17:00:00+00:00",
-        "stages": [
-            {
-                "index": 1,
-                "result": {
-                    "target_rps": 100,
-                    "achieved_rps": 98,
-                    "completed": 10,
-                    "successful": 10,
-                    "latency_ms": {"p95": 20},
-                },
-                "checkpoint": {},
-            }
-        ],
-    }
-    assert "| 1 | 100 | 98.00 | 10 | 10 | 20 | - |" in render_report(report)
-
-
-def _cmcd_profile(rng: random.Random) -> TrafficProfile:
-    return TrafficProfile(cmcd_ratio=1.0, sessions=build_cmcd_sessions(rng, 5))
-
-
-def test_cmcd_requests_headers_startup_flag_v2_and_ratio() -> None:
-    rng = random.Random(7)
-    url, headers = build_request("https://logs.example.com", 0.0, rng, _cmcd_profile(rng))
-    parsed = urlparse(url)
-    assert parsed.path.startswith("/video/")
-    cmcd = parse_qs(parsed.query)["CMCD"][0].split(",")
-    assert {"CMCD-Object", "CMCD-Request", "CMCD-Session", "CMCD-Status"} <= headers.keys()
-    for header in ("CMCD-Object", "CMCD-Request", "CMCD-Session", "CMCD-Status"):
-        assert set(headers[header].split(",")) <= set(cmcd)
-    assert any(field.startswith("sid=") for field in cmcd) and any(field.startswith("ot=") for field in cmcd)
-
-    rng3 = random.Random(3)
-    session = build_cmcd_sessions(rng3, 1)[0]
-    session.version = 1
-    first = build_cmcd_request(session, rng3)[1]["CMCD-Request"].split(",")
-    second = build_cmcd_request(session, rng3)[1]["CMCD-Request"].split(",")
-    assert "su" in first and "su" not in second
-
-    rng_v2 = random.Random(3)
-    session_v2 = build_cmcd_sessions(rng_v2, 1)[0]
-    session_v2.version = 2
-    assert "su=?1" in build_cmcd_request(session_v2, rng_v2)[1]["CMCD-Request"].split(",")
-
-    rng11 = random.Random(11)
-    profile = TrafficProfile(cmcd_ratio=0.5, sessions=build_cmcd_sessions(rng11, 5))
-    cmcd_hits = sum("CMCD" in build_request("https://x.example.com", 0.0, rng11, profile)[0] for _ in range(400))
-    assert 120 < cmcd_hits < 280
-
-
-def test_default_profile_diversify_and_rum_beacon_isolation() -> None:
-    assert build_request("https://x.example.com", 0.0, random.Random(1), None) == ("https://x.example.com", {})
-    assert build_request("https://x.example.com", 0.0, random.Random(1), TrafficProfile()) == (
-        "https://x.example.com",
-        {},
-    )
-
-    rng = random.Random(5)
-    results = [build_request("https://x.example.com", 0.0, rng, TrafficProfile(diversify=True)) for _ in range(300)]
-    assert len({urlparse(url).path for url, _ in results}) > 5
-    assert any(ua in BOT_USER_AGENTS for ua in (headers["User-Agent"] for _, headers in results))
-
-    rng2 = random.Random(2)
-    profile = TrafficProfile(cmcd_ratio=1.0, diversify=True, sessions=build_cmcd_sessions(rng2, 3))
-    url, headers = build_request("https://x.example.com", 1.0, rng2, profile)
-    assert urlparse(url).path == "/rum-beacon" and headers == {}
-
-    posted: list[tuple[str, dict[str, object]]] = []
-
-    class _FakeResp:
-        status = 204
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return False
-
-        async def read(self):
-            return b""
-
-    class _FakeSession:
-        def post(self, u: str, **kw: object) -> _FakeResp:
-            posted.append((u, kw))
-            return _FakeResp()
-
-    status, _ = asyncio.run(
-        scale_harness._request(_FakeSession(), "http://demo.global.ssl.fastly.net/rum-beacon?rum_metric_name=LCP", {})
-    )
-    assert status == 204 and len(posted) == 1
-    assert posted[0][0].startswith("https://demo.global.ssl.fastly.net/rum-beacon")
-    assert posted[0][1].get("allow_redirects") is False
 
 
 # ── Merged from test_verify_dashboard*.py ──────────────────────────────────────────────────────

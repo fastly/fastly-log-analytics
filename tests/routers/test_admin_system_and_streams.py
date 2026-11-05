@@ -1559,3 +1559,29 @@ def test_admin_suite_caches_hit_when_pytest_env_unset(client, monkeypatch):
             admin_queries._SLOW_QUERIES_CACHE,
         ):
             c.clear()
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("camp-p10-s3-pg04-cold", "api:GET /api/health @harness=camp-p10-s3-pg04-cold#plid-1"),
+        ("bad tag;drop", "api:GET /api/health#plid-1"),
+    ],
+)
+def test_harness_header_tags_process_context_before_page_load_suffix(client, monkeypatch, tag, expected):
+    import contextlib
+
+    from backend.utils import telemetry
+
+    seen: list[str] = []
+    real_scope = telemetry.process_context_scope
+
+    @contextlib.contextmanager
+    def _recording_scope(name):
+        seen.append(name)
+        with real_scope(name):
+            yield
+
+    monkeypatch.setattr(telemetry, "process_context_scope", _recording_scope)
+    client.get("/api/health", headers={"X-FLA-Harness": tag, "X-Page-Load-ID": "plid-1"})
+    assert expected in seen
