@@ -1839,3 +1839,30 @@ def test_ingest_log_atomic_rollback_and_rum_summary_isolation():
     assert summary["total_rows"] == 10
     assert summary["total_bytes"] == 100
     assert summary["latest_file_name"] == "s3://b/2026-01-01T00:00:00.000-a.gz"
+
+
+def test_start_cron_run_retries_on_deadlock_and_rolls_back():
+    import psycopg
+
+    sid = "svc-cron-deadlock-retry"
+    con = get_con(sid)
+    orig_execute = con.execute
+    delete_attempts = 0
+
+    def _deadlock_once(sql: str, params=None):
+        nonlocal delete_attempts
+        if "DELETE FROM job_runs WHERE id IN" in sql:
+            assert "FOR UPDATE SKIP LOCKED" in sql
+            delete_attempts += 1
+            if delete_attempts == 1:
+                raise psycopg.errors.DeadlockDetected("simulated deadlock on job_runs prune")
+        return orig_execute(sql, params)
+
+    with (
+        patch("backend.core.metadata.cron_runs.get_con", return_value=con),
+        patch.object(con, "execute", side_effect=_deadlock_once),
+    ):
+        run_id = start_cron_run(sid, "rum_discovery")
+
+    assert run_id > 0
+    assert delete_attempts == 2
