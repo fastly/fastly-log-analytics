@@ -39,7 +39,7 @@ def parse_asn_int(val: Any) -> int | None:
 
 def resolve_asn_names_map(service_name: str, asns: Iterable[Any]) -> dict[int, str]:
     """Look up ASN organization names from the metadata store for ``asns``."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     asn_ints = sorted({asn_int for a in asns if (asn_int := parse_asn_int(a)) is not None})
     if not asn_ints:
@@ -54,7 +54,7 @@ def format_asn_display_label(
     non_int_fallback: str | None = None,
 ) -> str:
     """Format a human-readable ASN display label ``Name (ASN)`` or ``AS{asn}``."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     asn_int = parse_asn_int(asn_val)
     if asn_int is not None:
@@ -66,7 +66,7 @@ def format_asn_display_label(
 
 def build_asn_label_map(service_name: str, asns: Iterable[Any]) -> dict[int, str]:
     """Return ``{asn_int: formatted_display_label}`` for all valid integer ASNs in ``asns``."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     asn_ints = [asn_int for a in asns if (asn_int := parse_asn_int(a)) is not None]
     if not asn_ints:
@@ -172,7 +172,7 @@ def finish_security_proxies(
     asns_to_resolve = {
         asn_int for row in (*isp_list, *client_list) if (asn_int := parse_asn_int(row.get("asn"))) is not None
     }
-    from backend.core.duckdb import get_asn_names
+    from backend.core.fos_client import get_asn_names
 
     asn_names = get_asn_names(source_name, list(asns_to_resolve))
 
@@ -219,13 +219,13 @@ def build_insight_asn_context(
     *,
     include_dma: bool | None = None,
 ) -> dict[str, Any]:
-    """Build ``{"asn_names": ..., "dma_map": ...}`` context for ASN/metro insights across DuckDB and ClickHouse."""
+    """Build ``{"asn_names": ..., "dma_map": ...}`` context for ASN/metro insights across ClickHouse."""
     if not any(marker in insight_id for marker in ("asn", "metro")):
         return {}
     row_list = list(rows)
     if not row_list:
         return {}
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     asn_vals = [r["asn"] if isinstance(r, Mapping) else r[0] for r in row_list if r]
     context: dict[str, Any] = {

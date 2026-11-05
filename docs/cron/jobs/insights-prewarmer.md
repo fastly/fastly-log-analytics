@@ -3,12 +3,9 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `insights_prewarmer_{service_id}`
 - **Category:** Analytics Cache Prewarming & Anomaly Pre-Computation
-- **Purpose:** Precomputes baseline statistical distributions and anomaly detection metrics for the Insights page (`/insights`), prewarming the in-memory cache every 240 seconds.
-- **Why It Runs:** Calculating statistical anomaly baselines requires multi-dimensional aggregations and percentile calculations. The cache TTL is 300 seconds (`INSIGHTS_CACHE_TTL = 300`). The 240s cadence aims to keep the adaptive default warm, but contention, deferral and run duration can still cause cache misses.
-- **Resource Policy:** Warm only the adaptive default for admin and eligible analyst shapes, using `max_workers=1`. Do not automatically warm the additional 24h/720h month comparison; it remains available on demand. Standard-mode measurements found repeated 91–95s prewarmer runs alongside 3.0–4.8s dashboard requests, compared with 1.1–2.2s after prewarming finished. This mitigation reduces background query concurrency and removes the extra historical scan; it does not guarantee sub-second dashboard latency.
-- **Ingest yield:** the prewarmer defers to in-flight `log_discovery` / `rum_sync` for the same service, because a tick (about 55 s on the 4-vCPU VM) running alongside them stretches their tick time and so ingest freshness. The signal is the in-process progress registry (`active_task_for_service`), with no DB query. Ingest in flight at tick start defers the tick (INFO log, no lease, no `cron_runs` row); ingest starting mid-tick skips the remaining shape recomputes and the run records success with "stopped early". The yield is bounded by warmth: it applies only while the last fully warmed tick is younger than `INSIGHTS_CACHE_TTL`; once the oldest entry reaches the TTL, or the process has never completed a warm, the tick runs to completion regardless of ingest. With a 240 s interval and a 300 s TTL at most one tick in a row is deferred or cut short, so an entry is cold for at most 180 s extra. In `high_scale` discovery runs on a Celery worker in another process, so the signal never fires there.
-- **Follow-up SQL optimization:** Cached computation telemetry identified crawler/referral matching at 17.6s, stale-browser detection at 15.8s, and shared window materialization at 11.1s. The two matching queries use literal substring searches against lowercased UA/referrer strings instead of repeated case-insensitive wildcard matching. Classification priority, null handling, distinct-IP counts, window boundaries and thresholds must remain unchanged. Initial one-million-row synthetic measurements showed crawler matching at 0.44–0.48s versus 1.59–2.73s and stale-browser matching at 0.66–0.82s versus 1.13–1.56s; these are isolated query measurements, not a production dashboard latency guarantee. Production impact requires a subsequent approved rollout and remeasurement during prewarming.
-- **Positive-result verification:** A further one-million-row, two-thread synthetic run produced identical non-empty result rows before and after the change. Median crawler query time fell from 581ms to 173ms (3.36×); stale-browser query time fell from 425ms to 214ms (1.99×). Repository regressions cover mixed-case brands, overlapping classification tokens, Unicode-containing strings, null UA/referrer/IP, distinct referral counting, crawler exclusions, Chrome parsing and window/threshold boundaries.
+- **Purpose:** Precomputes baseline statistical distributions and anomaly detection metrics for the Insights page (`/insights`) against ClickHouse (`backend/high_scale/insights/`), prewarming the in-memory cache every 240 seconds.
+- **Why It Runs:** Calculating statistical anomaly baselines across 51 detectors requires multi-dimensional aggregations and percentile calculations. The cache TTL is 300 seconds (`INSIGHTS_CACHE_TTL = 300`). The 240s cadence keeps the adaptive default warm for instant page loads.
+- **Resource Policy:** Warm only the adaptive default for admin and eligible analyst shapes, using `max_workers=1`. Do not automatically warm the additional 24h/720h month comparison; it remains available on demand.
 
 ---
 
@@ -26,10 +23,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Queries session DuckDB `logs` view and precomputed rollups; populates module memory cache `_insights_cache`. | Read-only connection from DuckDB pool with `skip_view_update=True`. Active request politeness gate (`should_defer_cron`) defers when user queries are active. Permitted under `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries ephemeral DuckDB over DuckLake or ClickHouse dimension rollups; populates local web cache. | Pod-local memory cache; never dispatched to Celery workers. Yields if active dashboard queries are executing. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod) | Queries ClickHouse via `backend/high_scale/insights/` and populates module memory cache `_insights_cache`. | Active request politeness gate (`should_defer_cron`) defers when user queries are active. Permitted under `FLA_DEV_NO_CRONS=1`. |
 
 ---
 
@@ -44,47 +40,41 @@
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **Source & Politeness Check:**
    - Loads source via `get_source_for_service(service_id)`.
-   - Checks `should_defer_cron("insights_prewarmer", service_id)`. If active user requests are running on the dashboard, defers to avoid DuckDB thread/CPU contention.
+   - Checks `should_defer_cron("insights_prewarmer", service_id)`. If active user requests are running on the dashboard, defers to avoid query contention.
 2. **Adaptive Parameter Resolution:**
    - Reads cached extent status via `svcconfig.get_status(src["name"])`.
    - Derives `(window_hours, baseline_hours)` adaptively from `history_hours_from_earliest(...)` using `pick_insights_default` (e.g. >= 7d history defaults to 24h/168h, matching the frontend picker).
 3. **Execution & Progress Initialization:**
    - Calls `start_cron_run(src, "insights_prewarmer")`.
    - Initializes live tracking via `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="insights_prewarmer")`.
-4. **Connection Acquisition & Resource Safety:**
-   - Opens read-only DuckDB connection: `get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)`.
-   - Keeps the configured connection-open tuning. Never changes DuckDB's instance-global thread count or memory limit during the job.
-5. **Admin Prewarming:**
-   - Calls `get_insights(con, src, window_hours, baseline_hours, service_id, force_refresh=True, max_workers=1)`.
+4. **Admin Prewarming:**
+   - Calls `hs_insights.get_high_scale_insights(...)` with `force_refresh=True` and `max_workers=1`.
    - Recomputes and populates `_insights_cache` for the admin view.
-6. **Analyst Shape Prewarming (Remote Share):**
+5. **Analyst Shape Prewarming (Remote Share):**
    - If sharing is live (`is_sharing_active()`), extracts distinct clamp shapes from active invites (capped at `_MAX_ANALYST_SHAPES = 8`).
-   - For each active clamp shape, computes clamp extents via `resolve_analyst_insights_clamp` and calls `get_insights(...)` with `clamp_cache_key` and `max_workers=1`. Existing API-load checks still defer remaining shapes; they do not interrupt an already-running query.
-7. **Telemetry & Duration Finalization:**
+   - For each active clamp shape, computes clamp extents via `resolve_analyst_insights_clamp` and warms the cache with `clamp_cache_key` and `max_workers=1`.
+6. **Telemetry & Duration Finalization:**
    - Emits done event to `cron_progress`.
    - Logs `success` run to `cron_runs` with detailed summary of warmed shapes and hours.
-   - In guaranteed `finally:` block: closes DuckDB connection, calls `end_progress(run_id)`, and calls `finalize_cron_duration(src, run_id, started)`.
+   - In guaranteed `finally:` block: calls `end_progress(run_id)` and `finalize_cron_duration(src, run_id, started)`.
 
 ---
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & Resource Capture:**
-  - **Zero FOS Calls:** Strictly local DuckDB/DuckLake execution; 0 cloud storage calls.
-  - **DuckDB Statements:** Analytical queries instrumented via `track_query` under category `"insights"`.
-  - **Connection Borrowing:** Uses `skip_view_update=True` to minimize lock overhead.
+  - **Zero FOS Calls:** Strictly ClickHouse execution; 0 cloud storage calls.
+  - **ClickHouse Statements:** Analytical queries registered via `query_registry` under category `"insights"`.
 - **Timing & Resource Budgets:**
-  - Prewarm query execution: < 2.0s on rollup-accelerated data.
+  - Prewarm query execution: < 2.0s.
   - Memory consumption: < 25MB cached payload across admin and analyst shapes.
 - **Audit Checklist:**
-  - Verify baseline queries leverage precomputed day/hour rollups where available.
-  - Verify user request to `/api/insights` returns `X-Cache: HIT` after prewarmer run.
+  - Verify user request to `/api/insights` returns `is_cached=True` after prewarmer run.
   - Verify active dashboard queries cause prewarmer to defer cleanly without logging error.
 
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
 - **Active Dashboard Load:** Politeness gate defers prewarming cleanly.
-- **DuckDB Lock Timeout:** Caught by `RuntimeError("database is locked")`; logs skip message and retries next tick.
 - **Prewarmer Exception:** Logged as `"error"` in `cron_runs`; dashboard users fall back gracefully to on-demand query execution upon loading `/insights`.
 
 ---
@@ -95,15 +85,13 @@
 ---
 
 ## 9. Verification Checklist
-### Contract Requirements
-- **Requirement 1 — Cadence and Trigger:** Interval timer running every 240 seconds (`seconds=240`, `jitter=15`) strictly within the 300s cache TTL (`INSIGHTS_CACHE_TTL = 300`)..
-- **Requirement 2 — Dynamic Registration Gating, Rescheduling & Unregistration:** Job disabled when `cron_insights_prewarmer.enabled=False`; rescheduled with custom interval on `cron_insights_prewarmer.interval_seconds` update; cleanly unregistered and removed from scheduler when disabled..
-- **Requirement 4 — Pod Safety:** In distributed High-Scale mode (`DEPLOYMENT_MODE=high_scale`), runs strictly on the web serving pod's APScheduler..
-- **Requirement 5 — Local Safety under `FLA_DEV_NO_CRONS=1`:** Registered and executed as a local-safe read-only cache prewarmer during dev mode via `_register_dev_local_safe_jobs`..
-- **Requirement 6 — Politeness Deferral:** Cleanly defers execution via `should_defer_cron("insights_prewarmer", service_id)` when active user queries are running on the dashboard..
-- **Requirement 7 — Adaptive Parameter Resolution:** Adaptively derives `(window_hours, baseline_hours)` based on service log history extents via `pick_insights_default`..
-- **Requirement 8 — Read-Only DuckDB Connection & Memory Tuning:** Acquires read-only DuckDB connection with `skip_view_update=True` and enforces `DUCKDB_MEMORY_LIMIT` without mutating thread pools..
-- **Requirement 9 — Admin Cache Prewarming & Subsequent Reuse:** Populates in-memory `_insights_cache` via `get_insights` with `force_refresh=True`, ensuring subsequent dashboard requests hit the cache (`is_cached=True`) without executing SQL queries..
-- **Requirement 10 — Remote Share Analyst Clamp Shapes:** When remote sharing is active (`is_sharing_active()`), extracts distinct active clamp shapes (capped at `_MAX_ANALYST_SHAPES = 8`) and prewarms each clamp cache key..
-- **Requirement 11 — Telemetry, Progress & Outcome Logging:** Emits `cron_progress` SSE events, attributes analytical queries to category `"insights"`, and records `success` run in PostgreSQL `cron_runs`..
-- **Requirement 12 — Guaranteed Duration Finalization:** Ensures `finalize_cron_duration`, `end_progress`, and connection close are executed in a guaranteed `finally` block even when prewarming errors..
+- **Requirement 1 — Cadence and Trigger:** Interval timer running every 240 seconds (`seconds=240`, `jitter=15`) strictly within the 300s cache TTL (`INSIGHTS_CACHE_TTL = 300`).
+- **Requirement 2 — Dynamic Registration Gating, Rescheduling & Unregistration:** Job disabled when `cron_insights_prewarmer.enabled=False`; rescheduled with custom interval on `cron_insights_prewarmer.interval_seconds` update; cleanly unregistered and removed from scheduler when disabled.
+- **Requirement 3 — Pod Safety:** Runs on the web serving pod's APScheduler to warm the pod-local `_insights_cache`.
+- **Requirement 4 — Local Safety under `FLA_DEV_NO_CRONS=1`:** Registered and executed as a local-safe read-only cache prewarmer during dev mode via `_register_dev_local_safe_jobs`.
+- **Requirement 5 — Politeness Deferral:** Cleanly defers execution via `should_defer_cron("insights_prewarmer", service_id)` when active user queries are running on the dashboard.
+- **Requirement 6 — Adaptive Parameter Resolution:** Adaptively derives `(window_hours, baseline_hours)` based on service log history extents via `pick_insights_default`.
+- **Requirement 7 — Admin Cache Prewarming & Subsequent Reuse:** Populates in-memory `_insights_cache` via ClickHouse insights with `force_refresh=True`, ensuring subsequent dashboard requests hit the cache (`is_cached=True`).
+- **Requirement 8 — Remote Share Analyst Clamp Shapes:** When remote sharing is active (`is_sharing_active()`), extracts distinct active clamp shapes (capped at `_MAX_ANALYST_SHAPES = 8`) and prewarms each clamp cache key.
+- **Requirement 9 — Telemetry, Progress & Outcome Logging:** Emits `cron_progress` SSE events, attributes analytical queries to category `"insights"`, and records `success` run in PostgreSQL `cron_runs`.
+- **Requirement 10 — Guaranteed Duration Finalization:** Ensures `finalize_cron_duration` and `end_progress` are executed in a guaranteed `finally` block even when prewarming errors.

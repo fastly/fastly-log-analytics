@@ -29,8 +29,12 @@ secret:
 env:
   - name: OTEL_EXPORTER
     value: prometheus
-  - name: DUCKDB_EXTENSION_DIRECTORY
-    value: /tmp/duckdb-extensions
+  - name: HIGH_SCALE_WORKER_THREADS
+    value: "1"
+  - name: HIGH_SCALE_MAX_BATCH_BYTES
+    value: "6291456"
+  - name: HIGH_SCALE_MAX_BATCH_OBJECTS
+    value: "10"
 
 # A deterministic identity lets a replacement pod recover leases left by the
 # previous pod instead of deriving a new identity from its process ID.
@@ -38,13 +42,12 @@ workerId: ""
 
 sharedState:
   # Required for high-scale workloads: this must be the same PVC mounted by
-  # the parent chart's backend and Celery workers.
+  # the parent chart's backend and workers.
   existingClaim: ""
   # Set true only for explicitly ephemeral development runs.
   emptyDir: false
   configSubPath: configs
   dataSubPath: data
-  cacheSubPath: cache
 
 podAnnotations:
   prometheus.io/scrape: 'true'
@@ -66,8 +69,8 @@ securityContext:
 
 resources:
   requests:
-    cpu: 250m
-    memory: 512Mi
+    cpu: 500m
+    memory: 1Gi
   limits:
     cpu: "1"
     memory: 2Gi

@@ -798,7 +798,7 @@ describe('runDeploy', () => {
     expect(path).toBe('/api/provision/execute')
     expect(body).toMatchObject({
       token: 'TOK', service_id: 'svc-1', service_name: 'svc', endpoint_name: 'My EP',
-      fos_bucket_name: 'my-bucket', sample_rate: '1', log_period: '60', commit_interval_mins: 5,
+      fos_bucket_name: 'my-bucket', sample_rate: '1', log_period: '60',
       cdn_url: 'https://mycdn.global.ssl.fastly.net',
     })
 
@@ -1237,8 +1237,6 @@ describe('DeleteDataDialog & TeardownDialog', () => {
         service={{
           service_id: 'test-svc',
           name: 'Test Service',
-          duckdb_size_bytes: 5_000_000,
-          cache_file_count: 12,
         } as ServiceConfig}
         open={true}
         onOpenChange={vi.fn()}
@@ -1248,26 +1246,12 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     )
   }
 
-  test('DeleteDataDialog shows local + cloud file counts and sizes before confirming', async () => {
+  test('DeleteDataDialog shows ClickHouse and Fastly Object Storage Archive scope before confirming', async () => {
     sseState.status = 'idle'
-    server.use(
-      http.get(`${API_BASE}/api/admin/storage-info`, ({ request }) => {
-        const url = new URL(request.url)
-        if (url.searchParams.get('service_id') !== 'test-svc') {
-          return HttpResponse.json({ error: 'wrong service targeted' }, { status: 400 })
-        }
-        return HttpResponse.json({ data_files: 42, size_bytes: 123_456_789, snapshots: 3 })
-      }),
-    )
-
     renderDialog()
 
     expect(screen.getByText('Delete Data: Test Service')).toBeDefined()
-    expect(await screen.findByText('12 files')).toBeInTheDocument()
-
-    await waitFor(() => {
-      expect(screen.getByText('42 files')).toBeInTheDocument()
-    })
+    expect(screen.getByText(/ClickHouse and canonical Archive Parquet in Fastly Object Storage/i)).toBeInTheDocument()
   })
 
   test('DeleteDataDialog keeps Delete Data disabled on a near-miss confirmation', async () => {
@@ -1299,7 +1283,7 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     renderDialog({ onOpenChange, onComplete })
 
     expect(screen.getByText('Delete Data: Test Service')).toBeDefined()
-    expect(screen.getByText(/local.*and cloud-stored/i)).toBeDefined()
+    expect(screen.getByText(/ClickHouse and canonical Archive Parquet in Fastly Object Storage/i)).toBeDefined()
     expect(screen.getByText(/preserved:/i)).toBeDefined()
 
     const deleteBtn = screen.getByRole('button', { name: /^delete data$/i })

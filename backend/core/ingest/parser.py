@@ -1,3 +1,7 @@
+"""Pure-Python compressed log stream inspection, ingest field catalog helpers, and quarantine outcome counters."""
+
+from __future__ import annotations
+
 import contextlib
 import gzip
 import io
@@ -8,8 +12,6 @@ from typing import Any
 import orjson
 import zstandard as zstd
 
-from backend.core import log_fields as fc
-from backend.core.duckdb import escape_sql_literal
 from backend.core.log_fields import LOG_FIELD_CATALOG
 
 logger = logging.getLogger("backend.core.ingest")
@@ -54,17 +56,20 @@ def _open_compressed_log(path: str):
             yield fh
 
 
-_INGEST_OUTCOME_COUNTER_KEYS = ( "valid_records", "malformed_records", "corrupt_containers", "quarantine_capture_failures",
-    "source_delete_failures", "cap_evictions", "objects_processed", "objects_successful", "objects_partial", "objects_failed",
-)  # fmt: skip
+_INGEST_OUTCOME_COUNTER_KEYS = (
+    "valid_records",
+    "malformed_records",
+    "corrupt_containers",
+    "quarantine_capture_failures",
+    "source_delete_failures",
+    "cap_evictions",
+    "objects_processed",
+    "objects_successful",
+    "objects_partial",
+    "objects_failed",
+)
 _INGEST_EXCLUDED_GROUPS = ("METRICS", "VIRTUAL", "INTERNAL")
 _EMPTY_VALUE_RE = re.compile(r":(?=[,}])")
-
-_DECODE_EXPRS: dict[str, str] = {
-    "c_speed": fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE),
-    "p_type": fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE),
-    "p_desc": fc.duckdb_decode_case("p_desc", fc.PROXY_DESC_ENCODE),
-}
 
 
 def _new_object_outcome(*, processed: int = 1) -> dict[str, int]:
@@ -98,10 +103,6 @@ def _sum_evidence_counts(evidence_results: list[dict[str, Any]], extra_failures:
     }
 
 
-def _read_json_auto_sql(paths_expr: str, columns_sql: str, *, filename: bool = False) -> str:
-    return f"read_json_auto({paths_expr}, format='newline_delimited', records='auto'{', filename=true' if filename else ''}, columns={columns_sql}, ignore_errors=true)"
-
-
 def _capture_corrupt_container(
     service_id: str,
     source_type: str,
@@ -116,9 +117,16 @@ def _capture_corrupt_container(
     try:
         with open(local_file, "rb") as raw:
             payload = raw.read()
-        result = capture_evidence( service_id, source_type, object_key, payload,
-            line_ordinal=None, byte_offset=None, error_category="corrupt_container", error_text=str(error)[:2_000],
-        )  # fmt: skip
+        result = capture_evidence(
+            service_id,
+            source_type,
+            object_key,
+            payload,
+            line_ordinal=None,
+            byte_offset=None,
+            error_category="corrupt_container",
+            error_text=str(error)[:2_000],
+        )
     except OSError:
         result = {"cap_evictions": 0, "quarantine_capture_failures": 1}
     base = {
@@ -165,29 +173,6 @@ def get_catalog_field_ids(log_fields_config: dict | None = None) -> list[str]:
     return ids
 
 
-def get_ingest_columns_sql(log_fields_config: dict | None = None) -> str:
-    hints = get_ingest_type_hints(log_fields_config)
-    return "{" + ", ".join(f"'{escape_sql_literal(k)}': '{escape_sql_literal(v)}'" for k, v in hints.items()) + "}"
-
-
-def _build_column_select_exprs(
-    src: dict | None, log_fields_config: dict | None = None, *, source_file_expr: str | None = None
-) -> list[str]:
-    svc_id = (src or {}).get("logging_service_id") or (src or {}).get("name", "")
-    backend_expr = (
-        f"regexp_replace(\"backend\", '^{escape_sql_literal(svc_id)}--', '') AS \"backend\"" if svc_id else '"backend"'
-    )
-    field_selects: list[str] = []
-    for fid in get_catalog_field_ids(log_fields_config):
-        if fid not in ("backend", "_source_file"):
-            safe_fid = fid.replace('"', '""')
-            field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{safe_fid}"' if fid in _DECODE_EXPRS else f'"{safe_fid}"')
-    if source_file_expr is not None:
-        field_selects.append(f"{source_file_expr} AS _source_file")
-    field_selects.append(backend_expr)
-    return field_selects
-
-
 def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
     invalid_rows: list[tuple[str, str]] = []
     for path in paths:
@@ -203,96 +188,6 @@ def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
                 if not is_valid:
                     invalid_rows.append((path, raw_line.decode("utf-8", errors="replace").rstrip("\r\n")))
     return invalid_rows
-
-
-def _quarantine_convert_corrupt_lines(
-    duckdb_con,
-    fos_client,
-    src: dict,
-    read_expr: str,
-    local_file: str,
-    object_key: str,
-) -> dict[str, int]:
-    from backend.core.metadata.ingest_log import capture_evidence
-
-    valid_count, corrupt_count = duckdb_con.execute(
-        f"SELECT count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) FROM {read_expr}"
-    ).fetchone()
-    if not corrupt_count:
-        return {
-            "valid_records": int(valid_count or 0),
-            "malformed_records": 0,
-            "cap_evictions": 0,
-            "quarantine_capture_failures": 0,
-        }
-    service_id = src.get("service_id") or src.get("name", "")
-    prefix_path = src.get("prefix", "").strip("/")
-    raw_prefix = f"{prefix_path}/raw/request/" if prefix_path else "raw/request/"
-    if not object_key.startswith(raw_prefix):
-        logger.warning(
-            "[ledger] %s: refusing request quarantine for key outside raw prefix: %s", service_id, object_key
-        )
-        return {
-            "valid_records": int(valid_count or 0),
-            "malformed_records": int(corrupt_count or 0),
-            "cap_evictions": 0,
-            "quarantine_capture_failures": int(corrupt_count or 0),
-        }
-    evidence_results = []
-    offset = 0
-    try:
-        with _open_compressed_log(local_file) as raw:
-            for ordinal, line in enumerate(raw, start=1):
-                current_offset = offset
-                offset += len(line)
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                category = None
-                error_text = ""
-                try:
-                    parsed = orjson.loads(stripped)
-                    if not isinstance(parsed, dict) or not parsed.get("timestamp"):
-                        category, error_text = "missing_timestamp", "record has no timestamp"
-                except (orjson.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                    category, error_text = "invalid_json", str(exc)[:2000]
-                if category is not None:
-                    evidence_results.append(
-                        capture_evidence(
-                            service_id,
-                            "request",
-                            object_key,
-                            line,
-                            line_ordinal=ordinal,
-                            byte_offset=current_offset,
-                            error_category=category,
-                            error_text=error_text,
-                        )
-                    )
-    except _COMPRESSED_STREAM_ERRORS as exc:
-        logger.warning("[ledger] %s: malformed request log container %s: %s", service_id, object_key, exc)
-        return _capture_corrupt_container(service_id, "request", object_key, local_file, exc, full_outcome=False)
-    if len(evidence_results) != int(corrupt_count or 0):
-        logger.error(
-            "[ledger] %s: DuckDB/raw-line corruption count mismatch for %s (%d vs %d)",
-            service_id,
-            object_key,
-            corrupt_count,
-            len(evidence_results),
-        )
-        return {
-            "valid_records": int(valid_count or 0),
-            "malformed_records": len(evidence_results),
-            **_sum_evidence_counts(evidence_results, extra_failures=1),
-        }
-    for result in evidence_results:
-        if int(result.get("quarantine_capture_failures", 0)):
-            logger.error("[ledger] %s: request quarantine capture failed for %s", service_id, object_key)
-    return {
-        "valid_records": int(valid_count or 0),
-        "malformed_records": len(evidence_results),
-        **_sum_evidence_counts(evidence_results),
-    }
 
 
 def _finalize_sync_outcome_counters(

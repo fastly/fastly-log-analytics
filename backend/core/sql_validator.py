@@ -1,17 +1,13 @@
-"""SQL AST validation and identifier/literal escaping for user queries."""
+"""Pure-Python SQL validation and identifier/literal escaping for user queries."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
-import threading
 import time
 from dataclasses import dataclass
 from typing import Any, NoReturn
-
-import duckdb
 
 
 def escape_sql_literal(value: str) -> str:
@@ -131,36 +127,7 @@ _BASELINE_TABLE_FUNCTIONS = frozenset(
 )
 
 
-def get_memory_connection() -> duckdb.DuckDBPyConnection:
-    from backend.core import duckdb as _db
-
-    return _db.get_memory_connection()
-
-
-_parser_con: duckdb.DuckDBPyConnection | None = None
-_parser_con_lock = threading.RLock()
-
-
-def get_parser_connection() -> duckdb.DuckDBPyConnection:
-    """Return a cached thread-safe in-memory DuckDB connection for AST parsing."""
-    global _parser_con
-    with _parser_con_lock:
-        if _parser_con is None:
-            _parser_con = duckdb.connect(":memory:")
-        return _parser_con
-
-
 def _enumerate_table_functions() -> frozenset[str]:
-    try:
-        with _parser_con_lock:
-            con = get_parser_connection()
-            rows = con.execute(
-                "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"
-            ).fetchall()
-        if names := {r[0].lower() for r in rows if r and isinstance(r[0], str)}:
-            return frozenset(names | _BASELINE_TABLE_FUNCTIONS)
-    except Exception:
-        logger.exception("[sql_validator] table-function enumeration failed; using baseline set")
     return _BASELINE_TABLE_FUNCTIONS
 
 
@@ -197,7 +164,7 @@ def _reject(sql: str, reason: str, message: str, session_id: str | None, service
 def validate_user_sql(
     sql: str,
     *,
-    parser_con: duckdb.DuckDBPyConnection | None = None,
+    parser_con: Any | None = None,
     session_id: str | None = None,
     service_id: str | None = None,
     allowed_tables: frozenset[str] | None = None,
@@ -373,66 +340,593 @@ def _walk_and_validate(
             )
 
 
-def apply_user_query_limits(
-    con: duckdb.DuckDBPyConnection, *, memory_limit: str = "2GB", timeout_seconds: int = 30
-) -> None:
+def apply_user_query_limits(con: Any, *, memory_limit: str = "2GB", timeout_seconds: int = 30) -> None:
     try:
         con.execute(f"SET memory_limit = '{memory_limit}'")
-    except duckdb.Error as exc:
+    except Exception as exc:
         logger.warning("[sql_validator] failed to apply memory_limit=%s: %s", memory_limit, exc)
     try:
         con.execute(f"SET statement_timeout = '{timeout_seconds * 1000}ms'")
-    except duckdb.Error as exc:
-        logger.debug("[sql_validator] statement_timeout not supported on this DuckDB build: %s", exc)
+    except Exception as exc:
+        logger.debug("[sql_validator] statement_timeout not supported: %s", exc)
+
+
+# ── Pure-Python SQL tokenizer & AST builder ──────────────────────────────────
+
+_NON_SELECT_STATEMENTS = frozenset(
+    {
+        "ATTACH",
+        "DETACH",
+        "INSTALL",
+        "LOAD",
+        "PRAGMA",
+        "SET",
+        "RESET",
+        "UPDATE",
+        "INSERT",
+        "DELETE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "COPY",
+        "EXPORT",
+        "IMPORT",
+        "CALL",
+        "EXPLAIN",
+        "VACUUM",
+        "ANALYZE",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "GRANT",
+        "REVOKE",
+        "TRUNCATE",
+        "USE",
+        "CHECKPOINT",
+        "MERGE",
+        "REPLACE",
+    }
+)
+_SHOW_REF_STATEMENTS = frozenset({"SHOW", "DESCRIBE", "SUMMARIZE", "DESC"})
+_CLAUSE_STOP_KEYWORDS = frozenset(
+    {
+        "WHERE",
+        "GROUP",
+        "HAVING",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "WINDOW",
+        "QUALIFY",
+        "SETTINGS",
+        "FORMAT",
+        "PREWHERE",
+        "SAMPLE",
+    }
+)
+_JOIN_MODIFIERS = frozenset(
+    {"JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "NATURAL", "GLOBAL", "ANY", "ALL", "ASOF"}
+)
+_NON_FUNCTION_KEYWORDS = frozenset(
+    {
+        "select",
+        "from",
+        "where",
+        "group",
+        "order",
+        "having",
+        "limit",
+        "offset",
+        "union",
+        "intersect",
+        "except",
+        "with",
+        "as",
+        "on",
+        "using",
+        "in",
+        "not",
+        "and",
+        "or",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "exists",
+        "cast",
+        "extract",
+        "position",
+        "substring",
+        "trim",
+        "overlay",
+        "filter",
+        "over",
+        "within",
+        "values",
+        "table",
+        "distinct",
+        "all",
+        "between",
+        "like",
+        "ilike",
+    }
+)
+
+
+@dataclass(slots=True)
+class _Tok:
+    kind: str  # "WORD" | "STRING" | "QIDENT" | "LPAREN" | "RPAREN" | "COMMA" | "DOT" | "SEMI" | "OTHER"
+    val: str
+
+
+def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
+    tokens: list[_Tok] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            nl = sql.find("\n", i + 2)
+            i = n if nl == -1 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if sql[j] == "/" and j + 1 < n and sql[j + 1] == "*":
+                    depth += 1
+                    j += 2
+                elif sql[j] == "*" and j + 1 < n and sql[j + 1] == "/":
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            if depth != 0:
+                return None, "unterminated block comment"
+            i = j
+            continue
+        if ch == "'":
+            j = i + 1
+            buf: list[str] = []
+            closed = False
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        buf.append("'")
+                        j += 2
+                        continue
+                    closed = True
+                    j += 1
+                    break
+                buf.append(sql[j])
+                j += 1
+            if not closed:
+                return None, "unterminated string literal"
+            tokens.append(_Tok("STRING", "".join(buf)))
+            i = j
+            continue
+        if ch == '"':
+            j = i + 1
+            buf = []
+            closed = False
+            while j < n:
+                if sql[j] == '"':
+                    if j + 1 < n and sql[j + 1] == '"':
+                        buf.append('"')
+                        j += 2
+                        continue
+                    closed = True
+                    j += 1
+                    break
+                buf.append(sql[j])
+                j += 1
+            if not closed:
+                return None, "unterminated quoted identifier"
+            tokens.append(_Tok("QIDENT", "".join(buf)))
+            i = j
+            continue
+        if ch == "(":
+            tokens.append(_Tok("LPAREN", "("))
+            i += 1
+            continue
+        if ch == ")":
+            tokens.append(_Tok("RPAREN", ")"))
+            i += 1
+            continue
+        if ch == ",":
+            tokens.append(_Tok("COMMA", ","))
+            i += 1
+            continue
+        if ch == ".":
+            tokens.append(_Tok("DOT", "."))
+            i += 1
+            continue
+        if ch == ";":
+            tokens.append(_Tok("SEMI", ";"))
+            i += 1
+            continue
+        if ch.isalpha() or ch == "_":
+            j = i + 1
+            while j < n and (sql[j].isalnum() or sql[j] in ("_", "$")):
+                j += 1
+            tokens.append(_Tok("WORD", sql[i:j]))
+            i = j
+            continue
+        j = i + 1
+        while (
+            j < n
+            and not sql[j].isspace()
+            and sql[j] not in ("'", '"', "(", ")", ",", ".", ";", "-", "/")
+            and not (sql[j].isalpha() or sql[j] == "_")
+        ):
+            j += 1
+        tokens.append(_Tok("OTHER", sql[i:j]))
+        i = j
+    return tokens, None
+
+
+def _find_matching_rparen(tokens: list[_Tok], lparen_idx: int) -> int:
+    depth = 0
+    for idx in range(lparen_idx, len(tokens)):
+        if tokens[idx].kind == "LPAREN":
+            depth += 1
+        elif tokens[idx].kind == "RPAREN":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return -1
+
+
+def _strip_outer_parens(tokens: list[_Tok]) -> list[_Tok]:
+    while len(tokens) >= 2 and tokens[0].kind == "LPAREN":
+        rp = _find_matching_rparen(tokens, 0)
+        if rp == len(tokens) - 1:
+            tokens = tokens[1:-1]
+        else:
+            break
+    return tokens
+
+
+def _validate_select_syntax(tokens: list[_Tok]) -> str | None:
+    """Catch malformed SELECT / WHERE clauses so invalid SQL fails closed."""
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok.kind == "LPAREN":
+            rp = _find_matching_rparen(tokens, i)
+            if rp == -1:
+                return "unbalanced parentheses"
+            err = _validate_select_syntax(tokens[i + 1 : rp])
+            if err is not None:
+                return err
+            i = rp + 1
+            continue
+        if tok.kind == "RPAREN":
+            return "unmatched closing parenthesis"
+        if tok.kind == "WORD":
+            wu = tok.val.upper()
+            if wu == "SELECT":
+                nxt = i + 1
+                if nxt < n and tokens[nxt].kind == "WORD" and tokens[nxt].val.upper() in ("DISTINCT", "ALL"):
+                    nxt += 1
+                if nxt >= n or (
+                    tokens[nxt].kind == "WORD"
+                    and tokens[nxt].val.upper() in ("FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION")
+                ):
+                    return "empty SELECT projection list"
+            elif wu == "WHERE":
+                nxt = i + 1
+                if nxt >= n or (tokens[nxt].kind == "OTHER" and tokens[nxt].val.startswith("*")):
+                    return "invalid WHERE clause"
+                if tokens[nxt].kind == "WORD" and tokens[nxt].val.upper() in (
+                    "FROM",
+                    "WHERE",
+                    "GROUP",
+                    "HAVING",
+                    "ORDER",
+                    "LIMIT",
+                ):
+                    return "empty WHERE clause"
+        i += 1
+    return None
+
+
+def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
+    tokens = _strip_outer_parens(tokens)
+    node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
+    if not tokens:
+        return node
+
+    i = 0
+    n = len(tokens)
+    if tokens[0].kind == "WORD" and tokens[0].val.upper() == "WITH":
+        i = 1
+        is_recursive = False
+        if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "RECURSIVE":
+            is_recursive = True
+            i += 1
+        cte_entries: list[dict[str, Any]] = []
+        while i < n:
+            if tokens[i].kind not in ("WORD", "QIDENT"):
+                break
+            cte_name = tokens[i].val
+            i += 1
+            if i < n and tokens[i].kind == "LPAREN":
+                rp = _find_matching_rparen(tokens, i)
+                if rp == -1:
+                    break
+                i = rp + 1
+            if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "AS":
+                i += 1
+            while i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() in ("MATERIALIZED", "NOT"):
+                i += 1
+            if i >= n or tokens[i].kind != "LPAREN":
+                break
+            rp = _find_matching_rparen(tokens, i)
+            if rp == -1:
+                break
+            cte_body = _parse_query_tokens(tokens[i + 1 : rp])
+            if is_recursive:
+                cte_body["type"] = "RECURSIVE_CTE_NODE"
+            cte_entries.append({"key": cte_name, "value": {"query": {"node": cte_body}}})
+            i = rp + 1
+            if i < n and tokens[i].kind == "COMMA":
+                i += 1
+                continue
+            break
+        node["cte_map"] = {"map": cte_entries}
+
+    _scan_body_tokens(tokens[i:], node)
+    return node
+
+
+def _scan_expr_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok.kind in ("WORD", "QIDENT") and i + 1 < n and tokens[i + 1].kind == "LPAREN":
+            rp = _find_matching_rparen(tokens, i + 1)
+            if rp != -1:
+                if tok.kind == "QIDENT" or tok.val.lower() not in _NON_FUNCTION_KEYWORDS:
+                    node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                _scan_expr_tokens(tokens[i + 2 : rp], node)
+                i = rp + 1
+                continue
+        elif tok.kind == "LPAREN":
+            rp = _find_matching_rparen(tokens, i)
+            if rp != -1:
+                inner = _strip_outer_parens(tokens[i + 1 : rp])
+                if inner and inner[0].kind == "WORD" and inner[0].val.upper() in ("SELECT", "WITH"):
+                    node["children"].append(_parse_query_tokens(inner))
+                else:
+                    _scan_expr_tokens(inner, node)
+                i = rp + 1
+                continue
+        i += 1
+
+
+def _scan_body_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
+    i = 0
+    n = len(tokens)
+    in_from = False
+    expect_table = False
+
+    while i < n:
+        tok = tokens[i]
+        if tok.kind == "WORD":
+            wu = tok.val.upper()
+            if wu in ("UNION", "INTERSECT", "EXCEPT"):
+                node["type"] = "SET_OPERATION_NODE"
+                in_from = False
+                expect_table = False
+                i += 1
+                continue
+            if wu == "FROM":
+                in_from = True
+                expect_table = True
+                i += 1
+                continue
+            if wu in _JOIN_MODIFIERS:
+                if wu == "JOIN":
+                    in_from = True
+                    expect_table = True
+                i += 1
+                continue
+            if wu in _CLAUSE_STOP_KEYWORDS:
+                in_from = False
+                expect_table = False
+                i += 1
+                continue
+            if in_from and wu in ("ON", "USING"):
+                expect_table = False
+                i += 1
+                continue
+
+        if in_from and tok.kind == "COMMA":
+            expect_table = True
+            i += 1
+            continue
+
+        if in_from and expect_table:
+            if tok.kind == "WORD" and tok.val.upper() == "LATERAL":
+                i += 1
+                continue
+            if tok.kind == "LPAREN":
+                rp = _find_matching_rparen(tokens, i)
+                if rp != -1:
+                    inner = _strip_outer_parens(tokens[i + 1 : rp])
+                    if inner and inner[0].kind == "WORD" and inner[0].val.upper() in ("SELECT", "WITH"):
+                        node["children"].append(_parse_query_tokens(inner))
+                    else:
+                        _scan_body_tokens(inner, node)
+                    expect_table = False
+                    i = rp + 1
+                    continue
+            if tok.kind == "STRING":
+                node["children"].append(
+                    {
+                        "type": "BASE_TABLE",
+                        "table_name": tok.val,
+                        "schema_name": "",
+                        "catalog_name": "",
+                    }
+                )
+                expect_table = False
+                i += 1
+                continue
+            if tok.kind in ("WORD", "QIDENT"):
+                parts = [tok.val]
+                j = i + 1
+                while j + 1 < n and tokens[j].kind == "DOT" and tokens[j + 1].kind in ("WORD", "QIDENT"):
+                    parts.append(tokens[j + 1].val)
+                    j += 2
+                if j < n and tokens[j].kind == "LPAREN":
+                    rp = _find_matching_rparen(tokens, j)
+                    if rp != -1:
+                        node["children"].append(
+                            {
+                                "class": "FUNCTION",
+                                "type": "TABLE_FUNCTION",
+                                "function_name": parts[-1],
+                            }
+                        )
+                        _scan_expr_tokens(tokens[j + 1 : rp], node)
+                        i = rp + 1
+                        # Skip optional table alias and column alias list: e.g. `range(3) t(n)` or `AS t(n)`
+                        if i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() == "AS":
+                            i += 1
+                        if (
+                            i < n
+                            and tokens[i].kind in ("WORD", "QIDENT")
+                            and tokens[i].val.upper() not in (_CLAUSE_STOP_KEYWORDS | _JOIN_MODIFIERS | {"ON", "USING"})
+                        ):
+                            i += 1
+                            if i < n and tokens[i].kind == "LPAREN":
+                                rp_alias = _find_matching_rparen(tokens, i)
+                                if rp_alias != -1:
+                                    i = rp_alias + 1
+                        expect_table = False
+                        continue
+                else:
+                    if len(parts) == 1:
+                        cat_name, sch_name, tbl_name = "", "", parts[0]
+                    elif len(parts) == 2:
+                        cat_name, sch_name, tbl_name = "", parts[0], parts[1]
+                    else:
+                        cat_name, sch_name, tbl_name = parts[0], parts[1], parts[-1]
+                    node["children"].append(
+                        {
+                            "type": "BASE_TABLE",
+                            "table_name": tbl_name,
+                            "schema_name": sch_name,
+                            "catalog_name": cat_name,
+                        }
+                    )
+                    expect_table = False
+                    i = j
+                    continue
+
+        # Scalar expression / subquery outside table-reference position
+        if tok.kind in ("WORD", "QIDENT") and i + 1 < n and tokens[i + 1].kind == "LPAREN":
+            rp = _find_matching_rparen(tokens, i + 1)
+            if rp != -1:
+                if tok.kind == "QIDENT" or tok.val.lower() not in _NON_FUNCTION_KEYWORDS:
+                    node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                _scan_expr_tokens(tokens[i + 2 : rp], node)
+                i = rp + 1
+                continue
+        if tok.kind == "LPAREN":
+            rp = _find_matching_rparen(tokens, i)
+            if rp != -1:
+                inner = _strip_outer_parens(tokens[i + 1 : rp])
+                if inner and inner[0].kind == "WORD" and inner[0].val.upper() in ("SELECT", "WITH"):
+                    node["children"].append(_parse_query_tokens(inner))
+                else:
+                    _scan_expr_tokens(inner, node)
+                i = rp + 1
+                continue
+
+        i += 1
 
 
 def _parse_single_select_node(
-    sql: str, parser_con: duckdb.DuckDBPyConnection | None = None, *, allow_multi: bool = False
+    sql: str, parser_con: Any | None = None, *, allow_multi: bool = False
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None, str | None]:
-    try:
-        if parser_con is None:
-            with _parser_con_lock:
-                row = get_parser_connection().execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+    del parser_con
+    tokens, tok_err = _tokenize_sql(sql)
+    if tok_err is not None or tokens is None:
+        return None, None, "parse_error:SYNTAX", f"SQL parse error: {tok_err}"
+
+    # Split into statements on top-level semicolons
+    stmts: list[list[_Tok]] = []
+    cur: list[_Tok] = []
+    depth = 0
+    for tok in tokens:
+        if tok.kind == "LPAREN":
+            depth += 1
+            cur.append(tok)
+        elif tok.kind == "RPAREN":
+            depth -= 1
+            if depth < 0:
+                return None, None, "parse_error:SYNTAX", "SQL parse error: unmatched closing parenthesis"
+            cur.append(tok)
+        elif tok.kind == "SEMI" and depth == 0:
+            if cur:
+                stmts.append(cur)
+                cur = []
         else:
-            row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
-    except Exception as exc:
-        return None, None, "parse_error", f"SQL parse failed: {exc}"
-    if not row or row[0] is None:
-        return None, None, "parse_empty", "SQL parse returned no output"
-    try:
-        parsed = json.loads(row[0])
-    except json.JSONDecodeError as exc:
-        return None, None, "parse_invalid_json", f"json_serialize_sql output invalid: {exc}"
-    if not isinstance(parsed, dict):
-        return None, None, "parse_unexpected_shape", "expected JSON object"
-    if parsed.get("error") is True:
-        return (
-            None,
-            None,
-            f"parse_error:{parsed.get('error_type', '')}",
-            f"SQL parse error: {parsed.get('error_message', '<unknown>')}",
-        )
-    statements = parsed.get("statements")
-    if not isinstance(statements, list) or not statements:
+            cur.append(tok)
+    if depth != 0:
+        return None, None, "parse_error:SYNTAX", "SQL parse error: unbalanced parentheses"
+    if cur:
+        stmts.append(cur)
+
+    if not stmts:
         return None, None, "no_statements", "no parseable statements"
-    if not allow_multi and len(statements) > 1:
-        return None, None, "multi_statement", f"only one statement allowed, got {len(statements)}"
-    stmt = statements[0]
-    node = stmt.get("node") if isinstance(stmt, dict) else None
-    node_type = node.get("type") if isinstance(node, dict) else None
-    if not isinstance(node, dict) or node_type not in ALLOWED_STATEMENT_TYPES:
+    if not allow_multi and len(stmts) > 1:
+        return None, None, "multi_statement", f"only one statement allowed, got {len(stmts)}"
+
+    stmt_tokens = _strip_outer_parens(stmts[0])
+    if not stmt_tokens:
+        return None, None, "no_statements", "no parseable statements"
+
+    first = stmt_tokens[0]
+    if first.kind != "WORD":
+        return None, None, "parse_error:SYNTAX", "SQL parse error: expected statement keyword"
+
+    first_upper = first.val.upper()
+    if first_upper in _SHOW_REF_STATEMENTS:
+        return None, None, "show_ref", "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query"
+    if first_upper in _NON_SELECT_STATEMENTS:
+        node_type = f"{first_upper}_NODE"
         return (
             None,
             None,
-            f"statement_type:{node_type or '?'}",
+            f"statement_type:{node_type}",
             f"only SELECT / WITH / UNION statements allowed (got {node_type})",
         )
-    if isinstance(from_table := node.get("from_table"), dict) and from_table.get("type") == "SHOW_REF":
-        return None, None, "show_ref", "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query"
+    if first_upper not in ("SELECT", "WITH", "VALUES"):
+        return None, None, "parse_error:SYNTAX", f"SQL parse error near {first.val!r}"
+
+    syntax_err = _validate_select_syntax(stmt_tokens)
+    if syntax_err is not None:
+        return None, None, "parse_error:SYNTAX", f"SQL parse error: {syntax_err}"
+
+    node = _parse_query_tokens(stmt_tokens)
+    parsed = {"error": False, "statements": [{"node": node}]}
     return parsed, node, None, None
 
 
-def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection | None = None) -> bool:
+def is_simple_select_statement(sql: str, *, parser_con: Any | None = None) -> bool:
     _parsed, node, err_code, _err_msg = _parse_single_select_node(sql, parser_con, allow_multi=True)
     return err_code is None and node is not None
 
@@ -460,7 +954,6 @@ __all__ = [
     "_walk_and_validate",
     "apply_user_query_limits",
     "escape_sql_literal",
-    "get_memory_connection",
     "is_safe_ident",
     "is_simple_select_statement",
     "require_safe_ident",

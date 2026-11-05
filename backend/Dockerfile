@@ -50,12 +50,6 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project
 
-# Pre-install DuckDB's platform-specific extensions while the build
-# environment has network access. Runtime pods may not be able to reach
-# extensions.duckdb.org, especially on local ARM64 Kubernetes clusters.
-RUN /app/.venv/bin/python -c \
-    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('ducklake', 'httpfs', 'parquet')]; con.close()"
-
 # --- Session scorer (Fastly Compute Wasm) ---
 # Built from source here so every image carries a package matching its own
 # commit; compute/scorer/pkg/ is gitignored and a hand-built tarball goes stale
@@ -106,7 +100,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     FLA_PRODUCTION=1 \
     PATH="/app/.venv/bin:$PATH" \
-    DUCKDB_MEMORY_LIMIT=4GB \
     ARROW_DEFAULT_MEMORY_POOL=system
 
 WORKDIR /app
@@ -135,21 +128,10 @@ COPY --from=falco-builder /usr/local/bin/falco /usr/local/bin/falco
 
 # Create a non-root runtime user so a foothold in the FastAPI process
 # can't write outside its mounts. UID/GID 1000 matches the host owner
-# of `/mnt/app-data/{configs,data,cache}` on the GCE VM — bumping
+# of `/mnt/app-data/{configs,data}` on the GCE VM — bumping
 # these requires `chown -R 1000:1000 /mnt/app-data/*` on the host
-# OR the container hits "Permission denied" on every write
-# (ingest_log, parquet write, scorer matrix sync, etc.). The
-# `addgroup --system` flag tags the group to suppress useradd's "no
-# matching entries" warnings on Debian.
-#
-# DuckDB's `INSTALL httpfs;` (called from _load_httpfs on every
-# pool-acquire) writes the extension cache into $HOME. Without a home
-# dir it crashes at first request with
-# `IO Error: Can't find the home directory at '/home/app'` and every
-# analytics endpoint 500s — the 2026-06-13 deploy hit this when the
-# original useradd used --no-create-home. Keep --create-home (or
-# carry an explicit `mkdir -p /home/app && chown app:app /home/app`)
-# any time this directive is touched.
+# OR the container hits "Permission denied" on every write.
+# Keep --create-home so tools expecting $HOME (/home/app) work cleanly.
 RUN groupadd --gid 1000 app \
  && useradd  --uid 1000 --gid 1000 --create-home --shell /sbin/nologin app
 
@@ -157,12 +139,11 @@ RUN groupadd --gid 1000 app \
 # Without this, the first request fails with PermissionError because
 # docker creates the bind-mount directories owned by root before the
 # mount is applied, and our entrypoint can't write under them.
-RUN mkdir -p /app/configs /app/data /app/cache /app/compute/scorer \
+RUN mkdir -p /app/configs /app/data /app/compute/scorer \
  && chown -R app:app /app
 
 # Copy the virtual environment from the builder
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
-COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 
 # Copy static assets, configuration, and helper scripts first.
 # Placing these before backend/ preserves Docker layer caching across application code changes.
@@ -177,16 +158,10 @@ COPY --from=scorer-builder --chown=app:app /session-scorer.tar.gz ./compute/scor
 # Copy backend application source
 COPY --chown=app:app backend/ ./backend/
 
-# Route allocations through jemalloc so memory freed when a DuckDB instance is
-# recycled (backend.cron.jobs.duckdb_recycle) is actually returned to the OS. Under
-# stock glibc malloc the freed object-cache pages stay in per-arena free lists
-# and RSS never drops, so the 12g container still OOMed even after the recycle
-# reached zero live connections (verified prod 2026-06-21: recycle logged
-# live_after=0 yet freed ~0MB and RSS climbed to the cap). jemalloc's background
-# purge returns dirty/muzzy pages to the OS on a short decay. See the
-# backend-oom-restart-loop runbook. Set LD_PRELOAD here (late) so the build
-# steps above don't run under a not-yet-installed preload.
-# Bare soname (arch-portable via ldconfig — see the build-time check above).
+# Route allocations through jemalloc so freed memory pages are returned to the OS
+# on a short decay rather than held in glibc per-arena free lists.
+# Set LD_PRELOAD here (late) so the build steps above don't run under a
+# not-yet-installed preload. Bare soname (arch-portable via ldconfig).
 ENV LD_PRELOAD=libjemalloc.so.2 \
     MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 

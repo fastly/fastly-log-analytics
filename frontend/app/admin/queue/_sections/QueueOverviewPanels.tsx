@@ -1,11 +1,9 @@
 'use client'
 
 import React from 'react'
-import { formatCount } from '@/lib/utils'
 import { DataTableReadonly } from '@/components/DataTable'
 import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 import type { components } from '@/types/api.generated'
 import {
   QUEUE_COLUMNS,
@@ -127,14 +125,7 @@ export function TrendSparklineCard({
 }
 
 export function QueueTrendsSection({
-  isStandardMode,
   isLoading,
-  isStatusRefetching,
-  error,
-  standardIngestedFiles,
-  standardQuarantinedItems,
-  inprocessSchedulesCount,
-  inprocessActiveRunsCount,
   latestQueue,
   queuePoints,
   latestWorker,
@@ -143,14 +134,7 @@ export function QueueTrendsSection({
   isTrendsRefetching,
   trendsError,
 }: {
-  isStandardMode: boolean
   isLoading: boolean
-  isStatusRefetching: boolean
-  error: unknown
-  standardIngestedFiles: number
-  standardQuarantinedItems: number
-  inprocessSchedulesCount: number
-  inprocessActiveRunsCount: number
   latestQueue: number | null
   queuePoints: React.ComponentProps<typeof Sparkline>['points']
   latestWorker: number | null
@@ -164,118 +148,43 @@ export function QueueTrendsSection({
       data-testid="admin-queue-trends-reservation"
       className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[204px] min-w-0 overflow-hidden [contain-intrinsic-size:auto_204px] [content-visibility:visible]"
     >
-      {isStandardMode ? (
-        [
-          {
-            key: 'standard-ingest-summary',
-            title: 'Standard Ingest Summary',
-            description:
-              'Tracked synchronous file ingestion and quarantine state across all services.',
-            loadingMessage: 'Loading ingest telemetry...',
-            testId: 'admin-queue-standard-ingest-summary',
-            tiles: [
-              {
-                label: 'Ingested Files',
-                value: formatCount(standardIngestedFiles),
-                sublabel: 'Tracked in PostgreSQL ingested_files',
-              },
-              {
-                label: 'Quarantined Items',
-                value: formatCount(standardQuarantinedItems),
-                valueClassName:
-                  standardQuarantinedItems > 0
-                    ? 'text-amber-600 dark:text-amber-400'
-                    : '',
-                sublabel: 'Corrupt files & lines preserved on disk',
-              },
-            ],
-          },
-          {
-            key: 'standard-scheduler-overview',
-            title: 'In-Process Scheduler Overview',
-            description:
-              'APScheduler background cron tasks and active PostgreSQL job leases.',
-            loadingMessage: 'Loading scheduler telemetry...',
-            testId: 'admin-queue-standard-scheduler-summary',
-            tiles: [
-              {
-                label: 'Registered Schedules',
-                value: inprocessSchedulesCount,
-                sublabel: 'Active APScheduler jobs',
-              },
-              {
-                label: 'Active Cron Runs',
-                value: inprocessActiveRunsCount,
-                sublabel: 'Currently executing in-process jobs',
-              },
-            ],
-          },
-        ].map((card) => (
-          <AnalyticsCard
-            key={card.key}
-            title={card.title}
-            description={card.description}
-            className="min-h-[204px]"
-            isLoading={isLoading}
-            isFetching={isStatusRefetching}
-            loadingMessage={card.loadingMessage}
-            error={error as AnalyticsCardError | null}
-          >
-            <div
-              className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]"
-              data-testid={card.testId}
-            >
-              {card.tiles.map((tile) => (
-                <SummaryStatTile key={tile.label} {...tile} />
-              ))}
-            </div>
-          </AnalyticsCard>
-        ))
-      ) : (
-        <>
-          <TrendSparklineCard
-            key="celery-queue-depth"
-            title="Total Queue Depth (1h)"
-            description="Aggregate sum of all Celery queue lengths."
-            label="Queue Depth"
-            latestValue={latestQueue}
-            points={queuePoints}
-            isLoading={isLoading}
-            trendsLoading={trendsLoading}
-            isTrendsRefetching={isTrendsRefetching}
-            trendsError={trendsError}
-          />
-          <TrendSparklineCard
-            key="celery-active-tasks"
-            title="Active Tasks (1h)"
-            description="Total actively executing Celery tasks across all workers."
-            label="Active Tasks"
-            latestValue={latestWorker}
-            points={workerPoints}
-            isLoading={isLoading}
-            trendsLoading={trendsLoading}
-            isTrendsRefetching={isTrendsRefetching}
-            trendsError={trendsError}
-          />
-        </>
-      )}
+      <TrendSparklineCard
+        key="celery-queue-depth"
+        title="Total Queue Depth (1h)"
+        description="Aggregate sum of all Celery queue lengths."
+        label="Queue Depth"
+        latestValue={latestQueue}
+        points={queuePoints}
+        isLoading={isLoading}
+        trendsLoading={trendsLoading}
+        isTrendsRefetching={isTrendsRefetching}
+        trendsError={trendsError}
+      />
+      <TrendSparklineCard
+        key="celery-active-tasks"
+        title="Active Tasks (1h)"
+        description="Total actively executing Celery tasks across all workers."
+        label="Active Tasks"
+        latestValue={latestWorker}
+        points={workerPoints}
+        isLoading={isLoading}
+        trendsLoading={trendsLoading}
+        isTrendsRefetching={isTrendsRefetching}
+        trendsError={trendsError}
+      />
     </div>
   )
 }
 
 export function QueueDepthsAndQuarantineSection({
-  isStandardMode,
   isLoading,
   isStatusRefetching,
   error,
-  standardQuarantinedItems,
   queues,
 }: {
-  isStandardMode: boolean
   isLoading: boolean
   isStatusRefetching: boolean
   error: unknown
-  standardQuarantinedItems: number
   queues: QueueDepth[]
 }) {
   return (
@@ -283,86 +192,53 @@ export function QueueDepthsAndQuarantineSection({
       data-testid="admin-queue-depths-reservation"
       className="min-h-[248px] min-w-0 overflow-hidden [contain-intrinsic-size:auto_248px] [content-visibility:visible]"
     >
-      {isStandardMode ? (
-        <AnalyticsCard
-          key="standard-quarantined-files"
-          title={`Quarantined Files & Corrupt Lines (${standardQuarantinedItems})`}
-          helpTitle="Quarantined Files & Corrupt Lines"
-          className="min-h-[248px]"
-          isLoading={isLoading}
-          isFetching={isStatusRefetching}
-          loadingMessage="Inspecting quarantine directory..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                Displays corrupt raw archive files and malformed JSON log lines isolated
-                on local disk during synchronous ingest.
-              </p>
-              <p>
-                Operators can inspect or download quarantined artifacts for forensic
-                debugging or purge them once resolved.
-              </p>
-            </div>
-          }
-        >
-          {standardQuarantinedItems === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No corrupt files or malformed log lines are currently quarantined on disk.
+      <AnalyticsCard
+        key="celery-queue-depths-card"
+        title="Queue Depths"
+        helpTitle="Queue Depths"
+        className="min-h-[248px]"
+        isLoading={isLoading}
+        isFetching={isStatusRefetching}
+        loadingMessage="Inspecting Celery task broker..."
+        error={error as AnalyticsCardError | null}
+        helpContent={
+          <div className="space-y-4 text-sm">
+            <p>
+              This table shows the current number of pending messages waiting to be
+              processed in each Celery queue.
             </p>
-          ) : (
-            <QuarantineSection />
-          )}
-        </AnalyticsCard>
-      ) : (
-        <AnalyticsCard
-          key="celery-queue-depths-card"
-          title="Queue Depths"
-          helpTitle="Queue Depths"
-          className="min-h-[248px]"
-          isLoading={isLoading}
-          isFetching={isStatusRefetching}
-          loadingMessage="Inspecting Celery task broker..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                This table shows the current number of pending messages waiting to be
-                processed in each Celery queue.
-              </p>
-              <ul className="list-disc pl-5 space-y-2">
-                <li>
-                  <strong>celery:</strong> The default fallback queue.
-                </li>
-                <li>
-                  <strong>q.ingest:</strong> Primary ingest queue for discovering and
-                  batch-processing log files.
-                </li>
-                <li>
-                  <strong>q.control:</strong> Control-plane queue for commits, compaction,
-                  and maintenance tasks.
-                </li>
-              </ul>
-            </div>
-          }
-        >
-          {queues.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No queues found or Celery mode is inactive.
-            </p>
-          ) : (
-            <div data-testid="admin-queue-depths-table">
-              <DataTableReadonly
-                columns={QUEUE_COLUMNS}
-                data={queues}
-                hideToolbar
-                showPagination={false}
-                tableCaption="Celery queue depths"
-              />
-            </div>
-          )}
-        </AnalyticsCard>
-      )}
+            <ul className="list-disc pl-5 space-y-2">
+              <li>
+                <strong>celery:</strong> The default fallback queue.
+              </li>
+              <li>
+                <strong>q.ingest:</strong> Primary ingest queue for discovering and
+                batch-processing log files.
+              </li>
+              <li>
+                <strong>q.control:</strong> Control-plane queue for maintenance and
+                administrative tasks.
+              </li>
+            </ul>
+          </div>
+        }
+      >
+        {queues.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No queues found or Celery broker is inactive.
+          </p>
+        ) : (
+          <div data-testid="admin-queue-depths-table">
+            <DataTableReadonly
+              columns={QUEUE_COLUMNS}
+              data={queues}
+              hideToolbar
+              showPagination={false}
+              tableCaption="Celery queue depths"
+            />
+          </div>
+        )}
+      </AnalyticsCard>
     </div>
   )
 }

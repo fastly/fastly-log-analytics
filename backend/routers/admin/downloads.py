@@ -33,7 +33,7 @@ def raw_tree_endpoint(
     source: dict[str, Any] = Depends(get_source),
     prefix: str = Query(default=""),
 ) -> TreeResponse:
-    from backend.core import duckdb as _db_mod
+    from backend.core import fos_client as _db_mod
 
     _db: Any = _db_mod
     cache_key = (str(source.get("name", "")), prefix)
@@ -52,7 +52,7 @@ def storage_tree_endpoint(
     source: dict[str, Any] = Depends(get_source),
     prefix: str = Query(default=""),
 ) -> TreeResponse:
-    from backend.core import duckdb as _db_mod
+    from backend.core import fos_client as _db_mod
 
     _db: Any = _db_mod
     cache_key = (str(source.get("name", "")), prefix)
@@ -72,7 +72,7 @@ def download_folder(
     prefix: str = Query(default=""),
     root: str = Query(default="raw"),
 ) -> StreamingResponse:
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     prefix = prefix.strip("/")
     base_prefix = source.get("prefix", "").strip().rstrip("/")
@@ -133,7 +133,7 @@ def download_file(
 
     from fastapi.responses import FileResponse
 
-    from backend.core.duckdb import _cache_dir, _get_fos_client
+    from backend.core.fos_client import _cache_dir, _get_fos_client
 
     if not key:
         raise HTTPException(status_code=400, detail={"error": "Missing key parameter"})
@@ -267,21 +267,13 @@ def download_all_files(
     source: dict[str, Any] = Depends(get_source),
     include: str = Query(default="all"),
 ) -> StreamingResponse:
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     src = source
     service_id = require_service_id(src.get("name"))
 
     def populate(zf: Any) -> None:
         if include == "local":
-            db_path = src.get("duckdb_path")
-            if not db_path:
-                from backend import config as svcconfig
-
-                db_path = svcconfig.duckdb_path(service_id)
-            if db_path and os.path.exists(db_path):
-                zf.write(db_path, os.path.basename(db_path))
-
             cache_dir = os.path.realpath(_db._cache_dir(src))
             walk_dir = os.path.realpath(
                 os.path.join(cache_dir, src.get("prefix", "").lstrip("/")) if src.get("prefix") else cache_dir

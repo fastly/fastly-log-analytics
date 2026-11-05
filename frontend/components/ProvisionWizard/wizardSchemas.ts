@@ -13,14 +13,10 @@ export const storageStepSchema = z.object({
   cdn_shield: z.string().min(1),
   enable_cron_sync: z.boolean(),
   delete_after: z.boolean(),
-  commit_interval_mins: z.number().int().min(1),
   log_retention_days: z.number().int().min(0),
   rum_retention_days: z.number().int().min(0),
   faro_version: z.string().nullable(),
   rum_custom_condition: z.string(),
-  cache_retention_days: z.number().int().min(0),
-  rollup_retention_months: z.number().int().min(0),
-  enable_cron_compact: z.boolean(),
 })
 
 export type StorageStepFormValues = z.infer<typeof storageStepSchema>

@@ -222,8 +222,7 @@ def test_worker_startup_rejects_an_unknown_profile_before_any_work(monkeypatch: 
 
 def test_health_snapshot_reports_the_configured_topology(client, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HIGH_SCALE_PROFILE", "portable-production")
-    with patch("backend.config.is_high_scale_mode", return_value=True):
-        body = client.get("/api/admin/health-snapshot").json()
+    body = client.get("/api/admin/health-snapshot").json()
 
     assert body["high_scale"]["topology"] == {
         "name": "portable-production",
@@ -239,8 +238,7 @@ def test_health_snapshot_degrades_to_no_topology_for_an_unknown_profile(
     client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HIGH_SCALE_PROFILE", "bogus")
-    with patch("backend.config.is_high_scale_mode", return_value=True):
-        resp = client.get("/api/admin/health-snapshot")
+    resp = client.get("/api/admin/health-snapshot")
 
     assert resp.status_code == 200
     assert resp.json()["high_scale"]["topology"] is None

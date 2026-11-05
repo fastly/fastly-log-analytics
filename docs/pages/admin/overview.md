@@ -10,10 +10,10 @@ Admin only. Analysts are blocked at the API (`/api/admin/`, `/api/provision/` ar
 
 ## UI
 
-- Header links to the other admin pages: Share Dashboard, Session Scoring, Live Queries, Trends, Queue, RUM, and ClickHouse (shown only when a service is high-scale). Hovering a link prefetches that page's data.
+- Header links to the other admin pages: Share Dashboard, Session Scoring, Live Queries, Trends, Queue, RUM, and ClickHouse. Hovering a link prefetches that page's data.
 - Operations cards: Live Queries, Ingest Gap (log accounting), Notable Slow Queries, Workers & Queues. Each links to its detail page and polls about every 10 seconds; the first paint is seeded from the bootstrap payload.
-- Service Management table: name, ID, FOS bucket, local cache size (with ZIP download), cron sync status and settings, and per-service actions (credentials rotation, NGWAF workspace, delete data, teardown). Add Service opens the provisioning wizard (see [`frontend/components/ProvisionWizard/`](../../../frontend/components/ProvisionWizard/)); Refresh Status refetches services and health.
-- System Health card (process, host and pool vitals).
+- Service Management table: name, ID, FOS bucket, cron sync status and settings, and per-service actions (credentials rotation, NGWAF workspace, delete data, teardown). Add Service opens the provisioning wizard (`token → service → storage → ngwaf → fields → execute`; see [`frontend/components/ProvisionWizard/`](../../../frontend/components/ProvisionWizard/)); Refresh Status refetches services and health.
+- System Health card (process, host, ClickHouse, and PostgreSQL vitals).
 - Quarantine section for unparseable log lines.
 - Global settings: debug-response visibility, PoP location refresh, and Pricing & Retention Defaults (the rates the [usage page](../usage-and-cost.md) uses).
 - An empty install (no service yet) still renders; the global endpoints work without a service.
@@ -24,16 +24,16 @@ Admin routes are in [`backend/routers/admin/`](../../../backend/routers/admin/) 
 
 | Area | Endpoints |
 |---|---|
-| Sync and storage state | `GET /api/admin/sync-status` and `GET /api/sync-status` (`sync_status.py`); `GET /api/admin/compaction-status[/{service_id}]` |
-| Health | `GET /api/admin/health-snapshot` (aliases `/system-metrics`, `/health`), `GET /api/admin/metric-history/batch`, `GET /api/admin/duckdb/status`, `POST /api/admin/duckdb/recycle` (`health.py`) |
+| Sync and storage state | `GET /api/admin/sync-status` and `GET /api/sync-status` (`sync_status.py`) |
+| Health | `GET /api/admin/health-snapshot` (aliases `/system-metrics`, `/health`), `GET /api/admin/metric-history/batch` (`health.py`) |
 | Log accounting | `GET /api/admin/log-accounting[/{service_id}]`: compares Fastly's per-bucket log-emission counter with ingested rows and reports a sustained-loss alert after 2 or more consecutive completed buckets at or above 5% deficit |
 | Operations cards | `GET /api/admin/queries/summary`, `GET /api/admin/slow-queries/count`, `GET /api/admin/celery/status` |
-| Manual jobs (202 + SSE progress) | `POST /api/admin/sync/{service_id}`, `/commit/{service_id}`, `/compact/{service_id}`, `/optimize/{service_id}`, `/full-sweep/{service_id}`, `/gap-heal/{service_id}`, `/ledger/sweep/{service_id}`, `/rum/sync/{service_id}`, `/expire-snapshots/{service_id}`, `/metadata-cleanup[/{service_id}]` |
+| Manual jobs (202 + SSE progress) | `POST /api/admin/sync/{service_id}`, `/full-sweep/{service_id}`, `/gap-heal/{service_id}`, `/ledger/sweep/{service_id}`, `/rum/discovery/{service_id}`, `/metadata-cleanup[/{service_id}]` |
 | Quarantine | `GET /api/admin/quarantine`, `/quarantine/summary`, `/quarantine/download/{item_id}`, `POST /api/admin/quarantine/purge` (`quarantine.py`) |
 | Services | `GET /api/services`, `PATCH /api/services/{service_id}/credentials`, `POST /api/services/{service_id}/cron-settings`, `/api/provision/*` (validate, execute, teardown, ngwaf-workspaces) |
 | Global settings | `GET`/`PATCH /api/admin/debug-settings`, `GET`/`PATCH /api/admin/usage-logging`, `GET /api/admin/pop-locations`, `POST /api/admin/pop-locations/refresh` |
 
-Operational metadata is PostgreSQL only ([ADR-22](../../adr/22-postgres-only-metadata.md)). Job definitions and schedules are documented in [docs/cron](../../cron/README.md).
+Operational metadata is PostgreSQL 16 only ([ADR-22](../../adr/22-postgres-only-metadata.md)). Job definitions and schedules are documented in [docs/cron](../../cron/README.md).
 
 ## Tests
 

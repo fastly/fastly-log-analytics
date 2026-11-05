@@ -10,7 +10,6 @@ from functools import wraps
 from logging import Logger
 from typing import NoReturn
 
-import duckdb
 from fastapi import HTTPException, Request
 
 from backend.utils.pii_masking import (
@@ -103,15 +102,11 @@ def raise_internal(
 
 
 def _caused_by_out_of_memory(e: BaseException) -> bool:
-    """True when ``e`` or anything in its ``__cause__`` / ``__context__`` chain is a DuckDB out-of-memory error.
-
-    Repository code re-raises engine failures as domain errors (for example the exact-window path raises
-    ``HistoricalCoverageUnavailable ... from exc``), so the memory failure is often not the outermost exception.
-    """
+    """True when ``e`` or anything in its ``__cause__`` / ``__context__`` chain is an out-of-memory error."""
     seen: set[int] = set()
     current: BaseException | None = e
     while current is not None and id(current) not in seen:
-        if isinstance(current, duckdb.OutOfMemoryException):
+        if isinstance(current, MemoryError) or type(current).__name__ == "OutOfMemoryException":
             return True
         seen.add(id(current))
         current = current.__cause__ or current.__context__

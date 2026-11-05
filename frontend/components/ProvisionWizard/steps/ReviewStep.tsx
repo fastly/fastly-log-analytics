@@ -41,16 +41,8 @@ export function ExecuteStep({ s }: { s: WizardState }) {
       enabled: config.enable_cron_sync,
     },
     {
-      label: `Commit to DuckLake every ${config.commit_interval_mins}m`,
-      enabled: config.enable_cron_sync,
-    },
-    {
       label: "Auto-delete Raw Logs",
       enabled: config.delete_after && config.enable_cron_sync,
-    },
-    {
-      label: "Daily DuckLake Optimization",
-      enabled: config.enable_cron_compact && config.enable_cron_sync,
     },
   ]
 

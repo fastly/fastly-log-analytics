@@ -14,7 +14,7 @@ from backend.core import metadata
 from backend.core.request_context import RequestContext, build_request_context, require_admin
 from backend.core.request_telemetry import HighScaleSections
 from backend.core.share_db import mask_ip
-from backend.high_scale._common import KeysetCursor, raw_query_producer
+from backend.high_scale._common import raw_query_producer
 from backend.high_scale.aggregate_query import (
     DEFAULT_AGGREGATE_DIMENSIONS,
     AggregateRequest,
@@ -64,8 +64,6 @@ from backend.utils.auth import mask_ips_for
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.router_utils import make_error, query_errors
-
-from .compaction import fetch_request_facts_emulation
 
 high_scale_router = APIRouter(prefix="/api/high-scale", tags=["high-scale"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -194,139 +192,11 @@ def cancel_export(
     return _export_response(service_id, job, cancelled=cancelled)
 
 
-def _normalize_ts_iso(val: object) -> str:
-    if isinstance(val, datetime):
-        from backend.utils.date_utils import iso_z
-
-        return iso_z(val)
-    if val is None:
-        return ""
-    s = str(val)
-    if s.endswith("+00:00"):
-        return s[:-6] + "Z"
-    return s
-
-
-def _emulate_standard_request_facts(
-    ctx: RequestContext,
-    req: HighScaleRequestFactRequest,
-    *,
-    start: datetime,
-    end: datetime,
-) -> HighScaleRequestFactResponse:
-    import os
-    import uuid
-    from datetime import UTC
-
-    from backend.core.duckdb import _safe_table_name
-    from backend.core.storage import execute_with_stale_view_retry
-
-    secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET", "").strip() or "standard-emulation-cursor-secret").encode("utf-8")
-    decoded = KeysetCursor.decode(req.cursor, secret) if req.cursor else None
-    if decoded and (decoded.service_id != ctx.service_id or decoded.domain != "request"):
-        raise ValueError("cursor does not belong to this service and domain")
-
-    candidate_tables = [_safe_table_name(str(ctx.source.get("name") or "default"))]
-    if "logs" not in candidate_tables:
-        candidate_tables.append("logs")
-
-    def _run_emulation(con: Any) -> Any:
-        return fetch_request_facts_emulation(
-            con,
-            candidate_tables,
-            req,
-            start=start,
-            end=end,
-            cursor_ts=decoded.timestamp if decoded is not None else None,
-            service_id=ctx.service_id,
-        )
-
-    raw_rows, cov_start, cov_end = execute_with_stale_view_retry(ctx.con, ctx.source, _run_emulation)
-
-    page_tuples = raw_rows[: req.limit]
-    rows: list[dict[str, object]] = []
-    mask = mask_ips_for(ctx.analyst_session)
-
-    for idx, tup in enumerate(page_tuples):
-        ts_val, country_val, ip_val, url_val, status_val, pop_val, host_val = tup
-        ts_iso = _normalize_ts_iso(ts_val)
-        ev_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{ctx.service_id}|{ts_iso}|{idx}|{url_val or ''}"))
-        ip_str = str(ip_val or "")
-        if mask and ip_str:
-            ip_str = mask_ip(ip_str)
-        status_str = str(status_val or "")
-        status_out: int | str = int(status_str) if status_str.isdigit() else status_str
-        pop_str = str(pop_val or "")
-        host_str = str(host_val or "")
-        rows.append(
-            {
-                "event_id": ev_id,
-                "timestamp": ts_iso,
-                "service_id": ctx.service_id,
-                "source_object_key": "ducklake://local",
-                "source_object_version": "v1",
-                "line_ordinal": idx,
-                "batch_id": "duckdb-emulation",
-                "country": str(country_val or ""),
-                "client_ip": ip_str,
-                "url": str(url_val or ""),
-                "status": status_out,
-                "pop": pop_str,
-                "host": host_str,
-                "custom_fields": {
-                    "status": status_str,
-                    "pop": pop_str,
-                    "host": host_str,
-                },
-                "cmcd": {},
-            }
-        )
-
-    next_cursor: str | None = None
-    if len(raw_rows) > req.limit and rows:
-        last_row = rows[-1]
-        last_ts = parse_iso_utc(str(last_row["timestamp"])) or end
-        next_cursor = KeysetCursor(last_ts, str(last_row["event_id"]), ctx.service_id, "request").encode(secret)
-
-    cov_start_dt = parse_iso_utc(_normalize_ts_iso(cov_start)) if cov_start is not None else start
-    cov_end_dt = parse_iso_utc(_normalize_ts_iso(cov_end)) if cov_end is not None else end
-    now_utc = datetime.now(UTC)
-    lag = max(0.0, (now_utc - cov_end_dt).total_seconds()) if cov_end_dt else 0.0
-    last_ev = str(rows[-1]["event_id"]) if rows else None
-
-    resp: HighScaleRequestFactResponse = HighScaleRequestFactResponse.with_telemetry(
-        rows=rows,
-        next_cursor=next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status="complete",
-            exact=True,
-            coverage=1.0,
-            freshness_lag_seconds=round(lag, 2),
-            watermark=ServingWatermarkResponse(
-                service_id=ctx.service_id,
-                domain="request",
-                owner_epoch=1,
-                coverage_start=cov_start_dt,
-                coverage_end=cov_end_dt,
-                last_accepted_cursor=next_cursor,
-                last_archived_event_id=last_ev,
-                last_visible_event_id=last_ev,
-                exact=True,
-            ),
-            approximation_error=None,
-            error=None,
-            mode="duckdb_emulation",
-        ),
-    )
-    return resp
-
-
 def _execute_request_facts_query(
     ctx: RequestContext,
     req: HighScaleRequestFactRequest,
     registry: HighScaleServiceRegistryProtocol,
     *,
-    allow_standard_emulation: bool,
     default_window_if_missing: bool,
 ) -> HighScaleRequestFactResponse:
     from datetime import UTC, timedelta
@@ -345,12 +215,12 @@ def _execute_request_facts_query(
     start, end = _clamp_and_parse_window(ctx, req_start, req_end)
 
     service = registry.resolve(ctx.service_id)
-    if service is None and not (allow_standard_emulation or req.emulate_standard):
+    if service is None:
         raise HTTPException(
             status_code=404,
             detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
         )
-    if service is not None and service.service_id != ctx.service_id:
+    if service.service_id != ctx.service_id:
         raise HTTPException(
             status_code=409,
             detail=make_error(
@@ -375,18 +245,12 @@ def _execute_request_facts_query(
         str(req.country or "").strip(),
         str(req.batch_id or "").strip(),
         bool(mask_ips_for(ctx.analyst_session)),
-        "clickhouse" if service is not None else "duckdb_emulation",
+        "clickhouse",
     )
     if use_cache:
         cached_resp = _REQUEST_FACTS_CACHE.get(cache_key)
         if cached_resp is not None:
             return cached_resp.model_copy(update={"is_cached": True})
-
-    if service is None:
-        emul_resp = _emulate_standard_request_facts(ctx, req, start=start, end=end)
-        if use_cache:
-            _REQUEST_FACTS_CACHE[cache_key] = emul_resp
-        return emul_resp
 
     def _compute_ch() -> HighScaleRequestFactResponse:
         if use_cache and (cached_inner := _REQUEST_FACTS_CACHE.get(cache_key)) is not None:
@@ -449,7 +313,6 @@ def get_request_facts_root(
     pop: str | None = None,
     country: str | None = None,
     batch_id: str | None = None,
-    emulate_standard: bool = True,
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ) -> HighScaleRequestFactResponse:
@@ -463,13 +326,11 @@ def get_request_facts_root(
         pop=pop,
         country=country,
         batch_id=batch_id,
-        emulate_standard=emulate_standard,
     )
     return _execute_request_facts_query(
         ctx,
         req,
         registry,
-        allow_standard_emulation=emulate_standard,
         default_window_if_missing=True,
     )
 
@@ -489,7 +350,6 @@ def post_request_facts_root(
         ctx,
         req,
         registry,
-        allow_standard_emulation=True,
         default_window_if_missing=True,
     )
 
@@ -512,7 +372,6 @@ def request_facts(
         ctx,
         req,
         registry,
-        allow_standard_emulation=req.emulate_standard,
         default_window_if_missing=False,
     )
 

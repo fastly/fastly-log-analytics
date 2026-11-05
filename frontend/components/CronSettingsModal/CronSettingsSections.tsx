@@ -18,16 +18,6 @@ export const SYNC_INTERVAL_OPTIONS = [
   { value: '360', label: 'Every 6 hours' },
 ]
 
-export const COMMIT_INTERVAL_OPTIONS = [
-  { value: '1', label: 'Every 1 minute' },
-  { value: '2', label: 'Every 2 minutes' },
-  { value: '5', label: 'Every 5 minutes' },
-  { value: '10', label: 'Every 10 minutes' },
-  { value: '15', label: 'Every 15 minutes' },
-  { value: '30', label: 'Every 30 minutes' },
-  { value: '60', label: 'Every 1 hour' },
-]
-
 export const NGWAF_INTERVAL_OPTIONS = [
   { value: '60', label: 'Every 1 hour' },
   { value: '180', label: 'Every 3 hours' },
@@ -70,18 +60,11 @@ interface LogSyncSectionProps {
   setDeleteAfter: (v: boolean) => void
   dataRetention: string
   setDataRetention: (v: string) => void
-  cacheRetention: string
-  setCacheRetention: (v: string) => void
-  rollupRetention: string
-  setRollupRetention: (v: string) => void
-  commitInterval: string
-  setCommitInterval: (v: string) => void
   syncLogEnabled: boolean
   setSyncLogEnabled: (v: boolean) => void
   syncRetention: string
   setSyncRetention: (v: string) => void
   syncFreqLabel: string
-  adminSyncSeconds: number
   rumRetention: string
   setRumRetention: (v: string) => void
   rumEnabled: boolean
@@ -96,12 +79,10 @@ interface LogSyncSectionProps {
 
 export function LogSyncSection({
   syncEnabled, setSyncEnabled, pollingMode, setPollingMode, deleteAfter, setDeleteAfter,
-  dataRetention, setDataRetention, cacheRetention, setCacheRetention, rollupRetention, setRollupRetention,
-  commitInterval, setCommitInterval, syncLogEnabled, setSyncLogEnabled, syncRetention, setSyncRetention,
-  syncFreqLabel, adminSyncSeconds, rumRetention, setRumRetention,
+  dataRetention, setDataRetention, syncLogEnabled, setSyncLogEnabled, syncRetention, setSyncRetention,
+  syncFreqLabel, rumRetention, setRumRetention,
   rumEnabled, rumSyncEnabled, setRumSyncEnabled, rumLogPeriod, setRumLogPeriod, rumDeleteAfter, setRumDeleteAfter, serviceId,
 }: LogSyncSectionProps) {
-  const minCommitMins = Math.max(1, Math.ceil(adminSyncSeconds / 60))
   const rumPeriodInt = parseInt(rumLogPeriod)
   const derivedRumSecs = rumPeriodInt >= 60 ? Math.max(5, Math.floor(rumPeriodInt / 2)) : Math.max(5, rumPeriodInt)
 
@@ -116,7 +97,7 @@ export function LogSyncSection({
         <div className="space-y-0.5 pr-4">
           <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-sync">Enable Cron Sync</Label>
           <p className="text-[10px] text-muted-foreground">
-            Polls FOS for new log files {syncFreqLabel} and ingests them into the local buffer.
+            Polls FOS for new log files {syncFreqLabel} and ingests them into ClickHouse.
           </p>
         </div>
         <Switch id="enable-sync" checked={syncEnabled} onCheckedChange={setSyncEnabled} />
@@ -140,18 +121,18 @@ export function LogSyncSection({
         <div className="flex items-center justify-between">
           <div className="space-y-0.5 pr-4">
             <Label className="text-[11px] font-semibold cursor-pointer" htmlFor="auto-delete">Auto-delete Raw .zst Logs</Label>
-            <p className="text-[10px] text-muted-foreground leading-tight">Saves FOS storage by removing raw logs once they are ingested into DuckLake.</p>
+            <p className="text-[10px] text-muted-foreground leading-tight">Saves FOS storage by removing raw logs once they are archived to Parquet and ingested into ClickHouse.</p>
           </div>
           <Switch id="auto-delete" checked={deleteAfter} onCheckedChange={setDeleteAfter} />
         </div>
 
-        <div className={`grid gap-4 pb-2 ${rumEnabled ? 'grid-cols-3' : 'grid-cols-2'}`}>
+        <div className={`grid gap-4 pb-2 ${rumEnabled ? 'grid-cols-2' : 'grid-cols-1'}`}>
           <div className="grid gap-1.5">
             <Label htmlFor="data-retention" className="text-[11px] font-medium">
               {rumEnabled ? 'Request Log Retention' : 'Cloud Data Retention'}
             </Label>
             <p className="text-[10px] text-muted-foreground leading-tight h-6">
-              Delete CDN request log data from DuckLake older than this.
+              Delete CDN request log data from ClickHouse and FOS Archive Parquet older than this.
             </p>
             <RetentionSelect id="data-retention" value={dataRetention} onValueChange={setDataRetention} />
           </div>
@@ -160,67 +141,21 @@ export function LogSyncSection({
             <div className="grid gap-1.5">
               <Label htmlFor="rum-retention" className="text-[11px] font-medium">RUM Data Retention</Label>
               <p className="text-[10px] text-muted-foreground leading-tight h-6">
-                Delete RUM beacon telemetry from DuckLake older than this.
+                Delete RUM beacon telemetry from ClickHouse older than this.
               </p>
               <RetentionSelect id="rum-retention" value={rumRetention} onValueChange={setRumRetention} />
             </div>
           )}
-
-          <div className="grid gap-1.5">
-            <Label htmlFor="cache-retention" className="text-[11px] font-medium">Local Cache Retention</Label>
-            <p className="text-[10px] text-muted-foreground leading-tight h-6">
-              Delete local cache files older than this to save disk space.
-            </p>
-            <RetentionSelect id="cache-retention" value={cacheRetention} onValueChange={setCacheRetention} />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="rollup-retention" className="text-[11px] font-medium">Rollup Retention</Label>
-            <p className="text-[10px] text-muted-foreground leading-tight h-6">
-              Keep local monthly rollup files for this many months.
-            </p>
-            <Select value={rollupRetention} onValueChange={v => v && setRollupRetention(v)}>
-              <SelectTrigger id="rollup-retention" className="h-7 text-[11px]">
-                <SelectValue>{(val) => val + (val === '1' ? ' month' : ' months')}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {[1, 2, 3, 6, 12, 24, 36, 60, 120].map(v => (
-                  <SelectItem key={v} value={String(v)} className="text-[11px]">{v} month{v === 1 ? '' : 's'}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <div className="grid gap-1.5">
-            <div className="flex items-center gap-1.5">
-              <Label htmlFor="commit-interval" className="text-[11px] font-semibold">Cloud Commit Interval</Label>
-            </div>
-            <p className="text-[10px] text-muted-foreground leading-tight">
-              How often the local buffer is committed to DuckLake and pushed to cloud storage. Cannot be shorter than sync frequency ({syncFreqLabel}).
-            </p>
-            <Select
-              value={commitInterval}
-              onValueChange={v => { if (v && parseInt(v) >= minCommitMins) setCommitInterval(v) }}
-            >
-              <SelectTrigger id="commit-interval" className="h-7 text-[11px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {COMMIT_INTERVAL_OPTIONS.filter(o => parseInt(o.value) >= minCommitMins).map(o => (
-                  <SelectItem key={o.value} value={o.value} className="text-[11px]">{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label htmlFor="sync-log-enabled" className="text-[11px] font-semibold">Sync Logs</Label>
-            <p className="text-[10px] text-muted-foreground leading-tight">
-              Keep historical records of execution statuses.
-            </p>
-            <div className="flex items-center gap-2 pt-2">
-              <Switch id="sync-log-enabled" checked={syncLogEnabled} onCheckedChange={setSyncLogEnabled} />
-              <span className="text-[11px] text-muted-foreground">{syncLogEnabled ? 'Enabled' : 'Disabled'}</span>
-            </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="sync-log-enabled" className="text-[11px] font-semibold">Sync Logs</Label>
+          <p className="text-[10px] text-muted-foreground leading-tight">
+            Keep historical records of execution statuses.
+          </p>
+          <div className="flex items-center gap-2 pt-2">
+            <Switch id="sync-log-enabled" checked={syncLogEnabled} onCheckedChange={setSyncLogEnabled} />
+            <span className="text-[11px] text-muted-foreground">{syncLogEnabled ? 'Enabled' : 'Disabled'}</span>
           </div>
         </div>
 
@@ -240,7 +175,7 @@ export function LogSyncSection({
                 <div className="space-y-0.5 pr-4">
                   <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-rum-sync">Enable RUM Beacon Sync</Label>
                   <p className="text-[10px] text-muted-foreground">
-                    Polls FOS for new RUM beacon logs and ingests them into DuckLake.
+                    Polls FOS for new RUM beacon logs and ingests them into ClickHouse.
                   </p>
                 </div>
                 <Switch id="enable-rum-sync" checked={rumSyncEnabled ?? false} onCheckedChange={setRumSyncEnabled} />
@@ -348,55 +283,6 @@ export function NgwafSection({
           retentionId="ngwaf-retention"
           retention={ngwafRetention}
           setRetention={setNgwafRetention}
-        />
-      </div>
-    </div>
-  )
-}
-
-interface StorageOptimizationSectionProps {
-  compactEnabled: boolean
-  setCompactEnabled: (v: boolean) => void
-  compactLogEnabled: boolean
-  setCompactLogEnabled: (v: boolean) => void
-  compactRetention: string
-  setCompactRetention: (v: string) => void
-}
-
-export function StorageOptimizationSection({
-  compactEnabled,
-  setCompactEnabled,
-  compactLogEnabled,
-  setCompactLogEnabled,
-  compactRetention,
-  setCompactRetention,
-}: StorageOptimizationSectionProps) {
-  return (
-    <div className="space-y-3">
-      <div>
-        <h3 className="text-sm font-bold uppercase tracking-widest text-foreground/80">DuckLake Optimization</h3>
-        <p className="text-[10px] text-muted-foreground">Nightly FOS-side housekeeping to keep cloud storage costs down. (Dashboard query speed is handled separately by always-on local compaction.)</p>
-      </div>
-
-      <div className="flex items-center justify-between p-3 border rounded-md bg-muted/10">
-        <div className="space-y-0.5 pr-4">
-          <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-compact">Enable Daily Optimization</Label>
-          <p className="text-[10px] text-muted-foreground leading-tight">
-            Rewrites many small DuckLake snapshot files into larger, optimized Parquet files at 04:00 UTC.
-            Strongly recommended when using frequent commit intervals.
-          </p>
-        </div>
-        <Switch id="enable-compact" checked={compactEnabled} onCheckedChange={setCompactEnabled} />
-      </div>
-
-      <div className={`space-y-4 pl-4 border-l-2 transition-opacity ${compactEnabled ? 'opacity-100 border-primary' : 'opacity-40 border-muted pointer-events-none'}`}>
-        <CronLogRetentionControls
-          switchId="compact-log-enabled"
-          logEnabled={compactLogEnabled}
-          setLogEnabled={setCompactLogEnabled}
-          retentionId="compact-retention"
-          retention={compactRetention}
-          setRetention={setCompactRetention}
         />
       </div>
     </div>

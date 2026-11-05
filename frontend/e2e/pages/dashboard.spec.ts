@@ -459,12 +459,12 @@ for (const route of CLEAN_ROUTES) {
         await request.fulfill({ json: {
           last_seq: 2,
           active: [{
-            query_id: 1, db_type: 'DuckDB', sql_preview: 'SELECT 1', sql_len: 8,
+            query_id: 1, db_type: 'ClickHouse', sql_preview: 'SELECT 1', sql_len: 8,
             service_id: null, started_at_utc: now - 1, duration_ms: 24,
             cancellable: true, cancelled_at: now, attribution,
           }],
           completed: [{
-            query_id: 2, db_type: 'DuckDB', sql_preview: 'SELECT 2', sql_len: 8,
+            query_id: 2, db_type: 'ClickHouse', sql_preview: 'SELECT 2', sql_len: 8,
             service_id: null, started_at_utc: now - 1, ended_at_utc: now,
             duration_ms: 24, outcome: 'ok', error_type: null, error_message: null,
             peak_memory_mb: null, attribution,
@@ -706,13 +706,13 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
         const now = new Date(), oneHourAgo = new Date(now.getTime() - 3600 * 1000)
         const [getRes, postRes] = await Promise.all([
           page.request.get(`/api/high-scale/request-facts?service_id=${encodeURIComponent(serviceId!)}&start_time=${encodeURIComponent(oneHourAgo.toISOString())}&end_time=${encodeURIComponent(now.toISOString())}&limit=10`),
-          page.request.post(`/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { data: { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true } }),
+          page.request.post(`/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { data: { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10 } }),
         ])
         expect(getRes.ok() && postRes.ok()).toBeTruthy()
         const [getData, postData] = (await Promise.all([getRes.json(), postRes.json()])) as [RequestFactsDebugResponse, RequestFactsDebugResponse]
         expect(Array.isArray(getData.rows) && Array.isArray(postData.rows)).toBeTruthy()
         expect(['complete', 'partial', 'unavailable']).toContain(getData.metadata?.status)
-        expect(['clickhouse', 'duckdb_emulation']).toContain(getData.metadata?.mode)
+        expect(getData.metadata?.mode).toBe('clickhouse')
         expect(postData.metadata?.watermark?.service_id).toBe(serviceId)
       },
     },
@@ -724,7 +724,7 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
     await gotoHeading(page, '/high-scale/request-facts', 'High-scale request facts')
     await expect(page.getByTestId('high-scale-facts-card')).toBeVisible({ timeout: 20_000 })
     for (const id of ['high-scale-metadata', 'high-scale-mode-badge', 'high-scale-filters', 'high-scale-table-wrapper']) await expect(page.getByTestId(id)).toBeVisible({ timeout: 15_000 })
-    expect(await page.getByTestId('high-scale-mode-badge').innerText()).toMatch(/DuckDB Standard Mode Emulation|ClickHouse Distributed Cluster/)
+    expect(await page.getByTestId('high-scale-mode-badge').innerText()).toMatch(/ClickHouse Distributed Cluster/)
     await expect(page.locator('[role="alert"].border-destructive')).toHaveCount(0)
     await page.getByTestId('filter-status').fill('200')
     await page.getByTestId('filter-pop').fill('IAD')
@@ -739,6 +739,6 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
     const serviceId = await getFirstServiceId(page)
     expect(serviceId).toBeTruthy()
     const now = new Date(), oneHourAgo = new Date(now.getTime() - 3600 * 1000)
-    await assertPostTelemetry(page, `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true }, { 'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}` })
+    await assertPostTelemetry(page, `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10 }, { 'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}` })
   })
 })

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import logging
+import time
 import urllib.parse
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.config import get_fastly_api_key
+from backend.core.clickhouse import get_clickhouse_client
 from backend.core.fastly.client import FASTLY_LOG_FIELDS, api_key_or_mock
+from backend.core.fos_client import _get_fos_client
 from backend.core.request_context import get_source
+from backend.high_scale._common import visible_publication_fence_sql
+from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.admin import (
     CurrentStorageResponse,
     PrefillRatesResponse,
@@ -24,11 +30,30 @@ from backend.models.admin import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import assets as repo
-from backend.repositories._base import SectionTimer
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import window_to_epoch
 from backend.utils.router_utils import query_errors, raise_internal
+
+_T = TypeVar("_T")
+
+
+class SectionTimer:
+    """Lightweight wall-clock section timer for usage diagnostics."""
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+
+    def mark(self, section: str, started_at: float) -> None:
+        self.entries.append({"section": section, "time_ms": round((time.perf_counter() - started_at) * 1000.0, 2)})
+
+    def call(self, section: str, fn: Callable[[], _T]) -> _T:
+        t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            self.mark(section, t0)
+
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +108,7 @@ def _compute_prefill_rates(
         "delete_after": True,
         "log_retention_days": 30,
         "rum_retention_days": 30,
-        "deployment_mode": "standard",
+        "deployment_mode": "high_scale",
         "class_a_rate_per_1k": float(global_rates.get("class_a_rate_per_1k", 0.005)),
         "class_b_rate_per_10k": float(global_rates.get("class_b_rate_per_10k", 0.01)),
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
@@ -106,7 +131,7 @@ def _compute_prefill_rates(
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cron_sync.get("data_retention_days", 30))
             result["rum_retention_days"] = int(cron_sync.get("rum_retention_days", result["log_retention_days"]))
-            result["deployment_mode"] = "high_scale" if svcconfig.is_high_scale_mode(source) else "standard"
+            result["deployment_mode"] = "high_scale"
             try:
                 from backend.core.log_fields import estimate_log_line_bytes
 
@@ -301,17 +326,25 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
         result["edge_ratio"] = cached_edge_ratio
     else:
         try:
-            from backend.core.duckdb import get_connection
 
-            def _edge_ratio_blocking() -> tuple[Any, ...]:
-                con = get_connection(source=source, max_wait=5, read_only=True, skip_view_update=True)
-                try:
-                    return repo.get_edge_ratio(con, source)
-                finally:
-                    con.close()
+            def _edge_ratio_blocking() -> float | None:
+                service_id = str(source.get("service_id") or source["name"])
+                hs_service = get_high_scale_service_registry().resolve(service_id)
+                client = hs_service.client if hs_service is not None else get_clickhouse_client()
+                if client is None:
+                    return None
+                fence = visible_publication_fence_sql("request", client=client, service_id=service_id)
+                rows = client.execute(
+                    f"SELECT countIf(lower(custom_fields['edge']) IN ('true', '1')) * 100.0 / nullIf(count(), 0) AS edge_ratio "
+                    f"FROM request_facts WHERE service_id={{service_id:String}} AND {fence}",
+                    {"service_id": service_id},
+                )
+                if rows and rows[0].get("edge_ratio") is not None:
+                    return round(float(rows[0]["edge_ratio"]), 2)
+                return None
 
             _t = _time.perf_counter()
-            edge_ratio, debug_queries = await asyncio.to_thread(_edge_ratio_blocking)
+            edge_ratio = await asyncio.to_thread(_edge_ratio_blocking)
             timer.mark("edge_ratio_query", _t)
             if edge_ratio is not None:
                 result["edge_ratio"] = edge_ratio
@@ -324,6 +357,32 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
     return resp
 
 
+def _get_storage_stats(src: dict[str, Any], start_str: str, end_str: str) -> dict[str, Any]:
+    repo_fn = getattr(repo, "get_storage_stats", None)
+    if callable(repo_fn):
+        return repo_fn(None, src, start_str, end_str)
+    from backend.core import metadata as metadata_db
+
+    total_files, total_bytes = metadata_db.get_storage_stats_window(src["name"], start_str, end_str)
+    return {
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "_debug_queries": [],
+        "_debug_calls": [],
+    }
+
+
+def _get_log_activity(src: dict[str, Any], start_str: str, end_str: str, by: str) -> dict[str, Any]:
+    repo_fn = getattr(repo, "get_log_activity", None)
+    if callable(repo_fn):
+        return repo_fn(src, start_str, end_str, by)
+    from backend.core import metadata as metadata_db
+
+    service_id = str(src.get("name") or src.get("service_id") or "")
+    out = metadata_db.get_log_activity(service_id, start_str, end_str, by)
+    return {**out, "_debug_queries": [], "_debug_calls": []}
+
+
 @usage_router.get("/current-storage", response_model=CurrentStorageResponse)
 @query_errors()
 def usage_current_storage(
@@ -331,8 +390,6 @@ def usage_current_storage(
     end: str = Query(default=""),
     source: dict[str, Any] = Depends(get_source),
 ) -> CurrentStorageResponse:
-    from backend.core.duckdb import _get_fos_client
-
     src = source
     if not src.get("bucket"):
         raise HTTPException(status_code=400, detail={"error": "Fastly Object Storage bucket not configured."})
@@ -354,7 +411,7 @@ def usage_current_storage(
         query_days = MIN_BILLING_DAYS if delete_after else retention_days
         retention_start_str = (now - timedelta(days=query_days)).strftime("%Y-%m-%d %H:%M:%S")
 
-        stats = repo.get_storage_stats(None, src, retention_start_str, retention_end_str)
+        stats = _get_storage_stats(src, retention_start_str, retention_end_str)
 
         total_files = stats["total_files"]
         total_bytes = stats["total_bytes"]
@@ -375,31 +432,6 @@ def usage_current_storage(
                 storage_bytes = int(cached_ib)
                 storage_files = int(cached_if)
                 storage_info_success = True
-            else:
-                try:
-                    from backend.core import storage as db_storage
-
-                    storage_info = db_storage.get_table_info(src)
-                    if not storage_info.get("error"):
-                        storage_bytes = storage_info.get("size_bytes", 0)
-                        storage_files = storage_info.get("data_files", 0)
-                        storage_info_success = True
-                except Exception:
-                    logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
-
-            if not storage_info_success:
-                try:
-                    s3 = _get_fos_client(src)
-                    bucket = src["bucket"]
-                    prefix = f"{src.get('prefix', '').strip().rstrip('/')}/" if src.get("prefix") else ""
-                    storage_prefix = f"{prefix}ducklake/"
-                    paginator = s3.get_paginator("list_objects_v2")
-                    for page in paginator.paginate(Bucket=bucket, Prefix=storage_prefix.rstrip("/")):
-                        for obj in page.get("Contents", []):
-                            storage_bytes += obj.get("Size", 0)
-                            storage_files += 1
-                except Exception as e:
-                    logging.error(f"FOS Scan failed: {e}")
 
             quarantine_bytes = 0
             try:
@@ -440,18 +472,15 @@ def usage_current_storage(
                 rum_bytes,
             )
 
-        # High-Scale also keeps one archive Parquet artifact (plus a manifest and a commit marker) per page; the
-        # worker deletes them past the retention window, and FOS still bills a deleted object for 30 days.
         archive_bytes = archive_objects = archive_expired_bytes = 0
-        if svcconfig.is_high_scale_mode(src):
-            try:
-                from backend.high_scale.postgres_control import PostgresControlPlane
+        try:
+            from backend.high_scale.postgres_control import PostgresControlPlane
 
-                summary = PostgresControlPlane().archive_storage_summary(str(src.get("service_id") or src["name"]))
-                archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
-                archive_expired_bytes = summary["expired_30d_bytes"]
-            except Exception:
-                logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
+            summary = PostgresControlPlane().archive_storage_summary(str(src.get("service_id") or src["name"]))
+            archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
+            archive_expired_bytes = summary["expired_30d_bytes"]
+        except Exception:
+            logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
 
         # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
         cloud_copy_deleted_bytes = 0
@@ -671,7 +700,7 @@ def usage_log_activity(
         ctx_repo = contextvars.copy_context()
         ctx_api = contextvars.copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            fut_repo = pool.submit(ctx_repo.run, repo.get_log_activity, source, start_str, end_str, by)
+            fut_repo = pool.submit(ctx_repo.run, _get_log_activity, source, start_str, end_str, by)
             fut_api = pool.submit(ctx_api.run, _fastly_api, stats_path, str(api_key))
             res = fut_repo.result()
             try:
@@ -680,7 +709,7 @@ def usage_log_activity(
                 logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
                 payload = None
     else:
-        res = repo.get_log_activity(source, start_str, end_str, by)
+        res = _get_log_activity(source, start_str, end_str, by)
 
     if payload is not None:
         try:

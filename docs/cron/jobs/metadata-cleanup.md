@@ -3,7 +3,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `metadata_cleanup_{service_id}`
 - **Category:** Operational Database Retention & Pruning
-- **Purpose:** Trims historical operational records from the unified PostgreSQL 16 `METADATA_DSN`, including `usage_log`, `ingested_files`, `cron_runs`, `slow_queries`, and global `metric_snapshots` according to configured retention windows. Quarantine-cap enforcement occurs during writes in log discovery; no separate quarantine cron or FOS deletion is executed.
+- **Purpose:** Trims historical operational records from the unified PostgreSQL 16 `METADATA_DSN`, including `usage_log`, `ingested_files`, `cron_runs`, and `slow_queries` according to configured retention windows. Quarantine-cap enforcement occurs during writes in log discovery; no separate quarantine cron or FOS deletion is executed.
 - **Why It Runs:** Continuous streaming writes hundreds of operational records per hour. Scheduled pruning bounds PostgreSQL table growth and keeps indexed lookups efficient.
 
 ---
@@ -11,7 +11,7 @@
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Cron trigger (`cron`)
 - **Default Schedule:** Daily at 03:15 UTC (`hour=3, minute=15`).
-- **Timing Rationale:** Runs before `full_sync` (03:30 UTC) and `optimize` (04:00 UTC) so that the daily maintenance window stays single-threaded across heavy phases.
+- **Timing Rationale:** Runs before `full_sync` (03:30 UTC) so the daily maintenance window stays sequenced across phases.
 - **Configurable Overrides:**
   - `provisioning.cron_metadata_cleanup.enabled` (default: `true`).
   - `provisioning.cron_metadata_cleanup.cron_hour` (default: `3`).
@@ -26,10 +26,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to PostgreSQL `METADATA_DSN` and issues bounded chunked `DELETE FROM` statements (`ctid IN (SELECT ctid ... LIMIT 5000)`). | PostgreSQL connection pool and transaction; politeness gate yields if active dashboard queries are running. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler | Connects to PostgreSQL `METADATA_DSN` and executes SQL deletes in bounded 5,000-row chunks. | PostgreSQL transaction; politeness gate yields if active dashboard queries are running. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod) | Connects to PostgreSQL `METADATA_DSN` and issues bounded chunked `DELETE FROM` statements (`ctid IN (SELECT ctid ... LIMIT 5000)`). | PostgreSQL connection pool and transaction; politeness gate yields if active dashboard queries are running. Gated by `FLA_DEV_NO_CRONS=1`. |
 
 ---
 
@@ -63,13 +62,10 @@
    - Deletes `slow_queries` older than `slow_queries_days` using unix-epoch cutoff (`started_at_utc < time.time() - days * 86400`).
 8. **PostgreSQL Autovacuum & Storage Management:**
    - Under PostgreSQL 16 MVCC, dead tuples are managed by autovacuum without blocking concurrent operations or requiring exclusive table locks.
-9. **Global System Metrics Purge:**
-   - Purges global `metric_snapshots` older than 30 days via `metric_snapshots.purge_old(retention_days=30)`.
-   - Performs zero FOS calls; local quarantine evidence adheres to the 1,000-item cap enforced during write discovery.
-10. **Telemetry, Progress & Duration Finalization:**
-    - Emits `done` event to `cron_progress`.
-    - Records deleted row tallies (`rows_ingested=total_deleted`) and execution status in `cron_runs`.
-    - In `finally:` block, calls `end_progress(run_id)` and `finalize_cron_duration(src, run_id, start_ts)`.
+9. **Telemetry, Progress & Duration Finalization:**
+   - Emits `done` event to `cron_progress`.
+   - Records deleted row tallies (`rows_ingested=total_deleted`) and execution status in `cron_runs`.
+   - In `finally:` block, calls `end_progress(run_id)` and `finalize_cron_duration(src, run_id, start_ts)`.
 
 ---
 
@@ -118,5 +114,5 @@
 - 8. Zero FOS calls contract.
 - 9. Retention window pruning of `ingested_files` (dedup suppression on `delete_after=false` and RUM window `max(ingested_files_days, log_retention_days + 1)`).
 - 10. `usage_log` chunked deletion in 5,000-row batches while preserving `usage_log_hourly_summary`.
-- 11. `cron_runs` (7d), `slow_queries` (30d unix-epoch), and global `metric_snapshots` (30d) retention.
+- 11. `cron_runs` (7d) and `slow_queries` (30d unix-epoch) retention.
 - 12. Manual trigger path parity (`POST /api/admin/metadata-cleanup/{service_id}` and `POST /api/admin/metadata-cleanup`).

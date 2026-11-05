@@ -8,7 +8,7 @@ Source: [`frontend/app/usage/`](../../frontend/app/usage/) (`page.tsx` re-export
 
 - Stat cards: Storage Impact (period), Class A Ops (period), Class B Ops (period), Estimated Incurred Cost.
 - Charts: FOS Operations, CDN Bandwidth, Estimated Cost, Log Activity (Processed), and Real User Monitoring (RUM) Operations.
-- Cost Estimator: inputs for storage, Class A and Class B rates, retention, volumes and a delivery billing zone selector (`MBZ100` $0.08/GB, `MBZ200` $0.12/GB default, `Global` $0.18/GB; `costCalculatorModel.ts`). Calculations run in the browser from the prefilled values. Storage sizing follows the service's data and RUM retention (0 keeps forever, modelled as 365 days; deleted objects floor at the 30-day FOS minimum); for high-scale services the archive footprint is included.
+- Cost Estimator: inputs for storage, Class A and Class B rates, retention, volumes and a delivery billing zone selector (`MBZ100` $0.08/GB, `MBZ200` $0.12/GB default, `Global` $0.18/GB; `costCalculatorModel.ts`). Calculations run in the browser from the prefilled values. Storage sizing follows the service's data and RUM retention (0 keeps forever, modelled as 365 days; deleted objects floor at the 30-day FOS minimum) and includes the batch archive footprint.
 
 ## Roles
 
@@ -21,8 +21,8 @@ All routes are in [`backend/routers/usage.py`](../../backend/routers/usage.py), 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/usage/prefill/rates` | Configured rates and `billing_zone` for the stat cards without a data scan. |
-| `GET /api/usage/prefill` | Estimator prefill: historical log volumes, retention (`data_retention_days`, `rum_retention_days`), `deployment_mode`, RUM beacon rates. |
-| `GET /api/usage/current-storage` | Live FOS object count and bytes; adds the high-scale archive and recently expired artifacts, which still bill. |
+| `GET /api/usage/prefill` | Estimator prefill: historical log volumes, retention (`data_retention_days`, `rum_retention_days`), RUM beacon rates. |
+| `GET /api/usage/current-storage` | Live FOS object count and bytes; adds the batch archive and recently expired artifacts, which still bill. |
 | `GET /api/usage/operations` | Class A / Class B operations over time. |
 | `GET /api/usage/bandwidth` | CDN bandwidth over time from Fastly stats. |
 | `GET /api/usage/log-activity` | Processed log activity over time. |

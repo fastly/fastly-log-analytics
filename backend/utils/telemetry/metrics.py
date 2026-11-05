@@ -633,7 +633,7 @@ def flush_usage_log(service_id: str) -> None:
         source = _load_service_source(service_id)
         if not source:
             return
-        from backend.core.duckdb import log_usage_calls
+        from backend.core.fos_client import log_usage_calls
 
         log_usage_calls(source, calls, process_context=get_process_context())
     except Exception as e:
@@ -645,7 +645,7 @@ def run_usage_log_cleanup(service_id: str) -> None:
         source = _load_service_source(service_id)
         if not source:
             return
-        from backend.core.duckdb import purge_usage_log
+        from backend.core.fos_client import purge_usage_log
 
         purge_usage_log(source)
     except Exception as e:

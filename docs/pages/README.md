@@ -18,7 +18,7 @@ One document per route. Each describes what the page shows, the backend endpoint
 | `/sessions/stream` | [sessions-stream.md](sessions-stream.md) | Per-session video QoE |
 | `/fastly-value` | [fastly-value.md](fastly-value.md) | Offload, cache, bandwidth, threats, Image Optimizer |
 | `/assets-shield` | [assets-shield.md](assets-shield.md) | Cache and compression by asset type |
-| `/query` | [query.md](query.md) | Read-only SQL pad and structured log browser |
+| `/query` | [query.md](query.md) | Read-only ClickHouse SQL pad and structured log browser |
 | `/logs` | [logs.md](logs.md) | Data management: crons, audit, ingestion, storage, schema |
 | `/alerts` | [alerts.md](alerts.md) | Alert rules and notifications |
 | `/usage` | [usage-and-cost.md](usage-and-cost.md) | Storage and API usage, cost estimator |
@@ -27,7 +27,7 @@ One document per route. Each describes what the page shows, the backend endpoint
 | `/share-login` | [share-login.md](share-login.md) | Analyst sign-in and terms gate |
 | `/admin` | [admin/overview.md](admin/overview.md) | Status cards, services, health, quarantine, settings |
 | `/admin/queries` | [admin/queries.md](admin/queries.md) | Live query monitor |
-| `/admin/queue` | [admin/queue.md](admin/queue.md) | Ingest ledger, Celery queues, scheduler |
+| `/admin/queue` | [admin/queue.md](admin/queue.md) | Ingest ledger, worker queues, scheduler |
 | `/admin/trends` | [admin/trends.md](admin/trends.md) | Sampled system vitals |
 | `/admin/usage-log` | [admin/usage-log.md](admin/usage-log.md) | Per-operation FOS and CDN ledger |
 | `/admin/rum` | [admin/rum.md](admin/rum.md) | RUM enablement and settings |
@@ -45,7 +45,7 @@ One document per route. Each describes what the page shows, the backend endpoint
 
 **Roles.** There are two personas. The admin has full access. The analyst is a remote share session: read-only, limited to the invited services and time ceiling, with client IPs and session IDs masked according to the invite's PII policy. Enforcement is server-side: `RemoteAccessMiddleware` ([`backend/utils/remote_access.py`](../../backend/utils/remote_access.py)) blocks admin prefixes and non-allow-listed writes for analysts, and `RequestContext` ([`backend/core/request_context.py`](../../backend/core/request_context.py)) enforces service access and time clamping. Pages that are admin-only for analysts: `/alerts`, `/usage`, `/logs`, `/high-scale/*` and everything under `/admin`.
 
-**Deployment modes.** `DEPLOYMENT_MODE=standard` serves from DuckDB over DuckLake plus the local Parquet buffer, using rollups where eligible. `DEPLOYMENT_MODE=high_scale` serves from ClickHouse readers in `backend/high_scale/`, which return real data or fail loudly. Operational metadata is PostgreSQL in both ([ADR-22](../adr/22-postgres-only-metadata.md)). Each page document notes where the two modes differ.
+**Serving architecture.** All analytics pages serve from ClickHouse readers in `backend/high_scale/`, which return real data or fail loudly, with operational metadata and ingest control state in PostgreSQL 16 ([ADR-21](../adr/21-high-scale-serving-architecture.md), [ADR-22](../adr/22-postgres-only-metadata.md)).
 
 **Telemetry.** The frontend API client sends `X-Page-Load-ID` on every request; when debug responses are enabled it also sends `x-debug-responses: 1`, and responses then include `_debug_queries` / `_debug_calls` that the Debug Panel renders. `GET /api/debug/page-telemetry` returns the telemetry recorded for a page load (admin only).
 
@@ -57,4 +57,4 @@ One document per route. Each describes what the page shows, the backend endpoint
 
 ## Writing or updating a page spec
 
-State only what exists: the route and its source files, URL parameters, panels, roles, endpoints with request and response fields taken from the Pydantic models, deployment-mode differences, and tests that exist in the repository. Keep it short.
+State only what exists: the route and its source files, URL parameters, panels, roles, endpoints with request and response fields taken from the Pydantic models, and tests that exist in the repository. Keep it short.

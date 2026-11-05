@@ -196,8 +196,6 @@ export function QueueClient() {
     [bulkTargetStatus, runLedgerAction],
   )
 
-  const isStandardMode =
-    data?.deployment_mode === 'standard' && !data?.broker_reachable
   const queues = data?.queues
     ? Object.entries(data.queues).sort((a, b) => a[0].localeCompare(b[0]))
     : []
@@ -206,9 +204,6 @@ export function QueueClient() {
     : []
   const workerCount = data?.workers?.count ?? 0
   const inprocessSchedules = data?.inprocess_schedules || []
-  const inprocessActiveRuns = data?.inprocess_active_runs || []
-  const standardIngestedFiles = data?.standard_ingest?.ingested_files ?? 0
-  const standardQuarantinedItems = data?.standard_ingest?.quarantined_items ?? 0
 
   const queuePoints = trends?.series?.['celery_queue_depth'] ?? []
   const workerPoints = trends?.series?.['celery_active_tasks'] ?? []
@@ -235,24 +230,18 @@ export function QueueClient() {
             </>
           ) : (
             <Badge
-              variant={data?.broker_reachable || isStandardMode ? 'outline' : 'secondary'}
+              variant={data?.broker_reachable ? 'outline' : 'secondary'}
               data-testid="admin-queue-broker-badge"
               className={
                 data?.broker_reachable
                   ? 'text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
-                  : isStandardMode
-                    ? 'text-sky-600 dark:text-sky-400 border-sky-500/30'
-                    : undefined
+                  : undefined
               }
             >
-              {data?.broker_reachable
-                ? 'Broker Reachable'
-                : isStandardMode
-                  ? 'Standard Mode · In-Process Scheduler'
-                  : 'Broker Unreachable / Standard Mode'}
+              {data?.broker_reachable ? 'Broker Reachable' : 'Broker Unreachable'}
             </Badge>
           )}
-          {!isStandardMode && data?.workers?.error ? (
+          {data?.workers?.error ? (
             <span className="text-xs text-amber-600 dark:text-amber-400 font-mono">
               Inspect warning: {data.workers.error}
             </span>
@@ -277,14 +266,7 @@ export function QueueClient() {
       </div>
 
       <QueueTrendsSection
-        isStandardMode={isStandardMode}
         isLoading={isLoading}
-        isStatusRefetching={isStatusRefetching}
-        error={error}
-        standardIngestedFiles={standardIngestedFiles}
-        standardQuarantinedItems={standardQuarantinedItems}
-        inprocessSchedulesCount={inprocessSchedules.length}
-        inprocessActiveRunsCount={inprocessActiveRuns.length}
         latestQueue={latestQueue}
         queuePoints={queuePoints}
         latestWorker={latestWorker}
@@ -295,20 +277,16 @@ export function QueueClient() {
       />
 
       <QueueDepthsAndQuarantineSection
-        isStandardMode={isStandardMode}
         isLoading={isLoading}
         isStatusRefetching={isStatusRefetching}
         error={error}
-        standardQuarantinedItems={standardQuarantinedItems}
         queues={queues}
       />
 
       <QueueWorkersSection
-        isStandardMode={isStandardMode}
         isLoading={isLoading}
         isStatusRefetching={isStatusRefetching}
         error={error}
-        inprocessActiveRuns={inprocessActiveRuns}
         workerCount={workerCount}
         activeWorkers={activeWorkers}
       />
@@ -317,7 +295,6 @@ export function QueueClient() {
         isLoading={isLoading}
         isStatusRefetching={isStatusRefetching}
         error={error}
-        deploymentMode={data?.deployment_mode}
         ledger={data?.ledger}
         ledgerFilter={ledgerFilter}
         setLedgerFilter={setLedgerFilter}

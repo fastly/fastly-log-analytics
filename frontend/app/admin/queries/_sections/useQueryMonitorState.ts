@@ -24,7 +24,7 @@ export interface Attribution {
 
 export interface ActiveRow {
   query_id: number
-  db_type: 'DuckDB' | 'Postgres' | 'ClickHouse'
+  db_type: 'ClickHouse' | 'Postgres'
   sql_preview: string
   sql: string | null
   sql_len: number
@@ -80,7 +80,7 @@ export interface MonitorConfig {
 }
 
 export type ViewMode = 'all' | 'live' | 'past'
-export type DbFilter = 'all' | 'DuckDB' | 'Postgres' | 'ClickHouse'
+export type DbFilter = 'all' | 'ClickHouse' | 'Postgres'
 
 export type GroupingMeta = {
   _groupedCount?: number
@@ -183,7 +183,7 @@ const KINDS = ['all', 'analyst', 'admin', 'cron', 'system'] as const satisfies r
   | 'all'
 )[]
 const VIEWS = ['all', 'live', 'past'] as const satisfies readonly ViewMode[]
-const DBS = ['all', 'DuckDB', 'Postgres', 'ClickHouse'] as const satisfies readonly DbFilter[]
+const DBS = ['all', 'ClickHouse', 'Postgres'] as const satisfies readonly DbFilter[]
 
 // parseInt (not Number) on purpose: `?slow=250ms` keeps hydrating to 250.
 const parseAsPositiveInt = createParser<number>({
@@ -466,7 +466,7 @@ export const formatThresholdMs = (ms: number, space = false) =>
 
 export const DB_FILTER_OPTIONS: { value: DbFilter; label: string }[] = [
   { value: 'all', label: 'All DBs' },
-  { value: 'DuckDB', label: 'DuckDB' },
+  { value: 'ClickHouse', label: 'ClickHouse' },
   { value: 'Postgres', label: 'Postgres' },
 ]
 

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 import os
 import shutil
 import sys as _sys
 import time
+from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
@@ -15,8 +18,12 @@ import httpx
 import tenacity
 
 from backend import config as svcconfig
-from backend.core import duckdb as _db  # noqa: F401
-from backend.core import duckdb_pool as _pool  # noqa: F401
+from backend.core.fastly.client import fastly_paginate
+from backend.core.fos_client import get_source_for_service
+from backend.core.metadata.base import (
+    get_pg_readonly_connection,
+    get_pg_thread_connection,
+)
 from backend.cron.scheduler import (
     JOB_COLORS,
     RESET_COLOR,
@@ -27,46 +34,273 @@ from backend.cron.scheduler import (
     global_job,
     record_skip_row,
 )
-from backend.utils.date_utils import iso_z_now
+from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 if TYPE_CHECKING:
-    from backend.cron.jobs.compaction import (
-        _run_local_compact as _run_local_compact,
-    )
-    from backend.cron.jobs.compaction import (
-        _run_partial_hour_merge as _run_partial_hour_merge,
-    )
-    from backend.cron.jobs.compaction import (
-        _run_rollup_compact_daily as _run_rollup_compact_daily,
-    )
-    from backend.cron.jobs.compaction import (
-        _run_rollup_hour_heal as _run_rollup_hour_heal,
-    )
-    from backend.cron.jobs.duckdb_recycle import run_duckdb_recycle as run_duckdb_recycle
     from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer as _run_insights_prewarmer
     from backend.cron.jobs.maintenance import (
-        _run_expire_snapshots as _run_expire_snapshots,
-    )
-    from backend.cron.jobs.maintenance import (
         _run_metadata_cleanup as _run_metadata_cleanup,
-    )
-    from backend.cron.jobs.maintenance import (
-        _run_optimize as _run_optimize,
-    )
-    from backend.cron.jobs.metric_snapshots import (
-        _run_metric_snapshot as _run_metric_snapshot,
-    )
-    from backend.cron.jobs.metric_snapshots import (
-        record_snapshot as record_snapshot,
-    )
-    from backend.cron.jobs.metric_snapshots import (
-        teardown as teardown,
     )
 
 _os = os
 _shutil = shutil
 logger = logging.getLogger("backend.scheduler")
 _RETRYABLE_WEBHOOK_STATUS = (429, 500, 502, 503, 504)
+_API_PREFIX = "/ngwaf/v1"
+
+
+# ── Fastly NGWAF API client & Postgres bot cache helpers ─────────────────────
+
+
+def _get_relative_time_range(ts_str: str) -> str:
+    """Convert an ISO timestamp to a rounded-up relative NGWAF time string (e.g. -5d, -15min)."""
+    ts = parse_iso_utc(ts_str)
+    if ts is None:
+        if ts_str.startswith("-"):
+            return ts_str
+        return "-1d"
+
+    delta = datetime.now(UTC) - ts
+    seconds = delta.total_seconds()
+
+    if seconds > 86400:
+        days = math.ceil(seconds / 86400)
+        return f"-{days}d"
+
+    if seconds > 3600:
+        hours = math.ceil(seconds / 3600)
+        return f"-{hours}h"
+
+    mins = math.ceil(seconds / 900) * 15
+    return f"-{max(mins, 1)}min"
+
+
+def _extract_bot_record(r: dict) -> dict | None:
+    """Extract bot info from a single NGWAF request record. Returns None if no VERIFIED-BOT signal."""
+    signals = r.get("signals", [])
+
+    verified = next((s for s in signals if s.get("id") == "VERIFIED-BOT"), None)
+    if not verified:
+        return None
+
+    subcat = next(
+        (s for s in signals if s.get("id", "").startswith("VERIFIED-BOT.") and s["id"] != "VERIFIED-BOT"),
+        None,
+    )
+
+    bot_name = verified.get("value")
+    category = subcat["id"].replace("VERIFIED-BOT.", "") if subcat else None
+
+    user_agent = r.get("user_agent") or next(
+        (
+            h["value"]
+            for h in r.get("request_headers", [])
+            if isinstance(h, dict) and h.get("name", "").lower() == "user-agent"
+        ),
+        None,
+    )
+
+    return {
+        "waf_req_id": r.get("id"),
+        "bot_name": bot_name,
+        "category": category,
+        "user_agent": user_agent,
+        "server_name": r.get("server_name"),
+        "timestamp": r.get("timestamp"),
+    }
+
+
+def fetch_verified_bots_paged(
+    api_key: str,
+    workspace_id: str,
+    from_ts: str,
+    until_ts: str | None = None,
+    page_limit: int = 500,
+) -> Generator[tuple[list[dict], str | None, int]]:
+    """Yield (page_records, latest_timestamp, raw_page_count) for each page of VERIFIED-BOT requests."""
+    from backend.core.fastly.client import is_mock_mode
+
+    if is_mock_mode():
+        yield [], None, 0
+        return
+
+    relative_from = _get_relative_time_range(from_ts)
+
+    q = f"tag:VERIFIED-BOT from:{relative_from}"
+    if until_ts:
+        relative_until = _get_relative_time_range(until_ts)
+        q += f" until:{relative_until}"
+
+    for data in fastly_paginate(
+        f"{_API_PREFIX}/workspaces/{workspace_id}/requests",
+        token=api_key,
+        style="cursor",
+        params={"q": q, "limit": page_limit},
+        page_delay=0.1,
+    ):
+        raw_data = data.get("data", [])
+        records: list[dict] = []
+        latest_ts: str | None = None
+
+        for r in raw_data:
+            record = _extract_bot_record(r)
+            if record:
+                records.append(record)
+                ts = record.get("timestamp")
+                if ts and (latest_ts is None or ts > latest_ts):
+                    latest_ts = ts
+
+        yield records, latest_ts, len(raw_data)
+
+
+def oldest_unenriched_timestamp(src: dict) -> str | None:
+    """Return the oldest request_facts timestamp with a VERIFIED-BOT waf_req_id."""
+    try:
+        from backend.core.clickhouse import get_clickhouse_client
+        from backend.high_scale._common import visible_publication_fence_sql
+
+        service_id = str(src.get("service_id") or src.get("name") or "")
+        client = get_clickhouse_client()
+        if client is None or not service_id:
+            return None
+        fence = visible_publication_fence_sql("request", client=client, service_id=service_id)
+        rows = client.execute(
+            f"SELECT min(event_timestamp) AS min_ts FROM request_facts "
+            f"WHERE service_id={{service_id:String}} AND {fence} "
+            f"AND custom_fields['waf_req_id'] != '' "
+            f"AND position(custom_fields['waf_sig'], 'VERIFIED-BOT') > 0",
+            {"service_id": service_id},
+        )
+        ts = rows[0].get("min_ts") if rows else None
+        if ts:
+            return iso_z(ts) if hasattr(ts, "strftime") else str(ts)
+    except Exception:
+        logger.debug("oldest_unenriched_timestamp: query failed (ignored)", exc_info=True)
+    return None
+
+
+def get_last_timestamp(workspace_id: str) -> str | None:
+    """Return last_timestamp_synced for workspace, or None if no sync has run yet."""
+    con = get_pg_readonly_connection()
+    try:
+        row = con.execute(
+            "SELECT last_timestamp_synced FROM ngwaf_sync_state WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone()
+        if row and row["last_timestamp_synced"]:
+            return row["last_timestamp_synced"]
+        return None
+    finally:
+        con.close()
+
+
+def update_sync_watermark(workspace_id: str, until_ts: str) -> None:
+    """Advance the high-water mark to until_ts after a completed scan."""
+    con = get_pg_thread_connection()
+    try:
+        con.execute(
+            """
+            INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+            VALUES (?, ?)
+            ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+            """,
+            (workspace_id, until_ts),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | None) -> None:
+    """Insert or replace bot records and update sync state in one transaction. Idempotent."""
+    con = get_pg_thread_connection()
+    now = iso_z_now()
+    rows = [
+        (
+            r["waf_req_id"],
+            r.get("bot_name"),
+            r.get("category"),
+            r.get("wellknown_bot_id"),
+            r.get("wellknown_bot_name"),
+            now,
+        )
+        for r in records
+        if r.get("waf_req_id")
+    ]
+    try:
+        if rows:
+            con.executemany(
+                """
+                INSERT INTO ngwaf_bots
+                    (waf_req_id, bot_name, category, wellknown_bot_id, wellknown_bot_name, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (waf_req_id) DO UPDATE SET
+                    bot_name = EXCLUDED.bot_name,
+                    category = EXCLUDED.category,
+                    wellknown_bot_id = EXCLUDED.wellknown_bot_id,
+                    wellknown_bot_name = EXCLUDED.wellknown_bot_name,
+                    synced_at = EXCLUDED.synced_at
+                """,
+                rows,
+            )
+        if latest_timestamp:
+            try:
+                _pts = parse_iso_utc(latest_timestamp)
+                next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
+            except ValueError:
+                next_ts = latest_timestamp
+            con.execute(
+                """
+                INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+                VALUES (?, ?)
+                ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+                """,
+                (workspace_id, next_ts),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+
+def cleanup_old_bots(retention_days: int) -> int:
+    """Delete rows with synced_at older than retention_days. Returns deleted row count."""
+    cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
+    con = get_pg_thread_connection()
+    try:
+        cur = con.execute("DELETE FROM ngwaf_bots WHERE synced_at < ?", (cutoff,))
+        con.commit()
+        return cur.rowcount or 0
+    finally:
+        con.close()
+
+
+def get_cache_stats() -> dict:
+    """Return summary statistics of cached NGWAF bot records."""
+    con = get_pg_readonly_connection()
+    try:
+        cur = con.execute("SELECT count(*) FROM ngwaf_bots")
+        total_bots = cur.fetchone()[0]
+
+        workspaces: dict[str, str | None] = {}
+        cur = con.execute("SELECT workspace_id, last_timestamp_synced FROM ngwaf_sync_state")
+        for r in cur.fetchall():
+            workspaces[r["workspace_id"]] = r["last_timestamp_synced"]
+
+        cur = con.execute(
+            "SELECT bot_name, count(*) AS cnt FROM ngwaf_bots WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count(*) DESC LIMIT 10"
+        )
+        top_bots = {r["bot_name"]: r["cnt"] for r in cur.fetchall()}
+
+        return {
+            "total_cached_bots": total_bots,
+            "workspaces": workspaces,
+            "top_bots": top_bots,
+        }
+    finally:
+        con.close()
+
+
+# ── Webhook notifications ────────────────────────────────────────────────────
 
 
 @tenacity.retry(
@@ -104,14 +338,6 @@ def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val
 
 @cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
 def _run_ngwaf_bot_sync(service_id: str) -> None:
-    from backend.core.duckdb import get_source_for_service
-    from backend.core.rollups.security_dims import (
-        cleanup_old_bots,
-        fetch_verified_bots_paged,
-        get_last_timestamp,
-        update_sync_watermark,
-        upsert_bots,
-    )
     from backend.cron.jobs.sync import get_service_display_label
     from backend.cron.scheduler import dev_mode_no_crons
     from backend.utils.bot_sources import build_matcher
@@ -285,10 +511,11 @@ def _run_share_audit_purge() -> tuple[str, str]:
 
 @cron_task("evaluate_alerts", job_name="alerts")
 def _run_service_alerts_evaluation(service_id: str) -> None:
-    from backend.core.duckdb import get_connection, get_source_for_service
     from backend.cron.scheduler import dev_mode_no_crons
     from backend.repositories import assets as alert_repo
     from backend.utils.telemetry import should_defer_cron
+
+    _evaluate_alert = importlib.import_module("backend.routers.alerts")._evaluate_alert
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[93m[alerts]\x1b[0m %s: dev_mode_no_crons active, skipping alerts evaluation.", service_id)
@@ -322,30 +549,31 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         if not run.ok:
             return
         run_id = run.run_id
-        con_ro = get_connection(src, read_only=True)
         webhook_failures: list[str] = []
-        try:
-            display_name = _display_label(src, service_id)
-            triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
-            for alert in enabled_alerts:
-                try:
-                    fired, webhook_url, payload, max_ts = alert_repo.evaluate_alert(
-                        con_ro, src, alert, display_name=display_name, service_id=service_id
+        display_name = _display_label(src, service_id)
+        triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
+        repo_eval = getattr(alert_repo, "evaluate_alert", None)
+        for alert in enabled_alerts:
+            try:
+                if repo_eval is not None:
+                    fired, webhook_url, payload, max_ts = repo_eval(
+                        None, src, alert, display_name=display_name, service_id=service_id
                     )
-                    if fired:
-                        triggered_items.append((alert, webhook_url, payload, max_ts))
-                        logger.info("🚨  \x1b[93m[alerts]\x1b[0m %s: Alert triggered: %s", display_name, alert["name"])
-                        _log_and_add_progress(
-                            run_id,
-                            service_id,
-                            job_name=task_name,
-                            event={"type": "status", "message": f"Alert triggered: {alert['name']}"},
-                        )
-                except Exception as e:
-                    logger.error("%s Failed to evaluate alert %s for %s: %s", alert_tag, alert["id"], display_name, e)
-        finally:
-            if con_ro is not None:
-                con_ro.close()
+                else:
+                    fired, webhook_url, payload, max_ts = _evaluate_alert(
+                        service_id, src, alert, display_name=display_name
+                    )
+                if fired:
+                    triggered_items.append((alert, webhook_url, payload, max_ts))
+                    logger.info("🚨  \x1b[93m[alerts]\x1b[0m %s: Alert triggered: %s", display_name, alert["name"])
+                    _log_and_add_progress(
+                        run_id,
+                        service_id,
+                        job_name=task_name,
+                        event={"type": "status", "message": f"Alert triggered: {alert['name']}"},
+                    )
+            except Exception as e:
+                logger.error("%s Failed to evaluate alert %s for %s: %s", alert_tag, alert["id"], display_name, e)
         try:
             if triggered_items:
                 for alert, _, _, max_ts in triggered_items:
@@ -429,82 +657,19 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
 
 _DELEGATED_EXPORTS: dict[str, str] = {
     "DEFAULT_PREWARM_IDLE_MINUTES": "backend.cron.jobs.insights_prewarmer",
-    "_CompactionModule": "backend.cron.jobs.compaction",
-    "_EMPTY": "backend.cron.jobs.metric_snapshots",
     "_INGEST_TASKS": "backend.cron.jobs.insights_prewarmer",
-    "_MAINTENANCE_ATTRS": "backend.cron.jobs.compaction",
     "_MAX_ANALYST_SHAPES": "backend.cron.jobs.insights_prewarmer",
-    "_MAX_BATCH_POINTS_PER_SERIES": "backend.cron.jobs.metric_snapshots",
-    "_METRICS": "backend.cron.jobs.metric_snapshots",
     "_active_analyst_shapes": "backend.cron.jobs.insights_prewarmer",
     "_analyst_prewarm_enabled": "backend.cron.jobs.insights_prewarmer",
     "_cache_cold": "backend.cron.jobs.insights_prewarmer",
-    "_call_with_lookback": "backend.cron.jobs.compaction",
-    "_downsample_rows": "backend.cron.jobs.metric_snapshots",
-    "_env_mb_bytes": "backend.cron.jobs.duckdb_recycle",
-    "_env_ms_to_s": "backend.cron.jobs.duckdb_recycle",
-    "_group_batch_rows": "backend.cron.jobs.metric_snapshots",
-    "_instrument": "backend.cron.jobs.metric_snapshots",
-    "_instruments": "backend.cron.jobs.metric_snapshots",
     "_last_full_warm": "backend.cron.jobs.insights_prewarmer",
     "_last_insights_request": "backend.cron.jobs.insights_prewarmer",
-    "_ledger_touched_hours": "backend.cron.jobs.compaction",
-    "_lock": "backend.cron.jobs.metric_snapshots",
-    "_lock_key": "backend.cron.jobs.duckdb_recycle",
-    "_maybe_adjust_recycle_schedule": "backend.cron.jobs.duckdb_recycle",
-    "_pg_connection": "backend.cron.jobs.metric_snapshots",
-    "_pg_write_connection": "backend.cron.jobs.metric_snapshots",
     "_prewarm_idle_minutes": "backend.cron.jobs.insights_prewarmer",
-    "_recycle_db_path": "backend.cron.jobs.duckdb_recycle",
-    "_recycle_drain_timeout_s": "backend.cron.jobs.duckdb_recycle",
-    "_recycle_grace_s": "backend.cron.jobs.duckdb_recycle",
-    "_recycle_lock_timeout_s": "backend.cron.jobs.duckdb_recycle",
-    "_recycle_rss_threshold_bytes": "backend.cron.jobs.duckdb_recycle",
-    "_run_expire_snapshots": "backend.cron.jobs.maintenance",
     "_run_insights_prewarmer": "backend.cron.jobs.insights_prewarmer",
-    "_run_local_compact": "backend.cron.jobs.compaction",
     "_run_metadata_cleanup": "backend.cron.jobs.maintenance",
-    "_run_metric_snapshot": "backend.cron.jobs.metric_snapshots",
-    "_run_optimize": "backend.cron.jobs.maintenance",
-    "_run_partial_hour_merge": "backend.cron.jobs.compaction",
-    "_run_rollup_compact_daily": "backend.cron.jobs.compaction",
-    "_run_rollup_hour_heal": "backend.cron.jobs.compaction",
     "_running_ingest": "backend.cron.jobs.insights_prewarmer",
-    "_safe_record": "backend.cron.jobs.metric_snapshots",
-    "_sample_active_queries": "backend.cron.jobs.metric_snapshots",
-    "_sample_celery_queues": "backend.cron.jobs.metric_snapshots",
-    "_sample_celery_workers": "backend.cron.jobs.metric_snapshots",
-    "_sample_cron_duration": "backend.cron.jobs.metric_snapshots",
-    "_sample_duckdb_size": "backend.cron.jobs.metric_snapshots",
-    "_sample_ducklake_admission": "backend.cron.jobs.metric_snapshots",
-    "_sample_high_scale": "backend.cron.jobs.metric_snapshots",
-    "_sample_high_scale_disk": "backend.cron.jobs.metric_snapshots",
-    "_sample_ingest_lag": "backend.cron.jobs.metric_snapshots",
-    "_sample_ingest_ledger": "backend.cron.jobs.metric_snapshots",
-    "_sample_os_vitals": "backend.cron.jobs.metric_snapshots",
-    "_sample_pool_wait": "backend.cron.jobs.metric_snapshots",
-    "_service_key": "backend.cron.jobs.duckdb_recycle",
-    "_sources_by_db_path": "backend.cron.jobs.duckdb_recycle",
-    "_trim_memory": "backend.cron.jobs.duckdb_recycle",
-    "_values": "backend.cron.jobs.metric_snapshots",
-    "close_all_connections": "backend.cron.jobs.metric_snapshots",
-    "get_batch": "backend.cron.jobs.metric_snapshots",
-    "get_meter": "backend.cron.jobs.metric_snapshots",
-    "graceful_restart_rss_threshold_bytes": "backend.cron.jobs.duckdb_recycle",
     "is_insights_active": "backend.cron.jobs.insights_prewarmer",
-    "last_snapshot_age_s": "backend.cron.jobs.metric_snapshots",
-    "maybe_graceful_restart": "backend.cron.jobs.duckdb_recycle",
-    "metric_snapshots": "backend.cron.jobs.metric_snapshots",
-    "purge_old": "backend.cron.jobs.metric_snapshots",
-    "record": "backend.cron.jobs.metric_snapshots",
     "record_insights_request": "backend.cron.jobs.insights_prewarmer",
-    "record_snapshot": "backend.cron.jobs.metric_snapshots",
-    "recycle_interval_min": "backend.cron.jobs.duckdb_recycle",
-    "recycle_once": "backend.cron.jobs.duckdb_recycle",
-    "reset_for_tests": "backend.cron.jobs.metric_snapshots",
-    "run_duckdb_recycle": "backend.cron.jobs.duckdb_recycle",
-    "schedule_cloud_push": "backend.cron.jobs.maintenance",
-    "teardown": "backend.cron.jobs.metric_snapshots",
 }
 
 

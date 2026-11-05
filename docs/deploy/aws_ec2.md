@@ -8,13 +8,13 @@ only the host-provisioning steps differ.
 
 - **AMI**: Amazon Linux 2023 (al2023-ami-*). Ubuntu 22.04 also works — switch
   `dnf` for `apt` in the install steps if you prefer it.
-- **Instance type**: `t3.large` (2 vCPU / 8 GB RAM) is the minimum. DuckDB and
-  pyarrow load the active session's parquet shards into memory, and the OS plus
-  the Next.js frontend eat ~1 GB before the backend starts. `t3.xlarge`
-  (16 GB) is the comfortable size for a busy single-tenant deploy.
+- **Instance type**: `t3.large` (2 vCPU / 8 GB RAM) is the minimum for running
+  ClickHouse 24.8, PostgreSQL 16, the stateless ingest worker, the FastAPI
+  backend, and the Next.js frontend together. `t3.xlarge` (16 GB) is the
+  comfortable size for a busy single-tenant deploy.
 - **EBS volume**: a single 100 GB gp3 root volume is sufficient for the OS plus
   the container images. Attach a second gp3 volume (100-500 GB depending on
-  cache retention) and mount it at `/mnt/app-data`. The durable data directory
+  ClickHouse retention) and mount it at `/mnt/app-data`. The durable data directory
   must be on EBS — the instance store on `t3` types is ephemeral and will
   vanish on stop/start.
 - **IMDSv2**: Amazon Linux 2023 defaults to IMDSv2 (session-token required).
@@ -65,11 +65,11 @@ echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme1n1) /mnt/app-data ext4 defaul
   | sudo tee -a /etc/fstab
 
 sudo chown -R ec2-user:ec2-user /mnt/app-data
-mkdir -p /mnt/app-data/{data,cache,configs,postgres}
+mkdir -p /mnt/app-data/{data,configs,postgres,clickhouse}
 ```
 
-`docker-compose.prod.yml` bind-mounts `/mnt/app-data/{configs,data,cache,postgres}`
-directly into the `backend` and `postgres` containers (overriding the relative
+`docker-compose.prod.yml` bind-mounts `/mnt/app-data/{configs,data,postgres,clickhouse}`
+directly into the `backend`, `worker`, `postgres`, and `clickhouse` containers (overriding the relative
 paths in `docker-compose.yml`), so `/mnt/app-data` must exist at that path.
 
 ## 4. Caddy / SSL
@@ -90,10 +90,10 @@ image and set the `CLOUDFLARE_API_TOKEN` env var.
 cd /mnt/app-data
 git clone https://github.com/fastly/fastly-log-analytics.git
 cd fastly-log-analytics
-# Create .env from .env.example and set DUCKLAKE_PG_PASSWORD.
+# Create .env from .env.example and set POSTGRES_PASSWORD and CLICKHOUSE_PASSWORD.
 # Copy configs from your local dev box or restore from S3 backup.
-# The backend runs as UID/GID 1000: make data/, cache/, and configs/ writable
-# by that user (sudo chown -R 1000:1000 /mnt/app-data/{data,cache,configs}).
+# The backend and worker run as UID/GID 1000: make data/ and configs/ writable
+# by that user (sudo chown -R 1000:1000 /mnt/app-data/{data,configs}).
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
@@ -153,8 +153,8 @@ sudo systemctl enable --now fastly-log-analytics
 
 ## 6. Secrets management
 
-The stack reads database and auth secrets (`DUCKLAKE_PG_PASSWORD`, `METADATA_DSN`,
-`DUCKLAKE_CATALOG`, `ADMIN_SHARED_SECRET`, `OAUTH_*`) from environment variables,
+The stack reads database and auth secrets (`POSTGRES_PASSWORD`, `METADATA_DSN`,
+`CLICKHOUSE_PASSWORD`, `ADMIN_SHARED_SECRET`, `OAUTH_*`) from environment variables,
 while per-service Fastly Object Storage credentials live in `configs/{service_id}.json`
 (and the PostgreSQL metadata store).
 Three options for managing VM environment secrets, in order of preference:

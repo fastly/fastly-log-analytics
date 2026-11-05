@@ -3,7 +3,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/confirm-dialog'
 import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
@@ -29,8 +28,6 @@ type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
 
 export function DebugPanel() {
   const { enabled, apiCallsEnabled } = useDebugStore()
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const services = useServiceStore((s) => s.services)
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
   const [isCallsOpen, setIsCallsOpen] = React.useState(false)
   const [isSqliteOpen, setIsSqliteOpen] = React.useState(false)
@@ -274,14 +271,12 @@ export function DebugPanel() {
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
-  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
-  const isHighScaleService = Boolean(activeService?.is_high_scale)
-  const defaultEngine = isHighScaleService ? 'ClickHouse' : 'DuckDB'
+  const defaultEngine = 'ClickHouse'
   const queryEngines = Array.from(
     new Set(
       queries
         .map((q) => q.engine)
-        .filter((e): e is string => Boolean(e) && (isHighScaleService || e !== 'ClickHouse')),
+        .filter((e): e is string => Boolean(e)),
     ),
   )
   const engineLabel = queryEngines.length > 0 ? queryEngines.join(' / ') : defaultEngine

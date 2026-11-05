@@ -3,7 +3,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `alerts_evaluation_{service_id}`
 - **Category:** Alerting & Real-Time Anomaly Notification
-- **Purpose:** Periodically evaluates user-configured alert threshold rules (error rates, bandwidth spikes, latency thresholds, 4xx/5xx ratios) against recent log windows in DuckDB/DuckLake and dispatches webhook notifications (Slack, PagerDuty, generic webhooks).
+- **Purpose:** Periodically evaluates user-configured alert threshold rules (error rates, bandwidth spikes, latency thresholds, 4xx/5xx ratios) against recent log windows in ClickHouse (`request_facts`) and dispatches webhook notifications (Slack, PagerDuty, generic webhooks).
 - **Why It Runs:** Real-time visibility into edge anomalies requires proactive alerting. Without scheduled evaluation, anomalies are only discovered when a human actively loads a dashboard page.
 
 ---
@@ -21,10 +21,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Queries session DuckDB `logs` view over lookback window (e.g. last 5-15 min). | Read-only DuckDB connection. Active request politeness gate (`should_defer_cron`) yields to interactive dashboard queries. Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries ephemeral DuckDB over DuckLake or ClickHouse facts/aggregates. | Ephemeral read-only connection; never runs on Celery workers. Yields if active interactive dashboard queries are executing. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod) | Queries ClickHouse `request_facts` over the alert lookback window (e.g. last 5–15 min) and reads/updates alert state in PostgreSQL 16 (`alerts`). | Active request politeness gate (`should_defer_cron`) yields to interactive dashboard queries. Gated by `FLA_DEV_NO_CRONS=1`. |
 
 ---
 
@@ -39,18 +38,17 @@
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **Source & Politeness Check:**
    - Loads source via `get_source_for_service(service_id)`.
-   - Checks `should_defer_cron("alerts", service_id)`. If active user queries are currently hitting DuckDB, defers until next interval to avoid query contention.
+   - Checks `should_defer_cron("alerts", service_id)`. If active user queries are currently executing, defers until next interval to avoid contention.
 2. **Alert Rule Fetch & Early Exit:**
    - Reads active alert configurations from PostgreSQL 16 table `alerts` via `backend.core.metadata` (per ADR-22).
-   - Filters to `enabled_alerts = [a for a in alerts if a["enabled"]]`. If empty, logs `skipped` with summary "No alerts configured" and exits without opening DuckDB.
+   - Filters to `enabled_alerts = [a for a in alerts if a["enabled"]]`. If empty, logs `skipped` with summary "No alerts configured" and exits.
 3. **Execution & Progress Initialization:**
-   - Opens read-only DuckDB connection `get_connection(src, read_only=True)`.
    - Calls `start_cron_run(src, "alerts")` and initializes `start_progress` in `cron_progress`.
-4. **DuckDB Metrics Query:**
-   - For each active alert, calls `alert_repo.evaluate_alert`:
-     - Queries `MAX(timestamp)` from `logs`. If logs are older than 30 minutes, skips evaluation.
-     - Constructs parameterized DuckDB query over the configured lookback window.
-     - Evaluates threshold expression against target metric.
+4. **ClickHouse Metrics Query:**
+   - For each active alert, evaluates the alert rule against ClickHouse `request_facts`:
+     - Checks the latest published event timestamp. If logs are older than 30 minutes, skips evaluation.
+     - Constructs a parameterized ClickHouse query over the configured lookback window.
+     - Evaluates threshold expression against the target metric.
    - If triggered: captures `(alert, webhook_url, payload, max_ts)` and emits progress event to `cron_progress`.
 5. **Durable Timestamp Update & Export:**
    - Before firing webhooks, calls `update_last_triggered` and `export_admin_state` so quiet-period debouncing persists even if an outbound webhook network request hangs.
@@ -68,7 +66,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **DuckDB Analytical Queries:** Every threshold query is instrumented via `track_query` with latency attribution under category `"alerts"`.
+  - **ClickHouse Analytical Queries:** Every threshold query is instrumented via `query_registry` with latency attribution under category `"alerts"`.
   - **Webhook Dispatches:** Outbound HTTP calls use bounded timeouts (5s) and catch network errors to prevent crashing the evaluation loop.
   - **PostgreSQL 16 Operations:** Updates to `alerts` table execute through the pooled PostgreSQL connection (`backend.core.metadata.pg_pool`) per ADR-22.
 - **Timing & Resource Budgets:**

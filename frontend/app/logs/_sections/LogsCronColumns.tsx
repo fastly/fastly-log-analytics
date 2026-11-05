@@ -15,14 +15,10 @@ import { CRON_DISPLAY_NAMES, CRON_EXPLANATIONS } from './LogsCronSchedule'
 const DASH_CELL = <span className="text-muted-foreground">—</span>
 const PROCESSING_CELL = <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
 const NO_FILES_TASKS = new Set([
-  'expire_snapshots',
-  'rollup_compact_daily',
-  'rollup_hour_heal',
   'metadata_cleanup',
   'insights_prewarmer',
-  'partial_hour_merge',
 ])
-const NO_ROWS_TASKS = new Set([...NO_FILES_TASKS, 'optimize', 'commit', 'rum_commit', 'local_compact'])
+const NO_ROWS_TASKS = new Set([...NO_FILES_TASKS])
 
 const COMMIT_CRON_COLUMNS: ColumnDef<CronRun>[] = [
   {
@@ -36,19 +32,6 @@ const COMMIT_CRON_COLUMNS: ColumnDef<CronRun>[] = [
           {formatCount(row.original.files_deleted_fos || 0)}
         </span>
       ),
-  },
-  {
-    id: 'rows_committed',
-    header: 'Rows Committed',
-    cell: ({ row }) => {
-      if (row.original.status === 'running') return PROCESSING_CELL
-      const val = row.original.task === 'commit' ? row.original.rows_ingested : null
-      return (
-        <span className="font-mono text-muted-foreground tabular-nums text-xs">
-          {val != null ? formatCount(val) : DASH_CELL}
-        </span>
-      )
-    },
   },
 ]
 
@@ -213,32 +196,23 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
         header: 'Files Processed',
         cell: ({ row }) => {
           if (row.original.status === 'running') return PROCESSING_CELL
-          const { task, files_downloaded, rows_ingested, parquet_files_optimized } = row.original
-          if (NO_FILES_TASKS.has(task) || ((task === 'commit' || task === 'rum_commit') && !rows_ingested)) {
+          const { task, files_downloaded } = row.original
+          if (NO_FILES_TASKS.has(task)) {
             return DASH_CELL
           }
-          const count =
-            task === 'commit' || task === 'rum_commit'
-              ? 1
-              : task === 'optimize'
-                ? parquet_files_optimized || 0
-                : files_downloaded || 0
+          const count = files_downloaded || 0
           const label =
             task === 'alerts'
               ? count === 1
                 ? 'alert evaluated'
                 : 'alerts evaluated'
-              : task === 'commit' || task === 'rum_commit'
-                ? 'cloud file cached'
-                : task === 'optimize' || task === 'local_compact'
-                  ? 'files merged'
-                  : task === 'rum_sync' || task === 'rum_discovery'
-                    ? 'raw RUM logs'
-                    : task === 'ngwaf_sync'
-                      ? count === 1
-                        ? 'bot record'
-                        : 'bot records'
-                      : 'raw logs'
+              : task === 'rum_sync' || task === 'rum_discovery'
+                ? 'raw RUM logs'
+                : task === 'ngwaf_sync'
+                  ? count === 1
+                    ? 'bot record'
+                    : 'bot records'
+                  : 'raw logs'
           return (
             <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>
               {formatCount(count)} <span className="text-[10px] text-muted-foreground">{label}</span>

@@ -128,18 +128,8 @@ describe('frontend → backend HTTP contract', () => {
   // ── Admin (service-scoped — accept either 200 or 4xx on empty
   // sandbox; assert the wire layer is reachable and the error envelope
   // matches FastAPI's {detail} contract) ───────────────────────────
-  it('GET /api/admin/storage-info is callable; reachable on the wire', async () => {
-    const { response } = await client.GET('/api/admin/storage-info')
-    expect([200, 400].includes(response.status)).toBe(true)
-  })
-
   it('GET /api/admin/metadata-storage is callable; reachable on the wire', async () => {
     const { response } = await client.GET('/api/admin/metadata-storage')
-    expect([200, 400].includes(response.status)).toBe(true)
-  })
-
-  it('GET /api/admin/storage-calendar is callable; reachable on the wire', async () => {
-    const { response } = await client.GET('/api/admin/storage-calendar')
     expect([200, 400].includes(response.status)).toBe(true)
   })
 

@@ -1,13 +1,13 @@
 # Fastly Log Analytics
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-![Version: 3.0.0-rc1](https://img.shields.io/badge/version-3.0.0--rc1-blue.svg)
+![Version: 3.0.0-rc3](https://img.shields.io/badge/version-3.0.0--rc3-blue.svg)
 
 A self-hosted dashboard for searching, filtering, and visualizing request-level Fastly logs streamed to [Fastly Object Storage](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/).
 
 Fastly's [historical stats](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/) give you aggregates. When you need to drill into individual requests — by IP, URL, status, WAF signal, or any field you log — Fastly's [real-time log streaming](https://www.fastly.com/documentation/guides/integrations/streaming-logs/about-fastlys-realtime-log-streaming-features/) makes the raw data available, but you still need somewhere to put it and something to query it with. This project fills that gap using only Fastly products. Costs are limited to Fastly Object Storage [class operations](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api) and [storage](https://docs.fastly.com/products/object-storage#billing) — no third-party logging vendor required.
 
-> **Coming from v2?** There is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision (see [docs/MIGRATION_v3.0.0_GUIDE.md](docs/MIGRATION_v3.0.0_GUIDE.md)). This is a release candidate (3.0.0-rc1).
+> **Coming from v2?** There is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision (see [docs/MIGRATION_v3.0.0_GUIDE.md](docs/MIGRATION_v3.0.0_GUIDE.md)). This is a release candidate (3.0.0-rc3).
 
 ### 📺 Watch the install walkthrough
 
@@ -24,7 +24,7 @@ You'll need:
 - A **Fastly account** with permission to create [services](https://www.fastly.com/documentation/guides/getting-started/services/about-services/) and Object Storage buckets
 - **Object Storage enabled** on the account — it's a separately activated product, not on by default
 - At least one **VCL service** to stream logs from
-- **Docker** (recommended) — or Python 3.12+, Node.js 24+ and a **PostgreSQL 16** server for a manual install
+- **Docker** (recommended) — or Python 3.12+, Node.js 24+, **ClickHouse**, and a **PostgreSQL 16** server for a manual install
 - *Optional:* a Fastly API token with the **Billing** permission to power the [Usage & Cost page](docs/features.md#usage--cost-page)
 - *Optional:* [`falco`](https://github.com/ysugimoto/falco) to validate VCL during provisioning (highly recommended; the app degrades gracefully without it)
 - *Optional:* **Rust 1.90+** with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`) — only needed if you plan to rebuild the [Session Scoring](docs/session_scoring_runbook.md) Compute Wasm scorer from source
@@ -33,70 +33,39 @@ You'll need:
 
 ## Server Specifications
 
-When running as a shared server (remote sharing), the host machine should meet these minimums:
+Fastly Log Analytics uses a single unified architecture — **ClickHouse + PostgreSQL 16 + stateless ingest worker (`python -m backend.high_scale.worker`) + Fastly Object Storage (FOS)** — that scales from a laptop Docker Compose stack up to multi-node Kubernetes clusters:
 
-- **RAM:** 16 GB
-- **CPU:** 2 vCPUs
-- **Disk:** 40 GB minimum — the Next.js build alone needs ~1 GB and the local DuckLake data and cache grow with log volume; 25 GB is sufficient for light use but can fill during `next build`
-- **Swap:** 4 GB minimum, 8 GB preferred — the backend holds large DuckDB query buffers in memory; swap prevents OOM kills during peak analytical load
-- **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536 — DuckDB parallel DuckLake scans open one file descriptor per Parquet file; the default Docker limit (~1024) causes `Too many open files` errors on large services. The production overlay (`docker-compose.prod.yml`) sets this automatically.
+- **Laptop / Local Evaluation (Docker Compose):**
+  - Runs comfortably in **~2–4 GiB RAM** with a single stateless worker configured with lightweight defaults (`HIGH_SCALE_WORKER_THREADS=1`, `HIGH_SCALE_MAX_BATCH_BYTES=6291456`, `HIGH_SCALE_MAX_BATCH_OBJECTS=10`, `2G` worker memory ceiling, `2G`–`4G` ClickHouse memory limit).
+- **Shared Server / Production VM:**
+  - **RAM:** 16 GB recommended
+  - **CPU:** 4 vCPUs recommended (2 vCPUs minimum)
+  - **Disk:** 40 GB minimum — the Next.js build needs ~1 GB and ClickHouse tables grow with retained log volume while durable canonical Parquet archives live in Fastly Object Storage
+  - **Swap:** 4 GB minimum, 8 GB preferred
+  - **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536. The production overlay (`docker-compose.prod.yml`) sets this automatically.
 
 ---
 
-## Deployment Architectures & Throughput Sizing
+## Architecture & Throughput Sizing
 
-Fastly Log Analytics supports two primary deployment topologies sized for different log volumes:
+A single unified architecture powers every deployment topology:
 
-| Architecture | Intended Throughput (requests/sec at your VCL service, 100% logged) | Backend Engine | Ingest Topology | Best For |
+| Deployment Topology | Intended Throughput (requests/sec at your VCL service, 100% logged) | Analytical & Control Plane | Ingest Topology | Best For |
 |---|---|---|---|---|
-| **Standard Architecture** | **Up to ~1,000 RPS comfortable on 4 vCPU / 16 GB** (ingest keeps pace to 10,000 RPS, but dashboard pages degrade above ~2,000 RPS — see [measured capacity](#measured-standard-mode-capacity-4-vcpu--16-gb)) | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
-| **High-Scale Architecture** | **~13,000–28,000+ sustained ingest RPS on 6–12 worker pods** *(absorbs bursts to 1,000,000 RPS via Fastly Object Storage — see [measured High-Scale capacity](#measured-high-scale-capacity))* | ClickHouse | High-Scale micro-batching workers + PostgreSQL control plane + FOS Archive Parquet | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
+| **Single-Host Docker Compose** | **Up to ~2,175 sustained RPS per worker** *(absorbs larger bursts via Fastly Object Storage)* | ClickHouse + PostgreSQL 16 + FOS Archive Parquet | 1 stateless worker (`HIGH_SCALE_WORKER_THREADS=1`, `HIGH_SCALE_MAX_BATCH_BYTES=6291456`, `HIGH_SCALE_MAX_BATCH_OBJECTS=10`) | Local development on laptops (~2–4 GiB RAM), single-VM production deployments, and moderate services |
+| **Multi-Pod Kubernetes (Helm)** | **~13,000–28,000+ sustained ingest RPS on 6–12 worker pods** *(absorbs bursts to 1,000,000 RPS via Fastly Object Storage — see [measured capacity](#measured-capacity))* | ClickHouse + PostgreSQL 16 + FOS Archive Parquet | Horizontally scaled stateless workers (`python -m backend.high_scale.worker`) with fenced partition cursors | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
 
 > [!NOTE]
 > **Requests per second at your VCL service:**
-> Sizing figures are the request rate at your Fastly VCL service when every request is logged (one log line per request, streamed to Fastly Object Storage). Fastly services handling tens or hundreds of thousands of requests per second can comfortably use either architecture by leveraging Fastly VCL log conditions:
+> Sizing figures are the request rate at your Fastly VCL service when every request is logged (one log line per request, streamed to Fastly Object Storage). Fastly services handling tens or hundreds of thousands of requests per second can also reduce ingest volume by leveraging Fastly VCL log conditions:
 > - **Sampling:** Stream 1-in-10 (`randombool(1, 10)`) or 1-in-50 requests for statistical sampling of high-volume traffic.
 > - **Conditional Logging:** Log only requests meeting specific criteria (e.g., HTTP errors `resp.status >= 400`, backend origin fetches, requests with origin latency above a threshold, or security/WAF events).
 >
 > As performance optimizations continue to evolve, these throughput guidelines will be updated with each release.
 
-### Measured Standard-mode capacity (4 vCPU / 16 GB)
+### Measured capacity
 
-Tested on a fresh install (no history) with a live synthetic feed stepped up without clearing data, log period 10 s, one analyst loading the pages every 30 s. Page times are API time-to-last-byte measured on the server; a browser adds network and render time (about 1–5 s usable at 1,000 RPS in our browser pass). Larger machines and log periods other than 10 s are not yet measured. On a live Fastly service, log-setting changes (including the log period) take a few minutes to propagate, so these figures assume a steady period.
-
-| Log rate | Ingest | Lag p95 | Dashboard | Network | Origin / Security / Performance |
-|---|---|---|---|---|---|
-| 500 RPS | keeps pace | 3–4 s | under 2 s | under 2 s | under 1 s |
-| 1,000 RPS | keeps pace | 4–5 s | 1.8–2.6 s | 1.2–1.5 s | under 1 s |
-| 2,000 RPS | keeps pace | 6–9 s | 3–8 s | 2.4–4 s | under 1 s |
-| 5,000 RPS | keeps pace | 6–55 s | 8–30 s | 5–18 s | under 15 s |
-| 10,000 RPS | keeps pace on average | 12–36 s | 24–48 s | 5–16 s | under 15 s |
-
-What drives page time:
-
-- **The live hour is read raw** and grows through the hour, so pages that read it slow down until the top of the hour (Network fell from 16 s to 0.2 s at the rollover). The dashboard top-N is accelerated by a 30 s speed layer; Network, Origin and Security are not yet.
-- **A just-closed hour needs its rollups built.** A busy hour takes minutes of CPU: about 33 seconds per million rows on an idle 4 vCPU machine (roughly 10 minutes for an hour at 5,000 RPS), and about twice that while serving traffic. Pages that read that hour fall back to raw scans, and ingest and page queries slow down, until it finishes.
-- **Ingest and rollup builds share the same CPUs as page queries**, so pages are slowest during commit and rollup bursts.
-
-Above ~2,000 RPS use a larger machine, sample or conditionally log at the edge (see the note above), or use the High-Scale architecture.
-
-### Measured capacity matrix (machine size × log period)
-
-We ran the same stepped test on two machine sizes, two settings profiles and three log periods (10 s, 60 s, 300 s). Each cell starts from an empty install and steps the synthetic feed up through 500, 1,000, 2,000, 5,000 and 10,000 RPS, running each step for 10 minutes without clearing data. One analyst loads the Dashboard, Network, Security, Origin and Performance pages every 30 s the whole time.
-
-"Scaled" raises DuckDB's threads and memory limit to fit the machine (6 threads and 14 GB on the 8 vCPU box, against 2 threads and 6 GB shipped).
-
-A step is viable when ingest lag stays inside the period-based limit (lag p95 at most 2 × period + 30 s, and end-of-step behind-live at most 2 × period + 60 s) and the p95 of Dashboard, Network and Security is at or under 3 s (or 5 s). Each cell shows the highest viable step for the 3 s / 5 s tier. Ingest kept pace at every step on every machine, so these are page-latency limits, not ingest limits. "None" means even the 500 RPS step missed the 3 s tier, which happened on the 4 vCPU box at a 300 s period (Dashboard p95 4.8 s). At 10,000 RPS the achieved ingest was 7,400 to 9,900 RPS.
-
-| Machine | Settings | 10 s period | 60 s period | 300 s period |
-|---|---|---|---|---|
-| 4 vCPU / 16 GB | Shipped | see table above | 500 / 1,000 RPS | none / 1,000 RPS |
-| 8 vCPU / 32 GB | Shipped | 2,000 / 2,000 RPS | 2,000 / 2,000 RPS | 1,000 / 2,000 RPS |
-| 8 vCPU / 32 GB | Scaled | 2,000 / 2,000 RPS | 1,000 / 5,000 RPS | 2,000 / 5,000 RPS |
-
-### Measured High-Scale capacity
-
-Tested on a Kubernetes deployment running a single ClickHouse replica (6 vCPU / 8 GB RAM), PostgreSQL 16 metadata plane, one backend API replica, and stateless High-Scale ingest workers with all background crons enabled. Using the same synthetic traffic generator and step-up harness, we stepped load from 500 RPS to 1,000,000 RPS across 34 stages without clearing data between stages, growing the live `request_facts` table to **101.1 million rows**. Every stage ingested **100% of expected rows** with zero data loss.
+Tested on a Kubernetes deployment running a single ClickHouse replica (6 vCPU / 8 GB RAM), PostgreSQL 16 metadata and control plane, one backend API replica, and stateless ingest workers (`python -m backend.high_scale.worker`) with all background crons enabled. Using a synthetic traffic generator and step-up harness, we stepped load from 500 RPS to 1,000,000 RPS across 34 stages without clearing data between stages, growing the live `request_facts` table to **101.1 million rows**. Every stage ingested **100% of expected rows** with zero data loss.
 
 #### 6 worker pods (`500` → `30,000` RPS across `10 s`, `60 s`, and `300 s` periods)
 
@@ -132,13 +101,13 @@ Measured against the **102,484,916-row** ClickHouse dataset on a single 6 vCPU /
 
 - **Warm (30 s response cache hit):** **13–21 ms** for Dashboard (`57 ms` SSR HTML), Origin, Performance, Security (`42 ms` full waterfall), and Sessions (`62 ms`); **25 ms** (`170 ms` full 5-endpoint waterfall) for Network.
 - **Cold (uncached arbitrary 24 h window across 102.5M rows):** **219–407 ms** for Origin, **261–449 ms** for Dashboard, **490–491 ms** for Performance, **882–1,052 ms** for Sessions, **1,603–1,617 ms** for Security, and **2,178–2,358 ms** for Network (all 6 full-page waterfalls complete in **under 2.4 seconds**).
-- **Scaling out:** Ingest throughput scales linearly with `high-scale-worker` replicas (~2,175–2,350 rows/s per worker pod). When scaling worker pods, keep `METADATA_PG_POOL_MAX=64` (the default) on the `backend` API deployment so its 40 FastAPI worker threads and APScheduler crons never wait on a metadata connection, and set `METADATA_PG_POOL_MAX=6` on `high-scale-worker` pods so horizontal worker scaling stays well inside PostgreSQL's `max_connections`.
+- **Scaling out:** Ingest throughput scales linearly with worker replicas (~2,175–2,350 rows/s per worker pod). When scaling worker pods, keep `METADATA_PG_POOL_MAX=64` (the default) on the `backend` API deployment so its 40 FastAPI worker threads and APScheduler crons never wait on a metadata connection, and set `METADATA_PG_POOL_MAX=6` on stateless worker pods so horizontal worker scaling stays well inside PostgreSQL's `max_connections`.
 
 ### Storage sizing
 
-Local disk holds the DuckLake Parquet data, the incoming buffer, rollups, Postgres, and DuckDB's temporary spill space. Measured on synthetic traffic after 24M rows: Parquet data about 40 bytes/row, rollups about 2 bytes/row, buffer 155 MB, Postgres 193 MB. Synthetic data is low-cardinality; **plan for 50–150 bytes/row** on real traffic (long URLs, user agents and many distinct IPs compress worse).
+ClickHouse stores compressed MergeTree parts on disk for low-latency serving while Fastly Object Storage holds the canonical Archive Parquet batches (`s3://{bucket}/{prefix}/archive/`), and PostgreSQL 16 holds operational metadata and ingest control state. On synthetic traffic, compressed storage is roughly 40 bytes/row; **plan for 50–150 bytes/row** on real traffic (long URLs, user agents, and high IP cardinality compress less).
 
-| Log rate (100% logged) | Rows/day | Parquet per day | 7 days retained |
+| Log rate (100% logged) | Rows/day | Compressed storage per day | 7 days retained |
 |---|---|---|---|
 | 500 RPS | 43M | 2–6 GB | 15–45 GB |
 | 1,000 RPS | 86M | 4–13 GB | 30–90 GB |
@@ -146,9 +115,7 @@ Local disk holds the DuckLake Parquet data, the incoming buffer, rollups, Postgr
 | 5,000 RPS | 432M | 22–65 GB | 150–450 GB |
 | 10,000 RPS | 864M | 43–130 GB | 300–900 GB |
 
-Add **10–50 GB for temporary spill** and about 20% headroom. Disk needed is roughly `retention_days × RPS × 86,400 × bytes_per_row`, plus those two allowances. Put the data volume on its own disk where possible so a spill or a full buffer cannot starve Postgres or the OS.
-
-**Spill space.** DuckDB writes large intermediate results (closed-hour rollups of a busy hour) to `data/services/.tmp`. The cap defaults to a quarter of the free disk, kept between 10 GB and 50 GB; set `DUCKDB_MAX_TEMP_DIRECTORY_SIZE` (for example `30GB`) to choose your own. At 5,000 RPS the folder reached 8–9 GB within minutes of a restart and peaked at 15 GB during a closed-hour rebuild, so a cap below that makes busy-hour rollups fail with `failed to offload data block`.
+Allow ~20% headroom on the ClickHouse data volume for background MergeTree merges. Put the ClickHouse data volume on its own disk where possible so large merges cannot starve PostgreSQL or the OS.
 
 ---
 
@@ -162,25 +129,25 @@ docker compose up --build
 
 > Requires Docker Compose v2 (the `docker compose` subcommand). The standalone `docker-compose` v1 binary reached end-of-life in 2023 and isn't shipped with current Docker installs.
 
-This local stack includes PostgreSQL 16 and is meant for evaluation and development. Production deployments use `docker-compose.yml` plus the `docker-compose.prod.yml` overlay rather than a plain `docker compose up` (see [docs/deploy/](docs/deploy/README.md)).
+This local stack starts PostgreSQL 16, ClickHouse, the stateless ingest worker (`python -m backend.high_scale.worker`), the FastAPI backend, the Next.js frontend, and Caddy. Production single-host deployments use `docker-compose.yml` plus the `docker-compose.prod.yml` overlay rather than a plain `docker compose up` (see [docs/deploy/](docs/deploy/README.md)); Kubernetes deployments use the Helm chart in [`deploy/chart/`](deploy/chart/).
 
 Open **http://localhost** and follow the provisioning wizard. The wizard creates your Object Storage bucket, access keys, a CDN-fronting service, and the logging endpoint on the VCL service you select.
 
 > The stack is fronted by Caddy on port **80** (a single ingress, mirroring production). A friendlier alias **http://fastly.localhost** works with no setup — browsers resolve `*.localhost` to `127.0.0.1`. For a custom name like **http://fastly.analytics**, add `127.0.0.1 fastly.analytics` to your hosts file.
 
-For manual install (no Docker), see [Manual Installation](#manual-installation). The non-Docker [`run.sh`](run.sh) path still serves the app directly on **http://localhost:3000**.
+For manual install (no Docker), see [Manual Installation](#manual-installation). The non-Docker [`run.sh`](run.sh) path serves the app directly on **http://localhost:3000**.
 
 ---
 
 ## How It Works
 
-The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the app continuously ingests new `.gz` log files from the bucket into a DuckLake table.
+The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the stateless ingest worker continuously discovers new `.gz` / `.zst` log files from the bucket, checkpoints canonical Parquet archive batches to Fastly Object Storage, and publishes verified batches into ClickHouse.
 
 ![Provisioning Process](docs/assets/provisioning.png)
 
 ![ETL Process](docs/assets/etl.png)
 
-Once the data lake is healthy, you can collaborate with teammates by sharing the live dashboard:
+Once ingestion is active, you can collaborate with teammates by sharing the live dashboard:
 
 ![Sharing Process](docs/assets/sharing.png)
 
@@ -199,11 +166,11 @@ You run the application as a central web-accessible server on a dedicated VM (or
 
 ## Features
 
-- **Transactional & high-scale storage** — DuckLake ACID-compliant log storage with a PostgreSQL 16 catalog and local NVMe/SSD Parquet in Standard mode, or ClickHouse backed by FOS Archive Parquet in High-Scale mode
-- **Automated provisioning** — wizard creates the bucket, access keys, CDN-fronting service, and logging endpoint
+- **Unified ClickHouse + FOS Archive storage** — sub-second analytical queries powered by ClickHouse MergeTree tables and projections, backed by canonical Archive Parquet in Fastly Object Storage and a PostgreSQL 16 operational and ingest control plane
+- **Automated provisioning** — wizard creates the bucket, access keys, CDN-fronting service, and logging endpoint (`token → service → storage → ngwaf → fields → execute`)
 - **CDN-accelerated reads** — every FOS read goes through a Fastly service to minimize egress and maximize caching
-- **Crash-safe ingestion** — buffered locally, atomically committed; interrupted imports never corrupt the table
-- **Retention and storage maintenance** — configurable request/RUM retention, DuckLake snapshot expiry, and local cache/rollup cleanup with admin-triggered runs; see the [`expire` job specification](docs/cron/jobs/expire.md)
+- **Crash-safe batched ingestion** — page-batched ingestion writes verified archive Parquet to FOS and publishes atomically to ClickHouse through a `pending` → `visible` publication gate; interrupted imports never expose partial batches
+- **Retention and storage maintenance** — configurable request/RUM retention, ClickHouse partition and FOS archive retention cleanup, and operational metadata pruning; see the [`expire` job specification](docs/cron/jobs/expire.md) and [`metadata_cleanup` job specification](docs/cron/jobs/metadata-cleanup.md)
 - **Schema evolution** — new and missing JSON fields handled gracefully; corrupt lines isolated and surfaced
 - **Log sampling** — optionally log a random percentage of requests to manage cost on high-traffic services
 - **Multi-source support** — analyze logs from multiple services side by side
@@ -218,7 +185,7 @@ You run the application as a central web-accessible server on a dedicated VM (or
 - **Streaming analytics** — CMCD (Common Media Client Data) dashboard for services with v1 or v2 streaming-log fields enabled, showing buffer health, bitrate, throughput, concurrent sessions, and per-session detail drill-down with auto-refresh
 - **Ingest error quarantine** — corrupt or unparseable log lines are isolated, classified, and surfaced in the admin UI with export/download, instead of silently dropped
 - **Session scoring** — edge-computed 0-100 risk score per request combining cookie/timing signals with a PageRank transition matrix, with live threshold enforcement, audit logging, key rotation, and matrix version history. See the [runbook](docs/session_scoring_runbook.md) and [feature reference](docs/features.md)
-- **Real User Monitoring (RUM)** — client-side Core Web Vitals, performance, and error analytics powered by a self-hosted, version-controlled [Grafana Faro Web SDK](https://grafana.com/oss/faro/) loaded dynamically from FOS, featuring a secure server-side beacon receiver, crash-safe local buffering, and an active SSE streaming live-event ticker
+- **Real User Monitoring (RUM)** — client-side Core Web Vitals, performance, and error analytics powered by a self-hosted, version-controlled [Grafana Faro Web SDK](https://grafana.com/oss/faro/) loaded dynamically from FOS, featuring a secure server-side beacon receiver, crash-safe ingestion into ClickHouse (`rum_vitals` and `rum_errors`), and an active SSE streaming live-event ticker
 - **Assets Shield** — static asset delivery and cache performance analyzer with hit/miss/pass ratios segmented across custom Fastly cache states, distinct document class filtering, and deep-link filtering that opens pre-filtered analytics views in a new tab, integrated directly as an executive tab under Service Summary
 - **Remote Frontend Deployment** — a secure, enterprise-grade edge proxy architecture fronted by a dedicated Fastly service, allowing admins to deploy and tear down a public reverse proxy for their local dashboard VM in a single click from the share control panel
 
@@ -234,11 +201,10 @@ If you'd rather not use Docker:
 # Recommended: install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# PostgreSQL 16 must be running. Create a database and user, then set the
-# PostgreSQL URI connection strings (both must start with postgresql:// or
-# postgres:// and may share one database; see .env.example):
-#   export METADATA_DSN=postgresql://USER:PASS@127.0.0.1:5432/ducklake
-#   export DUCKLAKE_CATALOG=postgresql://USER:PASS@127.0.0.1:5432/ducklake
+# PostgreSQL 16 and ClickHouse must be running. Configure connection settings
+# in your environment or .env (see .env.example):
+#   export METADATA_DSN=postgresql://USER:PASS@127.0.0.1:5432/fla
+#   export CLICKHOUSE_URL=http://127.0.0.1:8123
 
 # Backend dependencies
 uv sync
@@ -251,13 +217,16 @@ cd frontend && npm ci && cd ..
 
 # ...or development mode with hot reload
 ./run.sh --dev
+
+# In a separate terminal, run the stateless ingest worker:
+uv run python -m backend.high_scale.worker
 ```
 
 Then open **http://localhost:3000**.
 
 ### CLI provisioning (alternative to the wizard)
 
-If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Superuser** permissions (provisioning creates new services, which an Engineer token can't do), you can provision from the command line (with `METADATA_DSN` and `DUCKLAKE_CATALOG` exported in your shell, or via `docker compose exec backend`):
+If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Superuser** permissions (provisioning creates new services, which an Engineer token can't do), you can provision from the command line (with `METADATA_DSN` and `CLICKHOUSE_URL` exported in your shell, or via `docker compose exec backend`):
 
 ```bash
 # Guided
@@ -266,7 +235,7 @@ uv run python -m backend.provision.cli provision
 # Non-interactive
 uv run python -m backend.provision.cli provision --token <YOUR_TOKEN> --service-id <ID> --yes
 
-# Teardown (include --remove-data with --yes to also remove local data and catalog rows)
+# Teardown (include --remove-data with --yes to also remove local data and metadata rows)
 uv run python -m backend.provision.cli teardown --service-id <ID> --remove-data --yes
 ```
 
@@ -342,7 +311,7 @@ The `dev` script in `frontend/package.json` binds with `-H 127.0.0.1` to bypass 
 ### Dashboard shows "No data" but the header has a row count
 - Check the time range overlaps with your log data.
 - Check the browser console for failed `POST`s (often the ALPN issue above).
-- A newly provisioned service can take a few minutes for the first ingestion + commit. Check the **Log Management** page for sync status.
+- A newly provisioned service can take a few minutes for the first ingestion batch to publish. Check the **Log Management** page or **ClickHouse Diagnostics** (`/admin/clickhouse`) for ingest status.
 
 ---
 

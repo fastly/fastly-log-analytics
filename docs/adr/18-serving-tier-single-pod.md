@@ -1,88 +1,15 @@
 # ADR-18 — Durable Serving Mode Removes Native DuckDB File Ownership
 
-**Status:** Accepted (Amended by [ADR-21](21-high-scale-serving-architecture.md) & [ADR-22](22-postgres-only-metadata.md))
+**Status:** Superseded by [ADR-21](21-high-scale-serving-architecture.md) (historical)
 **Decided by:** v3 scalability review
 
 > [!NOTE]
-> **Architectural Amendments (v3.0):**
-> - **Deployment modes ([ADR-21](21-high-scale-serving-architecture.md)):** the supported modes are `standard` and `high_scale`.
-> - **PostgreSQL Metadata Unified ([ADR-22](22-postgres-only-metadata.md)):** PostgreSQL 16 is mandatory across all deployment topologies, retiring dual SQLite/Postgres mode.
-> - **Single-Pod Serving Tier Invariant Preserved:** Ingest scales horizontally across Celery / High-Scale workers, but the FastAPI backend serving tier remains strictly pinned to `replicaCount: 1` without HPA to avoid cache and lease conflicts.
+> **Superseded in v3.0.0-rc3 ([ADR-21](21-high-scale-serving-architecture.md)):**
+> Fastly Log Analytics now uses ClickHouse 24.8 + PostgreSQL 16 + stateless ingest workers (`python -m backend.high_scale.worker`) across all deployments. Per-service `.duckdb` files, local Parquet buffers, and pod-local Top-N rollup files have been removed. This ADR is retained as historical record of why file-backed DuckDB and pod-local rollups could not scale horizontally.
 
 ## Context
 
-[ADR-15](15-multi-writer-topology.md) and [ADR-16](16-ingest-ledger.md) made the **ingest** tier horizontally scalable: discovery and conversion fan out across Celery workers coordinated by a shared Postgres ledger and an atomic cron lease, and adding worker replicas adds throughput. That work is real and complete.
-
-The **serving** tier — the backend Deployment that answers API requests — did not move with it, and nothing in the docs said so. The v3 release notes, the chart, and ADR-15's own framing all read as "multi-pod scalable architecture," which is true of ingest and false of serving. A reader who scales `replicaCount` to 2 on the strength of that gets a stack that fails in three independent ways, two of them silently. This ADR names them so the next reader doesn't have to rediscover them from a production incident.
-
-Scope note: this is about running **N backend pods concurrently**. One backend pod plus N workers — the topology `docker-compose.multipod.yml` and the chart defaults actually describe — is supported and is what ADR-15 delivered.
-
-The first safe serving increment is deliberately narrower than a complete
-stateless dashboard redesign: Celery mode with a Postgres DuckLake catalog
-now has an explicit `DEPLOYMENT_MODE=high_scale`. Serving connections are
-read-only, independent in-memory DuckDB instances, and their `logs` views
-read only the per-service durable DuckLake table. Native service `.duckdb`
-files and local buffer files are not part of that serving path. Sync/file mode
-retains the existing file-backed behavior.
-
-## The remaining structural blockers
-
-### 1. The per-service `.duckdb` file was process-exclusive
-
-`backend/core/duckdb_pool.py` opens every pooled connection with `read_only=False`, and `get_connection` forces it, so cron write connections never conflict with pool connections *within a process*. Multiple connections to the same file from the **same** process share in-memory database state and are safe. A **second process** is not: DuckDB takes a process-exclusive lock on a read-write single-file database.
-
-This is avoided for the durable serving mode: a serving checkout never opens
-that file. The single-node sync/file deployment still has this constraint.
-
-Read-only attach is not an escape hatch either: the writer path (cron, view rebind, buffer commit) needs write access, and DuckDB does not offer multi-process read-write on one file.
-
-### 2. Pod-local parquet described by shared-Postgres bookkeeping
-
-`local_compacted_files` and `committed_buffers` are metadata tables, so under `METADATA_DSN` they live in **shared** Postgres via `metadata.base.get_con`. The compacted parquet they describe is **pod-local** — it sits in that pod's cache directory on that pod's disk. Shared bookkeeping pointing at unshared files is the whole bug.
-
-The cron lease makes it deterministic rather than merely racy. `local_compact_{id}` acquires a per-`(service, job)` lease (`start_cron_run(src, "local_compact")`, `backend/cron/jobs/compaction.py:86`), so exactly one pod runs local compaction, writes the merged output to its own disk, and registers the merged-away source basenames in shared Postgres. Every **other** pod then reads those basenames back out through `get_locally_compacted_basenames` (`backend/core/iceberg/sync.py:151` (removed)) and treats them as intentionally absent locally — `sync.py:170` and `sync.py:437` both exclude them from the "missing — re-download" check. So the other pods never re-download the source files, and never produced the merged output that was supposed to replace them. Those rows are simply gone from their view of the data. No error, no warning; the sync tick reports success.
-
-This is the same production incident as the former local-compaction orphan-cleanup trap (1.65M → 302K rows on 2026-05-31) replayed with **pods** substituted for **time**. The mechanism is identical: the registry suppresses re-download of files whose merged replacement does not exist. The 2026-05 fix made the merged output survive orphan-cleanup on the one machine that wrote it; it did nothing about a machine that never wrote it, because at the time there was only ever one.
-
-### 3. The cron lease inverts for jobs whose output is pod-local
-
-ADR-15 §4 built the lease as a cross-pod mutex, and for jobs writing to a **shared** target that is exactly right — `optimize` (`optimize.py:41`), `expire_snapshots` (`expire.py:29`), and alert-notification dedup must run once per tick fleet-wide, and the partial unique index on `job_runs` guarantees that.
-
-For jobs whose output is **pod-local**, the same mutex guarantees the opposite of what is needed: it ensures N-1 pods never produce their own copy of output they each require. Every one of these takes the lease:
-
-| Job | Lease site | Pod-local output |
-|---|---|---|
-| `local_compact` | `compaction.py:86` | merged parquet in the pod's cache |
-| `rollup_compact_daily` | `compaction.py:301` | per-day rollup parquet |
-| `rollup_hour_heal` | `compaction.py:218` | per-hour rollup parquet |
-| `insights_prewarmer` | `insights_prewarmer.py:136` | pod-local warm caches |
-| `metadata_sync` | `metadata.py:126` | pod-local caches + FOS state flush |
-| `ngwaf_sync` | `metadata.py:388` | pod-local `ngwaf_bot_cache` SQLite |
-
-The rollup jobs are the worst case, because rollups are a *performance* mechanism with a working fallback. One pod ends up with bundled rollups; the rest find no bundle and fall back to scanning raw parquet — the same runtime fallback described in trap #24, which exists precisely because it is much slower than the bundled read. Nothing is wrong-looking on those pods: correct answers, silently and dramatically slower, exactly where the 1M-RPS target needs rollups most. A latency regression that appears on a fraction of requests proportional to `(N-1)/N` and cannot be reproduced by hitting one pod directly is close to the worst possible shape for on-call.
-
-Note that pod-local jobs stay on the in-process APScheduler *on purpose*, so they touch the right pod's files. The defect is not the routing. It is that the lease, taken inside the job body, is scoped fleet-wide while the job's effect is scoped to one pod. Correct behavior for this class is a **per-pod** lease (a pod identity in the lease key), or no lease at all, and no such option exists today.
-
-## Options considered
-
-1. **Do nothing, document it.** This remains the constraint for sync/file mode and for pod-local accelerators.
-2. **Make the lease key pod-aware for the pod-local job class.** Smallest change that would let N pods each maintain their own rollups/caches. Does nothing about blockers 1 or 2, so it is necessary-but-insufficient and should not be built first — it would make the fleet *look* healthier while blocker 1 still 503s.
-3. **Move serving off the per-service DuckDB file** — selected as the smallest safe increment for the durable logs path. Querying DuckLake/object storage directly from ephemeral read-only DuckDB connections removes the native-file blocker, while rollups and other local accelerators remain a follow-up.
-4. **Shard by service.** Route each service's traffic to a designated pod via consistent hashing at the ingress, so a `.duckdb` file is only ever opened by one process. Scales the fleet with the number of *services* rather than with per-service load, needs session-independent routing at the ingress, and turns single-pod loss into per-service outage. Plausible middle path; unvalidated.
-
-## Decision
-
-Record the constraint and make it hard to violate by accident. Concretely, alongside this ADR:
-
-- The backend Deployment in `deploy/chart/fastly-log-analytics/` is pinned to one replica and no longer has an HPA. Previously `.Values.autoscaling.enabled` gated the backend HPA **and** the worker KEDA ScaledObject together, so the only lever for scaling the (scalable) worker fleet also scaled the (unscalable) backend to `maxReplicas: 10`. Worker autoscaling stays on that flag; the backend is not offered as a knob, because there is no value of it that works. Pinned by `tests/chart/test_helm.py`.
-- `backend/core/duckdb_pool.py` carries a pointer here at the `read_only=False` note, so the next reader of "multi-pod scalable architecture" does not infer that the serving tier scales.
-
-The durable mode is opt-in and only valid with `DEPLOYMENT_MODE=high_scale` plus a
-Postgres `DUCKLAKE_CATALOG`; boot validation rejects an incoherent combination.
-The sync/file mode remains unchanged. This does not yet make every dashboard
-accelerator shared: rollups, local compaction, and prewarming must still be
-treated as disposable or moved to durable storage before claiming unrestricted
-multi-pod scale.
+[ADR-15](15-multi-writer-topology.md) and [ADR-16](16-ingest-ledger.md) made the **ingest** tier horizontally scalable. This ADR documented the structural blockers that prevented scaling the legacy DuckDB/Parquet serving tier (`process-exclusive .duckdb files`, `pod-local compacted parquet`, and `fleet-wide cron leases over pod-local rollup files`) and motivated the cutover to ClickHouse ([ADR-21](21-high-scale-serving-architecture.md)).
 
 ### ClickHouse prototype decision (2026-09-08 UTC)
 

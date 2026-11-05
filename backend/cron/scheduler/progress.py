@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from typing import Any
@@ -201,7 +200,7 @@ else:
 
 def compute_sync_status_cached(service_id: str | None) -> dict | None:
     from backend import config as svcconfig
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     if not service_id:
         return None
@@ -219,7 +218,7 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
 
             latest_crons = latest_cron_per_task(service_id)
             req_sync = None
-            for t in ("log_discovery", "commit", "ledger_sweep"):
+            for t in ("log_discovery", "ledger_sweep"):
                 if t in latest_crons and latest_crons[t].get("started_at"):
                     ts = latest_crons[t]["started_at"]
                     if req_sync is None or ts > req_sync:
@@ -229,7 +228,7 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                 if not existing_req or str(req_sync) > str(existing_req):
                     metrics["request"]["last_sync_at"] = req_sync
             rum_sync = None
-            for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep"):
+            for t in ("rum_discovery", "ledger_rum_sweep"):
                 if t in latest_crons and latest_crons[t].get("started_at"):
                     ts = latest_crons[t]["started_at"]
                     if rum_sync is None or ts > rum_sync:
@@ -248,58 +247,12 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     lookup_key = service_id or src.get("service_id") or src.get("name", "")
     cached_status = svcconfig.get_status(lookup_key) or (svcconfig.get_status(src["name"]) if "name" in src else {})
     if not cached_status:
-        return None  # fall through to dedicated endpoint
+        return None
     request_status = cached_status.get("request")
     if isinstance(request_status, dict):
         cached_status["latest_log_at"] = request_status.get("latest_log_at")
-    try:
-        import re
-
-        from backend.core import metadata as metadata_db
-
-        summary = metadata_db.get_ingested_files_status_summary(lookup_key)
-        if not summary.get("latest_file_name") and "name" in src:
-            summary = metadata_db.get_ingested_files_status_summary(src["name"]) or summary
-        latest_file_name = summary.get("latest_file_name")
-        total_rows = summary.get("total_rows") or 0
-        try:
-            from backend.core.metadata.base import get_con as _get_meta_con
-
-            lrow = (
-                _get_meta_con(service_id)
-                .execute(
-                    "SELECT object_key FROM ingest_ledger WHERE service_id = ? AND status = 'committed' "
-                    "ORDER BY object_key DESC LIMIT 1",
-                    (service_id,),
-                )
-                .fetchone()
-            )
-            ledger_latest = lrow[0] if lrow else None
-            if ledger_latest and (
-                not latest_file_name or ledger_latest.split("/")[-1] > latest_file_name.split("/")[-1]
-            ):
-                latest_file_name = ledger_latest
-        except Exception:
-            pass
-        if latest_file_name:
-            fname = latest_file_name.split("/")[-1]
-            m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
-            if m:
-                latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
-                cached_status["latest_ingested_file_at"] = latest_ingested_file_at
-                cached_status["latest_available_file_at"] = latest_ingested_file_at
-        if request_status is None and total_rows > 0 and cached_status.get("local_rows") is None:
-            cached_status["local_rows"] = total_rows
-    except Exception as e:
-        logger.debug("[compute_sync_status_cached] failed to overlay real-time SQLite metadata: %s", e)
     cached_status["storage_mode"] = src.get("storage_mode", "cloud")
     cached_status["configured"] = True
-    db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
-    db_exists = os.path.exists(db_path)
-    db_size = os.path.getsize(db_path) if db_exists else 0
-    cache_size = _get_dir_size(_db._cache_dir(src))
-    cached_status["duckdb_size_bytes"] = db_size + cache_size
-    cached_status["duckdb_exists"] = db_exists
     active_run = get_latest_progress_for_service(service_id)
     if active_run:
         cached_status["active_run"] = active_run

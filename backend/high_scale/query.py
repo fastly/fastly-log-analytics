@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-import duckdb
 import orjson
 import zstandard as zstd
 
@@ -33,9 +32,13 @@ from backend.high_scale.archive import (
     row_matches_serving_domain,
 )
 from backend.models.analytics import QueryRequest as DashboardQueryRequest
-from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
-from backend.repositories.utils.response_shaping import build_query_response_envelope
+from backend.repositories.utils.response_shaping import (
+    SectionTimer,
+    _compact_sql_for_debug,
+    _safe_table,
+    build_query_response_envelope,
+)
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.telemetry import get_tracked_calls
 
@@ -636,17 +639,15 @@ def query_endpoint(
     allowed_tables = frozenset({"logs", "client_vitals", "client_errors", svc_table.lower()})
     _t_val = time.perf_counter()
     _reject_ambiguous_syntax(raw_sql, allowed_tables | frozenset(names.values()))
-    with duckdb.connect(":memory:") as parser_con:
-        try:
-            validate_user_sql(
-                raw_sql,
-                parser_con=parser_con,
-                session_id=session_id,
-                service_id=service.service_id,
-                allowed_tables=allowed_tables,
-            )
-        except SQLValidationError as exc:
-            raise PermissionError(exc.message) from exc
+    try:
+        validate_user_sql(
+            raw_sql,
+            session_id=session_id,
+            service_id=service.service_id,
+            allowed_tables=allowed_tables,
+        )
+    except SQLValidationError as exc:
+        raise PermissionError(exc.message) from exc
     timer.mark("validate_user_sql", _t_val)
     sql = raw_sql.rstrip().rstrip(";")
     for pat, repl in (

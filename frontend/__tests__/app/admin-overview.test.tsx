@@ -359,8 +359,6 @@ const SAMPLE_SERIES = {
   disk_used_pct: [{ ts: '2026-04-19T12:01:00Z', value: 31.2 }],
   disk_used_pct_root: [{ ts: '2026-04-19T12:01:00Z', value: 44.8 }],
   active_query_count: [{ ts: '2026-04-19T12:01:00Z', value: 2.0 }],
-  'pool_wait_p95_ms|svc-a': [{ ts: '2026-04-19T12:01:00Z', value: 4.2 }],
-  'pool_wait_p95_ms|svc-b': [{ ts: '2026-04-19T12:01:00Z', value: 11.5 }],
   'ingest_lag_s|svc-a': [{ ts: '2026-04-19T12:01:00Z', value: 18.0 }],
   'ingest_lag_s|svc-b': [{ ts: '2026-04-19T12:01:00Z', value: 7.0 }],
 }
@@ -382,11 +380,11 @@ describe('/admin/trends Page & Client', () => {
     expect(screen.getByTestId('admin-trends-grid-reservation').className).toContain('[contain-intrinsic-size:auto_680px]')
   })
 
-  it('renders all 7 vital series cards, switches lookback windows, and triggers manual Refresh', async () => {
+  it('renders all 6 vital series cards, switches lookback windows, and triggers manual Refresh', async () => {
     clientGetSpy.mockResolvedValue({ data: { series: SAMPLE_SERIES }, response: new Response(null, { status: 200 }) })
     renderWithQuery(<AdminTrendsClient />)
     await waitFor(() => expect(screen.getByTestId('admin-trends-latest-cpu_load_1m')).toHaveTextContent('0.82'))
-    for (const [k, v] of [['mem_used_pct', '54.3%'], ['disk_used_pct', '31.2%'], ['disk_used_pct_root', '44.8%'], ['active_query_count', '2.00'], ['pool_wait_p95_ms', '11.5ms'], ['ingest_lag_s', '18s']] as const) {
+    for (const [k, v] of [['mem_used_pct', '54.3%'], ['disk_used_pct', '31.2%'], ['disk_used_pct_root', '44.8%'], ['active_query_count', '2.00'], ['ingest_lag_s', '18s']] as const) {
       expect(screen.getByTestId(`admin-trends-latest-${k}`)).toHaveTextContent(v)
     }
 
@@ -502,7 +500,7 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
         return {
           last_seq: 12,
           active: [{
-            query_id: 11, db_type: 'DuckDB', sql_preview: 'SELECT count(*) FROM logs WHERE status >= 500',
+            query_id: 11, db_type: 'ClickHouse', sql_preview: 'SELECT count(*) FROM logs WHERE status >= 500',
             sql: 'SELECT count(*) FROM logs WHERE status >= 500', sql_len: 46, service_id: 'svc_alpha',
             started_at_utc: nowSec - 2, duration_ms: 1450.0, cancellable: true, cancelled_at: null,
             attribution: {
@@ -542,7 +540,7 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
       route === '/api/admin/app-config/query-monitor' ? { enabled: true } : new Promise(() => {}),
     )
     renderWithQuery(<QueryMonitorPage />, {
-      wrapper: withNuqsTestingAdapter({ searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1' }),
+      wrapper: withNuqsTestingAdapter({ searchParams: '?q=COMPACT&kind=cron&view=live&slow=250&db=ClickHouse&nogroup=1' }),
     })
     expect(await screen.findByDisplayValue('COMPACT')).toBeDefined()
     expect(screen.getByRole('tab', { name: /live only/i }).getAttribute('aria-selected')).toBe('true')
@@ -562,12 +560,7 @@ describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
     vi.restoreAllMocks()
   })
 
-  it('enforces Standard vs High-Scale deployment mode on loading shell, page, and status notices', async () => {
-    vi.stubEnv('DEPLOYMENT_MODE', 'standard')
-    expect(() => render(<ClickHouseLoading />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
-    expect(() => renderWithQueryClient(<ClickHouseAdminPage />)).toThrow('NEXT_HTTP_ERROR_FALLBACK;404')
-
-    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
+  it('renders loading shell, page, and status notices unconditionally', async () => {
     const { unmount: uLoad } = render(<ClickHouseLoading />)
     for (const id of [
       'admin-clickhouse-loading', 'admin-clickhouse-toolbar', 'admin-clickhouse-vitals-reservation',
@@ -1027,7 +1020,7 @@ describe('AdminQueuePage (/admin/queue)', () => {
     })
   })
 
-  it('renders Standard mode fallback and Standard Mode in-process scheduler telemetry', async () => {
+  it('renders broker unreachable state and in-process scheduler telemetry', async () => {
     const okRes = (data: unknown) => ({ data, response: { ok: true, status: 200 } })
     const emptyWorkers = { count: 0, active_tasks: {}, stats: {}, registered: {}, scheduled: {}, error: 'Valkey unreachable' }
 
@@ -1040,8 +1033,8 @@ describe('AdminQueuePage (/admin/queue)', () => {
     })
 
     const { unmount } = renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Unreachable / Standard Mode'))
-    expect(screen.getByText(/No queues found or Celery mode is inactive/i)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Unreachable'))
+    expect(screen.getByText(/No queues found or Celery broker is inactive/i)).toBeInTheDocument()
     expect(screen.getByText(/No active workers found/i)).toBeInTheDocument()
     expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument()
     expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
@@ -1050,15 +1043,14 @@ describe('AdminQueuePage (/admin/queue)', () => {
     clientGetSpy.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {
         return okRes({
-          broker_reachable: false, deployment_mode: 'standard',
-          workers: { ...emptyWorkers, error: 'Celery broker not configured in standard mode' },
+          broker_reachable: false,
+          workers: { ...emptyWorkers, error: 'Celery broker unreachable' },
           queues: {},
           inprocess_schedules: [
             { name: 'log_discovery_svc-alpha', trigger: 'interval[0:00:10]', next_run_at: 1700000010 },
             { name: 'commit_svc-alpha', trigger: 'interval[0:05:00]', next_run_at: 1700000300 },
           ],
           inprocess_active_runs: [{ run_id: 101, service_id: 'svc-alpha', task: 'sync', started_at: 1700000000 }],
-          standard_ingest: { ingested_files: 1250, quarantined_items: 2 },
           ledger: { committed: 1250, quarantined: 2, dead_letter: 0 },
         })
       }
@@ -1067,16 +1059,8 @@ describe('AdminQueuePage (/admin/queue)', () => {
     })
 
     renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Standard Mode · In-Process Scheduler'))
-    expect(screen.queryByText(/^Queue Depths$/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Total Queue Depth \(1h\)/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Inspect warning:/i)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Unreachable'))
     expect(screen.getByTestId('admin-queue-depths-reservation')).toBeInTheDocument()
-    expect(screen.getByText(/Quarantined Files & Corrupt Lines \(2\)/i)).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-standard-ingest-summary')).toBeInTheDocument()
-    expect(screen.getByText('1,250')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-standard-scheduler-summary')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-inprocess-active-table')).toBeInTheDocument()
     expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
     expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
     expect(screen.getByText('commit_svc-alpha')).toBeInTheDocument()

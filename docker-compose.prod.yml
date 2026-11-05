@@ -84,9 +84,7 @@ services:
     mem_limit: 12g
     memswap_limit: 12g
     # Without an explicit ulimit, Docker inherits the daemon default (often
-    # 1024 soft). DuckDB parallel DuckLake scans open one fd per parquet file;
-    # a populated service with 1k+ files hits the limit and throws
-    # "Too many open files". main.py bumps the soft limit at startup via
+    # 1024 soft). main.py bumps the soft limit at startup via
     # resource.setrlimit, but that call silently no-ops when Docker's hard
     # limit is already at or below the target. Setting both here ensures the
     # hard limit is reachable so the startup bump actually takes effect.
@@ -95,16 +93,6 @@ services:
         soft: 65536
         hard: 65536
     environment:
-      # DuckDB sees this via os.getenv at connection-open. backend/core/
-      # duckdb.py:760-768 issues ``SET max_memory = <env>`` per-session;
-      # the auto-calc fallback at ~line 803 is now gated on this env
-      # being UNSET (pre-fix it silently overrode this value with
-      # ``int(physical_ram * 0.6)`` ≈ 9-10GB on the 16GB VM, which left
-      # too little headroom and caused recurring host OOM-kills).
-      # 6GB chosen so: DuckDB 6 + Python/aiohttp working set
-      # ~3 + scoring/cache working set ~2 = ~11GB < 12GB container cap
-      # < 16GB host. Bump only after confirming RSS plateaus below 9GB.
-      - DUCKDB_MEMORY_LIMIT=6GB
       # Hard-fail at startup if /app/data isn't a real mount point. Guards
       # against the broken-fstab failure mode (data accidentally written to
       # an ephemeral boot-disk stub). See _enforce_data_dir_mounted in main.py.
@@ -126,78 +114,15 @@ services:
       - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
       # Pass through DEBUG_RESPONSES from the host environment (defaults to true).
       - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
-      # Pre-warm our upgraded 4-connection pool at startup to eliminate cold-start paint delays.
-      - DUCKDB_POOL_WARM_AT_BOOT=true
-      # Bound request concurrency to the memory envelope of this 4-core,
-      # 16GB single-host deployment. Cold connections are preferable to
-      # repeated OOM restarts and first-byte timeouts.
-      - DUCKDB_POOL_MAX_SIZE=4
-      # Cap pooled connections independently; httpfs and object-cache
-      # allocations are not fully represented by DuckDB's memory accounting
-      # (measured 2026-10-05: the configured ceiling reports as ~366MiB
-      # usable against a 512MB cap, ~28% eaten by that unaccounted
-      # overhead). 512MB was too tight for a single wide rollup query
-      # (ip_spread/ngwaf_bots) under dashboard+cron overlap -> real
-      # OutOfMemoryException, even though the container was only at 13% of
-      # its 12GB cap (1.57GB RSS) -- the bottleneck was this per-connection
-      # ceiling, not host/container capacity. 1GB x 4 pooled connections
-      # worst-case = 4GB, still well under the 6/11/12GB budget above.
-      # Note: in DuckDB, `SET max_memory` modifies the database-instance-wide
-      # buffer manager ceiling (shared across all connections to the same
-      # file-backed `.duckdb` instance). Setting 1GB here starved the shared
-      # file-backed buffer manager to 953.6 MiB when dashboard filtered scans
-      # overlapped background rollup crons. Default to 6GB (matching
-      # DUCKDB_MEMORY_LIMIT) while still allowing override for durable_serving.
-      - DUCKDB_POOL_CONN_MEMORY_LIMIT=${DUCKDB_POOL_CONN_MEMORY_LIMIT:-6GB}
-      # Optional emergency switch for the local active-hour optimization.
-      # Readers fall back to the existing live scan when this is disabled.
-      - PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}
-      # Periodic DuckDB instance recycle (backend/cron/jobs/duckdb_recycle.py).
-      # DuckDB's enable_object_cache caches parquet metadata keyed by
-      # filename and never evicts deleted files; under continuous buffer +
-      # compaction file churn the cache grows ~175MB/min and OOM-kills the
-      # 12g container every ~70min. The cache can't be cleared in place
-      # (no pragma_clear_cache in 1.5.3), so when RSS crosses the threshold
-      # we briefly QUIESCE all access to the db file (hold the connection
-      # barrier + drain the pool so live connections reach zero), which
-      # destroys + rebuilds the instance and frees the cache — keeping
-      # object_cache ON for its query perf. Near-zero-downtime: in-flight
-      # requests finish and new ones QUEUE for the ~1-3s drain (the barrier
-      # cap must exceed drain+grace so opens can't leak in mid-recycle —
-      # that 1500ms-too-short cap was the 2026-06-21 OOM regression).
-      # Set INTERVAL_MIN to 0 to disable (instant revert). Interval is 5min
-      # (not 15) so the recycle fires within 5min of crossing the threshold.
-      # Threshold lowered 9000 -> 6000: at 9GB the recycle fired only ~3GB
-      # (~17min) below the 12g cap, when the process is already memory-
-      # pressured and busy, so the pool wouldn't drain inside the timeout ->
-      # the recycle returned 'incomplete' and freed nothing -> OOM at 12.5GB
-      # anyway (observed 2026-06-21, two kills at an identical ~12.5GB ceiling
-      # ~88min apart). Firing at 6GB gives ~35min / ~7 attempts of runway and,
-      # more importantly, recycles while the process is calm and the pool
-      # drains cleanly. Costs a more frequent (~15min) lazy object-cache
-      # re-warm; raise back toward 9000 if that churn shows up in p95.
-      - DUCKDB_RECYCLE_INTERVAL_MIN=5
-      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=6000
-      - DUCKDB_RECYCLE_BARRIER_CAP_MS=10000
-      # OOM STOPGAP (backend/cron/jobs/duckdb_recycle.py). The cache recycle above
-      # does NOT bound RSS — the dominant allocation isn't the object cache
-      # (recycle/quiesce/jemalloc all empirically failed). Until the leak is
-      # attributed, restart cleanly BEFORE the 12g cgroup OOM-SIGKILL: when
-      # RSS crosses 9000MB (~3GB headroom for the graceful drain) the backend
+      # Graceful self-restart before the 12g cgroup OOM-SIGKILL: when RSS
+      # crosses 9000MB (~3GB headroom for the graceful drain) the backend
       # SIGTERMs itself, uvicorn exits 0, and restart:unless-stopped brings up
-      # a fresh process. Converts destructive exit-137 kills (strand sync rows
-      # + raw files) into clean ~15s restarts. Rides the 5min recycle job.
-      # Set to 0 to disable. Remove once the real leak is fixed.
+      # a fresh process. Set to 0 to disable.
       - BACKEND_GRACEFUL_RESTART_RSS_MB=9000
       # Allocator tuning passthrough. The Dockerfile bakes the production
-      # default (jemalloc background purge + 5s decay). Override via the VM
-      # .env to layer in jemalloc HEAP PROFILING
-      # (prof:true,prof_active:true,lg_prof_sample:19) without a rebuild and
-      # without committing debug flags to this public repo — /api/debug/jeprof
-      # can only dump if prof was enabled at process start. Keep this default
+      # default (jemalloc background purge + 5s decay). Keep this default
       # byte-for-byte in sync with backend/Dockerfile's MALLOC_CONF; an empty
       # .env resolves to it, so a fresh clone carries zero profiling overhead.
-      # Remove this passthrough once the leak is attributed and fixed.
       - MALLOC_CONF=${MALLOC_CONF:-background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000}
       # CORS allowlist for browser-origin XHR. The analyst SPA is same-
       # origin behind Caddy so this is defense-in-depth — without it the
@@ -237,33 +162,25 @@ services:
       - OAUTH_REDIRECT_BASE=${OAUTH_REDIRECT_BASE:-}
       # SSO-exclusive deployments only: set to 0 to disable passcode login.
       - SHARE_PASSCODE_LOGIN_ENABLED=${SHARE_PASSCODE_LOGIN_ENABLED:-}
-      # PostgreSQL standard metadata + DuckLake catalog (unified v3 storage).
-      # Points to the local Postgres container on loopback with fallback password.
-      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@127.0.0.1:5432/ducklake
-      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@127.0.0.1:5432/ducklake
+      # PostgreSQL operational metadata + ClickHouse analytical store (unified v3 storage).
+      # Points to the local containers on loopback with fallback password.
+      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@127.0.0.1:5432/fla
+      - CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://127.0.0.1:8123}
+      - HIGH_SCALE_CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://127.0.0.1:8123}
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-127.0.0.1}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      - HIGH_SCALE_ENABLED=1
     depends_on:
       - postgres
+      - clickhouse
     volumes: !override
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data
-      - /mnt/app-data/cache:/app/cache
-    # Plain /api/health (deep=0) returns HTTP 200 unconditionally, even while
-    # _startup_complete is still false (backend/main.py ~line 980) — it only
-    # confirms the HTTP server answers, not that the per-service warm-up loop
-    # (backend/main.py:_background_startup) finished. That warm-up can take
-    # 15-20 min on this VM, so the old `curl -f .../api/health` check flipped
-    # "Healthy" within seconds of container start while the app was still
-    # 15-20 min from real readiness (2026-08 false-positive readiness
-    # incident). ?deep=1 is exempt from the admin-token gate (path-only match
-    # in remote_access.py, query string doesn't affect it) and its docstring
-    # says the cost is local metadata only — no FOS/CDN/Fastly API — so it's cheap
-    # enough to poll every interval. Checking HTTP status alone still isn't
-    # enough: deep=1 ALSO returns plain 200 while status is "initializing"
-    # (only flips to a real 503 once _startup_complete is true and a service
-    # is degraded), so this greps the response body for the top-level
-    # "status":"ok" (anchored on `^{` so a per-service "status":"ok" inside
-    # the nested services[] array can't false-positive-match while the
-    # overall status is "degraded").
     healthcheck:
       test:
         [
@@ -273,17 +190,43 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      # Long enough to cover the documented 15-20 min per-service warm-up
-      # loop (_background_startup) with margin. Failures during start_period
-      # show as "starting", not "unhealthy" — Docker does NOT restart a
-      # container on a failed healthcheck by itself (restart:unless-stopped
-      # only reacts to process exit), but a generous start_period still
-      # avoids the container ever being labeled unhealthy mid-warm-up for
-      # anything (dashboards, `docker ps`, future orchestration) that reads
-      # that status. The check flips to "healthy" as soon as _startup_complete
-      # is true and every service is ok — no need to wait out the full
-      # budget in the common case.
       start_period: 25m
+
+  worker:
+    network_mode: host
+    ports: !reset []
+    networks: !reset []
+    logging: *prod-logging
+    command: ["python", "-m", "backend.high_scale.worker"]
+    mem_limit: 2g
+    memswap_limit: 2g
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_WORKER_THREADS=1
+      - HIGH_SCALE_MAX_BATCH_BYTES=6291456
+      - HIGH_SCALE_MAX_BATCH_OBJECTS=10
+      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@127.0.0.1:5432/fla
+      - CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://127.0.0.1:8123}
+      - HIGH_SCALE_CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://127.0.0.1:8123}
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-127.0.0.1}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+    depends_on:
+      - postgres
+      - clickhouse
+    volumes: !override
+      - /mnt/app-data/configs:/app/configs
+      - /mnt/app-data/data:/app/data
 
   frontend:
     network_mode: host
@@ -317,7 +260,7 @@ services:
     networks: !reset []
     logging: *prod-logging
     # Docker's default SIGKILL window is 10s. The Caddyfile sets a 120s
-    # read_timeout on /api/* to cover slow DuckDB queries. Without a grace
+    # read_timeout on /api/* to cover slow analytical queries. Without a grace
     # period, a rolling deploy SIGKILLs Caddy while it's still proxying an
     # in-flight request. 15s covers the vast majority of non-streaming
     # responses and lets Caddy drain cleanly before the new container starts.
@@ -340,15 +283,44 @@ services:
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     environment:
       - POSTGRES_USER=fla
-      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
-      - POSTGRES_DB=ducklake
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-fla_local_dev}
+      - POSTGRES_DB=fla
     volumes: !override
       - /mnt/app-data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fla -d ducklake"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fla -d fla"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    network_mode: host
+    ports: !reset []
+    networks: !reset []
+    logging: *prod-logging
+    mem_limit: 4g
+    memswap_limit: 4g
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fla}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes: !override
+      - /mnt/app-data/clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   caddy_data:

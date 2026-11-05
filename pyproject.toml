@@ -1,23 +1,13 @@
 [project]
 name = "fastly-log-analytics"
 version = "3.0.0rc1"
-description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
+description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by ClickHouse"
 # The codebase uses PEP 695 type-parameter syntax (``def foo[T]``) and
 # ``from datetime import UTC``, which require 3.12 and 3.11 respectively; the
 # Docker image and CI both run 3.13. Declaring the true floor keeps a ``pip
 # install`` on an older interpreter from failing with a bare SyntaxError.
 requires-python = ">=3.12"
 dependencies = [
-    # Pin to the 1.5 line specifically. Pre-1.3 ships without the
-    # canonical ``.to_arrow_table()`` method on DuckDBPyConnection
-    # (only the now-deprecated ``.fetch_arrow_table()`` alias), so
-    # ingest.py / storage/_core.py / rollups/recompute.py — which all
-    # use ``.to_arrow_table()`` — silently break on a dev box that
-    # resolved an older version. Prod docker has consistently shipped
-    # 1.5.x; matching that here closes the dev/prod drift window.
-    # 1.5.6 fixes empty-UNION window finalization (duckdb/duckdb#25713).
-    # Keep the 2.x API changes out until separately audited.
-    "duckdb>=1.5.6,<2",
     "python-dotenv>=1.0",
     "boto3>=1.34",
     "cymruwhois>=1.6",
@@ -35,12 +25,8 @@ dependencies = [
     # Floor at 4.14.2 to clear GHSA-82r6-8w77-94w6 (TLSStream IDNA
     # certificate-spoofing vulnerability).
     "anyio>=4.14.2",
-    # pytz is loaded at RUNTIME by DuckDB's icu_collations / TIMESTAMP WITH
-    # TIME ZONE handling. An earlier dedup pass dropped this thinking it
-    # was unused (no direct `import pytz` in Python sources) — that broke
-    # every scoring analytics endpoint with "Required module 'pytz' failed
-    # to import" the moment they ran `WHERE timestamp >= now() - INTERVAL`.
-    # Don't drop again without confirming DuckDB no longer needs it.
+    # pytz is loaded at runtime for timezone-aware timestamp handling in
+    # pandas/pyarrow and APScheduler.
     "pytz>=2026.1.post1",
     # Upper-bound lifted 2026-06-17 after vcrpy 8.2.0 (PR #996) shipped
     # the AsyncStreamReaderMixin removal compat. Floor raised to 3.14.1
@@ -170,14 +156,14 @@ dev = [
     # deptry: dep-hygiene scan. Used by ``make deps-check`` to catch
     # imports of transitive deps (DEP003), unused declared deps
     # (DEP002), and missing declared deps (DEP001). Configured under
-    # [tool.deptry] below — runtime-only deps (uvicorn CLI, pytz for
-    # DuckDB ICU, python-dotenv, python-multipart for FastAPI form
-    # parsing) get DEP002 ignores.
+    # [tool.deptry] below — runtime-only deps (uvicorn CLI, pytz,
+    # python-dotenv, python-multipart for FastAPI form parsing) get
+    # DEP002 ignores.
     "deptry>=0.20",
     # time-machine: deterministic time travel for tests. Enables
     # tests that assert on time boundaries (cron orphan threshold,
-    # rollup bucket cut-overs, snapshot retention windows) without
-    # the flaky-at-23:59 problem of relying on real wall-clock.
+    # snapshot retention windows) without the flaky-at-23:59 problem
+    # of relying on real wall-clock.
     # Preferred over freezegun: time-machine ticks the clock forward
     # during the call (so time.monotonic() / perf_counter() still
     # measure real elapsed time inside the frozen window).
@@ -203,8 +189,7 @@ extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*"]
 # needs deptry can't statically detect:
 #   uvicorn:         CLI runner (`uvicorn backend.main:app …`)
 #   python-dotenv:   loaded by uv via --env-file at process start
-#   pytz:            DuckDB ICU loads it at runtime for TIMESTAMP TZ
-#                    (regression of the 2026-05 dedup; do NOT drop)
+#   pytz:            loaded at runtime for timezone-aware timestamp handling
 #   python-multipart: FastAPI form-data parser, never imported directly
 DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart", "anyio", "certifi"]
 # DEP003 — direct import of a transitive dep. The codebase imports
@@ -220,7 +205,7 @@ DEP003 = ["botocore", "yarl", "dateutil", "numpy"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Worker cap: -n auto spawns cpu_count() workers, and each worker re-imports
-# the full backend (DuckDB, boto3, fastapi) at ~500 MB resident.
+# the full backend (boto3, fastapi, pyarrow) at ~500 MB resident.
 # On an 8-10 core Mac that's 4-5 GB just for pytest workers, which combined
 # with `make ci -j2` running vitest in parallel was pushing 16 GB Macs into
 # swap. -n 4 caps the worker pool at 4 regardless of CPU count.
@@ -285,32 +270,13 @@ filterwarnings = [
     # warning is pure noise on every ``-n 4`` run. Suppress by message so a
     # dedicated ``--benchmark-only`` run still surfaces real benchmark output.
     "ignore:Benchmarks are automatically disabled because xdist plugin is active",
-    # DuckDB deprecated ``fetch_record_batch()`` in favour of
-    # ``to_arrow_reader()``. We still instrument it by name in
-    # query_instrumentation._READER_METHODS because callers may use either,
-    # and tests/core/test_metrics_and_telemetry.py deliberately exercises the
-    # deprecated path to pin that the wrapper defers deregistration until the
-    # reader drains. The deprecation is DuckDB's, not ours to fix.
-    "ignore:fetch_record_batch.. is deprecated:DeprecationWarning",
 ]
 
 # Coverage tip — focused per-module coverage:
 #
 # Use ``--cov=backend`` for the full tree (what CI runs) and read the
 # per-file row from the report. For a SINGLE module use the file-path
-# form ``--cov=backend/path/to/file.py``. Do NOT use the dotted-module
-# form (``--cov=backend.path.to.file``) — pytest-cov resolves it by
-# eagerly importing the named module BEFORE conftest runs, and for
-# any module whose import chain transitively reaches duckdb, that
-# races duckdb's lazy ``_duckdb._sqltypes`` setup and crashes with
-# ``ModuleNotFoundError: No module named '_duckdb._sqltypes';
-# '_duckdb' is not a package`` (duckdb stages its submodules into
-# sys.modules from the .so's PyInit; coverage's import-instrumentation
-# starts before that stage completes). No ``[tool.coverage.run]``
-# block exists because every config we tried either no-ops against
-# this path or conflicts with the ``--cov=PATH`` filter. Workaround
-# is the path form; for an upstream-flavor fix this would need
-# coverage.py to defer the dotted-name resolution past plugin import.
+# form ``--cov=backend/path/to/file.py``.
 
 [tool.mypy]
 python_version = "3.13"
@@ -367,13 +333,6 @@ module = [
     # coverage. Each verified clean under the strict flags below before
     # opt-in; new files in these packages inherit the stricter checks
     # automatically.
-    "backend.core.rollups._common",
-    "backend.core.rollups.bundle_builder",
-    "backend.core.rollups.session_rollups",
-    "backend.core.rollups.day_bundles",
-    "backend.core.rollups.day_compaction_sql",
-    "backend.core.rollups.partial_hour",
-    "backend.core.rollups.recompute",
     "backend.routers.admin.health",
 ]
 disallow_untyped_defs = true

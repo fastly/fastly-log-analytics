@@ -23,7 +23,7 @@ Routes in [`backend/routers/admin/admin_queries.py`](../../../backend/routers/ad
 - `GET /api/admin/usage-log` (`UsageLogResponse`): query `service_id`, `start`, `end`, `usage_type`, `process_context`, `operation_type`, `page`, `page_size` (1 to 1000, default 100). Returns `entries[]` (`id`, `timestamp`, `operation_class`, `operation_type`, `url`, `bytes`, `duration_ms`, `function_name`, `process_context`, `status`, estimated cost), `total`, and `aggregate` (`total_class_a`, `total_class_b`, `total_cdn_downloads`, `total_cdn_bytes`, `total_fos_bytes`, estimated costs per class and in total, class A/B breakdowns by operation).
 - `GET /api/admin/usage-log/export`: CSV stream with the same filters and `max_rows` (default 100,000, up to 1,000,000).
 - `DELETE /api/admin/usage-log`: deletes all usage-log rows for the service (the durable hourly summary table is separate).
-- `GET`/`PATCH /api/admin/usage-logging`: global config (`enabled`, `retention_days`, `class_a_rate_per_1k`, `class_b_rate_per_10k`, `cdn_egress_rate_per_gb`, `storage_rate_per_gb_month`, `min_billed_days`, `track_duckdb_httpfs`, `billing_zone`); PATCH validates numeric ranges and the zone.
+- `GET`/`PATCH /api/admin/usage-logging`: global config (`enabled`, `retention_days`, `class_a_rate_per_1k`, `class_b_rate_per_10k`, `cdn_egress_rate_per_gb`, `storage_rate_per_gb_month`, `min_billed_days`, `billing_zone`); PATCH validates numeric ranges and the zone.
 - `GET /api/admin/system-jobs`: schedules and latest status of the process-global jobs (bot data refresh, rDNS enrichment, share audit purge).
 - `GET /api/admin/log-accounting[/{service_id}]`: accounting buckets (see [overview.md](overview.md) for the sustained-loss rule).
 

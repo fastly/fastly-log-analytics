@@ -23,14 +23,11 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import structlog
-from structlog.testing import capture_logs
 
 import backend.high_scale.archive as disk_sampler
 from backend.config import ClickHouseConfig
 from backend.core.clickhouse import ClickHouseClient
 from backend.core.rum_ingest import extract_metrics_from_faro_payload
-from backend.cron.jobs import metric_snapshots
-from backend.cron.jobs.metric_snapshots import _run_metric_snapshot, _sample_high_scale_disk
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale import sessions as hs_sessions
 from backend.high_scale.archive import (
@@ -1724,10 +1721,6 @@ def _reset_sampler() -> Iterator[None]:
     disk_sampler.reset_for_tests()
 
 
-def _history(metric: str) -> list[dict[str, Any]]:
-    return metric_snapshots.get_batch(since=datetime.now(UTC) - timedelta(hours=1)).get(metric, [])
-
-
 def test_sampler_reads_real_volume_stats_and_one_batch_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     probe = _FakeClickHouse(free_fraction=0.12)
     snapshot = disk_sampler.sample_disk_state(probe)
@@ -1759,55 +1752,12 @@ def test_mode_transitions_are_logged_once_each(monkeypatch: pytest.MonkeyPatch) 
     assert changes[-1][0] == "warning"
 
 
-def test_metric_snapshot_tick_high_scale_vs_standard_and_probe_failure() -> None:
-    probe = _FakeClickHouse(free_fraction=0.12)
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse.get_clickhouse_client", return_value=probe),
-    ):
-        _run_metric_snapshot()
-    assert probe.calls == 1
-    assert _history("high_scale_disk_mode_level")[-1]["value"] == 2.0
-    assert _history("high_scale_disk_free_fraction")[-1]["value"] == pytest.approx(0.12, abs=1e-3)
-
-    disk_sampler.reset_for_tests()
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=False),
-        patch("backend.core.clickhouse.get_clickhouse_client") as get_client,
-    ):
-        assert _sample_high_scale_disk() == 0
-        _run_metric_snapshot()
-    get_client.assert_not_called()
-    assert disk_sampler.latest_disk_snapshot() is None
-
-    class _Down:
-        def storage_health(self) -> dict:
-            raise RuntimeError("clickhouse unavailable")
-
-    with (
-        capture_logs() as logs,
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse.get_clickhouse_client", return_value=_Down()),
-    ):
-        assert _sample_high_scale_disk() == 0
-    assert any(e["event"] == "high_scale.disk_sample_failed" and e["error_kind"] == "RuntimeError" for e in logs)
-    assert disk_sampler.latest_disk_snapshot() is None
-
-
 def test_health_snapshot_disk_states(client: Any) -> None:
-    with patch("backend.config.is_high_scale_mode", return_value=False):
-        assert "high_scale" not in client.get("/api/admin/health-snapshot").json()
-
-    with patch("backend.config.is_high_scale_mode", return_value=True):
-        assert client.get("/api/admin/health-snapshot").json()["high_scale"]["disk"] is None
+    assert client.get("/api/admin/health-snapshot").json()["high_scale"]["disk"] is None
 
     probe = _FakeClickHouse(free_fraction=0.09)
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse.get_clickhouse_client", return_value=probe),
-    ):
-        _run_metric_snapshot()
-        resp = client.get("/api/admin/health-snapshot")
+    disk_sampler.sample_disk_state(probe)
+    resp = client.get("/api/admin/health-snapshot")
     assert resp.status_code == 200
     disk = resp.json()["high_scale"]["disk"]
     assert disk["mode"] == "emergency" and disk["free_fraction"] == pytest.approx(0.09, abs=1e-3)
@@ -1865,10 +1815,7 @@ def _cfg(retention_days: int | None = None) -> dict[str, Any]:
 
 def _get(client: Any, cfg: dict[str, Any] | None, **params: Any) -> Any:
     query = {"service_id": "svc-hs", "events_per_second": 1000, **params}
-    with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.config.load_config", return_value=cfg),
-    ):
+    with patch("backend.config.load_config", return_value=cfg):
         return client.get(_PATH, params=query)
 
 
@@ -1910,10 +1857,6 @@ def test_recommendation_endpoint_sampled_volume_and_error_cases(client: Any) -> 
     sampled = _get(client, _cfg()).json()
     assert sampled["volume_total_bytes"] == 2 * _TB and sampled["volume_total_source"] == "sampled"
 
-    with patch("backend.config.is_high_scale_mode", return_value=False):
-        r_disabled = client.get(_PATH, params={"service_id": "svc-hs", "events_per_second": 1000, "total_bytes": _TB})
-    assert r_disabled.status_code == 404 and r_disabled.json()["detail"]["error"] == "high_scale_not_enabled"
-
     r_missing = _get(client, None, service_id="nope", events_per_second=1, total_bytes=_TB)
     assert r_missing.status_code == 404 and r_missing.json()["detail"]["error"] == "service_not_found"
 
@@ -1923,7 +1866,6 @@ def test_recommendation_endpoint_sampled_volume_and_error_cases(client: Any) -> 
 def test_recommendation_is_logged_and_never_writes_config(client: Any, caplog: pytest.LogCaptureFixture) -> None:
     assert _is_blocked_path(_PATH) is True
     with (
-        patch("backend.config.is_high_scale_mode", return_value=True),
         patch("backend.config.load_config", return_value=_cfg()),
         patch("backend.config.save_config") as save,
     ):

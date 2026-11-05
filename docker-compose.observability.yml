@@ -75,7 +75,7 @@ services:
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.16.0
     environment:
-      - DATA_SOURCE_NAME=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake?sslmode=disable
+      - DATA_SOURCE_NAME=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@postgres:5432/fla?sslmode=disable
     networks: [app-network]
 
   celery-exporter:
@@ -83,11 +83,8 @@ services:
     command: ["--broker-url=redis://valkey:6379/0"]
     networks: [app-network]
 
-  # celery-exporter consumes worker task events, which are off by default —
-  # re-declare the worker command with -E added. The worker also exports its
-  # own OTel signals (ingest/cron spans, pool-wait histogram).
+  # The worker exports its own OTel signals (ingest/cron spans).
   worker:
-    command: ["python", "-m", "celery", "-A", "backend.celery_app", "worker", "-E", "-l", "info", "-Q", "q.ingest,q.control,celery", "--concurrency=2"]
     environment: *otel-env
 
 volumes:

@@ -22,16 +22,6 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import raise_internal
 
 from ._router import router
-from .health import (  # noqa: F401
-    ACTIVE_HOUR_BUCKET_COUNTS,
-    RAW_BUCKET_COUNTS,
-    ROLLUP_BUCKET_COUNTS,
-    RUM_BUCKET_COUNTS,
-    active_hour_bucket_counts,
-    raw_bucket_counts,
-    rollup_bucket_counts,
-    rum_bucket_counts,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +29,8 @@ logger = logging.getLogger(__name__)
 _FASTLY_COUNTS_TTL = 45.0
 _FASTLY_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_FASTLY_COUNTS_TTL)
 
-_DUCKDB_COUNTS_TTL = 45.0
-_DUCKDB_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_DUCKDB_COUNTS_TTL)
+_CLICKHOUSE_COUNTS_TTL = 45.0
+_CLICKHOUSE_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_CLICKHOUSE_COUNTS_TTL)
 
 
 def _fetch_fastly_request_counts(
@@ -75,164 +65,65 @@ LOG_ACCOUNTING_LOSS_THRESHOLD = 0.05
 LOG_ACCOUNTING_MIN_RUN = 2
 
 
-def _duckdb_row_counts_per_bucket(source: dict[str, Any], start: datetime, end: datetime, by: str) -> dict[str, int]:
-    """Per-bucket ``COUNT(*)`` from the live DuckDB view."""
+def _clickhouse_row_counts_per_bucket(
+    source: dict[str, Any], start: datetime, end: datetime, by: str
+) -> dict[str, int]:
+    """Per-bucket row counts from ClickHouse ``request_facts`` (falling back to metadata)."""
+    service_id = str(source.get("name") or source.get("service_id") or "")
     cache_key = (
-        source.get("name", ""),
+        service_id,
         int(start.timestamp()),
         int(end.timestamp()),
         by,
     )
-    cached: dict[str, int] | None = _DUCKDB_COUNTS_CACHE.get(cache_key)
+    cached: dict[str, int] | None = _CLICKHOUSE_COUNTS_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
     try:
-        result = _try_row_counts_from_rollup(source, start, end, fmt)
-        if result is None:
-            result = _raw_row_counts(source, start, end, fmt)
-        for b, n in _rum_row_counts(source, start, end, fmt).items():
-            result[b] = result.get(b, 0) + n
-        _DUCKDB_COUNTS_CACHE[cache_key] = result
-        return result
-    except Exception as e:
-        logger.warning("[log-accounting] DuckDB counts unavailable, falling back to metadata: %s", e)
-        return {}
+        from backend.core.clickhouse import get_clickhouse_client
 
-
-def _try_row_counts_from_rollup(
-    source: dict[str, Any],
-    start: datetime,
-    end: datetime,
-    fmt: str,
-) -> dict[str, int] | None:
-    """Read hourly request counts from the overview rollup parquet."""
-    import os
-
-    from backend.core.request_context import _ConnectionHolder
-    from backend.core.rollups import OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
-    from backend.core.rollups.rollup_coverage import collect_hourly_bundle_paths
-
-    bundled_root = _hour_bundled_root(source)
-    if not os.path.isdir(bundled_root):
-        return None
-
-    collected = collect_hourly_bundle_paths(
-        source,
-        start,
-        end,
-        bundled_root,
-        OVERVIEW_BUNDLE_FILENAME,
-    )
-    if collected is None:
-        return None
-    rollup_paths, crosses_active = collected
-    if not rollup_paths and not crosses_active:
-        return None
-
-    result: dict[str, int] = {}
-    unit = "day" if "%H" not in fmt else "hour"
-
-    if rollup_paths:
-        from backend.repositories._base import quote_path_list
-
-        paths_sql = quote_path_list(rollup_paths)
-        st_tz = start.astimezone(UTC).isoformat()
-        et_tz = end.astimezone(UTC).isoformat()
-        with _ConnectionHolder(source, read_only=True) as con:
-            rows = rollup_bucket_counts(con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=st_tz, end_tz=et_tz)
-        for b, n in rows:
-            result[b] = int(n)
-
-    if crosses_active:
-        import glob
-        from datetime import timedelta
-
-        from backend.core import duckdb as _ddb
-        from backend.core.duckdb import escape_sql_literal
-        from backend.core.storage._core import buffer_files
-
-        active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(start, active_hour_dt)
-        live_start_iso = live_start.strftime("%Y-%m-%d %H:%M:%S")
-        end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
-
-        hour_strs: set[str] = set()
-        cursor = live_start.replace(minute=0, second=0, microsecond=0)
-        while cursor < end:
-            hour_strs.add(cursor.strftime("%Y-%m-%d-%H"))
-            cursor += timedelta(hours=1)
-
-        cache_dir = _ddb._cache_dir(source)
-        committed_files: list[str] = []
-        for hour_str in hour_strs:
-            active_hour_glob = os.path.join(cache_dir, "data", f"timestamp_hour={hour_str}", "**", "*.parquet")
-            committed_files.extend(p for p in glob.glob(active_hour_glob, recursive=True) if os.path.isfile(p))
-        buf_files = buffer_files(source)
-
-        if committed_files:
-            active_paths = committed_files + buf_files
-            paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in active_paths)
-            with _ConnectionHolder(source, read_only=True) as con:
-                rows = active_hour_bucket_counts(
-                    con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=live_start_iso, end_iso=end_iso
-                )
+        client = get_clickhouse_client()
+        if client is None:
+            return {}
+        trunc_fn = "toStartOfHour" if by == "hour" else "toStartOfDay"
+        fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
+        sql = (
+            f"SELECT formatDateTime({trunc_fn}(req_start_time, 'UTC'), '{fmt}') AS bucket, "
+            "count() AS n "
+            "FROM request_facts "
+            "WHERE service_id = {service_id:String} "
+            "  AND req_start_time >= {start:DateTime64(3, 'UTC')} "
+            "  AND req_start_time < {end:DateTime64(3, 'UTC')} "
+            "GROUP BY bucket"
+        )
+        query_fn = getattr(client, "query", None)
+        if callable(query_fn):
+            res = query_fn(
+                sql,
+                parameters={
+                    "service_id": service_id,
+                    "start": start.astimezone(UTC),
+                    "end": end.astimezone(UTC),
+                },
+            )
+            rows = getattr(res, "result_rows", None) or []
+            out = {str(b): int(n) for b, n in rows}
         else:
-            table_name = _ddb._safe_table_name(source["name"])
-            with _ConnectionHolder(source, read_only=True) as con:
-                try:
-                    rows = raw_bucket_counts(
-                        con, unit=unit, fmt=fmt, table_name=table_name, start_iso=live_start_iso, end_iso=end_iso
-                    )
-                except Exception:
-                    if buf_files:
-                        paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in buf_files)
-                        rows = active_hour_bucket_counts(
-                            con, unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=live_start_iso, end_iso=end_iso
-                        )
-                    else:
-                        rows = []
-        for b, n in rows:
-            result[b] = result.get(b, 0) + int(n)
-
-    return result
-
-
-def _raw_row_counts(
-    source: dict[str, Any],
-    start: datetime,
-    end: datetime,
-    fmt: str,
-) -> dict[str, int]:
-    """Full raw-parquet scan fallback for row counts."""
-    from backend.core import duckdb as _ddb
-    from backend.core.request_context import _ConnectionHolder
-
-    table_name = _ddb._safe_table_name(source["name"])
-    start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
-    end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
-    unit = "day" if "%H" not in fmt else "hour"
-    with _ConnectionHolder(source, read_only=True) as con:
-        rows = raw_bucket_counts(con, unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso)
-    return {b: int(n) for b, n in rows}
-
-
-def _rum_row_counts(
-    source: dict[str, Any],
-    start: datetime,
-    end: datetime,
-    fmt: str,
-) -> dict[str, int]:
-    """Per-bucket RUM beacon edge request counts excluded from ``logs``."""
-    from backend.core.request_context import _ConnectionHolder
-
-    start_iso = start.strftime("%Y-%m-%d %H:%M:%S")
-    end_iso = end.strftime("%Y-%m-%d %H:%M:%S")
-    unit = "day" if "%H" not in fmt else "hour"
-    with _ConnectionHolder(source, read_only=True) as con:
-        rows = rum_bucket_counts(con, source, unit=unit, fmt=fmt, start_iso=start_iso, end_iso=end_iso)
-    return {b: int(n) for b, n in rows}
+            dict_rows = client.execute(
+                sql.replace("req_start_time", "event_timestamp"),
+                {
+                    "service_id": service_id,
+                    "start": start.astimezone(UTC),
+                    "end": end.astimezone(UTC),
+                },
+            )
+            out = {str(r["bucket"]): int(r["n"]) for r in (dict_rows or []) if "bucket" in r and "n" in r}
+        _CLICKHOUSE_COUNTS_CACHE[cache_key] = out
+        return out
+    except Exception as e:
+        logger.debug("[log-accounting] ClickHouse counts unavailable, falling back to metadata: %s", e)
+        return {}
 
 
 def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "hour") -> dict[str, Any]:
@@ -241,7 +132,7 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
 
     from backend import config as svcconfig
     from backend.core import metadata as metadata_db
-    from backend.repositories._base import SectionTimer
+    from backend.repositories.utils.response_shaping import SectionTimer
 
     timer = SectionTimer()
     service_id = source.get("name", "")
@@ -317,23 +208,23 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
                 service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
             ),
         )
-        fut_duckdb = pool.submit(
+        fut_ch = pool.submit(
             contextvars.copy_context().run,
             _run_timed,
-            lambda: _duckdb_row_counts_per_bucket(source, start, end_clamp, by),
+            lambda: _clickhouse_row_counts_per_bucket(source, start, end_clamp, by),
         )
         try:
             fastly_counts, ms_fastly = fut_fastly.result()
         except Exception as e:
             raise_internal(logger, e, code="fastly_stats_failed", status=502)
         local_counts, ms_sqlite = fut_sqlite.result()
-        duckdb_counts, ms_duckdb = fut_duckdb.result()
+        ch_counts, ms_ch = fut_ch.result()
 
     timer.entries.append({"section": "fastly_fetch", "time_ms": ms_fastly})
     timer.entries.append({"section": "sqlite_counts", "time_ms": ms_sqlite})
-    timer.entries.append({"section": "duckdb_counts", "time_ms": ms_duckdb})
+    timer.entries.append({"section": "clickhouse_counts", "time_ms": ms_ch})
 
-    all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()) | set(duckdb_counts.keys()))
+    all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()) | set(ch_counts.keys()))
     buckets: list[LogAccountingBucket] = []
     total_fastly = 0
     total_ours = 0
@@ -342,7 +233,7 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
     for b in all_buckets:
         req_count = int(fastly_counts.get(b, 0))
         _meta_rows, fcount = local_counts.get(b, (0, 0))
-        ours = int(duckdb_counts.get(b, _meta_rows))
+        ours = int(ch_counts.get(b, _meta_rows))
         gap = req_count - ours
         denom = req_count if req_count > 0 else ours
         gap_pct = (gap / denom) if denom > 0 else 0.0
@@ -466,4 +357,4 @@ def api_log_accounting(
 
 
 _CacheRegistry.register("routers.admin.log_accounting._FASTLY_COUNTS_CACHE", _FASTLY_COUNTS_CACHE)
-_CacheRegistry.register("routers.admin.log_accounting._DUCKDB_COUNTS_CACHE", _DUCKDB_COUNTS_CACHE)
+_CacheRegistry.register("routers.admin.log_accounting._CLICKHOUSE_COUNTS_CACHE", _CLICKHOUSE_COUNTS_CACHE)

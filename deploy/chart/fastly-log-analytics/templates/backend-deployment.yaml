@@ -7,16 +7,7 @@ metadata:
     helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  # Pinned to 1, NOT .Values.replicaCount: the per-service DuckDB file is
-  # process-exclusive, so a second backend pod 503s every data request.
-  # See docs/adr/18-serving-tier-single-pod.md.
   replicas: 1
-  # Default RollingUpdate surges a second pod before killing the first --
-  # for the reason above that's not a brief overlap, it's a guaranteed
-  # 503/lock-error window on every upgrade (confirmed live: also deadlocks
-  # entirely on a resource-tight cluster, since the surge pod can't schedule
-  # and the old one never scales down to free room for it). Recreate kills
-  # the old pod first.
   strategy:
     type: Recreate
   selector:
@@ -67,17 +58,6 @@ spec:
             {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
             - name: SSE_BACKPLANE
               value: {{ .Values.config.sseBackplane | quote }}
-            {{- include "fastly-log-analytics.duckdbEnv" . | nindent 12 }}
-            - name: DUCKDB_POOL_MAX_SIZE
-              value: {{ .Values.config.duckdbPoolMaxSize | quote }}
-            - name: DUCKDB_POOL_CONN_MEMORY_LIMIT
-              value: {{ .Values.config.duckdbPoolConnMemoryLimit | quote }}
-            - name: DUCKDB_RECYCLE_INTERVAL_MIN
-              value: {{ .Values.config.duckdbRecycleIntervalMin | quote }}
-            - name: DUCKDB_RECYCLE_RSS_THRESHOLD_MB
-              value: {{ .Values.config.duckdbRecycleRssThresholdMb | quote }}
-            - name: DUCKDB_RECYCLE_BARRIER_CAP_MS
-              value: {{ .Values.config.duckdbRecycleBarrierCapMs | quote }}
             - name: BACKEND_GRACEFUL_RESTART_RSS_MB
               value: {{ .Values.config.backendGracefulRestartRssMb | quote }}
             {{- if .Values.config.debugResponses }}

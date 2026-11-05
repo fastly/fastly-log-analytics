@@ -23,7 +23,7 @@ const REQUEST_FACTS_PATH = '/api/high-scale/services/{service_id}/request-facts'
 const DEFAULT_PAGE_SIZE = 100
 
 type RequestFactsResponse = components['schemas']['HighScaleRequestFactResponse']
-type RequestFactsRequest = components['schemas']['HighScaleRequestFactRequest']
+type RequestFactsRequest = Omit<components['schemas']['HighScaleRequestFactRequest'], 'emulate_standard'>
 
 interface HighScaleRequestFactsOptions {
   serviceId: string | null | undefined
@@ -35,7 +35,6 @@ interface HighScaleRequestFactsOptions {
   pop?: string | null
   country?: string | null
   batchId?: string | null
-  emulateStandard?: boolean
 }
 
 export function useHighScaleRequestFacts({
@@ -48,22 +47,22 @@ export function useHighScaleRequestFacts({
   pop,
   country,
   batchId,
-  emulateStandard,
 }: HighScaleRequestFactsOptions) {
-  const filterKey = `${status ?? ''}|${domain ?? ''}|${pop ?? ''}|${country ?? ''}|${batchId ?? ''}|${emulateStandard ?? ''}`
+  const filterKey = `${status ?? ''}|${domain ?? ''}|${pop ?? ''}|${country ?? ''}|${batchId ?? ''}`
   const rangeKey = `${serviceId ?? ''}|${startTime ?? ''}|${endTime ?? ''}|${pageSize}|${filterKey}`
   const [pagination, setPagination] = useState<{
     key: string
     pageIndex: number
     cursors: Array<string | null>
   }>({ key: rangeKey, pageIndex: 0, cursors: [null] })
+
   const activePagination = pagination.key === rangeKey
     ? pagination
     : { key: rangeKey, pageIndex: 0, cursors: [null] }
   const { pageIndex, cursors } = activePagination
   const cursor = cursors[pageIndex] ?? null
 
-  const queryKey = filterKey === '|||||'
+  const queryKey = filterKey === '||||'
     ? ['high-scale', 'request-facts', serviceId, startTime, endTime, pageSize, cursor]
     : ['high-scale', 'request-facts', serviceId, startTime, endTime, pageSize, cursor, filterKey]
 
@@ -80,7 +79,6 @@ export function useHighScaleRequestFacts({
         end_time: endTime,
         limit: pageSize,
         cursor,
-        emulate_standard: Boolean(emulateStandard),
       }
       if (status !== undefined && status !== null && String(status).trim() !== '') {
         body.status = status
@@ -101,7 +99,7 @@ export function useHighScaleRequestFacts({
         params: {
           path: { service_id: serviceId },
         },
-        body,
+        body: body as components['schemas']['HighScaleRequestFactRequest'],
         signal,
       })
       if (error || !data) {
@@ -249,7 +247,6 @@ export function HighScaleRequestFactsPanel() {
     pop: popFilter.trim() || null,
     country: countryFilter.trim() || null,
     batchId: batchIdFilter.trim() || null,
-    emulateStandard: true,
   })
 
   const hasFilters = Boolean(
@@ -316,8 +313,6 @@ export function HighScaleRequestFactsPanel() {
   const response = facts.data
   if (!response) return null
 
-  const isEmulated = (response.metadata as { mode?: string }).mode === 'duckdb_emulation'
-
   return (
     <Card
       key="loaded"
@@ -329,10 +324,10 @@ export function HighScaleRequestFactsPanel() {
           <div className="flex items-center gap-2">
             <span>Request facts</span>
             <Badge
-              variant={isEmulated ? 'secondary' : 'outline'}
+              variant="outline"
               data-testid="high-scale-mode-badge"
             >
-              {isEmulated ? 'DuckDB Standard Mode Emulation' : 'ClickHouse Distributed Cluster'}
+              ClickHouse Distributed Cluster
             </Badge>
           </div>
           <span className="text-sm font-normal text-muted-foreground">

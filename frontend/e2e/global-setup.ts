@@ -22,6 +22,20 @@ import { backendTestEnvironment } from '../__tests__/helpers/msw/handlers'
 
 const HOST = '127.0.0.1'
 
+function _clickhouseEnv(): Record<string, string> {
+  return {
+    CLICKHOUSE_ENABLED: 'true',
+    CLICKHOUSE_HOST: process.env.FLA_E2E_CLICKHOUSE_HOST || HOST,
+    CLICKHOUSE_PORT: process.env.FLA_E2E_CLICKHOUSE_PORT || '8123',
+    CLICKHOUSE_DATABASE: process.env.FLA_E2E_CLICKHOUSE_DATABASE || 'fla',
+    CLICKHOUSE_USER: process.env.FLA_E2E_CLICKHOUSE_USER || 'fla',
+    CLICKHOUSE_PASSWORD: process.env.FLA_E2E_CLICKHOUSE_PASSWORD ?? 'fla_local_dev',
+    CLICKHOUSE_SECURE: 'false',
+    HIGH_SCALE_ENABLED: '1',
+    HIGH_SCALE_CURSOR_SECRET: 'e2e-cursor-secret-0123456789', // gitleaks:allow
+  }
+}
+
 function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: string): void {
   try {
     const cfgPath = join(configsDir, 'svc-playwright-e2e.json')
@@ -35,6 +49,8 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
         join(repoRoot, 'scripts', 'load_test', 'generate_synthetic_traffic.py'),
         '--target',
         'local',
+        '--with-clickhouse',
+        '--clean',
         '--rows',
         '750',
         // 36h of history: Insights detectors need a full 24h baseline plus the
@@ -49,10 +65,14 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
       ],
       {
         cwd: sandbox,
+        env: {
+          ...backendTestEnvironment(sandbox),
+          ..._clickhouseEnv(),
+        },
         stdio: 'pipe',
       },
     )
-    console.log('[e2e] seeded 750 rows (36h span) of synthetic traffic into sandbox buffer')
+    console.log('[e2e] seeded 750 rows (36h span) of synthetic traffic into sandbox buffer + ClickHouse')
   } catch (err: unknown) {
     const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string }
     const out = e.stdout ? e.stdout.toString() : ''
@@ -225,6 +245,7 @@ async function globalSetup() {
           frontendPort: E2E_FRONTEND_PORT,
           registryPath: oauthRegistryPath,
         }),
+        ..._clickhouseEnv(),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.

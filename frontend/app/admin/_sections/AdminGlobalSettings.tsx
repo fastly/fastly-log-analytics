@@ -114,14 +114,10 @@ export function DiagnosticsPanel() {
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: queryKeys.admin.debugSettings() }); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }) },
   })
   const { data: bootstrapData } = useBootstrap()
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const services = useServiceStore((s) => s.services)
-  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
-  const queryEngineLabel = activeService?.is_high_scale ? 'ClickHouse' : 'DuckDB'
   const debugBackendOn = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn ? 'Backend debug responses are disabled — set DEBUG_RESPONSES=true in the server env (or .env file) and restart to see data here.' : undefined
   const panels = [
-    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: `Bottom-of-screen panel with ${queryEngineLabel} SQL queries and execution times.`, value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
+    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: 'Bottom-of-screen panel with ClickHouse SQL queries and execution times.', value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
     { id: 'diag-api-panel-label', title: 'API call panel', desc: 'Bottom-of-screen panel with all Fastly API calls and FOS operations per request.', value: settings?.api_call_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ api_call_debug_visibility: val }) },
   ]
   return (

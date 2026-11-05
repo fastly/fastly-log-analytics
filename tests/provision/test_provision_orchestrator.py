@@ -65,7 +65,6 @@ def _write_cfg(tmp_path: Path, state: dict, *, existing_cfg: object = ...):
     saved_cfgs: list[tuple[str, dict]] = []
     patches = [
         patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ]
     if existing_cfg is not ...:
         patches.append(patch("backend.config.load_config", return_value=existing_cfg))
@@ -128,7 +127,6 @@ def _mocked_provision_steps(
     write_side_effect=...,
     upload_faro_side_effect=...,
     source_return=None,
-    storage_side_effect=None,
     teardown_side_effect=None,
 ):
     reconcile_kw = (
@@ -158,13 +156,8 @@ def _mocked_provision_steps(
             stack.enter_context(
                 patch("backend.provision.orchestrator.perform_teardown", side_effect=teardown_side_effect)
             )
-        stack.enter_context(patch("backend.core.duckdb.get_source_for_service", return_value=source_return))
-        if source_return is not None:
-            stack.enter_context(patch("backend.core.duckdb.get_connection"))
-        mock_storage = stack.enter_context(
-            patch("backend.core.storage.init_storage_table", side_effect=storage_side_effect)
-        )
-        yield {"upload": mock_upload, "storage": mock_storage}
+        stack.enter_context(patch("backend.core.fos_client.get_source_for_service", return_value=source_return))
+        yield {"upload": mock_upload}
 
 
 def _teardown_state(**overrides) -> dict:
@@ -239,9 +232,6 @@ def test_write_service_config_options_and_defaults(tmp_path):
     assert _write_cfg(tmp_path, _make_state(log_period=120))["provisioning"]["cron_sync"]["interval_seconds"] == 120
     assert _write_cfg(tmp_path, _make_state(log_period=2))["provisioning"]["cron_sync"]["interval_seconds"] == 5
 
-    cfg = _write_cfg(tmp_path, _make_state(log_period=60, commit_interval_mins=15))
-    assert cfg["provisioning"]["cron_sync"]["commit_interval_mins"] == 15
-
     state = _make_state()
     state.pop("log_period", None)
     state["provisioning"] = {"log_period": 120}
@@ -255,15 +245,13 @@ def test_write_service_config_options_and_defaults(tmp_path):
     state_noname.pop("name", None)
     assert _write_cfg(tmp_path, state_noname)["name"] == "svc-test"
 
-    cfg_cron = _write_cfg(tmp_path, _make_state(enable_cron_sync=False, enable_cron_compact=False, delete_after=False))
+    cfg_cron = _write_cfg(tmp_path, _make_state(enable_cron_sync=False, delete_after=False))
     assert cfg_cron["provisioning"]["cron_sync"]["enabled"] is False
-    assert cfg_cron["provisioning"]["cron_compact"]["enabled"] is False
     assert cfg_cron["provisioning"]["cron_sync"]["delete_after"] is False
 
     cfg_ret = _write_cfg(tmp_path, _make_state(log_retention_days=90))
     assert cfg_ret["log_retention_days"] == 90
     assert cfg_ret["provisioning"]["cron_sync"]["log_retention_days"] == 90
-    assert cfg_ret["provisioning"]["cron_compact"]["log_retention_days"] == 90
 
     assert _write_cfg(tmp_path, _make_state(rate_limiting=False))["provisioning"]["rate_limiting"] is False
     assert _write_cfg(tmp_path, _make_state())["provisioning"]["rate_limiting"] is True
@@ -328,17 +316,12 @@ def test_cleanup_local_data_variants(tmp_path, monkeypatch):
         orchestrator.cleanup_local_data("svc", remove_data=False)
     assert not cfg_file.exists()
 
-    db, wal = tmp_path / "x.duckdb", tmp_path / "x.duckdb.wal"
-    db.write_text("")
-    wal.write_text("")
     with (
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(db)),
         patch("backend.core.metadata.teardown", side_effect=RuntimeError("locked")),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", remove_data=True)
-    assert not db.exists() and not wal.exists()
 
     monkeypatch.chdir(tmp_path)
     cache_dir = tmp_path / "cache" / "test-bucket"
@@ -346,40 +329,11 @@ def test_cleanup_local_data_variants(tmp_path, monkeypatch):
     (cache_dir / "stale.parquet").write_text("data")
     with (
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "no.duckdb")),
         patch("backend.core.metadata.teardown"),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", bucket="test-bucket", remove_data=True)
     assert not cache_dir.exists()
-
-
-def test_cleanup_local_data_drops_ducklake_state_only_with_remove_data(tmp_path):
-    with (
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "no.duckdb")),
-        patch("backend.core.metadata.teardown"),
-        patch("backend.core.duckdb.drop_service_ducklake_state", return_value={"tables_dropped": 3}) as drop,
-        patch("backend.provision.orchestrator._sync_crontab"),
-    ):
-        orchestrator.cleanup_local_data("svc", remove_data=False)
-        drop.assert_not_called()
-        orchestrator.cleanup_local_data("svc", remove_data=True)
-    drop.assert_called_once_with("svc")
-
-
-def test_cleanup_local_data_continues_when_ducklake_cleanup_fails(tmp_path):
-    db = tmp_path / "x.duckdb"
-    db.write_text("")
-    with (
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(db)),
-        patch("backend.core.metadata.teardown"),
-        patch("backend.core.duckdb.drop_service_ducklake_state", side_effect=RuntimeError("catalog down")),
-        patch("backend.provision.orchestrator._sync_crontab"),
-    ):
-        orchestrator.cleanup_local_data("svc", remove_data=True)
-    assert not db.exists()
 
 
 def test_sync_crontab_tolerates_missing_scheduler_and_busy_lease():
@@ -454,7 +408,6 @@ def test_provision_satisfies_faro_route_and_object_invariant_end_to_end(tmp_path
     config_dir = tmp_path / "configs"
     config_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
-    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
 
     chosen_version = "2.8.5"
     sample_bundle = (
@@ -497,7 +450,6 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
     config_dir = tmp_path / "configs"
     config_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
-    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
 
     teardown_called: list[bool] = []
 
@@ -579,20 +531,26 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
         _consume(orchestrator.provision(_provision_cfg(), _resume_from_state=True))
     assert captured_state["state"]["temp_admin_key_id"] == "PREV_ID"
 
-    with _mocked_provision_steps(write_side_effect=None, source_return=None) as env:
-        events, exc = _consume(orchestrator.provision(_provision_cfg()))
-    assert exc is None and events[-1]["type"] == "done" and not env["storage"].called
-    assert any(e["type"] == "status" and "not initialized" in e["message"].lower() for e in events)
-
-    with _mocked_provision_steps(
-        write_side_effect=None,
-        source_return={"name": "svc", "service_id": "sid", "logging_service_id": "lsid"},
-        storage_side_effect=RuntimeError("FOS not ready"),
-    ) as env:
+    with _mocked_provision_steps(write_side_effect=None, source_return=None):
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
     assert exc is None and events[-1]["type"] == "done"
-    env["storage"].assert_called_once()
-    assert any(e["type"] == "status" and "deferred to first commit" in e["message"].lower() for e in events)
+
+    with (
+        _mocked_provision_steps(
+            write_side_effect=None,
+            source_return={"name": "svc", "service_id": "sid", "logging_service_id": "lsid", "bucket": "b"},
+        ),
+        patch.multiple(
+            "backend.high_scale.ingest_controller",
+            create=True,
+            HighScaleServiceRegistration=MagicMock(),
+            get_high_scale_service_registry=MagicMock(),
+        ),
+        patch("backend.core.metadata.record_audit") as mock_audit,
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+    assert exc is None and events[-1]["type"] == "done"
+    mock_audit.assert_called_once()
 
 
 # ── perform_teardown() tests ──
@@ -685,7 +643,6 @@ def test_write_service_config_preserves_scoring_and_ngwaf(tmp_path, monkeypatch)
         patch(
             "backend.config._save_config_unlocked", side_effect=lambda sid, cfg, **_kw: saved_cfgs.append((sid, cfg))
         ),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ):
         orchestrator.write_service_config(_make_state())
 
@@ -784,11 +741,8 @@ def test_fos_path_safety_and_reconciler_edge_cases(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="state missing logging_service_id"):
         next(orchestrator.ensure_logging_via_reconciler({}, "tok"))
 
-    with (
-        patch(
-            "backend.provision.declarative.reconciler.FeatureState.from_config", side_effect=KeyError("missing_field")
-        ),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    with patch(
+        "backend.provision.declarative.reconciler.FeatureState.from_config", side_effect=KeyError("missing_field")
     ):
         with pytest.raises(RuntimeError, match="Invalid feature state configuration"):
             next(orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok"))
@@ -831,7 +785,6 @@ def test_fos_path_safety_and_reconciler_edge_cases(tmp_path, monkeypatch):
     symlink.symlink_to(external_dir)
     with (
         patch("backend.config.config_path", return_value=str(cfg_file)),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", bucket="../../../tmp", remove_data=True)
@@ -2173,24 +2126,3 @@ def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
         and saved_dis["rum_vcl_sha"] == rum_vcl_fingerprint(SID_rum_orchestrator, saved_dis)
         and saved_dis["concurrent_key"] == "kept"
     )
-
-
-def test_cli_restore_data_runs_the_cloud_restore_for_the_service():
-    from typer.testing import CliRunner
-
-    from backend.provision.cli import app
-
-    src = {"service_id": "svc-r", "name": "svc-r", "bucket": "bkt"}
-    result = {"remote_files": 4, "downloaded": 3, "registered": 4, "reindexed": 7}
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.storage.backup.restore_from_cloud", return_value=result) as restore,
-    ):
-        out = CliRunner().invoke(app, ["restore-data", "--service-id", "svc-r"])
-    assert (
-        out.exit_code == 0 and "4 cloud file(s): 3 downloaded, 4 registered, 7 raw object(s) re-indexed" in out.output
-    )
-    assert restore.call_args.args[0] == src
-
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
-        assert CliRunner().invoke(app, ["restore-data", "--service-id", "nope"]).exit_code != 0

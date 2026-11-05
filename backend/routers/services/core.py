@@ -17,11 +17,10 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
-from backend.core import duckdb as _db
+from backend.core import fos_client as _db
 from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
-from backend.core import storage as _storage
-from backend.core.duckdb import ensure_cid_salt
+from backend.core.fos_client import ensure_cid_salt
 from backend.core.log_fields import _filter_user_custom_fields, _is_system_field
 from backend.core.request_context import get_service_id, get_source
 from backend.models.common import (
@@ -50,8 +49,8 @@ from backend.models.common import (
     VclLintResponse,
 )
 from backend.repositories import assets as service_stats_repo
-from backend.repositories._base import SectionTimer
 from backend.repositories.assets import delete_cron_log, get_cron_logs, purge_cron_logs
+from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils.auth import require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
@@ -246,7 +245,6 @@ __all__ = [
     "_record_audit_best_effort",
     "_split_custom_field_warnings",
     "_sse",
-    "_storage",
     "_store_fos_credentials",
     "_trim_for_analyst",
     "_validate_and_save_custom_field",

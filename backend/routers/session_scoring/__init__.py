@@ -25,7 +25,6 @@ from backend.core.request_context import (
     require_admin,
     seal_session_token,
 )
-from backend.core.storage import execute_with_stale_view_retry
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.models.analytics import SessionDetailRequest, SessionDetailResponse, SessionsRequest, SessionsResponse
 from backend.models.analytics import (
@@ -70,8 +69,6 @@ from backend.models.analytics import (
     ScoringTopFlaggedResponse,
 )
 from backend.provision.session_scoring_orchestrator import SCORING_ENABLED_AT_KEY as _SCORING_ENABLED_AT_KEY
-from backend.repositories import sessions as _scoring_repo
-from backend.repositories import sessions as repo
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry

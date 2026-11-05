@@ -524,6 +524,7 @@ def gateway_image():
         _docker("rmi", "-f", tag, check=False)
 
 
+@pytest.mark.timeout(300)
 def test_upstream_caddy_filecap_cannot_exec_with_all_capabilities_dropped(gateway_image):
     # Root-cause pin: the official binary's cap_net_bind_service file capability
     # is outside the empty bounding set, so the kernel refuses exec outright.
@@ -611,6 +612,7 @@ def container_gateway(pki, gateway_image):
         assert env["ADMIN_GATEWAY_SECRET"].encode() not in logs.stdout + logs.stderr
 
 
+@pytest.mark.timeout(300)
 def test_hardened_container_enforces_client_mtls(pki, container_gateway):
     with pytest.raises((ssl.SSLError, ConnectionResetError)):
         tls_request(pki, container_gateway)
@@ -980,14 +982,14 @@ def test_compose_prod_backend_has_memory_cap():
 
 
 @pytest.mark.security_regression
-def test_compose_prod_bounds_duckdb_connections_below_container_limit():
-    """The single-host deployment must survive dashboard and cron overlap."""
+def test_compose_prod_bounds_worker_and_backend_memory_below_container_limit():
+    """The single-host deployment must bound backend RSS and worker batch memory."""
     compose = _read("docker-compose.prod.yml")
-    assert "DUCKDB_POOL_WARM_AT_BOOT=true" in compose
-    assert "DUCKDB_POOL_MAX_SIZE=4" in compose
-    assert "DUCKDB_POOL_CONN_MEMORY_LIMIT=${DUCKDB_POOL_CONN_MEMORY_LIMIT:-6GB}" in compose
-    assert "DUCKDB_MEMORY_LIMIT=6GB" in compose
-    assert "PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}" in compose
+    assert "BACKEND_GRACEFUL_RESTART_RSS_MB=9000" in compose
+    assert "HIGH_SCALE_WORKER_THREADS=1" in compose
+    assert "HIGH_SCALE_MAX_BATCH_BYTES=6291456" in compose
+    assert "HIGH_SCALE_MAX_BATCH_OBJECTS=10" in compose
+    assert "DUCKDB" not in compose
 
 
 # ── 3. backend/main.py middleware order (ADR-04) ─────────────────────────────

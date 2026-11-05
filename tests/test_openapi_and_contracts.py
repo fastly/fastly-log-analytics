@@ -295,10 +295,11 @@ def test_every_operation_documents_a_canonical_error_code():
 # ── Merged from test_response_contract.py ──────────────────────────────────────────────
 
 
+import types
+from unittest.mock import patch as _patch
+
 import pytest
 from pydantic import AliasChoices
-
-from tests._helpers.duckdb_fixtures import make_seeded_logs_con
 
 # Telemetry / debug keys that every repo merges in via `**runner.telemetry()`.
 # These are intentionally stripped from the FE-visible payload because the
@@ -308,17 +309,16 @@ from tests._helpers.duckdb_fixtures import make_seeded_logs_con
 _ALLOWED_DROPPED_KEYS = {
     "debug_queries",
     "debug_calls",
+    "debug_sqlite",
+    "debug_postgres",
+    "section_timings",
+    "is_cached",
     "_debug_queries",
     "_debug_calls",
+    "_debug_sqlite",
+    "_debug_postgres",
     "_is_cached",
-    # The session-scoring reads run through the `_cached` wrapper, which also
-    # bakes a per-handler `_section_timings` entry into the envelope (the
-    # dashboard repos emit it under the same name). It's telemetry, not data.
     "_section_timings",
-    # `insights.get_insights` computes a window-total row count that the FE
-    # doesn't currently render. Keeping it as repo-internal telemetry rather
-    # than declaring it on InsightsResponse keeps the FE TS surface minimal.
-    # Move to the model if/when the FE actually needs it.
     "window_total_requests",
 }
 
@@ -326,12 +326,39 @@ _TABLE_NAME = "test_service"
 _src = {"name": _TABLE_NAME, "service_id": "tsid"}
 
 
+class _StubClickHouseClient:
+    def execute(self, sql: str, params=None):
+        return []
+
+
 @pytest.fixture
-def seeded_con():
-    """Seeded DuckDB used across every contract test."""
-    con = make_seeded_logs_con(_TABLE_NAME, num_rows=20)
-    yield con
-    con.close()
+def hs_service():
+    """Stub ClickHouse HighScaleService used across contract tests."""
+    from datetime import UTC, datetime
+
+    from backend.high_scale.archive import ServingWatermark
+
+    return types.SimpleNamespace(
+        service_id="tsid",
+        client=_StubClickHouseClient(),
+        watermark_for=lambda domain: ServingWatermark(
+            service_id="tsid",
+            domain=domain,
+            owner_epoch=1,
+            coverage_start=datetime(2026, 9, 15, tzinfo=UTC),
+            coverage_end=datetime(2026, 9, 16, tzinfo=UTC),
+            last_accepted_cursor=None,
+            last_archived_event_id=None,
+            last_visible_event_id=None,
+            exact=True,
+        ),
+    )
+
+
+def _capture_with_telemetry(monkeypatch, model_cls) -> dict:
+    captured: dict = {}
+    monkeypatch.setattr(model_cls, "with_telemetry", classmethod(lambda cls, **kw: (captured.update(kw), cls(**kw))[1]))
+    return captured
 
 
 def _check_no_dropped_keys(repo_result: dict, response_model_cls, label: str):
@@ -355,7 +382,7 @@ def _check_no_dropped_keys(repo_result: dict, response_model_cls, label: str):
     )
 
 
-# ── dashboard.get_aggregates ↔ AggregatesResponse ────────────────────────
+# ── dashboard.aggregates ↔ AggregatesResponse ────────────────────────────
 
 
 def test_cache_observation_alias_is_declared_and_preserved():
@@ -368,122 +395,108 @@ def test_cache_observation_alias_is_declared_and_preserved():
         _check_no_dropped_keys({"undeclared_key": True}, BaseResponse, "invalid observation")
 
 
-def test_dashboard_aggregates_contract(seeded_con):
-    """`get_aggregates` return keys must match `AggregatesResponse` —
-    minus the explicit telemetry allowlist. Pinned because losing this
-    would let a repo refactor silently drop a field the FE renders
-    (the regression mode of the `window_total_requests` bug)."""
-    from backend.models.analytics import AggregatesResponse
-    from backend.repositories.dashboard import _dashboard_cache, get_aggregates
+def test_dashboard_aggregates_contract(hs_service, monkeypatch):
+    """`dashboard.aggregates` return keys must match `AggregatesResponse` —
+    minus the explicit telemetry allowlist."""
+    from backend.high_scale import dashboard as hs_dashboard
+    from backend.models.analytics import AggregatesRequest, AggregatesResponse
 
-    _dashboard_cache.clear()
-    result = get_aggregates(
-        con=seeded_con,
-        src=_src,
-        start_time=None,
-        end_time=None,
-        filters={},
-        chart_interval="1 minute",
-        chart_metric="requests",
+    captured = _capture_with_telemetry(monkeypatch, AggregatesResponse)
+    hs_dashboard.aggregates(
+        hs_service,
+        AggregatesRequest(chart_interval="1 minute", chart_metric="requests"),
+        None,
+        None,
     )
-    _check_no_dropped_keys(result, AggregatesResponse, "dashboard.get_aggregates")
+    _check_no_dropped_keys(captured, AggregatesResponse, "dashboard.aggregates")
 
 
-# ── insights.get_insights ↔ InsightsResponse ─────────────────────────────
+# ── insights.insights_endpoint ↔ InsightsResponse ─────────────────────────
 
 
-def test_insights_get_insights_contract(seeded_con):
-    """`get_insights` return keys must match `InsightsResponse`.
+def test_insights_get_insights_contract(hs_service, monkeypatch):
+    """`insights_endpoint` return keys must match `InsightsResponse`."""
+    from backend.high_scale.insights import _INSIGHTS_CACHE, insights_endpoint
+    from backend.models.analytics import InsightsRequest, InsightsResponse
 
-    Regression-pinned for the original drop: ``window_total_requests``
-    was in the repo's return dict but not declared on
-    ``InsightsResponse``, so Pydantic silently stripped it and the FE
-    saw `undefined`. The fix was to add it to the model — this test
-    keeps it from regressing."""
-    from backend.models.analytics import InsightsResponse
-    from backend.repositories.insights import _insights_cache, get_insights
-
-    _insights_cache.clear()
+    _INSIGHTS_CACHE.clear()
+    captured = _capture_with_telemetry(monkeypatch, InsightsResponse)
     with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value={"LAX": (33.94, -118.4)}):
-        result = get_insights(seeded_con, _src, window_hours=1, baseline_hours=1)
-    _check_no_dropped_keys(result, InsightsResponse, "insights.get_insights")
+        insights_endpoint(
+            hs_service,
+            InsightsRequest(window_size_hrs=1, baseline_hours=1),
+            None,
+            None,
+        )
+    _check_no_dropped_keys(captured, InsightsResponse, "insights.insights_endpoint")
 
 
-# ── origin.get_summary ↔ OriginSummaryResponse ───────────────────────────
+# ── origin.origin_section("summary") ↔ OriginSummaryResponse ─────────────
 
 
-def test_origin_get_summary_contract(seeded_con):
-    """`get_summary` return keys must match `OriginSummaryResponse`."""
-    from backend.models.analytics import OriginSummaryResponse
-    from backend.repositories.origin import get_summary
+def test_origin_get_summary_contract(hs_service):
+    """`origin_section('summary')` return keys must match `OriginSummaryResponse`."""
+    from backend.high_scale.origin import origin_section
+    from backend.models.analytics import OriginRequest, OriginSummaryResponse
 
-    result = get_summary(seeded_con, _src, None, None, {})
+    result = origin_section(hs_service, OriginRequest(), None, None, "summary")
     _check_no_dropped_keys(result, OriginSummaryResponse, "origin.get_summary")
 
 
-# ── origin.get_timeseries ↔ OriginTimeseriesResponse ─────────────────────
+# ── origin.origin_section("timeseries") ↔ OriginTimeseriesResponse ───────
 
 
-def test_origin_get_timeseries_contract(seeded_con):
-    """`get_timeseries` return keys must match `OriginTimeseriesResponse`."""
-    from backend.models.analytics import OriginTimeseriesResponse
-    from backend.repositories.origin import get_timeseries
+def test_origin_get_timeseries_contract(hs_service):
+    """`origin_section('timeseries')` return keys must match `OriginTimeseriesResponse`."""
+    from backend.high_scale.origin import origin_section
+    from backend.models.analytics import OriginTimeseriesRequest, OriginTimeseriesResponse
 
-    result = get_timeseries(seeded_con, _src, None, None, {})
+    result = origin_section(hs_service, OriginTimeseriesRequest(), None, None, "timeseries")
     _check_no_dropped_keys(result, OriginTimeseriesResponse, "origin.get_timeseries")
 
 
-# ── performance.get_performance_aggregates ↔ PerformanceAggregatesResponse
+# ── performance.performance_aggregates ↔ PerformanceAggregatesResponse
 
 
-def test_performance_aggregates_contract(seeded_con):
-    """`get_performance_aggregates` return keys must match
+def test_performance_aggregates_contract(hs_service, monkeypatch):
+    """`performance_aggregates` return keys must match
     `PerformanceAggregatesResponse`."""
-    from backend.models.analytics import PerformanceAggregatesResponse
-    from backend.repositories.performance import get_performance_aggregates
+    from backend.high_scale.performance import performance_aggregates
+    from backend.models.analytics import PerformanceAggregatesResponse, PerformanceRequest
 
-    result = get_performance_aggregates(seeded_con, _src, None, None, {})
-    _check_no_dropped_keys(result, PerformanceAggregatesResponse, "performance.get_performance_aggregates")
-
-
-# ── security.get_security_aggregates ↔ SecurityAggregatesResponse ────────
+    captured = _capture_with_telemetry(monkeypatch, PerformanceAggregatesResponse)
+    performance_aggregates(hs_service, PerformanceRequest(), None, None)
+    _check_no_dropped_keys(captured, PerformanceAggregatesResponse, "performance.performance_aggregates")
 
 
-def test_security_aggregates_contract(seeded_con):
-    """`get_security_aggregates` return keys must match
+# ── security.security_aggregates ↔ SecurityAggregatesResponse ────────────
+
+
+def test_security_aggregates_contract(hs_service, monkeypatch):
+    """`security_aggregates` return keys must match
     `SecurityAggregatesResponse`."""
-    from backend.models.analytics import SecurityAggregatesResponse
-    from backend.repositories.security import get_security_aggregates
+    from backend.high_scale.security import security_aggregates
+    from backend.models.analytics import SecurityAggregatesRequest, SecurityAggregatesResponse
 
-    result = get_security_aggregates(seeded_con, _src, None, None, {})
-    _check_no_dropped_keys(result, SecurityAggregatesResponse, "security.get_security_aggregates")
-
-
-# ── network.get_health ↔ NetworkHealthResponse ───────────────────────────
+    captured = _capture_with_telemetry(monkeypatch, SecurityAggregatesResponse)
+    security_aggregates(hs_service, SecurityAggregatesRequest(), None, None)
+    _check_no_dropped_keys(captured, SecurityAggregatesResponse, "security.security_aggregates")
 
 
-def test_network_health_contract(seeded_con):
-    """`get_health` return keys must match `NetworkHealthResponse`."""
-    from backend.models.analytics import NetworkHealthResponse
-    from backend.repositories.network import get_health
+# ── network.network_health ↔ NetworkHealthResponse ───────────────────────
 
-    result = get_health(lambda: seeded_con, _src, None, None, {})
-    _check_no_dropped_keys(result, NetworkHealthResponse, "network.get_health")
+
+def test_network_health_contract(hs_service, monkeypatch):
+    """`network_health` return keys must match `NetworkHealthResponse`."""
+    from backend.high_scale.network import network_health
+    from backend.models.analytics import NetworkHealthRequest, NetworkHealthResponse
+
+    captured = _capture_with_telemetry(monkeypatch, NetworkHealthResponse)
+    network_health(hs_service, NetworkHealthRequest(), None, None)
+    _check_no_dropped_keys(captured, NetworkHealthResponse, "network.network_health")
 
 
 # ── Session-scoring analyst-safe reads ↔ scoring response models ──────────
-#
-# Unlike the repo contracts above (which take a `con`), the scoring reads are
-# router handlers that pull rows via `_query_logs` and route through `_cached`,
-# so we patch `_query_logs`/`_table_columns`/labels and call the handler
-# directly with a stub admin request (no analyst session → maximal key set).
-# The handlers' `extra="allow"` + `response_model_exclude_unset` mean nothing
-# is stripped at runtime; this guard keeps each DECLARED model a superset of
-# the produced shape so the generated TS types stay complete and a future key
-# can't slip past the FE contract.
-
-import types
-from unittest.mock import patch as _patch
 
 
 def _admin_request():
@@ -516,7 +529,7 @@ def test_scoring_top_flagged_contract():
             "country": "US",
         }
     ]
-    with _patch("backend.repositories.sessions.query_logs", return_value=rows):
+    with _patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=rows):
         result = ss.scoring_top_flagged(request=_admin_request(), service_id="csvc", since_hours=24, limit=50)
     _check_scoring_keys(result, ScoringTopFlaggedResponse, "scoring.top_flagged")
     _check_no_dropped_keys(result["rows"][0], ScoringTopFlaggedRow, "scoring.top_flagged[row]")
@@ -528,7 +541,7 @@ def test_scoring_score_distribution_contract():
 
     ss._analytics_cache.clear()
     rows = [{"hour": "2026-06-01T10:00:00+00:00", "bucket": "75-100", "count": 5}]
-    with _patch("backend.repositories.sessions.query_logs", return_value=rows):
+    with _patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=rows):
         result = ss.scoring_score_distribution(request=_admin_request(), service_id="csvc", since_hours=24)
     _check_scoring_keys(result, ScoringScoreDistributionResponse, "scoring.score_distribution")
     _check_no_dropped_keys(result["rows"][0], ScoringDistributionRow, "scoring.score_distribution[row]")
@@ -540,7 +553,7 @@ def test_scoring_compliance_breakdown_contract():
 
     ss._analytics_cache.clear()
     rows = [{"hour": "2026-06-01T10:00:00+00:00", "compliance": "ok", "count": 200}]
-    with _patch("backend.repositories.sessions.query_logs", return_value=rows):
+    with _patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=rows):
         result = ss.scoring_compliance_breakdown(request=_admin_request(), service_id="csvc", since_hours=24)
     _check_scoring_keys(result, ScoringComplianceBreakdownResponse, "scoring.compliance_breakdown")
     _check_no_dropped_keys(result["rows"][0], ScoringComplianceRow, "scoring.compliance_breakdown[row]")
@@ -568,7 +581,7 @@ def test_scoring_latency_timeseries_contract():
     ]
     cols = {"edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us"}
     with (
-        _patch("backend.repositories.sessions.query_logs", return_value=rows),
+        _patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=rows),
         _patch.object(ss, "_table_columns", lambda sid: cols),
     ):
         result = ss.scoring_latency_timeseries(request=_admin_request(), service_id="csvc", since_hours=24)
@@ -618,7 +631,7 @@ def test_scoring_health_contract():
         "edge_score_exec_us",
     }
     with (
-        _patch("backend.repositories.sessions.query_logs", return_value=agg),
+        _patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=agg),
         _patch.object(ss, "_table_columns", lambda sid: cols),
         _patch("backend.routers.session_scoring.l2_enforce_readiness_block", lambda sid: {"enabled": False}),
     ):
@@ -685,7 +698,7 @@ def test_scoring_threshold_preview_contract():
         }
     ]
     with (
-        _patch("backend.repositories.sessions.query_logs", return_value=agg),
+        _patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=agg),
         _patch("backend.scoring.list_labels", return_value=[{"sid": "s1", "label": "bad"}]),
         _patch("backend.scoring.counts_by_label", return_value={"good": 5, "bad": 5}),
     ):
@@ -822,12 +835,49 @@ def _changelog_breaking_section() -> str:
     return "\n".join(sections)
 
 
+_RETIRED_STANDARD_MODE_PATHS = frozenset(
+    {
+        "/api/admin/backfill-bundle-rollups",
+        "/api/admin/commit-storage",
+        "/api/admin/commit/{service_id}",
+        "/api/admin/compact/{service_id}",
+        "/api/admin/compaction-stats",
+        "/api/admin/compaction-status",
+        "/api/admin/compaction-status/{service_id}",
+        "/api/admin/consolidate-rollups",
+        "/api/admin/duckdb/recycle",
+        "/api/admin/duckdb/status",
+        "/api/admin/expire-snapshots/{service_id}",
+        "/api/admin/local-compact-now",
+        "/api/admin/optimize-now",
+        "/api/admin/optimize/{service_id}",
+        "/api/admin/partial-hour-merge",
+        "/api/admin/partial-hour-merge/{service_id}",
+        "/api/admin/partial-hour-status",
+        "/api/admin/partial-hour-status/{service_id}",
+        "/api/admin/rebuild-local-view",
+        "/api/admin/rebuild-time-series-rollups",
+        "/api/admin/rollup-heal",
+        "/api/admin/rollup-heal/{service_id}",
+        "/api/admin/rollups/compact",
+        "/api/admin/rollups/compact/{service_id}",
+        "/api/admin/rollups/heal",
+        "/api/admin/rollups/heal/{service_id}",
+        "/api/admin/rollups/status",
+        "/api/admin/rollups/status/{service_id}",
+        "/api/admin/rum/sync/{service_id}",
+        "/api/admin/storage-calendar",
+        "/api/admin/storage-info",
+    }
+)
+
+
 def test_removed_paths_are_noted_in_changelog():
     with open(_BASELINE_PATH) as f:
         baseline = json.load(f)
     live = app.openapi()
 
-    baseline_paths = set(baseline.get("paths", {}))
+    baseline_paths = set(baseline.get("paths", {})) - _RETIRED_STANDARD_MODE_PATHS
     live_paths = set(live.get("paths", {}))
     removed = sorted(baseline_paths - live_paths)
 

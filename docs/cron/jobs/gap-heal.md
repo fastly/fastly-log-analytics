@@ -3,8 +3,8 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `gap_heal_{service_id}`
 - **Category:** Autonomous Loss Detection & Reactive Self-Healing
-- **Purpose:** Periodically evaluates Fastly log accounting metrics against actual ingested events. If sustained log loss is detected (>= 2 consecutive completed hourly buckets with >= 5% loss between Fastly edge billable counts and ingested rows), it automatically triggers a targeted full sweep (`_run_full_sweep`) to heal the gap.
-- **Why It Runs:** Network blips, queue overflows, or edge delivery anomalies can result in lost log bursts. Waiting for scheduled full sweeps could leave analytics inaccurate for hours. The gap-heal evaluator continuously audits delivery fidelity and reacts dynamically to restore complete data within minutes.
+- **Purpose:** Periodically evaluates Fastly log accounting metrics against actual ingested events in ClickHouse / PostgreSQL control plane. If sustained log loss is detected (>= 2 consecutive completed hourly buckets with >= 5% loss between Fastly edge billable counts and ingested rows), it automatically triggers a targeted full sweep (`_run_full_sweep`) to heal the gap.
+- **Why It Runs:** Network blips, queue overflows, or edge delivery anomalies can result in delayed log bursts. Waiting for scheduled full sweeps could leave analytics incomplete for hours. The gap-heal evaluator continuously audits delivery fidelity and reacts dynamically to restore complete data within minutes.
 
 ---
 
@@ -26,10 +26,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Queries Fastly `/stats/service` and compares with DuckDB row counts; triggers `_run_full_sweep` if sustained loss occurs. | Read-only accounting query. Active-request deferral (`should_defer_cron("gap_heal", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | APScheduler + Celery Workers | Compares Fastly API metrics against `ingest_ledger` / DuckLake counts; enqueues sweep tasks via `discover_prefix`. | Distributed PostgreSQL locking. |
+| **Unified ClickHouse Architecture** | APScheduler + Stateless Workers | Compares Fastly `/stats/service` metrics against ClickHouse / PostgreSQL control-plane counts; triggers `_run_full_sweep` (`discover_prefix`) if sustained loss occurs. | Active-request deferral (`should_defer_cron("gap_heal", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
 
 ---
 
@@ -45,11 +44,11 @@
 1. **Prerequisite & Politeness Check:**
    - Verifies service has a valid `logging_service_id` or `service_id` configured.
    - Checks `FLA_DEV_NO_CRONS=1` (aborts if set).
-   - Evaluates `should_defer_cron("gap_heal", service_id)`. If active user queries are running in DuckDB, yields to preserve dashboard query latency.
+   - Evaluates `should_defer_cron("gap_heal", service_id)`. If active user queries are running, yields to preserve dashboard query latency.
 2. **Accounting Computation:**
    - Calls `compute_log_accounting(src, hours=24, by="hour")`.
    - Queries Fastly Stats API for edge-recorded billable request counts in 1-hour buckets.
-   - Queries DuckDB / DuckLake for ingested request counts in the same hourly buckets.
+   - Queries ClickHouse / PostgreSQL control plane for ingested request counts in the same hourly buckets.
 3. **Loss Analysis:**
    - Compares Edge Count vs Ingested Count across completed buckets (ignores the active, in-progress hour).
    - Detects `SustainedLossAlert`: triggered if >= 2 consecutive buckets exhibit >= 5% deficit (`loss_pct >= 0.05`).
@@ -71,7 +70,7 @@
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
   - **Fastly API Calls:** Requests to Fastly `/stats/service/{id}` are cached with 45s TTL to prevent rate limit exhaustion.
-  - **DuckDB Accounting Queries:** Count queries across hourly partitions use short-TTL cache (45s) and indexed rollups.
+  - **ClickHouse / Control Plane Accounting Queries:** Count queries across hourly partitions use short-TTL cache (45s).
   - **Audit Logging:** Every gap heal evaluation records its findings in `cron_runs` (warning when sustained loss is detected or throttled).
 - **Timing & Resource Budgets:**
   - Accounting evaluation: < 500ms total runtime (when cached).
@@ -81,7 +80,7 @@
 
 ## 7. Failure Modes & Recovery Runbooks
 - **Fastly API Timeout / 500:** Logs error, retries on next 30m tick; does not trigger false-positive sweep.
-- **Zero Log Ingest on Dead Service:** If Fastly reports 0 requests, gap is 0%; no sweep triggered.
+- **Zero Log Ingest on Idle Service:** If Fastly reports 0 requests, gap is 0%; no sweep triggered.
 - **Active Dashboard Queries:** `should_defer_cron` yields gap heal evaluation while users are actively running queries.
 
 ---

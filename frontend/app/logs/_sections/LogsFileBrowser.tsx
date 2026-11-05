@@ -4,7 +4,6 @@ import React, { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   HardDrive,
-  Archive,
   RefreshCw,
   Download,
   Bot,
@@ -51,7 +50,7 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
   },
   {
     id: 'type',
-    header: 'DuckDB Type',
+    header: 'ClickHouse Type',
     accessorFn: (c) => c.type,
     size: 160,
     cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,
@@ -112,7 +111,7 @@ export function SchemaTab({
     <>
       <div className="p-4 border-b flex justify-between items-center">
         <div>
-          <h3 className="text-sm font-medium">DuckDB Table Schema & Statistics</h3>
+          <h3 className="text-sm font-medium">ClickHouse Table Schema & Statistics</h3>
           <p className="text-xs text-muted-foreground mt-1">Based on a fast statistical sample of your logs.</p>
         </div>
       </div>
@@ -122,7 +121,7 @@ export function SchemaTab({
         isLoading={isLoadingSchema}
         hideToolbar
         showPagination={false}
-        tableCaption="DuckDB Table Schema and Statistics"
+        tableCaption="ClickHouse Table Schema and Statistics"
       />
     </>
   )
@@ -193,7 +192,7 @@ export function QuickActionsBar({
 }) {
   const queryClient = useQueryClient()
   const triggerCronAction = async (
-    endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-storage',
+    endpoint: '/api/admin/ingest-logs',
     title: string,
     description: string,
   ) => {
@@ -239,20 +238,6 @@ export function QuickActionsBar({
         title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"
       >
         <Download className="h-3 w-3 mr-1.5" /> Backfill Logs
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-8 text-xs bg-background"
-        onClick={() =>
-          triggerCronAction(
-            '/api/admin/commit-storage',
-            'Committing Buffer',
-            'Committing the local Parquet buffer to DuckLake and pushing it to cloud storage...',
-          )
-        }
-      >
-        <Archive className="h-3 w-3 mr-1.5" /> Commit Buffer
       </Button>
       <Button
         size="sm"
@@ -550,7 +535,7 @@ export function FileBrowser({ type }: { type: 'storage' | 'raw' }) {
     <div className="flex flex-col font-sans h-full relative">
       <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/5 sticky top-0 z-10 backdrop-blur-sm">
         <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
-          {type === 'storage' ? 'DuckLake Data' : 'Raw Archives'}
+          {type === 'storage' ? 'Archive Parquet' : 'Raw Archives'}
         </span>
         <div className="flex items-center gap-2">
           <Button

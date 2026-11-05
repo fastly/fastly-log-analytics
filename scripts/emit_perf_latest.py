@@ -43,7 +43,9 @@ import sys
 import time
 from pathlib import Path
 
-import duckdb
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_PATH = REPO_ROOT / "tests" / "perf" / "latest.json"
@@ -100,61 +102,67 @@ def _scale_key_for(num_rows: int) -> str:
     return "nightly_5m"
 
 
-def _generate_seed_data(con: duckdb.DuckDBPyConnection, num_rows: int) -> None:
-    """Seed a single ``logs`` table with synthetic rows that resemble the
-    real Fastly log shape closely enough for the dashboard's aggregate
-    query to exercise the same code paths.
+def _generate_seed_table(num_rows: int) -> tuple[pa.Table, pa.Buffer]:
+    """Build a synthetic ``num_rows`` Arrow table and serialize to canonical Archive Parquet."""
+    base_statuses = [200, 200, 200, 200, 204, 301, 302, 400, 403, 404, 500, 502, 503]
+    base_methods = ["GET", "GET", "GET", "POST", "HEAD"]
+    base_countries = ["US", "DE", "GB", "JP", "BR", "FR", "CA", "AU", "IN", "NL"]
+    chunk = 1000
+    chunk_status = [base_statuses[(i * 17) % len(base_statuses)] for i in range(chunk)]
+    chunk_method = [base_methods[(i * 31) % len(base_methods)] for i in range(chunk)]
+    chunk_country = [base_countries[(i * 53) % len(base_countries)] for i in range(chunk)]
+    chunk_url = [f"/path/{i % 500}" for i in range(chunk)]
+    chunk_ottfb = [10 + ((i * 71) % 4990) for i in range(chunk)]
+    chunk_bytes = [100 + ((i * 89) % 49900) for i in range(chunk)]
 
-    Generates in-DuckDB via ``range()`` + deterministic ``hash(i, seed)``
-    for the categorical / int columns. The previous Python
-    ``random.choice`` + ``executemany`` path was O(N) Python-side and
-    dominated wall time at 1M+ rows; pure-SQL generation does 1M rows
-    in well under a second.
-    """
-    statuses = [200, 200, 200, 200, 204, 301, 302, 400, 403, 404, 500, 502, 503]
-    methods = ["GET", "GET", "GET", "POST", "HEAD"]
-    countries = ["US", "DE", "GB", "JP", "BR", "FR", "CA", "AU", "IN", "NL"]
-    statuses_sql = "[" + ", ".join(str(s) for s in statuses) + "]"
-    methods_sql = "[" + ", ".join(f"'{m}'" for m in methods) + "]"
-    countries_sql = "[" + ", ".join(f"'{c}'" for c in countries) + "]"
-    con.execute(
-        f"""
-        CREATE TABLE logs AS
-        SELECT
-            format('2026-06-09T04:{{:02d}}:{{:02d}}Z',
-                   CAST((i // 1000) % 60 AS INTEGER),
-                   CAST(i % 60 AS INTEGER)) AS timestamp,
-            {statuses_sql}[1 + CAST(hash(i, 17) % {len(statuses)} AS INTEGER)] AS status,
-            {methods_sql}[1 + CAST(hash(i, 31) % {len(methods)} AS INTEGER)] AS method,
-            {countries_sql}[1 + CAST(hash(i, 53) % {len(countries)} AS INTEGER)] AS country,
-            '/path/' || CAST(i % 500 AS VARCHAR) AS url,
-            10 + CAST(hash(i, 71) % 4990 AS INTEGER) AS ottfb_ms,
-            100 + CAST(hash(i, 89) % 49900 AS INTEGER) AS response_size_bytes
-        FROM range({num_rows}) AS t(i)
-        """
+    repeats = (num_rows + chunk - 1) // chunk
+    table = pa.table(
+        {
+            "status": pa.array((chunk_status * repeats)[:num_rows], type=pa.int32()),
+            "method": pa.array((chunk_method * repeats)[:num_rows], type=pa.string()),
+            "country": pa.array((chunk_country * repeats)[:num_rows], type=pa.string()),
+            "url": pa.array((chunk_url * repeats)[:num_rows], type=pa.string()),
+            "ottfb_ms": pa.array((chunk_ottfb * repeats)[:num_rows], type=pa.int64()),
+            "response_size_bytes": pa.array((chunk_bytes * repeats)[:num_rows], type=pa.int64()),
+        }
     )
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, compression="zstd")
+    return table, sink.getvalue()
 
 
-# Representative dashboard-aggregate-style query.
-_AGG_QUERY = """
-    SELECT
-        country,
-        COUNT(*) AS requests,
-        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS errors_5xx,
-        AVG(ottfb_ms) AS avg_ottfb,
-        APPROX_QUANTILE(ottfb_ms, 0.95) AS p95_ottfb,
-        SUM(response_size_bytes) / 1024 / 1024 AS total_mb
-    FROM logs
-    WHERE status >= 200 AND ottfb_ms < 10000
-    GROUP BY country
-    HAVING requests > 10
-    ORDER BY requests DESC
-"""
+def _run_aggregate_query(table: pa.Table) -> pa.Table:
+    """Execute the representative dashboard aggregate query over an Arrow table."""
+    mask = pc.and_(
+        pc.greater_equal(table["status"], 200),
+        pc.less(table["ottfb_ms"], 10000),
+    )
+    filtered = table.filter(mask)
+    is_5xx = pc.if_else(pc.greater_equal(filtered["status"], 500), 1, 0)
+    enriched = filtered.append_column("is_5xx", is_5xx)
+    grouped = enriched.group_by("country").aggregate(
+        [
+            ("status", "count"),
+            ("is_5xx", "sum"),
+            ("ottfb_ms", "mean"),
+            ("ottfb_ms", "max"),
+            ("response_size_bytes", "sum"),
+        ]
+    )
+    having = grouped.filter(pc.greater(grouped["status_count"], 10))
+    return having.sort_by([("status_count", "descending")])
 
 
-def _time_query_ms(con: duckdb.DuckDBPyConnection, sql: str) -> int:
+def _time_cold_ms(parquet_buf: pa.Buffer) -> int:
     t0 = time.perf_counter()
-    con.execute(sql).fetchall()
+    table = pq.read_table(pa.BufferReader(parquet_buf))
+    _run_aggregate_query(table)
+    return int((time.perf_counter() - t0) * 1000)
+
+
+def _time_warm_ms(table: pa.Table) -> int:
+    t0 = time.perf_counter()
+    _run_aggregate_query(table)
     return int((time.perf_counter() - t0) * 1000)
 
 
@@ -163,30 +171,22 @@ def main() -> int:
     scale_key = _scale_key_for(num_rows)
     print(f"[perf-emit] generating {num_rows:,}-row synthetic dataset (scale={scale_key})...", flush=True)
 
-    # Cold-path proxy: run NUM_RUNS_COLD times, take p95.
+    table, parquet_buf = _generate_seed_table(num_rows)
+    _run_aggregate_query(table.slice(0, 1))
+
+    # Cold-path proxy: deserialize canonical Archive Parquet + aggregate NUM_RUNS_COLD times, take p95.
     cold_samples: list[int] = []
-    con: duckdb.DuckDBPyConnection | None = None
     for i in range(NUM_RUNS_COLD):
-        # New connection per run to defeat statement / catalog caching.
-        run_con = duckdb.connect(":memory:")
-        _generate_seed_data(run_con, num_rows)
-        ms = _time_query_ms(run_con, _AGG_QUERY)
+        ms = _time_cold_ms(parquet_buf)
         cold_samples.append(ms)
         print(f"  cold run {i + 1}/{NUM_RUNS_COLD}: {ms} ms", flush=True)
-        if i == NUM_RUNS_COLD - 1:
-            con = run_con
-        else:
-            run_con.close()
 
-    assert con is not None
     # p95 across the cold samples — with N=5 that's max() since 5 * 0.95 = 4.75.
     cold_samples.sort()
     cold_p95 = cold_samples[-1]
 
-    # Warm-path proxy: repeat against the SAME connection so DuckDB's
-    # statement cache / metadata cache stays warm. Take p50.
-    warm_samples = [_time_query_ms(con, _AGG_QUERY) for _ in range(NUM_RUNS_WARM)]
-    con.close()
+    # Warm-path proxy: repeat against the resident Arrow table. Take p50.
+    warm_samples = [_time_warm_ms(table) for _ in range(NUM_RUNS_WARM)]
     print(f"  warm samples: {warm_samples}", flush=True)
     warm_p50 = int(statistics.median(warm_samples))
 

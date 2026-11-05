@@ -1,6 +1,6 @@
-# High-scale analyst SQL console: least-privilege ClickHouse identities
+# Analyst SQL console: least-privilege ClickHouse identities
 
-On a high-scale deployment the free-form SQL console (`POST /api/query`) runs on ClickHouse. Analysts are an
+The free-form SQL console (`POST /api/query`) runs on ClickHouse. Analysts are an
 adversary in this repo's trust model, so their SQL never runs as the application's ClickHouse user.
 
 ## How the boundary is enforced

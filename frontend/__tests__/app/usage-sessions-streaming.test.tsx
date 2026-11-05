@@ -246,8 +246,8 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 
 function makePrefill(overrides: Partial<PrefillResponse>): PrefillResponse {
   return {
-    _is_cached: false, data_days: 7, commit_interval_mins: 5, sample_rate: 100, edge_only: false,
-    compaction_enabled: true, delete_after: false, log_retention_days: 90, rum_retention_days: 90, deployment_mode: 'standard', billing_zone: null, ...overrides,
+    _is_cached: false, data_days: 7, sample_rate: 100, edge_only: false,
+    delete_after: false, log_retention_days: 90, rum_retention_days: 90, billing_zone: null, ...overrides,
   }
 }
 
@@ -393,15 +393,17 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)
       // RUM storage follows the RUM retention: 90 days is three times the 30-day monthly volume.
       expect(results.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      expect(results.costRum).toBeCloseTo(1.5 + expected30dRumGbMonths * 3 * 0.02, 5)
       const rumTier = results.storageTiers.find(t => t.label === 'RUM data')
+      const rumArchiveTier = results.storageTiers.find(t => t.label === 'RUM archive')
       expect(rumTier).toBeDefined()
+      expect(rumArchiveTier).toBeDefined()
       expect(rumTier?.gbMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      // A shorter RUM retention shrinks RUM storage but not the request data.
+      expect(results.costRum).toBeCloseTo(1.5 + (expected30dRumGbMonths * 3 + (rumArchiveTier?.gbMonths ?? 0)) * 0.02, 5)
+      // A shorter RUM retention shrinks RUM storage but not the request archive.
       const short = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 30 })
       expect(short.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths, 5)
-      expect(short.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths)
-        .toBeCloseTo(results.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths ?? 0, 6)
+      expect(short.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths)
+        .toBeCloseTo(results.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths ?? 0, 6)
     })
 
     test('models ZSTD raw log compression (15x) for smaller compressed volume, raw storage, and CDN egress', () => {
@@ -419,65 +421,58 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(prefilled.bytesPerLine).toBe(expectedBpl)
     })
 
-    test('High-Scale adds the archive Parquet tier sized from the measured per-artifact and per-row bytes', () => {
-      const standard = calculate(DEFAULTS)
-      const highScale = calculate({ ...DEFAULTS, deploymentMode: 'high_scale' })
-      expect(standard.storageTiers.find(t => t.label === 'High-Scale archive')).toBeUndefined()
-      const archive = highScale.storageTiers.find(t => t.label === 'High-Scale archive')
+    test('sizes the Archive Parquet tier from the measured per-artifact and per-row bytes and batches busy services', () => {
+      const defaults = calculate(DEFAULTS)
+      const archive = defaults.storageTiers.find(t => t.label === 'Archive Parquet')
       expect(archive?.gbMonths).toBeGreaterThan(0)
-      expect(highScale.totalGBStored).toBeCloseTo(standard.totalGBStored + (archive?.gbMonths ?? 0), 6)
       // Defaults: 1440 log files/day at ~0.33 objects per tick means one object per page, so 3 writes and 3 reads per file.
       const filesPerMonth = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes * 30
-      expect(highScale.classAPerMonth - standard.classAPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
-      expect(highScale.classBPerMonth - standard.classBPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
-      const busy = calculate({ ...DEFAULTS, deploymentMode: 'high_scale', logNodes: 60 })
+      expect(defaults.classBPerMonth).toBeCloseTo(filesPerMonth * 4, 6)
+      const busy = calculate({ ...DEFAULTS, logNodes: 60 })
       const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
       const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
-      expect(busy.classAPerMonth - calculate({ ...DEFAULTS, logNodes: 60 }).classAPerMonth).toBeCloseTo(busyPages * 30 * 3, 6)
+      expect(busy.parquetFilesPerMonth).toBeCloseTo(busyPages * 30, 6)
       expect(busyPages).toBeLessThan(busyFiles)
     })
 
-    test('PREFILL takes the service retention settings and deployment mode; 0 means keep forever', () => {
+    test('PREFILL takes the service retention settings; 0 means keep forever', () => {
       const prefilled = reducer(DEFAULTS, {
         type: 'PREFILL',
-        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7, deployment_mode: 'high_scale' }),
+        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7 }),
       })
-      expect([prefilled.retentionDays, prefilled.rumRetentionDays, prefilled.deploymentMode]).toEqual([14, 7, 'high_scale'])
+      expect([prefilled.retentionDays, prefilled.rumRetentionDays]).toEqual([14, 7])
       const forever = reducer(DEFAULTS, {
         type: 'PREFILL',
-        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0, deployment_mode: 'standard' }),
+        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0 }),
       })
-      expect([forever.retentionDays, forever.rumRetentionDays, forever.deploymentMode]).toEqual([365, 365, 'standard'])
+      expect([forever.retentionDays, forever.rumRetentionDays]).toEqual([365, 365])
     })
 
-    test('the High-Scale archive is billed for the retention window plus the one-day margin, per domain', () => {
-      const base = { ...DEFAULTS, deploymentMode: 'high_scale' as const, rumBeaconsDay: 10000, minDays: 1 }
+    test('the FOS archive is billed for the retention window plus the one-day margin, per domain', () => {
+      const base = { ...DEFAULTS, rumBeaconsDay: 10000, minDays: 1 }
       const archiveGB = (state: typeof base, label: string) =>
         calculate(state).storageTiers.find(t => t.label === label)?.gbMonths ?? 0
       // Request archive scales with the request retention (+1 day) and ignores RUM retention.
-      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'High-Scale archive')
-      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'High-Scale archive')
+      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'Archive Parquet')
+      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'Archive Parquet')
       expect(req30 / req7).toBeCloseTo(31 / 8, 6)
-      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'High-Scale archive')).toBeCloseTo(req30, 9)
+      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'Archive Parquet')).toBeCloseTo(req30, 9)
       // RUM archive scales with the RUM retention (+1 day) and ignores the request retention.
-      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'High-Scale RUM archive')
-      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'High-Scale RUM archive')
+      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'RUM archive')
+      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'RUM archive')
       expect(rum30).toBeGreaterThan(0)
       expect(rum30 / rum7).toBeCloseTo(31 / 8, 6)
-      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'High-Scale RUM archive')).toBeCloseTo(rum30, 9)
+      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'RUM archive')).toBeCloseTo(rum30, 9)
       // The FOS 30-day minimum floors a short window.
       const floored = calculate({ ...base, minDays: 30, retentionDays: 3 })
-      expect(floored.storageTiers.find(t => t.label === 'High-Scale archive')?.flagged).toBe(true)
-      // Standard keeps no archive and no RUM archive.
-      const standard = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
-      expect(standard.storageTiers.some(t => t.label.includes('archive'))).toBe(false)
+      expect(floored.storageTiers.find(t => t.label === 'Archive Parquet')?.flagged).toBe(true)
     })
 
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {
       const prefill = makePrefill({
         rum_beacons_per_day: 5000, requests_per_day: 1000000, edge_requests_per_day: 800000,
-        log_period_seconds: 60, commit_interval_mins: 5, sample_rate: 100, edge_only: true,
-        compaction_enabled: true, delete_after: true, log_retention_days: 90,
+        log_period_seconds: 60, sample_rate: 100, edge_only: true,
+        delete_after: true, log_retention_days: 90,
         class_a_rate_per_1k: 0.005, class_b_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12,
         storage_rate_per_gb_month: 0.02, min_billed_days: 30, avg_nodes_per_flush: 1,
       })
@@ -657,7 +652,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(screen.getByTestId('high-scale-loading-card').className).toContain('contain-intrinsic-size')
   })
 
-  it('renders DuckDB Standard Mode Emulation badge and supports filter controls', () => {
+  it('renders ClickHouse Distributed Cluster badge and supports filter controls', () => {
     useFactsMock.mockReturnValue(
       mockFactsState({
         data: {
@@ -665,13 +660,13 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
             event_id: 'event-emul-1', timestamp: '2026-09-11T00:00:01Z', service_id: 'service-1',
             status: 200, host: 'www.example.com', pop: 'IAD', country: 'US', client_ip: '203.0.113.xxx', url: '/healthz',
           }],
-          metadata: { ...baseMetadata, mode: 'duckdb_emulation' },
+          metadata: baseMetadata,
           next_cursor: null, _is_cached: false,
         },
       }),
     )
     render(<HighScaleRequestFactsPage />)
-    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('DuckDB Standard Mode Emulation')
+    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('ClickHouse Distributed Cluster')
     expect(screen.getByText('/healthz')).toBeInTheDocument()
     expect(screen.getByText('IAD')).toBeInTheDocument()
     expect(screen.getByText('203.0.113.xxx')).toBeInTheDocument()
@@ -685,7 +680,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(useFactsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         serviceId: 'service-1', status: 503, domain: 'api.example.com',
-        pop: 'LHR', country: 'GB', batchId: 'batch-9', emulateStandard: true,
+        pop: 'LHR', country: 'GB', batchId: 'batch-9',
       }),
     )
 

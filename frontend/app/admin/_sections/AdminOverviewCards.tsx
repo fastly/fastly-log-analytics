@@ -20,16 +20,14 @@ const ADMIN_PREFETCH_LINKS = [
   { href: '/admin/trends', label: 'Trends', icon: TrendingUp, key: 'trends' },
   { href: '/admin/queue', label: 'Queue', icon: Layers, key: 'queue' },
   { href: '/admin/rum', label: 'RUM', icon: Eye, key: 'rum' },
-  { href: '/admin/clickhouse', label: 'ClickHouse', icon: Database, key: 'clickhouse', highScaleOnly: true },
+  { href: '/admin/clickhouse', label: 'ClickHouse', icon: Database, key: 'clickhouse' },
 ] as const
 
-export function AdminPrefetchLinks({ isHighScale }: { isHighScale?: boolean } = {}) {
+export function AdminPrefetchLinks() {
   const queryClient = useQueryClient()
   const mounted = useMounted()
   const storeServiceId = useServiceStore(s => s.activeServiceId)
-  const services = useServiceStore(s => s.services)
   const activeServiceId = mounted ? storeServiceId : null
-  const showClickHouse = isHighScale ?? services.some(s => Boolean(s.is_high_scale))
   const handlePrefetch = (key: (typeof ADMIN_PREFETCH_LINKS)[number]['key']) => {
     if (key === 'share') queryClient.prefetchQuery({ queryKey: queryKeys.admin.shareStatus(), queryFn: async ({ signal }) => unwrapClient(client.GET('/api/admin/share/status', { signal })) })
     else if (key === 'scoring' && activeServiceId) { queryClient.prefetchQuery(scoringAnalyticsCompositeOptions(activeServiceId, 24)); queryClient.prefetchQuery(scoringConfigCompositeOptions(activeServiceId)) }
@@ -48,7 +46,7 @@ export function AdminPrefetchLinks({ isHighScale }: { isHighScale?: boolean } = 
   }
   return (
     <>
-      {ADMIN_PREFETCH_LINKS.filter(item => !('highScaleOnly' in item && item.highScaleOnly) || showClickHouse).map(item => (
+      {ADMIN_PREFETCH_LINKS.map(item => (
         <Link key={item.key} href={activeServiceId ? `${item.href}?service=${activeServiceId}` : item.href} prefetch={false} onMouseEnter={() => handlePrefetch(item.key)} data-testid={'testId' in item ? item.testId : undefined} className={buttonVariants({ variant: 'secondary', size: 'sm' })}>
           <item.icon className="h-4 w-4 mr-1" /> {item.label}
         </Link>
@@ -186,24 +184,20 @@ function CeleryStatusCard() {
     retry: false, staleTime: POLL_MS, refetchInterval: POLL_MS,
   })
   const data = mounted ? queryData : undefined
-  const isStandardMode = data?.deployment_mode === 'standard' && !data?.broker_reachable
   const workers = data?.workers?.count ?? 0
   const ingestQ = data?.queues?.['q.ingest'] ?? 0
   const controlQ = data?.queues?.['q.control'] ?? 0
   const deadLetters = data?.ledger?.dead_letter ?? 0
-  const quarantined = (data?.ledger?.quarantined ?? 0) + (data?.standard_ingest?.quarantined_items ?? 0)
-  const schedCount = data?.inprocess_schedules?.length ?? 0
-  const activeRuns = data?.inprocess_active_runs?.length ?? 0
-  const ingestedFiles = data?.standard_ingest?.ingested_files ?? 0
-  let primaryText = isStandardMode ? `${schedCount} scheduled` : `${workers} workers`
-  let primaryTone: CardTone = isStandardMode ? 'default' : workers > 0 ? 'default' : 'warning'
-  let secondaryText = isStandardMode ? `${activeRuns} active · ${formatCount(ingestedFiles)} ingested · in-process` : `ingest: ${ingestQ} · control: ${controlQ}`
+  const quarantined = data?.ledger?.quarantined ?? 0
+  let primaryText = `${workers} workers`
+  let primaryTone: CardTone = workers > 0 ? 'default' : 'warning'
+  let secondaryText = `ingest: ${ingestQ} · control: ${controlQ}`
   if (deadLetters > 0) {
     primaryText = `${deadLetters} dead letters`; primaryTone = 'critical'
-    secondaryText = isStandardMode ? `${schedCount} scheduled · in-process` : `${workers} workers · ingest: ${ingestQ}`
+    secondaryText = `${workers} workers · ingest: ${ingestQ}`
   } else if (quarantined > 0) {
     primaryText = `${quarantined} quarantined`; primaryTone = 'attention'
-    secondaryText = isStandardMode ? `${schedCount} scheduled · in-process` : `${workers} workers · ingest: ${ingestQ}`
+    secondaryText = `${workers} workers · ingest: ${ingestQ}`
   }
   return <OverviewCard href="/admin/queue" icon={<Activity className="h-4 w-4" />} title="Workers & Queues" primary={primaryText} primaryTone={primaryTone} secondary={secondaryText} isStale={isError && !!data} isRefreshing={isFetching && !isLoading} />
 }

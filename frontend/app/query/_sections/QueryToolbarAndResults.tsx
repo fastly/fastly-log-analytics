@@ -247,7 +247,7 @@ export function QueryInitializingSkeleton({ controls }: { controls?: React.React
       >
         <Button disabled size="lg" data-testid="query-run-btn">
           <Database className="h-4 w-4 mr-2 animate-spin" />
-          Initializing DuckDB analytical engine...
+          Initializing ClickHouse analytical engine...
         </Button>
       </PageHeader>
       {controls ?? <Skeleton className="h-9 w-full rounded-lg" />}

@@ -31,10 +31,10 @@ Routes in [`backend/routers/network.py`](../../backend/routers/network.py), mode
 - `POST` or `GET /api/network/bundle` (`NetworkBundleResponse`): health, quality, `pop_health` and `transport` (`TransportMetrics`: `tcp_rtt_p50_ms` ... `tcp_rtt_p99_ms`, `retrans_rate_pct`, `packet_loss_pct`, `delivery_rate_mbps`, `protocol_distribution`, `missing_fields`). The page uses it only for transport.
 - `GET /api/network/pop-health` (`PopHealthListResponse`).
 
-ASN names come from the PostgreSQL `asn_names` table via `enrich_asn_labels`; unresolved ASNs display as `AS<number>`. Standard mode uses the `network_rtt`, `network_speed`, heatmap and geo rollups where eligible (rollup-served sections set `_approx`); a rollup-served PoP health window must start on an hour boundary, otherwise the scoped raw path is used ([AGENTS.md](../../AGENTS.md) trap 49). High-scale mode reads `request_facts` directly ([`backend/high_scale/network.py`](../../backend/high_scale/network.py)).
+ASN names come from the PostgreSQL `asn_names` table via `enrich_asn_labels`; unresolved ASNs display as `AS<number>`. The ClickHouse reader ([`backend/high_scale/network.py`](../../backend/high_scale/network.py)) reads visible `request_facts` directly for the service and window.
 
 ## Tests
 
-- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/repositories/test_rollup_reader_coverage_golden.py`](../../tests/repositories/test_rollup_reader_coverage_golden.py)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_reader_parity.py`](../../tests/high_scale/test_reader_parity.py)
 - Frontend: [`frontend/__tests__/components/Map/NetworkMap.test.tsx`](../../frontend/__tests__/components/Map/NetworkMap.test.tsx)
 - E2E: `Network Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts)

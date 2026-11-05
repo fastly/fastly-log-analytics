@@ -3,7 +3,7 @@ import type { FiltersPayload } from '@/types/api'
 
 const SIMPLE_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
 const NUMERIC_LITERAL_RE = /^-?\d+(\.\d+)?$/
-const NUMERIC_DUCKDB_TYPES = new Set([
+const NUMERIC_SQL_TYPES = new Set([
   'TINYINT',
   'SMALLINT',
   'INTEGER',
@@ -18,6 +18,18 @@ const NUMERIC_DUCKDB_TYPES = new Set([
   'DOUBLE',
   'REAL',
   'DECIMAL',
+  'INT8',
+  'INT16',
+  'INT32',
+  'INT64',
+  'INT128',
+  'UINT8',
+  'UINT16',
+  'UINT32',
+  'UINT64',
+  'UINT128',
+  'FLOAT32',
+  'FLOAT64',
 ])
 
 export function sqlEscape(v: string): string {
@@ -29,7 +41,7 @@ export function quoteIdent(name: string): string {
 }
 
 export function isNumericType(t: string | undefined): boolean {
-  return Boolean(t && NUMERIC_DUCKDB_TYPES.has(t.toUpperCase().split('(')[0].trim()))
+  return Boolean(t && NUMERIC_SQL_TYPES.has(t.toUpperCase().split('(')[0].trim()))
 }
 
 export function toCanonicalSqlTs(ts: string): string {

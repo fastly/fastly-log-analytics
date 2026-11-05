@@ -557,18 +557,23 @@ def _select_stale_ips(*, limit: int) -> list[tuple[str]]:
 
 
 def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
-    """Query all DuckDB sources for IPs not yet in the rDNS cache.
+    """Query all ClickHouse sources for IPs not yet in the rDNS cache.
     Yields progress events.
     """
     try:
         from backend import config as svcconfig
-        from backend.core.duckdb import get_connection, get_source_for_service
+        from backend.core.clickhouse import get_clickhouse_client
+        from backend.core.fos_client import get_source_for_service
     except ImportError:
         yield {"type": "count", "count": 0}
         return
 
+    client = get_clickhouse_client()
+    if client is None:
+        yield {"type": "count", "count": 0}
+        return
+
     try:
-        # Load fully hydrated source dictionaries (including credentials)
         sources = []
         for cfg in svcconfig.list_configs():
             service_id = cfg.get("service_id")
@@ -581,54 +586,30 @@ def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
         yield {"type": "count", "count": 0}
         return
 
-    # Collect IPs not already in cache across all sources
     new_ips: set[str] = set()
     remaining = max_new
 
     for src in sources:
         if remaining <= 0:
             break
-        yield {"type": "status", "message": f"Scanning {src.get('name')}..."}
+        svc_id = str(src.get("name") or src.get("service_id") or "")
+        if not svc_id:
+            continue
+        yield {"type": "status", "message": f"Scanning {svc_id}..."}
         try:
-            # read_only: SELECT DISTINCT against the view, no writes.
-            con = get_connection(src, read_only=True)
-            try:
-                from backend.core.duckdb import _safe_table_name
-                from backend.core.storage import execute_with_stale_view_retry
-
-                # Check if this source has an ip column
-                table_name = _safe_table_name(src["name"])
-                cols = [
-                    r[0]
-                    for r in con.execute(
-                        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'"
-                    ).fetchall()
-                ]
-                if "ip" not in cols:
-                    continue
-
-                # Wrap the DISTINCT scan in the stale-view self-heal so
-                # a buffer parquet that's been swept since this connection
-                # was opened gets recovered (clear caches + force rebind +
-                # retry once), matching QueryRunner.execute_with_retry.
-                # Pre-fix: every commit cycle that swept a buffer left the
-                # rdns discovery scan failing for 5 minutes (until next
-                # tick), spamming ERROR logs on a 100% failure pattern
-                # for hours — witnessed 2026-06-10.
-                def _scan_ips(c):
-                    return c.execute(
-                        f"""SELECT DISTINCT ip FROM "{table_name}"
-                            WHERE ip IS NOT NULL
-                              AND timestamp >= now() - INTERVAL '{days} days'
-                            LIMIT {remaining * 2}"""
-                    ).fetchall()
-
-                rows = execute_with_stale_view_retry(con, src, _scan_ips)
-            finally:
-                con.close()
-
-            # Filter to IPs not already cached
-            candidate_ips = [r[0] for r in rows if r[0]]
+            rows = client.execute(
+                f"SELECT DISTINCT client_ip FROM request_facts "
+                f"WHERE service_id = {{service_id:String}} "
+                f"AND client_ip != '' "
+                f"AND event_timestamp >= now() - INTERVAL {int(days)} DAY "
+                f"LIMIT {int(remaining * 2)}",
+                {"service_id": svc_id},
+            )
+            candidate_ips: list[str] = [
+                str(r.get("client_ip") if isinstance(r, dict) else r[0])
+                for r in rows
+                if (r.get("client_ip") if isinstance(r, dict) else (r[0] if r else None))
+            ]
             if not candidate_ips:
                 continue
 
@@ -655,11 +636,11 @@ def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
                     if remaining <= 0:
                         break
             if found_this_src > 0:
-                yield {"type": "log", "message": f"Found {found_this_src} new IPs in {src.get('name')}"}
+                yield {"type": "log", "message": f"Found {found_this_src} new IPs in {svc_id}"}
 
         except Exception as e:
-            logger.error("[rdns_cache] Discovery error for source %s: %s", src.get("name"), e)
-            yield {"type": "log", "message": f"Error scanning {src.get('name')}: {e}"}
+            logger.error("[rdns_cache] Discovery error for source %s: %s", svc_id, e)
+            yield {"type": "log", "message": f"Error scanning {svc_id}: {e}"}
 
     if new_ips:
         enqueue(list(new_ips))
@@ -669,7 +650,7 @@ def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
 
 
 def _discover_new_ips(max_new: int = 500, days: int = 30) -> int:
-    """Query all DuckDB sources for IPs not yet in the rDNS cache.
+    """Query all ClickHouse sources for IPs not yet in the rDNS cache.
 
     Returns count of newly enqueued IPs.
     """
@@ -678,3 +659,29 @@ def _discover_new_ips(max_new: int = 500, days: int = 30) -> int:
         if event["type"] == "count":
             count = event["count"]
     return count
+
+
+def backfill_from_logs(service_id: str, limit: int = 500) -> int:
+    """Backfill unseen IPs for a single service from ClickHouse request_facts."""
+    try:
+        from backend.core.clickhouse import get_clickhouse_client
+    except ImportError:
+        return 0
+    client = get_clickhouse_client()
+    if client is None or not service_id:
+        return 0
+    try:
+        rows = client.execute(
+            f"SELECT DISTINCT client_ip FROM request_facts "
+            f"WHERE service_id = {{service_id:String}} AND client_ip != '' "
+            f"LIMIT {int(limit)}",
+            {"service_id": service_id},
+        )
+        ips: list[str] = [
+            str(r.get("client_ip") if isinstance(r, dict) else r[0])
+            for r in rows
+            if (r.get("client_ip") if isinstance(r, dict) else (r[0] if r else None))
+        ]
+        return enqueue(ips) if ips else 0
+    except Exception:
+        return 0

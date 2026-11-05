@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC
 
 from backend.cron.scheduler.lifecycle import (
     _resolve_rum_sync_interval,
     _service_has_alerts,
     dev_local_crons_enabled,
     dev_mode_no_crons,
-    partial_hour_merge_enabled,
-    partial_hour_merge_interval_sec,
 )
 
 logger = logging.getLogger("backend.scheduler")
@@ -35,10 +33,8 @@ class Scheduler:
         if dev_mode_no_crons():
             logger.warning(
                 "🚫 [scheduler] FLA_DEV_NO_CRONS=1 — skipping all FOS-writing / ingest / outbound crons "
-                "(sync/full_sweep/gap_heal/commit/optimize/expire/ngwaf_sync/metadata_cleanup/"
-                "bot_data_refresh/rdns/alerts). Registering ONLY local-safe jobs (local_compact, "
-                "rollup_compact, insights_prewarmer) that touch the local cache only. "
-                "HTTP API calls (including /api/admin/rebuild-local-view) remain functional."
+                "(sync/full_sweep/gap_heal/ngwaf_sync/metadata_cleanup/"
+                "bot_data_refresh/rdns/alerts). Registering ONLY local-safe jobs (insights_prewarmer)."
             )
             self._register_dev_local_safe_jobs()
             if self._job_ids:
@@ -52,37 +48,6 @@ class Scheduler:
         self._sync_jobs()
         self._sched.start()
         logger.info("🟢 [scheduler] Started (pid: %d). %d job(s) registered.", os.getpid(), len(self._job_ids))
-        from backend import config as svcconfig
-        from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.core.duckdb_pool import (
-            _pool_warm_at_boot_count,
-            _pool_warm_at_boot_enabled,
-            warm_pool_at_startup,
-        )
-
-        warm_enabled = _pool_warm_at_boot_enabled()
-        warm_count = _pool_warm_at_boot_count() if warm_enabled else 0
-        for cfg in svcconfig.list_configs():
-            service_id = cfg.get("service_id")
-            if not service_id:
-                continue
-            if warm_enabled:
-                src = get_source_for_service(service_id)
-                if src and is_configured(src):
-                    try:
-                        built = warm_pool_at_startup(service_id, src, count=warm_count)
-                        logger.info(
-                            "🔥 [pool] %s: warm_pool_at_startup built %d/%d idle conns",
-                            service_id,
-                            built,
-                            warm_count,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "[pool] %s: warm_pool_at_startup raised (continuing startup): %s",
-                            service_id,
-                            e,
-                        )
 
     def shutdown(self, *, wait: bool = False) -> None:
         try:
@@ -177,131 +142,12 @@ class Scheduler:
             misfire_grace_time=360,
         )
 
-    def _register_recycle_job(self, seen_ids: set[str] | None = None) -> None:
-        from backend.cron.jobs.duckdb_recycle import recycle_interval_min
-        from backend.cron.jobs.metadata import run_duckdb_recycle
-
-        recycle_interval = recycle_interval_min()
-        if recycle_interval <= 0:
-            return
-        self._register_once_job(
-            "duckdb_recycle",
-            run_duckdb_recycle,
-            "interval",
-            seen_ids,
-            "♻️  \x1b[35m[recycle]\x1b[0m Registered DuckDB instance recycle job (every %gm, executor=maintenance).",
-            recycle_interval,
-            minutes=recycle_interval,
-            misfire_grace_time=120,
-            executor="maintenance",
-        )
-
-    def _register_metric_snapshot_job(self, seen_ids: set[str] | None = None) -> None:
-        from backend.cron.jobs.metric_snapshots import _run_metric_snapshot
-
-        self._register_once_job(
-            "metric_snapshot",
-            _run_metric_snapshot,
-            "interval",
-            seen_ids,
-            "📈 \x1b[34m[metric_snapshot]\x1b[0m Registered metric snapshot job (every 60s).",
-            seconds=60,
-            jitter=5,
-            misfire_grace_time=60,
-        )
-
-    def _sync_local_compaction_jobs(
-        self,
-        service_id: str,
-        cfg: dict,
-        seen_ids: set[str] | None = None,
-        *,
-        dev_local: bool = False,
-    ) -> None:
-        from backend.cron.jobs.metadata import (
-            _run_local_compact,
-            _run_partial_hour_merge,
-            _run_rollup_compact_daily,
-            _run_rollup_hour_heal,
-        )
-
-        prov = cfg.get("provisioning", {})
-        compact_cfg = prov.get("cron_compact", {})
-        tag = "(dev-local) " if dev_local else ""
-        lc_job_id = f"local_compact_{service_id}"
-        lc_interval_mins = max(1, int(os.environ.get("LOCAL_COMPACT_INTERVAL_MIN", "2")))
-        self._register_once_job(
-            lc_job_id,
-            _run_local_compact,
-            "interval",
-            seen_ids,
-            "⚙️  [scheduler] %sRegistered %s%s (every %d min, local-only).",
-            tag,
-            "" if dev_local else "local_compact job ",
-            lc_job_id,
-            lc_interval_mins,
-            minutes=lc_interval_mins,
-            jitter=10,
-            args=[service_id],
-            misfire_grace_time=60,
-        )
-        if partial_hour_merge_enabled():
-            ph_job_id = f"partial_hour_merge_{service_id}"
-            ph_interval_sec = partial_hour_merge_interval_sec()
-            self._register_once_job(
-                ph_job_id,
-                _run_partial_hour_merge,
-                "interval",
-                seen_ids,
-                "⚡ [scheduler] %sRegistered %s%s (every %ds, local-only).",
-                tag,
-                "" if dev_local else "partial_hour_merge job ",
-                ph_job_id,
-                ph_interval_sec,
-                seconds=ph_interval_sec,
-                jitter=5,
-                args=[service_id],
-                misfire_grace_time=60,
-            )
-        if compact_cfg.get("enabled", True):
-            rc_job_id = f"rollup_compact_{service_id}"
-            self._register_once_job(
-                rc_job_id,
-                _run_rollup_compact_daily,
-                "cron",
-                seen_ids,
-                "📦 [scheduler] %sRegistered %s%s (daily 02:00 UTC).",
-                tag,
-                "" if dev_local else "rollup compaction job ",
-                rc_job_id,
-                hour=2,
-                minute=0,
-                args=[service_id],
-                misfire_grace_time=3600,
-            )
-            rh_job_id = f"rollup_heal_{service_id}"
-            self._register_once_job(
-                rh_job_id,
-                _run_rollup_hour_heal,
-                "cron",
-                seen_ids,
-                "🩹 [scheduler] %sRegistered %s%s (hourly at :05).",
-                tag,
-                "" if dev_local else "rollup hour-heal job ",
-                rh_job_id,
-                minute=5,
-                next_run_time=datetime.now(UTC) + timedelta(seconds=5),
-                args=[service_id],
-                misfire_grace_time=900,
-            )
-
     def _register_dev_local_safe_jobs(self) -> None:
         if not dev_local_crons_enabled():
             logger.warning("🚫 [scheduler] FLA_DEV_LOCAL_CRONS=0 — no dev-local-safe jobs registered.")
             return
         from backend import config as svcconfig
-        from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.high_scale.ingest_controller import get_high_scale_service_registry
+        from backend.core.fos_client import get_source_for_service, is_configured
 
         seen_ids: set[str] = set()
         for cfg in svcconfig.list_configs():
@@ -311,30 +157,26 @@ class Scheduler:
             src = get_source_for_service(service_id)
             if not src or not is_configured(src):
                 continue
-            if get_high_scale_service_registry().resolve(service_id) is not None:
-                logger.info(
-                    "⏭️  [scheduler] (dev-local) Skipping legacy local jobs for high-scale service %s.", service_id
-                )
-                continue
             prov = cfg.get("provisioning", {})
-            self._sync_local_compaction_jobs(service_id, cfg, dev_local=True)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-        self._register_metric_snapshot_job()
-        self._register_recycle_job()
 
     def _sync_jobs(self) -> None:
         from backend import config as svcconfig
-        from backend.core.duckdb import get_source_for_service, is_configured
+        from backend.core.fos_client import get_source_for_service, is_configured
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
-            _run_expire_snapshots,
             _run_metadata_cleanup,
             _run_ngwaf_bot_sync,
-            _run_optimize,
             _run_rdns_enrichment,
             _run_share_audit_purge,
         )
-        from backend.cron.jobs.sync import _run_commit, _run_full_sweep, _run_gap_heal, _run_rum_commit, _run_rum_sync
+        from backend.cron.jobs.sync import (
+            _run_full_sweep,
+            _run_gap_heal,
+            _run_ledger_sweep,
+            _run_rum_discovery_cron,
+            _run_rum_ledger_sweep,
+        )
         from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
 
         configs = svcconfig.list_configs()
@@ -358,7 +200,6 @@ class Scheduler:
                 interval_seconds = max(5, int(sync_cfg["interval_seconds"]))
             else:
                 interval_seconds = max(5, log_period // 2 if log_period >= 60 else log_period)
-            commit_interval_mins = max(1, int(sync_cfg.get("commit_interval_mins", 5)))
             job_id = f"log_discovery_{service_id}"
             seen_ids.add(job_id)
             if job_id in self._job_ids:
@@ -386,45 +227,26 @@ class Scheduler:
                 )
                 self._job_ids[job_id] = job_id
                 logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
-            commit_job_id = f"commit_{service_id}"
-            self._register_reschedulable_job(
-                commit_job_id,
-                _run_commit,
-                "interval",
-                seen_ids,
-                "📦 [scheduler] Registered commit job %s (every %dm).",
-                commit_job_id,
-                commit_interval_mins,
-                minutes=commit_interval_mins,
-                jitter=30,
-                args=[service_id],
-                misfire_grace_time=commit_interval_mins * 60,
-            )
-            if svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.sync import _run_ledger_sweep
-
-                sweep_cfg = prov.get("cron_ledger_sweep", {})
-                if sweep_cfg.get("enabled", True):
-                    sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
-                    sweep_job_id = f"ledger_sweep_{service_id}"
-                    self._register_reschedulable_job(
-                        sweep_job_id,
-                        _run_ledger_sweep,
-                        "interval",
-                        seen_ids,
-                        "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
-                        sweep_job_id,
-                        sweep_interval_mins,
-                        minutes=sweep_interval_mins,
-                        args=[service_id],
-                        misfire_grace_time=300,
-                    )
+            sweep_cfg = prov.get("cron_ledger_sweep", {})
+            if sweep_cfg.get("enabled", True):
+                sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
+                sweep_job_id = f"ledger_sweep_{service_id}"
+                self._register_reschedulable_job(
+                    sweep_job_id,
+                    _run_ledger_sweep,
+                    "interval",
+                    seen_ids,
+                    "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
+                    sweep_job_id,
+                    sweep_interval_mins,
+                    minutes=sweep_interval_mins,
+                    args=[service_id],
+                    misfire_grace_time=300,
+                )
             rum_cfg = cfg.get("rum")
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
             rum_enabled = svcconfig.is_rum_enabled(cfg)
-            if rum_enabled and svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.sync import _run_rum_discovery_cron, _run_rum_ledger_sweep
-
+            if rum_enabled:
                 rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_disc_job_id = f"rum_discovery_{service_id}"
                 self._register_reschedulable_job(
@@ -455,35 +277,6 @@ class Scheduler:
                         args=[service_id],
                         misfire_grace_time=300,
                     )
-            elif rum_enabled:
-                rum_sync_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
-                rum_sync_job_id = f"rum_sync_{service_id}"
-                self._register_reschedulable_job(
-                    rum_sync_job_id,
-                    _run_rum_sync,
-                    "interval",
-                    seen_ids,
-                    "[scheduler] Registered RUM sync job %s (every %ds).",
-                    rum_sync_job_id,
-                    rum_sync_interval_secs,
-                    seconds=rum_sync_interval_secs,
-                    args=[service_id],
-                    misfire_grace_time=60,
-                )
-                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", 1)))
-                rum_commit_job_id = f"rum_commit_{service_id}"
-                self._register_reschedulable_job(
-                    rum_commit_job_id,
-                    _run_rum_commit,
-                    "interval",
-                    seen_ids,
-                    "[scheduler] Registered RUM commit job %s (every %dm).",
-                    rum_commit_job_id,
-                    rum_commit_interval_mins,
-                    minutes=rum_commit_interval_mins,
-                    args=[service_id],
-                    misfire_grace_time=60,
-                )
             alerts_cfg = prov.get("cron_alerts", {})
             alerts_enabled = alerts_cfg.get("enabled", True)
             alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
@@ -524,56 +317,7 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=600,
                 )
-            compact_cfg = prov.get("cron_compact", {})
-            if compact_cfg.get("enabled", True):
-                opt_job_id = f"optimize_{service_id}"
-                self._register_once_job(
-                    opt_job_id,
-                    _run_optimize,
-                    "cron",
-                    seen_ids,
-                    "⚙️  [scheduler] Registered optimize job %s (daily 04:00 UTC). Local compact handles ongoing dashboard perf — this is just FOS-side housekeeping.",
-                    opt_job_id,
-                    hour=4,
-                    minute=0,
-                    args=[service_id],
-                    misfire_grace_time=3600,
-                )
-            self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-            if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
-                exp_job_id = f"expire_{service_id}"
-                seen_ids.add(exp_job_id)
-                expire_interval_mins = max(5, int(sync_cfg.get("expire_interval_mins", 60)))
-                if exp_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_expire_snapshots,
-                        "interval",
-                        minutes=expire_interval_mins,
-                        jitter=60,
-                        args=[service_id],
-                        id=exp_job_id,
-                        max_instances=1,
-                        coalesce=True,
-                        misfire_grace_time=3600,
-                    )
-                    self._job_ids[exp_job_id] = exp_job_id
-                    logger.info(
-                        "🗑️  [scheduler] Registered expire-snapshots job %s (every %dm).",
-                        exp_job_id,
-                        expire_interval_mins,
-                    )
-                else:
-                    job = self._sched.get_job(exp_job_id)
-                    if job is not None:
-                        existing = getattr(getattr(job, "trigger", None), "interval", None)
-                        if existing is None or int(existing.total_seconds()) != expire_interval_mins * 60:
-                            job.reschedule("interval", minutes=expire_interval_mins)
-                            logger.info(
-                                "🗑️  [scheduler] Rescheduled expire-snapshots job %s to every %dm.",
-                                exp_job_id,
-                                expire_interval_mins,
-                            )
             if svcconfig.get_ngwaf_workspace_id(service_id):
                 ngwaf_interval_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
                 ngwaf_job_id = f"ngwaf_sync_{service_id}"
@@ -640,8 +384,6 @@ class Scheduler:
             minute=45,
             misfire_grace_time=3600,
         )
-        self._register_metric_snapshot_job(seen_ids)
-        self._register_recycle_job(seen_ids)
         for jid in list(self._job_ids.keys()):
             if jid in seen_ids:
                 continue
@@ -674,24 +416,18 @@ class Scheduler:
         args = kwargs.pop("args", [])
         if "executor" not in kwargs and job_id:
             jid = str(job_id)
-            if jid.startswith(("log_discovery_", "rum_discovery_", "rum_sync_", "commit_", "sync_")):
+            if jid.startswith(("log_discovery_", "rum_discovery_", "sync_")):
                 kwargs["executor"] = "streaming"
             elif jid.startswith(
                 (
                     "insights_prewarmer_",
-                    "local_compact_",
-                    "rollup_compact_",
-                    "rollup_heal_",
-                    "metric_snapshot",
                     "reconcile_fastly_",
                     "metadata_cleanup",
                     "rdns_enrichment",
                     "rdns_refresh",
                     "bot_data_refresh",
-                    "optimize_",
                     "ngwaf_sync_",
                     "share_audit_purge",
-                    "duckdb_recycle",
                 )
             ):
                 kwargs["executor"] = "maintenance"
@@ -722,22 +458,13 @@ def get_scheduler() -> Scheduler:
 
 TASK_MAP = {
     "log_discovery": "log_discovery",
-    "rum_sync": "rum_sync",
     "full_sync": "full_sync",
     "gap_heal": "gap_heal",
-    "commit": "commit",
-    "rum_commit": "rum_commit",
-    "optimize": "optimize",
-    "local_compact": "local_compact",
-    "expire": "expire_snapshots",
     "alerts_evaluation": "alerts",
     "ngwaf_sync": "ngwaf_sync",
     "metadata_cleanup": "metadata_cleanup",
     "insights_prewarmer": "insights_prewarmer",
-    "rollup_heal": "rollup_hour_heal",
-    "rollup_compact": "rollup_compact_daily",
     "ledger_sweep": "ledger_sweep",
-    "partial_hour_merge": "partial_hour_merge",
     "rum_discovery": "rum_discovery",
     "ledger_rum_sweep": "ledger_rum_sweep",
 }
@@ -806,6 +533,4 @@ __all__ = [
     "dev_mode_no_crons",
     "get_scheduler",
     "logger",
-    "partial_hour_merge_enabled",
-    "partial_hour_merge_interval_sec",
 ]

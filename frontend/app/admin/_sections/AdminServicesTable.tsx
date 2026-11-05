@@ -2,11 +2,11 @@
 import React, { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { AlertCircle, Bot, ChevronDown, CloudDownload, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, Settings, Settings2, Trash2 } from 'lucide-react'
+import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, Settings, Settings2, Trash2 } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import type { ServiceConfig } from '@/types/api'
-import { adminFetch, client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import { cn, downloadBlob, formatBytes, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
+import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
+import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
 import { useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
@@ -64,25 +64,13 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
       cell: ({ row }) => <MonoExternalCell text={row.getValue('fos_bucket') as string} href="https://manage.fastly.com/resources/object-storage/buckets" title="View Object Storage in Fastly" />,
     },
     {
-      id: 'local_cache', accessorFn: (row) => row.duckdb_size_bytes, header: 'Local Cache', size: 180,
+      id: 'storage', accessorFn: (row) => row.log_row_count ?? 0, header: 'Storage', size: 180,
       cell: ({ row }) => {
-        const size = row.original.duckdb_size_bytes, files = row.original.cache_file_count || 0, rows = row.original.log_row_count || 0
-        if (!size) return <span className="text-xs text-muted-foreground italic">No cache</span>
+        const rows = row.original.log_row_count || 0
         return (
           <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
-            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              <span className="flex items-center gap-1">
-                {formatCount(files)} file{files === 1 ? '' : 's'}
-                {files > 0 && (
-                  <Button variant="ghost" size="icon" aria-label="Download local cache as ZIP" className="h-4 w-4 p-0 ml-0.5 hover:bg-transparent text-muted-foreground hover:text-primary transition-colors" title="Download local cache as ZIP" onClick={(e) => {
-                    e.stopPropagation(); const sid = row.original.service_id
-                    void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(async (res) => { if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`) }).catch(() => {})
-                  }}><CloudDownload className="h-3 w-3" /></Button>
-                )}
-              </span>
-              <span>•</span><span>{formatCount(rows)} rows</span>
-            </div>
+            <span className="text-xs font-medium text-foreground">ClickHouse</span>
+            <span className="text-[10px] text-muted-foreground tabular-nums">{formatCount(rows)} rows</span>
           </div>
         )
       },

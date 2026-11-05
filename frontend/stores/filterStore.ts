@@ -265,7 +265,6 @@ export interface Service {
   name: string
   cmcdEnabled?: boolean
   rum_enabled?: boolean
-  is_high_scale?: boolean
 }
 
 interface ServiceState {

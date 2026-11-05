@@ -2,8 +2,7 @@
 """Unified Multi-Tier Synthetic Traffic Generator.
 
 Supports:
-  1. --target local: Writes synthetic Parquet batches into `cache/{bucket}/buffer/`
-     and optionally calls `commit_buffer` to materialize DuckLake snapshots.
+  1. --target local: Writes synthetic Parquet batches into `cache/{bucket}/buffer/`.
   2. --target fos: Generates gzipped NDJSON chunks conforming to
      `backend/provision/cli.py` and uploads them to FOS object storage.
   3. --target clickhouse / --with-clickhouse: Directly seeds ClickHouse
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 try:
@@ -41,11 +41,7 @@ for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.paren
         sys.path.insert(0, str(p))
 
 from backend.config import list_configs, load_config  # noqa: E402
-from backend.core.storage import (  # noqa: E402
-    _buffer_dir,
-    commit_buffer,
-    get_arrow_schema,
-)
+from backend.core.catalog import LOG_FIELD_CATALOG  # noqa: E402
 from scripts.lib.log_factory import (  # noqa: E402
     build_pop_wave_weights,
     generate_rum_records,
@@ -58,6 +54,44 @@ from scripts.lib.log_factory import (
 )
 
 # fmt: off
+
+
+def _buffer_dir(src: dict[str, Any]) -> str:
+    bucket = src.get("s3_bucket") or src.get("fos_bucket") or src.get("service_id") or "default"
+    return str(Path("cache") / str(bucket) / "buffer")
+
+
+def get_arrow_schema(log_fields: dict[str, Any] | None = None) -> pa.Schema:
+    type_map = {
+        "TIMESTAMP": pa.timestamp("us", tz="UTC"),
+        "VARCHAR": pa.string(),
+        "USMALLINT": pa.int32(),
+        "INTEGER": pa.int32(),
+        "UBIGINT": pa.int64(),
+        "BIGINT": pa.int64(),
+        "DOUBLE": pa.float64(),
+        "BOOLEAN": pa.bool_(),
+    }
+    fields = [
+        pa.field(f["id"], type_map.get(str(f.get("duckdb_type", "VARCHAR")).upper(), pa.string()))
+        for f in LOG_FIELD_CATALOG
+        if f.get("group") not in ("METRICS", "VIRTUAL", "INTERNAL")
+    ]
+    seen = {f.name for f in fields}
+    for cf in (log_fields or {}).get("custom_fields") or []:
+        name = cf.get("name")
+        if name and name not in seen:
+            fields.append(pa.field(name, type_map.get(str(cf.get("type", "VARCHAR")).upper(), pa.string())))
+            seen.add(name)
+    if "_source_file" not in seen:
+        fields.append(pa.field("_source_file", pa.string()))
+    return pa.schema(fields)
+
+
+def commit_buffer(src: dict[str, Any]) -> dict[str, int]:
+    buf_dir = Path(_buffer_dir(src))
+    files = list(buf_dir.glob("*.parquet")) if buf_dir.exists() else []
+    return {"rows_committed": 0, "files_committed": len(files)}
 
 
 def _pacing_desc(rate_rps: int, burst_rps: int, burst_duration: int, burst_interval: int) -> str:
@@ -244,7 +278,7 @@ def run_target_local(
     burst_duration: int = 30,
     burst_interval: int = 120,
 ) -> int:
-    """Writes Parquet directly to local buffer and optionally commits to DuckLake."""
+    """Writes Parquet directly to local buffer directory."""
     _validate_generation_args(rows=rows, batch_size=batch_size, file_rows=file_rows)
     buf_dir = _buffer_dir(src)
     os.makedirs(buf_dir, exist_ok=True)
@@ -308,7 +342,7 @@ def run_target_local(
     print(f"\nSUCCESS: Generated {total_rows:,} rows in {total_elapsed:.2f}s ({total_rows / total_elapsed:,.0f} rows/s).")
 
     if commit:
-        print("\nCommitting buffer to DuckLake table...", flush=True)
+        print("\nFinalizing local Parquet buffer...", flush=True)
         t_commit = time.monotonic()
         res = commit_buffer(src)
         print(
@@ -565,13 +599,20 @@ def run_target_clickhouse(
     burst_rps: int = 0,
     burst_duration: int = 30,
     burst_interval: int = 120,
+    clean: bool = False,
 ) -> int:
     """Generates synthetic log records and inserts them directly into ClickHouse."""
     _validate_generation_args(rows=rows, batch_size=batch_size)
     from uuid import uuid4
 
-    from backend.core.clickhouse import ClickHouseClient, get_clickhouse_client
+    from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES, ClickHouseClient, get_clickhouse_client
     from backend.high_scale.archive import ClickHouseBatchAdapter, HighScaleBatch, install_clickhouse_schema
+    from backend.high_scale.ingest_controller.service import AggregateBatchAdapter, compute_dimension_counts
+    from backend.high_scale.network import build_network_projection_rows
+    from backend.high_scale.origin import build_origin_projection_rows
+    from backend.high_scale.performance import build_performance_projection_rows
+    from backend.high_scale.query import _normalize_serving_fields
+    from backend.high_scale.security import build_security_projection_rows
 
     if clickhouse_host:
         os.environ["CLICKHOUSE_HOST"] = clickhouse_host
@@ -605,11 +646,25 @@ def run_target_clickhouse(
                 return 1
             client.health()
             install_clickhouse_schema()
+            if os.getenv("METADATA_DSN"):
+                from backend.core.clickhouse import create_clickhouse_schema
+
+                create_clickhouse_schema(client)
         except Exception as exc:
             print(f"ERROR: ClickHouse connection/schema initialization failed: {exc}", file=sys.stderr)
             return 1
 
     service_id = src.get("service_id", "default_service")
+    if clean and client is not None:
+        for tbl in (*sorted(CLICKHOUSE_HIGH_SCALE_TABLES), "request_aggregates_1h"):
+            try:
+                client.execute(
+                    f"ALTER TABLE `{tbl}` DELETE WHERE service_id = {{service_id:String}} SETTINGS mutations_sync = 1",
+                    {"service_id": service_id},
+                )
+            except Exception:
+                pass
+
     start_ms, end_ms = int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
     rng = np.random.default_rng(seed)
 
@@ -623,6 +678,7 @@ def run_target_clickhouse(
     rows_remaining, batch_idx, total_rows_emitted = rows, 0, 0
     t0 = time.monotonic()
     adapter = ClickHouseBatchAdapter(client) if client else None
+    agg_adapter = AggregateBatchAdapter(client) if client else None
 
     while rows_remaining > 0:
         b_t0 = time.monotonic()
@@ -644,16 +700,52 @@ def run_target_clickhouse(
             row_dict["line_ordinal"] = i
             row_dict["transform_version"] = "v1"
             row_dict["client_ip"] = str(row_dict.get("ip", ""))
+            _normalize_serving_fields(row_dict, "request")
             batch_rows.append(row_dict)
 
         batch_id = f"batch_{service_id}_{batch_idx}_{batch_uid}"
-        batch = HighScaleBatch(batch_id=batch_id, service_id=service_id, domain="request", generation="1", rows=tuple(batch_rows))
+        event_tuple = tuple(batch_rows)
+        batch = HighScaleBatch(batch_id=batch_id, service_id=service_id, domain="request", generation="1", rows=event_tuple)
 
         if dry_run:
             print(f"  [dry-run] [{mode_str}] Would insert ClickHouse batch {batch_id}: {n:,} rows ({batch.digest[:16]}...)")
         else:
-            assert adapter is not None
+            assert adapter is not None and agg_adapter is not None
             receipt = adapter.insert(batch)
+            counts = tuple(r for r in compute_dimension_counts("request", event_tuple) if r.get("value") != "")
+            if counts:
+                agg_adapter.insert(
+                    HighScaleBatch(f"{batch_id}:request_aggregate", service_id, "request_aggregate", "1", counts)
+                )
+            origin_proj = build_origin_projection_rows(event_tuple)
+            for sub_domain, proj_rows in (
+                ("origin_summary", origin_proj.summary_rows),
+                ("origin_dimensions", origin_proj.dimension_rows),
+            ):
+                if proj_rows:
+                    agg_adapter.insert(HighScaleBatch(f"{batch_id}:{sub_domain}", service_id, sub_domain, "1", proj_rows))
+            perf_proj = build_performance_projection_rows(event_tuple)
+            for sub_domain, proj_rows in (
+                ("performance_dimensions", perf_proj.dimension_rows),
+                ("performance_summary", perf_proj.summary_rows),
+                ("performance_scatter", perf_proj.scatter_rows),
+            ):
+                if proj_rows:
+                    agg_adapter.insert(HighScaleBatch(f"{batch_id}:{sub_domain}", service_id, sub_domain, "1", proj_rows))
+            sec_proj = build_security_projection_rows(event_tuple)
+            if sec_proj.dimension_rows:
+                agg_adapter.insert(
+                    HighScaleBatch(
+                        f"{batch_id}:security_dimensions", service_id, "security_dimensions", "1", sec_proj.dimension_rows
+                    )
+                )
+            net_proj = build_network_projection_rows(event_tuple)
+            if net_proj.dimension_rows:
+                agg_adapter.insert(
+                    HighScaleBatch(
+                        f"{batch_id}:network_dimensions", service_id, "network_dimensions", "1", net_proj.dimension_rows
+                    )
+                )
             print(f"  inserted [{mode_str}] ClickHouse batch {receipt.batch_id}: {receipt.rows_inserted:,} rows ({receipt.digest[:16]}...)")
 
         total_rows_emitted += n
@@ -689,8 +781,8 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=25_000, help="Rows per generation batch.")
     parser.add_argument("--file-rows", type=int, default=50_000, help="Rows per output Parquet file.")
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility.")
-    parser.add_argument("--commit", dest="commit", action="store_true", default=True, help="Commit buffer to DuckLake table after writing (default: True).")
-    parser.add_argument("--no-commit", dest="commit", action="store_false", help="Skip committing buffer to DuckLake table.")
+    parser.add_argument("--commit", dest="commit", action="store_true", default=True, help="Finalize local Parquet buffer after writing (default: True).")
+    parser.add_argument("--no-commit", dest="commit", action="store_false", help="Skip finalizing local Parquet buffer.")
     parser.add_argument("--rate-rps", type=int, default=0, help="Sustained rate pacing in requests per second (0 disables).")
     parser.add_argument("--burst-rps", type=int, default=0, help="Burst rate pacing in requests per second (0 disables).")
     parser.add_argument("--burst-duration", type=int, default=30, help="Duration of each burst in seconds (default: 30s).")
@@ -770,6 +862,7 @@ def main() -> int:
             clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
             clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
             burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+            clean=args.clean,
         )
 
     if res == 0 and args.with_clickhouse and args.target != "clickhouse":
@@ -780,6 +873,7 @@ def main() -> int:
             clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
             clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
             burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+            clean=args.clean,
         )
 
     return res

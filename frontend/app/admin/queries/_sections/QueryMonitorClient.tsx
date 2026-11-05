@@ -1,6 +1,6 @@
 'use client'
 /**
- * Live Query Monitor — real-time view of every executing Postgres/DuckDB
+ * Live Query Monitor — real-time view of every executing ClickHouse/Postgres
  * statement, with attribution, caller frame, pool slot, and a kind-aware
  * kill button, plus shared TanStack ColumnDef builders for ActiveTable and CompletedTable.
  */
@@ -312,7 +312,7 @@ export function QueryMonitorPage() {
     <div className="space-y-6" data-testid="admin-queries-root">
       <PageHeader
         title="Live Query Monitor"
-        description="Real-time view of every executing DuckDB and Postgres query. Click a row to see the full SQL."
+        description="Real-time view of every executing ClickHouse and Postgres query. Click a row to see the full SQL."
       >
         <BackToAdminLink variant="secondary" prefetch={false} />
       </PageHeader>

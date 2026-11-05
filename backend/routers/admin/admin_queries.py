@@ -178,7 +178,7 @@ def list_persisted_slow_queries(
     since_hours: int = Query(24, ge=1, le=24 * 30),
     threshold_ms: float = Query(100.0, ge=0.0),
     kind: str | None = Query(None, pattern="^(analyst|admin|cron|system)$"),
-    db_type: str | None = Query(None, pattern="^(DuckDB|Postgres|ClickHouse)$"),
+    db_type: str | None = Query(None, pattern="^(Postgres|ClickHouse)$"),
     sort: str = Query("recent", pattern="^(recent|duration)$"),
     limit: int = Query(200, ge=1, le=2000),
 ) -> SlowQueriesResponse:

@@ -1,10 +1,6 @@
 # fastly-log-analytics (Helm chart)
 
-**EXPERIMENTAL.** This chart is not the supported deployment path — that is the
-single-VM `docker-compose.prod.yml` at the repo root. The chart exists to
-exercise the multi-pod Celery/valkey ingest split on Kubernetes.
-
-## Two topologies
+## Architecture
 
 Optional admin client-mTLS is configured through `adminGateway.enabled`,
 `adminGateway.existingSecret`, `adminGateway.host` and the required
@@ -14,39 +10,24 @@ release and certificate lifecycle are documented in
 [admin-gateway/README.md](../admin-gateway/README.md).
 The public Ingress uses a credential-stripping proxy when this option is on.
 
-The chart renders one of two shapes, selected by `config.deploymentMode`.
-
-| | `standard` (default) | `high_scale` |
-|---|---|---|
-| Ingest | in-process APScheduler on the backend pod | High-scale worker micro-batching |
-| Pods | backend, frontend | backend, frontend, high-scale-worker |
-| Postgres | **required** at runtime (`DUCKLAKE_CATALOG` + `METADATA_DSN`, per [ADR-22](../../../docs/adr/22-postgres-only-metadata.md)) | **required** (DuckLake catalog + metadata + control plane) |
-| valkey/redis | not used | optional (broker, SSE backplane) |
-| Scales ingest | no | yes (`highScale.workloads.ingest.replicas`) |
-
-Neither mode scales the **serving** tier. The backend Deployment is pinned to
-one replica in the template and has no HPA in either mode, because the
-per-service `.duckdb` file in `standard` mode is process-exclusive — see
-[ADR-18](../../../docs/adr/18-serving-tier-single-pod.md). `replicaCount`
-applies to the stateless frontend only.
+The chart deploys the unified Fastly Log Analytics stack on Kubernetes:
+- **Backend** (`replicas: 1`) — FastAPI serving tier reading analytical queries from ClickHouse and operational metadata from PostgreSQL 16.
+- **Worker** (`workers.replicaCount`, default `1`) — Stateless ingest worker (`python -m backend.high_scale.worker`) configured with the lightweight pod profile (`1 vCPU / 2 GiB`, `HIGH_SCALE_WORKER_THREADS=1`, `HIGH_SCALE_MAX_BATCH_BYTES=6291456`, `HIGH_SCALE_MAX_BATCH_OBJECTS=10`).
+- **Frontend** (`replicaCount`, default `1`) — Next.js App Router dashboard.
 
 ## Prerequisites
 
-`standard` mode renders at `helm template` time with default values and a ReadWriteOnce StorageClass (`persistence.storageClassName`, default empty, i.e. the cluster default):
+The chart renders at `helm template` time with default values and a ReadWriteOnce StorageClass (`persistence.storageClassName`, default empty, i.e. the cluster default):
 
 ```sh
 helm template fla ./deploy/chart/fastly-log-analytics
 ```
 
-At runtime, both `standard` and `high_scale` require PostgreSQL 16 DSNs (`config.ducklakeCatalog` and `secrets.metadataDsn` or `secrets.existingSecret`) per [ADR-22](../../../docs/adr/22-postgres-only-metadata.md).
-
-`high_scale` mode needs **Postgres and ClickHouse**.
-Bring your own — then:
+At runtime, the deployment requires **PostgreSQL 16** (`secrets.metadataDsn` or `secrets.existingSecret`, per [ADR-22](../../../docs/adr/22-postgres-only-metadata.md)) and **ClickHouse** (`config.clickhouseUrl` / `config.clickhouseHost`).
 
 ```sh
 helm install fla ./deploy/chart/fastly-log-analytics \
-  --set config.deploymentMode=high_scale \
-  --set config.ducklakeCatalog=postgresql://fla:PASSWORD@postgres:5432/ducklake \
+  --set config.clickhouseUrl=http://clickhouse:8123 \
   --set secrets.existingSecret=fla-connections
 ```
 
@@ -54,33 +35,18 @@ where `fla-connections` is a Secret you created first:
 
 ```sh
 kubectl create secret generic fla-connections \
-  --from-literal=CELERY_BROKER_URL=redis://valkey-master:6379/0 \
-  --from-literal=METADATA_DSN=postgresql://fla:PASSWORD@postgres:5432/ducklake
+  --from-literal=METADATA_DSN=postgresql://fla:PASSWORD@postgres:5432/fla \
+  --from-literal=CLICKHOUSE_PASSWORD=PASSWORD \
+  --from-literal=CELERY_BROKER_URL=redis://valkey-master:6379/0
 ```
 
-`secrets.celeryBrokerUrl` / `secrets.metadataDsn` are the convenience
-alternative for a test cluster — they land in the release manifest, readable
-to anyone with helm access, so prefer `existingSecret` for anything real.
+`secrets.metadataDsn` / `secrets.clickhousePassword` / `secrets.celeryBrokerUrl` are the convenience alternative for a test cluster — they land in the release manifest, readable to anyone with helm access, so prefer `existingSecret` for production.
 
-The two DSNs may point at the same Postgres database; every DuckLake table is
-`ducklake_`-prefixed and does not collide with the metadata schema
-([ADR-15](../../../docs/adr/15-multi-writer-topology.md)). Run
-`scripts/setup_pg_schema.py` against the metadata database before first boot.
+Run `scripts/setup_pg_schema.py` against the metadata database before first boot.
 
-High-scale mode serves analytical queries from ClickHouse (backed by FOS archive
-Parquet and the Postgres control plane), while any DuckLake queries use durable
-serving (ephemeral read-only DuckDB connections over the shared Postgres
-DuckLake catalog without opening a native per-service `.duckdb` file).
+## Optional high-scale application plane subchart
 
-## Optional high-scale application plane
-
-The chart also contains an opt-in `highScale` application subchart. The
-currently executable workload is the continuous FOS-to-archive-to-ClickHouse
-`ingest` worker. Archive, query, replay, and control-plane workload stanzas
-remain available for later standalone entrypoints but are disabled until those
-processes exist. The subchart adds
-Deployment, PodDisruptionBudget, NetworkPolicy, ServiceAccount, optional
-Secret, resource, and workload-fairness configuration:
+The chart also contains an opt-in `highScale` application subchart for multi-workload policies (PodDisruptionBudget, NetworkPolicy, anti-affinity, and dedicated ServiceAccount):
 
 ```sh
 helm install fla ./deploy/chart/fastly-log-analytics \
@@ -88,58 +54,11 @@ helm install fla ./deploy/chart/fastly-log-analytics \
   --set highScale.secret.existingName=fla-high-scale-connections
 ```
 
-The subchart is deliberately disabled by default, and enabling it does not
-change `config.deploymentMode`, existing startup commands, or the standard /
-`high_scale` workload set. The enabled ingest workload runs
-`python -m backend.high_scale.worker` continuously. Supply the application
-image and override workload arguments through `highScale.image` /
-`highScale.workloads` when needed. For a service registry shared with the
-existing application deployment, set
-`highScale.sharedState.existingClaim` to the application PVC; the worker then
-mounts its `configs`, `data`, and `cache` subdirectories without replacing its
-Python environment. Additional runtime variables belong in
-`highScale.env`, and credentials should come from
-`highScale.secret.existingName`. The chart assigns a deterministic
-`HIGH_SCALE_WORKER_ID` (override with `highScale.workerId`) so replacement pods
-can recover expired leases left by an interrupted worker. A writable `emptyDir`
-is mounted at `/tmp` because archive publication uses temporary files while the
-container root filesystem remains read-only.
-
-ClickHouse and Keeper are **not** installed by this chart. Select and operate
-one external ClickHouse/Keeper operator or chart, then grant the workloads
-access through an operator-managed Secret and the `highScale.networkPolicy`
-egress rules. No operator-specific values or CRDs are included.
-
-## Misconfiguration is a template-time error
-
-`backend/config.py::validate_deployment_mode()` refuses to boot a backend or
-worker whose `DEPLOYMENT_MODE=high_scale` lacks a Postgres `DUCKLAKE_CATALOG` or
-`METADATA_DSN`. `templates/validate.yaml` reproduces those conditions at
-render time, so `helm install`/`helm template` fails with a message naming the
-value to set instead of deploying backend and worker pods that all
-CrashLoop. It also rejects combinations that fail *silently* at runtime:
-an unrecognised `deploymentMode` or `sseBackplane=valkey` with no broker URL.
-
-The one case it cannot check is an `existingSecret` missing a key — the chart
-cannot read a Secret it did not create. In celery mode both `secretKeyRef`s
-are non-optional, so that surfaces as the pod failing to start with
-`couldn't find key CELERY_BROKER_URL in Secret`, not as a boot-gate
-CrashLoop.
-
-The invariants above are pinned by `tests/chart/test_helm.py` (in the pytest
-suite); `make deploy-validate` additionally runs `helm lint` and a
-default-values `helm template`.
-
 ## Persistence
 
 `persistence.enabled: false` swaps the PVC for an `emptyDir`, which loses
 `/app/configs` — the service registry — on every pod restart, so the install
 forgets every configured service. Only use it for a throwaway install.
-
-The PVC is ReadWriteOnce, so every pod mounting it is pinned to one node. That
-includes the worker pods in celery mode: scaling workers across nodes needs
-shared storage for `/app/cache` (and is subject to the pod-local-output
-caveats in ADR-18).
 
 ## Admin access
 

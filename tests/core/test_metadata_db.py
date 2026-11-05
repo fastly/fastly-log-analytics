@@ -23,7 +23,7 @@ import backend.core.metadata.base as pg_connection
 import backend.core.metadata.base as pg_schema
 import backend.core.metadata.ingest_log as quarantine
 import backend.core.metadata.usage_log as usage_log_db
-from backend import celery_app, config, main
+from backend import config, main
 from backend.core import share_db as share_db_connection
 from backend.core.metadata import base, ingest_log, usage_log
 from backend.core.metadata.base import InvalidServiceIdError, get_con
@@ -587,10 +587,8 @@ def test_connection_openers_raise_without_dsn(no_dsn, opener):
 
 
 def test_deployment_validation_and_usage_log_ddl(monkeypatch):
-    monkeypatch.setattr(config, "DEPLOYMENT_MODE", "standard")
-    monkeypatch.setattr(config, "DUCKLAKE_CATALOG", "postgresql://u:p@h/db")
     monkeypatch.setenv("METADATA_DSN", "sqlite:///tmp/x.db")
-    with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN"):
+    with pytest.raises(RuntimeError, match="METADATA_DSN must be a Postgres DSN"):
         config.validate_deployment_mode()
 
     statements = pg_schema.pg_schema_statements()
@@ -877,7 +875,6 @@ def test_ensure_pg_schema_lifecycle_and_boot_wiring(monkeypatch, caplog):
 
     assert "_application_lifespan(app)" in inspect.getsource(main.lifespan)
     assert "ensure_pg_schema" in inspect.getsource(main._application_lifespan)
-    assert "ensure_pg_schema" in inspect.getsource(celery_app._worker_process_init)
 
 
 def test_quarantine_defaults_and_advisory_lock(monkeypatch):

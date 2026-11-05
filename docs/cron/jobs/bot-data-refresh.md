@@ -18,10 +18,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Fetches public HTTP/JSON feeds, normalizes format, writes to `data/cache/bot_sources/{source_id}.json`. | Local in-process locks (`_matcher_lock`, `_source_cache_lock`). Gated by `FLA_DEV_NO_CRONS=1` (outbound HTTP suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Fetches feeds and populates local bot cache on web serving pods. | Process-global singleton; never scheduled to Celery workers. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod) | Fetches public HTTP/JSON feeds, normalizes format, writes to `data/cache/bot_sources/{source_id}.json`. | Local in-process locks (`_matcher_lock`, `_source_cache_lock`). Gated by `FLA_DEV_NO_CRONS=1` (outbound HTTP suppressed). |
 
 ---
 
@@ -102,5 +101,4 @@
 - 3. Unit tests verify `_run_bot_data_refresh` records `error` on total feed failures.
 - 4. Unit tests verify `_run_bot_data_refresh` skips when `FLA_DEV_NO_CRONS=1` is active (`status="skipped"`).
 - 5. Unit tests verify manual `POST /api/admin/bot-sources/refresh` and alias `/api/admin/bots/refresh` endpoints.
-- 7. Unit tests verify atomic file writes, tempfile cleanup on error, and 4-cache invalidation (`_matcher_cache`, `_source_cache`, `_compiled_ip_feeds`, `_version_cache`).
-- 8. Regression suite verifies backward compatibility with existing scheduler tests.
+- 6. Unit tests verify atomic file writes, tempfile cleanup on error, and 4-cache invalidation (`_matcher_cache`, `_source_cache`, `_compiled_ip_feeds`, `_version_cache`).

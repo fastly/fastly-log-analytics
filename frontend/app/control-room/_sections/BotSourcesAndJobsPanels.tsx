@@ -7,7 +7,6 @@ import {
   RefreshCw,
   Wifi,
   ExternalLink,
-  CloudDownload,
 } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useQuery } from '@tanstack/react-query'
@@ -15,7 +14,6 @@ import type { components } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { NextRunCountdown } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { DataTableReadonly } from '@/components/DataTable'
 import { useDateFormat } from '@/hooks/useSSE'
@@ -108,50 +106,6 @@ export function SystemJobsStrip() {
         )}
       </div>
     </div>
-  )
-}
-
-function RebuildLocalViewButton() {
-  const [busy, setBusy] = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function rebuild() {
-    setBusy(true)
-    setError(null)
-    try {
-      const { error: apiError } = await client.POST('/api/admin/rebuild-local-view', {})
-      if (apiError) throw new Error(extractApiError(apiError))
-      setConfirmOpen(false)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'rebuild failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <>
-      <Button variant="outline" size="sm" onClick={() => setConfirmOpen(true)}>
-        <CloudDownload className="h-3 w-3 mr-1.5" />
-        Rebuild Local View
-      </Button>
-      <ConfirmDialog
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title="Rebuild local view?"
-        description={
-          <>
-            Clears the local view caches and rebuilds the DuckDB view over the DuckLake table. Un-committed buffer data
-            is preserved. This can take a minute on large tables.
-            {error && <span className="block mt-2 text-xs text-red-500">{error}</span>}
-          </>
-        }
-        confirmLabel="Rebuild"
-        isPending={busy}
-        onConfirm={rebuild}
-      />
-    </>
   )
 }
 
@@ -332,15 +286,6 @@ export function BotSourcesPanel() {
             {enriching ? 'Enriching…' : 'Enrich Now'}
           </Button>
         </div>
-      </div>
-      <div className="space-y-3 pt-2">
-        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Maintenance</Label>
-        <div className="flex flex-wrap gap-2">
-          <RebuildLocalViewButton />
-        </div>
-        <p className="text-[11px] text-muted-foreground">
-          Clears the local view caches and rebuilds the DuckDB view. The local buffer (un-committed data) is left alone.
-        </p>
       </div>
       <SystemJobsStrip />
     </div>

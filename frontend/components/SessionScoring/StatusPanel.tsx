@@ -33,7 +33,7 @@ import {
   StepListDescription,
 } from './ScoringVclTab'
 
-export { StorageCalendar, StorageStatus, MetadataStorageCard } from './StoragePanels'
+export { MetadataStorageCard } from './StoragePanels'
 export {
   L2EnforcementCard,
   type L2EnforcementCardProps,

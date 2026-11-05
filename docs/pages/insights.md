@@ -34,11 +34,9 @@ Defaults adapt to available history (a young service compares the last hour agai
 
 **network** (9): `asn_metro_performance`, `region_latency`, `network_asn_health`, `metro_delivery_degradation`, `http3_fallback`, `asn_concentration`, `new_asn_traffic`, `asn_hosting_shift`, `connection_type_mix`
 
-Definitions (id, category, title, `required_fields`, `required_groups`, SQL, row processor) live in [`backend/repositories/insights/definitions/`](../../backend/repositories/insights/definitions/) and [`backend/core/insight_definitions.py`](../../backend/core/insight_definitions.py) (`INSIGHT_DEFINITIONS`). Key invariants:
-- Every definition must declare an `InsightCategory` ([`backend/repositories/insights/__init__.py`](../../backend/repositories/insights/__init__.py); registration without one fails Pydantic at import). A new insight in an existing category needs no frontend change; a new category needs a tab entry in [`frontend/components/Insights/InsightTabsAndControls.tsx`](../../frontend/components/Insights/InsightTabsAndControls.tsx).
+Definitions (id, category, title, `required_fields`, `required_groups`, ClickHouse SQL, row processor) live in [`backend/high_scale/insights/`](../../backend/high_scale/insights/) and [`backend/core/insight_definitions.py`](../../backend/core/insight_definitions.py) (`INSIGHT_DEFINITIONS`). Key invariants:
+- Every definition must declare an `InsightCategory` (`INSIGHT_DEFINITIONS`; registration without one fails validation at import). A new insight in an existing category needs no frontend change; a new category needs a tab entry in [`frontend/components/Insights/InsightTabsAndControls.tsx`](../../frontend/components/Insights/InsightTabsAndControls.tsx).
 - Set `required_groups=[]` when the gate should be only core fields — declaring a group grays the card out in previews even if it would run.
-- Because the parameter-binding heuristic counts `sql.count("?")`, regex literals in SQL templates must be `?`-free (no `(?i)`; pass the `'i'` flag to `regexp_matches`).
-- Evaluate regex/string predicates once per distinct `url`, `ua`, or `referer` rather than per row, and keep CTEs referenced by both the window and baseline comparison (`AS NOT MATERIALIZED`) from being materialized over the full 30-day table. Zero behavior drift across all registered definitions is enforced by `tests/repositories/test_insights_golden.py`.
 
 ## Roles
 
@@ -55,11 +53,11 @@ Routes in [`backend/routers/insights.py`](../../backend/routers/insights.py), mo
 - `POST /api/insights/cache-collapse-detail` (`CacheCollapseDetailResponse`): timeline, disposition breakdown and recent misses for one URL (`url`, `window_size_hrs`, `baseline_hours`).
 - `GET /api/insight-availability` ([`backend/routers/bootstrap.py`](../../backend/routers/bootstrap.py)): `InsightsAvailabilityResponse` listing available and unavailable detectors for the active service.
 
-Results are cached in-process (TTL 300 s) and warmed by the `insights_prewarmer` cron, which is demand-driven and yields to ingest ([cron spec](../cron/jobs/insights-prewarmer.md)).
+Results are cached in-process (TTL 300 s) and warmed by the `insights_prewarmer` cron, which is demand-driven ([cron spec](../cron/jobs/insights-prewarmer.md)).
 
-High-scale mode ([`backend/high_scale/insights/`](../../backend/high_scale/insights/)) runs every registered detection natively in ClickHouse over visible `request_facts` (`sql_queries.py`, one query per detection, same row layout as the standard processors), so cards, thresholds and severities come from the same registry code. Detections whose required field is absent are omitted; a service with less history than the baseline gets the standard `info` card ("Requires Nh of historical data"), except `impossible_distance`, which needs no baseline; a failing query becomes an `error` card, never `clean`.
+The Insights engine ([`backend/high_scale/insights/`](../../backend/high_scale/insights/)) runs every registered detection natively in ClickHouse over visible `request_facts` (`sql_queries.py`, one query per detection), so cards, thresholds and severities come from the unified registry. Detections whose required field is absent are omitted; a service with less history than the baseline gets the standard `info` card ("Requires Nh of historical data"), except `impossible_distance`, which needs no baseline; a failing query becomes an `error` card, never `clean`.
 
 ## Tests
 
-- Backend: [`tests/repositories/test_insights_golden.py`](../../tests/repositories/test_insights_golden.py) (all registered definitions on a synthetic dataset), [`tests/cron/test_insights_prewarmer.py`](../../tests/cron/test_insights_prewarmer.py), [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py)
+- Backend: [`tests/cron/test_insights_prewarmer.py`](../../tests/cron/test_insights_prewarmer.py), [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py)
 - E2E: `Insights Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts)

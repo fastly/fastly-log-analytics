@@ -253,7 +253,7 @@ export function RouteSkeleton({ variant }: { variant: RouteSkeletonVariant }) {
         <div className="space-y-6 min-h-[820px]" data-testid="admin-clickhouse-loading">
           <SkeletonHeader
             title="ClickHouse Replay & Cluster Operations"
-            description="Monitor High-Scale ClickHouse cluster status, publication manifest health, and execute bounded artifact replays."
+            description="Monitor ClickHouse cluster status, publication manifest health, and execute bounded artifact replays."
           />
           <ClickHousePanelFallback />
         </div>
@@ -263,7 +263,7 @@ export function RouteSkeleton({ variant }: { variant: RouteSkeletonVariant }) {
         <div className="space-y-6" data-testid="admin-queries-loading">
           <SkeletonHeader
             title="Live Query Monitor"
-            description="Real-time view of every executing DuckDB and Postgres query. Click a row to see the full SQL."
+            description="Real-time view of every executing ClickHouse and Postgres query. Click a row to see the full SQL."
           >
             <Skeleton className="h-7 w-28" />
           </SkeletonHeader>
@@ -274,7 +274,7 @@ export function RouteSkeleton({ variant }: { variant: RouteSkeletonVariant }) {
             <div className="flex items-center gap-3">
               <Skeleton className="h-5 w-20 rounded-full" />
               <Skeleton className="h-5 w-16 rounded-full" />
-              <span className="text-xs text-muted-foreground">Inspecting DuckDB connection pool...</span>
+              <span className="text-xs text-muted-foreground">Inspecting ClickHouse and Postgres queries...</span>
             </div>
             <Skeleton className="h-8 w-8" />
           </div>
@@ -294,7 +294,7 @@ export function RouteSkeleton({ variant }: { variant: RouteSkeletonVariant }) {
                   <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
                     <Skeleton className="h-6 w-56" />
                     <span className="text-xs text-muted-foreground">
-                      {isActive ? 'Inspecting DuckDB connection pool...' : 'Loading query telemetry...'}
+                      {isActive ? 'Inspecting ClickHouse and Postgres queries...' : 'Loading query telemetry...'}
                     </span>
                   </CardHeader>
                   <CardContent className="p-0">

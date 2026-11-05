@@ -137,19 +137,15 @@ export const INPROCESS_ACTIVE_COLUMNS: ColumnDef<InProcessActiveRun>[] = [
 ]
 
 export function QueueWorkersSection({
-  isStandardMode,
   isLoading,
   isStatusRefetching,
   error,
-  inprocessActiveRuns,
   workerCount,
   activeWorkers,
 }: {
-  isStandardMode: boolean
   isLoading: boolean
   isStatusRefetching: boolean
   error: unknown
-  inprocessActiveRuns: InProcessActiveRun[]
   workerCount: number
   activeWorkers: [string, ActiveTask[]][]
 }) {
@@ -158,99 +154,56 @@ export function QueueWorkersSection({
       data-testid="admin-queue-workers-reservation"
       className="min-h-[200px] min-w-0 overflow-hidden [contain-intrinsic-size:auto_200px] [content-visibility:visible]"
     >
-      {isStandardMode ? (
-        <AnalyticsCard
-          key="standard-active-jobs"
-          title={`Active In-Process Jobs (${inprocessActiveRuns.length})`}
-          helpTitle="Active In-Process Jobs"
-          className="min-h-[200px]"
-          isLoading={isLoading}
-          isFetching={isStatusRefetching}
-          loadingMessage="Inspecting active cron leases..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                Displays all background cron tasks currently holding an active execution
-                lease in PostgreSQL (`job_runs`).
-              </p>
-              <p>
-                In Standard deployment mode, background sync, commit, compaction, and
-                maintenance tasks execute in-process via APScheduler rather than external
-                Celery workers.
-              </p>
-            </div>
-          }
-        >
-          {inprocessActiveRuns.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No background cron jobs are actively executing right now (scheduler is idle
-              between ticks).
+      <AnalyticsCard
+        key="celery-active-workers"
+        title={`Active Workers (${workerCount})`}
+        helpTitle="Active Workers"
+        className="min-h-[200px]"
+        isLoading={isLoading}
+        isFetching={isStatusRefetching}
+        loadingMessage="Inspecting Celery task broker..."
+        error={error as AnalyticsCardError | null}
+        helpContent={
+          <div className="space-y-4 text-sm">
+            <p>
+              Displays all currently running Celery worker nodes and the tasks they are
+              actively executing.
             </p>
-          ) : (
-            <div data-testid="admin-queue-inprocess-active-table">
-              <DataTableReadonly
-                columns={INPROCESS_ACTIVE_COLUMNS}
-                data={inprocessActiveRuns}
-                hideToolbar
-                showPagination={false}
-                tableCaption="Active in-process cron jobs"
-              />
-            </div>
-          )}
-        </AnalyticsCard>
-      ) : (
-        <AnalyticsCard
-          key="celery-active-workers"
-          title={`Active Workers (${workerCount})`}
-          helpTitle="Active Workers"
-          className="min-h-[200px]"
-          isLoading={isLoading}
-          isFetching={isStatusRefetching}
-          loadingMessage="Inspecting Celery task broker..."
-          error={error as AnalyticsCardError | null}
-          helpContent={
-            <div className="space-y-4 text-sm">
-              <p>
-                Displays all currently running Celery worker nodes and the tasks they are
-                actively executing.
-              </p>
-              <p>
-                If a worker is listed but has no active tasks, it is idle and waiting for
-                messages from the queue.
-              </p>
-            </div>
-          }
-        >
-          {activeWorkers.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No active workers found.</p>
-          ) : (
-            <div className="space-y-6" data-testid="admin-queue-workers-list">
-              {activeWorkers.map(([workerName, tasks]) => (
-                <div key={workerName}>
-                  <h4 className="font-mono text-sm font-semibold mb-2 flex items-center">
-                    {workerName}
-                    <Badge variant="outline" className="ml-2">
-                      {tasks.length} active task{tasks.length === 1 ? '' : 's'}
-                    </Badge>
-                  </h4>
-                  {tasks.length > 0 ? (
-                    <DataTableReadonly
-                      columns={TASK_COLUMNS}
-                      data={tasks}
-                      hideToolbar
-                      showPagination={false}
-                      tableCaption={`Active tasks on ${workerName}`}
-                    />
-                  ) : (
-                    <p className="text-xs text-muted-foreground italic">Idle</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </AnalyticsCard>
-      )}
+            <p>
+              If a worker is listed but has no active tasks, it is idle and waiting for
+              messages from the queue.
+            </p>
+          </div>
+        }
+      >
+        {activeWorkers.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No active workers found.</p>
+        ) : (
+          <div className="space-y-6" data-testid="admin-queue-workers-list">
+            {activeWorkers.map(([workerName, tasks]) => (
+              <div key={workerName}>
+                <h4 className="font-mono text-sm font-semibold mb-2 flex items-center">
+                  {workerName}
+                  <Badge variant="outline" className="ml-2">
+                    {tasks.length} active task{tasks.length === 1 ? '' : 's'}
+                  </Badge>
+                </h4>
+                {tasks.length > 0 ? (
+                  <DataTableReadonly
+                    columns={TASK_COLUMNS}
+                    data={tasks}
+                    hideToolbar
+                    showPagination={false}
+                    tableCaption={`Active tasks on ${workerName}`}
+                  />
+                ) : (
+                  <p className="text-xs text-muted-foreground italic">Idle</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </AnalyticsCard>
     </div>
   )
 }
@@ -283,11 +236,11 @@ export function InProcessSchedulesSection({
           <div className="space-y-4 text-sm">
             <p>
               Displays all registered background schedules running in-process via
-              APScheduler across both Standard and High-Scale deployment modes.
+              APScheduler.
             </p>
             <p>
-              These recurrent jobs handle log discovery, DuckLake commits, local
-              compaction, rollup healing, cloud maintenance, and alert evaluation.
+              These recurrent jobs handle log discovery, RUM sync, cloud maintenance,
+              insights prewarming, and alert evaluation.
             </p>
           </div>
         }

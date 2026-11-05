@@ -351,8 +351,6 @@ def wizard(args) -> dict:
         "cdn_secret": cdn_secret,
         "delete_after": not getattr(args, "disable_delete_after", False) if delete_after else False,
         "enable_cron_sync": not getattr(args, "disable_cron_sync", False),
-        "commit_interval_mins": getattr(args, "commit_interval_mins", 5) or 5,
-        "enable_cron_compact": not getattr(args, "disable_cron_compact", False),
         "log_retention_days": getattr(args, "log_retention_days", 30) or 30,
         "log_fields": log_fields_cfg,
     }
@@ -445,7 +443,7 @@ def handle_teardown(args):
             service_id,
             bucket=state.get("fos_bucket_name"),
             remove_data=args.remove_data
-            or (not args.yes and ask_yes("Remove local database and cache as well?", default=True)),
+            or (not args.yes and ask_yes("Remove local metadata and cache as well?", default=True)),
         )
         ok("Teardown completed.")
     except Exception as exc:
@@ -469,10 +467,9 @@ def handle_reset_logs(args):
     if not args.yes:
         blank()
         print(f"  {_c(YLW + BOLD, 'The following will be permanently deleted:')}")
-        print(f"  {_c(DIM, 'Cloud DuckLake log data (ducklake/ in FOS, High-Scale only)')}")
+        print(f"  {_c(DIM, 'ClickHouse analytical log tables and rollups')}")
         print(f"  {_c(DIM, 'Quarantined-file copies (errors/)')}")
-        print(f"  {_c(DIM, 'Local DuckLake data, DuckDB analytical database + cache')}")
-        print(f"  {_c(DIM, 'Local ingestion dedup indexes')}")
+        print(f"  {_c(DIM, 'Postgres ingest ledger and local ingestion dedup indexes')}")
         if args.delete_raw:
             print(f"  {_c(YLW + BOLD, 'Raw .gz request logs in cloud storage (raw/request/)')}")
         if args.wipe_usage:
@@ -725,8 +722,6 @@ def cmd_provision(
     shield: str | None = typer.Option(None, "--shield"),
     disable_delete_after: bool = typer.Option(False, "--disable-delete-after"),
     disable_cron_sync: bool = typer.Option(False, "--disable-cron-sync"),
-    commit_interval_mins: int = typer.Option(5, "--commit-interval-mins"),
-    disable_cron_compact: bool = typer.Option(False, "--disable-cron-compact"),
     log_retention_days: int = typer.Option(30, "--log-retention-days"),
     preset: str | None = typer.Option(None, "--preset"),
     enable_group: list[str] | None = typer.Option(None, "--enable-group"),
@@ -750,8 +745,6 @@ def cmd_provision(
         shield=shield,
         disable_delete_after=disable_delete_after,
         disable_cron_sync=disable_cron_sync,
-        commit_interval_mins=commit_interval_mins,
-        disable_cron_compact=disable_cron_compact,
         log_retention_days=log_retention_days,
         preset=preset,
         enable_group=enable_group,
@@ -816,23 +809,6 @@ def cmd_reset_logs(
 ):
     args = SimpleNamespace(service_id=service_id, delete_raw=delete_raw, wipe_usage=wipe_usage, yes=yes)
     handle_reset_logs(args)
-
-
-@app.command("restore-data", help="Rebuild a service's local DuckLake data from its cloud copy in FOS.")
-def cmd_restore_data(
-    service_id: str = typer.Option(..., "--service-id", help="The Fastly service ID to restore."),
-):
-    from backend.core.duckdb import get_source_for_service
-    from backend.core.storage.backup import restore_from_cloud
-
-    source = get_source_for_service(service_id)
-    if source is None:
-        raise typer.BadParameter(f"No configured service {service_id!r}", param_hint="--service-id")
-    result = restore_from_cloud(source, progress=info)
-    ok(
-        f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, "
-        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed."
-    )
 
 
 @app.command("update-logs", help="Push a refreshed log_fields config.")

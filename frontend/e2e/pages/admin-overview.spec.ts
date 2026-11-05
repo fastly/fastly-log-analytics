@@ -61,7 +61,7 @@ function buildProvisionPayload(sid: string, label: string, prefix: string) {
     fos_region: 'us-east-1', fos_bucket_name: `${slug}-bucket-${ts}`, fos_prefix: '', sample_rate: '100',
     edge_only: true, custom_condition: '', log_period: '60', cdn_service_name: `${prefix} CDN`,
     cdn_url: `https://${slug}-${ts}.example`, cdn_shield: 'none', enable_cron_sync: false, delete_after: true,
-    commit_interval_mins: 5, enable_cron_compact: false, log_retention_days: 30, log_fields: null,
+    log_retention_days: 30, log_fields: null,
   }
 }
 
@@ -110,7 +110,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     await assertAnalyst403(page, 'Admin', () => ['/api/admin/sync-status'])
   })
 
-  test('3. Backend REST contracts (/api/admin/sync-status, /api/admin/system-metrics, /api/admin/health, /api/admin/compaction-status)', async ({ page }) => {
+  test('3. Backend REST contracts (/api/admin/sync-status, /api/admin/system-metrics, /api/admin/health, /api/admin/log-accounting)', async ({ page }) => {
     const [syncRes, metricsRes, healthRes, servicesRes] = await Promise.all([
       page.request.get('/api/admin/sync-status'), page.request.get('/api/admin/system-metrics'),
       page.request.get('/api/admin/health'), page.request.get('/api/services'),
@@ -120,18 +120,14 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
       syncRes.json(), metricsRes.json(), healthRes.json(), servicesRes.json(),
     ])
     for (const p of ['configured']) expect(syncData).toHaveProperty(p)
-    for (const p of ['load', 'vcpus', 'in_flight_runs', 'compaction']) expect(metricsData).toHaveProperty(p)
+    for (const p of ['load', 'vcpus', 'in_flight_runs']) expect(metricsData).toHaveProperty(p)
     for (const p of ['load', 'recent_cron_failures']) expect(healthData).toHaveProperty(p)
     expect(Array.isArray(servicesData.services)).toBeTruthy()
     if (servicesData.services.length > 0) {
       const firstId = servicesData.services[0].service_id
-      const [compRes, acctRes] = await Promise.all([
-        page.request.get(`/api/admin/compaction-status/${firstId}`),
-        page.request.get(`/api/admin/log-accounting/${firstId}?hours=24`),
-      ])
-      expect(compRes.ok() && acctRes.ok()).toBeTruthy()
-      const [compData, acctData] = await Promise.all([compRes.json(), acctRes.json()])
-      for (const p of ['partitions', 'total_files']) expect(compData).toHaveProperty(p)
+      const acctRes = await page.request.get(`/api/admin/log-accounting/${firstId}?hours=24`)
+      expect(acctRes.ok()).toBeTruthy()
+      const acctData = await acctRes.json()
       for (const p of ['buckets', 'totals']) expect(acctData).toHaveProperty(p)
     }
   })
@@ -435,32 +431,21 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     await assertAnalyst403(page, 'Queue', () => ['/api/admin/celery/status', '/api/admin/metric-history/batch?since=1h'])
   })
 
-  test('4. Mode-aware sections (Standard In-Process vs High-Scale Celery) and Ingest Ledger render cleanly', async ({ page }) => {
+  test('4. Queue sections, in-process schedules, and Ingest Ledger render cleanly', async ({ page }) => {
     await page.goto('/admin/queue')
     await expect(page.locator('[data-testid="admin-queue-root"]:visible')).toBeVisible({ timeout: 30_000 })
-    const statusBody = await (await page.request.get('/api/admin/celery/status')).json()
-    const isStandardMode = statusBody.deployment_mode === 'standard' && !statusBody.broker_reachable
     const brokerBadge = page.locator('[data-testid="admin-queue-broker-badge"]:visible')
     await expect(brokerBadge).toBeVisible({ timeout: 15_000 })
     const trendsCard = page.locator('[data-testid="admin-queue-trends-reservation"]:visible')
     const depthsCard = page.locator('[data-testid="admin-queue-depths-reservation"]:visible')
     const workersCard = page.locator('[data-testid="admin-queue-workers-reservation"]:visible')
 
-    if (isStandardMode) {
-      await expect(brokerBadge).toContainText(/Standard Mode · In-Process Scheduler/i)
-      await expect(trendsCard).toContainText(/Standard Ingest Summary/i, { timeout: 15_000 })
-      await expect(trendsCard).toContainText(/In-Process Scheduler Overview/i, { timeout: 15_000 })
-      await expect(depthsCard).toContainText(/Quarantined Files & Corrupt Lines \(\d+\)/i, { timeout: 15_000 })
-      await expect(depthsCard).not.toContainText(/Queue Depths/i)
-      await expect(workersCard).toContainText(/Active In-Process Jobs \(\d+\)/i, { timeout: 15_000 })
-    } else {
-      await expect(brokerBadge).toContainText(/Broker Reachable|Broker Unreachable \/ Standard Mode/i)
-      await expect(trendsCard).toContainText(/Total Queue Depth \(1h\)/i, { timeout: 15_000 })
-      await expect(trendsCard).toContainText(/Active Tasks \(1h\)/i, { timeout: 15_000 })
-      await expect(depthsCard).toContainText(/Queue Depths/i, { timeout: 15_000 })
-      await expect(depthsCard).toContainText(/Queue Name|No queues found or Celery mode is inactive/i, { timeout: 15_000 })
-      await expect(workersCard).toContainText(/Active Workers \(\d+\)/i, { timeout: 15_000 })
-    }
+    await expect(brokerBadge).toContainText(/Broker Reachable|Broker Unreachable/i)
+    await expect(trendsCard).toContainText(/Total Queue Depth \(1h\)/i, { timeout: 15_000 })
+    await expect(trendsCard).toContainText(/Active Tasks \(1h\)/i, { timeout: 15_000 })
+    await expect(depthsCard).toContainText(/Queue Depths/i, { timeout: 15_000 })
+    await expect(depthsCard).toContainText(/Queue Name|No queues found or Celery (?:broker|mode) is inactive/i, { timeout: 15_000 })
+    await expect(workersCard).toContainText(/Active Workers \(\d+\)|Active In-Process Jobs \(\d+\)/i, { timeout: 15_000 })
     await expect(page.locator('[data-testid="admin-queue-schedules-reservation"]:visible')).toContainText(/In-Process Schedules \(\d+\)/i, { timeout: 15_000 })
     const ledgerSection = page.locator('[data-testid="admin-queue-ledger-reservation"]:visible')
     await expect(ledgerSection).toContainText(/Ingest Ledger Status/i, { timeout: 15_000 })
@@ -601,7 +586,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
     expect((await page.request.get('/api/admin/metric-history/batch?since=invalid')).status()).toBe(400)
   })
 
-  test('4. Time-window selector interaction (1h -> 6h -> 24h -> 7d) and 7 sparkline cards', async ({ page }) => {
+  test('4. Time-window selector interaction (1h -> 6h -> 24h -> 7d) and 6 sparkline cards', async ({ page }) => {
     const windowStatuses = new Map<string, number>()
     page.on('response', (res) => {
       if (res.url().includes('/api/admin/metric-history/batch') && res.request().method() === 'GET') {
@@ -611,7 +596,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
     })
     await page.goto('/admin/trends')
     await expect(page.locator('[data-testid="admin-trends-root"]:visible')).toBeVisible({ timeout: 30_000 })
-    for (const metric of ['cpu_load_1m', 'mem_used_pct', 'disk_used_pct', 'disk_used_pct_root', 'active_query_count', 'pool_wait_p95_ms', 'ingest_lag_s']) {
+    for (const metric of ['cpu_load_1m', 'mem_used_pct', 'disk_used_pct', 'disk_used_pct_root', 'active_query_count', 'ingest_lag_s']) {
       await expect(page.locator(`[data-testid="admin-trends-card-${metric}"]:visible`)).toBeVisible({ timeout: 15_000 })
     }
     await expect(page.locator('[data-testid="admin-trends-window-1h"]:visible')).toHaveAttribute('aria-pressed', 'true')
@@ -758,34 +743,23 @@ test.describe('/admin/usage-log — Admin FOS Usage & Class A/B Ledger Contract'
   })
 })
 
-async function isClickHouseEnabledForEnv(page: Page): Promise<boolean> {
-  const serviceId = await resolveFirstServiceId(page)
-  const statusRes = await page.request.get(`/api/admin/clickhouse/status?service_id=${encodeURIComponent(serviceId)}`)
-  return statusRes.status() === 200 ? Boolean((await statusRes.json()).enabled) : false
-}
-
 test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster Operations)', () => {
   test('1. Route accessibility, ServerFooter, ClickHouse layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
-    const enabled = await isClickHouseEnabledForEnv(page)
-    expect([200, 404]).toContain((await page.goto('/admin/clickhouse'))?.status())
+    expect((await page.goto('/admin/clickhouse'))?.status()).toBe(200)
     await page.addInitScript(clsInitScript)
     const status = (await page.reload({ waitUntil: 'domcontentloaded' }))?.status() ?? 0
-    expect([200, 404]).toContain(status)
-    if (!enabled || status === 404) {
-      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0)
-    } else {
-      await expect(page.getByRole('heading', { name: 'ClickHouse Replay & Cluster Operations' })).toBeVisible()
-      await expect(page.getByTestId('admin-clickhouse-root')).toBeVisible()
-      await assertFooterVisible(page, /Admin View.*(standard|high-scale)/i)
-      await expect(page.getByTestId('admin-clickhouse-toolbar')).toBeVisible()
-      for (const [id, minH] of [['admin-clickhouse-vitals-reservation', 200], ['admin-clickhouse-generation-reservation', 180], ['admin-clickhouse-replay-reservation', 260]] as const) {
-        const loc = page.getByTestId(id)
-        await expect(loc).toBeVisible()
-        await expect.poll(async () => (await loc.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(minH)
-      }
-      await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(/^(ok|disabled|unavailable)$/)
-      await page.waitForTimeout(300)
+    expect(status).toBe(200)
+    await expect(page.getByRole('heading', { name: 'ClickHouse Replay & Cluster Operations' })).toBeVisible()
+    await expect(page.getByTestId('admin-clickhouse-root')).toBeVisible()
+    await assertFooterVisible(page, /Admin View/i)
+    await expect(page.getByTestId('admin-clickhouse-toolbar')).toBeVisible()
+    for (const [id, minH] of [['admin-clickhouse-vitals-reservation', 200], ['admin-clickhouse-generation-reservation', 180], ['admin-clickhouse-replay-reservation', 260]] as const) {
+      const loc = page.getByTestId(id)
+      await expect(loc).toBeVisible()
+      await expect.poll(async () => (await loc.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(minH)
     }
+    await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(/^(ok|disabled|unavailable)$/)
+    await page.waitForTimeout(300)
     const clsScore = await readClsScore(page)
     const vitalsPerf = await page.evaluate(() => {
       const fcpEntry = performance.getEntriesByName('first-contentful-paint')[0] as PerformanceEntry | undefined
@@ -820,16 +794,11 @@ test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster O
   })
 
   test('5. Interactive manual refresh workflow with X-Page-Load-ID telemetry attribution', async ({ page }) => {
-    const enabled = await isClickHouseEnabledForEnv(page), observedPageLoadIds: string[] = []
+    const observedPageLoadIds: string[] = []
     page.on('request', (req) => {
       if (req.url().includes('/api/admin/clickhouse/status') && req.headers()['x-page-load-id']) observedPageLoadIds.push(req.headers()['x-page-load-id'])
     })
-    const response = await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' })
-    if (!enabled || response?.status() === 404) {
-      await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0)
-      expect(observedPageLoadIds.length).toBe(0)
-      return
-    }
+    await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' })
     await expect(page.getByTestId('admin-clickhouse-health-badge')).toHaveText(/^(ok|disabled|unavailable)$/)
     const refreshBtn = page.getByTestId('admin-clickhouse-refresh-btn')
     await expect(refreshBtn).toBeVisible()

@@ -4,63 +4,53 @@
 
 ## 1. Overview & Objectives
 - **Job Identifier:** `rum_discovery_{service_id}`
-- **Category:** Distributed High-Scale RUM Discovery
-- **Purpose:** In `DEPLOYMENT_MODE=high_scale`, periodically issues FOS LIST calls on the raw RUM prefix (`raw/rum/**/*.gz`) across a sliding 5-minute window, records discovered keys into PostgreSQL `ingest_ledger`, dispatches batched Celery conversion tasks (`convert_batch_rum_files`), and reconciles the Faro client script bundle.
-- **Why It Runs:** At high traffic volumes (tens of thousands of client beacons per second), single-pod synchronous beacon decompression and parsing exhausts CPU resources. Distributed discovery decouples S3 LIST operations from worker-tier conversion, allowing RUM ingestion to scale horizontally across worker nodes.
+- **Category:** RUM Discovery & Faro Bundle Reconciliation
+- **Purpose:** Periodically issues FOS LIST calls on the raw RUM prefix (`raw/rum/**/*.{zst,gz}`) across a sliding 5-minute window, records discovered keys into the PostgreSQL ingest ledger for batched worker ingestion into ClickHouse (`rum_vitals` and `rum_errors`), and reconciles the Faro client script bundle.
+- **Why It Runs:** Client-side Core Web Vitals and JS error beacons are streamed to `raw/rum/`. Discovery decouples S3 LIST operations from worker-tier batch decoding and archiving, allowing RUM ingestion to scale seamlessly alongside request ingestion.
 
 ---
 
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Evaluated every `rum_disc_interval_secs` (derived from `rum.sync_interval_seconds` or `log_period`, min: 5s).
-- **Registration Gate:** Registered **ONLY** if `rum.enabled == true` AND `DEPLOYMENT_MODE == "high_scale"`.
-- **Worker Routing:** Scheduled on the in-process APScheduler and dispatches conversion tasks to the Celery worker fleet.
+- **Registration Gate:** Registered when `rum.enabled == true`.
 - **Jitter & Misfire Policy:**
   - `max_instances=1`, `coalesce=True`, `misfire_grace_time=60s`.
 
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | Disabled | Synchronous mode uses `rum_sync_{service_id}` instead (see [rum-sync.md](rum-sync.md)). Cleanly returns if invoked. | N/A |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | APScheduler + Celery Workers | Discovers FOS `raw/rum/` keys, writes to PostgreSQL `ingest_ledger`, dispatches Celery conversion jobs. | PostgreSQL row-level locks on `ingest_ledger`. |
+| **Unified ClickHouse Architecture** | APScheduler + Stateless Ingest Worker | Discovers FOS `raw/rum/` keys, writes to PostgreSQL ingest ledger, and publishes verified batches to FOS Archive Parquet and ClickHouse (`rum_vitals`, `rum_errors`). | PostgreSQL row-level locks on `ingest_ledger`. |
 
 ---
 
 ## 4. Role & Permissions Matrix
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
-| **Admin (`read_write`)** | Active | `POST /api/admin/rum/discovery/{service_id}` | Distributed RUM queue metrics in Admin UI. |
+| **Admin (`read_write`)** | Active | `POST /api/admin/rum/discovery/{service_id}` | RUM queue and status metrics in Admin UI. |
 | **Analyst (Remote Share)** | N/A | Blocked (403) | Server-side background daemon. |
 
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
-1. **Prerequisite & Mode Checks:**
+1. **Prerequisite Checks:**
    - Checks `dev_mode_no_crons()`; skips if `FLA_DEV_NO_CRONS=1`.
-   - Confirms `is_high_scale_mode(src)` and active RUM configuration (`rum_enabled`).
-   - Confirms service is `read_write`.
+   - Confirms active RUM configuration (`rum_enabled`) and `read_write` service mode.
 2. **Progress Lifecycle Start:**
    - Calls `start_cron_run(src, "rum_discovery")` returning `run_id`.
    - Calls `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="rum_discovery")`.
 3. **Faro Bundle Integrity & Upstream Drift Reconcile:**
    - Calls `_reconcile_faro_bundle(service_id, run_id)`.
-   - If Faro reconciliation fails or reports an issue, tracks `faro_ok = False` and
-     continues discovery. Faro is the only RUM-specific warning condition; ingestion,
-     quarantine, counters, retries, and FOS deletion follow the same contract as request
-     discovery.
-4. **Broker Check:**
-   - Confirms `CELERY_BROKER_URL` is set; records status `"error"` if missing.
-5. **FOS LIST Call & Ledger Dispatch:**
+   - If Faro reconciliation fails or reports an issue, tracks `faro_ok = False` and continues discovery. Faro is the only RUM-specific warning condition; ingestion, quarantine, counters, retries, and FOS deletion follow the same contract as request discovery.
+4. **FOS LIST Call & Ledger Dispatch:**
    - For each minute in a 5-minute lookback window (`rum_minute_list_prefix`):
      - Executes `discover_rum_prefix(service_id, prefix_subpath=prefix)`.
      - Inserts unseen keys into PostgreSQL `ingest_ledger` with `status='discovered'`.
-     - Dispatches batches to Celery via `convert_batch_rum_files.delay`.
-6. **Telemetry & Finalization:**
-   - Records the same shared zero-filled outcome counters and status rules as request
-     discovery. A Faro-only failure adds warning details to `summary` and `error_message`;
-     any data-plane failure records `"error"`.
+     - Stateless workers claim discovered RUM objects, decode both `rum_vitals` and `rum_errors` domains from shared objects (Trap #48), archive to FOS Parquet, and publish to ClickHouse.
+5. **Telemetry & Finalization:**
+   - Records the shared zero-filled outcome counters and status rules. A Faro-only failure adds warning details to `summary` and `error_message`; any data-plane failure records `"error"`.
    - If successful: records status `"success"` with `files_downloaded=discovered`.
    - Guaranteed `finally:` ends progress and calls `finalize_cron_run_if_running`.
 
@@ -70,18 +60,15 @@
 - **100% Query & API Call Capture:**
   - **FOS S3 Calls:** LIST operations are attributed to the PostgreSQL `usage_log` table under `cron.rum_discovery`.
   - **PostgreSQL DML:** Ledger and originating-run outcome updates use the shared instrumented Postgres metadata connection.
-  - **Celery Enqueue Time:** Task dispatch latency must be < 10ms.
 - **Timing & Resource Budgets:**
   - Discovery LIST execution: < 200ms.
   - PostgreSQL batch insert: < 50ms.
 - **Audit Checklist:**
   - Verify PostgreSQL index on `(service_id, source_type, status)` is utilized.
-  - Verify zero task queue congestion under normal traffic volumes.
 
 ---
 
 ## 7. Failure Modes & Recovery Runbooks
-- **Celery Queue Saturation:** Checks queue depth before dispatching; defers claiming if worker queues are full.
 - **Worker Crash:** Orphaned claimed items are reclaimed automatically by `ledger_rum_sweep_{service_id}`.
 - **Faro Upstream Outage:** Discovery continues uninterrupted; run records status `"warning"`.
 
@@ -94,7 +81,6 @@
 ---
 
 ## 9. Verification Checklist
-- 2. Confirm high-scale RUM discovery across 5-minute sliding window with `status='success'`.
-- 3. Confirm Faro bundle reconcile failure records `status='warning'` without halting beacon discovery.
-- 4. Confirm standard-mode guard skips cleanly when invoked outside high-scale deployments.
-- 5. Confirm clean progress lifecycle (`start_progress`, `end_progress`) and `finalize_cron_run_if_running`.
+- 1. Confirm RUM discovery across 5-minute sliding window with `status='success'`.
+- 2. Confirm Faro bundle reconcile failure records `status='warning'` without halting beacon discovery.
+- 3. Confirm clean progress lifecycle (`start_progress`, `end_progress`) and `finalize_cron_run_if_running`.

@@ -4,12 +4,8 @@ import json
 import logging
 import os
 import shutil
-import threading
-import time
-from typing import Any
 
 from backend.core import log_fields as lf
-from backend.core.duckdb import rum_duckdb_path
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import is_mock_mode, region_endpoint
 from backend.provision.cli import ok, run_with_events, step, warn
@@ -226,7 +222,6 @@ def write_service_config(state: dict):
     service_id = state.get("logging_service_id") or state.get("service_id")
     if not service_id:
         raise ValueError("ingest state missing logging_service_id / service_id")
-    db_path = svcconfig.duckdb_path(service_id)
 
     def _build_cfg(existing_cfg: dict) -> dict:
         fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
@@ -263,7 +258,6 @@ def write_service_config(state: dict):
             "cdn_service_id": state.get("cdn_service_id", ""),
             "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
             "log_retention_days": int(state.get("log_retention_days", 30)),
-            "duckdb_path": db_path,
             "log_fields": incoming_lf,
         }
         for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
@@ -289,7 +283,6 @@ def write_service_config(state: dict):
             cfg["log_period"] = state["provisioning"]["log_period"]
         log_period_secs = int(cfg.get("log_period", 120))
         sync_interval_seconds = max(5, log_period_secs)
-        commit_interval_mins = max(max(1, sync_interval_seconds // 60), int(state.get("commit_interval_mins", 5)))
         _rate_limiting = state.get("rate_limiting")
         if _rate_limiting is None:
             _rate_limiting = state.get("provisioning", {}).get("rate_limiting")
@@ -298,7 +291,6 @@ def write_service_config(state: dict):
         rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
         prov_in = state.get("provisioning", {})
         cron_sync_in = prov_in.get("cron_sync", {})
-        cron_compact_in = prov_in.get("cron_compact", {})
 
         def _int_opt(key: str, default: int, *, sub: dict = cron_sync_in) -> int:
             return int(state.get(key, sub.get(key, default)))
@@ -316,19 +308,11 @@ def write_service_config(state: dict):
                 "enabled": state.get("enable_cron_sync", cron_sync_in.get("enabled", True)),
                 "delete_after": state.get("delete_after", cron_sync_in.get("delete_after", True)),
                 "interval_seconds": sync_interval_seconds,
-                "commit_interval_mins": commit_interval_mins,
                 "log_enabled": True,
                 "log_retention_days": int(state.get("log_retention_days", 30)),
                 "data_retention_days": _int_opt("data_retention_days", 30),
                 "rum_retention_days": _int_opt("rum_retention_days", 30),
                 "cache_retention_days": _int_opt("cache_retention_days", 90),
-                "rollup_retention_months": _int_opt("rollup_retention_months", 12),
-            },
-            "cron_compact": {
-                "enabled": state.get("enable_cron_compact", cron_compact_in.get("enabled", True)),
-                "interval_mins": 1440,
-                "log_enabled": True,
-                "log_retention_days": int(state.get("log_retention_days", 30)),
             },
             "temp_admin_key_id": state.get("temp_admin_key_id", prov_in.get("temp_admin_key_id")),
         }
@@ -572,66 +556,31 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         step(8, total, "Finalizing configuration")
         write_service_config(state)
         if is_mock_mode():
-            yield {"type": "status", "message": "⚠ Skipping DuckLake initialization in mock mode."}
             yield {"type": "progress", "current": 8, "total": total}
             yield {"type": "done", "message": "🎉 Provisioning complete!"}
             return
         try:
-            from backend.core import duckdb as db
-            from backend.core import storage as db_storage
+            from backend.core import metadata as metadata_db
+            from backend.core.fos_client import get_source_for_service
+            from backend.high_scale.ingest_controller import (
+                HighScaleServiceRegistration,
+                get_high_scale_service_registry,
+            )
 
-            src = db.get_source_for_service(state["logging_service_id"])
-            if not src:
-                logger.warning(
-                    "[provision] %s: no source resolved after config write — "
-                    "DuckLake table will be created lazily on the first commit",
-                    state.get("logging_service_id"),
-                )
-                warn("DuckLake table not initialized yet (no source resolved) — created on first commit")
-                yield {
-                    "type": "status",
-                    "message": "⚠ DuckLake table not initialized yet (no source resolved) — "
-                    "it will be created on the first commit.",
-                }
-            else:
-                yield {"type": "status", "message": "🧊 Initializing DuckLake table..."}
-                from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_incrementing
-
-                _ICE_INIT_ATTEMPTS = 3
-                ice_exc: Exception | None = None
+            svc_id = state["logging_service_id"]
+            src = get_source_for_service(svc_id)
+            if src:
                 try:
-                    for attempt in Retrying(
-                        stop=stop_after_attempt(_ICE_INIT_ATTEMPTS),
-                        wait=wait_incrementing(start=1.5, increment=1.5),
-                        retry=retry_if_exception_type(OSError),
-                        sleep=lambda s: time.sleep(s),
-                        reraise=True,
-                    ):
-                        with attempt:
-                            idx = attempt.retry_state.attempt_number
-                            if idx > 1:
-                                yield {
-                                    "type": "status",
-                                    "message": (
-                                        f"… Object Storage not ready yet "
-                                        f"(attempt {idx - 1}/{_ICE_INIT_ATTEMPTS}); retrying…"
-                                    ),
-                                }
-                            db_storage.init_storage_table(src)
-                except Exception as e:
-                    ice_exc = e
-                if ice_exc is None:
-                    ok("DuckLake table ready")
-                    yield {"type": "status", "message": "✓ DuckLake table ready."}
-                else:
-                    logger.error(
-                        "[provision] DuckLake table init failed after %d attempt(s) (deferred to first commit)",
-                        _ICE_INIT_ATTEMPTS,
-                        exc_info=ice_exc,
+                    get_high_scale_service_registry().register(
+                        HighScaleServiceRegistration(
+                            service_id=svc_id,
+                            source_bucket=src.get("bucket") or state.get("fos_bucket_name") or "",
+                            source_prefix=src.get("prefix") or "",
+                            delete_raw_after_commit=bool(state.get("delete_after", True)),
+                        )
                     )
-                    warn(f"DuckLake table init deferred to first commit: {ice_exc}")
-                    yield {"type": "status", "message": f"⚠ DuckLake table init deferred to first commit: {ice_exc}"}
-                c = db.get_connection(source=src)
+                except Exception:
+                    logger.debug("[provision] high-scale registry registration skipped/failed", exc_info=True)
                 initial_lf = state.get("log_fields", {})
                 if initial_lf:
                     details = {
@@ -642,12 +591,9 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                         "fields_removed": [],
                         "format_hash": lf.format_hash(initial_lf),
                     }
-                    from backend.core import metadata as metadata_db
-
                     metadata_db.record_audit(src["name"], "log_format_change", details, actor="provisioning")
-                c.close()
         except Exception:
-            logger.exception("[provision] post-provision DuckLake/audit step failed (non-fatal)")
+            logger.exception("[provision] post-provision audit step failed (non-fatal)")
         yield {"type": "progress", "current": 8, "total": total}
         yield {"type": "done", "message": "🎉 Provisioning complete!"}
     except _PreflightError as e:
@@ -802,58 +748,16 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         }
 
 
-_DUCKLAKE_DROP_TIMEOUT_S = 60.0
-
-
-def _drop_ducklake_state_bounded(service_id: str) -> None:
-    """Drop the service's DuckLake tables and local data, never blocking teardown on a hung catalog."""
-    from backend.core.duckdb import drop_service_ducklake_state
-
-    outcome: dict[str, Any] = {}
-
-    def _run() -> None:
-        try:
-            outcome["result"] = drop_service_ducklake_state(service_id)
-        except Exception as exc:
-            outcome["error"] = exc
-
-    worker = threading.Thread(target=_run, name=f"teardown-ducklake-{service_id}", daemon=True)
-    worker.start()
-    worker.join(_DUCKLAKE_DROP_TIMEOUT_S)
-    if worker.is_alive():
-        warn(f"DuckLake cleanup for {service_id} timed out after {_DUCKLAKE_DROP_TIMEOUT_S:.0f}s; local data kept")
-    elif "error" in outcome:
-        warn(f"DuckLake cleanup for {service_id} failed: {outcome['error']}")
-    else:
-        result = outcome["result"]
-        ok(f"Dropped {result['tables_dropped']} DuckLake table(s) and removed local DuckLake data")
-
-
 def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = False):
-    """Remove local config files, database, and cache associated with a service."""
+    """Remove local config files, metadata, and cache associated with a service."""
     from backend import config as svcconfig
 
-    if service_id and remove_data:
-        _drop_ducklake_state_bounded(service_id)
     if service_id:
         cfg_path = svcconfig.config_path(service_id)
         if os.path.exists(cfg_path):
             os.remove(cfg_path)
             ok(f"Removed service config: {cfg_path}")
     if remove_data:
-        db_path = (
-            svcconfig.duckdb_path(service_id)
-            if service_id
-            else os.path.join(os.path.dirname(__file__), "..", "data", "logs.duckdb")
-        )
-        rum_db_path = rum_duckdb_path(db_path)
-        for target_db, label in ((db_path, "local database"), (rum_db_path, "local RUM database")):
-            if os.path.exists(target_db):
-                os.remove(target_db)
-                wal = target_db + ".wal"
-                if os.path.exists(wal):
-                    os.remove(wal)
-                ok(f"Removed {label}: {target_db}")
         if service_id:
             try:
                 from backend.core import metadata as metadata_db

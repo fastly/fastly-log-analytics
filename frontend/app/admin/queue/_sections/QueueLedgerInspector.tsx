@@ -259,7 +259,6 @@ export function IngestLedgerSection({
   isLoading,
   isStatusRefetching,
   error,
-  deploymentMode,
   ledger,
   ledgerFilter,
   setLedgerFilter,
@@ -281,7 +280,6 @@ export function IngestLedgerSection({
   isLoading: boolean
   isStatusRefetching: boolean
   error: unknown
-  deploymentMode?: string | null
   ledger?: Record<string, number> | null
   ledgerFilter: LedgerStatusFilter
   setLedgerFilter: React.Dispatch<React.SetStateAction<LedgerStatusFilter>>
@@ -331,8 +329,8 @@ export function IngestLedgerSection({
                 queued for commit.
               </li>
               <li>
-                <strong>COMMITTED:</strong> Fully ingested into the long-term{' '}
-                {deploymentMode === 'high_scale' ? 'ClickHouse' : 'DuckLake'} table.
+                <strong>COMMITTED:</strong> Fully ingested into the long-term ClickHouse
+                table.
               </li>
               <li>
                 <strong>QUARANTINED:</strong> Skipped due to corruption or parsing errors.

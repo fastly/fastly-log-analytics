@@ -27,7 +27,7 @@ Source: [`frontend/app/dashboard/`](../../frontend/app/dashboard/) (`page.tsx`, 
 
 Filter bar (shared, from `ReportLayout`): time presets and custom range, filter pills with include/exclude, an "Edge only" switch, a Compare toggle with offset presets (`1w`, `4w`, `1y`; the default compare window is the preceding window of equal length), and saved views (select and save). A row click adds an include filter; a pill can be negated.
 
-States: skeletons reserve fixed 300px boxes ("Crunching logs...", "Loading map…", "Loading..."); while refetching, panels dim (`opacity-40`) and an "Updating" badge appears. A stale-view error shows an amber "Preparing your data" notice and retries; other errors show a Retry banner.
+States: skeletons reserve fixed 300px boxes ("Crunching logs...", "Loading map…", "Loading..."); while refetching, panels dim (`opacity-40`) and an "Updating" badge appears. Query errors show a Retry banner.
 
 ## Roles
 
@@ -48,10 +48,10 @@ Routes are in [`backend/routers/dashboard.py`](../../backend/routers/dashboard.p
 - `POST /api/dashboard/raw/csv`: streaming CSV (limit capped at 50,000 rows). Analyst exports mask IP columns and redact session IDs. No page component calls it today.
 - Saved views use `GET /api/views/{service_id}`, `POST /api/views/`, `DELETE /api/views/{view_id}` ([`backend/routers/alerts.py`](../../backend/routers/alerts.py)); the log-field catalog comes from bootstrap.
 
-The bundle runs `aggregates` on the request connection and `top_bots` on a second pooled connection when one is idle, otherwise sequentially. Standard mode serves unfiltered requests from rollups where coverage allows and falls back to scoped raw SQL; filtered requests materialize one connection-local temp table. In `high_scale` mode the request is dispatched to the ClickHouse reader ([`backend/high_scale/dashboard.py`](../../backend/high_scale/dashboard.py)); failures surface as errors, never as empty data. See [AGENTS.md](../../AGENTS.md) traps 47, 49, 52, 53 and 55 for window-boundary and cache-key rules.
+Requests are served by the ClickHouse reader ([`backend/high_scale/dashboard.py`](../../backend/high_scale/dashboard.py)), using minute projections (`request_minute_summary`, `request_minute_dimensions`, `security_minute_dimensions`) on unfiltered windows and `request_facts` when filters are active; failures surface as errors, never as empty data. See [AGENTS.md](../../AGENTS.md) trap #53 for cache-key and window-clamping rules.
 
 ## Tests
 
 - Frontend unit: [`frontend/__tests__/app/dashboard.test.tsx`](../../frontend/__tests__/app/dashboard.test.tsx)
 - E2E: `Dashboard Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts) (single bundle call, metric switching, compare query, click-to-filter, map, card/collapse persistence, NGWAF card gating)
-- Backend: [`tests/routers/test_dashboard_router.py`](../../tests/routers/test_dashboard_router.py), [`tests/repositories/test_top_n_rollups_golden.py`](../../tests/repositories/test_top_n_rollups_golden.py), [`tests/repositories/test_rollup_reader_coverage_golden.py`](../../tests/repositories/test_rollup_reader_coverage_golden.py)
+- Backend: [`tests/routers/test_dashboard_router.py`](../../tests/routers/test_dashboard_router.py), [`tests/high_scale/test_reader_parity.py`](../../tests/high_scale/test_reader_parity.py)

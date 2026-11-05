@@ -431,7 +431,7 @@ def seeded_metadata_db():
 @patch("backend.core.metadata.log_synthetic_usage")
 def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
     """backfill should hand a list of synthesised PUT_OBJECT calls to metadata_db.log_synthetic_usage."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     _log_synth.return_value = 3
     inserted = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
@@ -454,7 +454,7 @@ def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
 @patch("backend.config.is_usage_logging_enabled", return_value=True)
 def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     """Running backfill multiple times should not insert duplicate rows."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     second = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
@@ -475,7 +475,7 @@ def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
 @patch("backend.config.is_usage_logging_enabled", return_value=False)
 @patch("backend.core.metadata.log_synthetic_usage")
 def test_backfill_skips_when_usage_logging_disabled(_log_synth, _enabled, seeded_metadata_db):
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     inserted = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
 
@@ -490,7 +490,7 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
     SQL level, so we don't even pay the dedup IN-clause cost.
     """
     import backend.core.metadata as metadata_db
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     assert first == 3
@@ -728,7 +728,7 @@ def test_mock_mode_makes_no_network_calls(monkeypatch):
 
 
 def test_ngwaf_verified_bots_paged_uses_cursor_pagination():
-    from backend.core.rollups.security_dims import fetch_verified_bots_paged
+    from backend.cron.jobs.metadata import fetch_verified_bots_paged
 
     bot = {"id": "r1", "timestamp": "2026-10-01T00:00:00Z", "signals": [{"id": "VERIFIED-BOT", "value": "Googlebot"}]}
     f = _pages(
@@ -1388,6 +1388,7 @@ async def test_poller_starts_and_suspends(monkeypatch):
     import backend.core.realtime as poller_mod
     from backend.core.realtime import RealtimeMetricsPublisher
 
+    monkeypatch.setattr("backend.config.SSE_BACKPLANE", "memory")
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
     monkeypatch.setattr(poller_mod, "publisher", test_publisher)
@@ -1433,6 +1434,7 @@ async def test_cursor_advances(monkeypatch):
     import backend.core.realtime as poller_mod
     from backend.core.realtime import RealtimeMetricsPublisher
 
+    monkeypatch.setattr("backend.config.SSE_BACKPLANE", "memory")
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
     monkeypatch.setattr(poller_mod, "publisher", test_publisher)

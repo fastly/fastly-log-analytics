@@ -661,7 +661,8 @@ def test_discover_new_ips_gen_emits_zero_count_when_no_configs():
     must terminate cleanly (not iterate forever)."""
     with (
         patch("backend.config.list_configs", return_value=[]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=MagicMock()),
     ):
         events = list(rdns_cache._discover_new_ips_gen(max_new=10))
 
@@ -679,6 +680,7 @@ def test_discover_new_ips_gen_swallows_list_configs_exception():
     cron — the cron should keep running for the next interval."""
     with (
         patch("backend.config.list_configs", side_effect=RuntimeError("configs dir gone")),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=MagicMock()),
     ):
         events = list(rdns_cache._discover_new_ips_gen(max_new=10))
 
@@ -688,22 +690,14 @@ def test_discover_new_ips_gen_swallows_list_configs_exception():
 
 @pytest.mark.usefixtures("isolated_db")
 def test_discover_new_ips_gen_scans_source_and_emits_log_on_found_ips():
-    """Happy-path: source with `ip` column → scan emits a "Found N
+    """Happy-path: source with `client_ip` rows in ClickHouse → scan emits a "Found N
     new IPs in <service>" log event AND enqueues them for the next
     enrichment pass. Pinned because losing the enqueue would silently
     starve the resolution loop of new work."""
     fake_src = {"name": "test_service", "service_id": "svc-1"}
 
-    # Mock the DuckDB connection used inside the function
-    fake_con = MagicMock()
-    # First execute: schema query → returns a row with 'ip' column
-    # Second execute: distinct IPs query → returns rows
-    # Each call returns its own mock; configure side_effect
-    schema_rows = MagicMock()
-    schema_rows.fetchall.return_value = [("ip",), ("status",)]
-    ip_rows = MagicMock()
-    ip_rows.fetchall.return_value = [("1.1.1.2",), ("1.1.1.3",)]
-    fake_con.execute.side_effect = [schema_rows, ip_rows]
+    fake_ch = MagicMock()
+    fake_ch.execute.return_value = [{"client_ip": "1.1.1.2"}, {"client_ip": "1.1.1.3"}]
 
     # And the write con for the "already" filter — empty (nothing cached)
     fake_write_con = MagicMock()
@@ -713,8 +707,8 @@ def test_discover_new_ips_gen_scans_source_and_emits_log_on_found_ips():
 
     with (
         patch("backend.config.list_configs", return_value=[{"service_id": "svc-1"}]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=fake_ch),
         patch("backend.utils.bot_sources._write_con", return_value=fake_write_con),
         patch("backend.utils.bot_sources.enqueue") as mock_enqueue,
     ):
@@ -733,22 +727,16 @@ def test_discover_new_ips_gen_scans_source_and_emits_log_on_found_ips():
 
 
 @pytest.mark.usefixtures("isolated_db")
-def test_discover_new_ips_gen_skips_sources_without_ip_column():
-    """Sources whose schema lacks an `ip` column are skipped silently
-    (no events emitted for them). Pinned because non-edge-log
-    services (e.g. metadata-only replicas) don't have an ip column;
-    forcing them through the rDNS loop would 500 the cron."""
+def test_discover_new_ips_gen_skips_sources_without_candidate_ips():
+    """Sources returning no candidate IPs from ClickHouse are skipped silently."""
     fake_src = {"name": "no_ip_svc", "service_id": "svc-2"}
-    fake_con = MagicMock()
-    # Schema row WITHOUT 'ip'
-    schema_rows = MagicMock()
-    schema_rows.fetchall.return_value = [("status",), ("timestamp",)]
-    fake_con.execute.return_value = schema_rows
+    fake_ch = MagicMock()
+    fake_ch.execute.return_value = []
 
     with (
         patch("backend.config.list_configs", return_value=[{"service_id": "svc-2"}]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=fake_ch),
         patch("backend.utils.bot_sources.enqueue") as mock_enqueue,
     ):
         events = list(rdns_cache._discover_new_ips_gen(max_new=10))
@@ -761,16 +749,17 @@ def test_discover_new_ips_gen_skips_sources_without_ip_column():
 
 @pytest.mark.usefixtures("isolated_db")
 def test_discover_new_ips_gen_emits_error_log_on_source_scan_failure():
-    """If scanning a single source raises (DuckDB lock, corrupt
-    parquet), emit a log event and continue to the next source.
+    """If scanning a single source raises in ClickHouse, emit a log event and continue to the next source.
     Pinned because losing the error-log fallback would hide
     per-source failures during the global rDNS sweep."""
     fake_src = {"name": "broken_svc", "service_id": "svc-bad"}
+    fake_ch = MagicMock()
+    fake_ch.execute.side_effect = RuntimeError("ClickHouse unavailable")
 
     with (
         patch("backend.config.list_configs", return_value=[{"service_id": "svc-bad"}]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.core.duckdb.get_connection", side_effect=RuntimeError("file locked")),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=fake_ch),
     ):
         events = list(rdns_cache._discover_new_ips_gen(max_new=10))
 

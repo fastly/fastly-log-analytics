@@ -26,7 +26,7 @@ def test_parse_asn_int_handles_valid_and_invalid_inputs() -> None:
 
 
 def test_resolve_and_format_asn_labels(monkeypatch: pytest.MonkeyPatch) -> None:
-    from backend.core import duckdb as db_mod
+    from backend.core import fos_client as db_mod
 
     monkeypatch.setattr(
         db_mod,
@@ -51,7 +51,7 @@ def test_resolve_and_format_asn_labels(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_enrich_asn_rows_and_performance_asn_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    from backend.core import duckdb as db_mod
+    from backend.core import fos_client as db_mod
 
     monkeypatch.setattr(
         db_mod,
@@ -107,7 +107,7 @@ def test_enrich_asn_rows_and_performance_asn_rows(monkeypatch: pytest.MonkeyPatc
 
 
 def test_finish_security_proxies_and_insight_asn_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    from backend.core import duckdb as db_mod
+    from backend.core import fos_client as db_mod
 
     monkeypatch.setattr(db_mod, "get_asn_names", lambda svc, asns: {15169: "Google LLC"})
     monkeypatch.setattr(db_mod, "_get_dma_map", lambda: {"807": "San Francisco-Oakland-San Jose"})
@@ -326,14 +326,14 @@ def test_top_n_and_breakdown_shaping() -> None:
 @pytest.mark.parametrize(
     ("repo_mod_name", "hs_mod_name"),
     [
-        ("backend.repositories.origin", "backend.high_scale.origin"),
-        ("backend.repositories.performance", "backend.high_scale.performance"),
-        ("backend.repositories.cmcd", "backend.high_scale.cmcd"),
-        ("backend.repositories.network", "backend.high_scale.network"),
-        ("backend.repositories.security", "backend.high_scale.security"),
-        ("backend.repositories.sessions", "backend.high_scale.sessions"),
-        ("backend.repositories.dashboard", "backend.high_scale.dashboard"),
-        ("backend.repositories.insights.repository", "backend.high_scale.insights"),
+        ("backend.repositories.utils.response_shaping", "backend.high_scale.origin"),
+        ("backend.repositories.utils.filters", "backend.high_scale.performance"),
+        ("backend.repositories.utils.response_cache", "backend.high_scale.cmcd"),
+        ("backend.repositories.value", "backend.high_scale.network"),
+        ("backend.repositories.security.watchdog", "backend.high_scale.security"),
+        ("backend.repositories.assets", "backend.high_scale.sessions"),
+        ("backend.repositories.insights", "backend.high_scale.dashboard"),
+        ("backend.repositories.insights.shaping", "backend.high_scale.insights"),
         ("backend.repositories.query", "backend.high_scale.query"),
     ],
 )

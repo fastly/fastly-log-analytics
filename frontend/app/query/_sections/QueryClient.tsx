@@ -332,7 +332,7 @@ function QueryPageInner() {
         description={
           isStructured
             ? 'Browse raw request logs using the global filter bar — column headers sort server-side.'
-            : 'Write custom SQL against your local DuckDB log cache. Header sorting is client-side only.'
+            : 'Write custom SQL against ClickHouse (least-privilege fla_cv_* views such as fla_cv_request_facts). Header sorting is client-side only.'
         }
       >
         <Button

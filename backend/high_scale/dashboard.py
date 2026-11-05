@@ -1107,6 +1107,7 @@ def dashboard_aggregates(
                         if extra_end_count
                         else responses[field].top_values
                     )
+                    if value != ""
                 ],
                 total=responses[field].request_count + extra_end_count,
             )
@@ -1119,7 +1120,7 @@ def dashboard_aggregates(
             else (map_response.top_values if map_response is not None else ())
         )
         map_data = (
-            [MapPoint(country=value, count=count) for value, count in map_top_values]
+            [MapPoint(country=value, count=count) for value, count in map_top_values if value != ""]
             if want_map and map_response is not None
             else []
         )
@@ -1218,12 +1219,31 @@ def bundle(
         res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
         res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
 
+    sub_queries: list[Any] = []
+    sub_calls: list[Any] = []
     if res_aggregates is not None and hasattr(res_aggregates, "debug_queries"):
+        sub_queries.extend(res_aggregates.debug_queries or [])
+        sub_calls.extend(getattr(res_aggregates, "debug_calls", None) or [])
         res_aggregates.debug_queries = []
         res_aggregates.debug_calls = []
     if res_top_bots is not None and hasattr(res_top_bots, "debug_queries"):
+        sub_queries.extend(res_top_bots.debug_queries or [])
+        sub_calls.extend(getattr(res_top_bots, "debug_calls", None) or [])
         res_top_bots.debug_queries = []
         res_top_bots.debug_calls = []
+
+    merged_queries: list[Any] = []
+    seen_q_keys: set[tuple[str, str]] = set()
+    for q in [*get_queries(), *sub_queries]:
+        q_sql = q.get("sql") if isinstance(q, dict) else getattr(q, "sql", None)
+        q_params = q.get("params") if isinstance(q, dict) else getattr(q, "params", None)
+        qk = (str(q_sql or "").strip(), str(q_params if q_params is not None else ""))
+        if qk in seen_q_keys:
+            continue
+        seen_q_keys.add(qk)
+        merged_queries.append(q)
+
+    merged_calls = list(get_tracked_calls()) or sub_calls
 
     combined_timings = [
         t for r in (res_aggregates, res_top_bots) if r is not None for t in (getattr(r, "section_timings", None) or [])
@@ -1243,8 +1263,8 @@ def bundle(
         "aggregates": res_aggregates,
         "top_bots": res_top_bots,
         "section_timings": combined_timings,
-        "debug_queries": get_queries(),
-        "debug_calls": get_tracked_calls(),
+        "debug_queries": merged_queries,
+        "debug_calls": merged_calls,
         "debug_sqlite": list(get_sqlite_queries()),
     }
 

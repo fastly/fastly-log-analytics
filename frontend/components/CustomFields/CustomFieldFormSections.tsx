@@ -271,7 +271,7 @@ export function CustomFieldStorageSection({
       <h3 className="text-sm font-semibold border-b pb-2">Storage & Display</h3>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
         <div className="space-y-2">
-          <LabelWithInfo labelClassName="text-xs" info="The underlying DuckDB column type. VARCHAR is safest for strings, while numeric types (BIGINT, DOUBLE) save space and enable mathematical operations." label="Data Type (DuckDB)" />
+          <LabelWithInfo labelClassName="text-xs" info="The underlying column type. VARCHAR is safest for strings, while numeric types (BIGINT, DOUBLE) save space and enable mathematical operations." label="Data Type" />
           <Select value={formData.duckdb_type} onValueChange={v => { const t = oneOf(DUCKDB_TYPES, v); if (t) onChange('duckdb_type', t) }}>
             <SelectTrigger className="h-8 text-xs">
               <SelectValue />
@@ -323,7 +323,7 @@ export function CustomFieldStorageSection({
           <Switch id="toggle-nullable" checked={formData.nullable} onCheckedChange={v => onChange('nullable', v)} />
         </div>
         <div className="flex items-center justify-between">
-          <LabelWithInfo labelClassName="text-sm font-normal cursor-pointer" htmlFor="toggle-dashboard" info="Displays a leaderboard card on the dashboard. Enabling this automatically pre-calculates hourly rollups for instant, high-performance loading." label="Show in Dashboard" />
+          <LabelWithInfo labelClassName="text-sm font-normal cursor-pointer" htmlFor="toggle-dashboard" info="Displays a leaderboard card on the dashboard." label="Show in Dashboard" />
           <Switch id="toggle-dashboard" checked={formData.show_in_dashboard} onCheckedChange={v => onChange('show_in_dashboard', v)} />
         </div>
         <div className="flex items-center justify-between">

@@ -37,23 +37,13 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
       metadata-schema-init:
         condition: service_completed_successfully
     environment:
     - PYTHONUNBUFFERED=1
-    - DUCKDB_MEMORY_LIMIT=2GB
-    # Bound per-op DuckDB parallelism on the shared Colima host — see the
-    # Local Standard backend for the full rationale. Two full stacks share
-    # 6 cores during the parallel verify; unbounded cron thread fan-out
-    # starves this backend's serving loop.
-    - DUCKDB_THREADS=2
-    - DUCKDB_POOL_MAX_SIZE=4
     - LOCAL_HOSTS=fastly.localhost,fastly.analytics
-    # Celery/multipod mode REQUIRES a transactional multi-writer DuckLake
-    # catalog: worker processes write while the backend reads, which a
-    # DuckDB-file catalog cannot do (single-process file lock; torn merges).
-    # The backend refuses to boot celery mode on a file catalog.
-    - &ducklake-catalog DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
     # Trust XFF only from the pinned compose subnet (Caddy's egress network).
     # A wildcard here lets any direct client spoof its IP and become
     # loopback-admin — the backend hard-fails boot on `*`.
@@ -67,16 +57,21 @@ services:
     # beyond the compose network.
     - LOCAL_ADMIN_CIDRS=172.28.0.0/16
     - CELERY_BROKER_URL=redis://valkey:6379/0
-    - DEPLOYMENT_MODE=high_scale
     - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
     # All operational metadata (cron leases, ingest ledger, ingested-file
     # manifests, alerts, views, usage logs) lives in shared PostgreSQL 16
-    # (ADR-22). validate_deployment_mode() requires METADATA_DSN across all
-    # backend and worker pods.
-    # Same Postgres instance and database as the DuckLake catalog above:
-    # separate table namespaces, one container to run locally. They are
-    # separate concerns and nothing in the code assumes they coincide.
-    - &metadata-dsn METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    # (ADR-22).
+    - &metadata-dsn METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@postgres:5432/fla
+    - &clickhouse-url CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
+    - &high-scale-clickhouse-url HIGH_SCALE_CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
+    - CLICKHOUSE_ENABLED=true
+    - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+    - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+    - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+    - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+    - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
+    - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+    - HIGH_SCALE_ENABLED=1
     # Pass through DEBUG_RESPONSES from the host env (defaults to true) —
     # without it the backend redacts the _debug_queries envelopes and the
     # dashboard Debug Panel shows 0 queries.
@@ -93,10 +88,9 @@ services:
     stop_grace_period: 75s
     volumes:
     - ./configs:/app/configs
-    # Keep pod-local staging files and disposable caches out of the
-    # host sync topology. All durable metadata and ingest state is in Postgres/DuckLake/FOS.
+    # Keep pod-local staging files out of the host sync topology.
+    # All durable metadata and ingest state is in Postgres/ClickHouse/FOS.
     - multipod-data:/app/data
-    - multipod-cache:/app/cache
   caddy:
     extends:
       file: docker-compose.common.yml
@@ -129,14 +123,13 @@ services:
     image: postgres:16-alpine
     # max_connections raised from the default 100: the metadata pool is sized
     # per PROCESS (METADATA_PG_POOL_MAX, default 32) and backend + worker
-    # each hold their own, while DuckLake's catalog connections draw on
-    # the same budget. 100 is not enough for 2 * 32 + DuckLake + exporters.
+    # each hold their own.
     command:
     - postgres
     - -c
     - max_connections=300
     # Local-dev credentials only (see header comment; defined in
-    # docker-compose.common.yml) — override with DUCKLAKE_PG_PASSWORD for
+    # docker-compose.common.yml) — override with POSTGRES_PASSWORD for
     # anything beyond a workstation.
     healthcheck:
       timeout: 3s
@@ -145,6 +138,33 @@ services:
     # No published ports on purpose: pods reach it on the compose network.
     volumes:
     - pgdata:/var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 4g
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    environment:
+    - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fla}
+    - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+    - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+    - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+    - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+    - app-network
 
   valkey:
     image: valkey/valkey:8.0
@@ -191,52 +211,49 @@ services:
     # Run tini as PID 1 so orphaned children are reaped — see the base
     # docker-compose.yml backend for the zombie-wedge rationale.
     init: true
-    # Prefork pool (celery's default) so task_time_limit is enforceable —
-    # the threads pool cannot deliver SIGTERM-based time limits. `celery` is
-    # included so tasks not matched by task_routes (default queue) are
-    # consumed too.
-    # Concurrency 6: per-file converts are I/O-bound (FOS GET + parquet PUT);
-    # 2 processes couldn't keep up with ~50 files/min of discovery inflow.
-    # Scale-out beyond one worker pod is the same lever (more replicas).
-    command: ["python", "-m", "celery", "-A", "backend.celery_app", "worker", "-l", "info", "-Q", "q.ingest,q.control,celery", "--concurrency=6"]
+    command: ["python", "-m", "backend.high_scale.worker"]
+    mem_limit: 2g
+    memswap_limit: 2g
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
     depends_on:
       valkey:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
       metadata-schema-init:
         condition: service_completed_successfully
     environment:
     - PYTHONUNBUFFERED=1
-    - DUCKDB_MEMORY_LIMIT=4GB
-    # Per-file converts are I/O-bound (FOS GET + parquet PUT), so 1 DuckDB
-    # thread per worker proc is plenty. Unset it defaults to 6 — with
-    # concurrency=6 that is 36 CPU-bound threads on the shared 6-core host,
-    # which starves the co-located backend serving loop.
-    - DUCKDB_THREADS=1
     - CELERY_BROKER_URL=redis://valkey:6379/0
-    # Cron/ingest bodies execute here and gate on DEPLOYMENT_MODE; SSE progress
-    # events publish through the valkey backplane.
-    - DEPLOYMENT_MODE=high_scale
     - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
-    - *ducklake-catalog
-    # Shared metadata — same rationale as the backend service above.
+    - HIGH_SCALE_ENABLED=1
+    - HIGH_SCALE_WORKER_THREADS=1
+    - HIGH_SCALE_MAX_BATCH_BYTES=6291456
+    - HIGH_SCALE_MAX_BATCH_OBJECTS=10
     - *metadata-dsn
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A backend.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10"]
-      interval: 60s
-      timeout: 15s
-      retries: 3
-      start_period: 60s
+    - *clickhouse-url
+    - *high-scale-clickhouse-url
+    - CLICKHOUSE_ENABLED=true
+    - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+    - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+    - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+    - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+    - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
+    - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
     networks:
     - app-network
     restart: unless-stopped
     volumes:
     - ./configs:/app/configs
     - multipod-data:/app/data
-    - multipod-cache:/app/cache
 
 volumes:
   multipod-data:
-  multipod-cache:
   pgdata:
+  clickhouse-data:

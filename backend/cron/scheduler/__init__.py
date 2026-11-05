@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from backend.cron.scheduler import lifecycle, progress, runner
 from backend.cron.scheduler.lifecycle import (  # noqa: F401
-    _BACKLOG_AGE_MULTIPLIER,
-    _BACKLOG_BYTES_WARN,
-    _BACKLOG_FILE_COUNT_WARN,
     _CRON_HARD_CAP_S,
     _DISK_FREE_HARD_FLOOR_BYTES,
     _DISK_FREE_HARD_FLOOR_PCT,
@@ -20,7 +17,6 @@ from backend.cron.scheduler.lifecycle import (  # noqa: F401
     RESET_COLOR,
     TYPE_ICONS,
     CronHeartbeat,
-    _check_buffer_backlog,
     _check_disk_space,
     _claim_heavy_refresh,
     _display_label,
@@ -46,8 +42,6 @@ from backend.cron.scheduler.lifecycle import (  # noqa: F401
     global_job,
     iso_z_now,
     logger,
-    partial_hour_merge_enabled,
-    partial_hour_merge_interval_sec,
     record_job_run,
     record_skip_row,
 )

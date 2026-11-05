@@ -8,10 +8,12 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from backend.core.request_context import RequestContext, build_request_context
+from backend.high_scale import dashboard as hs_dashboard
+from backend.high_scale.ingest_controller import HighScaleService
 from backend.models.analytics import (
     AggregatesRequest,
     AggregatesResponse,
@@ -22,13 +24,11 @@ from backend.models.analytics import (
     RawRequest,
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
-from backend.repositories import dashboard as repo
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import (
     make_section_expander,
     query_errors,
-    run_cached_repo_endpoint,
 )
 from backend.utils.telemetry import get_sqlite_queries
 
@@ -41,21 +41,21 @@ dashboard_router = router
 _expand_sections = make_section_expander(DashboardSectionName)
 
 
+def _require_high_scale(ctx: RequestContext) -> HighScaleService:
+    if ctx.high_scale is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "ClickHouse service is not available for this service"},
+        )
+    return ctx.high_scale
+
+
 def _resolve_aggregate_flags(
     req: AggregatesRequest,
     sections: set[str] | None,
 ) -> tuple[bool, bool, bool, bool]:
     """Translate the sections selector + existing include_* flags into the
-    four gates the repo consumes: (time_series, conn_requests, map_data,
-    top_n). When ``sections`` is None the include_* flags pass through
-    untouched (None → True downstream) and top_n is always on — preserves
-    the pre-selector behavior. When ``sections`` is set it OVERRIDES the
-    include_* flags so the selector is the unambiguous canonical surface.
-
-    Coupling:
-      core   → time_series=True, conn_requests=True, map_data=True
-      topten → top_n=True (the per-field cards), fields filter passthrough
-      bots   → no /aggregates effect (handled in /bundle's second branch)
+    four gates: (time_series, conn_requests, map_data, top_n).
     """
     if sections is None:
         return (
@@ -76,32 +76,9 @@ def dashboard_aggregates(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.resolve_window(req)
-    high_scale_service = ctx.high_scale
-    if high_scale_service is not None:
-        from backend.high_scale.dashboard import aggregates as high_scale_aggregates
-
-        return high_scale_aggregates(high_scale_service, req, start_time, end_time)
-
-    sections = _expand_sections(req.sections)
-    its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
-    return run_cached_repo_endpoint(
-        ctx,
-        repo_module="backend.repositories.dashboard",
-        get_fn=repo.get_aggregates,
-        peek_fn=repo.peek_aggregates,
-        kwargs={
-            "start_time": start_time,
-            "end_time": end_time,
-            "filters": req.filters,
-            "chart_interval": req.chart_interval,
-            "chart_metric": req.chart_metric,
-            "fields_filter": req.fields,
-            "include_time_series": its,
-            "include_conn_requests": icr,
-            "include_map_data": imd,
-            "include_top_n": itn,
-        },
-    )
+    _expand_sections(req.sections)
+    high_scale_service = _require_high_scale(ctx)
+    return hs_dashboard.aggregates(high_scale_service, req, start_time, end_time)
 
 
 @router.post("/bundle", response_model=BundleResponse)
@@ -110,220 +87,11 @@ async def dashboard_bundle(
     req: AggregatesRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    """Composite endpoint returning the two queries the dashboard page
-    fires on every mount: /api/dashboard/aggregates + /api/security/top-bots.
-
-    Saves one RTT per cold load — the frontend's useDashboardBundle
-    hook fetches this once and seeds the existing
-    ``['dashboard', 'aggregates', ...]`` and ``['dashboard',
-    'top-bots', ...]`` React Query caches so the dedicated hooks
-    return cached data without firing their own POSTs.
-
-    Concurrent execution when a second pool connection is free:
-    aggregates runs on ctx.con, top_bots runs on a separately-acquired
-    pool connection, both wrapped in ``asyncio.to_thread`` and awaited
-    via ``asyncio.gather``. The 2nd-connection acquire uses a short
-    ``max_wait`` (200 ms) so that under pool saturation we bail with
-    ``_PoolBusy`` and fall back to sequential execution on ctx.con —
-    no latency regression on the saturated case. Pool size is 8 per
-    service (DUCKDB_POOL_MAX_SIZE), so 4 concurrent bundle requests
-    fit before fallback kicks in for the 5th.
-
-    Response is BundleResponse (finding 013) — Pydantic re-engages
-    the BaseResponse._strip_debug_when_disabled serializer so internal
-    SQL queries and execution timings are redacted when DEBUG_RESPONSES
-    is unset. The composite previously emitted an untyped dict that
-    bypassed this filter, leaking sub-response debug telemetry into
-    every prod response.
-    """
-    from backend.core.duckdb_pool import _PoolBusy, checkout_connection
-    from backend.repositories import security as security_repo
-    from backend.repositories._base import SectionTimer
-
-    timer = SectionTimer()
-    section_timings = timer.entries
-
-    # Resolve+clamp ONCE here so BOTH sub-queries (_run_aggregates and
-    # _run_top_bots) close over the same clamped window — neither can scan
-    # unclamped bounds, and the keyed path's invite-ceiling clamp covers both.
+    """Composite endpoint returning /api/dashboard/aggregates + /api/security/top-bots."""
     start_time, end_time = ctx.resolve_window(req)
-    high_scale_service = ctx.high_scale
-    if high_scale_service is not None:
-        from backend.high_scale.dashboard import bundle as high_scale_bundle
-
-        # Run the blocking ClickHouse aggregate queries OFF the asyncio event
-        # loop. Called synchronously here (as it was), every per-field
-        # ``_aggregate`` + ``_time_series`` query executes ON the loop, freezing
-        # /api/health, SSE, and every concurrent request for the whole bundle —
-        # the remote high-scale 24h "Crunching logs… → Failed to fetch"
-        # wedge. Mirrors the non-high-scale branch's off-loop execution below.
-        return await asyncio.to_thread(high_scale_bundle, high_scale_service, req, start_time, end_time)
-
-    sections = _expand_sections(req.sections)
-    its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
-    want_aggregates = sections is None or bool(sections & {"core", "topten"})
-    want_bots = sections is None or "bots" in sections
-    aggregate_kwargs: dict[str, Any] = {
-        "start_time": start_time,
-        "end_time": end_time,
-        "filters": req.filters,
-        "chart_interval": req.chart_interval,
-        "chart_metric": req.chart_metric,
-        "fields_filter": req.fields,
-        "include_time_series": its,
-        "include_conn_requests": icr,
-        "include_map_data": imd,
-        "include_top_n": itn,
-    }
-    cached_aggregates = None
-    cached_bots = None
-    t_cache = time.perf_counter()
-    if want_aggregates and getattr(repo.get_aggregates, "__module__", "") == "backend.repositories.dashboard":
-        cached_aggregates = repo.peek_aggregates(src=ctx.source, **aggregate_kwargs)
-    if want_bots and getattr(security_repo.get_top_bots, "__module__", "") == "backend.repositories.security":
-        cached_bots = security_repo.peek_top_bots(
-            src=ctx.source, start_time=start_time, end_time=end_time, filters=req.filters
-        )
-    timer.mark("bundle:cache_lookup", t_cache)
-    if (not want_aggregates or cached_aggregates is not None) and (not want_bots or cached_bots is not None):
-        return _assemble_dashboard_bundle_response(cached_aggregates, cached_bots, section_timings)
-
-    # Resolve the primary pooled connection OFF the asyncio event loop. The
-    # first ``ctx.con`` access performs a BLOCKING pool checkout (DuckLake
-    # attach + storage view rebuild + up-to-max_wait lock retry); passed as an
-    # argument to ``asyncio.to_thread(_run_aggregates, ctx.con)`` it is
-    # evaluated ON the loop BEFORE the worker thread runs, so under
-    # cron-vs-dashboard DuckLake contention it freezes /api/health and every
-    # other request — cascading one slow dashboard query into a fully
-    # "unhealthy" backend (GCE 2026-10-02 py-spy wedge). Pre-warming here in a
-    # worker thread caches the connection on the holder so every downstream
-    # ``ctx.con`` read is non-blocking and the loop stays responsive.
-    #
-    # The await MUST be cancellation-guarded. A bare un-shielded
-    # ``to_thread`` prewarm cancelled mid-checkout
-    # (client disconnect on a slow/503 response) raises CancelledError
-    # immediately while the detached worker thread is still inside
-    # ``_ConnectionHolder.__enter__``; the request-context dependency's
-    # ``finally`` then races ``__exit__`` against the still-executing checkout
-    # generator, so the connection is acquired (in_use++) but never released —
-    # permanently stranding a pool slot (4 leaks → every request 503s "pool
-    # saturated at 4" until restart; Local Std 2026-10-02). Mirror the guarded
-    # sub-query pattern below: await the checkout task to completion on
-    # cancellation so the holder records the connection for the finally to
-    # release.
-    t_prewarm = time.perf_counter()
-    await ctx.prewarm_con()
-    timer.mark("bundle:primary_checkout", t_prewarm)
-
-    def _run_aggregates(con) -> Any:
-        return repo.get_aggregates(con=con, src=ctx.source, **aggregate_kwargs)
-
-    # The dashboard ALWAYS shows the two bot cards (Fastly Bots + NGWAF
-    # Verified Bots), independent of which other top-N cards the lazy
-    # fields list is hydrating. The prior gate (skip when fields is set
-    # and doesn't include _bot_name/_ngwaf_bot_name) was checking the
-    # wrong thing — the dashboard sends a lazy fields list that excludes
-    # the bot virtual fields, so the gate fired in the common case and
-    # seeded the React Query cache with empty bot arrays. The standalone
-    # /api/security/top-bots refetch then read the seeded blank from the
-    # cache instead of replacing it, leaving both cards visually empty
-    # even though the backend had bot rows available.
-    def _run_top_bots(con) -> dict[str, Any]:
-        return security_repo.get_top_bots(
-            con=con,
-            src=ctx.source,
-            start_time=start_time,
-            end_time=end_time,
-            filters=req.filters,
-        )
-
-    aggregates: Any = None
-    top_bots: Any = None
-
-    async def _shielded_to_thread(fn: Any, *args: Any) -> Any:
-        task = asyncio.create_task(asyncio.to_thread(fn, *args))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
-
-    # Single-branch fast path — when the selector excluded the other
-    # branch, skip the 2nd-conn checkout + asyncio.gather hardness
-    # entirely. The remaining branch runs synchronously on ctx.con.
-    if not (want_aggregates and want_bots):
-        if want_aggregates:
-            t0 = time.perf_counter()
-            aggregates = await _shielded_to_thread(_run_aggregates, ctx.con)
-            timer.mark("bundle:aggregates", t0)
-        if want_bots:
-            t1 = time.perf_counter()
-            top_bots = await _shielded_to_thread(_run_top_bots, ctx.con)
-            timer.mark("bundle:top_bots", t1)
-        return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
-
-    def _checkout_second() -> tuple[Any, Any]:
-        # Never build a second connection: cold parallel checkouts can
-        # exhaust the pool while waiting for the serialized DuckLake attach.
-        cm = checkout_connection(ctx.source, max_wait=0.2, reuse_only=True)
-        return cm, cm.__enter__()
-
-    async def _aggregates_branch() -> Any:
-        t = time.perf_counter()
-        res = await asyncio.to_thread(_run_aggregates, ctx.con)
-        timer.mark("bundle:aggregates", t)
-        return res
-
-    aggregate_task = asyncio.create_task(_aggregates_branch())
-
-    async def _top_bots_branch() -> dict[str, Any]:
-        second_cm = None
-        second_con = None
-        t_second_checkout = time.perf_counter()
-        try:
-            second_cm, second_con = await asyncio.to_thread(_checkout_second)
-        except _PoolBusy:
-            pass
-        except Exception:
-            logger.debug("dashboard_bundle: second checkout failed; using serial fallback", exc_info=True)
-        finally:
-            timer.mark("bundle:second_checkout", t_second_checkout)
-
-        try:
-            if second_cm is None:
-                # Fallback shares the primary connection, so its aggregate
-                # worker must finish before the bots query can use it.
-                await aggregate_task
-                second_con = ctx.con
-            t = time.perf_counter()
-            res = await asyncio.to_thread(_run_top_bots, second_con)
-            timer.mark("bundle:top_bots", t)
-            return res
-        finally:
-            if second_cm is not None:
-                try:
-                    second_cm.__exit__(None, None, None)
-                except Exception:
-                    logger.debug("dashboard_bundle: second_cm.__exit__ failed (ignored)", exc_info=True)
-
-    # F015: drain both workers AND the second checkout before cancellation
-    # unwinds the request dependency and returns the primary connection.
-    gather_task = asyncio.gather(
-        aggregate_task,
-        _top_bots_branch(),
-        return_exceptions=True,
-    )
-    try:
-        results = await asyncio.shield(gather_task)
-    except asyncio.CancelledError:
-        await gather_task
-        raise
-    aggregates, top_bots = results
-    if isinstance(aggregates, BaseException):
-        raise aggregates
-    if isinstance(top_bots, BaseException):
-        raise top_bots
-    return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
+    _expand_sections(req.sections)
+    high_scale_service = _require_high_scale(ctx)
+    return await asyncio.to_thread(hs_dashboard.bundle, high_scale_service, req, start_time, end_time)
 
 
 def _assemble_dashboard_bundle_response(
@@ -363,52 +131,22 @@ def dashboard_raw_csv(
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     csv_limit = min(max(1, int(req.limit)), 50000) if "limit" in req.model_fields_set and req.limit else 50000
-    if ctx.high_scale is not None:
-        from backend.high_scale import dashboard as hs_dashboard
-
-        df = hs_dashboard.raw_df(ctx.high_scale, req, start_time, end_time, limit=csv_limit)
-    else:
-        df = repo.get_raw_df(
-            con=ctx.con,
-            src=ctx.source,
-            start_time=start_time,
-            end_time=end_time,
-            filters=req.filters,
-            limit=csv_limit,
-            columns=req.columns,
-        )
+    high_scale_service = _require_high_scale(ctx)
+    df = hs_dashboard.raw_df(high_scale_service, req, start_time, end_time, limit=csv_limit)
 
     if df.empty:
         return StreamingResponse(iter([b""]), media_type="text/csv")
 
-    # R-2: streaming CSV bypasses the middleware's _strip_analyst_envelope
-    # PII pass (text/csv content-type). Apply mask_ips here so analyst
-    # exports respect the per-invite policy. The same mask_ip helper the
-    # JSON path uses is reused here for shape parity. CSV projects the real
-    # stored column names (raw/csv can't alias them the way /api/query can),
-    # so masking by source-column name is complete here.
     if mask_ips_for(ctx.analyst_session):
         from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip
 
         for col in IP_FAMILY_KEYS:
             if col in df.columns:
                 df[col] = df[col].apply(lambda v: mask_ip(v) if isinstance(v, str) else v)
-        # Phase-4 Track C: session identifiers (e.g. cookie_session) are
-        # per-client PII with no reliable value shape — redact wholesale by
-        # column (empty / non-string cells left untouched), mirroring
-        # apply_pii_policy on the JSON surfaces.
         for col in SESSION_ID_KEYS:
             if col in df.columns:
                 df[col] = df[col].apply(lambda v: ("[redacted]" if v else v) if isinstance(v, str) else v)
 
-    # Chunked serialization — avoids the StringIO double-buffer (the
-    # whole CSV string in memory in addition to the DataFrame). For
-    # 50k rows × ~75 cols this cuts peak resident-set ~50% by deleting
-    # the per-export `output` allocation; the DataFrame itself still
-    # lives across the response but it dies as soon as the generator
-    # finishes. DuckDB COPY would be the next tier (zero DataFrame
-    # materialization) but bot_metadata enrichment lives in Python so
-    # the pushdown isn't free.
     def csv_chunks() -> Iterator[bytes]:
         chunk_rows = 2000
         first = True
@@ -417,7 +155,7 @@ def dashboard_raw_csv(
             yield slice_df.to_csv(header=first, index=False).encode("utf-8")
             first = False
 
-    source_name = ctx.high_scale.service_id if ctx.high_scale is not None else ctx.source["name"]
+    source_name = high_scale_service.service_id
     filename = f"logs_{source_name}_{int(time.time())}.csv"
     return StreamingResponse(
         csv_chunks(),
@@ -433,18 +171,5 @@ def dashboard_field_values(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    if ctx.high_scale is not None:
-        from backend.high_scale import dashboard as hs_dashboard
-
-        return hs_dashboard.field_values(ctx.high_scale, req, start_time, end_time)
-    _is_real_repo = getattr(repo.get_field_values, "__module__", "") == "backend.repositories.dashboard"
-    return repo.get_field_values(
-        con=ctx.con_or_factory(force_eager=not _is_real_repo),
-        src=ctx.source,
-        field=req.field,
-        search=req.search,
-        limit=req.limit,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-    )
+    high_scale_service = _require_high_scale(ctx)
+    return hs_dashboard.field_values(high_scale_service, req, start_time, end_time)

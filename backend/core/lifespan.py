@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from backend import config as svcconfig
 from backend.core import clickhouse as clickhouse_client
 from backend.core import clickhouse as clickhouse_observer
-from backend.core import duckdb as _db
+from backend.core import fos_client as _fos
 from backend.core import request_telemetry
 from backend.high_scale import postgres_control as console_access
 from backend.high_scale.ingest_controller import (
@@ -37,7 +37,7 @@ def _initialize_service(cfg: dict):
     # ThreadPoolExecutor worker threads don't inherit the parent's
     # ContextVar; process_context_scope sets both the ContextVar and pushes
     # onto the global active-contexts stack so out-of-thread I/O fallback
-    # (get_process_context_with_fallback) attributes this worker's DuckLake
+    # (get_process_context_with_fallback) attributes this worker's FOS
     # I/O correctly. A bare ContextVar setter (no scope) would race with
     # concurrent scheduler ticks: their process_context_scope exit pops the
     # empty stack and nulls the mirror, untagging any I/O still in flight.
@@ -71,17 +71,11 @@ def _initialize_service(cfg: dict):
                 else:
                     logger.warning("[fastapi] Could not reap orphaned cron runs for %s: %s", sid, e)
 
-            src = _db.get_source_for_service(sid)
+            src = _fos.get_source_for_service(sid)
             if src:
-                _db.refresh_config_status(sid)
-                _ensure_persistent_view(sid, src)
+                _fos.refresh_config_status(sid)
                 # Pre-warm compute_sync_status_cached so the very first
-                # /api/sync-status?skip_fos=true after restart doesn't pay
-                # the ~700ms _get_dir_size walk (19k files on a populated
-                # rollups cache). The FilterBar, header badge, and every
-                # CSR page fires this endpoint within the first second of
-                # nav — landing here cold added 1.7s to /dashboard cold
-                # load in the 2026-06-11 audit.
+                # /api/sync-status?skip_fos=true after restart is warm.
                 try:
                     _admin_mod = importlib.import_module("backend.routers.admin")
                     _admin_mod.compute_sync_status_cached(sid)
@@ -91,46 +85,6 @@ def _initialize_service(cfg: dict):
                 logger.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:
             logger.warning("[fastapi] Could not initialise service %s: %s", sid, e)
-
-
-def _ensure_persistent_view(sid: str, src: dict) -> None:
-    """Build the per-service DuckLake view at startup if it's missing from
-    the .duckdb file.
-
-    Why this exists: ``refresh_config_status`` opens a read-only connection
-    with ``skip_view_update=True``, so it can't (and won't) create the
-    view. The scheduler's data sync builds the view only at the END of a
-    full sync cycle (after potentially 1015+ files / 3+ minutes). So
-    after any restart where the persisted view was previously dropped
-    (manual DROP VIEW, .duckdb file deletion) the dashboard, security
-    top-bots, and query page all surface "Catalog Error: Table with name
-    logs_xxx does not exist" until the first sync completes.
-
-    Building the view here uses only the DuckLake catalog + local
-    parquet/buffer files — no FOS round-trip. When the view already exists, this is
-    a single information_schema lookup and a no-op."""
-    if svcconfig.is_durable_serving_mode(src):
-        logger.info("[fastapi] Service %s: durable serving uses per-connection views; skipping file pre-warm", sid)
-        return
-    try:
-        from backend.core import storage as _storage
-        from backend.core.duckdb import get_connection
-
-        # Always refresh the view at startup so the first dashboard load
-        # after a restart doesn't pay the 500-900ms CREATE OR REPLACE VIEW
-        # cost mid-request. Subsequent dashboard loads reuse the warm view
-        # until a sync writer rebuilds it again. The previous "skip if
-        # already exists" behaviour kept stale views around when buffer
-        # files had been appended since the last writer close.
-        logger.info("[fastapi] Service %s: pre-warming DuckLake view at startup", sid)
-        writer = get_connection(source=src, read_only=False)
-        try:
-            _storage.update_storage_view(writer, src)
-        finally:
-            writer.close()
-        logger.info("[fastapi] Service %s: view pre-warmed", sid)
-    except Exception as e:
-        logger.warning("[fastapi] Service %s: view pre-warm failed: %s", sid, e)
 
 
 def _ensure_pop_cache():
@@ -218,15 +172,15 @@ def _background_startup():
         # MUST be process_context_scope (the context manager): the scheduler
         # starts below and its first cron's scope exit would pop the
         # active-contexts stack and null the mirror, untagging any in-flight
-        # DuckLake I/O from the init_service workers. The scope keeps "startup" on
+        # FOS I/O from the init_service workers. The scope keeps "startup" on
         # the stack as a base so the mirror falls back to "startup" instead of
         # None when nested scopes (cron, init_service) exit.
         from backend.utils.telemetry import process_context_scope
 
         with process_context_scope("startup"):
             try:
-                _db.reload_default_source()
-                logging.info("[fastapi] db module initialised.")
+                _fos.reload_default_source()
+                logging.info("[fastapi] fos_client module initialised.")
             except Exception as e:
                 logging.warning("[fastapi] reload_default_source failed: %s", e)
 
@@ -439,9 +393,7 @@ async def _application_lifespan(app: FastAPI):
 
     ensure_pg_schema()
 
-    # Deployment-mode sanity: DEPLOYMENT_MODE is the single gate for the
-    # high-scale data plane (standard vs high_scale), and
-    # high_scale mode requires a multi-writer (Postgres) DuckLake catalog.
+    # Deployment-mode sanity: validate Postgres METADATA_DSN configuration.
     svcconfig.validate_deployment_mode()
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
@@ -475,7 +427,7 @@ async def _application_lifespan(app: FastAPI):
         )
 
     # Eagerly start the local telemetry proxy. Idempotent —
-    # boto3/DuckDB would lazy-start it on first call otherwise; eager
+    # boto3 would lazy-start it on first call otherwise; eager
     # start moves the ~hundreds-of-ms port bind out of the first request's
     # latency.
     try:
@@ -485,8 +437,8 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:
         logging.warning("[fastapi] telemetry proxy failed to start at lifespan boot: %s", e)
 
-    # All initialisation (scheduler, DuckDB views, status cache) runs in a
-    # background daemon thread so slow S3/DuckLake calls never block startup.
+    # All initialisation (scheduler, status cache) runs in a
+    # background daemon thread so slow S3 calls never block startup.
     # Skip during testing to avoid background logging after sys.stdout is closed.
     if "pytest" not in sys.modules:
         threading.Thread(target=_background_startup, daemon=True).start()
@@ -511,7 +463,6 @@ async def _application_lifespan(app: FastAPI):
         except Exception as e:
             logging.warning("[fastapi] Failed to stop scheduler: %s", e)
 
-        _db.close_all_connections()
         logging.info("[fastapi] Shutdown complete.")
 
 

@@ -19,7 +19,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
-import duckdb
 import httpx
 import pytest
 from psycopg_pool import ConnectionPool
@@ -693,7 +692,6 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
         patch("backend.utils.telemetry.start_proxy_server"),
         patch("backend.utils.tunnel.get_tunnel_manager"),
         patch("backend.main._bounded_scheduler_shutdown"),
-        patch("backend.core.duckdb.close_all_connections"),
         patch("backend.core.clickhouse.get_clickhouse_client", return_value=c) as initialize,
         patch("backend.core.clickhouse.close_clickhouse_client") as close,
     ):
@@ -943,11 +941,12 @@ def test_observer_gauges_errors_and_stop(monkeypatch):
     make.assert_not_called()
 
 
-def _rows_from_fixture(con) -> list[tuple]:
+def _rows_from_fixture(rows_data: list[dict]) -> list[tuple]:
     out = []
-    for idx, r in enumerate(con.execute("SELECT * FROM fixture").fetch_arrow_table().to_pylist()):
-        r["row_ordinal"] = idx
-        out.append(canonical_row(r))
+    for idx, r in enumerate(rows_data):
+        row_copy = dict(r)
+        row_copy["row_ordinal"] = idx
+        out.append(canonical_row(row_copy))
     return out
 
 
@@ -968,19 +967,23 @@ def fixture():
         0,
         digest_rows(()),
     )
-    con = duckdb.connect()
-    con.execute(
-        "CREATE TABLE fixture AS SELECT 'source' AS source_identity, "
-        "'2026-09-01 00:00:00'::TIMESTAMP AS timestamp, NULL::VARCHAR AS country, "
-        "'192.0.2.1' AS ip, '/' AS url, 1::BIGINT AS conn_requests FROM range(5)"
-    )
-    yield dataset, objects, fos, con
-    con.close()
+    rows_data = [
+        {
+            "source_identity": "source",
+            "timestamp": datetime(2026, 9, 1, 0, 0, 0),
+            "country": None,
+            "ip": "192.0.2.1",
+            "url": "/",
+            "conn_requests": 1,
+        }
+        for _ in range(5)
+    ]
+    yield dataset, objects, fos, rows_data
 
 
 def test_fos_artifacts_roundtrip_corrupt_and_head_mismatch(fixture):
-    dataset, objects, fos, con = fixture
-    all_rows = _rows_from_fixture(con)
+    dataset, objects, fos, rows_data = fixture
+    all_rows = _rows_from_fixture(rows_data)
     artifacts = [objects.put(dataset, tuple(all_rows[i : i + 2])) for i in range(0, len(all_rows), 2)]
     rows = tuple(r for a in artifacts for r in objects.load(a).rows)
     assert [r[1] for r in rows] == list(range(5)) and digest_rows(rows) == digest_rows(tuple(all_rows))

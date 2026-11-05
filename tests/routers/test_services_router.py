@@ -35,7 +35,7 @@ _BASE_CFG = {
     "log_period": 60,
     "provisioning": {
         "cron_sync": {"enabled": True, "interval_mins": 1},
-        "cron_compact": {"enabled": True, "commit_interval_mins": 60},
+        "cron_compact": {"enabled": True, "log_retention_days": 30},
     },
 }
 
@@ -112,7 +112,7 @@ def _mutate_cfg_ctx(initial_cfg: dict | None = None, *extra_patches):
 
 # ── Credentials & Cron Settings ──
 def test_credentials_access_key_saves_to_config():
-    with _mutate_cfg_ctx(_cfg()) as saved, patch("backend.core.duckdb._get_fos_client") as mock_fos:
+    with _mutate_cfg_ctx(_cfg()) as saved, patch("backend.core.fos_client._get_fos_client") as mock_fos:
         mock_fos.return_value.list_objects_v2.return_value = {"Contents": []}
         response = _client().patch("/api/services/svc1/credentials", json={"access_key": "AKID", "secret_key": "SEC"})
 
@@ -136,7 +136,7 @@ def test_credentials_fos_validation_failure_returns_400():
     error_response = {"Error": {"Code": "AccessDenied", "Message": "Forbidden"}}
     with (
         patch("backend.config.load_config", return_value=_cfg()),
-        patch("backend.core.duckdb._get_fos_client") as mock_fos,
+        patch("backend.core.fos_client._get_fos_client") as mock_fos,
     ):
         mock_fos.return_value.list_objects_v2.side_effect = botocore.exceptions.ClientError(
             error_response, "ListObjectsV2"
@@ -333,7 +333,7 @@ def test_custom_field_patch_rejects_type_change_when_field_in_storage():
     with _mutate_cfg_ctx(
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
         patch("backend.routers.services.core._committed_duckdb_field_types", return_value={"cf_env": "VARCHAR"}),
     ) as saved:
         response = _client().patch(
@@ -351,7 +351,7 @@ def test_custom_field_patch_allows_type_change_before_storage_write():
     with _mutate_cfg_ctx(
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
         patch("backend.routers.services.core._committed_duckdb_field_types", return_value={}),
     ) as saved:
         response = _client().patch(
@@ -450,7 +450,7 @@ def test_ngwaf_sync_source_missing_yields_error_event():
     with (
         patch("backend.config.load_config", return_value=_cfg(fastly_api_key="key")),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
     events = _parse_sse_events(resp.text)
@@ -461,8 +461,8 @@ def test_ngwaf_sync_start_cron_run_raises_yields_error_event():
     with (
         patch("backend.config.load_config", return_value=_cfg(fastly_api_key="key")),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"}),
-        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"}),
+        patch("backend.core.fos_client.start_cron_run", side_effect=CronLeaseHeldError("already running")),
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
     events = _parse_sse_events(resp.text)
@@ -482,29 +482,25 @@ def _ngwaf_sync_ctx(
         stack.enter_context(patch("backend.config.load_config", return_value=_cfg(fastly_api_key="key")))
         stack.enter_context(patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"))
         stack.enter_context(
-            patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"})
+            patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "service_id": "svc1"})
         )
-        stack.enter_context(patch("backend.core.duckdb.start_cron_run", return_value=42))
+        stack.enter_context(patch("backend.core.fos_client.start_cron_run", return_value=42))
         stack.enter_context(
-            patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw)))
+            patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw)))
         )
         stack.enter_context(patch("backend.utils.bot_sources.build_matcher", return_value=matcher or (lambda ua: ())))
-        stack.enter_context(
-            patch("backend.core.rollups.security_dims.oldest_unenriched_timestamp", return_value=oldest_ts)
-        )
+        stack.enter_context(patch("backend.cron.jobs.metadata.oldest_unenriched_timestamp", return_value=oldest_ts))
         mock_fetch = stack.enter_context(
-            fetch_patch
-            if fetch_patch is not None
-            else patch("backend.core.rollups.security_dims.fetch_verified_bots_paged")
+            fetch_patch if fetch_patch is not None else patch("backend.cron.jobs.metadata.fetch_verified_bots_paged")
         )
         if upsert_calls is not None:
             stack.enter_context(
                 patch(
-                    "backend.core.rollups.security_dims.upsert_bots",
+                    "backend.cron.jobs.metadata.upsert_bots",
                     side_effect=lambda rows, ws, ts: upsert_calls.append((list(rows), ws, ts)),
                 )
             )
-            stack.enter_context(patch("backend.core.rollups.security_dims.cleanup_old_bots", return_value=0))
+            stack.enter_context(patch("backend.cron.jobs.metadata.cleanup_old_bots", return_value=0))
         yield log_calls, mock_fetch
 
 
@@ -524,7 +520,7 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
 
     with _ngwaf_sync_ctx(
         matcher=lambda ua: ({"id": "googlebot", "name": "Google Bot"},) if "Google" in (ua or "") else (),
-        fetch_patch=patch("backend.core.rollups.security_dims.fetch_verified_bots_paged", return_value=iter(pages)),
+        fetch_patch=patch("backend.cron.jobs.metadata.fetch_verified_bots_paged", return_value=iter(pages)),
         upsert_calls=upsert_calls,
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
@@ -540,9 +536,7 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
 
 def test_ngwaf_sync_fetcher_exception_yields_error_event_and_logs():
     with _ngwaf_sync_ctx(
-        fetch_patch=patch(
-            "backend.core.rollups.security_dims.fetch_verified_bots_paged", side_effect=RuntimeError("NGWAF 503")
-        )
+        fetch_patch=patch("backend.cron.jobs.metadata.fetch_verified_bots_paged", side_effect=RuntimeError("NGWAF 503"))
     ) as (log_calls, _):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
 
@@ -743,7 +737,7 @@ def _run_logging_settings_update(
         patch("backend.config.save_config", side_effect=_save) as mock_save,
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save)),
         patch("backend.provision.update_logging_endpoint", side_effect=_gen),
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
     ):
         response = client.post(f"/api/services/{service_id}/logging-settings/update", params=params)
 
@@ -882,7 +876,7 @@ def test_api_create_custom_field_validation_errors(tmp_path, monkeypatch):
 
 @patch("backend.config.load_config")
 @patch("backend.config.save_config")
-@patch("backend.core.duckdb.get_source_for_service")
+@patch("backend.core.fos_client.get_source_for_service")
 def test_custom_fields_persist_on_log_fields_update(mock_get_source, mock_save_config, mock_load_config):
     mock_get_source.return_value = None
     mock_load_config.return_value = {
@@ -1506,7 +1500,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
     assert any(e.get("loc", [])[-1] == "custom_fields" for e in bad_list.json()["detail"])
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         imp = client.post(
@@ -1532,7 +1526,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
 
     # Locked type change on import & PATCH
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc"}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc"}),
         patch("backend.routers.services.core._committed_duckdb_field_types", return_value={"keep_me": "VARCHAR"}),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
@@ -1553,7 +1547,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
 
     # Format exceeds limit
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
         patch("backend.provision.validate_log_format", return_value=["LOG_FORMAT_TOO_LONG: would be 12000 chars"]),
     ):
         imp_long = client.post(
@@ -1712,7 +1706,7 @@ def test_cron_logs_list_filters_pagination_and_since_id(client, test_service_sou
         [
             {"task": "sync", "status": "success"},
             {"task": "sync", "status": "running"},
-            {"task": "commit", "status": "error"},
+            {"task": "maintenance", "status": "error"},
         ],
     )
     r_all = client.get("/api/cron-runs", headers=_SVC_HEADERS).json()
@@ -1738,7 +1732,7 @@ def test_cron_logs_list_filters_pagination_and_since_id(client, test_service_sou
 @pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
 def test_cron_logs_delete_and_purge(client, test_service_source):
     svc = test_service_source["name"]
-    [keep, kill, c1] = _seed_cron_runs(svc, [{"task": "sync"}, {"task": "sync"}, {"task": "commit"}])
+    [keep, kill, c1] = _seed_cron_runs(svc, [{"task": "sync"}, {"task": "sync"}, {"task": "maintenance"}])
 
     r_del = client.delete(f"/api/cron-runs/{kill}", headers=_SVC_HEADERS)
     assert r_del.status_code == 204 and r_del.content == b""
@@ -1749,7 +1743,7 @@ def test_cron_logs_delete_and_purge(client, test_service_source):
     assert kill not in remaining and keep in remaining and c1 in remaining
 
     assert client.delete("/api/cron-runs", params={"task": "sync"}, headers=_SVC_HEADERS).status_code == 204
-    assert [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()] == ["commit"]
+    assert [row[0] for row in con.execute("SELECT task FROM cron_runs").fetchall()] == ["maintenance"]
 
     assert client.delete("/api/cron-runs", headers=_SVC_HEADERS).status_code == 204
     assert con.execute("SELECT count(*) FROM cron_runs").fetchone()[0] == 0

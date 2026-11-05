@@ -23,7 +23,6 @@ import {
   BILLING_ZONE_DESCRIPTIONS,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
-  type DeploymentMode,
   type CalcState,
   type CalcAction,
   DEFAULTS,
@@ -40,7 +39,6 @@ export {
   BILLING_ZONE_DESCRIPTIONS,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
-  type DeploymentMode,
   type CalcState,
   type CalcAction,
   DEFAULTS,
@@ -118,7 +116,7 @@ export function ResultRow({ label, detail, cost, highlight }: {
 interface InputsProps {
   s: CalcState
   r: CalcResults
-  set: (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => void
+  set: (key: keyof CalcState) => (value: number | boolean) => void
 }
 
 export function Inputs({ s, r, set }: InputsProps) {
@@ -147,25 +145,11 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on a dev High-Scale deployment). The worker deletes archive artifacts a day after the data retention window.">
-          <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
-            <option value="standard">Standard</option>
-            <option value="high_scale">High-Scale</option>
-          </select>
-        </Row>
-        {s.deploymentMode === 'high_scale' && (
-          <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
-            <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
-          </Row>
-        )}
-        <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to FOS (e.g., 5).">
-          <NumInput value={s.commitMins} onChange={set('commitMins')} min={1} />
+        <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
+          <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
         </Row>
         <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~15× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
-        </Row>
-        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly DuckLake compaction. Larger targets mean fewer rewritten objects (and lower FOS storage cost in High-Scale).">
-          <NumInput value={s.parquetMB} onChange={set('parquetMB')} min={1} />
         </Row>
         <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
           <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
@@ -176,17 +160,14 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='CDN fronting FOS reads' tooltip="Use a Fastly CDN service to cache reads from Fastly Object Storage, reducing Class B operations.">
           <Switch aria-label="CDN fronting FOS reads" checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
         </Row>
-        <Row label='Data retention (days)' tooltip="The service's data retention. Request data, its cloud copy and (High-Scale) its archive artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
+        <Row label='Data retention (days)' tooltip="The service's data retention. ClickHouse rows and FOS archive Parquet artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
           <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
         </Row>
-        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and, in High-Scale, the RUM archive artifacts.">
+        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and the RUM archive artifacts.">
           <NumInput value={s.rumRetentionDays} onChange={set('rumRetentionDays')} min={1} />
         </Row>
-        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files once they are committed to DuckLake. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
+        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files once they are archived to FOS Parquet and published to ClickHouse. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
           <Switch aria-label="Auto-delete raw .zst logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
-        </Row>
-        <Row label='DuckLake compaction enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. The merged files are pushed to FOS and the replaced ones deleted (30-day minimum billing applies).">
-          <Switch aria-label="DuckLake compaction enabled" checked={s.compactionEnabled} onCheckedChange={set('compactionEnabled')} />
         </Row>
       </div>
 
@@ -220,21 +201,10 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Fastly writes each log file', '1 op/file'],
-      ['Raw Parquet upload per sync', '1 op/file'],
+      ['Archive batch publish (Parquet + manifest + marker)', '3 ops/batch'],
       ['List during sync (per 1,000 objects)', '1 op/page'],
       ['Manual log checks (LIST)', '1 op/check'],
       ['Admin sync state to FOS', '1 op/sync'],
-    ],
-  },
-  {
-    title: 'DuckLake Cloud Copy (if compaction enabled)',
-    cls: 'py-1 font-semibold text-blue-500 dark:text-blue-300 italic',
-    rowCls: 'pl-3 py-0.5 text-muted-foreground/70',
-    valCls: 'text-right text-muted-foreground/70',
-    rows: [
-      ['DuckLake commit (append data)', '1 op/sync'],
-      ['Table optimization (rewrite)', '1 op/file'],
-      ['Weekly snapshot expiry', '1 op/week'],
     ],
   },
   {
@@ -244,6 +214,7 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Read each .zst during ingest', '1 op/file'],
+      ['Archive publish verification reads', '3 ops/batch'],
     ],
   },
   {
@@ -442,7 +413,7 @@ export function Results({ s, r }: ResultsProps) {
             ['Raw volume / month (uncompressed)', formatBytes(r.totalBytesPerMonth)],
             ['Est. volume / month (.zst compressed)', formatBytes(r.totalGzBytesPerMonth)],
             ['Log files written / month', fmtN(Math.round(r.logFilesPerMonth))],
-            ['DuckLake data files pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['Archive Parquet batches pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
             ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
             ...(s.rumBeaconsDay > 0 ? [
@@ -473,7 +444,7 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
     if (prefillData) dispatch({ type: 'PREFILL', prefill: prefillData })
   }, [prefillData])
 
-  const set = (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => dispatch({ type: 'SET', key, value })
+  const set = (key: keyof CalcState) => (value: number | boolean) => dispatch({ type: 'SET', key, value })
   const setZone = (zone: BillingZone) => dispatch({ type: 'SET_ZONE', zone })
   const r = useMemo(() => calculate(s), [s])
 
@@ -499,8 +470,7 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
       <p className='text-xs text-muted-foreground leading-relaxed'>
         * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Storage is billed in GB-hours;
         the calculator converts to GB-months (1 month = 720 hours). Each object is billed for a minimum
-        of {s.minDays} days regardless of when it is deleted. CDN caching eliminates Class B ops for cached
-        parquet reads; local cache eliminates them entirely for query reads. Actual usage may vary.
+        of {s.minDays} days regardless of when it is deleted. Analytical queries execute against ClickHouse, so interactive dashboard reads do not incur FOS Class B operations. Actual usage may vary.
       </p>
     </div>
   )

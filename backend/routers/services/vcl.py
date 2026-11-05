@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from backend.core import duckdb as _db
 from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
 from backend.models.common import (
@@ -21,8 +20,7 @@ from backend.models.common import (
     LogFieldsUpdateResponse,
     LoggingSettingsResponse,
 )
-from backend.repositories import assets as service_stats_repo
-from backend.repositories._base import SectionTimer
+from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils.auth import require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.router_utils import (
@@ -147,21 +145,6 @@ def api_service_log_fields_get(request: Request, service_id: str):
     if not log_fields_config.get("groups"):
         log_fields_config = {"groups": lf_module.PRESETS["standard"]["groups"], "field_overrides": {}}
     waf_warning = False
-    if "J" in log_fields_config.get("groups", []):
-        try:
-            src = _db.get_source_for_service(service_id)
-            if src:
-                c = _db.get_connection(source=src, read_only=True, max_wait=5.0, skip_view_update=True)
-                try:
-                    actual_cols = {col["name"] for col in _db.get_schema(c, src, stats=False)}
-                    if "waf" in actual_cols:
-                        res = service_stats_repo.get_waf_flag_counts_7d(c, _db._safe_table_name(src["name"]))
-                        if res and res[1] and (res[1] >= 10000) and ((res[0] or 0) == 0):
-                            waf_warning = True
-                finally:
-                    c.close()
-        except Exception:
-            logger.debug("api_service_log_fields_get: step failed (ignored)", exc_info=True)
     history = []
     try:
         _, history_rows = metadata_db.get_audit_logs(service_id, event_type="log_format_change", page=1, per_page=20)
@@ -225,9 +208,6 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     new_lf["format_updated_at"] = datetime.now(UTC).isoformat()
     cfg["log_fields"] = new_lf
     mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
-    from backend.repositories.query import invalidate_presets_cache
-
-    invalidate_presets_cache(service_id, old_hash)
     try:
         from backend.core.metadata.base import export_admin_state
 

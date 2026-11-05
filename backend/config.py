@@ -72,7 +72,7 @@ SYSTEM_DATA_DIR = DATA_DIR / "system"
 # Deployment topology is deployment-wide rather than per-service. Define this
 # before the default source is built so config_to_source() can safely include
 # it during module import.
-DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "standard").strip().lower()
+DEPLOYMENT_MODE = "high_scale"
 
 
 @dataclass(frozen=True)
@@ -113,7 +113,7 @@ def _clickhouse_number(name: str, default: float, maximum: float, *, integer: bo
 
 
 def load_clickhouse_config() -> ClickHouseConfig | None:
-    """CLICKHOUSE_ENABLED is opt-in; disabled mode ignores all other settings.
+    """CLICKHOUSE_ENABLED defaults to true when ClickHouse settings are present.
 
     Enabled mode requires HOST (bare DNS/IP), DATABASE and USER. SECURE defaults
     to true (verified HTTPS, port 8443; HTTP uses 8123). A missing PASSWORD is
@@ -122,9 +122,11 @@ def load_clickhouse_config() -> ClickHouseConfig | None:
     CONNECT/POOL_TIMEOUT_S are 0.01..60; QUERY/INSERT_TIMEOUT_S 0.01..300;
     POOL_MAX_SIZE is 1..64. Environment changes require a process restart.
     """
-    if os.getenv("DEPLOYMENT_MODE", "").strip().lower() == "standard":
+    if not _clickhouse_bool("CLICKHOUSE_ENABLED", "true"):
         return None
-    if not _clickhouse_bool("CLICKHOUSE_ENABLED", "false"):
+    if os.getenv("CLICKHOUSE_ENABLED") is None and not any(
+        os.getenv(f"CLICKHOUSE_{k}", "").strip() for k in ("HOST", "DATABASE", "USER")
+    ):
         return None
     required = {}
     for key in ("HOST", "DATABASE", "USER"):
@@ -292,11 +294,6 @@ def _validate_service_id(service_id: str) -> str:
 def config_path(service_id: str) -> Path:
     _validate_service_id(service_id)
     return CONFIGS_DIR / f"{service_id}.json"
-
-
-def duckdb_path(service_id: str) -> str:
-    _validate_service_id(service_id)
-    return str(SERVICES_DATA_DIR / f"{service_id}.duckdb")
 
 
 def load_config(service_id: str | None) -> dict | None:
@@ -508,7 +505,7 @@ def mutate_config(
 
     Returns the saved config, or ``None`` when the service has no config.
     Use for partial edits so a concurrent writer's changes are not clobbered.
-    ``allow_cid_salt_change`` is reserved for ``backend.core.duckdb.rotate_cid_salt``; every other
+    ``allow_cid_salt_change`` is reserved for ``backend.core.fos_client.rotate_cid_salt``; every other
     writer has the persisted cid salt re-adopted.
     """
     with config_lock(service_id):
@@ -625,7 +622,6 @@ class _SourceConfigModel(BaseModel):
     cdn_secret: Any = ""
     cdn_service_id: Any = ""
     logging_service_id: Any = Field("", validation_alias="service_id")
-    duckdb_path: str = ""
     deployment_mode: str = DEPLOYMENT_MODE
     storage_mode: Any = "cloud"
     log_period: int = 60
@@ -641,7 +637,7 @@ class _SourceConfigModel(BaseModel):
         # requests, so writes and lists must go direct.
         if "fos_native_endpoint" not in self.model_fields_set:
             self.fos_native_endpoint = f"{self.region}.object.fastlystorage.app"
-        # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet GETs)
+        # Prefer CDN URL as the S3 endpoint for FOS object reads
         # so we benefit from caching and free egress.
         self.endpoint = (
             self.cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
@@ -657,10 +653,8 @@ class _SourceConfigModel(BaseModel):
 
 
 def config_to_source(cfg: dict) -> dict:
-    """Convert a service config dict to the db.py 'source' dict format."""
-    actual_db_path = duckdb_path(cfg.get("service_id", "default"))
+    """Convert a service config dict to the normalized 'source' dict format."""
     out = _SourceConfigModel.model_validate(cfg).model_dump()
-    out["duckdb_path"] = actual_db_path
     out["deployment_mode"] = DEPLOYMENT_MODE
     out["rum_enabled"] = is_rum_enabled(cfg)
     return out
@@ -877,10 +871,6 @@ class _UsageLoggingConfigModel(BaseModel):
     storage_rate_per_gb_month: float = 0.02
     min_billed_days: int = 30
     billing_zone: str = "MBZ200"
-    # When true, every DuckDB connection enables HTTP-only structured logging
-    # so we can record httpfs FOS GETs (parquet scans) as Class B ops. Adds
-    # tiny per-query overhead (one in-memory log scan + truncate at close).
-    track_duckdb_httpfs: bool = True
 
 
 _USAGE_LOGGING_DEFAULTS: dict = _UsageLoggingConfigModel().model_dump()
@@ -932,8 +922,6 @@ _CacheRegistry.register("config._scalar_caches", _ConfigScalarCaches())
 
 # Cloud / Scalability Overrides (Phase 2+)
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
-DUCKLAKE_CATALOG = os.getenv("DUCKLAKE_CATALOG", "")
-DUCKLAKE_DATA_PATH = os.getenv("DUCKLAKE_DATA_PATH", "")
 HOT_S3_ENDPOINT = os.getenv("HOT_S3_ENDPOINT", "")
 HOT_S3_KEY = os.getenv("HOT_S3_KEY", "")
 HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
@@ -942,7 +930,7 @@ HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
 def _default_sse_backplane() -> str:
     if explicit := os.getenv("SSE_BACKPLANE"):
         return explicit.strip()
-    return "valkey" if (DEPLOYMENT_MODE == "high_scale" or bool(CELERY_BROKER_URL)) else "local"
+    return "valkey" if bool(CELERY_BROKER_URL) else "local"
 
 
 SSE_BACKPLANE = _default_sse_backplane()
@@ -979,53 +967,15 @@ def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) ->
     return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
 
 
-def is_high_scale_mode(source: dict | None = None) -> bool:
-    """Return whether the deployment uses the high-scale ClickHouse topology."""
-    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
-    if mode == "high_scale":
-        return True
-    if mode == "standard":
-        return False
-    return os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def is_durable_serving_mode(source: dict | None = None) -> bool:
-    """Return whether serving must use durable shared state only.
-
-    The durable serving mode is used in high-scale topology with a Postgres
-    DuckLake catalog. Sync/file mode keeps its existing native per-service
-    DuckDB file and local-buffer behavior.
-    """
-    return is_high_scale_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
-
-
 def validate_deployment_mode() -> None:
     """Fail fast on incoherent deployment configuration.
 
-    Allowed modes are 'standard' and 'high_scale'.
-    DEPLOYMENT_MODE=high_throughput has been completely removed.
-    Both modes require DUCKLAKE_CATALOG and METADATA_DSN to be Postgres DSNs per ADR-22.
+    Requires METADATA_DSN to be a Postgres DSN per ADR-22.
     """
-    if DEPLOYMENT_MODE == "high_throughput":
-        raise RuntimeError("DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'")
-    if DEPLOYMENT_MODE not in {"standard", "high_scale"}:
-        raise RuntimeError(f"DEPLOYMENT_MODE must be either 'standard' or 'high_scale'; got {DEPLOYMENT_MODE!r}")
-    if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
-        raise RuntimeError(
-            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires DUCKLAKE_CATALOG to be a Postgres DSN — "
-            "a DuckDB-file catalog is single-process and cannot serve concurrent "
-            "worker writers plus backend readers (torn merges corrupt the catalog). "
-            f"Got: {DUCKLAKE_CATALOG!r}"
-        )
     metadata_dsn = os.getenv("METADATA_DSN", "")
     if not metadata_dsn.startswith(("postgres://", "postgresql://")):
         raise RuntimeError(
-            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires METADATA_DSN to be a Postgres DSN — "
+            "METADATA_DSN must be a Postgres DSN — "
             "per-service SQLite metadata is a pod-local file, so the cron lease "
             "(job_runs), the ingest ledger, and the ingested-file manifest would "
             "each be private to one process: every worker would re-discover and "

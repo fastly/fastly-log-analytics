@@ -36,8 +36,6 @@ const REFERENCE = [
   'alerts',
   'saved_views',
   'audit_log',
-  'in_flight_buffers',
-  'locally_compacted_files',
 ] as const
 
 const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
@@ -51,16 +49,11 @@ const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
   },
   cron_runs: {
     label: 'Cron run history',
-    sub: 'audit trail for sync, optimize, cleanup, etc.',
+    sub: 'audit trail for sync, gap heal, cleanup, etc.',
   },
   alerts: { label: 'Saved alerts', sub: 'user-configured alert rules' },
   saved_views: { label: 'Saved dashboard views', sub: 'user-saved filter combinations' },
   audit_log: { label: 'Admin audit log', sub: 'admin actions (settings, teardown, share invites)' },
-  in_flight_buffers: { label: 'In-flight ingest buffers', sub: 'pending parquet writes mid-sync' },
-  locally_compacted_files: {
-    label: 'Local-compaction registry',
-    sub: 'tracks compacted source files to block re-download',
-  },
 }
 
 const fmtRetentionDays = (n: number): string =>

@@ -71,6 +71,17 @@ def install_clickhouse_schema() -> None:
                 try:
                     client.execute(stmt)
                 except Exception as e:
+                    fallback_stmt = re.sub(
+                        r",\s*(?:map_serialization_version|map_serialization_version_for_zero_level_parts|map_buckets_strategy|max_buckets_in_map|map_buckets_min_avg_size)\s*=\s*[^,;\n]+",
+                        "",
+                        stmt,
+                    )
+                    if fallback_stmt != stmt:
+                        try:
+                            client.execute(fallback_stmt)
+                            continue
+                        except Exception:
+                            pass
                     logging.getLogger(__name__).warning("Failed to install schema %s: %s", filename, e)
 
 

@@ -1,12 +1,12 @@
 # Data Management (`/logs`)
 
-Admin hub for one service's ingestion pipeline: cron schedule and run history, configuration audit history, ingested files, DuckLake storage, PostgreSQL metadata footprint, raw FOS browser and the logs-table schema. Raw log exploration lives on [`/query`](query.md) and [`/high-scale/request-facts`](high-scale-request-facts.md).
+Admin hub for one service's ingestion pipeline: cron schedule and run history, configuration audit history, ingested files, PostgreSQL metadata footprint, raw FOS browser and the logs-table schema. Raw log exploration lives on [`/query`](query.md) and [`/high-scale/request-facts`](high-scale-request-facts.md).
 
 Source: [`frontend/app/logs/`](../../frontend/app/logs/): `page.tsx` is a server wrapper (`force-dynamic`) that prefetches the 500-row cron-runs slice and the cron schedule and dehydrates them into the keys the client uses (`LogsClient` in `_sections/`); `loading.tsx` reserves the header, quick-actions bar, tab list and table. Page state and polling are in `_sections/useLogsPageState.ts`.
 
 ## URL parameters
 
-`service` (target service for the SSR seed) and `tab` (`cron` default, `service_history`, `ingestion`, `storage`, `metadata_storage`, `raw`, `schema`).
+`service` (target service for the SSR seed) and `tab` (`cron` default, `service_history`, `ingestion`, `metadata_storage`, `raw`, `schema`).
 
 ## Roles
 
@@ -14,17 +14,16 @@ Admin only. The sidebar entry is hidden for share analysts, a direct visit is re
 
 ## Quick actions
 
-Import Logs (manual `log_discovery`), Backfill Logs (opens a date-range dialog), Commit Buffer, NGWAF Bot Sync (only when the service has an NGWAF workspace) and View Recent Logs. Long operations stream into an SSE console and a floating operations dock that survives tab switches.
+Import Logs (manual `log_discovery`), Backfill Logs (opens a date-range dialog), NGWAF Bot Sync (only when the service has an NGWAF workspace) and View Recent Logs. Long operations stream into an SSE console and a floating operations dock that survives tab switches.
 
 ## Tabs
 
 1. **Cron Runs**: collapsible schedule overview plus the `cron_runs` table filterable by task and status, a live elapsed counter for running jobs, and Purge History.
 2. **Service History**: configuration and lifecycle audit events (`audit_logs`).
 3. **Ingestion History**: filterable list of `ingested_files` (read-only).
-4. **DuckLake Storage**: storage status, snapshot calendar and a Parquet file browser (lazy-mounted).
-5. **Metadata Storage**: PostgreSQL table sizes and row counts, retention windows and a Run Cleanup Now action (lazy-mounted).
-6. **Available Logs**: hierarchical browser over the FOS `raw/` prefix with ZIP and single-file download (lazy-mounted).
-7. **DuckDB Schema**: columns and types of the active `logs` view with search (lazy-mounted).
+4. **Metadata Storage**: PostgreSQL table sizes and row counts, retention windows and a Run Cleanup Now action (lazy-mounted).
+5. **Available Logs**: hierarchical browser over the FOS `raw/` prefix with ZIP and single-file download (lazy-mounted).
+6. **Table Schema**: columns and types of the active `logs` (`request_facts`) schema with search (lazy-mounted).
 
 The Cron Runs tab delta-polls `GET /api/cron-runs?since_id=` (15 s, faster while a job is running) and merges rows in place.
 
@@ -38,8 +37,8 @@ The Cron Runs tab delta-polls `GET /api/cron-runs?since_id=` (15 s, faster while
 | `GET /api/audit-logs` | Paged audit events (`event_type`, `page`, `per_page`, `sort`, `dir`), `views.py`. |
 | `GET /api/admin/ingested-files` | Ingested file list ([`backend/routers/admin/sync_status.py`](../../backend/routers/admin/sync_status.py)). |
 | `GET /api/schema` | Columns and types of the logs table ([`backend/routers/bootstrap.py`](../../backend/routers/bootstrap.py)). |
-| `GET /api/admin/storage-info`, `/storage-calendar`, `/compaction-status`, `/metadata-storage`; `POST /api/admin/metadata-cleanup`, `/commit-storage` | Storage inspection and actions ([`backend/routers/admin/compaction.py`](../../backend/routers/admin/compaction.py)). |
-| `GET /api/admin/storage-tree`, `/raw-tree` | File browsers ([`backend/routers/admin/downloads.py`](../../backend/routers/admin/downloads.py)). |
+| `GET /api/admin/metadata-storage`, `GET /api/admin/metadata-retention`, `PATCH /api/admin/metadata-retention`, `POST /api/admin/metadata-cleanup`, `POST /api/admin/reset-logs`, `POST /api/admin/reset-rum` | Metadata storage inspection, retention configuration, cleanup, and ClickHouse/PostgreSQL ledger reset ([`backend/routers/admin/compaction.py`](../../backend/routers/admin/compaction.py)). |
+| `GET /api/admin/raw-tree` | FOS raw log file browser ([`backend/routers/admin/downloads.py`](../../backend/routers/admin/downloads.py)). |
 | `POST /api/admin/ingest-logs` | Manual import or ranged backfill ([`backend/routers/admin/ingest.py`](../../backend/routers/admin/ingest.py)). |
 | `POST /api/services/{service_id}/ngwaf-sync` | NGWAF bot sync (SSE). |
 

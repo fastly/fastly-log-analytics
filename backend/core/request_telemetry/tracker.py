@@ -1,4 +1,4 @@
-"""RequestTelemetry facade, High-Scale section tracking, and durable request metrics observer."""
+"""RequestTelemetry facade, High-Scale section tracking, and request metrics observer."""
 
 from __future__ import annotations
 
@@ -16,14 +16,10 @@ import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
-from backend import config
-from backend.celery_app import publisher
+from backend.core.fos_client import _safe_table_name
 from backend.core.request_telemetry.instruments import get_tracer
-from backend.core.request_telemetry.query_registry import (
-    InstrumentedDuckDBConnection,
-    current_attribution,
-)
-from backend.utils.telemetry import get_page_load_id, parse_iso_utc
+from backend.core.request_telemetry.query_registry import current_attribution
+from backend.utils.telemetry import get_page_load_id
 
 logger = logging.getLogger("backend.core.request_telemetry")
 
@@ -230,7 +226,7 @@ class HighScaleSections:
             return result
 
 
-# ── Request Metrics & Observer (folded from backend.core.request_metrics) ───
+# ── Request Metrics & Observer ───────────────────────────────────────────────
 
 
 def compute_sync_status_cached(*args: Any, **kwargs: Any) -> Any:
@@ -257,32 +253,6 @@ _active_query: Any | None = None
 _cancelled = threading.Event()
 
 
-def _read_durable_rum_metrics(con: Any, source: dict) -> dict[str, Any] | None:
-    """Read RUM extents from the same durable serving connection as requests."""
-    from backend.core.storage._core import ducklake_table_name
-
-    tables: list[str] = []
-    for table_name in (ducklake_table_name(source, "client_vitals"), ducklake_table_name(source, "client_errors")):
-        try:
-            con.execute(f'SELECT 1 FROM lake."{table_name}" LIMIT 0')
-            tables.append(table_name)
-        except Exception:
-            continue
-    if not tables:
-        return None
-
-    union_sql = " UNION ALL ".join(f'SELECT req_id, cid, timestamp FROM lake."{table}"' for table in tables)
-    row = con.execute(
-        "SELECT COUNT(DISTINCT COALESCE(NULLIF(req_id, ''), "
-        "concat(cid, '_', CAST(epoch(timestamp) AS BIGINT)))), "
-        f"MAX(timestamp) FROM ({union_sql}) AS rum_rows"
-    ).fetchone()
-    return {
-        "latest_log_at": row[1].isoformat() if row and row[1] is not None else None,
-        "total_rows": int(row[0] or 0) if row else 0,
-    }
-
-
 def interrupt_request_metrics() -> None:
     """Interrupt only this observer's dedicated connection, never a reader."""
     with _query_lock:
@@ -305,93 +275,10 @@ def _check_cancelled(stop_event: threading.Event | None) -> None:
 def refresh_durable_request_metrics(
     source: dict, *, stop_event: threading.Event | None = None, extra_status: dict | None = None
 ) -> dict | None:
-    """Read one current count/min/max, then persist; failures never write zeros."""
-    global _active_query
-    if not config.is_durable_serving_mode(source):
-        raise ValueError("request metrics observation requires durable serving mode")
-    if not _refresh_lock.acquire(blocking=False):
-        return None
-    con = None
-    timer = None
-    finished = threading.Event()
-    try:
-        from backend.core.duckdb import _safe_table_name, open_serving_connection
-        from backend.core.metadata.usage_log import latest_cron_per_task
-        from backend.utils.telemetry import process_context_scope
-
-        service_id = source["name"]
-        with process_context_scope("request_metrics_observer"):
-            if stop_event is not None and stop_event.is_set():
-                return None
-            con = open_serving_connection(source, max_wait=5, skip_view_update=False)
-            if stop_event is not None and stop_event.is_set():
-                return None
-            with _query_lock:
-                _cancelled.clear()
-                _active_query = con
-            timer = threading.Timer(QUERY_TIMEOUT_S, _interrupt_until_finished, args=(finished,))
-            timer.daemon = True
-            timer.start()
-            row = (
-                InstrumentedDuckDBConnection(con, service_id=service_id)
-                .execute(f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{_safe_table_name(service_id)}"')
-                .fetchone()
-            )
-            if row is None:
-                raise RuntimeError("request metrics aggregate returned no result")
-            _check_cancelled(stop_event)
-
-            cron = latest_cron_per_task(service_id)
-            current = config.get_status(service_id) or {}
-            rum = _read_durable_rum_metrics(con, source)
-            if rum is None:
-                rum = (extra_status or {}).get("rum", current.get("rum"))
-            rum = dict(rum or {})
-            rum.setdefault("last_sync_at", None)
-            rum_cron_times = [
-                t
-                for k in ("rum_discovery", "rum_sync", "ledger_rum_sweep")
-                if isinstance(t := cron.get(k, {}).get("started_at"), str)
-            ]
-            if rum_cron_times:
-                latest_rum_cron = max(
-                    rum_cron_times,
-                    key=lambda v: dt.timestamp() if (dt := parse_iso_utc(v)) is not None else float("-inf"),
-                )
-                cur_dt = parse_iso_utc(rum.get("last_sync_at")) if rum.get("last_sync_at") else None
-                new_dt = parse_iso_utc(latest_rum_cron)
-                if cur_dt is None or (new_dt is not None and new_dt > cur_dt):
-                    rum["last_sync_at"] = latest_rum_cron
-
-            rum_rows = rum.get("total_rows") or 0
-            earliest = row[1].isoformat() if row[1] is not None else None
-            latest = row[2].isoformat() if row[2] is not None else None
-            observation = {
-                "earliest_log_at": earliest,
-                "latest_log_at": latest,
-                "local_rows": int(row[0]) + rum_rows,
-                "rum": rum,
-                "request": {
-                    "latest_log_at": latest,
-                    "total_rows": int(row[0]),
-                    "last_sync_at": cron.get("log_discovery", {}).get("started_at"),
-                },
-            }
-            _check_cancelled(stop_event)
-            config.update_status(service_id, {**(extra_status or {}), **observation})
-            return {**observation, "rum": rum}
-    finally:
-        finished.set()
-        if timer is not None:
-            timer.cancel()
-            timer.join()
-        with _query_lock:
-            _active_query = None
-        try:
-            if con is not None:
-                con.close()
-        finally:
-            _refresh_lock.release()
+    """No-op after DuckLake removal; ClickHouse services use high-scale watermarks."""
+    del stop_event, extra_status
+    _safe_table_name(str(source.get("name") or ""))
+    return None
 
 
 class RequestMetricsObserver:
@@ -405,73 +292,10 @@ class RequestMetricsObserver:
         self._next_attempt_mono: dict[str, float] = {}
 
     def reconcile(self) -> None:
-        if not self._pass_lock.acquire(blocking=False):
-            return
-        try:
-            for cfg in config.list_configs():
-                if self._stop.is_set():
-                    break
-                source = config.config_to_source(cfg)
-                service_id = source["name"]
-                if (
-                    not config.is_durable_serving_mode(source)
-                    or get_high_scale_service_registry().resolve(service_id) is not None
-                    or time.monotonic() < self._next_attempt_mono.get(service_id, 0.0)
-                ):
-                    continue
-                try:
-                    observed = refresh_durable_request_metrics(source, stop_event=self._stop)
-                    if observed is None:
-                        continue
-                    self._failure_backoff_s.pop(service_id, None)
-                    self._next_attempt_mono.pop(service_id, None)
-                    if observed == self._published.get(service_id):
-                        continue
-                    snapshot = compute_sync_status_cached(service_id)
-                    if snapshot is not None and not self._stop.is_set():
-                        publisher.publish(service_id, snapshot)
-                        self._published[service_id] = observed
-                        logger.info(
-                            "request_metrics.published service=%s rows=%s",
-                            service_id,
-                            observed["request"]["total_rows"],
-                        )
-                except Exception:
-                    delay = min(
-                        self._failure_backoff_s.get(service_id, FAILURE_BACKOFF_BASE_S),
-                        FAILURE_BACKOFF_MAX_S,
-                    )
-                    self._failure_backoff_s[service_id] = min(delay * 2, FAILURE_BACKOFF_MAX_S)
-                    self._next_attempt_mono[service_id] = time.monotonic() + delay
-                    logger.warning("request_metrics.refresh_failed service=%s", service_id, exc_info=True)
-        finally:
-            self._pass_lock.release()
-
-    def _run(self) -> None:
-        try:
-            while not self._stop.is_set():
-                try:
-                    self.reconcile()
-                except Exception:
-                    logger.warning("request_metrics.reconcile_failed", exc_info=True)
-                self._stop.wait(RECONCILE_INTERVAL_S)
-        finally:
-            from backend.core.metadata.base import release_thread_connection
-
-            release_thread_connection()
+        return None
 
     def start(self) -> None:
-        if not config.is_durable_serving_mode():
-            return
-        with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._stop.clear()
-            self._published.clear()
-            self._failure_backoff_s.clear()
-            self._next_attempt_mono.clear()
-            self._thread = threading.Thread(target=self._run, name="request-metrics-observer", daemon=True)
-            self._thread.start()
+        return None
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -479,9 +303,7 @@ class RequestMetricsObserver:
             interrupt_request_metrics()
             if self._thread is not None:
                 self._thread.join(timeout=STOP_TIMEOUT_S)
-                if self._thread.is_alive():
-                    logger.warning("request_metrics.stop_timeout")
-                else:
+                if not self._thread.is_alive():
                     self._thread = None
 
 

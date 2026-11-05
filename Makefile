@@ -338,8 +338,8 @@ coalesce-guard:
 # Grafana/Prometheus/Tempo and their exporters.
 COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.yml
 
-# App services whose image bakes in the source tree. Only configs/, data/ and
-# cache/ are bind-mounted, so a .py edit is invisible until the image is
+# App services whose image bakes in the source tree. Only configs/ and data/
+# are bind-mounted, so a .py edit is invisible until the image is
 # rebuilt — `stack-restart` rebuilds these, `stack-up` does not.
 #
 # metadata-schema-init belongs here even though it is a one-shot: it has its
@@ -367,7 +367,7 @@ stack-up:
 	@$(MAKE) --no-print-directory stack-health
 
 # Stop the containers, keeping volumes (never `down -v` — that drops Postgres,
-# which now holds both the metadata and the DuckLake catalog).
+# which holds the operational metadata and ingest control plane).
 stack-down:
 	docker compose $(COMPOSE_STACK) down
 
@@ -398,15 +398,14 @@ stack-health:
 # skipped with a note otherwise).
 # Mirrors the "Deploy config validation" step in ci.yml.
 deploy-validate:
+	docker compose -f docker-compose.yml config -q
 	docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
-	docker compose -f docker-compose.yml -f docker-compose.observability.standard.yml config -q
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.standard.yml -f docker-compose.observability.standard.prod.yml config -q
 	docker compose -f docker-compose.multipod.yml config -q
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \
-		helm lint deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null; \
+		helm lint deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null; \
 	else \
 		echo "helm not installed; skipping chart lint/template"; \
 	fi

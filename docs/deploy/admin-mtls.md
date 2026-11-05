@@ -2,7 +2,7 @@
 
 ## Access contract
 
-Standard Docker Compose and Kubernetes deployments can expose a separate HTTPS
+Docker Compose and Kubernetes deployments can expose a separate HTTPS
 admin gateway requiring a certificate issued by a deployment-specific admin
 client CA. This is an alternative to SSH and Kubernetes dashboard port
 forwarding, not a replacement for host management or Kubernetes authorization.
@@ -70,7 +70,7 @@ management.
 - Public anonymous bootstrap and authenticated analyst responses retain their
   existing restricted shapes and permissions.
 - The gateway secret never appears in browser responses or diagnostics.
-- Both deployment modes render real data through the gateway.
+- Both Docker Compose and Kubernetes deployments render real data through the gateway.
 - Certificate enrollment, expiry, rotation and removal of trust are documented
   with generic Kubernetes and Compose instructions and no private deployment
   identifiers.
@@ -91,7 +91,7 @@ installation, server trust, renewal and emergency removal of client-CA trust.
   the OS/browser trust store.
 - The gateway-only bundle contains `server.crt`, `server.key`, `client-ca.crt`
   and `ADMIN_GATEWAY_SECRET`. It excludes client keys and both CA signing keys.
-- Standard Compose adds `docker-compose.admin-mtls.yml`; host-network
+- Docker Compose adds `docker-compose.admin-mtls.yml`; host-network
   production additionally adds `docker-compose.admin-mtls.prod.yml`, last in
   the overlay order. Both use the companion chart's `files/Caddyfile`.
   The default external TLS port is configurable and separate from the

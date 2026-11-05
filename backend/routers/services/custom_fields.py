@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from backend.core import duckdb as _db
+from backend.core import fos_client as _db
 from backend.core import log_fields as lf_module
 from backend.core.log_fields import _filter_user_custom_fields, _is_system_field
 from backend.models.common import (

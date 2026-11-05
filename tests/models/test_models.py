@@ -1,4 +1,4 @@
-"""CMCD streaming row models keep every producer's wire bytes (repository + high-scale)."""
+"""Analytics row models keep every ClickHouse producer's wire bytes and config contracts."""
 
 from __future__ import annotations
 
@@ -16,16 +16,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import AliasChoices
-from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
 
 import backend  # noqa: F401 - register module aliases
 from backend import config as svcconfig
 from backend.config import is_rum_enabled
-from backend.core.duckdb import _clear_schema_cache
 from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
-from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.high_scale import network as hs_network
 from backend.high_scale import performance as hs_performance
 from backend.high_scale import security as hs_security
@@ -37,7 +33,6 @@ from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.security import security_aggregates as hs_security_aggregates
 from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
 from backend.models.analytics import (
-    AggregatesResponse,
     CmcdAggregatesResponse,
     CmcdRequest,
     InsightCard,
@@ -47,55 +42,19 @@ from backend.models.analytics import (
     NetworkHealthResponse,
     NetworkQualityResponse,
     OriginAggregatesResponse,
-    OriginDrilldownResponse,
-    OriginIpHealthResponse,
-    OriginPathBreakdownResponse,
-    OriginPopLatencyResponse,
-    OriginShieldingAnalysisResponse,
-    OriginSlowUrlsResponse,
-    OriginStatusCodesResponse,
-    OriginSummaryResponse,
-    OriginTimeseriesResponse,
     PerformanceAggregatesResponse,
     SecurityAggregatesRequest,
     SecurityAggregatesResponse,
-    SecurityTopBotsResponse,
     SessionDetailRequest,
     SessionDetailResponse,
     TopBotRow,
     WafSignalRow,
 )
 from backend.models.common import BaseResponse, DebugCall, DebugQuery
-from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 from backend.provision.declarative.reconciler import FeatureState
-from backend.repositories import origin as origin_mod
-from backend.repositories._base import _safe_table
-from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
-from backend.repositories.dashboard import get_aggregates as dash_aggs
-from backend.repositories.insights import _insights_cache, get_insights, registry
-from backend.repositories.network import get_health, get_quality
-from backend.repositories.origin import (
-    get_ip_health,
-    get_path_breakdown,
-    get_pop_latency,
-    get_shielding_analysis,
-    get_slow_urls,
-    get_status_codes,
-    get_summary,
-    get_timeseries,
-)
-from backend.repositories.performance import get_performance_aggregates
-from backend.repositories.security import get_security_aggregates, get_security_proxies, get_top_bots
-from backend.repositories.sessions import get_session_detail
-from backend.repositories.value import get_summary as get_value_summary
+from backend.repositories.insights import registry
 from backend.utils import telemetry, terraform_gen
 from tests.conftest import MOCK_SERVICE_ID
-from tests.repositories.test_insights_golden import (
-    _MOCK_POP_MAP,
-    _create_impossible_distance_table,
-    _seed_network_edge_data,
-    _seed_track_c_data,
-)
 
 
 def _capture_with_telemetry(monkeypatch, model_cls) -> dict:
@@ -174,7 +133,7 @@ def test_with_telemetry_skips_collectors_when_debug_responses_are_disabled(monke
 
 def test_debug_query_params_absent_from_wire_unless_set(monkeypatch):
     monkeypatch.setenv("DEBUG_RESPONSES", "1")
-    producer_row = {"sql": "SELECT 1", "time_ms": 1.5, "engine": "DuckDB"}
+    producer_row = {"sql": "SELECT 1", "time_ms": 1.5, "engine": "ClickHouse"}
     plain = BaseResponse(debug_queries=[producer_row]).model_dump(by_alias=True, mode="json")
     assert plain["_debug_queries"] == [{**producer_row, "is_cached": False}]
     bound = BaseResponse(debug_queries=[{**producer_row, "params": ["a", 1]}]).model_dump(by_alias=True, mode="json")
@@ -215,44 +174,6 @@ def test_security_proxies_and_request_validation():
     )
     req = SecurityAggregatesRequest(start_time="2026-08-17T00:00:00Z", end_time="2026-08-17T23:59:59Z")
     assert req.start_time == "2026-08-17T00:00:00Z" and req.end_time == "2026-08-17T23:59:59Z"
-
-
-@pytest.mark.parametrize(
-    "repo_fn, pydantic_model, extra_args",
-    [
-        (dash_aggs, AggregatesResponse, {"chart_interval": "1 hour", "chart_metric": "requests"}),
-        (get_security_aggregates, SecurityAggregatesResponse, {"bucket_seconds": 3600}),
-        (get_health, NetworkHealthResponse, {"bucket_seconds": 3600}),
-        (get_quality, NetworkQualityResponse, {}),
-        (get_summary, OriginSummaryResponse, {}),
-        (get_performance_aggregates, PerformanceAggregatesResponse, {}),
-        (get_timeseries, OriginTimeseriesResponse, {}),
-        (get_slow_urls, OriginSlowUrlsResponse, {}),
-        (get_status_codes, OriginStatusCodesResponse, {}),
-        (get_path_breakdown, OriginPathBreakdownResponse, {}),
-        (get_pop_latency, OriginPopLatencyResponse, {}),
-        (get_ip_health, OriginIpHealthResponse, {}),
-        (get_shielding_analysis, OriginShieldingAnalysisResponse, {}),
-    ],
-)
-def test_repository_keys_match_pydantic_model(in_memory_duckdb, repo_fn, pydantic_model, extra_args):
-    src = {"name": "test_empty_src", "service_id": "test_empty_src"}
-    kw = (
-        {"con_factory": lambda: in_memory_duckdb}
-        if repo_fn.__name__ in ("get_health", "get_quality")
-        else {"con": in_memory_duckdb}
-    )
-    repo_result = repo_fn(src=src, start_time=None, end_time=None, filters={}, **kw, **extra_args)
-    repo_keys = set(repo_result.keys()) - {"_debug_queries", "_debug_calls", "_is_cached"}
-    parsed = pydantic_model.model_validate(repo_result)
-    model_keys = set(pydantic_model.model_fields.keys())
-    for name in parsed.model_fields_set:
-        alias = pydantic_model.model_fields[name].validation_alias
-        if isinstance(alias, str):
-            model_keys.add(alias)
-        elif isinstance(alias, AliasChoices):
-            model_keys.update(choice for choice in alias.choices if isinstance(choice, str))
-    assert not (repo_keys - model_keys), f"{pydantic_model.__name__} missing fields: {repo_keys - model_keys}"
 
 
 def test_stats_record_and_response_validation():
@@ -316,62 +237,7 @@ SECTIONS = (
 )
 
 
-def _seed(con, src, n=60):
-    table = _safe_table(src["name"])
-    raw_fields = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
-    parts = [f'"{f["id"]}" {f["duckdb_type"]}' for f in raw_fields] + [
-        f'"{cf["name"]}" {cf["duckdb_type"]}' for cf in _CMCD_CUSTOM_FIELDS
-    ]
-    con.execute(f"CREATE TABLE {table} ({', '.join(parts)})")
-    logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
-    for i, log in enumerate(logs):
-        log.update(
-            cmcd_sid=f"session_{i % 5}",
-            cmcd_bl=15 + i,
-            cmcd_br=4500 + i * 100,
-            cmcd_bs=(i % 4 == 0),
-            cmcd_mtp=6000 + i * 200,
-            cmcd_ot=["v", "a"][i % 2],
-            cmcd_sf="h",
-            cmcd_su=(i % 10 == 0),
-            cmcd_tb=5000 + i * 100,
-            cmcd_rtp=4800 + i * 100,
-            cmcd_cid=f"content_{i % 3}",
-            cmcd_dl=50 + i,
-            country="US" if i % 2 == 0 else "GB",
-            asn=7922 if i % 2 == 0 else 3320,
-        )
-    insert_mock_logs(con, table, logs)
-
-
 class TestWireCmcd:
-    @pytest.fixture(autouse=True)
-    def _clear_cache(self):
-        _response_cache.clear()
-        yield
-        _response_cache.clear()
-
-    @pytest.mark.parametrize("windowed", [False, True])
-    def test_repository_wire_identical(self, in_memory_duckdb, test_service_source, monkeypatch, windowed):
-        _seed(in_memory_duckdb, test_service_source)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast"})
-        now = datetime.now(UTC)
-        start, end = ((now - timedelta(hours=3)).isoformat(), now.isoformat()) if windowed else (None, None)
-        res = get_cmcd_aggregates(
-            con=in_memory_duckdb,
-            src=test_service_source,
-            start_time=start,
-            end_time=end,
-            filters={},
-            bucket_seconds=600,
-        )
-        assert_sections_wire_identical(CmcdAggregatesResponse, res, non_empty=SECTIONS)
-
-    def test_repository_unavailable_wire_identical(self, in_memory_duckdb):
-        src = {"name": "cmcd_wire_missing", "service_id": "cmcd_wire_missing"}
-        res = get_cmcd_aggregates(con=in_memory_duckdb, src=src, start_time=None, end_time=None, filters={})
-        assert_sections_wire_identical(CmcdAggregatesResponse, res)
-
     def test_high_scale_wire_identical(self, monkeypatch):
         monkeypatch.setattr("backend.high_scale.cmcd._asn_names", lambda sid, asns: {7922: "Comcast"})
         present = {
@@ -446,22 +312,6 @@ class TestWireCmcd:
 
 
 # ── Merged from tests/models/test_wire_dashboard.py ──
-def _seed_wire_dashboard(con, src, n=120):
-    logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
-    for i, log in enumerate(logs):
-        log.update(
-            elapsed=100_000 + (i * 7919) % 900_000,
-            ttfb=f"{(50_000 + (i * 1013) % 400_000) / 1_000_000:.6f}",
-            ottfb=20_000 + (i * 331) % 30_000,
-            ottlb=60_000 + (i * 331) % 30_000,
-            url=f"/path-{i % 4}",
-            asn=[7922, 15169][i % 2],
-            ttl=[0, 5, 45, 3600, 90000][i % 5],
-            cache="HIT" if i % 3 else "MISS",
-        )
-    insert_mock_logs(con, _safe_table(src["name"]), logs)
-
-
 class _HsClient:
     def execute(self, sql, params=None):
         row = {"value": "/slow", "req_count": 9, "avg_ms": 12.5, "p50_ms": 10.0, "p95_ms": 20.0, "p99_ms": 30.0}
@@ -490,67 +340,10 @@ _START = "2020-01-01T00:00:00+00:00"
 _END = "2100-01-01T00:00:00+00:00"
 
 
-def _summary(con, src):
-    logs = generate_mock_logs(src, num_logs=120, hours_ago=1)
-    for i, log in enumerate(logs):
-        log.update(
-            waf_sig=["SQLI,XSS", "XSS", "VERIFIED-BOT.search-engine"][i % 3],
-            _bot_name=["googlebot", "bingbot", ""][i % 3],
-            url=f"/img/{i % 4}.jpg",
-            io_input_bytes=100_000 + i,
-            io_output_bytes=40_000 + i,
-            io_input_format=["jpeg", "png"][i % 2],
-            io_output_format=["webp", "avif"][i % 2],
-            resp_bytes=50_000 + i,
-        )
-    insert_mock_logs(con, _safe_table(src["name"]), logs)
-    return get_value_summary(con, src, None, None, {}, sections={"security", "bots", "io"}, service_id=None)
-
-
 class TestWireDashboard:
-    def test_repository_live_wire_identical(self, in_memory_duckdb, test_service_source, monkeypatch):
-        _seed_wire_dashboard(in_memory_duckdb, test_service_source)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast"})
-        res = get_performance_aggregates(
-            con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={}
-        )
-        assert_sections_wire_identical(
-            PerformanceAggregatesResponse, res, non_empty=("top_urls", "top_asns", "ttl_dist", "scatter", "waterfall")
-        )
-
-    def test_repository_rollup_hit_wire_identical(self, in_memory_duckdb, test_service_source, monkeypatch):
-        _seed_wire_dashboard(in_memory_duckdb, test_service_source)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast"})
-
-        def _hit(self, *_a, **kw):
-            return {
-                "rows": [
-                    {
-                        "value": "/rolled" if kw.get("dimension") == "url" else 7922,
-                        "requests": 100,
-                        "avg_ms": 1.0,
-                        "p50_ms": 1.0,
-                        "p95_ms": 2.0,
-                        "p99_ms": 3.0,
-                    }
-                ]
-            }
-
-        with patch("backend.repositories._base.QueryRunner.try_perf_latency_from_rollup", _hit):
-            res = get_performance_aggregates(
-                con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={}
-            )
-        assert res["approx"] is True
-        assert_sections_wire_identical(PerformanceAggregatesResponse, res, non_empty=("top_urls", "top_asns"))
-
-    def test_repository_empty_schema_wire_identical(self, in_memory_duckdb):
-        src = {"name": "perf_wire_missing", "service_id": "perf_wire_missing"}
-        res = get_performance_aggregates(con=in_memory_duckdb, src=src, start_time=None, end_time=None, filters={})
-        assert_sections_wire_identical(PerformanceAggregatesResponse, res)
-
     def test_high_scale_wire_identical(self, monkeypatch):
         captured = _capture_with_telemetry(monkeypatch, PerformanceAggregatesResponse)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast"})
+        monkeypatch.setattr("backend.core.fos_client.get_asn_names", lambda sid, asns: {7922: "Comcast"})
         hs_performance.performance_aggregates(
             SimpleNamespace(service_id="svc", client=_HsClient()), SimpleNamespace(), None, None
         )
@@ -560,33 +353,6 @@ class TestWireDashboard:
             captured,
             non_empty=("top_urls", "top_asns", "ttl_dist", "scatter", "waterfall"),
         )
-
-    def test_repository_detail_wire_identical_across_every_log_column(self, in_memory_duckdb, test_service_source):
-        table = _safe_table(test_service_source["name"])
-        logs = generate_mock_logs(test_service_source, num_logs=40, hours_ago=1)
-        for log in logs:
-            log["ip"] = "203.0.113.7"
-        insert_mock_logs(in_memory_duckdb, table, logs)
-        res = get_session_detail(in_memory_duckdb, test_service_source, "203.0.113.7", _START, _END)
-        raw_ids = {f["id"] for f in LOG_FIELD_CATALOG if f.get("vcl") is not None}
-        assert raw_ids <= set(res["columns"]), "fixture must exercise every raw log column"
-        assert {str, int, float} <= {type(v) for row in res["data"] for v in row.values()}
-        assert_sections_wire_identical(SessionDetailResponse, res, non_empty=("data", "columns"))
-
-    def test_repository_detail_keeps_booleans_and_nulls(self, in_memory_duckdb):
-        src = {"name": "sess_wire_bool", "service_id": "sess_wire_bool"}
-        table = _safe_table(src["name"])
-        now = datetime.now(UTC)
-        in_memory_duckdb.execute(
-            f'CREATE TABLE {table} ("timestamp" TIMESTAMPTZ, "ip" VARCHAR, "flag" BOOLEAN, "n" BIGINT, "x" DOUBLE, "s" VARCHAR)'
-        )
-        in_memory_duckdb.execute(
-            f"INSERT INTO {table} VALUES (?, '203.0.113.7', TRUE, 5, 2.0, NULL), (?, '203.0.113.7', FALSE, NULL, 0.5, 'a')",
-            [now.isoformat(), (now + timedelta(seconds=1)).isoformat()],
-        )
-        res = get_session_detail(in_memory_duckdb, src, "203.0.113.7", _START, _END)
-        assert [r["flag"] for r in res["data"]] == [True, False]
-        assert_sections_wire_identical(SessionDetailResponse, res, non_empty=("data",))
 
     def test_high_scale_detail_wire_identical(self):
         ts = datetime(2026, 9, 15, 0, 0, tzinfo=UTC)
@@ -619,12 +385,15 @@ class TestWireDashboard:
         with pytest.raises(ValueError, match="data"):
             SessionDetailResponse.model_validate({"columns": ["a"], "data": [{"a": [1, 2]}]})
 
-    def test_value_list_rows_wire_identical(self, in_memory_duckdb, test_service_source):
-        res = _summary(in_memory_duckdb, test_service_source)
-        assert_rows_wire_identical(WafSignalRow, res["security"]["top_waf_signals"])
-        assert_rows_wire_identical(TopBotRow, res["bots"]["top_bots"])
-        assert_rows_wire_identical(IOOpportunityRow, res["io"]["optimization_opportunities"])
-        assert_rows_wire_identical(IOFormatConversionPair, res["io"]["io_format_conversion_pairs"])
+    def test_value_list_rows_wire_identical(self):
+        assert_rows_wire_identical(WafSignalRow, [{"signal": "SQLI", "count": 42}])
+        assert_rows_wire_identical(TopBotRow, [{"name": "googlebot", "count": 100}])
+        assert_rows_wire_identical(
+            IOOpportunityRow, [{"url": "/img/a.jpg", "request_count": 10, "total_bytes": 1000, "avg_kb": 100.0}]
+        )
+        assert_rows_wire_identical(
+            IOFormatConversionPair, [{"input_format": "jpeg", "output_format": "webp", "count": 10, "avg_ratio": 0.4}]
+        )
 
 
 # ── Merged from tests/models/test_wire_insights.py ──
@@ -787,67 +556,6 @@ class TestWireInsights:
         )
         assert _dump_cards([card])[0]["items"][0]["meta"]["future"] == [1]
 
-    def test_repository_impossible_distance_wire_identical(self, in_memory_duckdb, test_service_source):
-        _create_impossible_distance_table(in_memory_duckdb, _safe_table(test_service_source["name"]))
-        _insights_cache.clear()
-        with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=_MOCK_POP_MAP):
-            res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
-        assert _assert_cards_wire_identical([c for c in res["insights"] if c["id"] == "impossible_distance"]) > 0
-
-    def test_repository_network_edge_and_track_c_wire_identical(self, in_memory_duckdb, test_service_source):
-        table = _safe_table(test_service_source["name"])
-        in_memory_duckdb.execute(
-            f'CREATE TABLE IF NOT EXISTS {table} ("timestamp" TIMESTAMPTZ, "metro" USMALLINT, "delivery_rate" UBIGINT, '
-            '"c_type" VARCHAR, "c_speed" VARCHAR, "pop" VARCHAR, "elapsed" UBIGINT, "transport" VARCHAR, "cache" VARCHAR, '
-            '"url" VARCHAR, "status" USMALLINT, "resp_bytes" UBIGINT, "resp_header_content_encoding" VARCHAR, "ip" VARCHAR, '
-            '"cookie_session" VARCHAR, "oconnect_ms" UINTEGER, "ottfb" UBIGINT)'
-        )
-        _seed_network_edge_data(in_memory_duckdb, table)
-        _seed_track_c_data(in_memory_duckdb, table)
-        _insights_cache.clear()
-        res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
-        cards = [c for c in res["insights"] if c["items"]]
-        assert {
-            "metro_delivery_degradation",
-            "connection_type_mix",
-            "pop_latency_regression",
-            "http3_fallback",
-            "cache_hit_cliff",
-            "payload_compression_regression",
-            "session_harvesting",
-            "timeout_split",
-        } <= {c["id"] for c in cards}
-        assert _assert_cards_wire_identical(cards) >= 8
-
-    def test_repository_network_asn_health_and_low_and_slow_wire_identical(self, in_memory_duckdb, test_service_source):
-        table = _safe_table(test_service_source["name"])
-        in_memory_duckdb.execute(
-            f'CREATE TABLE IF NOT EXISTS {table} ("timestamp" TIMESTAMPTZ, "asn" INTEGER, "ploss" DOUBLE, "rtt_var" INTEGER, "retrans" DOUBLE, "ip" VARCHAR, "url" VARCHAR, "ja3" VARCHAR)'
-        )
-        now = datetime.now(UTC)
-        for count, mins, ploss in ((60, 30, 0.08), (120, 90, 0.001)):
-            ts = (now - timedelta(minutes=mins)).isoformat()
-            in_memory_duckdb.executemany(
-                f"INSERT INTO {table} VALUES (?, 64500, ?, 1000, 0.0, NULL, NULL, NULL)", [(ts, ploss)] * count
-            )
-        for path, mins in zip(
-            ["/admin", "/.env", "/.git", "/wp-login.php", "/phpmyadmin/index.php", "/config.json"],
-            [110, 88, 66, 44, 22, 6],
-            strict=True,
-        ):
-            in_memory_duckdb.execute(
-                f"INSERT INTO {table} VALUES (?, NULL, NULL, NULL, NULL, '192.0.2.55', ?, NULL)",
-                [(now - timedelta(minutes=mins)).isoformat(), path],
-            )
-        _insights_cache.clear()
-        with patch("backend.core.duckdb.get_asn_names", return_value={}):
-            res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=1)
-        cards = [c for c in res["insights"] if c["id"] in {"network_asn_health", "low_and_slow"}]
-        assert {c["id"] for c in cards if c["items"]} == {
-            "network_asn_health",
-            "low_and_slow",
-        } and _assert_cards_wire_identical(cards) == 2
-
     def test_high_scale_cards_are_the_standard_cards_and_wire_identical(self):
         class _Client:
             def execute(self, query, params):
@@ -874,26 +582,6 @@ class TestWireInsights:
 
 
 # ── Merged from tests/models/test_wire_network.py ──
-def _seed_wire_network(con, src, n=120):
-    logs = generate_mock_logs(src, num_logs=n, hours_ago=2)
-    for i, log in enumerate(logs):
-        log.update(
-            tcp_rtt=20_000 + (i * 997) % 90_000,
-            rtt_min=10_000 + (i * 131) % 8_000,
-            rtt_var=500 + (i * 53) % 5_000,
-            ploss=0.0 if i % 7 else 0.02,
-            asn=[7922, 15169, 701][i % 3],
-            status=200 if i % 9 else 503,
-            pop=["SJC", "IAD", "LAX"][i % 3],
-            region=["CA", "NY"][i % 2],
-        )
-    insert_mock_logs(con, _safe_table(src["name"]), logs)
-
-
-def _health(con, src, **kw):
-    return get_health(lambda: con, src, None, None, {}, **kw)
-
-
 _START_wire_network = datetime(2026, 9, 15, 0, 0, tzinfo=UTC)
 _END_wire_network = datetime(2026, 9, 15, 1, 0, tzinfo=UTC)
 _B0 = int(_START_wire_network.timestamp())
@@ -980,51 +668,12 @@ def _service() -> HighScaleService:
 
 
 class TestWireNetwork:
-    def test_repository_health_wire_identical(self, in_memory_duckdb, test_service_source, monkeypatch):
-        _seed_wire_network(in_memory_duckdb, test_service_source)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast", 15169: "Google"})
-        res = _health(in_memory_duckdb, test_service_source)
-        assert_sections_wire_identical(
-            NetworkHealthResponse,
-            res,
-            non_empty=("heatmap", "leaderboard", "map_buckets", "cities", "metro_leaderboard", "summary", "buckets"),
-        )
-
-    def test_repository_health_dense_window_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_network(in_memory_duckdb, test_service_source)
-        now = datetime.now(UTC)
-        res = get_health(
-            lambda: in_memory_duckdb,
-            test_service_source,
-            (now - timedelta(hours=3)).isoformat(),
-            now.isoformat(),
-            {},
-            bucket_seconds=600,
-            top_n=2,
-        )
-        assert_sections_wire_identical(NetworkHealthResponse, res, non_empty=("heatmap", "leaderboard"))
-
-    def test_repository_quality_wire_identical(self, in_memory_duckdb, test_service_source, monkeypatch):
-        _seed_wire_network(in_memory_duckdb, test_service_source)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda sid, asns: {7922: "Comcast"})
-        res = get_quality(lambda: in_memory_duckdb, test_service_source, None, None, {}, region_country="US")
-        assert_sections_wire_identical(
-            NetworkQualityResponse, res, non_empty=("by_country", "by_asn", "by_pop", "scatter", "countries")
-        )
-
-    def test_repository_unavailable_shapes_wire_identical(self, in_memory_duckdb):
-        src = {"name": "net_wire_missing", "service_id": "net_wire_missing"}
-        assert_sections_wire_identical(
-            NetworkQualityResponse, get_quality(lambda: in_memory_duckdb, src, None, None, {}, region_country="US")
-        )
-        assert_sections_wire_identical(NetworkHealthResponse, get_health(lambda: in_memory_duckdb, src, None, None, {}))
-
     @pytest.mark.parametrize(
         "fn, model", [("network_health", NetworkHealthResponse), ("network_quality", NetworkQualityResponse)]
     )
     def test_high_scale_wire_identical(self, monkeypatch, fn, model):
         captured = _capture_with_telemetry(monkeypatch, model)
-        monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda _sid, asns: {a: f"AS{a}" for a in asns})
+        monkeypatch.setattr("backend.core.fos_client.get_asn_names", lambda _sid, asns: {a: f"AS{a}" for a in asns})
         getattr(hs_network, fn)(_service(), _Req(), _Req.start_time, _Req.end_time)
         non_empty = (
             ("heatmap", "leaderboard", "map_buckets", "cities", "metro_leaderboard", "summary")
@@ -1036,31 +685,6 @@ class TestWireNetwork:
 
 # ── Merged from tests/models/test_wire_origin.py ──
 _ORIGIN_SECTIONS = ("summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health")
-
-
-def _seed_wire_origin(con, src, n=60):
-    logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
-    for i, log in enumerate(logs):
-        ottlb = 90000 + i * 1000
-        log.update(
-            ottfb=50000 + i * 1000,
-            ottlb=ottlb,
-            elapsed=ottlb + 5000,
-            ost=829 if i == 3 else (200 if i % 5 else 500),
-            oip="203.0.113.1" if i < 25 else "203.0.113.2",
-            url="/api/data" if i % 2 == 0 else "/images/logo.png",
-            pop=["SJC", "IAD", "LAX"][i % 3],
-            host="example.com" if i % 2 else "www.example.com",
-            edge=(i % 4 != 0),
-            cache="MISS" if i % 3 == 0 else ("PASS" if i % 3 == 1 else "HIT"),
-            rid=f"rid-{i}",
-            prid=f"rid-{i - 1}" if i % 4 == 0 and i else None,
-        )
-    insert_mock_logs(con, _safe_table(src["name"]), logs)
-
-
-def _call(fn, con, src, **kw):
-    return fn(con=con, src=src, start_time=None, end_time=None, filters={}, **kw)
 
 
 def _origin_hs_req():
@@ -1120,53 +744,6 @@ class _HsClient_wire_origin:
 
 
 class TestWireOrigin:
-    @pytest.fixture(autouse=True)
-    def _clear_origin_caches(self):
-        _clear_schema_cache()
-        origin_mod._response_cache.clear()
-        yield
-        _clear_schema_cache()
-        origin_mod._response_cache.clear()
-
-    def test_granular_repositories_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_origin(in_memory_duckdb, test_service_source)
-        con, src = in_memory_duckdb, test_service_source
-        cases = [
-            (origin_mod.get_summary, OriginSummaryResponse, {}, ("has_data",)),
-            (origin_mod.get_timeseries, OriginTimeseriesResponse, {}, ("series",)),
-            (origin_mod.get_slow_urls, OriginSlowUrlsResponse, {"min_requests": 1}, ("rows",)),
-            (origin_mod.get_status_codes, OriginStatusCodesResponse, {}, ("rows",)),
-            (origin_mod.get_path_breakdown, OriginPathBreakdownResponse, {}, ("rows",)),
-            (origin_mod.get_pop_latency, OriginPopLatencyResponse, {}, ("rows",)),
-            (origin_mod.get_ip_health, OriginIpHealthResponse, {}, ("rows",)),
-            (origin_mod.get_shielding_analysis, OriginShieldingAnalysisResponse, {}, ("rows",)),
-            *[
-                (origin_mod.get_drilldown, OriginDrilldownResponse, {"dimension": d}, ("rows",))
-                for d in ("host", "pop", "oip")
-            ],
-        ]
-        for fn, model, kw, non_empty in cases:
-            assert_sections_wire_identical(model, _call(fn, con, src, **kw), non_empty=non_empty)
-        split = _call(origin_mod.get_timeseries, con, src, split_by_leg=True)
-        assert any("edge" in point for point in split["series"])
-        assert_sections_wire_identical(OriginTimeseriesResponse, split, non_empty=("series",))
-
-    @pytest.mark.asyncio
-    async def test_composite_aggregates_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_origin(in_memory_duckdb, test_service_source)
-        res = await origin_mod.get_aggregates(
-            in_memory_duckdb, test_service_source, None, None, {}, slow_urls_min_requests=1
-        )
-        assert_sections_wire_identical(OriginAggregatesResponse, res, non_empty=_ORIGIN_SECTIONS)
-        for section in _ORIGIN_SECTIONS[1:]:
-            assert res[section]["rows" if section != "timeseries" else "series"], section
-
-    @pytest.mark.asyncio
-    async def test_composite_aggregates_empty_schema_wire_identical(self, in_memory_duckdb):
-        src = {"name": "origin_wire_empty", "service_id": "origin_wire_empty"}
-        res = await origin_mod.get_aggregates(in_memory_duckdb, src, None, None, {})
-        assert_sections_wire_identical(OriginAggregatesResponse, res)
-
     def test_high_scale_aggregates_wire_identical(self):
         service = SimpleNamespace(service_id="svc", client=_HsClient_wire_origin())
         res = hs_aggregates(service, _origin_hs_req(), None, None, sections=None)
@@ -1184,39 +761,6 @@ class TestWireOrigin:
 # ── Merged from tests/models/test_wire_security.py ──
 START = "2026-08-01T00:00:00Z"
 END = "2026-08-02T00:00:00Z"
-
-
-def _seed_wire_security(con, src, n=200):
-    table = _safe_table(src["name"])
-    con.execute(
-        f"CREATE TABLE {table} (timestamp TIMESTAMPTZ, ip VARCHAR, ua VARCHAR, pop VARCHAR, rtt_min INTEGER, tcp_rtt INTEGER, "
-        "lat DOUBLE, lon DOUBLE, asn INTEGER, country VARCHAR, city VARCHAR, tls_ciphers_sha VARCHAR, req_header_bytes INTEGER, "
-        "conn_requests INTEGER, is_ipv6 BOOLEAN, p_type VARCHAR, waf_sig VARCHAR, waf_req_id VARCHAR)"
-    )
-    rows = [
-        (
-            f"2026-08-01 {12 + i % 3}:{i % 60:02d}:00Z",
-            f"10.0.{i % 7}.{i % 11}",
-            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" if i % 2 else "curl/8",
-            "SJC",
-            [5, 10, 500, 1000][i % 4],
-            1000,
-            37.0,
-            -121.0,
-            [1111, 2222, 3333][i % 3],
-            "US",
-            "San Jose",
-            f"fp{i % 5}",
-            100 + (i * 97) % 40000,
-            1 + i % 120,
-            i % 3 == 0,
-            ["vpn", "tor", ""][i % 3],
-            "VERIFIED-BOT.search-engine,OTHER.tag" if i % 4 == 0 else None,
-            None,
-        )
-        for i in range(n)
-    ]
-    con.executemany(f"INSERT INTO {table} VALUES ({', '.join('?' * 18)})", rows)
 
 
 class _FakeClickHouse:
@@ -1258,73 +802,6 @@ class _FakeClickHouse:
 
 
 class TestWireSecurity:
-    def test_repository_aggregates_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_security(in_memory_duckdb, test_service_source)
-        with patch("backend.core.duckdb.get_asn_names", return_value={}):
-            res = get_security_aggregates(
-                con=in_memory_duckdb,
-                src=test_service_source,
-                start_time=START,
-                end_time=END,
-                filters={},
-                bucket_seconds=3600,
-            )
-        assert_sections_wire_identical(
-            SecurityAggregatesResponse,
-            res,
-            non_empty=("tls_fingerprints", "req_size_dist", "conn_reuse_dist", "ipv6_adoption", "proxy_dist"),
-        )
-
-    def test_repository_masked_top_ips_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_security(in_memory_duckdb, test_service_source)
-        res = get_security_aggregates(
-            con=in_memory_duckdb,
-            src=test_service_source,
-            start_time=START,
-            end_time=END,
-            filters={},
-            sections={"top_ips_header"},
-            mask_ips=True,
-        )
-        assert_sections_wire_identical(SecurityAggregatesResponse, res, non_empty=("top_ips_header",))
-
-    def test_repository_proxies_and_top_bots_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_security(in_memory_duckdb, test_service_source, n=300)
-        with patch("backend.core.duckdb.get_asn_names", return_value={}):
-            proxies = get_security_proxies(
-                con=in_memory_duckdb, src=test_service_source, start_time=START, end_time=END, filters={}
-            )
-        assert_sections_wire_identical(
-            SecurityAggregatesResponse, proxies, non_empty=("traffic_quality", "suspicious_isps", "active_clients")
-        )
-        bots = get_top_bots(con=in_memory_duckdb, src=test_service_source, start_time=START, end_time=END, filters={})
-        assert_sections_wire_identical(SecurityTopBotsResponse, bots)
-
-    def test_repository_wellknown_and_verified_bots_wire_identical(self, in_memory_duckdb, test_service_source):
-        _seed_wire_security(in_memory_duckdb, test_service_source, n=60)
-        entry = {"id": "googlebot", "categories": ["search-engine"], "verification": {"domains": ["googlebot.com"]}}
-        with (
-            patch(
-                "backend.utils.bot_sources.build_matcher",
-                return_value=lambda ua: (entry,) if "Googlebot" in (ua or "") else (),
-            ),
-            patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=None),
-            patch("backend.utils.bot_sources.get_hostnames", return_value={}),
-            patch("backend.utils.bot_sources.enqueue"),
-        ):
-            res = get_security_aggregates(
-                con=in_memory_duckdb,
-                src=test_service_source,
-                start_time=START,
-                end_time=END,
-                filters={},
-                sections={"wellknown_bots", "verified_bots_ts"},
-                bucket_seconds=3600,
-            )
-        assert_sections_wire_identical(
-            SecurityAggregatesResponse, res, non_empty=("wellknown_bots", "verified_bots_ts")
-        )
-
     def test_high_scale_aggregates_wire_identical(self, monkeypatch):
         svc = HighScaleService(
             service_id="svc",
@@ -1343,7 +820,7 @@ class TestWireSecurity:
             ),
         )
         captured = _capture_with_telemetry(monkeypatch, hs_security.SecurityAggregatesResponse)
-        with patch("backend.core.duckdb.get_asn_names", return_value={}):
+        with patch("backend.core.fos_client.get_asn_names", return_value={}):
             hs_security_aggregates(svc, None, START, END)
         assert captured["tls_fingerprints"][0]["ip_count"] == 2 and captured["req_size_dist"][0]["bucket"] == "0-256B"
         assert captured["ipv6_adoption"][0]["pct"] == 33.3
@@ -1404,7 +881,6 @@ def _cfg(**overrides) -> dict:
 def test_path_helpers():
     p = svcconfig.config_path("svc-abc")
     assert p.name == "svc-abc.json" and p.parent.name == "configs"
-    assert svcconfig.duckdb_path("svc-abc").endswith("services/svc-abc.duckdb")
 
 
 def test_save_and_load_config_lifecycle(tmp_path):
@@ -1635,11 +1111,7 @@ def test_usage_logging_config_and_ensure_dirs():
     svcconfig._ensure_dirs()
     svcconfig._USAGE_LOGGING_CONFIG_PATH.write_text(json.dumps({"enabled": True}))
     out = svcconfig.load_usage_logging_config()
-    assert (
-        out["enabled"] is True
-        and out["retention_days"] == svcconfig._USAGE_LOGGING_DEFAULTS["retention_days"]
-        and out["track_duckdb_httpfs"] is True
-    )
+    assert out["enabled"] is True and out["retention_days"] == svcconfig._USAGE_LOGGING_DEFAULTS["retention_days"]
     svcconfig._USAGE_LOGGING_CONFIG_PATH.write_text("{not json")
     assert svcconfig.load_usage_logging_config() == svcconfig._USAGE_LOGGING_DEFAULTS
 
@@ -1697,12 +1169,16 @@ def clickhouse_env(monkeypatch):
 
 
 def test_clickhouse_disabled_and_remote_and_provisioner(clickhouse_env, monkeypatch):
-    monkeypatch.delenv("CLICKHOUSE_ENABLED")
     monkeypatch.setenv("CLICKHOUSE_QUERY_TIMEOUT_S", "not-a-timeout")
-    assert svcconfig.load_clickhouse_config() is None
     for val in ("false", "0", "no", "off", " FALSE "):
         monkeypatch.setenv("CLICKHOUSE_ENABLED", val)
         assert svcconfig.load_clickhouse_config() is None
+    monkeypatch.delenv("CLICKHOUSE_ENABLED")
+    for k in ("HOST", "DATABASE", "USER"):
+        monkeypatch.delenv(f"CLICKHOUSE_{k}")
+    assert svcconfig.load_clickhouse_config() is None
+    for k, v in {"HOST": "localhost", "DATABASE": "analytics", "USER": "default"}.items():
+        monkeypatch.setenv(f"CLICKHOUSE_{k}", v)
     monkeypatch.delenv("CLICKHOUSE_QUERY_TIMEOUT_S", raising=False)
     for val in ("true", "1", "yes", "on", " TRUE "):
         monkeypatch.setenv("CLICKHOUSE_ENABLED", val)
@@ -1921,43 +1397,22 @@ def test_rum_enable_done_event_reports_the_shared_resolution(final_cfg, expected
 
 
 # ── Merged from test_validate_ingest_mode.py ──
-_PG = "postgresql://fla:pw@pg:5432/ducklake"
+_PG = "postgresql://fla:pw@pg:5432/fla_meta"
 
 
 @pytest.fixture
 def high_scale_env(monkeypatch):
     monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
-    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
     monkeypatch.setenv("METADATA_DSN", _PG)
     return monkeypatch
 
 
-def test_deployment_mode_validation(high_scale_env, monkeypatch):
+def test_deployment_mode_validation(high_scale_env):
     assert svcconfig.validate_deployment_mode() is None
     for scheme in ("postgres", "postgresql"):
         dsn = f"{scheme}://fla:pw@pg:5432/db"
-        high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", dsn)
         high_scale_env.setenv("METADATA_DSN", dsn)
         assert svcconfig.validate_deployment_mode() is None
-
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
-    monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "")
-    assert svcconfig.validate_deployment_mode() is None
-
-    for bad_mode, match in [
-        ("high_throughput", "DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'"),
-        ("unknown", "DEPLOYMENT_MODE"),
-    ]:
-        monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", bad_mode)
-        with pytest.raises(RuntimeError, match=match):
-            svcconfig.validate_deployment_mode()
-
-
-@pytest.mark.parametrize("catalog", ["", "/app/data/services/svc.ducklake", "svc.ducklake"])
-def test_high_scale_rejects_non_postgres_ducklake_catalog(high_scale_env, catalog):
-    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", catalog)
-    with pytest.raises(RuntimeError, match="requires DUCKLAKE_CATALOG to be a Postgres DSN"):
-        svcconfig.validate_deployment_mode()
 
 
 @pytest.mark.parametrize("dsn", [None, "", "/app/data/services/svc.metadata.db", "sqlite:///app/data/svc.metadata.db"])
@@ -1966,15 +1421,12 @@ def test_high_scale_rejects_non_postgres_metadata_dsn(high_scale_env, dsn):
         high_scale_env.delenv("METADATA_DSN", raising=False)
     else:
         high_scale_env.setenv("METADATA_DSN", dsn)
-    with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN") as exc:
+    with pytest.raises(RuntimeError, match="METADATA_DSN must be a Postgres DSN") as exc:
         svcconfig.validate_deployment_mode()
     if dsn is None:
         assert all(s in str(exc.value) for s in ("job_runs", "ingest ledger", "pod-local"))
 
 
-@pytest.mark.parametrize("mode", ["standard", "high_scale"])
-def test_config_to_source_emits_deployment_mode(monkeypatch, tmp_path, mode):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", mode)
-    monkeypatch.setattr(svcconfig, "duckdb_path", lambda _service_id: str(tmp_path / "service.duckdb"))
+def test_config_to_source_emits_deployment_mode():
     source = svcconfig.config_to_source({"service_id": "svc", "raw_layout_version": 3})
-    assert source["deployment_mode"] == mode and "ingest_mode" not in source and "serving_mode" not in source
+    assert source["deployment_mode"] == "high_scale" and "ingest_mode" not in source and "serving_mode" not in source

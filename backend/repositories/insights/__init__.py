@@ -1,25 +1,17 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
+
 
 class InsightCategory(StrEnum):
-    """Thematic section an insight belongs to on the Anomaly Detection page.
-
-    The lowercase machine key is the ONLY thing on the API contract; the
-    human-facing section label, icon, and ordering live in the frontend
-    (``frontend/lib/format.ts``) so a section can be renamed
-    without touching the API or the insight definitions.
-
-    ``network`` (Phase 3) is the dedicated Network Path section: ISP/ASN
-    reachability, RTT/packet-loss, and metro/region delivery quality
-    (asn_concentration, asn_metro_performance, region_latency, and the
-    Phase-3 network_asn_health insight). See the design plan §2/§3.
-    """
+    """Thematic section an insight belongs to on the Anomaly Detection page."""
 
     security = "security"
     origin = "origin"
@@ -35,22 +27,13 @@ class InsightDefinition(BaseModel):
 
     id: str
     title: str
-    # Required, no default — a registration that forgets its category fails
-    # Pydantic validation at import time. That import-time failure is the
-    # entire point: it forces every new insight to declare which section it
-    # belongs to instead of silently landing in a wrong/fallback bucket.
     category: InsightCategory
     description: str = ""
     sql_template: str
     visual_type: str = "table"  # "table", "chart", "map"
     required_fields: list[str] = Field(default_factory=list)
 
-    # Optional callback to process a raw row from DuckDB into a standardized item dict
-    # signature: (row: tuple, definition: InsightDefinition, context: dict) -> dict
     row_processor: Callable[[Any, InsightDefinition, dict[str, Any]], dict] | None = None
-
-    # Optional logic to determine overall severity for the insight based on its items
-    # signature: (items: list[dict]) -> str
     severity_logic: Callable[[list[dict]], str] | None = None
 
 
@@ -76,11 +59,8 @@ class InsightsRegistry:
 # Singleton registry instance
 registry: InsightsRegistry = InsightsRegistry()
 
-from backend.utils.module_shim import install_shim_module  # noqa: E402
-
-from . import repository as _repository  # noqa: E402
-from . import rollup_fastpath as _rollup_fastpath
-from .repository import _insights_cache, check_insights_cache, get_cache_collapse_detail, get_insights  # noqa: E402
+# Side-effect import: registers all insight definitions with the singleton registry
+from . import definitions as _definitions  # noqa: E402, F401
 from .shaping import (  # noqa: E402
     build_error_insight_card,
     build_insight_card,
@@ -101,7 +81,45 @@ from .shaping import (  # noqa: E402
     shape_insight_card_from_rows,
 )
 
+INSIGHTS_CACHE_TTL = 300  # seconds
+_insights_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=500, ttl_seconds=INSIGHTS_CACHE_TTL)
+_insights_cache_lock = threading.Lock()
+
+
+def check_insights_cache(
+    src: dict,
+    window_hours: float = 24,
+    baseline_hours: float = 168,
+    clamp_start: str | None = None,
+    clamp_end: str | None = None,
+    mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    force_refresh: bool = False,
+    filters: dict | None = None,
+) -> dict | None:
+    if INSIGHTS_CACHE_TTL <= 0 or force_refresh:
+        return None
+    cache_key = build_insights_cache_key(
+        src["name"],
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        clamp_start=clamp_start,
+        clamp_end=clamp_end,
+        mask_ips=mask_ips,
+        clamp_cache_key=clamp_cache_key,
+        filters=filters,
+    )
+    with _insights_cache_lock:
+        entry = _insights_cache.get(cache_key)
+    if entry is not None:
+        cached = entry[1].copy()
+        cached["is_cached"] = True
+        return cached
+    return None
+
+
 __all__ = [
+    "INSIGHTS_CACHE_TTL",
     "InsightCategory",
     "InsightDefinition",
     "InsightsRegistry",
@@ -118,8 +136,6 @@ __all__ = [
     "evaluate_insight_severity",
     "fingerprint_column",
     "format_insight_summary",
-    "get_cache_collapse_detail",
-    "get_insights",
     "make_investigate_url_builder",
     "process_insight_rows",
     "registry",
@@ -128,5 +144,3 @@ __all__ = [
     "shape_cache_collapse_recent_misses",
     "shape_insight_card_from_rows",
 ]
-
-install_shim_module(__name__, (_repository, _rollup_fastpath))

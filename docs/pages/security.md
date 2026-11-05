@@ -31,10 +31,10 @@ Routes in [`backend/routers/security.py`](../../backend/routers/security.py), mo
 - `GET /api/security/threat-intel` (`start_time`, `end_time`): `ThreatIntelListResponse` of TLS fingerprints with request count, top country, matched WAF rule count, bot percentage and proxy flag.
 - `GET /api/security/proxies/export` (`start_time`, `end_time`, `threshold`, `format` = `fastly-acl` CSV or plain text): streamed blocklist; the router masks IPs for analysts.
 
-Bot enrichment uses the PostgreSQL `ngwaf_bots` and `rdns` tables. Standard mode uses the `security_*` and verified-bot rollups where eligible with raw fallback. High-scale mode ([`backend/high_scale/security.py`](../../backend/high_scale/security.py)) reads `request_facts` with the request filters bound (unfiltered NGWAF bot cards read `security_minute_dimensions`); NGWAF names are resolved at ingest; a ClickHouse failure propagates as an error.
+Bot enrichment uses the PostgreSQL `ngwaf_bots` and `rdns` tables. The ClickHouse reader ([`backend/high_scale/security.py`](../../backend/high_scale/security.py)) reads `request_facts` with the request filters bound (unfiltered NGWAF bot cards read `security_minute_dimensions`); NGWAF names are resolved at ingest; a ClickHouse failure propagates as an error.
 
 ## Tests
 
 - Frontend unit: [`frontend/__tests__/app/security.test.tsx`](../../frontend/__tests__/app/security.test.tsx)
-- Backend: [`tests/repositories/test_security.py`](../../tests/repositories/test_security.py), [`tests/core/test_rollups_security_and_bots.py`](../../tests/core/test_rollups_security_and_bots.py), [`tests/utils/test_rdns_cache.py`](../../tests/utils/test_rdns_cache.py)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/utils/test_rdns_cache.py`](../../tests/utils/test_rdns_cache.py)
 - E2E: `Security Page Contract` in [`frontend/e2e/pages/core-analytics-pages.spec.ts`](../../frontend/e2e/pages/core-analytics-pages.spec.ts)

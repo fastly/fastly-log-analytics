@@ -36,7 +36,6 @@ from backend.core.log_fields import (
     validate_recv_exclusion_regex_with_lint,
     validate_url_exclusion_regex,
 )
-from backend.core.rollups._common import quote_path_list
 from backend.core.sql_validator import escape_sql_literal
 from backend.provision import cmcd_fields as orch
 from backend.provision import generate_capture_vcl
@@ -513,7 +512,6 @@ def test_path_within_dir_and_sql_quote_helpers(tmp_path, monkeypatch):
     monkeypatch.setattr(os.path, "commonpath", _raise_mismatch)
     assert path_within_dir("/tmp/base", "/tmp/base/candidate") is False
 
-    assert quote_path_list(["/a/o'brien.parquet", "/b.parquet"]) == "'/a/o''brien.parquet', '/b.parquet'"
     with pytest.raises(TypeError):
         escape_sql_literal(5)  # type: ignore[arg-type]
 

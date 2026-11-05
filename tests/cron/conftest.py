@@ -51,7 +51,10 @@ def stub_source(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "service_id": "svc-1",
         "bucket": "fos-test-bkt",
     }
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.core.fos_client.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.cron.jobs.metadata.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.cron.jobs.sync.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.cron.jobs.rum_ledger.get_source_for_service", lambda sid: src)
     return src
 
 
@@ -91,13 +94,11 @@ def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     """Stub the standard cron envelope helpers so a cron job's progress and
     ``cron_runs`` side effects can be inspected without real DB writes.
     """
-    default_run_id = (
-        33 if ("test_commit" in request.node.nodeid.lower() or "testcommitjob" in request.node.nodeid.lower()) else 11
-    )
+    default_run_id = 11
     start = MagicMock(return_value=default_run_id)
     log = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
+    monkeypatch.setattr("backend.core.fos_client.start_cron_run", start)
+    monkeypatch.setattr("backend.core.fos_client.log_cron_run", log)
 
     start_progress = MagicMock()
     end_progress = MagicMock()
@@ -108,13 +109,10 @@ def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", cleanup)
     monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", log_event)
     monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr("backend.cron.scheduler._check_buffer_backlog", lambda *a, **kw: "")
     monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: "")
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
+    monkeypatch.setattr("backend.core.fos_client._cache_dir", lambda src: "/tmp/cache")
     monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: False)
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
-    monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
-    monkeypatch.setattr("backend.cron.jobs._common._refresh_status_after_commit", MagicMock())
     return {
         "start": start,
         "log": log,

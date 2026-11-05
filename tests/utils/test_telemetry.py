@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import io
 import logging
 import os
 import socket
@@ -14,15 +13,12 @@ import time
 import tracemalloc
 import types
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import boto3
-import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 import yarl
 from aiohttp import web
@@ -39,9 +35,8 @@ import backend.core.metadata.usage_log as usage_log_db
 import backend.utils.telemetry as sqlite_profiler
 import backend.utils.telemetry as telemetry_proxy
 from backend import config as svcconfig
-from backend.core import duckdb as _ddb
-from backend.core import storage as _ic
-from backend.core.duckdb import log_usage_calls, purge_usage_log
+from backend.core import fos_client as _ddb
+from backend.core.fos_client import log_usage_calls, purge_usage_log
 from backend.models import common as common_models
 from backend.models.common import BaseResponse
 from backend.utils import telemetry as _t
@@ -574,7 +569,7 @@ def test_flush_usage_log_skip_conditions(enabled: bool, has_call: bool, cfg: dic
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=enabled),
         patch("backend.config.load_config", return_value=cfg),
-        patch("backend.core.duckdb.log_usage_calls") as mock_log,
+        patch("backend.core.fos_client.log_usage_calls") as mock_log,
     ):
         flush_usage_log("svc-flush-skip")
     mock_log.assert_not_called()
@@ -592,7 +587,7 @@ def test_flush_usage_log_happy_path_forwards_calls_and_context():
         patch("backend.config.is_usage_logging_enabled", return_value=True),
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_to_source", return_value=fake_source),
-        patch("backend.core.duckdb.log_usage_calls") as mock_log,
+        patch("backend.core.fos_client.log_usage_calls") as mock_log,
     ):
         flush_usage_log("svc-flush-3")
 
@@ -610,7 +605,7 @@ def test_flush_usage_log_swallows_inner_exception():
         patch("backend.config.is_usage_logging_enabled", return_value=True),
         patch("backend.config.load_config", return_value={"service_id": "x"}),
         patch("backend.config.config_to_source", return_value={"name": "x"}),
-        patch("backend.core.duckdb.log_usage_calls", side_effect=RuntimeError("db down")),
+        patch("backend.core.fos_client.log_usage_calls", side_effect=RuntimeError("db down")),
     ):
         flush_usage_log("svc-flush-error")
 
@@ -618,7 +613,7 @@ def test_flush_usage_log_swallows_inner_exception():
 def test_run_usage_log_cleanup_skips_when_service_config_missing():
     with (
         patch("backend.config.load_config", return_value=None),
-        patch("backend.core.duckdb.purge_usage_log") as mock_purge,
+        patch("backend.core.fos_client.purge_usage_log") as mock_purge,
     ):
         run_usage_log_cleanup("svc-cleanup-missing")
     mock_purge.assert_not_called()
@@ -630,7 +625,7 @@ def test_run_usage_log_cleanup_happy_path_delegates_to_purge():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_to_source", return_value=fake_source),
-        patch("backend.core.duckdb.purge_usage_log") as mock_purge,
+        patch("backend.core.fos_client.purge_usage_log") as mock_purge,
     ):
         run_usage_log_cleanup("svc-cleanup-1")
     mock_purge.assert_called_once_with(fake_source)
@@ -640,7 +635,7 @@ def test_run_usage_log_cleanup_swallows_inner_exception():
     with (
         patch("backend.config.load_config", return_value={"service_id": "x"}),
         patch("backend.config.config_to_source", return_value={"name": "x"}),
-        patch("backend.core.duckdb.purge_usage_log", side_effect=RuntimeError("boom")),
+        patch("backend.core.fos_client.purge_usage_log", side_effect=RuntimeError("boom")),
     ):
         run_usage_log_cleanup("svc-cleanup-error")
 
@@ -1213,6 +1208,30 @@ def test_count_does_not_raise_math_domain_error_under_extreme_bucket_ranks():
     hll._buckets = [25 for _ in hll._buckets]
     n = hll.count()
     assert isinstance(n, int) and n >= 0
+
+
+def test_sketches_from_ip_lists_is_byte_identical_to_adding_each_ip():
+    from backend.utils.hll import sketches_from_ip_lists
+
+    lists = [
+        [f"10.0.{i % 7}.{i}" for i in range(300)],
+        [],
+        None,
+        ["", None, "2001:db8::1", "2001:db8::1", "192.0.2.9"],
+        [f"10.0.{i % 7}.{i}" for i in range(0, 300, 3)],
+    ]
+    expected = []
+    for ips in lists:
+        hll = HyperLogLog()
+        for ip in ips or []:
+            if ip:
+                hll.add(ip)
+        expected.append(hll.to_bytes())
+    chunked = pa.chunked_array([pa.array(lists[:2], pa.list_(pa.string())), pa.array(lists[2:], pa.list_(pa.string()))])
+    cache: dict[str, tuple[int, int]] = {}
+
+    assert sketches_from_ip_lists(chunked, cache=cache) == expected
+    assert sketches_from_ip_lists(chunked, cache=cache) == expected
 
 
 # ── Merged from tests/utils/test_telemetry_proxy.py ──
@@ -2081,166 +2100,6 @@ def test_sign_request_adds_content_md5_for_bulk_delete(monkeypatch):
     assert ("Content-MD5" in signed or "content-md5" in signed) and "Authorization" in signed
 
 
-def _get_fos_secret(source: dict, *, run_s3_cfg: bool = False):
-    con = duckdb.connect(":memory:")
-    try:
-        _ddb._configure_fos(con, source)
-        if run_s3_cfg:
-            _ic.configure_duckdb_s3(con)
-        rows = con.execute("SELECT name, type, secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchall()
-        ep = con.execute("SELECT current_setting('s3_endpoint')").fetchone()[0] if run_s3_cfg else None
-        return rows, ep
-    finally:
-        con.close()
-
-
-def test_configure_fos_creates_proxy_secret_no_cdn(proxy_server):
-    rows, _ = _get_fos_secret(
-        {
-            "name": "phase3a-no-cdn",
-            "service_id": "phase3a-no-cdn",
-            "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-            "endpoint": "us-east-1.object.fastlystorage.app",
-            "access_key_id": "AKIA-phase3a",
-            "secret_access_key": "secret-phase3a",
-            "region": "us-east-1",
-        }
-    )
-    assert len(rows) == 1 and rows[0][1].upper() == "S3"
-    sec = rows[0][2]
-    assert proxy_server.proxy_endpoint().replace("http://", "") in sec
-    for req in (
-        "X-Fos-Target=us-east-1.object.fastlystorage.app",
-        "X-Telemetry-Service-Id=phase3a-no-cdn",
-        "X-Telemetry-Caller=duckdb.httpfs",
-    ):
-        assert req in sec
-    assert "x-fastly-key" not in sec.lower()
-
-
-def test_configure_fos_creates_proxy_secret_with_cdn(proxy_server):
-    rows, _ = _get_fos_secret(
-        {
-            "name": "phase3a-cdn",
-            "service_id": "phase3a-cdn",
-            "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-            "endpoint": "cdn.example.com",
-            "cdn_url": "https://cdn.example.com",
-            "cdn_secret": "fastly-secret-abc",
-            "access_key_id": "AKIA-phase3a",
-            "secret_access_key": "secret-phase3a",
-            "region": "us-east-1",
-        }
-    )
-    sec = rows[0][2]
-    assert "X-Fos-Target=cdn.example.com" in sec
-    assert "us-east-1.object.fastlystorage.app" not in sec
-    assert "x-fastly-key=fastly-secret-abc" in sec
-
-
-def test_configure_fos_uses_native_fos_when_edge_only_is_false(proxy_server):
-    rows, _ = _get_fos_secret(
-        {
-            "name": "phase3a-native-reads",
-            "service_id": "phase3a-native-reads",
-            "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-            "endpoint": "cdn.example.com",
-            "cdn_url": "https://cdn.example.com",
-            "cdn_secret": "fastly-secret-abc",
-            "provisioning": {"edge_only": False},
-            "access_key_id": "AKIA-phase3a",
-            "secret_access_key": "secret-phase3a",
-            "region": "us-east-1",
-        }
-    )
-    sec = rows[0][2]
-    assert "X-Fos-Target=us-east-1.object.fastlystorage.app" in sec
-    assert "X-Fos-Target=cdn.example.com" not in sec
-    assert "x-fastly-key" not in sec.lower()
-
-
-def test_configure_duckdb_s3_does_not_clobber_proxy_secret(proxy_server):
-    rows, ep = _get_fos_secret(
-        {
-            "name": "phase3a-icestack",
-            "service_id": "phase3a-icestack",
-            "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-            "endpoint": "us-east-1.object.fastlystorage.app",
-            "access_key_id": "AKIA-test",
-            "secret_access_key": "secret-test",
-            "region": "us-east-1",
-        },
-        run_s3_cfg=True,
-    )
-    assert len(rows) == 1 and proxy_server.proxy_endpoint().replace("http://", "") in rows[0][2]
-    assert ep in ("", None)
-
-
-async def test_duckdb_read_through_proxy_logs_telemetry(proxy_server, moto_s3_server, tmp_path):
-    endpoint_url, host_port = moto_s3_server
-    buf = io.BytesIO()
-    pq.write_table(pa.table({"x": list(range(8))}), buf)
-    _seed_moto_object(endpoint_url, "test-bucket", "hello.parquet", buf.getvalue())
-
-    source = {
-        "name": "phase3a-e2e",
-        "service_id": "phase3a-e2e",
-        "fos_native_endpoint": f"http://{host_port}",
-        "endpoint": f"http://{host_port}",
-        "access_key_id": "testing",
-        "secret_access_key": "testing",
-        "region": "us-east-1",
-        "duckdb_path": str(tmp_path / "phase3a_e2e.duckdb"),
-    }
-    captured_rows: list[dict] = []
-    telemetry_proxy._bust_config_cache()
-    with (
-        patch("backend.config.load_config", return_value=MOCK_FOS_CFG),
-        patch(
-            "backend.core.metadata.log_usage_calls",
-            side_effect=lambda _s, rows, process_context=None: captured_rows.extend(rows),
-        ),
-    ):
-        con = _ddb.get_connection(source, skip_view_update=True)
-        try:
-            (count,) = con.execute("SELECT count(*) FROM read_parquet('s3://test-bucket/hello.parquet')").fetchone()
-            assert count == 8
-        finally:
-            con.close()
-        telemetry_proxy._flush_log_writes_for_tests()
-
-    duckdb_rows = [r for r in captured_rows if r.get("caller") == "duckdb.httpfs"]
-    assert any("test-bucket" in (r.get("path") or "") and "hello.parquet" in (r.get("path") or "") for r in duckdb_rows)
-
-
-def test_configure_fos_concurrent_no_write_write_conflict(proxy_server, tmp_path):
-    db_path = str(tmp_path / "concurrent_fos.duckdb")
-    source = {
-        "name": "phase3a-concurrent",
-        "service_id": "phase3a-concurrent",
-        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-        "endpoint": "us-east-1.object.fastlystorage.app",
-        "access_key_id": "AKIA-concurrent",
-        "secret_access_key": "secret-concurrent",
-        "region": "us-east-1",
-    }
-    errors: list[Exception] = []
-
-    def _worker(_i: int) -> None:
-        try:
-            con = duckdb.connect(db_path)
-            try:
-                _ddb._configure_fos(con, source)
-            finally:
-                con.close()
-        except Exception as e:
-            errors.append(e)
-
-    with duckdb.connect(db_path) as _keep_attached, ThreadPoolExecutor(max_workers=16) as ex:
-        list(ex.map(_worker, range(32)))
-    assert not errors
-
-
 def test_fastapi_lifespan_starts_proxy():
     from backend import main as _main
 
@@ -2325,64 +2184,3 @@ def test_upstream_timeout_env_var_override():
         else:
             os.environ["FOS_PROXY_UPSTREAM_TIMEOUT_S"] = original
         importlib.reload(telemetry_proxy)
-
-
-def test_download_chunk_to_local_propagates_process_context_to_worker_threads(tmp_path):
-    from backend.core.ingest.discovery import _download_chunk_to_local
-
-    seen_contexts: list[str | None] = []
-    client = _FakeBoto3Client()
-    telemetry_proxy.install_boto3_proxy_hook(client, _cdn_source())
-
-    class _MockFosClient:
-        def get_object(self, *, Bucket: str, Key: str):
-            hdrs = client.invoke(method="GET", event_name="before-send.s3.GetObject")
-            seen_contexts.append(hdrs.get("X-Telemetry-Context"))
-            return {"Body": io.BytesIO(b"payload")}
-
-    # Simulate an unrelated API request setting _LATEST_PROCESS_CONTEXT on another thread
-    with tlm._LATEST_PROCESS_CONTEXT_LOCK:
-        prev_latest = tlm._LATEST_PROCESS_CONTEXT
-        tlm._LATEST_PROCESS_CONTEXT = "api:POST /api/network-health"
-    try:
-        with tlm.process_context_scope("cron:log_discovery"):
-            # Override _LATEST_PROCESS_CONTEXT mid-flight as if an API request arrived after cron started
-            with tlm._LATEST_PROCESS_CONTEXT_LOCK:
-                tlm._LATEST_PROCESS_CONTEXT = "api:POST /api/network-health"
-            s3_to_local, _ = _download_chunk_to_local(
-                _MockFosClient(),
-                ["s3://bucket/raw/request/a.log.gz", "s3://bucket/raw/request/b.log.gz"],
-                str(tmp_path),
-            )
-    finally:
-        with tlm._LATEST_PROCESS_CONTEXT_LOCK:
-            tlm._LATEST_PROCESS_CONTEXT = prev_latest
-
-    assert len(s3_to_local) == 2
-    assert seen_contexts == ["cron:log_discovery", "cron:log_discovery"]
-
-
-def test_configure_fos_updates_secret_when_process_context_changes(proxy_server):
-    source = {
-        "name": "phase3a-ctx-fp",
-        "service_id": "phase3a-ctx-fp",
-        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-        "endpoint": "us-east-1.object.fastlystorage.app",
-        "access_key_id": "AKIA-phase3a",
-        "secret_access_key": "secret-phase3a",
-        "region": "us-east-1",
-    }
-    con = duckdb.connect(":memory:")
-    try:
-        with tlm.process_context_scope("api:GET /api/bootstrap"):
-            _ddb._configure_fos(con, source)
-            sec1 = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
-        assert "api:GET /api/bootstrap" in sec1
-
-        with tlm.process_context_scope("cron:rollup_recompute"):
-            _ddb._configure_fos(con, source)
-            sec2 = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
-        assert "cron:rollup_recompute" in sec2
-        assert "api:GET /api/bootstrap" not in sec2
-    finally:
-        con.close()

@@ -798,7 +798,7 @@ describe('DebugPanel & DiagnosticsPanel', () => {
   test('subscription picks up _debug_queries / _debug_calls, deduplicates identical notifications, and labels engine dynamically', async () => {
     act(() => {
       useDebugStore.setState({ enabled: true, apiCallsEnabled: true })
-      useServiceStore.setState({ activeServiceId: 'std-svc', services: [{ id: 'std-svc', name: 'Standard Service', is_high_scale: false } as never] })
+      useServiceStore.setState({ activeServiceId: 'std-svc', services: [{ id: 'std-svc', name: 'Default Service' }] })
     })
     const qc = makeDebugClient()
     const { useQuery } = await import('@tanstack/react-query')
@@ -816,7 +816,7 @@ describe('DebugPanel & DiagnosticsPanel', () => {
       expect(screen.getByRole('button', { name: /Show 1 calls/i })).toBeInTheDocument()
     })
     expect(screen.getByText(/12\.50ms/)).toBeInTheDocument()
-    expect(screen.getByText('Data Queries (DuckDB)')).toBeInTheDocument()
+    expect(screen.getByText('Data Queries (ClickHouse)')).toBeInTheDocument()
     await act(async () => {
       const q = qc.getQueryCache().find({ queryKey: ['debug-fixture', 'one'] })!
       qc.getQueryCache().notify({ type: 'updated', query: q } as QueryCacheNotifyEvent)
@@ -825,10 +825,10 @@ describe('DebugPanel & DiagnosticsPanel', () => {
     expect(screen.getByRole('button', { name: /Show 1 queries/i })).toBeInTheDocument()
     await act(async () => {
       qc.setQueryData(['debug-fixture', 'one'], {
-        _debug_queries: [{ sql: 'SELECT 1', time_ms: 99 }],
+        _debug_queries: [{ sql: 'SELECT 1', time_ms: 99, engine: 'ClickHouse' }],
         _debug_calls: [{ service: 'FOS', method: 'GET', path: '/x', time_ms: 8, status: 'OK' }],
       })
-      useServiceStore.setState({ activeServiceId: 'hs-svc', services: [{ id: 'hs-svc', name: 'High-Scale Service', is_high_scale: true } as never] })
+      useServiceStore.setState({ activeServiceId: 'hs-svc', services: [{ id: 'hs-svc', name: 'High-Scale Service' }] })
     })
     await waitFor(() => {
       expect(screen.getByText(/99\.00ms/)).toBeInTheDocument()
@@ -902,8 +902,7 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     const baseProps = {
       syncEnabled: true, setSyncEnabled: vi.fn(), pollingMode: 'regular' as const, setPollingMode,
       deleteAfter: false, setDeleteAfter: vi.fn(), dataRetention: '30', setDataRetention: vi.fn(),
-      cacheRetention: '90', setCacheRetention: vi.fn(), rollupRetention: '12', setRollupRetention: vi.fn(),
-      commitInterval: '5', setCommitInterval: vi.fn(), syncLogEnabled: true, setSyncLogEnabled: vi.fn(),
+      syncLogEnabled: true, setSyncLogEnabled: vi.fn(),
       syncRetention: '7', setSyncRetention: vi.fn(), syncFreqLabel: 'every 2 minutes', isAnalyst: false,
       syncIntervalNum: 120, adminSyncSeconds: 120, rumRetention: '30', setRumRetention: vi.fn(),
       rumEnabled: false, rumLogPeriod: '300', setRumLogPeriod: vi.fn(), rumDeleteAfter: false, setRumDeleteAfter: vi.fn(),
@@ -922,15 +921,15 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(setRumSyncEnabled).toHaveBeenCalledWith(true, expect.anything())
   })
 
-  test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and partial_hour_merge is registered', async () => {
+  test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and sync tasks are registered', async () => {
     useServiceStore.setState({ activeServiceId: 'test-svc' })
     mocks.status.mockReturnValue({ data: { idle: true } })
     const { unmount } = renderWithQuery(<LogsClient initialTab="cron" />)
     expect(screen.getByText('Data Management')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled(); unmount()
-    expect(CRON_DISPLAY_NAMES.partial_hour_merge).toBeTruthy()
-    expect(CRON_EXPLANATIONS.partial_hour_merge).toBeTruthy()
-    expect(CRON_GROUPS.find((g) => g.tasks.includes('rollup_hour_heal'))?.tasks).toContain('partial_hour_merge')
+    expect(CRON_DISPLAY_NAMES.log_discovery).toBeTruthy()
+    expect(CRON_EXPLANATIONS.log_discovery).toBeTruthy()
+    expect(CRON_GROUPS.find((g) => g.tasks.includes('log_discovery'))?.tasks).toContain('gap_heal')
     const postSpy = vi.spyOn(client, 'POST'), start = vi.fn()
     renderWithQuery(
       <QuickActionsBar
@@ -1043,7 +1042,7 @@ describe('SchemaTab & BotSourcesPanel', () => {
   it('SchemaTab renders every column past 50 rows with formatted stats and em-dash for bare columns', () => {
     const schema = Array.from({ length: 80 }, (_, i) => ({ name: `col_${i}`, type: 'VARCHAR', null_percentage: i === 0 ? 25 : 0, approx_unique: 1234, min: 'a', max: 'z' }))
     const { unmount } = render(<SchemaTab schemaData={{ schema } as unknown as SchemaResponse} isLoadingSchema={false} />)
-    for (const name of ['Column Name', 'DuckDB Type', 'Populated %', 'Approx Unique', 'Min Value', 'Max Value']) expect(screen.getByRole('columnheader', { name })).toBeTruthy()
+    for (const name of ['Column Name', 'ClickHouse Type', 'Populated %', 'Approx Unique', 'Min Value', 'Max Value']) expect(screen.getByRole('columnheader', { name })).toBeTruthy()
     expect(screen.getByText('col_79')).toBeTruthy()
     expect(screen.getByText('75.0%')).toBeTruthy(); unmount()
     render(<SchemaTab schemaData={{ schema: [{ name: 'bare', type: 'INTEGER' }] } as unknown as SchemaResponse} isLoadingSchema={false} />)

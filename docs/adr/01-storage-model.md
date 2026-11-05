@@ -1,13 +1,12 @@
 # ADR-01 — Storage Model
 
-**Status:** Partially Superseded (Amended by [ADR-14](14-ducklake-replacement.md) & [ADR-21](21-high-scale-serving-architecture.md))
+**Status:** Superseded by [ADR-21](21-high-scale-serving-architecture.md) (historical)
 **Decided by:** Engineering retrospective
 **Supersedes:** implicit storage model that grew over the perf-improvement branch
 
 > [!NOTE]
-> **Architectural Amendments (v3.0):**
-> - **DuckLake Cutover ([ADR-14](14-ducklake-replacement.md)):** The commit-path durable catalog replaced PyIceberg with DuckLake. Raw logs stream to Fastly Object Storage (FOS), are transformed into Parquet in the local buffer, and commit to DuckLake.
-> - **High-Scale Data Plane ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ingest micro-batches directly to ClickHouse and writes durable FOS archive Parquet. Serving queries ClickHouse directly or uses ephemeral in-memory DuckDB reading durable DuckLake state. The live-buffer tier and rollups-as-query-optimization pattern remain active in standard mode.
+> **Superseded in v3.0.0-rc3 ([ADR-21](21-high-scale-serving-architecture.md)):**
+> Fastly Log Analytics now uses a single, unified storage architecture across all deployments: raw `.gz` logs in Fastly Object Storage (FOS) are claimed and parsed by the stateless ingest worker (`python -m backend.high_scale.worker`), written to verified FOS batch archive artifacts (`high-scale/archive/`), and published into ClickHouse (`request_facts`, `rum_*_facts`, `cmcd_projection_facts`, and minute projections). The local Parquet buffer, Iceberg/DuckLake catalog, and local Top-N rollup files have been removed.
 
 ## Context
 

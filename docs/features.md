@@ -4,37 +4,34 @@ Detailed reference for every feature in the app. The [README](../README.md) has 
 
 ## Ingestion & Storage
 
-### DuckLake transactional data lake
-Logs are stored in a transactional DuckDB **DuckLake** table backed by PostgreSQL 16 (`DUCKLAKE_CATALOG`) and Fastly Object Storage (FOS). Multiple readers and writers can operate concurrently without locking each other out, and snapshots make point-in-time reads and retention cleanup trivial.
+### ClickHouse analytical store & FOS canonical archive
+Logs are ingested by stateless workers (`python -m backend.high_scale.worker`), archived as checksum-verified Parquet batches in Fastly Object Storage (`s3://{bucket}/{prefix}/archive/`), and served from **ClickHouse** MergeTree tables and projections (`request_facts`, `rum_vitals`, `rum_errors`) coordinated by **PostgreSQL 16** (`METADATA_DSN`). Multiple readers and workers operate concurrently without locking each other out, scaling from a single-worker laptop Docker Compose stack (~2–4 GiB RAM) to multi-pod Kubernetes clusters handling up to 1,000,000 RPS bursts.
 
-### Crash-safe ingestion
-Raw `.gz` log files are downloaded, parsed, buffered locally as Parquet, and atomically committed to the DuckLake catalog. An in-flight manifest (`ingest_in_flight` / `ingest_ledger` in PostgreSQL) guards the window between buffer write and metadata commit so an interrupted process never corrupts the table or loses data. On restart, recovery either promotes the buffer to a permanent file or drops the in-flight row and re-ingests cleanly on the next tick.
+### Crash-safe batched ingestion
+Raw `.gz` / `.zst` log files are discovered, claimed under fenced owner epochs in PostgreSQL (`high_scale_source_ledger`), decoded in memory, written as merged canonical Parquet archives to FOS, and published into ClickHouse through a strict `pending` → `visible` publication gate (`high_scale_publication_batches`). Readers query only `visible` batches, so an interrupted worker or row-count mismatch never exposes partial or duplicate data. Automated ledger sweeps (`ledger_sweep`, `ledger_rum_sweep`) recover expired claims on restart or worker failover.
 
 ### Schema evolution
-JSON log fields are mapped to typed DuckLake columns. New fields are added to the schema on the fly; missing fields are filled with NULLs. Invalid or corrupt log lines are isolated and surfaced in the ingestion history rather than failing the batch.
+JSON log fields are mapped to typed schema columns and custom field maps. New fields are absorbed seamlessly; missing fields default cleanly. Invalid or corrupt log lines are isolated into `quarantine_evidence` and surfaced in the admin UI rather than failing the batch.
 
-### Automated DuckLake compaction & optimization
-Small, frequently committed data files are periodically merged into larger files (`local_compact` and `optimize` via `ducklake_flush_inlined_data`, `ducklake_merge_adjacent_files`, and `ducklake_rewrite_data_files`) to keep query performance high and metadata size in check. Old snapshots are expired on an hourly schedule (`expire`).
-
-### Smart local storage & cloud durability
-Queried Parquet data is stored on local NVMe/SSD disk (in `standard` mode) or served via ClickHouse and durable FOS Parquet (in `high_scale` mode) for instant analytical queries. A durable copy of the committed Parquet is pushed to FOS after each commit and can be restored with `python -m backend.provision.cli restore-data --service-id <id>`.
+### Automated retention & archive maintenance
+Expired ClickHouse partitions, FOS archive batches, and raw log objects are cleaned up on an hourly schedule (`expire`), while operational metadata tables (`cron_runs`, `usage_log`, `ingested_files`, `slow_queries`) are pruned daily (`metadata_cleanup`).
 
 ### Log cleanup (optional)
-After successful DuckLake commits, the original `.gz` raw log files can be removed from the bucket automatically to keep storage costs down.
+After raw log objects are archived to FOS Parquet and published to ClickHouse, the original `.gz` / `.zst` raw log files can be removed from the bucket automatically to keep storage costs down.
 
 ### Multi-source support
-Every Fastly service / bucket / prefix combination gets its own configuration JSON, DuckDB engine file, and DuckLake table schema. Switch between services from the navigation bar to analyze logs from multiple Fastly services side by side.
+Every Fastly service / bucket / prefix combination gets its own configuration JSON (`configs/{service_id}.json`) and isolated tenant scope in ClickHouse and PostgreSQL. Switch between services from the navigation bar to analyze logs from multiple Fastly services side by side.
 
 ## Provisioning
 
 ### Automated provisioning
-A guided wizard (or the `python -m backend.provision.cli` CLI) creates the FOS bucket, a read-write access key scoped to it, a CDN-fronting Fastly Delivery service, and the logging endpoint on your target VCL service in one flow. Provisioning failures auto-rollback to leave your Fastly account in a clean state.
+A guided wizard (`token → service → storage → ngwaf → fields → execute`) or the `python -m backend.provision.cli` CLI creates the FOS bucket, a read-write access key scoped to it, a CDN-fronting Fastly Delivery service, and the logging endpoint on your target VCL service in one flow. Provisioning failures auto-rollback to leave your Fastly account in a clean state.
 
 ### Log sampling
 Optionally log only a random percentage (1–100%) of requests to manage storage costs on high-traffic services. Sampling is implemented via Fastly [logging conditions](https://www.fastly.com/documentation/guides/full-site-delivery/conditions/using-conditions/), which the app creates and manages automatically.
 
 ### Teardown
-A single command (or button in the UI) removes everything provisioning created: the logging endpoint on the VCL service, the CDN service, the FOS access key, the local config, the local DuckDB, and the local Parquet cache. Optionally also removes the FOS bucket contents.
+A single command (or button in the UI) removes everything provisioning created: the logging endpoint on the VCL service, the CDN service, the FOS access key, the local config, and the service's ClickHouse and PostgreSQL records. Optionally also removes the FOS bucket contents.
 
 ## Log Field Configuration
 
@@ -45,7 +42,7 @@ The **Fields** button on each service card opens a configurator with core HTTP f
 For high-fidelity metrics (TTFB / TTLB, network quality, edge timings) the tool generates VCL capture snippets that read the right variables at the network edge before shielding or backend fetches can mask the data. The **Logging Settings** modal can deploy the updated format and VCL snippets to your Fastly service when you change field selections.
 
 ### Custom log fields
-Admins can define arbitrary additional VCL fields appended to the log format. Each custom field has a name, a VCL log expression (e.g. `%{req.http.X-My-Header}V`), optional per-hook VCL snippets, and a DuckDB column type. Custom fields appear in the dashboard, raw logs viewer, and filter panel alongside built-in fields.
+Admins can define arbitrary additional VCL fields appended to the log format. Each custom field has a name, a VCL log expression (e.g. `%{req.http.X-My-Header}V`), optional per-hook VCL snippets, and a column data type. Custom fields appear in the dashboard, raw logs viewer, and filter panel alongside built-in fields.
 
 ### Log format size guard
 Fastly enforces a practical limit (`FASTLY_LOG_FORMAT_SAFE_MAX`, default 12,000 characters, against Fastly's ~16 KiB hard limit) on log format strings. The configurator warns if your selection approaches the cap and estimates the per-line byte cost before deploying.
@@ -58,8 +55,8 @@ Traffic-over-time with click-and-drag time range selection (1h / 24h / 7d / 30d 
 ### Insights
 Automated anomaly detection that compares a recent window against a longer baseline. 51 insights are organized into five tabbed categories — Security & Threat Detection, Origin Health & Stability, Edge & Delivery Performance, Network Path, and Traffic & Volumetrics — with per-tab severity badges and a full severity breakdown in each panel; only the active tab computes, so cards load when you open them. Coverage spans error spikes, credential enumeration, content-discovery (404) scanning, session harvesting, low-and-slow probing, regional traffic surges, new IPs / geographies / ASNs, WAF signal changes, cache efficiency collapses and hit-ratio cliffs, latency regressions (regional and per-PoP), HTTP/3 fallback, per-ASN network degradation, method and referer drift, and more. A few insights require optional log fields (e.g. `cookie_session` for session harvesting) and stay dormant until the field is enabled and history accrues.
 
-### Free-form query editor
-A DuckDB SQL pad pre-seeded with the logs view, useful for ad-hoc questions that don't fit the canned dashboards.
+### Free-form SQL console
+A read-only ClickHouse SQL pad (`/query`) scoped to least-privilege `fla_cv_*` console views, useful for ad-hoc questions that don't fit the canned dashboards. See [docs/runbooks/high-scale-analyst-console.md](runbooks/high-scale-analyst-console.md).
 
 ### Saved views
 Pin filter sets + time ranges as saved views from the filter bar. Restore them in one click from any analytics page.
@@ -70,12 +67,12 @@ Threshold-based alerts that fire webhooks when a metric crosses an operator/thre
 ## Cost & Usage Visibility
 
 ### Usage & Cost page
-Live breakdown of storage usage (raw logs vs. DuckLake Parquet), a bar chart of Fastly Object Storage Class A / Class B operations, period totals with estimated cost, and an interactive cost estimator. The estimator pre-fills from your active service's traffic stats and the observed average log-line size from your ingested data.
+Live breakdown of storage usage (raw logs vs. FOS Archive Parquet), a bar chart of Fastly Object Storage Class A / Class B operations, period totals with estimated cost, and an interactive cost estimator. The estimator pre-fills from your active service's traffic stats and the observed average log-line size from your ingested data.
 
 Requires a `FASTLY_API_KEY` with the [Billing permission](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/about-user-roles-and-permissions/#account-management-roles).
 
 ### Log-line accounting
-A dedicated admin panel reconciles Fastly's authoritative `/stats/service/{id}` log emission counter against locally-ingested rows, bucket-by-bucket. Surfaces per-bucket gaps, a worst-bucket callout, and a sustained-loss alert (≥2 consecutive hours with ≥5% one-sided gap) so pipeline loss is visible immediately rather than hidden in aggregate totals.
+A dedicated admin panel reconciles Fastly's authoritative `/stats/service/{id}` log emission counter against ingested rows, bucket-by-bucket. Surfaces per-bucket gaps, a worst-bucket callout, and a sustained-loss alert (≥2 consecutive hours with ≥5% one-sided gap) so pipeline loss is visible immediately rather than hidden in aggregate totals.
 
 ### FOS usage logging
 Every FOS Class A / Class B operation and CDN download is recorded with its process context (cron job name or API route) for cost analysis. The `/admin/usage-log` page surfaces a filterable, exportable timeline with cost attribution by job / route.
@@ -84,10 +81,10 @@ Every FOS Class A / Class B operation and CDN download is recorded with its proc
 
 The app is designed to minimize Fastly Object Storage operation costs:
 
-- **CDN-fronted reads.** With `cdn_url` configured, all Parquet data reads go through a Fastly Delivery service that fronts the FOS bucket. Edge caching means repeated queries cost **zero Class B operations** at the storage layer. The provisioning wizard generates the CDN VCL that handles AWS4 signing and shared-secret authentication automatically (see [CDN fronting](../README.md#cdn-fronting-optional-but-strongly-recommended) for hand-managed setups).
-- **Lazy listing.** The UI relies on local metadata for status updates; FOS `LIST` (Class A) only fires when polling for new raw logs. Ingestion uses S3 pagination markers (`StartAfter`) to scan only *new* files instead of iterating the bucket.
-- **Batch processing.** Bulk deletion and multi-file ingestion are batched to minimize API round-trips.
-- **Dashboards never hit the cloud.** All analytics queries serve from local DuckDB + DuckLake storage (or ClickHouse in high-scale mode) and PostgreSQL 16 operational metadata (`METADATA_DSN`). The only cloud reads are the cron-driven ingest cycle and the on-demand Fastly Stats reconciliation in the log-accounting panel (rate-limited to ≤1 call/minute per open admin tab).
+- **CDN-fronted reads.** With `cdn_url` configured, FOS reads go through a Fastly Delivery service that fronts the FOS bucket. Edge caching means repeated downloads cost **zero Class B operations** at the storage layer. The provisioning wizard generates the CDN VCL that handles AWS4 signing and shared-secret authentication automatically (see [CDN fronting](../README.md#cdn-fronting-optional-but-strongly-recommended) for hand-managed setups).
+- **Lazy listing.** The UI relies on PostgreSQL metadata for status updates; FOS `LIST` (Class A) only fires when polling for new raw logs. Ingestion uses S3 pagination markers (`StartAfter`) and fenced cursors to scan only *new* files instead of iterating the bucket.
+- **Page-batched archiving.** Multi-file ingestion merges pages of raw log objects into single archive Parquet files and batches bulk deletions to minimize API round-trips.
+- **Dashboards never hit the cloud.** All analytics queries serve from ClickHouse and PostgreSQL 16 operational metadata (`METADATA_DSN`). The only cloud reads are the ingest cycle and the on-demand Fastly Stats reconciliation in the log-accounting panel (rate-limited to ≤1 call/minute per open admin tab).
 
 ## Collaboration
 
@@ -99,29 +96,27 @@ Sharing runs in direct mode against a public HTTPS endpoint you control (no thir
 1. **Your own hostname** — requires a publicly resolvable hostname pointing at the admin's machine, a TLS cert (Caddy / Cloudflare / Let's Encrypt), and the forward port reachable from the internet.
 2. **Your public IP** — no DNS required. Still needs HTTPS because analyst session cookies are issued with `secure=true`. Public CAs do not issue certs for raw IPs, so plan on a self-signed cert (analysts must trust the browser warning) or a reverse proxy that terminates TLS for a hostname.
 
-
-
 See [SECURITY.md](../SECURITY.md#live-dashboard-sharing--trust-model) for the trust model and per-mode caveats. Best for short-lived collaboration where provisioning a second instance is overkill.
 
 ## Operational
 
 ### Log Management view
-Dedicated page for managing the ingestion pipeline, reviewing import / commit / sync history, and updating log settings (including automated log format alignment when you change field selections).
+Dedicated page for managing the ingestion pipeline, reviewing discovery / archive / publication history, and updating log settings (including automated log format alignment when you change field selections).
 
 ### Cron run history
-Every scheduled job (sync, commit, optimize, expire) writes a row to `cron_runs` with start/end timestamps, status, and counters. Surfaced under the **Cron Runs** tab on the Log Management page.
+Every scheduled job (`log_discovery`, `expire`, `full_sync`, `gap_heal`, `ledger_sweep`, etc.) writes a row to `cron_runs` with start/end timestamps, status, and counters. Surfaced under the **Cron Runs** tab on the Log Management page.
 
-### Automated syncing
-Sync, commit, optimization, and snapshot expiration all run in the background via an in-process APScheduler. No crontab setup required. Jobs are added and removed per service automatically when you provision or tear down.
+### Automated scheduling & worker ingestion
+Discovery, retention expiration, ledger sweeps, and metadata maintenance run in the background via an in-process APScheduler alongside the stateless ingest worker (`python -m backend.high_scale.worker`). No crontab setup required. Jobs are added and removed per service automatically when you provision or tear down.
 
 ### Health probe
-`GET /api/health` is a cheap liveness check. `GET /api/health?deep=1` also verifies per-service ingest freshness and returns 503 when any service is degraded (last ingest older than the configured `stale_minutes`, adaptively widened per-service from that service's own ingest history to avoid false positives on low-traffic services, or last sync errored). Safe to wire into a load balancer.
+`GET /api/health` is a cheap liveness check. `GET /api/health?deep=1` probes ClickHouse, PostgreSQL 16, FOS reachability, and per-service ingest freshness, returning 503 when any component is unreachable or any service is degraded (last ingest older than the configured `stale_minutes`, adaptively widened per-service from that service's own ingest history to avoid false positives on low-traffic services, or last sync errored). Safe to wire into a load balancer.
 
 ### NGWAF integration
 If a Next-Gen WAF workspace is linked during provisioning, the app syncs verified-bot signal data from the Fastly NGWAF API into PostgreSQL (`ngwaf_bots` table) and enriches matching log rows for analysis.
 
 ### Control Room
-Real-time operational dashboard at `/control-room` (the Admin tab is hidden from analysts). Six tabs: Summary, CDN & Caching, Security, Performance, Network, and Admin. Live metrics come from `rt.fastly.com` via SSE (requests/sec, error rate, cache hit ratio, bandwidth). The Admin tab surfaces log-field audit results and ingest health, and a correlator lets admins drill into any metric dimension against ingested logs. Mutation endpoints (mitigations, rules, allowlist, big red button, cost governor) are admin-gated stubs that return 501 Not Implemented.
+Real-time operational dashboard at `/control-room` (the Admin tab is hidden from analysts). Six tabs: Summary, CDN & Caching, Security, Performance, Network, and Admin. Live metrics come from `rt.fastly.com` via SSE (requests/sec, error rate, cache hit ratio, bandwidth). The Admin tab surfaces log-field audit results and ingest health, and a correlator lets admins drill into any metric dimension against ingested logs in ClickHouse. Mutation endpoints (mitigations, rules, allowlist, big red button, cost governor) are admin-gated stubs that return 501 Not Implemented.
 
 ### Bring your own bucket (manual config)
 If you already have a bucket, you can configure the app by writing a JSON file in `configs/` instead of running the provisioning wizard. See `config.example.json` for the schema.
@@ -129,7 +124,7 @@ If you already have a bucket, you can configure the app by writing a JSON file i
 ## Session Scoring
 
 ### What it does
-Real-time edge scoring of every request as it transits Fastly. A two-layer scorer (L1 cookie+timing heuristics, L2 PageRank transition matrix over URL paths) produces a 0–100 score per request along with a reason code. Scores are logged alongside every line and land in the data store as ordinary columns, queryable from the dashboard, raw logs viewer, and SQL pad.
+Real-time edge scoring of every request as it transits Fastly. A two-layer scorer (L1 cookie+timing heuristics, L2 PageRank transition matrix over URL paths) produces a 0–100 score per request along with a reason code. Scores are logged alongside every line and land in ClickHouse as ordinary columns, queryable from the dashboard, raw logs viewer, and SQL pad.
 
 ### Custom log fields
 Enabling scoring on a service appends nine system-managed custom fields to the log format (re-asserted on every log-field write):
@@ -176,8 +171,8 @@ Real User Monitoring (RUM) captures fine-grained, client-side metrics and Core W
 * **SDK Asset Router (`/js/faro-sdk.js`):** Proxies and caches the corresponding versioned SDK package (`rum/faro-web-sdk-v{version}.iife.js`) from FOS with public caching headers (`stale-while-revalidate`).
 
 ### Beacon Ingestion & Processing
-* **Server-Side Receiver (`/rum-beacon`):** A high-performance, secure backend receiver. It parses client-side JSON beacons (navigation timings, web vitals, errors, browser/device info) and maps them to PyArrow tables.
-* **Crash-Safe Buffer Ingest:** Faro event data is buffered to local Parquet files. Dedicated `rum_sync` and `rum_commit` cron jobs run on the APScheduler to commit RUM data atomically into the hour-partitioned DuckLake tables (`client_vitals` and `client_errors`).
+* **Server-Side Receiver (`/rum-beacon`):** A high-performance, secure backend receiver. It parses client-side JSON beacons (navigation timings, web vitals, errors, browser/device info) and streams them via Fastly logging to `raw/rum/`.
+* **Crash-Safe Batched Ingest:** `rum_discovery` and the stateless ingest worker claim raw RUM objects, archive them to FOS Parquet, and publish verified batches into ClickHouse (`rum_vitals` and `rum_errors`), with `ledger_rum_sweep` as the automated crash-recovery sweep.
 * **Analytics & Real-time Live Feed:** The RUM dashboard visualizes core performance metrics (LCP, FID, CLS, TTFB), error rates, device/OS distributions, and features an active, streaming SSE ticker feed (`/api/services/{id}/rum/live-events`) displaying navigation ticks as they occur.
 
 ## Assets Shield (Static Asset Delivery Analytics)

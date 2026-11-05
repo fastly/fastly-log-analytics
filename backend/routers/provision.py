@@ -65,13 +65,11 @@ def _sse(type_: str, message: str | None = None, **extra: object) -> str:
 
 
 def _invalidate_service_credentials(service_id: str) -> None:
-    """Drop in-process FOS client + pooled DuckDB S3 SECRET caches for ``service_id``."""
+    """Drop in-process FOS client cache for ``service_id``."""
     try:
-        from backend.core import duckdb as _ddb
-        from backend.core import duckdb_pool as _ddb_pool
+        from backend.core import fos_client as _db
 
-        _ddb.clear_fos_client(service_id)
-        _ddb_pool.reset_pool_for_service(service_id)
+        _db.clear_fos_client(service_id)
     except Exception:
         logger.warning("[provision] credential cache invalidation failed for %s", service_id, exc_info=True)
 
@@ -268,7 +266,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     body = body or ProvisionTeardownRequest()
     token, service_id = body.token, body.service_id
     from backend import config as svcconfig
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
     from backend.core.vcl_generator import validate_destructive_token
     from backend.provision import _sync_crontab, perform_teardown
 
@@ -329,14 +327,6 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                     if body.remove_cron:
                         yield _sse("status", f"Warning: Failed to update cron jobs: {e}")
 
-                try:
-                    from backend.core import storage as db_storage
-
-                    _cache_src = svcconfig.config_to_source(svc_cfg) if svc_cfg else {"name": sid}
-                    db_storage.invalidate_service_caches(_cache_src)
-                except Exception:
-                    logger.debug("stream: db_storage.invalidate_service_caches failed (ignored)", exc_info=True)
-
                 _invalidate_service_credentials(sid)
 
             yield _sse("status", "Starting teardown of Fastly resources...")
@@ -344,15 +334,6 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 yield json.dumps(event)
 
             if body.remove_cache:
-                db_path = svcconfig.duckdb_path(sid) if sid else _db.DUCKDB_PATH
-                for f in [db_path, db_path + ".wal"]:
-                    if os.path.exists(f):
-                        try:
-                            os.remove(f)
-                            _db.clear_initialization_state(f)
-                        except Exception as e:
-                            yield _sse("status", f"Warning: could not remove {os.path.basename(f)}: {e}")
-
                 src_mock = {"bucket": state.get("fos_bucket_name", ""), "prefix": state.get("fos_prefix", "")}
                 if src_mock["bucket"]:
                     svc_cache_dir = _db._cache_dir(src_mock)
@@ -381,7 +362,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                     except Exception as e:
                         yield _sse("status", f"Warning: could not clear metadata: {e}")
 
-                yield _sse("status", "Removed local database and cache")
+                yield _sse("status", "Removed local metadata and cache")
 
             if sid and not body.remove_cache:
                 try:
@@ -419,7 +400,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
 @provision_router.post("/execute")
 def provision_execute(req: ProvisionExecuteRequest):
     from backend import config as svcconfig
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
     from backend.provision import parse_period
     from backend.utils.pop_utils import fetch_pop_locations
 
@@ -443,8 +424,6 @@ def provision_execute(req: ProvisionExecuteRequest):
         "cdn_shield": req.cdn_shield,
         "enable_cron_sync": req.enable_cron_sync,
         "delete_after": req.delete_after,
-        "commit_interval_mins": req.commit_interval_mins,
-        "enable_cron_compact": req.enable_cron_compact,
         "log_retention_days": req.log_retention_days,
         "rum_retention_days": req.rum_retention_days,
         "logging_enabled": req.logging_enabled,
@@ -553,8 +532,6 @@ def provision_execute(req: ProvisionExecuteRequest):
                                 "log_period": cfg.get("log_period"),
                                 "enable_cron_sync": cfg.get("enable_cron_sync"),
                                 "delete_after": cfg.get("delete_after"),
-                                "commit_interval_mins": cfg.get("commit_interval_mins"),
-                                "enable_cron_compact": cfg.get("enable_cron_compact"),
                                 "log_retention_days": cfg.get("log_retention_days"),
                                 "log_fields": cfg.get("log_fields"),
                             },
@@ -732,8 +709,6 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "cdn_secret": body.get("cdn_secret"),
         "enable_cron_sync": body.get("enable_cron_sync", True),
         "delete_after": body.get("delete_after", True),
-        "commit_interval_mins": body.get("commit_interval_mins", 5),
-        "enable_cron_compact": body.get("enable_cron_compact", True),
         "log_retention_days": body.get("log_retention_days", 30),
         "rum_retention_days": body.get("rum_retention_days", 30),
         "provisioning": {"fos_key_id": fos_key_id},
@@ -795,6 +770,25 @@ def provision_ingest(payload: ProvisionConfigRequest):
                     state["rum"][k] = faro_src[k]
 
     write_service_config(state)
+
+    try:
+        from backend.high_scale.ingest_controller import (
+            HighScaleServiceRegistration,
+            get_high_scale_service_registry,
+        )
+
+        svc_id = state.get("logging_service_id") or ""
+        if svc_id:
+            get_high_scale_service_registry().register(
+                HighScaleServiceRegistration(
+                    service_id=svc_id,
+                    source_bucket=state.get("fos_bucket_name") or "",
+                    source_prefix=state.get("fos_prefix") or "",
+                    delete_raw_after_commit=bool(state.get("delete_after", True)),
+                )
+            )
+    except Exception:
+        logger.debug("[provision_ingest] high-scale registry registration skipped/failed", exc_info=True)
 
     try:
         from backend.cron.scheduler import get_scheduler

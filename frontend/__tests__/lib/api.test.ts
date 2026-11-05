@@ -442,8 +442,6 @@ describe('queryKeys.admin shapes', () => {
     ['schemaAll', k.schemaAll(), ['admin', 'schema']],
     ['storage', k.storage('s'), ['admin', 'storage', 's']],
     ['storageAll', k.storageAll(), ['admin', 'storage']],
-    ['storageCalendar', k.storageCalendar('s'), ['admin', 'storage', 'calendar', 's']],
-    ['storageInfo', k.storageInfo('s'), ['admin', 'storage-info', 's']],
     ['storageTree', k.storageTree('s'), ['admin', 'storage-tree', 's']],
     ['rawTree', k.rawTree('s'), ['admin', 'raw-tree', 's']],
     ['fileTree storage', k.fileTree('storage', 's', 'p/'), ['admin', 'storage-tree', 's', 'p/']],
@@ -460,7 +458,7 @@ describe('queryKeys.admin shapes', () => {
     const qc = createTestQueryClient()
     qc.setQueryData(k.cronLogs('s', 'all', 'all'), 1)
     qc.setQueryData(k.cronLogs('other', 'all', 'all'), 2)
-    qc.setQueryData(k.storageCalendar('s'), 3)
+    qc.setQueryData(k.storage('s'), 3)
     qc.setQueryData(k.queryMonitorSnapshot(false), 4)
 
     qc.invalidateQueries({ queryKey: k.cronLogsFor('s') })
@@ -468,7 +466,7 @@ describe('queryKeys.admin shapes', () => {
     expect(qc.getQueryState(k.cronLogs('other', 'all', 'all'))?.isInvalidated).toBe(false)
 
     qc.invalidateQueries({ queryKey: k.storageAll() })
-    expect(qc.getQueryState(k.storageCalendar('s'))?.isInvalidated).toBe(true)
+    expect(qc.getQueryState(k.storage('s'))?.isInvalidated).toBe(true)
 
     qc.invalidateQueries({ queryKey: k.queryMonitorSnapshotAll() })
     expect(qc.getQueryState(k.queryMonitorSnapshot(false))?.isInvalidated).toBe(true)

@@ -5,32 +5,21 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import os
 import random
 import sys
-import tempfile
 import time
 import types
-import uuid
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import duckdb
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 from fastapi.encoders import jsonable_encoder
 
-import backend.core.duckdb_pool as duckdb_pool
-from backend.core.log_fields import LOG_FIELD_CATALOG, resolve_enabled_fields
-from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME, IP_SPREAD_DIR_NAME
-from backend.repositories._base import _safe_table
+from backend.core.log_fields import resolve_enabled_fields
 
 # ── Sources & TinyFos (from sources.py) ──────────────────────────────────────
 
@@ -72,7 +61,6 @@ def make_source(
             "service_id": service_id or name,
             "fos_local_warehouse": True,
             "_cache_dir_override": str(cache),
-            "duckdb_path": str(base_dir / f"{name}.duckdb"),
         }
     elif kind == "cache":
         src = {
@@ -225,7 +213,7 @@ async def await_until(
         interval = min(interval * backoff_factor, max_interval)
 
 
-# ── Ingest ledger & DuckLake batch convert helpers (from ledger.py) ──────────
+# ── Ingest ledger helpers (from ledger.py) ───────────────────────────────────
 
 
 def clear_ledger(service_id: str, *, quarantine: bool = False):
@@ -286,117 +274,6 @@ def download_stub(s3_to_local: dict[str, str], requested: list[list[str]] | None
     return _download
 
 
-def attacher(catalog: str, data_path: str, read_only_override: bool = False):
-    """Build a file-backed ``ducklake:`` attach callback for tests."""
-
-    def _attach(con_arg, src_arg=None, read_only: bool = False):
-        con_arg.execute("INSTALL ducklake; LOAD ducklake;")
-        ro = ", READ_ONLY" if (read_only or read_only_override) else ""
-        for attempt in range(40):
-            try:
-                con_arg.execute(f"ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data_path}'{ro})")
-                break
-            except duckdb.Error as exc:
-                if "already exists" in str(exc).lower():
-                    break
-                if attempt == 39:
-                    raise
-                time.sleep(0.05)
-        return True
-
-    return _attach
-
-
-def lake_reader(attach_fn, *, read_only: bool = False):
-    """Open a fresh DuckDB connection attached to the test DuckLake catalog."""
-    con = duckdb.connect()
-    attach_fn(con, None, read_only=read_only)
-    return con
-
-
-class DuckLakeLedgerEnv:
-    """Reusable context manager for DuckLake + ingest ledger convert tests.
-
-    Patches ``load_config``, ``SERVICES_DATA_DIR``, ``get_source_for_service``,
-    ``_get_fos_client``, ``_download_chunk_to_local``, ``_ducklake_attach``,
-    ``_configure_fos``, and ``ducklake_table_name``.
-
-    Yields ``self``, which is also directly callable as an ``attach(con, src, read_only=...)``
-    function for backwards compatibility with ``with _batch_env(...) as attach:``.
-    """
-
-    def __init__(
-        self,
-        service_id: str,
-        tmp_path,
-        download=None,
-        *,
-        s3_to_local: dict[str, str] | None = None,
-        fos=None,
-        attach=None,
-        cfg: dict[str, Any] | None = None,
-        bucket: str = "test-bucket",
-        prefix: str = "",
-        read_only_override: bool = False,
-        table_name: str | None = "logs",
-    ) -> None:
-        self.service_id = service_id
-        self.tmp_path = tmp_path
-        self.bucket = bucket
-        self.prefix = prefix
-        self.src = {"service_id": service_id, "name": service_id, "bucket": bucket, "prefix": prefix}
-        self.catalog = str(tmp_path / "cat.ducklake")
-        self.data_path = str(tmp_path / "lakedata")
-        self.real_attach = attacher(self.catalog, self.data_path, read_only_override)
-        self.attach = attach if attach is not None else self.real_attach
-        self.fos = fos if fos is not None else MagicMock()
-        self.cfg = cfg if cfg is not None else {"service_id": service_id}
-        if download is not None:
-            self.download = download
-        else:
-            self.download = download_stub(s3_to_local or {})
-        self.table_name = table_name
-        self._stack = []
-
-    def __call__(self, con_arg, src_arg=None, read_only: bool = False):
-        return self.real_attach(con_arg, src_arg, read_only=read_only)
-
-    def reader(self, *, read_only: bool = False):
-        return lake_reader(self.real_attach, read_only=read_only)
-
-    def __enter__(self):
-        patches = [
-            patch("backend.config.load_config", return_value=self.cfg),
-            patch("backend.core.duckdb.get_source_for_service", return_value=self.src),
-            patch("backend.core.ingest._get_fos_client", return_value=self.fos),
-            patch("backend.core.ingest._download_chunk_to_local", side_effect=self.download),
-            patch("backend.core.storage._core._ducklake_attach", side_effect=self.attach),
-            patch("backend.core.ingest._configure_fos"),
-            patch("backend.core.duckdb._configure_fos"),
-            patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
-            patch("backend.config.HOT_S3_ENDPOINT", False),
-        ]
-        if self.table_name is not None:
-            patches.append(patch("backend.core.storage._core.ducklake_table_name", return_value=self.table_name))
-        else:
-            patches.append(
-                patch(
-                    "backend.core.storage._core.ducklake_table_name",
-                    side_effect=lambda src, table_name="logs": table_name,
-                )
-            )
-        self._stack = patches
-        for p in self._stack:
-            p.start()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        for p in reversed(self._stack):
-            p.stop()
-        self._stack = []
-        return False
-
-
 # ── Config store fakes & Fastly provisioning mocks (from config_fakes.py) ────
 
 
@@ -454,25 +331,6 @@ def read_persisted_config(service_id: str = "logsvc1") -> dict[str, Any]:
     from backend import config as svcconfig
 
     return json.loads(svcconfig.config_path(service_id).read_text())
-
-
-def fetch_metric_snapshot_history(
-    metric: str,
-    *,
-    since: Any,
-    service_id: str | None = None,
-    task: str | None = None,
-) -> list[dict[str, Any]]:
-    """Test helper wrapping ``metric_snapshots.get_batch`` for a single metric."""
-    from backend.cron.jobs import metric_snapshots
-
-    batch = metric_snapshots.get_batch(since=since)
-    parts = [metric]
-    if service_id:
-        parts.append(service_id)
-    if task:
-        parts.append(task)
-    return batch.get("|".join(parts), [])
 
 
 @pytest.fixture
@@ -590,7 +448,7 @@ def make_happy_path_fastly_mock_with_post_secret(
     return MagicMock(side_effect=side_effect)
 
 
-# ── DuckDB analytical table fixtures (from duckdb_fixtures.py) ───────────────
+# ── Synthetic log record generators ──────────────────────────────────────────
 
 DEFAULT_TABLE_NAME = "test_service"
 
@@ -661,399 +519,7 @@ def generate_mock_logs(config: dict, num_logs: int = 100, hours_ago: int = 1) ->
     return generate_mock_records(config, num_logs=num_logs, hours_ago=hours_ago)
 
 
-def insert_mock_logs(con, table_name: str, logs: list[dict]):
-    """Inserts a list of mock JSON logs directly into the DuckDB connection."""
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
-        for log in logs:
-            f.write(json.dumps(log) + "\n")
-        temp_path = f.name
-
-    try:
-        raw_fields = [f for f in LOG_FIELD_CATALOG if f.get("vcl") is not None]
-        columns_map = {f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else f["duckdb_type"]) for f in raw_fields}
-        for log in logs:
-            for k, v in log.items():
-                if k not in columns_map:
-                    if isinstance(v, bool):
-                        columns_map[k] = "BOOLEAN"
-                    elif isinstance(v, int):
-                        columns_map[k] = "BIGINT"
-                    elif isinstance(v, float):
-                        columns_map[k] = "DOUBLE"
-                    else:
-                        columns_map[k] = "VARCHAR"
-
-        schema_def = ", ".join([f'"{col}" {dtype}' for col, dtype in columns_map.items()])
-        con.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({schema_def})")
-        for col, dtype in columns_map.items():
-            try:
-                con.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS "{col}" {dtype}')
-            except Exception:
-                pass
-
-        cols_sql = "{" + ", ".join(f"'{k}': '{v}'" for k, v in columns_map.items()) + "}"
-        con.execute(f"INSERT INTO {table_name} BY NAME SELECT * FROM read_json_auto('{temp_path}', columns={cols_sql})")
-    finally:
-        os.unlink(temp_path)
-
-
-def make_seeded_logs_con(
-    table_name: str = DEFAULT_TABLE_NAME,
-    num_rows: int = 20,
-) -> duckdb.DuckDBPyConnection:
-    """Create an in-memory DuckDB connection with the full 43-column analytical schema
-    and ``num_rows`` deterministic rows covering status codes, POPs, countries, and latencies.
-    """
-    con = duckdb.connect(":memory:")
-    table = _safe_table(table_name)
-    con.execute(
-        f"""
-        CREATE TABLE {table} (
-            "timestamp" TIMESTAMPTZ, "dt" VARCHAR, "timestamp_hour" VARCHAR, "status" INTEGER,
-            "country" VARCHAR, "url" VARCHAR, "ip" VARCHAR, "method" VARCHAR, "ua" VARCHAR,
-            "pop" VARCHAR, "asn" INTEGER, "city" VARCHAR, "region" VARCHAR, "elapsed" INTEGER,
-            "cache" VARCHAR, "ottfb" DOUBLE, "ttfb" DOUBLE, "ottlb" DOUBLE, "waf_sig" VARCHAR,
-            "edge" BOOLEAN, "lat" DOUBLE, "lon" DOUBLE, "resp_bytes" INTEGER, "oip" VARCHAR,
-            "ost" INTEGER, "tcp_rtt" INTEGER, "ploss" DOUBLE, "rtt_var" INTEGER, "rtt_min" INTEGER,
-            "metro" VARCHAR, "ja3" VARCHAR, "ja4" VARCHAR, "ttl" INTEGER, "p_type" VARCHAR,
-            "transport" VARCHAR, "c_speed" VARCHAR, "c_type" VARCHAR, "server_region" VARCHAR,
-            "retrans" INTEGER, "bw" INTEGER, "delivery_rate" INTEGER, "rid" VARCHAR, "prid" VARCHAR
-        )
-        """
-    )
-    base = datetime.now(UTC) - timedelta(hours=1)
-    statuses = [200, 200, 200, 200, 404, 500, 200, 304, 301, 200]
-    pops = ["LAX", "JFK", "LHR"]
-    step_minutes = max(1, 60 // max(num_rows, 1))
-    for i in range(num_rows):
-        ts = base + timedelta(minutes=i * step_minutes)
-        status = statuses[i % len(statuses)]
-        con.execute(
-            f"INSERT INTO {table} VALUES " + "(" + ", ".join(["?"] * 43) + ")",
-            [
-                ts,
-                ts.strftime("%Y-%m-%d"),
-                ts.strftime("%Y-%m-%d-%H"),
-                status,
-                "US" if i % 3 == 0 else "GB",
-                f"/path-{i % 10}",
-                f"10.0.0.{i}",
-                "GET",
-                "Mozilla/5.0",
-                pops[i % len(pops)],
-                15169 + (i % 5),
-                "San Francisco",
-                "CA",
-                50 + i * 10,
-                "HIT" if i % 2 == 0 else "MISS",
-                50000.0 + i,
-                0.05 + i * 0.01,
-                0.1 + i * 0.01,
-                "",
-                True,
-                37.7749,
-                -122.4194,
-                500 + i * 100,
-                "origin-1.example.com",
-                status,
-                10000 + i * 100,
-                0.0,
-                100,
-                50,
-                "807",
-                "ja3_fp",
-                "ja4_fp",
-                300,
-                "U",
-                "h2",
-                "C",
-                "broadband",
-                "us-west",
-                0,
-                100000,
-                100000,
-                f"rid_{i}",
-                f"prid_{i % 5}",
-            ],
-        )
-    return con
-
-
-# ── Rollup writer/reader test helpers (from rollups.py) ──────────────────────
-
-ALL_FIELDS = "all_fields.parquet"
-DEFAULT_ANCHOR = datetime(2026, 3, 15, 10, 0, 0, tzinfo=UTC)
-
-
-@contextmanager
-def noop_lock(*_a: Any, **_k: Any) -> Iterator[None]:
-    """No-op stand-in for per-service context-manager locks in unit tests."""
-    yield
-
-
-def days_ago_iso(days: int) -> str:
-    return (datetime.now(UTC).date() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-
-def yesterday_iso() -> str:
-    return days_ago_iso(1)
-
-
-def two_days_ago_iso() -> str:
-    return days_ago_iso(2)
-
-
-def three_days_ago_iso() -> str:
-    return days_ago_iso(3)
-
-
-def past_hour(hours_ago: int) -> tuple[str, datetime]:
-    """``(partition key "YYYY-MM-DD-HH", hour-aligned datetime)`` for ``hours_ago`` hours back."""
-    dt = (datetime.now(UTC) - timedelta(hours=hours_ago)).replace(minute=0, second=0, microsecond=0)
-    return dt.strftime("%Y-%m-%d-%H"), dt
-
-
-def write_hour_all_fields(cache_root: str, hour: str) -> None:
-    """Write a sentinel ``all_fields.parquet`` so the backfill walk treats ``hour`` as touched."""
-    d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
-    os.makedirs(d, exist_ok=True)
-    pq.write_table(
-        pa.table(
-            {
-                "field": pa.array(["x"]),
-                "value": pa.array(["y"]),
-                "count": pa.array([1], type=pa.int64()),
-            }
-        ),
-        os.path.join(d, "all_fields.parquet"),
-    )
-
-
-def build_writer_patches(
-    cache_root: Any,
-    table: str,
-    con_factory: Callable[[], Any],
-    *,
-    safe_table_target: str = "backend.core.rollups._common._safe_table_for",
-) -> tuple[Any, ...]:
-    """Return the common 5-patch stack for rollup writer tests."""
-    return (
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch(safe_table_target, return_value=table),
-        patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.storage._core._get_service_lock", noop_lock),
-        patch(
-            "backend.core.storage.execute_with_stale_view_retry",
-            side_effect=lambda c, _src, fn: fn(c),
-        ),
-    )
-
-
-@contextmanager
-def writer_patches(
-    cache_root: Any,
-    table: str,
-    con: Any,
-    *,
-    safe_table_target: str = "backend.core.rollups._common._safe_table_for",
-) -> Iterator[None]:
-    """Context manager entering the 5-patch rollup writer stack."""
-    with ExitStack() as stack:
-        for p in build_writer_patches(cache_root, table, lambda: con, safe_table_target=safe_table_target):
-            stack.enter_context(p)
-        yield
-
-
-def write_hour_bundle(hour_dir: str, filename: str, select_sql_values: str, schema_cols: str) -> None:
-    """Write a Parquet bundle file from a SQL ``VALUES`` clause."""
-    os.makedirs(hour_dir, exist_ok=True)
-    wcon = duckdb.connect()
-    try:
-        wcon.execute(
-            f"COPY (SELECT * FROM (VALUES {select_sql_values}) AS t({schema_cols})) "
-            f"TO '{hour_dir}/{filename}' (FORMAT PARQUET)"
-        )
-    finally:
-        wcon.close()
-
-
-def make_stub_runner(
-    src: dict[str, Any],
-    captured_sql: list[str],
-    stub_rows: list[tuple[Any, ...]],
-    *,
-    table: str = "logs_svc_reader",
-) -> Any:
-    """Build a ``QueryRunner`` with ``execute()`` stubbed to capture SQL and return canned rows."""
-    from backend.repositories._base import QueryRunner
-
-    class _Result:
-        def fetchall(self) -> list[tuple[Any, ...]]:
-            return stub_rows
-
-        def fetchone(self) -> tuple[Any, ...] | None:
-            return stub_rows[0] if stub_rows else None
-
-    class _Conn:
-        def execute(self, sql: str, params: Any = None) -> _Result:
-            captured_sql.append(sql)
-            return _Result()
-
-    runner = QueryRunner.__new__(QueryRunner)
-    runner.src = src
-    runner._table = table
-    runner.execute = _Conn().execute  # type: ignore[method-assign]
-    return runner
-
-
-@dataclass
-class RollupGoldenLayout:
-    """Unified on-disk rollup directory layout helper for golden characterization suites."""
-
-    root: Path
-    anchor: datetime = DEFAULT_ANCHOR
-    fns: tuple[str, ...] = ()
-    hour_root: Path = field(init=False)
-    day_root: Path = field(init=False)
-    field_root: Path = field(init=False)
-    hour: Path = field(init=False)
-    day: Path = field(init=False)
-    hour_b: Path = field(init=False)
-    day_b: Path = field(init=False)
-    bundled: Path = field(init=False)
-    perfield: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        r = self.root / "rollups"
-        self.hour_root = r / "hour_bundled"
-        self.day_root = r / "day_bundled"
-        self.field_root = r / "hour"
-        self.hour = self.field_root
-        self.day = r / "day"
-        self.hour_b = self.hour_root
-        self.day_b = self.day_root
-        self.bundled = self.hour_root
-        self.perfield = r / IP_SPREAD_DIR_NAME
-
-    def hkey(self, k: int) -> str:
-        return (self.anchor + timedelta(hours=k)).strftime("%Y-%m-%d-%H")
-
-    def hk(self, k: int) -> str:
-        return self.hkey(k)
-
-    def dkey(self, k: int) -> str:
-        return (self.anchor + timedelta(days=k)).strftime("%Y-%m-%d")
-
-    def dk(self, k: int) -> str:
-        return (self.anchor.replace(hour=0) + timedelta(days=k)).strftime("%Y-%m-%d")
-
-    @staticmethod
-    def _touch(p: Path) -> None:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"x")
-
-    def mkroot(self) -> None:
-        self.hour_root.mkdir(parents=True, exist_ok=True)
-        self.day_root.mkdir(parents=True, exist_ok=True)
-        self.field_root.mkdir(parents=True, exist_ok=True)
-
-    def hour_files(self, ks: range | list[int], fns: tuple[str, ...] | None = None) -> None:
-        for k in ks:
-            d = self.hour_root / f"hour={self.hkey(k)}"
-            d.mkdir(parents=True, exist_ok=True)
-            for fn in fns or self.fns:
-                (d / fn).write_bytes(b"x")
-
-    def day_files(self, ks: range | list[int], variant: str = "std") -> None:
-        for k in ks:
-            day = self.dkey(k)
-            for fn in self.fns:
-                if variant == "std" or fn != ALL_FIELDS:
-                    d = self.day_root / f"day={day}"
-                    d.mkdir(parents=True, exist_ok=True)
-                    (d / fn).write_bytes(b"x")
-                elif variant == "nested_alt":
-                    d = self.day_root / f"day={day}"
-                    d.mkdir(parents=True, exist_ok=True)
-                    (d / f"day_bundle_{day}.parquet").write_bytes(b"x")
-                elif variant == "flat_alt":
-                    self.day_root.mkdir(parents=True, exist_ok=True)
-                    (self.day_root / f"day_bundle_{day}.parquet").write_bytes(b"x")
-
-    def marker(self, k: int) -> None:
-        (self.field_root / "field=requests" / f"hour={self.hkey(k)}").mkdir(parents=True, exist_ok=True)
-
-    def sentinel(self, k: int) -> None:
-        d = self.hour_root / f"hour={self.hkey(k)}"
-        d.mkdir(parents=True, exist_ok=True)
-        schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
-        pq.write_table(pa.table({"field": [], "value": [], "count": []}, schema=schema), d / ALL_FIELDS)
-
-    def nonempty_allfields(self, k: int) -> None:
-        d = self.hour_root / f"hour={self.hkey(k)}"
-        d.mkdir(parents=True, exist_ok=True)
-        schema = pa.schema([("field", pa.string()), ("value", pa.string()), ("count", pa.int64())])
-        pq.write_table(pa.table({"field": ["country"], "value": ["US"], "count": [1]}, schema=schema), d / ALL_FIELDS)
-
-    def field_hours(self, fields: list[str], ks: range | list[int], fname: str = "part-0.parquet") -> None:
-        for f in fields:
-            for k in ks:
-                self._touch(self.hour / f"field={f}" / f"hour={self.hk(k)}" / fname)
-
-    def field_hour_dirs(self, fields: list[str], ks: list[int]) -> None:
-        for f in fields:
-            for k in ks:
-                (self.hour / f"field={f}" / f"hour={self.hk(k)}").mkdir(parents=True, exist_ok=True)
-
-    def field_days(self, fields: list[str], ks: list[int], fname: str = "part-0.parquet") -> None:
-        for f in fields:
-            for k in ks:
-                self._touch(self.day / f"field={f}" / f"day={self.dk(k)}" / fname)
-
-    def empty_day_dirs(self, fields: list[str], ks: list[int]) -> None:
-        for f in fields:
-            for k in ks:
-                (self.day / f"field={f}" / f"day={self.dk(k)}").mkdir(parents=True, exist_ok=True)
-
-    def bundled_hours(self, ks: range | list[int]) -> None:
-        for k in ks:
-            self._touch(self.hour_b / f"hour={self.hk(k)}" / ALL_FIELDS)
-
-    def bundled_days(self, ks: list[int], variant: str = "std") -> None:
-        for k in ks:
-            day = self.dk(k)
-            if variant == "std":
-                self._touch(self.day_b / f"day={day}" / ALL_FIELDS)
-            elif variant == "nested_alt":
-                self._touch(self.day_b / f"day={day}" / f"day_bundle_{day}.parquet")
-            elif variant == "flat_alt":
-                self._touch(self.day_b / f"day_bundle_{day}.parquet")
-
-    def bundles(self, ks: range | list[int], fname: str = IP_SPREAD_BUNDLE_FILENAME) -> None:
-        for k in ks:
-            self._touch(self.bundled / f"hour={self.hk(k)}" / fname)
-
-    def perfield_hours(self, fields: list[str], ks: range | list[int], fname: str = "part-0.parquet") -> None:
-        for f in fields:
-            for k in ks:
-                self._touch(self.perfield / f"field={f}" / f"hour={self.hk(k)}" / fname)
-
-
-def build_rollup_golden_layout(
-    root: Path,
-    builder: Callable[[RollupGoldenLayout], None] | None = None,
-    *,
-    anchor: datetime = DEFAULT_ANCHOR,
-    fns: tuple[str, ...] = (),
-) -> RollupGoldenLayout:
-    """Create a ``RollupGoldenLayout`` and optionally apply ``builder`` to populate it."""
-    lay = RollupGoldenLayout(root=root, anchor=anchor, fns=fns)
-    if builder is not None:
-        builder(lay)
-    return lay
-
-
-# ── RUM DuckDB test fixtures and beacon insertion helpers (from rum.py) ──────
+# ── RUM payload helpers (from rum.py) ────────────────────────────────────────
 
 
 def _is_faro_payload(beacon: dict[str, Any]) -> bool:
@@ -1066,84 +532,6 @@ def _is_faro_payload(beacon: dict[str, Any]) -> bool:
     return False
 
 
-@pytest.fixture
-def setup_temp_rum_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Set up a temporary DuckDB database for RUM and mock the source resolver."""
-    base_db_path = tmp_path / "test.duckdb"
-    rum_db_path = tmp_path / "test.rum.duckdb"
-
-    con = duckdb.connect(str(rum_db_path))
-    try:
-        con.execute(
-            """
-            CREATE TABLE client_vitals (
-                timestamp TIMESTAMPTZ,
-                metric_name VARCHAR,
-                metric_value DOUBLE,
-                metric_rating VARCHAR,
-                pathname VARCHAR,
-                browser VARCHAR,
-                os VARCHAR,
-                device VARCHAR,
-                cid VARCHAR,
-                req_id VARCHAR,
-                city VARCHAR DEFAULT NULL,
-                region VARCHAR DEFAULT NULL,
-                country VARCHAR DEFAULT NULL,
-                pop VARCHAR DEFAULT NULL,
-                tls VARCHAR DEFAULT NULL,
-                ttfb DOUBLE DEFAULT NULL
-            )
-            """
-        )
-        con.execute(
-            """
-            CREATE TABLE client_errors (
-                timestamp TIMESTAMPTZ,
-                error_message VARCHAR,
-                error_file VARCHAR,
-                error_line INTEGER,
-                error_col INTEGER,
-                pathname VARCHAR,
-                browser VARCHAR,
-                os VARCHAR,
-                device VARCHAR,
-                cid VARCHAR,
-                req_id VARCHAR,
-                city VARCHAR DEFAULT NULL,
-                region VARCHAR DEFAULT NULL,
-                country VARCHAR DEFAULT NULL,
-                pop VARCHAR DEFAULT NULL,
-                tls VARCHAR DEFAULT NULL,
-                ttfb DOUBLE DEFAULT NULL
-            )
-            """
-        )
-    finally:
-        con.close()
-
-    unique_id = f"test_service_{uuid.uuid4().hex[:8]}"
-    mock_source = {
-        "name": unique_id,
-        "service_id": unique_id,
-        "duckdb_path": str(base_db_path),
-        "endpoint": "localhost",
-        "access_key_id": "mock",
-        "secret_access_key": "mock",
-        "region": "mock",
-    }
-
-    duckdb_pool.reset_pool_for_service("test_service")
-    duckdb_pool.reset_pool_for_service("test_service_rum")
-    monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
-    monkeypatch.setattr(
-        "backend.core.request_context._resolve_source_or_400", lambda service_id, read_only=False: mock_source
-    )
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda service_id: mock_source)
-
-    return rum_db_path
-
-
 def _rate_vital(metric_name: str | None, val: float) -> str:
     if metric_name == "load_time":
         return "good" if val <= 2.0 else "poor"
@@ -1154,146 +542,6 @@ def _rate_vital(metric_name: str | None, val: float) -> str:
     if metric_name == "inp":
         return "good" if val <= 200 else ("needs_improvement" if val <= 500 else "poor")
     return "good"
-
-
-def insert_rum_beacons(temp_rum_db_path: Path | str, beacons_list: list[dict[str, Any]]) -> None:
-    """Insert synthetic flat beacons or Faro-shaped payloads into ``temp_rum_db_path``."""
-    from backend.core.rum_ingest import extract_metrics_from_faro_payload
-
-    duckdb_pool.shutdown_all()
-
-    vitals_rows: list[tuple[Any, ...]] = []
-    errors_rows: list[tuple[Any, ...]] = []
-
-    for i, b in enumerate(beacons_list):
-        if _is_faro_payload(b):
-            received_at_dt = datetime.now(UTC) - timedelta(minutes=i + 5)
-            req_id = f"req_{i}_{id(b)}"
-            extracted = extract_metrics_from_faro_payload(b, {})
-            for item in extracted:
-                metric_name = item.get("metric_name")
-                if metric_name == "exception":
-                    errors_rows.append(
-                        (
-                            received_at_dt,
-                            item.get("error_message"),
-                            item.get("error_file"),
-                            item.get("error_line"),
-                            item.get("error_col"),
-                            item.get("pathname"),
-                            item.get("browser"),
-                            item.get("os"),
-                            item.get("device"),
-                            item.get("cid"),
-                            req_id,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    )
-                else:
-                    val = item.get("metric_value")
-                    if metric_name == "pageLoadTime" and val is not None:
-                        try:
-                            val = float(val)
-                        except Exception:
-                            pass
-                    rating = item.get("metric_rating")
-                    if not rating and val is not None:
-                        try:
-                            rating = _rate_vital(metric_name, float(val))
-                        except Exception:
-                            rating = "good"
-                    vitals_rows.append(
-                        (
-                            received_at_dt,
-                            metric_name,
-                            val,
-                            rating,
-                            item.get("pathname"),
-                            item.get("browser"),
-                            item.get("os"),
-                            item.get("device"),
-                            item.get("cid"),
-                            req_id,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    )
-            continue
-
-        received_at = b.get("received_at")
-        if not received_at:
-            received_at = (datetime.now(UTC) - timedelta(minutes=i + 5)).isoformat()
-        dt = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
-
-        meta = b.get("meta") or {}
-        browser_val = meta.get("browser") or "Chrome"
-        os_val = meta.get("os") or "macOS"
-        device_val = meta.get("device") or "Desktop"
-        pathname_val = b.get("pathname") or "/"
-        cid_val = b.get("cid") or "test_cid_1"
-        req_id_val = b.get("req_id") if "req_id" in b else f"req_{id(b)}"
-
-        city_val = b.get("city") or "Austin"
-        region_val = b.get("region") or "TX"
-        country_val = b.get("country") or "US"
-        pop_val = b.get("pop") or "SIN"
-        tls_val = b.get("tls") or "1.3"
-        ttfb_val = float(b["ttfb"]) if "ttfb" in b else 45.0
-        common_tail = (
-            pathname_val,
-            browser_val,
-            os_val,
-            device_val,
-            cid_val,
-            req_id_val,
-            city_val,
-            region_val,
-            country_val,
-            pop_val,
-            tls_val,
-            ttfb_val,
-        )
-
-        for vital_key in ("load_time", "lcp", "cls", "inp"):
-            if vital_key in b:
-                v_val = float(b[vital_key])
-                vitals_rows.append((dt, vital_key, v_val, _rate_vital(vital_key, v_val), *common_tail))
-
-        for exc in b.get("exceptions") or []:
-            errors_rows.append(
-                (
-                    dt,
-                    exc.get("value") or exc.get("message") or "TypeError",
-                    exc.get("filename") or "main.js",
-                    0,
-                    0,
-                    *common_tail,
-                )
-            )
-
-    con = duckdb.connect(str(temp_rum_db_path), read_only=False)
-    try:
-        if vitals_rows:
-            con.executemany(
-                "INSERT INTO client_vitals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                vitals_rows,
-            )
-        if errors_rows:
-            con.executemany(
-                "INSERT INTO client_errors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                errors_rows,
-            )
-    finally:
-        con.close()
 
 
 class _CallableHelperModule(types.ModuleType):
@@ -1310,9 +558,7 @@ for _alias in (
     "tests._helpers.wire",
     "tests._helpers.ledger",
     "tests._helpers.config_fakes",
-    "tests._helpers.duckdb_fixtures",
-    "tests._helpers.rollups",
     "tests._helpers.rum",
 ):
     sys.modules[_alias] = _mod
-sources = wire = ledger = config_fakes = duckdb_fixtures = rollups = rum = _mod
+sources = wire = ledger = config_fakes = rum = _mod

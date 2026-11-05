@@ -296,7 +296,7 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "DuckLake PG size",
+      "title": "Metadata PG size",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -338,13 +338,13 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "pg_database_size_bytes{datname=\"ducklake\"}",
+          "expr": "pg_database_size_bytes{datname=\"fla\"}",
           "legendFormat": "",
           "range": true,
           "refId": "A"
         }
       ],
-      "description": "The total disk space used by the Postgres database backing DuckLake metadata. Expect gradual growth; sudden spikes suggest uncontrolled metadata generation."
+      "description": "The total disk space used by the Postgres database backing operational metadata. Expect gradual growth; sudden spikes suggest uncontrolled metadata generation."
     },
     {
       "id": 100,
@@ -682,7 +682,7 @@
     },
     {
       "type": "row",
-      "title": "Analytical Engine (DuckDB)",
+      "title": "Analytical Engine (ClickHouse)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -742,7 +742,7 @@
           "refId": "A"
         }
       ],
-      "description": "The number of DuckDB queries currently executing across the system. Correlates with user activity and complex dashboard loads."
+      "description": "The number of analytical queries currently executing across the system. Correlates with user activity and complex dashboard loads."
     },
     {
       "id": 13,
@@ -794,7 +794,7 @@
           "refId": "A"
         }
       ],
-      "description": "The 95th percentile execution time for analytical DuckDB queries. Increases here will directly impact user dashboard load times."
+      "description": "The 95th percentile execution time for analytical queries. Increases here will directly impact user dashboard load times."
     },
     {
       "id": 14,
@@ -846,7 +846,7 @@
           "refId": "A"
         }
       ],
-      "description": "The 95th percentile wait time for a thread to acquire a DuckDB connection from the pool. High wait times mean queries are queued waiting for connections, suggesting the connection pool might be exhausted or queries are too slow."
+      "description": "The 95th percentile wait time for a thread to acquire a connection from the pool."
     },
     {
       "type": "row",
@@ -1187,7 +1187,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(pg_stat_database_xact_commit{datname=\"ducklake\"}[2m])",
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"fla\"}[2m])",
           "legendFormat": "commit",
           "range": true,
           "refId": "A"
@@ -1197,7 +1197,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(pg_stat_database_xact_rollback{datname=\"ducklake\"}[2m])",
+          "expr": "rate(pg_stat_database_xact_rollback{datname=\"fla\"}[2m])",
           "legendFormat": "rollback",
           "range": true,
           "refId": "B"
@@ -1303,7 +1303,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(pg_stat_database_blks_hit{datname=\"ducklake\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{datname=\"ducklake\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname=\"ducklake\"}[5m])))",
+          "expr": "sum(rate(pg_stat_database_blks_hit{datname=\"fla\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{datname=\"fla\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname=\"fla\"}[5m])))",
           "legendFormat": "Hit Ratio",
           "range": true,
           "refId": "A"

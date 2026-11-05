@@ -48,13 +48,7 @@ export async function ServerFooter() {
     envName = 'production'
   }
 
-  const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
-  const isHighScale =
-    rawMode === 'standard'
-      ? false
-      : rawMode === 'high_scale' ||
-        ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
-  const architecture = isHighScale ? 'high-scale' : 'standard'
+  const architecture = 'clickhouse'
   const commitHash = process.env.COMMIT_HASH || 'unknown'
 
   return (

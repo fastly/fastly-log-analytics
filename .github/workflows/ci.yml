@@ -32,26 +32,21 @@ jobs:
         env:
           POSTGRES_USER: fla
           POSTGRES_PASSWORD: fla_test_password
-          POSTGRES_DB: ducklake_test
+          POSTGRES_DB: fla_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-cmd "pg_isready -U fla -d fla_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
     env:
-      # Metadata storage (cron/ingest bookkeeping) and DuckLake's commit-path
-      # catalog both point at the postgres service container above — see
-      # docs/adr/15-multi-writer-topology.md. tests/conftest.py's
-      # _pg_worker_schema fixture layers a per-xdist-worker schema on top of
-      # this DSN via `options=-c search_path=...` for parallel-safe isolation.
-      # DUCKLAKE_CATALOG must be the bare DSN (no `postgres:` prefix) —
-      # backend/core/storage/_core.py::_ducklake_attach adds that prefix
-      # itself before the ATTACH statement.
-      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
-      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      # Metadata storage (cron/ingest bookkeeping) points at the postgres
+      # service container above. tests/conftest.py's _pg_worker_schema fixture
+      # layers a per-xdist-worker schema on top of this DSN via
+      # `options=-c search_path=...` for parallel-safe isolation.
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -302,15 +297,14 @@ jobs:
         # template validate deploy/chart/fastly-log-analytics (ubuntu runners
         # ship both docker and helm).
         run: |
+          docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
-          docker compose -f docker-compose.yml -f docker-compose.observability.standard.yml config -q
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.standard.yml -f docker-compose.observability.standard.prod.yml config -q
           docker compose -f docker-compose.multipod.yml config -q
           docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
           if command -v helm >/dev/null 2>&1; then
-            helm lint deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake
-            helm template ci-validate deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null
-            helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null
+            helm lint deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla
+            helm template ci-validate deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null
+            helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null
           else
             echo "helm not installed; skipping chart lint/template"
           fi
@@ -336,8 +330,8 @@ jobs:
         run: bash scripts/check_security_regression_count.sh
 
       - name: Emit perf samples (CI-scale synthetic load)
-        # Produces tests/perf/latest.json from a 100K-row in-memory
-        # DuckDB dataset (~2 s wall). The gate below compares to
+        # Produces tests/perf/latest.json from a 100K-row synthetic dataset.
+        # The gate below compares to
         # tests/perf/baseline.json and fails on >regression_pct_threshold%
         # over baseline (50 % default; tuned for GH Actions runner
         # variance at CI scale).
@@ -364,18 +358,17 @@ jobs:
         env:
           POSTGRES_USER: fla
           POSTGRES_PASSWORD: fla_test_password
-          POSTGRES_DB: ducklake_test
+          POSTGRES_DB: fla_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-cmd "pg_isready -U fla -d fla_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
     env:
-      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
-      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

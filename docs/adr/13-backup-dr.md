@@ -1,14 +1,13 @@
 # ADR-13 — Backup, Disaster Recovery, and Data Replay
 
-**Status:** Partially superseded by [ADR-14](14-ducklake-replacement.md), [ADR-21](21-high-scale-serving-architecture.md), & [ADR-22](22-postgres-only-metadata.md)
+**Status:** Partially superseded by [ADR-21](21-high-scale-serving-architecture.md) & [ADR-22](22-postgres-only-metadata.md)
 **Decided by:** Engineering retrospective
 
 > [!NOTE]
 > **Architectural Amendments (v3.0):**
-> - **Unified PostgreSQL 16 Metadata ([ADR-22](22-postgres-only-metadata.md)):** Per-service SQLite `metadata.db` files and local `iceberg_catalog.db` have been completely eliminated. All operational metadata (`ingested_files`, `cron_runs`, `usage_log`, `audit_logs`) and the DuckLake catalog reside in PostgreSQL 16 (`METADATA_DSN` and `DUCKLAKE_CATALOG`).
-> - **DuckLake Commit Catalog ([ADR-14](14-ducklake-replacement.md)):** Long-term storage uses DuckLake tables rather than PyIceberg `metadata.json` pointer chains.
-> - **High-Scale Mode ([ADR-21](21-high-scale-serving-architecture.md)):** ClickHouse data is reconstructed from immutable FOS archive Parquet.
-> - **Core Invariant Preserved:** **FOS remains the ultimate source of truth** for raw logs and durable storage; database tier state is fully regenerable from FOS via ingest replay and PostgreSQL backups.
+> - **Unified PostgreSQL 16 Metadata ([ADR-22](22-postgres-only-metadata.md)):** Per-service SQLite `metadata.db` files and local catalog files have been completely eliminated. All operational metadata (`ingested_files`, `cron_runs`, `usage_log`, `audit_logs`) and the ingest control plane reside in PostgreSQL 16 (`METADATA_DSN`).
+> - **Unified ClickHouse & FOS Batch Archive ([ADR-21](21-high-scale-serving-architecture.md)):** ClickHouse tables (`request_facts`, `rum_*_facts`, `cmcd_projection_facts`, and minute projections) serve all queries and are reconstructed from immutable FOS archive Parquet (`high-scale/archive/`).
+> - **Core Invariant Preserved:** **FOS remains the ultimate source of truth** for raw logs and durable archive artifacts; database tier state is regenerable from FOS via archive replay (`scripts/backfill_high_scale.py`) and PostgreSQL backups.
 
 ## 1. Context & Motivation
 

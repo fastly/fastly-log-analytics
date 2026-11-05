@@ -800,7 +800,7 @@ def network_health(
         dma_map: dict = {}
         if has_metro:
             try:
-                from backend.core import duckdb as _db
+                from backend.core import fos_client as _db
 
                 dma_map = _db._get_dma_map()
             except Exception:

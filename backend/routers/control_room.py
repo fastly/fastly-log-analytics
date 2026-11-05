@@ -1,7 +1,7 @@
 """Control Room router — Phase 1: passive observation with real data.
 
 Overview and Cost tabs are backed by the rt.fastly.com polling stream.
-Correlator and error-stream endpoints provide DuckDB/ClickHouse-driven data.
+Correlator and error-stream endpoints provide ClickHouse-driven data.
 Mutation endpoints remain 501 stubs.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -18,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from backend.core.fos_client import get_source_for_service
 from backend.core.request_context import ServiceId, require_admin, require_service_access
 from backend.core.share_db import mask_ip
 from backend.high_scale.ingest_controller import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
@@ -32,7 +32,6 @@ from backend.models.common import (
     MutationStub,
     RealtimeSeedResponse,
 )
-from backend.repositories._base import record_duckdb_query
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import query_errors
 from backend.utils.sse import sse_response
@@ -42,26 +41,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["control-room"], responses=DEFAULT_ERROR_RESPONSES)
 control_room_router = router
 
-RECENT_STANDARD_ERRORS = """
-SELECT
-    md5(concat_ws('|', CAST(timestamp AS VARCHAR), CAST(status AS VARCHAR),
-                  COALESCE(url, ''), COALESCE(pop, ''), COALESCE(ip, ''),
-                  CAST(row_number() OVER (
-                      ORDER BY timestamp DESC, status, url, pop, ip
-                  ) AS VARCHAR))) AS event_id,
-    timestamp,
-    TRY_CAST(status AS INTEGER) AS status,
-    COALESCE(url, '') AS url,
-    COALESCE(pop, '') AS pop,
-    COALESCE(ip, '') AS client_ip
-FROM {view}
-WHERE timestamp >= now() - INTERVAL 2 MINUTE
-  AND TRY_CAST(status AS INTEGER) BETWEEN 400 AND 599
-ORDER BY timestamp DESC
-LIMIT 20
-"""
-
-# ClickHouse (high-scale) dialect; ``{service_id:String}`` is a ClickHouse bind parameter, not a format field.
+# ClickHouse dialect; ``{service_id:String}`` is a ClickHouse bind parameter, not a format field.
 RECENT_HIGH_SCALE_ERRORS = """
 SELECT
     toString(event_id) AS event_id,
@@ -77,16 +57,6 @@ WHERE service_id={service_id:String}
   AND publication_state = 'visible'
 ORDER BY event_timestamp DESC
 LIMIT 20
-"""
-
-CORRELATE_TOP_VALUES = """
-SELECT {col} AS value, COUNT(*) AS count
-FROM {view}
-WHERE timestamp >= ?
-  AND TRY_CAST(status AS INTEGER) BETWEEN 400 AND 599
-GROUP BY 1
-ORDER BY 2 DESC
-LIMIT ?
 """
 
 HIGH_SCALE_CORRELATE_TOP_VALUES = """
@@ -105,32 +75,9 @@ ORDER BY aggregate_count DESC, value ASC
 LIMIT {limit:UInt32}
 """
 
-LATEST_TIMESTAMP_WINDOWED = "SELECT MAX(timestamp) AS latest FROM {view} WHERE timestamp >= ?"
-
-LATEST_TIMESTAMP = "SELECT MAX(timestamp) AS latest FROM {view}"
-
-
-def recent_standard_error_events(con: Any, view_name: str, *, service_id: str | None = None) -> list[dict[str, Any]]:
-    """Last-2-minute 4xx/5xx events (max 20, newest first) from the standard-mode request view."""
-    q = RECENT_STANDARD_ERRORS.format(view=view_name)
-    t0 = time.perf_counter()
-    rows = con.execute(q).fetchall()
-    record_duckdb_query(q, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
-    return [
-        {
-            "event_id": str(row[0]),
-            "timestamp": row[1].isoformat(),
-            "status": int(row[2]),
-            "url": str(row[3]),
-            "pop": str(row[4]),
-            "client_ip": str(row[5]),
-        }
-        for row in rows
-    ]
-
 
 def recent_high_scale_error_events(client: Any, service_id: str) -> list[dict[str, Any]]:
-    """Last-2-minute 4xx/5xx events (max 20, newest first) for a high-scale (ClickHouse) service."""
+    """Last-2-minute 4xx/5xx events (max 20, newest first) for a ClickHouse service."""
     rows = client.execute(RECENT_HIGH_SCALE_ERRORS, {"service_id": service_id})
     return [
         {
@@ -143,34 +90,6 @@ def recent_high_scale_error_events(client: Any, service_id: str) -> list[dict[st
         }
         for row in rows
     ]
-
-
-def correlate_top_values(
-    con: Any,
-    view_name: str,
-    col: str,
-    since: datetime,
-    limit: int,
-    *,
-    service_id: str | None = None,
-) -> tuple[list[Any], Any]:
-    """``(top [(value, count)] since ``since``, MAX(timestamp) row)`` for one allow-listed column."""
-    q_top = CORRELATE_TOP_VALUES.format(col=col, view=view_name)
-    t0 = time.perf_counter()
-    rows = con.execute(q_top, [since, limit]).fetchall()
-    record_duckdb_query(q_top, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
-
-    q_fresh = LATEST_TIMESTAMP_WINDOWED.format(view=view_name)
-    t1 = time.perf_counter()
-    freshness_row = con.execute(q_fresh, [since]).fetchone()
-    record_duckdb_query(q_fresh, round((time.perf_counter() - t1) * 1000, 2), service_id=service_id)
-
-    if (not freshness_row or freshness_row[0] is None) and not rows:
-        q_fallback = LATEST_TIMESTAMP.format(view=view_name)
-        t2 = time.perf_counter()
-        freshness_row = con.execute(q_fallback).fetchone()
-        record_duckdb_query(q_fallback, round((time.perf_counter() - t2) * 1000, 2), service_id=service_id)
-    return rows, freshness_row
 
 
 # ── Canned tab responses ────────────────────────────────────────────────────
@@ -396,25 +315,6 @@ async def realtime_stream(
 # ── Recent error stream ─────────────────────────────────────────────────────
 
 
-def _recent_standard_errors(source: dict[str, Any], service_id: str) -> list[dict[str, Any]]:
-    from backend.core import duckdb as _db
-    from backend.core.storage import execute_with_stale_view_retry
-    from backend.repositories._base import _safe_table
-
-    con = _db.get_connection(source=source, read_only=True)
-    try:
-        view_name = _safe_table(service_id.replace("-", "_"))
-        return execute_with_stale_view_retry(
-            con,
-            source,
-            recent_standard_error_events,
-            view_name,
-            service_id=service_id,
-        )
-    finally:
-        con.close()
-
-
 def _recent_high_scale_errors(service: Any) -> list[dict[str, Any]]:
     return recent_high_scale_error_events(service.client, service.service_id)
 
@@ -433,9 +333,6 @@ async def control_room_error_stream(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ) -> EventSourceResponse:
     """Stream bounded recent 4xx/5xx request events."""
-    from backend.core import duckdb as _db
-
-    source = await asyncio.to_thread(_db.get_source_for_service, service_id)
     high_scale_service = registry.resolve(service_id)
 
     async def stream() -> AsyncIterator[dict[str, Any]]:
@@ -444,8 +341,6 @@ async def control_room_error_stream(
             try:
                 if high_scale_service is not None:
                     events = await asyncio.to_thread(_recent_high_scale_errors, high_scale_service)
-                elif source is not None:
-                    events = await asyncio.to_thread(_recent_standard_errors, source, service_id)
                 else:
                     events = []
                 for event in reversed(_mask_error_events(events, request)):
@@ -478,9 +373,9 @@ async def control_room_correlate(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ) -> dict[str, Any]:
     """Top-N breakdown by a log field within a recent time window."""
-    from backend.core import duckdb as _db
     from backend.core import log_fields as field_registry
-    from backend.repositories._base import _safe_table
+    from backend.high_scale._common import visible_publication_fence_sql
+    from backend.high_scale.aggregate_query import _FACT_DIMENSION_EXPRESSIONS
 
     field_def = field_registry.try_get(body.dimension)
     if field_def is None:
@@ -494,94 +389,56 @@ async def control_room_correlate(
     limit = body.limit
 
     high_scale_service = registry.resolve(service_id)
-    if high_scale_service is not None:
-        from backend.high_scale._common import visible_publication_fence_sql
-        from backend.high_scale.aggregate_query import _FACT_DIMENSION_EXPRESSIONS
-
-        now_utc = datetime.now(UTC)
-        start = now_utc - timedelta(minutes=window_minutes)
-        aggregate_dimension = "client_ip" if col == "ip" else col
-        dim_expr = _FACT_DIMENSION_EXPRESSIONS["request"].get(
-            aggregate_dimension,
-            "custom_fields[{dimension:String}]",
-        )
-        watermark = high_scale_service.watermark_for("request")
-        watermark.validate()
-        sql = HIGH_SCALE_CORRELATE_TOP_VALUES.replace("{dim_expr}", dim_expr).replace(
-            "{fence}", visible_publication_fence_sql("request")
-        )
-        params: dict[str, Any] = {
-            "service_id": service_id,
-            "dimension": aggregate_dimension,
-            "start": start,
-            "end": now_utc,
-            "limit": int(limit),
-        }
-        hs_rows = await asyncio.to_thread(high_scale_service.client.execute, sql, params)
-        top_values = [
-            (str(row["value"]), max(0, int(row.get("aggregate_count") or row.get("count") or 0)))
-            for row in hs_rows
-            if str(row.get("value") or "") != ""
-        ][:limit]
-        if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
-            top_values = [(mask_ip(value), count) for value, count in top_values]
-        freshness_lag = (
-            max(0.0, (now_utc - watermark.coverage_end.astimezone(UTC)).total_seconds())
-            if watermark.coverage_end is not None
-            else 0.0
-        )
-        return CorrelateResponse(
-            dimension=body.dimension,
-            top=[CorrelatorTopRow(value=value, count=count) for value, count in top_values],
-            freshness=CorrelatorFreshness(
-                latest_log_at=(watermark.coverage_end.isoformat() if watermark.coverage_end else None),
-                lag_seconds=int(freshness_lag),
-            ),
-        ).model_dump()
-
-    source = await asyncio.to_thread(_db.get_source_for_service, service_id)
-    if source is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "no_data_source", "service_id": service_id},
-        )
-
-    def _query() -> tuple[list[Any], Any]:
-        from backend.core.storage import execute_with_stale_view_retry
-
-        con = _db.get_connection(source=source, read_only=True)
-        try:
-            view_name = _safe_table(service_id.replace("-", "_"))
-            return execute_with_stale_view_retry(
-                con,
-                source,
-                correlate_top_values,
-                view_name,
-                col,
-                datetime.now(UTC) - timedelta(minutes=window_minutes),
-                limit,
-                service_id=service_id,
+    if high_scale_service is None:
+        source = await asyncio.to_thread(get_source_for_service, service_id)
+        if source is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "no_data_source", "service_id": service_id},
             )
-        finally:
-            con.close()
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "high_scale_unavailable", "service_id": service_id},
+        )
 
-    rows, freshness_row = await asyncio.to_thread(_query)
-
-    latest_log_at = freshness_row[0] if freshness_row else None
-    lag_seconds = 0
-    if latest_log_at:
-        lag_seconds = max(0, int((datetime.now(UTC) - latest_log_at).total_seconds()))
-
-    top_items = [CorrelatorTopRow(value=str(r[0]), count=r[1]) for r in rows]
+    now_utc = datetime.now(UTC)
+    start = now_utc - timedelta(minutes=window_minutes)
+    aggregate_dimension = "client_ip" if col == "ip" else col
+    dim_expr = _FACT_DIMENSION_EXPRESSIONS["request"].get(
+        aggregate_dimension,
+        "custom_fields[{dimension:String}]",
+    )
+    watermark = high_scale_service.watermark_for("request")
+    watermark.validate()
+    sql = HIGH_SCALE_CORRELATE_TOP_VALUES.replace("{dim_expr}", dim_expr).replace(
+        "{fence}", visible_publication_fence_sql("request")
+    )
+    params: dict[str, Any] = {
+        "service_id": service_id,
+        "dimension": aggregate_dimension,
+        "start": start,
+        "end": now_utc,
+        "limit": int(limit),
+    }
+    hs_rows = await asyncio.to_thread(high_scale_service.client.execute, sql, params)
+    top_values = [
+        (str(row["value"]), max(0, int(row.get("aggregate_count") or row.get("count") or 0)))
+        for row in hs_rows
+        if str(row.get("value") or "") != ""
+    ][:limit]
     if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
-        top_items = [CorrelatorTopRow(value=mask_ip(str(item.value or "")), count=item.count) for item in top_items]
-
+        top_values = [(mask_ip(value), count) for value, count in top_values]
+    freshness_lag = (
+        max(0.0, (now_utc - watermark.coverage_end.astimezone(UTC)).total_seconds())
+        if watermark.coverage_end is not None
+        else 0.0
+    )
     return CorrelateResponse(
         dimension=body.dimension,
-        top=top_items,
+        top=[CorrelatorTopRow(value=value, count=count) for value, count in top_values],
         freshness=CorrelatorFreshness(
-            latest_log_at=latest_log_at.isoformat() if latest_log_at else None,
-            lag_seconds=lag_seconds,
+            latest_log_at=(watermark.coverage_end.isoformat() if watermark.coverage_end else None),
+            lag_seconds=int(freshness_lag),
         ),
     ).model_dump()
 
@@ -607,11 +464,8 @@ def control_room_tab(
 
 
 __all__ = [
-    "CORRELATE_TOP_VALUES",
-    "LATEST_TIMESTAMP",
-    "LATEST_TIMESTAMP_WINDOWED",
+    "HIGH_SCALE_CORRELATE_TOP_VALUES",
     "RECENT_HIGH_SCALE_ERRORS",
-    "RECENT_STANDARD_ERRORS",
     "TAB_STUBS",
     "control_room_allowlist",
     "control_room_big_red_button",
@@ -622,10 +476,8 @@ __all__ = [
     "control_room_router",
     "control_room_rules",
     "control_room_tab",
-    "correlate_top_values",
     "realtime_seed",
     "realtime_stream",
     "recent_high_scale_error_events",
-    "recent_standard_error_events",
     "router",
 ]

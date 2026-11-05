@@ -10,7 +10,6 @@ export function toService(s: components['schemas']['BootstrapService']): Service
     name: s.name || s.service_id,
     cmcdEnabled: s.cmcd_enabled ?? undefined,
     rum_enabled: s.rum_enabled ?? undefined,
-    is_high_scale: s.is_high_scale ?? undefined,
   }
 }
 

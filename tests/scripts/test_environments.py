@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -25,7 +26,6 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 
-import duckdb
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -1096,7 +1096,7 @@ paths = {{
     "cwd": Path.cwd(),
     "configs": config.CONFIGS_DIR,
     "data": config.DATA_DIR,
-    "duckdb": config.duckdb_path("sandbox-service"),
+    "services": config.SERVICES_DATA_DIR,
     "usage_config": config._USAGE_LOGGING_CONFIG_PATH,
     "buffer_cache": Path("cache"),
 }}
@@ -1109,7 +1109,7 @@ print(json.dumps({{key: str(Path(value).resolve()) for key, value in paths.items
         "cwd": str(sandbox),
         "configs": str(configs),
         "data": str(data),
-        "duckdb": str(data / "services/sandbox-service.duckdb"),
+        "services": str(data / "services"),
         "usage_config": str(data / "system/usage_logging.json"),
         "buffer_cache": str(sandbox / "cache"),
     }
@@ -1542,19 +1542,24 @@ def test_correlated_upper_bound_and_censoring_and_population_floor(monkeypatch):
 
 def test_correlated_sql_finds_only_exact_recent_events(monkeypatch):
     key = "/approved/O'Brien?probe=owned&seq=0"
-    with duckdb.connect(":memory:") as connection:
-        connection.execute("CREATE TABLE logs(url VARCHAR, timestamp TIMESTAMPTZ)")
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE logs(url TEXT, timestamp TEXT)")
         connection.execute(
-            "INSERT INTO logs VALUES (?, CURRENT_TIMESTAMP), (?, CURRENT_TIMESTAMP), (?, CURRENT_TIMESTAMP - INTERVAL 2 HOUR)",
+            "INSERT INTO logs VALUES (?, datetime('now')), (?, datetime('now')), (?, datetime('now', '-2 hours'))",
             [key, key + "unrelated", "/old?probe=owned"],
         )
 
         def post(url, body, headers, **kwargs):
-            result = connection.execute(body["sql"])
+            sql = (
+                body["sql"]
+                .replace("CURRENT_TIMESTAMP - INTERVAL 1 HOUR", "datetime('now', '-1 hour')")
+                .replace("CURRENT_TIMESTAMP + INTERVAL 1 MINUTE", "datetime('now', '+1 minute')")
+            )
+            result = connection.execute(sql)
             columns = [col[0] for col in result.description]
             rows = [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
             for row in rows:
-                row["timestamp"] = row["timestamp"].isoformat()
+                row["timestamp"] = row["timestamp"].replace(" ", "T") + "Z"
             return 200, {"data": rows, "truncated": False, "_response_cache": {"state": "bypass"}}
 
         monkeypatch.setattr(freshness, "http_post", post)

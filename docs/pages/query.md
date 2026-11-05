@@ -25,7 +25,7 @@ Raw mode starts with `SELECT * FROM logs LIMIT 100`. Query history is kept in br
 | Role | Access |
 |---|---|
 | Admin | Full read-only SQL. |
-| Analyst (remote share) | `POST /api/query` is allowed. Time bounds are clamped to the invite and IP columns are masked server-side (`mask_ips`). In high-scale mode analysts only get the console through a per-service, least-privilege ClickHouse identity; without `CLICKHOUSE_CONSOLE_SECRET` the API returns 403 `console_unavailable_for_analysts` ([runbook](../runbooks/high-scale-analyst-console.md)). |
+| Analyst (remote share) | `POST /api/query` is allowed. Time bounds are clamped to the invite and IP columns are masked server-side (`mask_ips`). Analysts only access the console through a per-service, least-privilege ClickHouse identity; without `CLICKHOUSE_CONSOLE_SECRET` the API returns 403 `console_unavailable_for_analysts` ([runbook](../runbooks/high-scale-analyst-console.md)). |
 
 ## Backend
 
@@ -34,7 +34,7 @@ Routes in [`backend/routers/query.py`](../../backend/routers/query.py); models i
 - `POST /api/query` (`QueryRequest`: `sql`, `dataset`, `max_rows` 1 to 10,000 default 500, `explain`) returns `QueryResponse` (`columns`, `data`, `row_count`, `total_rows`, `truncated`, `elapsed_ms`, `explain_plan`). Empty SQL is 400 `empty_sql`.
 - `GET /api/query/schema/{service_id}`: table and column definitions for the service (falls back to a small default column list when no schema is known). `GET /api/schema` and `GET /api/presets` (curated `PresetQuery` list) support the page.
 
-Validation ([`backend/core/sql_validator.py`](../../backend/core/sql_validator.py), `validate_user_sql`): the statement is parsed with DuckDB's own parser and only `SELECT` and set-operation nodes are accepted, with input size limits, a NUL-byte check and table/function allow-listing; a rejection is 403 `sql_not_permitted`. Standard mode runs on a pooled DuckDB connection with the stale-view retry; high-scale mode runs against ClickHouse, where the user SQL is never spliced with scope: service, publication and window scope are sent as server-enforced `additional_table_filters` ([AGENTS.md](../../AGENTS.md), High-scale readers section).
+Validation ([`backend/core/sql_validator.py`](../../backend/core/sql_validator.py), `validate_user_sql`): the statement is parsed into an AST and only `SELECT` and set-operation nodes are accepted, with input size limits, a NUL-byte check and table/function allow-listing; a rejection is 403 `sql_not_permitted`. Validated queries execute against ClickHouse, where the user SQL is never spliced with scope: service, publication and window scope are sent as server-enforced `additional_table_filters` ([AGENTS.md](../../AGENTS.md), ClickHouse readers section).
 
 ## Tests
 

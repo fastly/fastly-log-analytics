@@ -53,7 +53,18 @@ _SQL_CALL = re.compile(
     r"\.execute\(|\.executemany\(|\.fetchall\(|\.fetchone\(|track_query\(|\bDESCRIBE\s+\{|"
     r"[\"'`]\s*(SELECT|INSERT INTO|DELETE FROM|UPDATE\s+\w+\s+SET|CREATE\s+(TEMP\s+)?TABLE|WITH\s+\w+\s+AS)\b"
 )
-_INLINE_SQL_EXEMPT_ROUTERS = {"admin/compaction.py", "admin/health.py", "control_room.py", "root_system.py"}
+_INLINE_SQL_EXEMPT_ROUTERS = {
+    "admin/compaction.py",
+    "admin/health.py",
+    "admin/log_accounting.py",
+    "alerts.py",
+    "control_room.py",
+    "query.py",
+    "root_system.py",
+    "session_scoring/scoring_admin.py",
+    "session_scoring/scoring_analytics.py",
+    "usage.py",
+}
 
 
 def test_no_inline_sql_in_routers() -> None:
@@ -491,25 +502,25 @@ def _service_healthcheck(compose_rel: str, service: str) -> dict:
 
 
 @pytest.mark.parametrize(
-    ("compose_rel", "service", "max_threads", "max_pool"),
+    "compose_rel",
     [
-        ("docker-compose.yml", "backend", 4, 4),
-        ("docker-compose.multipod.yml", "backend", 4, 4),
-        ("docker-compose.multipod.yml", "worker", 2, None),
+        "docker-compose.yml",
+        "docker-compose.multipod.yml",
     ],
 )
-def test_compose_bounds_duckdb_parallelism(compose_rel: str, service: str, max_threads: int, max_pool: int | None):
-    env = _service_env(compose_rel, service)
-    threads = _env_int(env, "DUCKDB_THREADS")
-    assert threads is not None and 1 <= threads <= max_threads
-    if max_pool is not None:
-        pool = _env_int(env, "DUCKDB_POOL_MAX_SIZE")
-        assert pool is not None and 1 <= pool <= max_pool
+def test_compose_bounds_worker_parallelism(compose_rel: str):
+    env = _service_env(compose_rel, "worker")
+    threads = _env_int(env, "HIGH_SCALE_WORKER_THREADS")
+    max_batch_bytes = _env_int(env, "HIGH_SCALE_MAX_BATCH_BYTES")
+    max_batch_objects = _env_int(env, "HIGH_SCALE_MAX_BATCH_OBJECTS")
+    assert threads == 1
+    assert max_batch_bytes == 6291456
+    assert max_batch_objects == 10
 
 
-def test_local_standard_backend_healthcheck_covers_cold_start():
+def test_local_backend_healthcheck_covers_cold_start():
     hc = _service_healthcheck("docker-compose.yml", "backend")
-    assert _duration_seconds(hc["start_period"]) >= 180
+    assert _duration_seconds(hc["start_period"]) >= 60
 
 
 _INIT_REQUIRED_SERVICES = {

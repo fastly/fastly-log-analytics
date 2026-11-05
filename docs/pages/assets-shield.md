@@ -22,7 +22,7 @@ Source: [`frontend/app/assets-shield/`](../../frontend/app/assets-shield/): `pag
 
 ## Backend
 
-`POST /api/assets/aggregates` (and a query-string `GET` mirror) in [`backend/routers/performance.py`](../../backend/routers/performance.py); models in [`backend/models/analytics/performance.py`](../../backend/models/analytics/performance.py). Request is `AssetsRequest` (range fields plus `filters`). Response `AssetsAggregatesResponse`: `asset_type_breakdown`, `cache_performance`, `compression_performance`, `large_uncompressed_assets`, `low_ttl_assets`, `missing_fields`. The repository ([`backend/repositories/assets.py`](../../backend/repositories/assets.py)) classifies URLs into asset types in a single pass.
+`POST /api/assets/aggregates` (and a query-string `GET` mirror) in [`backend/routers/performance.py`](../../backend/routers/performance.py); models in [`backend/models/analytics/performance.py`](../../backend/models/analytics/performance.py). Request is `AssetsRequest` (range fields plus `filters`). Response `AssetsAggregatesResponse`: `asset_type_breakdown`, `cache_performance`, `compression_performance`, `large_uncompressed_assets`, `low_ttl_assets`, `missing_fields`. The ClickHouse reader ([`backend/high_scale/performance.py`](../../backend/high_scale/performance.py)) classifies URLs into asset types over visible `request_facts`.
 
 ## Tests
 

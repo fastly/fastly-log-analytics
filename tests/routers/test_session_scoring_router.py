@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import duckdb
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -19,21 +18,18 @@ import backend.routers.session_scoring as _admin
 import backend.routers.session_scoring as _ssa
 import backend.scoring as _labels
 from backend import config as svcconfig
-from backend.core.duckdb import _clear_schema_cache
 from backend.core.request_context import build_request_context
 from backend.core.share_db import apply_pii_policy
 from backend.main import app
 from backend.models.analytics import ScoringL2EnforceBody
-from backend.repositories._base import _safe_table
-from backend.repositories.sessions import _SCORING_COLUMN_TYPES
 from backend.routers import session_scoring as _ss
 from backend.routers.session_scoring import _build_l2_enforce_block
 from backend.routers.session_scoring import router as scoring_router
+from backend.routers.session_scoring.scoring_analytics import _SCORING_COLUMNS
 from backend.scoring import EvaluationResult, MatrixStats, TransitionMatrix
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.config_fakes import mutate_via_save
-from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
 
 LOG_SVC = "TestScoringRouterSvc"
@@ -148,7 +144,7 @@ def _capture_cfg_save(monkeypatch) -> dict:
 
 
 def _patch_query_logs(rows: list[dict]):
-    return patch("backend.repositories.sessions.query_logs", return_value=rows)
+    return patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=rows)
 
 
 def _fake_request(analyst_session):
@@ -588,15 +584,16 @@ def test_latency_timeseries_buckets_by_minute_for_1h_window(client, monkeypatch)
     captured: dict[str, str] = {}
 
     def _fake_query_logs(*args, **kwargs):
-        captured["sql"] = next((a for a in [*args, *kwargs.values()] if isinstance(a, str) and "date_trunc" in a), "")
+        captured["sql"] = next((a for a in [*args, *kwargs.values()] if isinstance(a, str) and "toStartOf" in a), "")
         return [{"hour": "2026-06-17 10:00:00", "scored_count": 1, "fail_open_count": 0}]
 
-    with patch("backend.repositories.sessions.query_logs", side_effect=_fake_query_logs):
+    with patch("backend.routers.session_scoring.scoring_analytics.query_logs", side_effect=_fake_query_logs):
         for hours, gran in ((1, "minute"), (24, "hour")):
             _ss._analytics_cache.clear()
             r = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours={hours}")
             assert r.status_code == 200 and r.json()["granularity"] == gran
-            assert f"date_trunc('{gran}'" in captured["sql"]
+            fn_name = "toStartOfMinute(" if gran == "minute" else "toStartOfHour("
+            assert fn_name in captured["sql"]
 
 
 @pytest.mark.usefixtures("_clear_analytics_cache_between_tests")
@@ -657,7 +654,10 @@ def test_evaluation_and_curves_when_min_samples_met(client, with_config):
     with (
         _patch_labels(fake_labels, fake_counts),
         patch("backend.routers.session_scoring._load_matrix", return_value={"transitions": {}}),
-        patch("backend.repositories.sessions.reconstruct_labeled_sessions", return_value=reconstructed),
+        patch(
+            "backend.routers.session_scoring.scoring_analytics._reconstruct_labeled_sessions",
+            return_value=reconstructed,
+        ),
         patch("backend.scoring.evaluate_from_persisted_scores", return_value=fake_result),
     ):
         r_eval = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation")
@@ -707,7 +707,7 @@ def test_threshold_preview_bucketing_and_extremes(client, with_config):
     assert abs(body["precision"] - 2 / 3) < 0.01 and abs(body["recall"] - 2 / 3) < 0.01
 
     # Extreme thresholds (0 vs 100)
-    _provisioned_cols = [{"column_name": c} for c in ("edge", *tuple(_SCORING_COLUMN_TYPES))]
+    _provisioned_cols = [{"column_name": c} for c in ("edge", *tuple(_SCORING_COLUMNS))]
     call_count = {"n": 0}
 
     def _route_query(_service_id, sql, *_args, **_kwargs):
@@ -721,7 +721,7 @@ def test_threshold_preview_bucketing_and_extremes(client, with_config):
         )
 
     with (
-        patch("backend.repositories.sessions.query_logs", side_effect=_route_query),
+        patch("backend.routers.session_scoring.scoring_analytics.query_logs", side_effect=_route_query),
         _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
     ):
         _ss._analytics_cache.clear()
@@ -751,11 +751,14 @@ def test_retrain_smoke(client, with_config, tmp_path):
         transitions=12,
         routes_seen=2,
     )
+    fake_hs = SimpleNamespace(client=SimpleNamespace(execute=lambda *a, **kw: []))
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": LOG_SVC}),
-        patch("backend.core.duckdb.get_connection") as mock_get_con,
-        patch("backend.scoring.extract_traces", return_value=iter([])),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": LOG_SVC}),
+        patch(
+            "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+            return_value=SimpleNamespace(resolve=lambda _sid: fake_hs),
+        ),
         patch("backend.scoring.build_matrix", return_value=(fake_matrix, fake_stats)),
         _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", tmp_path / "matrix.json"),
@@ -763,7 +766,6 @@ def test_retrain_smoke(client, with_config, tmp_path):
         patch("backend.routers.session_scoring.resolve_fastly_token", return_value="tok"),
         patch("backend.core.fastly.client.fastly_raw") as mock_raw,
     ):
-        mock_get_con.return_value.close = lambda: None
         r = client.post(f"/api/services/{LOG_SVC}/scoring/retrain?since_days=7")
     assert r.status_code == 200
     body = r.json()
@@ -1209,19 +1211,19 @@ def test_scoring_time_window_and_endpoint_clamping(monkeypatch):
     )
     pred, disc = _ss._scoring_time_window(_fake_request(session), 168)
     assert "INTERVAL" not in pred and disc is not None
-    lits = re.findall(r"TIMESTAMPTZ '([^']+)'", pred)
+    lits = re.findall(r"parseDateTime64BestEffort\('([^']+)'", pred)
     span_h = (parse_iso_utc(lits[1]) - parse_iso_utc(lits[0])).total_seconds() / 3600
     assert 0.9 <= span_h <= 1.1
 
     captured: dict = {}
     monkeypatch.setattr(
-        "backend.repositories.sessions.query_logs",
+        "backend.routers.session_scoring.scoring_analytics.query_logs",
         lambda sid, sql, params=(): (
             captured.__setitem__("sql", sql) or [{"ip": "1.2.3.4", "ua": "Mozilla", "url": "/secret", "edge_score": 91}]
         ),
     )
     out_analyst = _ss.scoring_top_flagged(request=_fake_request(session), service_id="svc", since_hours=168, limit=50)
-    assert "TIMESTAMPTZ" in captured["sql"] and out_analyst["rows"][0]["url"] == "/secret"
+    assert "parseDateTime64BestEffort" in captured["sql"] and out_analyst["rows"][0]["url"] == "/secret"
 
     out_admin = _ss.scoring_top_flagged(request=_fake_request(None), service_id="svc", since_hours=24, limit=50)
     assert "INTERVAL 24 HOUR" in captured["sql"] and out_admin["rows"][0]["url"] == "/secret"
@@ -1235,50 +1237,34 @@ def test_scoring_time_window_and_endpoint_clamping(monkeypatch):
         ),
     )
     _admin.scoring_session_events(request=_fake_request(session), service_id="svc", sid="abc", since_days=90)
-    assert captured["ts_predicate"] is not None and "TIMESTAMPTZ" in captured["ts_predicate"]
+    assert captured["ts_predicate"] is not None and "parseDateTime64BestEffort" in captured["ts_predicate"]
     _admin.scoring_session_events(request=_fake_request(None), service_id="svc", sid="abc", since_days=90)
     assert captured["ts_predicate"] is None
 
 
 @pytest.mark.usefixtures("_clear_analytics_cache_between_tests")
 def test_scoring_source_and_pre_enablement_degradation(monkeypatch):
-    assert _ss._scoring_source("logs_x", set(_SCORING_COLUMN_TYPES) | {"edge", "timestamp"}) == "logs_x"
-    assert _ss._scoring_source("logs_x", set()) == "logs_x"
     src = _ss._scoring_source("logs_x", {"edge", "timestamp", "ip"})
-    assert src.startswith("(SELECT *, ") and src.endswith(" FROM logs_x)")
-    for col, typ in _SCORING_COLUMN_TYPES.items():
-        assert f"CAST(NULL AS {typ}) AS {col}" in src
-    assert "edge_score_rtt_us" not in src
+    assert src.startswith("(SELECT ") and src.endswith(")")
+    assert "FROM request_facts" in src and "publication_state = 'visible'" in src
+    for col in _SCORING_COLUMNS:
+        assert f"AS {col}" in src
 
-    con = duckdb.connect(":memory:")
-    try:
-        con.execute(
-            "CREATE TABLE logs_noscore (timestamp TIMESTAMP, edge BOOLEAN, ip VARCHAR, ua VARCHAR, url VARCHAR, status INTEGER, country VARCHAR)"
-        )
-        con.execute("INSERT INTO logs_noscore VALUES (now()::TIMESTAMP, true, '1.2.3.4', 'UA', '/', 200, 'US')")
-
-        def fake_query_logs(service_id, sql, params=()):
-            cur = con.execute(sql, params) if params else con.execute(sql)
-            rows = cur.fetchall()
-            cnames = [d[0] for d in cur.description] if cur.description else []
-            return [dict(zip(cnames, r)) for r in rows]
-
-        monkeypatch.setattr("backend.repositories.sessions.query_logs", fake_query_logs)
-        req = _fake_request(None)
-        assert _ss.scoring_top_flagged(request=req, service_id="noscore", since_hours=24, limit=50)["rows"] == []
-        assert _ss.scoring_score_distribution(request=req, service_id="noscore", since_hours=24)["rows"] == []
-        assert _ss.scoring_compliance_breakdown(request=req, service_id="noscore", since_hours=24)["rows"] == []
-        assert _ss.scoring_latency_timeseries(request=req, service_id="noscore", since_hours=24)["has_latency"] is False
-        assert (
-            _ss.scoring_threshold_preview(request=req, service_id="noscore", threshold=75, since_hours=24)[
-                "total_scored_sessions"
-            ]
-            == 0
-        )
-        health = _ss.scoring_health(request=req, service_id="noscore", since_hours=24)
-        assert health["scored_rows"] == 0 and health["fire_rate_pct"] == 0.0 and health["top_reasons"] == []
-    finally:
-        con.close()
+    monkeypatch.setattr("backend.routers.session_scoring.scoring_analytics.query_logs", lambda sid, sql, params=(): [])
+    monkeypatch.setattr(_ss, "_table_columns", lambda sid: set())
+    req = _fake_request(None)
+    assert _ss.scoring_top_flagged(request=req, service_id="noscore", since_hours=24, limit=50)["rows"] == []
+    assert _ss.scoring_score_distribution(request=req, service_id="noscore", since_hours=24)["rows"] == []
+    assert _ss.scoring_compliance_breakdown(request=req, service_id="noscore", since_hours=24)["rows"] == []
+    assert _ss.scoring_latency_timeseries(request=req, service_id="noscore", since_hours=24)["has_latency"] is False
+    assert (
+        _ss.scoring_threshold_preview(request=req, service_id="noscore", threshold=75, since_hours=24)[
+            "total_scored_sessions"
+        ]
+        == 0
+    )
+    health = _ss.scoring_health(request=req, service_id="noscore", since_hours=24)
+    assert health["scored_rows"] == 0 and health["fire_rate_pct"] == 0.0 and health["top_reasons"] == []
 
 
 # ── Merged from tests/routers/test_session_scoring_admin.py ──
@@ -1401,7 +1387,7 @@ class TestSessionScoringStatusAndComposites:
             patch("backend.config.load_config", return_value=cfg),
             patch("backend.scoring.list_labels", return_value=[]),
             patch("backend.scoring.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
-            patch("backend.repositories.sessions.query_logs", return_value=[]),
+            patch("backend.routers.session_scoring.scoring_analytics.query_logs", return_value=[]),
         ):
             res = client.get(f"/api/services/{SVC}/{prefix}/dashboard?since_hours=24&threshold=75")
 
@@ -2188,35 +2174,101 @@ def test_rotate_key_when_scoring_disabled(seeded_service):
 _HDR = {"x-fastly-service-id": MOCK_SERVICE_ID}
 
 
-def _seed(in_memory_duckdb, source, ip="10.0.0.1", n=10):
-    # Mock logs store naive TIMESTAMP holding UTC wall-clock. Production clamps
-    # to tz-aware bounds (parse_iso_utc → CAST AS TIMESTAMPTZ), so pin the
-    # session TZ to UTC (as prod does) — otherwise the naive↔tz-aware compare
-    # uses the host's local TZ and the window misses every row.
-    in_memory_duckdb.execute("SET TimeZone='UTC'")
-    logs = generate_mock_logs(source, num_logs=n, hours_ago=1)
-    for log in logs:
-        log["ip"] = ip
-    insert_mock_logs(in_memory_duckdb, _safe_table(source["name"]), logs)
-    # The schema cache is keyed by table name, not connection — clear it so
-    # get_sessions reads THIS fresh in-memory connection's columns rather than
-    # a stale (possibly empty) entry left by another test on "test_service".
-    _clear_schema_cache()
+def _install_sessions_high_scale(monkeypatch, source, *, ip: str, n: int, start_dt: datetime, end_dt: datetime):
+    from backend.utils.bounded_cache import CacheRegistry
+
+    CacheRegistry.clear_all()
+    start_ts = start_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    end_ts = end_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    def _execute(sql, params=None):
+        p = params or {}
+        if "/* sessions:page */" in sql:
+            return [
+                {
+                    "ip": ip,
+                    "ja4": "",
+                    "session_start": start_ts,
+                    "session_end": end_ts,
+                    "req_count": n,
+                    "unique_urls": 1,
+                    "reqs_4xx": 0,
+                    "reqs_5xx": 0,
+                    "total_bytes": 1000,
+                    "edge_count": n,
+                    "shield_count": 0,
+                    "flagged": False,
+                    "is_streaming": False,
+                    "total_sessions": 1,
+                }
+            ]
+        if "/* sessions:detail */" in sql:
+            q_start = p.get("start_time")
+            q_end = p.get("end_time")
+            if (
+                p.get("ip") == ip
+                and isinstance(q_start, datetime)
+                and isinstance(q_end, datetime)
+                and q_start < q_end
+                and q_start <= start_dt <= q_end
+            ):
+                return [
+                    {
+                        "ip": ip,
+                        "ja4": "",
+                        "timestamp": start_ts,
+                        "country": "US",
+                        "url": "/",
+                        "status": 200,
+                        "method": "GET",
+                        "protocol": "HTTP/2",
+                        "resp_bytes": 200,
+                        "tcp_rtt": 10.0,
+                        "edge": "1",
+                        "edge_sid": "sid1",
+                        "ua": "Mozilla",
+                        "asn": 15169,
+                    }
+                ]
+            return []
+        return []
+
+    svc = SimpleNamespace(
+        service_id=source["service_id"],
+        client=SimpleNamespace(execute=_execute),
+    )
+    monkeypatch.setattr(
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        lambda: SimpleNamespace(resolve=lambda sid: svc if sid == source["service_id"] else None),
+    )
+    return start_ts
 
 
-def _seed_zero_width(in_memory_duckdb, source, ip="10.0.0.9", n=5):
+def _seed(monkeypatch, source, ip="10.0.0.1", n=10):
+    now = datetime.now(UTC).replace(microsecond=0)
+    _install_sessions_high_scale(
+        monkeypatch,
+        source,
+        ip=ip,
+        n=n,
+        start_dt=now - timedelta(minutes=40),
+        end_dt=now - timedelta(minutes=30),
+    )
+
+
+def _seed_zero_width(monkeypatch, source, ip="10.0.0.9", n=5):
     """Seed a single-request session: every log shares ONE timestamp so the
     aggregated session has session_start == session_end (a zero-width window).
     Returns the pinned timestamp."""
-    in_memory_duckdb.execute("SET TimeZone='UTC'")
-    ts = (datetime.now(UTC) - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    logs = generate_mock_logs(source, num_logs=n, hours_ago=1)
-    for log in logs:
-        log["ip"] = ip
-        log["timestamp"] = ts
-    insert_mock_logs(in_memory_duckdb, _safe_table(source["name"]), logs)
-    _clear_schema_cache()
-    return ts
+    pinned_dt = (datetime.now(UTC) - timedelta(minutes=30)).replace(microsecond=0)
+    return _install_sessions_high_scale(
+        monkeypatch,
+        source,
+        ip=ip,
+        n=n,
+        start_dt=pinned_dt,
+        end_dt=pinned_dt,
+    )
 
 
 def _window():
@@ -2224,19 +2276,15 @@ def _window():
     return (now - timedelta(hours=2)).isoformat(), now.isoformat()
 
 
-def _use_analyst(in_memory_duckdb, source, *, mask_ips: bool):
+def _use_analyst(source, *, mask_ips: bool):
     """Re-point build_request_context to inject an analyst session into ctx.
     (The local TestClient socket path classifies as admin in the middleware, so
     we exercise the router's analyst branch via the injected ctx.analyst_session.)"""
     session = SimpleNamespace(service_ids=[source["service_id"]], pii_policy={"mask_ips": mask_ips})
-    app.dependency_overrides[build_request_context] = override_request_context(
-        source=source, _con_override=in_memory_duckdb, session=session
-    )
+    app.dependency_overrides[build_request_context] = override_request_context(source=source, session=session)
 
 
-def _list_first_token(client, in_memory_duckdb, source):
-    # Omit start/end → default range (raw session path). An explicit >1h window
-    # routes get_sessions to the rollup path, which has no parquet in tests.
+def _list_first_token(client):
     r = client.post("/api/sessions", headers=_HDR, json={})
     assert r.status_code == 200, r.text
     sessions = r.json()["sessions"]
@@ -2244,52 +2292,52 @@ def _list_first_token(client, in_memory_duckdb, source):
     return sessions[0]
 
 
-def test_list_attaches_session_token(client, in_memory_duckdb, test_service_source):
+def test_list_attaches_session_token(client, monkeypatch, test_service_source):
     """Every session row carries a non-empty opaque token."""
-    _seed(in_memory_duckdb, test_service_source)
-    row = _list_first_token(client, in_memory_duckdb, test_service_source)
+    _seed(monkeypatch, test_service_source)
+    row = _list_first_token(client)
     assert row.get("session_token"), "session_token missing/empty on list row"
     # opaque — must not embed the raw ip
     assert "10.0.0.1" not in row["session_token"]
 
 
-def test_token_resolves_detail(client, in_memory_duckdb, test_service_source):
+def test_token_resolves_detail(client, monkeypatch, test_service_source):
     """A token taken from the list resolves a non-empty detail result."""
-    _seed(in_memory_duckdb, test_service_source)
-    row = _list_first_token(client, in_memory_duckdb, test_service_source)
+    _seed(monkeypatch, test_service_source)
+    row = _list_first_token(client)
     r = client.post("/api/sessions/detail", headers=_HDR, json={"session_token": row["session_token"]})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["data"], "token-keyed detail returned no rows"
 
 
-def test_invalid_token_returns_400(client, in_memory_duckdb, test_service_source):
+def test_invalid_token_returns_400(client, monkeypatch, test_service_source):
     """A malformed/stale token surfaces a clear 400, not a silent empty grid."""
-    _seed(in_memory_duckdb, test_service_source)
+    _seed(monkeypatch, test_service_source)
     r = client.post("/api/sessions/detail", headers=_HDR, json={"session_token": "garbage.token"})
     assert r.status_code == 400, r.text
     assert r.json()["detail"]["error"] == "session_token_invalid"
 
 
-def test_zero_width_session_detail_via_token(client, in_memory_duckdb, test_service_source):
+def test_zero_width_session_detail_via_token(client, monkeypatch, test_service_source):
     """A single-request session (session_start == session_end) must still
     resolve detail rows. Previously the time clamp rejected the zero-width
     window with 400 'time_range_empty' and the modal showed 'No results' —
     for ~28% of real sessions, all roles. The detail handler now widens a
     zero-width window by 1s/side before clamping."""
-    _seed_zero_width(in_memory_duckdb, test_service_source)
-    row = _list_first_token(client, in_memory_duckdb, test_service_source)
+    _seed_zero_width(monkeypatch, test_service_source)
+    row = _list_first_token(client)
     assert row["session_start"] == row["session_end"], "fixture should produce a zero-width session"
     r = client.post("/api/sessions/detail", headers=_HDR, json={"session_token": row["session_token"]})
     assert r.status_code == 200, r.text
     assert r.json()["data"], "zero-width session detail returned no rows"
 
 
-def test_zero_width_session_detail_via_raw_ip(client, in_memory_duckdb, test_service_source):
+def test_zero_width_session_detail_via_raw_ip(client, monkeypatch, test_service_source):
     """The same zero-width widening helps the legacy raw-ip path (admin /
     non-masking analyst), not only the token path — the widen is shared."""
-    _seed_zero_width(in_memory_duckdb, test_service_source)
-    row = _list_first_token(client, in_memory_duckdb, test_service_source)
+    _seed_zero_width(monkeypatch, test_service_source)
+    row = _list_first_token(client)
     r = client.post(
         "/api/sessions/detail",
         headers=_HDR,
@@ -2301,12 +2349,12 @@ def test_zero_width_session_detail_via_raw_ip(client, in_memory_duckdb, test_ser
 
 @pytest.mark.security_regression
 @pytest.mark.parametrize("raw_ip", ["10.0.0.1", "10.0.0.xxx"])
-def test_masking_analyst_raw_ip_rejected(client, in_memory_duckdb, test_service_source, raw_ip):
+def test_masking_analyst_raw_ip_rejected(client, monkeypatch, test_service_source, raw_ip):
     """A masking analyst supplying a raw OR masked top-level ip (no token) is
     rejected with 403 — accepting it would be a presence oracle (the masked
     value can never match; a raw value would probe for a guessed real IP)."""
-    _seed(in_memory_duckdb, test_service_source)
-    _use_analyst(in_memory_duckdb, test_service_source, mask_ips=True)
+    _seed(monkeypatch, test_service_source)
+    _use_analyst(test_service_source, mask_ips=True)
     start, end = _window()
     r = client.post(
         "/api/sessions/detail",
@@ -2318,23 +2366,23 @@ def test_masking_analyst_raw_ip_rejected(client, in_memory_duckdb, test_service_
 
 
 @pytest.mark.security_regression
-def test_masking_analyst_token_returns_rows(client, in_memory_duckdb, test_service_source):
+def test_masking_analyst_token_returns_rows(client, monkeypatch, test_service_source):
     """The fix itself: a masking analyst drills in via the opaque token and gets
     rows — without ever holding the real IP."""
-    _seed(in_memory_duckdb, test_service_source)
-    _use_analyst(in_memory_duckdb, test_service_source, mask_ips=True)
-    row = _list_first_token(client, in_memory_duckdb, test_service_source)
+    _seed(monkeypatch, test_service_source)
+    _use_analyst(test_service_source, mask_ips=True)
+    row = _list_first_token(client)
     r = client.post("/api/sessions/detail", headers=_HDR, json={"session_token": row["session_token"]})
     assert r.status_code == 200, r.text
     assert r.json()["data"], "masking analyst token-keyed detail returned no rows"
 
 
 @pytest.mark.security_regression
-def test_non_masking_analyst_raw_ip_allowed(client, in_memory_duckdb, test_service_source):
+def test_non_masking_analyst_raw_ip_allowed(client, monkeypatch, test_service_source):
     """A NON-masking analyst still uses the legacy raw-ip path (the lock is
     gated on pii_policy.mask_ips, not on analyst-hood)."""
-    _seed(in_memory_duckdb, test_service_source)
-    _use_analyst(in_memory_duckdb, test_service_source, mask_ips=False)
+    _seed(monkeypatch, test_service_source)
+    _use_analyst(test_service_source, mask_ips=False)
     start, end = _window()
     r = client.post(
         "/api/sessions/detail",
@@ -2455,9 +2503,9 @@ def test_field_values_ip_is_masked_by_policy():
     assert [v["value"] for v in apply_pii_policy(url_body, {"mask_ips": True})["values"]] == ["/a", "1.2.3.4"]
 
 
-def test_sessions_with_range_token(client, in_memory_duckdb, test_service_source):
+def test_sessions_with_range_token(client, monkeypatch, test_service_source):
     """Verify range_token is recognized and resolved server-side on POST /api/sessions."""
-    _seed(in_memory_duckdb, test_service_source, ip="10.0.0.42", n=5)
+    _seed(monkeypatch, test_service_source, ip="10.0.0.42", n=5)
     r = client.post(
         "/api/sessions",
         headers=_HDR,
@@ -2469,10 +2517,10 @@ def test_sessions_with_range_token(client, in_memory_duckdb, test_service_source
     assert any(s["ip"] == "10.0.0.42" for s in data["sessions"])
 
 
-def test_sessions_telemetry_attribution(client, in_memory_duckdb, test_service_source, monkeypatch):
+def test_sessions_telemetry_attribution(client, test_service_source, monkeypatch):
     """Verify process_context is captured for sessions:list and sessions:detail."""
     captured_contexts = []
-    import backend.routers.session_scoring as sess_mod
+    import backend.routers.session_scoring.scoring_analytics as sess_mod
 
     orig_scope = sess_mod.process_context_scope
 
@@ -2481,7 +2529,7 @@ def test_sessions_telemetry_attribution(client, in_memory_duckdb, test_service_s
         return orig_scope(ctx_name)
 
     monkeypatch.setattr(sess_mod, "process_context_scope", mock_scope)
-    _seed(in_memory_duckdb, test_service_source, ip="10.0.0.55", n=5)
+    _seed(monkeypatch, test_service_source, ip="10.0.0.55", n=5)
 
     r = client.post("/api/sessions", headers=_HDR, json={"range_token": "1h"})
     assert r.status_code == 200
@@ -2494,19 +2542,19 @@ def test_sessions_telemetry_attribution(client, in_memory_duckdb, test_service_s
     assert "sessions:detail" in captured_contexts
 
 
-def test_sessions_stale_view_retry_wrapped(client, in_memory_duckdb, test_service_source, monkeypatch):
-    """Verify execute_with_stale_view_retry wraps get_sessions in sessions_endpoint."""
-    import backend.routers.session_scoring as sess_mod
+def test_sessions_stale_view_retry_wrapped(client, test_service_source, monkeypatch):
+    """Verify sessions_endpoint delegates to backend.high_scale.sessions.sessions_endpoint."""
+    import backend.high_scale.sessions as hs_sess_mod
 
     called = []
-    orig_retry = sess_mod.execute_with_stale_view_retry
+    orig_sessions = hs_sess_mod.sessions_endpoint
 
-    def mock_retry(con, src, fn):
+    def mock_hs_sessions(service, req, start_time, end_time):
         called.append(True)
-        return orig_retry(con, src, fn)
+        return orig_sessions(service, req, start_time, end_time)
 
-    monkeypatch.setattr(sess_mod, "execute_with_stale_view_retry", mock_retry)
-    _seed(in_memory_duckdb, test_service_source, ip="10.0.0.99", n=2)
+    monkeypatch.setattr(hs_sess_mod, "sessions_endpoint", mock_hs_sessions)
+    _seed(monkeypatch, test_service_source, ip="10.0.0.99", n=2)
     r = client.post("/api/sessions", headers=_HDR, json={})
     assert r.status_code == 200
-    assert called, "execute_with_stale_view_retry should be called by sessions_endpoint"
+    assert called, "backend.high_scale.sessions.sessions_endpoint should be called by sessions_endpoint"

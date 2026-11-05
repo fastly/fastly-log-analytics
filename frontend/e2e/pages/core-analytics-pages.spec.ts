@@ -31,7 +31,7 @@ test.describe('Data Management Page Contract (/logs)', () => {
     const res = await page.goto('/logs')
     expect(res?.status()).toBe(200)
     await expect(page.getByRole('heading', { name: 'Data Management', exact: true })).toBeVisible({ timeout: 30_000 })
-    for (const btnName of [/Import Logs/i, /Backfill Logs/i, /Commit Buffer/i]) {
+    for (const btnName of [/Import Logs/i, /Backfill Logs/i, /View Recent Logs/i]) {
       await expect(page.getByRole('button', { name: btnName })).toBeVisible({ timeout: 15_000 })
     }
     await assertFooterVisible(page)
@@ -62,13 +62,13 @@ test.describe('Data Management Page Contract (/logs)', () => {
 
   test('4. 7-tab workspace navigation & lazy-mounted tab panels', async ({ page }) => {
     await gotoHeading(page, '/logs', 'Data Management')
-    for (const name of [/Cron Runs/i, /Service History/i, /Ingestion History/i, /DuckLake Storage/i, /Metadata Storage/i, /Available Logs/i, /DuckDB Schema/i]) {
+    for (const name of [/Cron Runs/i, /Service History/i, /Ingestion History/i, /Archive Storage/i, /Metadata Storage/i, /Available Logs/i, /ClickHouse Schema/i]) {
       await expect(page.getByRole('tab', { name })).toBeVisible()
     }
     for (const [tabRe, heading] of [
       [/Service History/i, 'Service History'],
       [/Ingestion History/i, 'Log Ingestion History'],
-      [/DuckDB Schema/i, 'DuckDB Table Schema & Statistics'],
+      [/ClickHouse Schema/i, 'ClickHouse Table Schema & Statistics'],
     ] as const) {
       await page.getByRole('tab', { name: tabRe }).click()
       await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible({ timeout: 15_000 })

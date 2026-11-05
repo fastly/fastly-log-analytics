@@ -1124,7 +1124,7 @@ def test_load_vcl_with_rate_limiting_false_strips_ratelimit_blocks():
 # ── Merged from test_fastly_mock_mode.py ──────────────────────────────────────────────
 
 from backend.core.fastly.client import fastly, is_mock_mode, mock_response
-from backend.core.rollups.security_dims import fetch_verified_bots_paged
+from backend.cron.jobs.metadata import fetch_verified_bots_paged
 
 
 def test_is_mock_mode_reads_env(monkeypatch):
@@ -1675,7 +1675,6 @@ import backend.utils.telemetry as sqlite_profiler
 import backend.utils.telemetry as structlog_config
 import backend.utils.tunnel as _session_mod
 from backend.core.metadata import base
-from backend.core.rollups._common import parse_hour_token
 from backend.utils import remote_access, tunnel
 from backend.utils.bounded_cache import BoundedLRUCache, BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import (
@@ -1730,7 +1729,7 @@ _INSIGHTS_NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
 _TS_SOURCE = ROOT / "frontend" / "lib" / "chartUtils.ts"
 _HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12", "2026-1-5-3"]
 _BAD_KEYS = ["", "2026-10-19", "2026-10-19-24", "2026-13-01-00", "garbage", "2026-10-19T05", "2026-10-19-05-00"]
-_DROP_TABLE_FILES = sorted([*(ROOT / "backend" / "repositories").glob("*.py"), ROOT / "backend" / "core" / "duckdb.py"])
+_DROP_TABLE_FILES = sorted((ROOT / "backend" / "repositories").glob("*.py"))
 
 
 @pytest.fixture(autouse=True)
@@ -1910,19 +1909,14 @@ def test_cache_registry_register_and_clear():
 
 
 def test_storage_caches_are_registered_at_import():
-    import backend.core.duckdb  # noqa: F401
-    import backend.core.storage  # noqa: F401
-    import backend.repositories.dashboard  # noqa: F401
-    import backend.repositories.network  # noqa: F401
+    import backend.config  # noqa: F401
+    import backend.core.fos_client  # noqa: F401
 
     names = set(CacheRegistry.names())
     for required in (
-        "storage._view_cache",
-        "dashboard._dashboard_cache",
-        "network._response_cache",
+        "config._config_cache",
+        "config._name_cache",
         "duckdb._fos_client_cache",
-        "duckdb._initialized_paths",
-        "core._duckdb_status._schema_cache",
     ):
         assert required in names, f"missing registration: {required}"
 
@@ -1994,10 +1988,8 @@ def _unthrottled(path: str, only_funcs: set[str] | None, only_msg: str | None) -
 @pytest.mark.parametrize(
     ("path", "funcs", "msg"),
     [
-        ("backend/core/duckdb_pool.py", None, None),
         ("backend/core/ingest/parser.py", None, "_parse_rum_line"),
         ("backend/core/ingest/parser.py", {"extract_metrics_from_faro_payload"}, None),
-        ("backend/repositories/dashboard.py", None, "analyst"),
         *[(p.relative_to(ROOT).as_posix(), None, "DROP TABLE") for p in _DROP_TABLE_FILES],
     ],
 )
@@ -2288,7 +2280,7 @@ def test_hour_and_day_key_parsers_and_ensure_utc():
         raw = datetime.strptime(key, "%Y-%m-%d-%H").replace(tzinfo=UTC)
         assert parse_hour_key(key) == raw == parse_hour_key_strict(key) and parse_hour_key(key).tzinfo is UTC
     for key in _BAD_KEYS:
-        assert parse_hour_key(key) is None and parse_hour_token(key) is None
+        assert parse_hour_key(key) is None
         with pytest.raises(ValueError):
             parse_hour_key_strict(key)
     for key in ("2026-10-19", "2024-02-29", "2026-1-5"):

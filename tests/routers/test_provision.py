@@ -213,7 +213,6 @@ def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
                 "edge_only": True,
                 "log_period": "60",
                 "enable_cron_sync": True,
-                "enable_cron_compact": True,
             },
         )
 
@@ -433,16 +432,19 @@ def test_teardown_unknown_service_id_never_provisioned_is_404(isolated_configs_d
     assert r.status_code == 404
 
 
-def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir, tmp_path):
-    """``remove_cache=False`` MUST leave the per-service DuckDB file intact."""
-    sid = "svc-idem-keep-cache"
-    _seed_cfg(sid)
+def test_teardown_preserves_cache_when_remove_cache_false(isolated_configs_dir, tmp_path):
+    """``remove_cache=False`` MUST leave the per-service cache directory intact."""
+    from backend.core import fos_client as _db
 
-    db_path = svcconfig.duckdb_path(sid)
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    with open(db_path, "w") as f:
-        f.write("placeholder-duckdb-bytes")
-    assert os.path.exists(db_path)
+    sid = "svc-idem-keep-cache"
+    cfg = _seed_cfg(sid)
+
+    svc_cache_dir = _db._cache_dir({"bucket": cfg["fos_bucket"], "prefix": ""})
+    os.makedirs(svc_cache_dir, exist_ok=True)
+    sentinel = os.path.join(svc_cache_dir, "cached-file.txt")
+    with open(sentinel, "w") as f:
+        f.write("placeholder-cache-bytes")
+    assert os.path.exists(sentinel)
 
     with _teardown_patches(sid, fastly_fn=_auth_fastly_ok(sid, "cust-IDEM")), TestClient(app) as client:
         r = client.post(
@@ -452,7 +454,7 @@ def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir,
 
     assert r.status_code == 200
     assert not os.path.exists(svcconfig.config_path(sid))
-    assert os.path.exists(db_path)
+    assert os.path.exists(sentinel)
 
 
 def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_configs_dir):
@@ -560,8 +562,6 @@ def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
         "log_period": "60",
         "enable_cron_sync": True,
         "delete_after": True,
-        "commit_interval_mins": 5,
-        "enable_cron_compact": True,
         "log_retention_days": 30,
         **overrides,
     }
@@ -570,10 +570,7 @@ def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
 def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_configs_dir, tmp_path, monkeypatch):
     """End-to-end: execute → orchestrator yields done → config persists → bootstrap lists svc."""
     sid = "svc-wizard-e2e-1"
-    extras = [
-        patch("backend.core.storage.init_storage_table", side_effect=RuntimeError("storage init skipped (test)")),
-    ]
-    with _wizard_env(tmp_path, monkeypatch, extra_patches=extras), TestClient(app) as client:
+    with _wizard_env(tmp_path, monkeypatch), TestClient(app) as client:
         r = client.post("/api/provision/execute", json=_wizard_payload(sid, "wizard-e2e-bucket"))
 
     assert r.status_code == 200, r.text[:500]
@@ -1297,7 +1294,7 @@ def test_provision_execute_dns_fallback_and_faro_version_threading():
         ),
         patch("backend.provision.provision", side_effect=fake_provision),
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.core.metadata.record_audit"),
     ):
         base_req = {"token": "tok", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True}
@@ -1452,15 +1449,13 @@ def test_teardown_endpoint_flows():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_path", return_value="/tmp/nonexistent-config.json"),
-        patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab", side_effect=lambda: sync_calls.append(True)),
         patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
-        patch("backend.core.storage.clear_source_caches"),
         patch(
             "backend.provision.perform_teardown",
             return_value=iter([{"type": "status", "message": "removed s3 bucket"}]),
         ),
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
         resp = _client().post(
@@ -1479,12 +1474,10 @@ def test_teardown_endpoint_flows():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_path", return_value="/tmp/nonexistent.json"),
-        patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler", return_value=MagicMock()),
-        patch("backend.core.storage.clear_source_caches"),
         patch("backend.provision.perform_teardown", side_effect=_boom),
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
         resp_err = _client().post(

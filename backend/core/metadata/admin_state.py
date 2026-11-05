@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_fos_client(source: dict[str, Any] | None = None) -> Any:
-    from backend.core.duckdb import _get_fos_client as _impl
+    from backend.core.fos_client import _get_fos_client as _impl
 
     return _impl(source or {})
 
 
 def get_source_for_service(service_id: str | None = None) -> dict[str, Any] | None:
-    from backend.core.duckdb import get_source_for_service as _impl
+    from backend.core.fos_client import get_source_for_service as _impl
 
     return _impl(service_id or "")
 

@@ -118,32 +118,6 @@ def ledger_sweep_service(
         _run_ledger_sweep,
         success_msg="Ledger sweep started.",
         in_progress_msg="Ledger sweep already running.",
-        require_high_scale=True,
-        high_scale_detail="Ledger sweep is only supported under high-scale mode.",
-    )
-    if isinstance(res, SyncStartResponse):
-        return res
-    return SyncStartResponse(**res)
-
-
-@router.post(
-    "/admin/rum/sync/{service_id}",
-    response_model=SyncStartResponse,
-    response_model_exclude_unset=True,
-)
-def rum_sync_service(
-    service_id: str,
-    _admin: None = Depends(require_admin),
-    source: dict[str, Any] = Depends(get_source),
-) -> SyncStartResponse:
-    from backend.cron.jobs.sync import _run_rum_sync
-
-    res = _ru.run_admin_cron_trigger(
-        source,
-        "rum_sync",
-        _run_rum_sync,
-        success_msg="RUM sync started.",
-        in_progress_msg="RUM sync already running.",
     )
     if isinstance(res, SyncStartResponse):
         return res
@@ -168,8 +142,6 @@ def rum_discovery_service(
         _run_rum_discovery_cron,
         success_msg="RUM discovery started.",
         in_progress_msg="RUM discovery already running.",
-        require_high_scale=True,
-        high_scale_detail="RUM discovery is only supported under high-scale mode.",
     )
     if isinstance(res, SyncStartResponse):
         return res
@@ -209,10 +181,6 @@ def rum_ledger_sweep_service(
         _run_rum_ledger_sweep,
         success_msg="RUM ledger sweep started.",
         in_progress_msg="RUM ledger sweep already running.",
-        require_high_scale=True,
-        high_scale_detail=make_error(
-            "high_scale_required", "RUM ledger sweep is only supported under high-scale mode."
-        ),
         precheck=_precheck,
     )
     if isinstance(res, SyncStartResponse):
@@ -227,10 +195,10 @@ def ingest_endpoint(
     source: dict[str, Any] = Depends(get_source),
 ) -> SyncStartResponse:
     from backend.cron.jobs.sync import _run_log_discovery_cron
-    from backend.repositories.dashboard import invalidate_service
+    from backend.repositories.utils.response_cache import invalidate_service_cache
 
     src = source
-    invalidate_service(src["name"])
+    invalidate_service_cache(src["name"])
     res = _ru.start_or_resume_cron(
         src,
         "log_discovery",

@@ -8,20 +8,13 @@ import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClien
 export const dynamic = 'force-dynamic'
 
 export default function AdminPage() {
-  const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
-  const isHighScale =
-    rawMode === 'standard'
-      ? false
-      : rawMode === 'high_scale' ||
-        ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
-
   return (
     <div className="space-y-6" data-testid="admin-overview-root">
       <PageHeader
         title="Admin"
         description="Manage your global settings, Fastly services, and log ingestion pipelines."
       >
-        <AdminPrefetchLinks isHighScale={isHighScale} />
+        <AdminPrefetchLinks />
       </PageHeader>
 
       <div

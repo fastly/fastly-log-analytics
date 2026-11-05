@@ -69,7 +69,9 @@ _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
 _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
+_INSIGHTS_TELEMETRY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_TELEMETRY_CACHE", _INSIGHTS_TELEMETRY_CACHE)
 
 
 def _severity(items: list[dict[str, Any]]) -> str:
@@ -95,6 +97,8 @@ def insights_endpoint(
     clamp_cache_key: str | None = None,
     force_refresh: bool = False,
 ) -> InsightsResponse:
+    from backend.utils.telemetry import get_queries
+
     window_hours = float(req.window_size_hrs)
     baseline_hours = float(req.baseline_hours)
     req_filters = getattr(req, "filters", None)
@@ -116,7 +120,13 @@ def insights_endpoint(
     if use_cache and not force_refresh:
         cached = _INSIGHTS_CACHE.get(cache_key)
         if cached is not None:
-            return InsightsResponse.with_telemetry(**cached, is_cached=True, cache_age_seconds=0)
+            cached_queries = [
+                q.copy() if isinstance(q, dict) else q for q in (_INSIGHTS_TELEMETRY_CACHE.get(cache_key) or [])
+            ]
+            return InsightsResponse.with_telemetry(
+                **cached, is_cached=True, cache_age_seconds=0, debug_queries=cached_queries
+            )
+    get_queries()
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -222,6 +232,9 @@ def insights_endpoint(
     )
     if use_cache and not any(c.get("severity") == "error" for c in cards):
         _INSIGHTS_CACHE[cache_key] = payload
+        _INSIGHTS_TELEMETRY_CACHE[cache_key] = [
+            {**q, "is_cached": True} if isinstance(q, dict) else q for q in get_queries()
+        ]
     return InsightsResponse.with_telemetry(**payload)
 
 

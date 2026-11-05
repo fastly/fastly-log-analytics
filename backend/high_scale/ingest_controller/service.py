@@ -121,13 +121,37 @@ class HighScaleServiceRegistryProtocol(Protocol):
     def resolve(self, service_id: str) -> HighScaleService | None: ...
 
 
+@dataclass(frozen=True)
+class HighScaleServiceRegistration:
+    service_id: str
+    source_bucket: str = ""
+    source_prefix: str = ""
+    delete_raw_after_commit: bool = True
+
+
 class HighScaleServiceRegistry:
     """Small injectable registry; services opt in by explicit registration."""
 
     def __init__(self, services: Mapping[str, HighScaleService] | None = None) -> None:
         self._services = dict(services or {})
 
-    def register(self, service: HighScaleService) -> None:
+    def register(self, service: HighScaleService | HighScaleServiceRegistration) -> None:
+        if isinstance(service, HighScaleServiceRegistration):
+            if not service.service_id:
+                raise ValueError("high-scale service id is required")
+            from backend.core.clickhouse import get_clickhouse_client
+
+            client = get_clickhouse_client()
+            if client is not None:
+                cursor_secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET") or "fla-default-cursor-secret").encode("utf-8")
+                register_high_scale_services(
+                    self,
+                    client=client,
+                    service_ids=(service.service_id,),
+                    cursor_secret=cursor_secret,
+                    owner_epoch=int(os.getenv("HIGH_SCALE_OWNER_EPOCH", "1")),
+                )
+            return
         if not service.service_id:
             raise ValueError("high-scale service id is required")
         if not service.cursor_secret:
@@ -247,7 +271,7 @@ def _default_control_factory() -> ArchiveManifestCatalog:
 
 
 def _default_archive_factory(service_id: str) -> ArchivePublication | None:
-    from backend.core.duckdb import _get_fos_client, get_source_for_service
+    from backend.core.fos_client import _get_fos_client, get_source_for_service
 
     source = get_source_for_service(service_id)
     bucket = source.get("bucket") if source is not None else None

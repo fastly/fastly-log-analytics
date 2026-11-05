@@ -277,7 +277,7 @@ class HighScaleWorkerLoop:
 
 def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoop:
     """Build the durable FOS → archive → ClickHouse worker from process config."""
-    from backend.core.duckdb import _get_fos_client, get_source_for_service
+    from backend.core.fos_client import _get_fos_client, get_source_for_service
     from backend.high_scale.ingest_controller import (
         AggregateBatchAdapter,
         HighScaleIngestController,

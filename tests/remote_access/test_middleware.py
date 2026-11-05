@@ -828,33 +828,32 @@ def _beacon_health_disabled(client):
 
 
 def _beacon_health_check_failed(client):
-    with (
-        patch("backend.routers.rum.svcconfig.load_config", return_value={"rum": {"enabled": True}}),
-        patch("backend.routers.rum.rum_source_for", side_effect=RuntimeError("boom")),
-    ):
+    with patch("backend.routers.rum.analytics.svcconfig.load_config", return_value={"rum": {"enabled": True}}):
         return client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=_HEADERS)
 
 
 def _analytics_no_data(client):
     with (
-        patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
-        patch("backend.routers.rum._ConnectionHolder", _Holder),
-        patch("backend.routers.rum.execute_with_stale_view_retry", return_value={"no_data": True}),
+        patch(
+            "backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=object()
+        ),
+        patch(
+            "backend.high_scale.rum.rum_analytics",
+            return_value={**dict(_HS_ANALYTICS), "no_data": True, "beacon_count": 0},
+        ),
     ):
         return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
 
 
 def _analytics_success(client):
-    db_res = {
-        "no_data": False, "total_beacons": 7, "pageviews": 5, "interactions": 1, "errors_count": 1,
-        "vitals_rows": [("LCP", 2100.0, 10, 8, 1, 1)], "worst_pages_rows": [("/p", 4, 120.0, 2100.0, 0.05, 0.1)],
-        "errors_rows": [("boom", "app.js", 3, 4, 2)], "trends_rows": [],
-        "browsers": {"Firefox": 7}, "os": {"macOS": 7}, "devices": {"desktop": 7},
-    }  # fmt: skip
     with (
-        patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
-        patch("backend.routers.rum._ConnectionHolder", _Holder),
-        patch("backend.routers.rum.execute_with_stale_view_retry", return_value=db_res),
+        patch(
+            "backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=object()
+        ),
+        patch(
+            "backend.high_scale.rum.rum_analytics",
+            return_value={**dict(_HS_ANALYTICS), "beacon_count": 7, "pageview_count": 5},
+        ),
     ):
         return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
 

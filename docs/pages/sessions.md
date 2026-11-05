@@ -6,7 +6,7 @@ Source: [`frontend/app/sessions/`](../../frontend/app/sessions/) (`page.tsx` re-
 
 ## How sessions are formed
 
-[`backend/repositories/sessions/queries.py`](../../backend/repositories/sessions/queries.py) partitions requests by client IP (plus JA4 when the field is logged) and starts a new session after a gap of more than 30 minutes. Each row reports start/end, request count, unique URLs, 4xx/5xx counts, bytes, median RTT, edge/shield counts, `edge_sid` and, when CMCD fields exist, `is_streaming`. The page is limited to a 7-day window; a wider range shows a notice asking the user to narrow it. Single-request sessions are widened by one second each side before the analyst time clamp.
+[`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py) partitions requests in ClickHouse `request_facts` by client IP (plus JA4 when the field is logged) and starts a new session after a gap of more than 30 minutes. Each row reports start/end, request count, unique URLs, 4xx/5xx counts, bytes, median RTT, edge/shield counts, `edge_sid` and, when CMCD fields exist, `is_streaming`. The page is limited to a 7-day window; a wider range shows a notice asking the user to narrow it. Single-request sessions are widened by one second each side before the analyst time clamp.
 
 ## URL parameters
 
@@ -37,10 +37,10 @@ Router: `sessions_router` (prefix `/api/sessions`) in [`backend/routers/session_
 - `POST /api/sessions` (`SessionsRequest`: range fields, `filters`, `page`, `limit` up to 500, `sort_by`, `sort_dir`, `flagged_only`, `streaming_only`, `min_reqs_flag`, `min_4xx_pct_flag`) returns `SessionsResponse`: `sessions[]`, `asn_names`, `total`, `page`, `limit` and the `has_*` flags.
 - `POST /api/sessions/detail` (`SessionDetailRequest`: `session_token`, or `ip`/`ja4`/`start_time`/`end_time` for admins) returns `SessionDetailResponse` (`columns`, `data`).
 
-Standard mode reads the sessions rollup where eligible (`rollup_reader.py`), otherwise the request view. High-scale mode ([`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py)) applies the shared filters, `sort_by`/`sort_dir`, real pagination and a real window `total`; `is_streaming` and `streaming_only` read the stored `cmcd` map.
+The ClickHouse reader ([`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py)) applies the shared filters, `sort_by`/`sort_dir`, real pagination and a real window `total`; `is_streaming` and `streaming_only` read the stored `cmcd` map.
 
 ## Tests
 
 - Frontend: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx)
-- Backend: [`tests/repositories/test_sessions.py`](../../tests/repositories/test_sessions.py), [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), [`tests/routers/test_session_scoring_router.py`](../../tests/routers/test_session_scoring_router.py)
+- Backend: [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), [`tests/routers/test_session_scoring_router.py`](../../tests/routers/test_session_scoring_router.py)
 - E2E: `User Sessions Explorer Page Contract` in [`frontend/e2e/pages/core-analytics-pages.spec.ts`](../../frontend/e2e/pages/core-analytics-pages.spec.ts)

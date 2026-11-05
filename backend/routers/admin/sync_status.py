@@ -10,11 +10,11 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from backend.celery_app import publisher as sync_status_publisher
-from backend.core import duckdb as _db_mod
+from backend.core import fos_client as _db_mod
 from backend.core.request_context import get_service_id, get_source, require_service_access
 from backend.cron.scheduler import compute_sync_status_cached
 from backend.models.admin import (
@@ -24,9 +24,7 @@ from backend.models.admin import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
-from backend.utils.dir_size import _get_dir_size
 from backend.utils.router_utils import (
-    make_error,
     query_errors,
     raise_internal,
     require_service_id,
@@ -75,38 +73,14 @@ def sync_status(
         return resp_empty
 
     try:
-        from backend.high_scale.ingest_controller import get_high_scale_service_registry
-
         compute_fn = _resolve_compute_sync_status_cached()
-        high_scale_service = get_high_scale_service_registry().resolve(service_id)
-        if high_scale_service is not None:
-            cached = compute_fn(service_id)
-            if cached is not None:
-                high_scale_response: SyncStatusResponse = SyncStatusResponse.with_telemetry(**cached)
-                return high_scale_response
+        cached = compute_fn(service_id)
+        if cached is not None:
+            resp_cached: SyncStatusResponse = SyncStatusResponse.with_telemetry(**cached)
+            return resp_cached
 
-        if skip_fos and not force:
-            cached = compute_fn(service_id)
-            if cached is not None:
-                resp_cached: SyncStatusResponse = SyncStatusResponse.with_telemetry(**cached)
-                return resp_cached
-
-        is_durable = svcconfig.is_durable_serving_mode(src)
-        _con = _db.get_connection(source=src, max_wait=5, skip_view_update=True, read_only=is_durable)
-        try:
-            status = _db.get_sync_status(_con, src, skip_fos=skip_fos, force=force)
-        finally:
-            _con.close()
-
-        db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)
-        db_exists = os.path.exists(db_path)
-        db_size = os.path.getsize(db_path) if db_exists else 0
-
-        cache_size = _get_dir_size(_db._cache_dir(src))
-
-        status["duckdb_size_bytes"] = db_size + cache_size
-        status["duckdb_exists"] = db_exists
-
+        status = dict(svcconfig.get_status(service_id) or {"configured": True})
+        status.setdefault("configured", True)
         from backend.cron.scheduler import get_latest_progress_for_service
 
         active_run = get_latest_progress_for_service(service_id)
@@ -119,12 +93,6 @@ def sync_status(
 
         resp: SyncStatusResponse = SyncStatusResponse.with_telemetry(**status)
         return resp
-    except _db.DBBusyError as e:
-        logger.warning("db_busy service_id=%s: %s", service_id, e)
-        raise HTTPException(
-            status_code=503,
-            detail=make_error("db_busy", "Database is busy; retry shortly", busy=True),
-        ) from e
     except Exception as e:
         raise_internal(logger, e, code="sync_status_failed")
 
@@ -243,8 +211,6 @@ CacheRegistry.register("sync_status._INGESTED_FILES_CACHE", _INGESTED_FILES_CACH
 @router.get("/admin/ingested-files", response_model=IngestedFilesResponse)
 @query_errors(status_code=500)
 def ingested_files(source: dict[str, Any] = Depends(get_source)) -> IngestedFilesResponse:
-    import os
-
     service_id = str(source.get("name", ""))
     use_cache = "PYTEST_CURRENT_TEST" not in os.environ
     res = _INGESTED_FILES_CACHE.get(service_id) if use_cache else None

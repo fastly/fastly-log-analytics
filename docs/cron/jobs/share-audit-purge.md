@@ -11,7 +11,7 @@
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Cron trigger (`cron`)
 - **Default Schedule:** Daily at 03:45 UTC (`hour=3, minute=45`).
-- **Timing Rationale:** Runs after `full_sync` (03:30 UTC) and before `optimize` (04:00 UTC) during the quiet daily maintenance window.
+- **Timing Rationale:** Runs after `full_sync` (03:30 UTC) during the quiet daily maintenance window.
 - **Scope:** Process-global singleton job.
 - **Configurable Overrides:** `share_settings.share_audit_retention_days` (default: 90 days), `max_idle_session_days` (default: 30 days).
 - **Executor Pool:** Routed explicitly to `maintenance` threadpool executor in `backend/cron/scheduler/runner.py` to preserve streaming ingest capacity.
@@ -21,10 +21,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process) | Connects to PostgreSQL 16 via `backend.core.share_db` / `get_global_share_con()`, executes SQL deletes across share tables. Routed to `maintenance` executor pool. | Thread-local connection pool (`backend/core/metadata/pg_pool.py`). Skips execution cleanly when `FLA_DEV_NO_CRONS=1` returning `("skipped", "skipped (dev_mode_no_crons)")`. |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Serving Pod Only) | Prunes remote share database on web serving pod via PostgreSQL 16; never scheduled to Celery workers. Routed to `maintenance` executor pool. | PostgreSQL transaction isolation / row-level locks. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod) | Connects to PostgreSQL 16 via `backend.core.share_db` / `get_global_share_con()`, executes SQL deletes across share tables. Routed to `maintenance` executor pool. | Thread-local connection pool (`backend/core/metadata/pg_pool.py`). Skips execution cleanly when `FLA_DEV_NO_CRONS=1` returning `("skipped", "skipped (dev_mode_no_crons)")`. |
 
 ---
 

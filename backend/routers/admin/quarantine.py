@@ -89,7 +89,7 @@ def list_ledger_quarantine(
     source_type: str | None = Query(default=None, min_length=1, max_length=32),
     _admin: None = Depends(require_admin),
 ) -> QuarantineListResponse:
-    from backend.core.duckdb import get_source_for_service
+    from backend.core.fos_client import get_source_for_service
 
     resolved_id = require_service_id(service_id)
     src = get_source_for_service(resolved_id)

@@ -1,15 +1,14 @@
-"""System health snapshot, system-metrics sampler, VCL health, DuckDB status, and Celery admin endpoints."""
+"""System health snapshot, system-metrics sampler, VCL health, and Celery admin endpoints."""
 
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 import re
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, HTTPException, Query
@@ -21,8 +20,7 @@ from backend.celery_app import (
     purge_ingest_ledger_entries,
     retry_ingest_ledger_entries,
 )
-from backend.core import duckdb as _db_mod
-from backend.core import duckdb_pool as _pool
+from backend.core import fos_client as _db_mod
 from backend.core import metadata as _meta_mod
 from backend.core.request_context import require_admin
 from backend.core.request_telemetry import query_registry
@@ -32,15 +30,11 @@ from backend.models.admin import (
     CeleryStatusResponse,
     DebugSettingsResponse,
     DebugSettingsUpdateBody,
-    DuckdbStatusResponse,
     HealthSnapshotResponse,
     IngestLedgerActionRequest,
     IngestLedgerActionResponse,
     IngestLedgerListResponse,
     MetricHistoryBatchResponse,
-)
-from backend.models.analytics import (
-    DuckdbRecycleResponse,
 )
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
@@ -67,22 +61,6 @@ from .admin_queries import _ensure_enabled
 
 _db: Any = _db_mod
 logger = logging.getLogger(__name__)
-
-
-def _get_recycle_mod() -> Any:
-    return importlib.import_module("backend.cron.jobs.duckdb_recycle")
-
-
-def _get_metric_snapshots_mod() -> Any:
-    return importlib.import_module("backend.cron.jobs.metric_snapshots")
-
-
-def __getattr__(name: str) -> Any:
-    if name == "_recycle":
-        return _get_recycle_mod()
-    if name == "metric_snapshots":
-        return _get_metric_snapshots_mod()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +127,7 @@ def _sample_health_snapshot() -> dict[str, Any]:
 
 
 def _sample_metric_history() -> dict[str, Any]:
-    cutoff = datetime.now(UTC) - timedelta(hours=1)
-    return {"series": _get_metric_snapshots_mod().get_batch(since=cutoff)}
+    return {"series": {}}
 
 
 def _sample_queries_summary() -> dict[str, Any] | None:
@@ -329,37 +306,6 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     except Exception:
         out["in_flight_runs"] = []
 
-    # ── Per-service compaction stats ─────────────────────────────────
-    try:
-        from backend import config as _svcconfig
-        from backend.core.storage import _core as _lc
-
-        stats_by_svc: dict[str, Any] = {}
-        for cfg in _svcconfig.list_configs():
-            sid = str(cfg.get("service_id") or cfg.get("name") or "")
-            try:
-                src = _svcconfig.config_to_source(cfg)
-                stats_by_svc[sid] = _lc.compaction_stats(src)
-            except Exception:
-                stats_by_svc[sid] = None
-        out["compaction"] = stats_by_svc
-    except Exception:
-        out["compaction"] = {}
-
-    # ── DuckDB connection-pool wait stats ────────────────────────────
-    try:
-        from backend.core import duckdb_pool as _pool_mod
-
-        out["pool_wait"] = _pool_mod.get_all_stats()
-    except Exception:
-        out["pool_wait"] = []
-
-    # ── Scheduler liveness (SRE-06) ──────────────────────────────────
-    try:
-        out["scheduler_last_tick_age_s"] = _get_metric_snapshots_mod().last_snapshot_age_s()
-    except Exception:
-        out["scheduler_last_tick_age_s"] = None
-
     # ── Recent cron failures (SRE-03) ────────────────────────────────
     try:
         from backend import config as _svcconfig
@@ -450,25 +396,36 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         except Exception:
             out["fos"] = None
 
-    # ── High-scale disk guard (high-scale topology only) ─────────────
+    # ── ClickHouse health probe & disk guard ─────────────────────────
     try:
-        from backend import config as _hs_cfg
+        from dataclasses import asdict
 
-        if _hs_cfg.is_high_scale_mode():
-            from dataclasses import asdict
+        from backend.core.clickhouse import get_clickhouse_client
+        from backend.high_scale.archive import (
+            disk_snapshot_payload,
+            topology_from_environment,
+        )
 
-            from backend.high_scale.archive import (
-                disk_snapshot_payload,
-                topology_from_environment,
-            )
+        topology: dict[str, Any] | None
+        try:
+            topology = asdict(topology_from_environment())
+        except ValueError:
+            logger.warning("health snapshot: HIGH_SCALE_PROFILE is not a known topology profile")
+            topology = None
 
-            topology: dict[str, Any] | None
-            try:
-                topology = asdict(topology_from_environment())
-            except ValueError:
-                logger.warning("health snapshot: HIGH_SCALE_PROFILE is not a known topology profile")
-                topology = None
-            out["high_scale"] = {"disk": disk_snapshot_payload(), "topology": topology}
+        ch_health: dict[str, Any]
+        try:
+            ch_client = get_clickhouse_client()
+            if ch_client is not None:
+                ch_client.health()
+                ch_health = {"reachable": True}
+            else:
+                ch_health = {"reachable": False}
+        except Exception as ch_exc:
+            ch_health = {"reachable": False, "error": str(ch_exc)[:200]}
+
+        out["clickhouse"] = ch_health
+        out["high_scale"] = {"disk": disk_snapshot_payload(), "topology": topology, "clickhouse": ch_health}
     except Exception:
         logger.warning("health snapshot: high-scale block failed", exc_info=True)
 
@@ -496,9 +453,8 @@ def metric_history_batch(
                 f"Invalid lookback window '{since}'. Expected <N>m, <N>h, or <N>d (e.g. 30m, 1h, 6h, 24h, 7d)."
             ),
         )
-    cutoff = parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
-    raw = _get_metric_snapshots_mod().get_batch(since=cutoff)
-    return JSONResponse(content=attach_debug_db_snapshot({"series": raw}))
+    parse_relative_time_window(since, max_lookback_days=_MAX_LOOKBACK_DAYS)
+    return JSONResponse(content=attach_debug_db_snapshot({"series": {}}))
 
 
 @router.get(
@@ -542,66 +498,6 @@ def update_debug_settings(body: DebugSettingsUpdateBody) -> DebugSettingsRespons
     return DebugSettingsResponse(
         query_debug_visibility=query_vis,
         api_call_debug_visibility=api_vis,
-    )
-
-
-@router.post("/admin/duckdb/recycle", response_model=DuckdbRecycleResponse, response_model_exclude_unset=True)
-def trigger_duckdb_recycle_endpoint(
-    force: bool = Query(False, description="Bypass RSS threshold check and force recycle"),
-) -> DuckdbRecycleResponse:
-    """Trigger on-demand recycle of DuckDB instances to free parquet metadata cache."""
-    recycle_mod = _get_recycle_mod()
-    rss_before = _db.current_rss_bytes()
-    threshold = recycle_mod._recycle_rss_threshold_bytes()
-
-    if not force and threshold > 0 and rss_before is not None and rss_before < threshold:
-        mb_before = rss_before / (1024 * 1024)
-        mb_thresh = threshold / (1024 * 1024)
-        return DuckdbRecycleResponse(
-            ok=True,
-            status="skipped",
-            reason=f"RSS {mb_before:.0f}MB < threshold {mb_thresh:.0f}MB",
-            rss_mb=round(mb_before, 1),
-            threshold_mb=round(mb_thresh, 1),
-        )
-
-    detail = recycle_mod.recycle_once(reason="manual_admin")
-    rss_after = _db.current_rss_bytes()
-    freed = (rss_before - rss_after) if (rss_before is not None and rss_after is not None) else None
-
-    return DuckdbRecycleResponse(
-        ok=True,
-        status="recycled",
-        detail=detail,
-        rss_before_mb=round(rss_before / (1024 * 1024), 1) if rss_before is not None else None,
-        rss_after_mb=round(rss_after / (1024 * 1024), 1) if rss_after is not None else None,
-        freed_mb=round(freed / (1024 * 1024), 1) if freed is not None else None,
-    )
-
-
-@router.get("/admin/duckdb/status", response_model=DuckdbStatusResponse, response_model_exclude_unset=True)
-def get_duckdb_status_endpoint() -> DuckdbStatusResponse:
-    """Return memory metrics, recycle configuration, and active connection pool states."""
-    recycle_mod = _get_recycle_mod()
-    rss = _db.current_rss_bytes()
-    threshold = recycle_mod._recycle_rss_threshold_bytes()
-    interval_min = recycle_mod.recycle_interval_min()
-    barrier_active = _db.is_recycle_barrier_active()
-    pool_stats = _pool.get_pool_status()
-
-    return DuckdbStatusResponse(
-        ok=True,
-        memory={
-            "current_rss_mb": round(rss / (1024 * 1024), 1) if rss is not None else None,
-            "recycle_threshold_mb": round(threshold / (1024 * 1024), 1) if threshold > 0 else None,
-            "recycle_interval_min": interval_min,
-        },
-        barrier={
-            "is_active": bool(barrier_active),
-            "active_paths": list(barrier_active) if isinstance(barrier_active, set) else [],
-        },
-        pools=pool_stats["pools"],
-        retired_pools=pool_stats["retired_pools"],
     )
 
 
@@ -670,87 +566,3 @@ def api_celery_ledger_purge(body: IngestLedgerActionRequest) -> IngestLedgerActi
     return IngestLedgerActionResponse(
         **purge_ingest_ledger_entries(items=items, status=body.status, service_id=body.service_id)
     )
-
-
-ROLLUP_BUCKET_COUNTS = (
-    "SELECT strftime(date_trunc('{unit}', hour_start), '{fmt}') AS bucket, "
-    "  SUM(requests) AS n "
-    "FROM read_parquet([{paths_sql}]) "
-    "WHERE hour_start >= TIMESTAMPTZ '{start_tz}' "
-    "  AND hour_start < TIMESTAMPTZ '{end_tz}' "
-    "GROUP BY date_trunc('{unit}', hour_start)"
-)
-
-ACTIVE_HOUR_BUCKET_COUNTS = (
-    "SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
-    "FROM read_parquet([{paths_sql}], union_by_name=true) "
-    "WHERE timestamp >= TIMESTAMP '{start_iso}' "
-    "  AND timestamp <  TIMESTAMP '{end_iso}' "
-    "GROUP BY date_trunc('{unit}', timestamp)"
-)
-
-RAW_BUCKET_COUNTS = (
-    "SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, COUNT(*) AS n "
-    "FROM {table_name} "
-    "WHERE timestamp >= TIMESTAMP '{start_iso}' "
-    "  AND timestamp <  TIMESTAMP '{end_iso}' "
-    "GROUP BY date_trunc('{unit}', timestamp)"
-)
-
-RUM_BUCKET_COUNTS = (
-    "SELECT strftime(date_trunc('{unit}', timestamp), '{fmt}') AS bucket, "
-    "  COUNT(*) + COUNT(*) FILTER (WHERE coalesce(tls, '') = '') AS n "
-    "FROM client_vitals "
-    "WHERE timestamp >= TIMESTAMP '{start_iso}' "
-    "  AND timestamp <  TIMESTAMP '{end_iso}' "
-    "GROUP BY date_trunc('{unit}', timestamp)"
-)
-
-
-def rollup_bucket_counts(
-    con: Any, *, unit: str, fmt: str, paths_sql: str, start_tz: str, end_tz: str
-) -> list[tuple[Any, ...]]:
-    """Closed-hour request counts per bucket from the overview rollup parquet files."""
-    from backend.utils.telemetry import track_query
-
-    q = ROLLUP_BUCKET_COUNTS.format(unit=unit, fmt=fmt, paths_sql=paths_sql, start_tz=start_tz, end_tz=end_tz)
-    with track_query(con, q, [], "log_accounting.rollup_bucket_counts") as cur:
-        return list(cur.fetchall())
-
-
-def active_hour_bucket_counts(
-    con: Any, *, unit: str, fmt: str, paths_sql: str, start_iso: str, end_iso: str
-) -> list[tuple[Any, ...]]:
-    """Row counts per bucket straight from the active-hour committed + buffer parquet files."""
-    from backend.utils.telemetry import track_query
-
-    q = ACTIVE_HOUR_BUCKET_COUNTS.format(unit=unit, fmt=fmt, paths_sql=paths_sql, start_iso=start_iso, end_iso=end_iso)
-    with track_query(con, q, [], "log_accounting.active_hour_bucket_counts") as cur:
-        return list(cur.fetchall())
-
-
-def raw_bucket_counts(
-    con: Any, *, unit: str, fmt: str, table_name: str, start_iso: str, end_iso: str
-) -> list[tuple[Any, ...]]:
-    """Full raw-table scan fallback for row counts per bucket."""
-    from backend.utils.telemetry import track_query
-
-    q = RAW_BUCKET_COUNTS.format(unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso)
-    with track_query(con, q, [], "log_accounting.raw_bucket_counts") as cur:
-        return list(cur.fetchall())
-
-
-def rum_bucket_counts(
-    con: Any, source: dict[str, Any], *, unit: str, fmt: str, start_iso: str, end_iso: str
-) -> list[tuple[Any, ...]]:
-    """Per-bucket RUM beacon edge request counts from ``client_vitals``."""
-    from backend.core.storage import update_storage_view
-    from backend.utils.telemetry import track_query
-
-    try:
-        update_storage_view(con, source, target_table="client_vitals")
-        q = RUM_BUCKET_COUNTS.format(unit=unit, fmt=fmt, start_iso=start_iso, end_iso=end_iso)
-        with track_query(con, q, [], "log_accounting.rum_bucket_counts") as cur:
-            return list(cur.fetchall())
-    except Exception:
-        return []

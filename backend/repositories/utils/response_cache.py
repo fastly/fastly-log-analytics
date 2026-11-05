@@ -16,7 +16,6 @@ from backend.utils.telemetry import get_queries, get_tracked_calls
 
 if TYPE_CHECKING:
     from backend.models.common import FiltersDict
-    from backend.repositories._base import QueryRunner
 
 _CLIENT_TOKEN_COUNTER = itertools.count(1)
 _MEMO_COUNTER = itertools.count(1)
@@ -157,11 +156,17 @@ def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str
     cache[key] = {k: v for k, v in value.items() if k not in drop}
 
 
+_RESPONSE_MEMOS: list[ResponseMemo] = []
+
+
 class ResponseMemo:
     def __init__(self, *, ttl: float = 30.0, maxsize: int = 256, prewarmer: bool | None = None) -> None:
         self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
         self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
-        CacheRegistry.register(f"response_memo.telemetry.{next(_MEMO_COUNTER)}", self._telemetry_cache)
+        memo_id = next(_MEMO_COUNTER)
+        CacheRegistry.register(f"response_memo.cache.{memo_id}", self.cache)
+        CacheRegistry.register(f"response_memo.telemetry.{memo_id}", self._telemetry_cache)
+        _RESPONSE_MEMOS.append(self)
         self.prewarmer = prewarmer
 
     def get(self, key: str) -> dict | None:
@@ -195,10 +200,29 @@ class ResponseMemo:
         else:
             self._telemetry_cache.pop(key, None)
 
-    def check(self, key: str, runner: QueryRunner) -> dict | None:
-        cached = self.get(key)
-        return None if cached is None else {**cached, **runner.telemetry(), "is_cached": True}
 
-    def store(self, key: str, payload: dict, runner: QueryRunner) -> dict:
-        self.put(key, payload)
-        return self.result({**payload, **runner.telemetry()}, state="miss")
+def invalidate_service_cache(service_id: str | dict = "") -> int:
+    """Invalidate cached analytical responses across all registered ResponseMemos."""
+    svc = (
+        str(service_id.get("name") or service_id.get("service_id") or "")
+        if isinstance(service_id, dict)
+        else str(service_id or "")
+    )
+    cleared = 0
+    for memo in _RESPONSE_MEMOS:
+        if not svc:
+            cleared += len(memo.cache)
+            memo.cache.clear()
+            memo._telemetry_cache.clear()
+        else:
+            keys = [k for k in list(memo.cache.keys()) if svc in str(k)]
+            if keys:
+                for k in keys:
+                    memo.cache.pop(k, None)
+                    memo._telemetry_cache.pop(k, None)
+                cleared += len(keys)
+            else:
+                cleared += len(memo.cache)
+                memo.cache.clear()
+                memo._telemetry_cache.clear()
+    return cleared

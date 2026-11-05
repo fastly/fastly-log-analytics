@@ -16,14 +16,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from backend import config
-from backend.core.duckdb import DBBusyError
 from backend.core.request_context import get_source, require_admin
-from backend.cron.jobs import metric_snapshots
 from backend.main import app
 from backend.routers.admin import events as ev
 from backend.routers.admin import health as sampler
 from backend.routers.admin import router as admin_router
-from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.sources import make_source
 from tests._helpers.wire import await_until
@@ -169,7 +166,18 @@ async def test_stream_skips_unneeded_or_serviceless_feeders(monkeypatch, channel
 
 @pytest.mark.asyncio
 async def test_cleanup_cancels_publisher_subscription(monkeypatch):
-    ev.sync_status_publisher.bind_loop(asyncio.get_running_loop())
+    subs: dict[str, int] = {}
+
+    async def _fake_subscribe(sid: str):
+        subs[sid] = subs.get(sid, 0) + 1
+        try:
+            await asyncio.Future()
+            yield {}
+        finally:
+            subs[sid] = max(0, subs.get(sid, 1) - 1)
+
+    monkeypatch.setattr(ev.sync_status_publisher, "subscribe", _fake_subscribe)
+    monkeypatch.setattr(ev.sync_status_publisher, "subscriber_count", lambda sid: subs.get(sid, 0))
     monkeypatch.setattr(ev, "compute_sync_status_cached", lambda _sid: None)
 
     async def _fake_cached(_sid):
@@ -222,58 +230,49 @@ def test_get_pop_locations(client):
 
 
 def test_sync_status_returns_configured_false_when_no_service():
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None), TestClient(app) as c:
+    with patch("backend.core.fos_client.get_source_for_service", return_value=None), TestClient(app) as c:
         resp = c.get("/api/sync-status")
     assert resp.status_code == 200 and resp.json()["configured"] is False
 
 
-@pytest.mark.parametrize(
-    ("exc", "expected_status", "check_busy"),
-    [(DBBusyError("locked"), 503, True), (RuntimeError("config corrupt"), 500, False)],
-)
-def test_sync_status_error_mapping(client, exc, expected_status, check_busy):
+def test_sync_status_error_mapping(client):
     fake_src = {"name": "test_service", "service_id": MOCK_SERVICE_ID, "bucket": "b"}
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.core.duckdb.get_connection") as mock_conn,
-        patch("backend.core.duckdb.get_sync_status", side_effect=exc),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
+        patch(
+            "backend.routers.admin.sync_status.compute_sync_status_cached",
+            side_effect=RuntimeError("config corrupt"),
+        ),
     ):
-        mock_conn.return_value = type("C", (), {"close": lambda self: None})()
         resp = client.get("/api/sync-status", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
-    assert resp.status_code == expected_status
-    if check_busy:
-        assert resp.json()["detail"]["busy"] is True
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["error"] == "sync_status_failed"
 
 
-def test_sync_status_routes_high_scale_and_durable_modes(client):
+def test_sync_status_routes_high_scale_and_fallback_modes(client):
     fake_src = {"name": "high_scale_svc", "service_id": "HS123", "bucket": "b"}
     cached_metrics = {"configured": True, "local_rows": 1000, "latest_log_at": "2026-09-16T06:00:00Z"}
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.high_scale.ingest_controller.get_high_scale_service_registry") as mock_reg,
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
         patch("backend.routers.admin.sync_status.compute_sync_status_cached", return_value=cached_metrics),
-        patch("backend.core.duckdb.get_connection") as mock_conn,
     ):
-        mock_reg.return_value.resolve.return_value = object()
         resp = client.get("/api/sync-status?service_id=HS123")
         assert resp.status_code == 200 and resp.json()["local_rows"] == 1000
-        mock_conn.assert_not_called()
 
     fake_std = {"name": "test_service", "service_id": MOCK_SERVICE_ID, "bucket": "b"}
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_std),
-        patch("backend.config.is_durable_serving_mode", return_value=True),
-        patch("backend.core.duckdb.get_connection") as mock_conn2,
-        patch("backend.core.duckdb.get_sync_status", return_value={"configured": True}),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_std),
+        patch("backend.routers.admin.sync_status.compute_sync_status_cached", return_value=None),
+        patch("backend.config.get_status", return_value={"configured": True, "local_rows": 42}),
+        patch("backend.cron.scheduler.get_latest_progress_for_service", return_value=None),
+        patch("backend.config.load_config", return_value={}),
     ):
-        mock_conn2.return_value = type("C", (), {"close": lambda self: None})()
         resp2 = client.get("/api/sync-status", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
-        assert resp2.status_code == 200
-        mock_conn2.assert_called_once_with(source=fake_std, max_wait=5, skip_view_update=True, read_only=True)
+        assert resp2.status_code == 200 and resp2.json()["local_rows"] == 42
 
 
 def test_log_extents_endpoint_variants(client):
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None), TestClient(app) as c:
+    with patch("backend.core.fos_client.get_source_for_service", return_value=None), TestClient(app) as c:
         r0 = c.get("/api/log-extents")
     b0 = r0.json()
     assert r0.status_code == 200 and b0["configured"] is False
@@ -287,7 +286,7 @@ def test_log_extents_endpoint_variants(client):
         "active_run": {"task": "sync", "status": "running"},
     }
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
         patch("backend.config.get_status", return_value=cached),
     ):
         r1 = client.get("/api/log-extents", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
@@ -297,7 +296,7 @@ def test_log_extents_endpoint_variants(client):
     assert "ngwaf_workspace_id" not in b1 and "active_run" not in b1
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
+        patch("backend.core.fos_client.get_source_for_service", return_value=fake_src),
         patch("backend.config.get_status", return_value={}),
     ):
         r2 = client.get("/api/log-extents", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
@@ -310,43 +309,23 @@ def test_log_extents_endpoint_variants(client):
     )
 
 
-@pytest.mark.parametrize(
-    ("url", "target", "ret", "check_fn"),
-    [
-        (
-            "/api/admin/ingested-files",
-            "backend.core.duckdb.get_ingested_files",
-            [
-                {
-                    "file_name": "log-001.gz",
-                    "ingested_at": "2026-01-01T00:00:00Z",
-                    "row_count": 100,
-                    "file_size_bytes": 5000,
-                }
-            ],
-            lambda b: len(b["files"]) == 1 and b["files"][0]["file_name"] == "log-001.gz",
-        ),
-        (
-            "/api/admin/storage-info",
-            "backend.core.storage.get_table_info",
-            {"table_name": "logs_test_service", "snapshots": 7, "data_files": 42, "size_bytes": 52428800},
-            lambda b: b["data_files"] == 42 and b["snapshots"] == 7,
-        ),
-        (
-            "/api/admin/storage-calendar",
-            "backend.core.storage.get_snapshot_calendar",
-            {"2026-01-01": {"data_files": 12, "size_bytes": 4096}},
-            lambda b: b["2026-01-01"]["data_files"] == 12 and "_debug_calls" in b,
-        ),
-    ],
-)
-def test_admin_get_and_500_pairs(client, url, target, ret, check_fn):
-    with patch(target, return_value=ret):
-        resp = client.get(url, headers={"x-fastly-service-id": MOCK_SERVICE_ID})
-    assert resp.status_code == 200 and check_fn(resp.json())
+def test_admin_ingested_files_get_and_500_pairs(client):
+    ret = [
+        {
+            "file_name": "log-001.gz",
+            "ingested_at": "2026-01-01T00:00:00Z",
+            "row_count": 100,
+            "file_size_bytes": 5000,
+        }
+    ]
+    with patch("backend.core.fos_client.get_ingested_files", return_value=ret):
+        resp = client.get("/api/admin/ingested-files", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["files"]) == 1 and body["files"][0]["file_name"] == "log-001.gz"
 
-    with patch(target, side_effect=RuntimeError("boom")):
-        resp_err = client.get(url, headers={"x-fastly-service-id": MOCK_SERVICE_ID})
+    with patch("backend.core.fos_client.get_ingested_files", side_effect=RuntimeError("boom")):
+        resp_err = client.get("/api/admin/ingested-files", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
     assert resp_err.status_code == 500
 
 
@@ -435,12 +414,10 @@ def test_health_snapshot_returns_shape_with_known_collectors(client):
         "data_mount",
         "root_disk",
         "in_flight_runs",
-        "compaction",
-        "pool_wait",
-        "scheduler_last_tick_age_s",
         "recent_cron_failures",
         "observability",
         "config_backup",
+        "celery",
     ):
         assert k in body
 
@@ -451,8 +428,6 @@ def test_health_snapshot_returns_shape_with_known_collectors(client):
         ("os.getloadavg", OSError("no load avg"), "load", None),
         ("builtins.open", FileNotFoundError("no /proc/meminfo"), "memory", None),
         ("backend.cron.scheduler.list_active_runs", RuntimeError("boom"), "in_flight_runs", []),
-        ("backend.config.list_configs", RuntimeError("boom"), "compaction", {}),
-        ("backend.core.duckdb_pool.get_all_stats", RuntimeError("boom"), "pool_wait", []),
         ("multiprocessing.cpu_count", NotImplementedError(), "vcpus", None),
     ],
 )
@@ -495,13 +470,7 @@ def test_health_snapshot_memory_and_disk_stats(client):
         assert _get_health(client)["data_mount"]["used_pct"] is None
 
 
-def _compaction_stats_fail_bad(s):
-    if s["name"] == "svc-bad":
-        raise RuntimeError("fail")
-    return {"partitions": 7}
-
-
-def test_health_snapshot_in_flight_compaction_pool_and_fos(client):
+def test_health_snapshot_in_flight_and_fos(client):
     fake_runs = [
         {"run_id": 101, "service_id": "svc-a", "task": "sync", "started_at": "2026-06-12T10:00:00Z", "rows_done": 1234},
         {"run_id": 102, "service_id": "svc-b", "task": "metadata_cleanup", "started_at": 1781758323.4424183},
@@ -511,27 +480,13 @@ def test_health_snapshot_in_flight_compaction_pool_and_fos(client):
     assert len(runs) == 2 and set(runs[0].keys()) == {"run_id", "service_id", "task", "started_at"}
     assert isinstance(runs[1]["started_at"], str) and "T" in runs[1]["started_at"]
 
-    fake_configs = [{"service_id": "svc-good", "name": "svc-good"}, {"service_id": "svc-bad", "name": "svc-bad"}]
-    with (
-        patch("backend.config.list_configs", return_value=fake_configs),
-        patch("backend.config.config_to_source", side_effect=lambda c: c),
-        patch(
-            "backend.core.storage.compaction_stats",
-            side_effect=_compaction_stats_fail_bad,
-        ),
-    ):
-        comp = _get_health(client)["compaction"]
-    assert comp["svc-good"]["partitions"] == 7 and comp["svc-bad"] is None
-
-    fake_stats = [{"pool": "default", "wait_p50_ms": 5.0, "wait_p95_ms": 12.0}]
-    with patch("backend.core.duckdb_pool.get_all_stats", return_value=fake_stats):
-        assert _get_health(client)["pool_wait"] == fake_stats
-
     svc_cfg = [{"service_id": "svc-a", "name": "svc-a"}]
     with (
         patch("backend.config.list_configs", return_value=svc_cfg),
         patch("backend.config.config_to_source", side_effect=lambda c: c),
-        patch("backend.core.duckdb.fos_reachable", return_value={"reachable": True, "latency_ms": 45}) as mock_reach,
+        patch(
+            "backend.core.fos_client.fos_reachable", return_value={"reachable": True, "latency_ms": 45}
+        ) as mock_reach,
     ):
         r_fos = client.get("/api/admin/health-snapshot?probe_fos=True")
         assert r_fos.status_code == 200 and r_fos.json()["fos"]["svc-a"]["reachable"] is True
@@ -540,7 +495,7 @@ def test_health_snapshot_in_flight_compaction_pool_and_fos(client):
     with (
         patch("backend.config.list_configs", return_value=svc_cfg),
         patch("backend.config.config_to_source", side_effect=lambda c: c),
-        patch("backend.core.duckdb.fos_reachable", side_effect=RuntimeError("S3 connection timed out")),
+        patch("backend.core.fos_client.fos_reachable", side_effect=RuntimeError("S3 connection timed out")),
     ):
         r_fos_err = client.get("/api/admin/health-snapshot?probe_fos=True").json()["fos"]["svc-a"]
         assert r_fos_err["reachable"] is False and "timed out" in r_fos_err["error"]
@@ -557,14 +512,14 @@ def test_admin_sync_status_and_health_aliases(overview_client: TestClient):
     fake_payload = {
         "configured": True,
         "busy": False,
-        "storage_mode": "ducklake",
+        "storage_mode": "clickhouse",
         "access_level": "read_write",
         "local_rows": 1250,
         "earliest_log_at": "2026-10-15T20:00:00Z",
         "latest_log_at": "2026-10-16T20:00:00Z",
     }
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.core.fos_client.get_source_for_service", return_value=src),
         patch("backend.routers.admin.sync_status.compute_sync_status_cached", return_value=fake_payload),
     ):
         for p in ("/api/admin/sync-status", "/api/sync-status"):
@@ -574,12 +529,10 @@ def test_admin_sync_status_and_health_aliases(overview_client: TestClient):
     for path in ("/api/admin/system-metrics", "/api/admin/health", "/api/admin/health-snapshot"):
         resp = overview_client.get(path)
         assert resp.status_code == 200
-        assert {"load", "vcpus", "in_flight_runs", "compaction", "pool_wait", "recent_cron_failures"} <= set(
-            resp.json()
-        )
+        assert {"load", "vcpus", "in_flight_runs", "recent_cron_failures", "observability"} <= set(resp.json())
 
 
-def test_admin_compaction_and_log_accounting_routes(overview_client: TestClient):
+def test_admin_log_accounting_routes(overview_client: TestClient):
     src = _make_source()
     app.dependency_overrides[get_source] = lambda: src
     fake_accounting = {
@@ -600,12 +553,6 @@ def test_admin_compaction_and_log_accounting_routes(overview_client: TestClient)
         "section_timings": [],
     }
     try:
-        r1 = overview_client.get(f"/api/admin/compaction-status/{src['service_id']}")
-        r2 = overview_client.get(f"/api/admin/compaction-status?service_id={src['service_id']}")
-        assert r1.status_code == 200 and r2.status_code == 200
-        assert {"partitions", "total_files", "partitions_above_3"} <= set(r1.json())
-        assert r2.json()["total_files"] == r1.json()["total_files"]
-
         with patch("backend.routers.admin.log_accounting.compute_log_accounting", return_value=fake_accounting):
             ra1 = overview_client.get(f"/api/admin/log-accounting/{src['service_id']}?hours=24")
             ra2 = overview_client.get(f"/api/admin/log-accounting?service_id={src['service_id']}&hours=24")
@@ -616,31 +563,25 @@ def test_admin_compaction_and_log_accounting_routes(overview_client: TestClient)
 
 
 def test_admin_manual_cron_trigger_routes_and_rbac(overview_client: TestClient):
+    import sys
+
     src = _make_source()
     app.dependency_overrides[get_source] = lambda: src
     try:
         with (
+            patch.dict(
+                sys.modules,
+                {"backend.repositories.dashboard": SimpleNamespace(invalidate_service=lambda *a, **k: None)},
+            ),
             patch(
                 "backend.utils.router_utils.start_or_resume_cron",
-                return_value={"ok": True, "message": "Started.", "run_id": 42},
+                return_value={"ok": True, "message": "Started.", "run_id": "42"},
             ) as mock_start,
-            patch(
-                "backend.core.storage.compact_local_partitions",
-                return_value={
-                    "partitions_checked": 2,
-                    "partitions_compacted": 1,
-                    "files_removed": 3,
-                    "rows_preserved": 500,
-                    "dups_removed": 0,
-                },
-            ),
-            patch("backend.cron.jobs.compaction._run_optimize", return_value={"files_rewritten": 4, "files_added": 1}),
         ):
             sid = src["service_id"]
             assert overview_client.post(f"/api/admin/sync/{sid}").status_code == 200 and mock_start.called
-            assert overview_client.post(f"/api/admin/commit/{sid}").status_code == 202
-            assert overview_client.post(f"/api/admin/compact/{sid}").json()["partitions_compacted"] == 1
-            assert overview_client.post(f"/api/admin/optimize/{sid}").json()["files_rewritten"] == 4
+            assert overview_client.post(f"/api/admin/full-sweep/{sid}").status_code == 200
+            assert overview_client.post(f"/api/admin/gap-heal/{sid}").status_code == 200
     finally:
         app.dependency_overrides.pop(get_source, None)
 
@@ -652,13 +593,10 @@ def test_analyst_path_b_rejected_with_403_on_admin_overview_routes():
         "/api/admin/system-metrics",
         "/api/admin/health",
         "/api/admin/health-snapshot",
-        "/api/admin/compaction-status",
-        "/api/admin/compaction-status/svc-admin-test",
         "/api/admin/log-accounting/svc-admin-test",
         "/api/admin/sync/svc-admin-test",
-        "/api/admin/commit/svc-admin-test",
-        "/api/admin/compact/svc-admin-test",
-        "/api/admin/optimize/svc-admin-test",
+        "/api/admin/full-sweep/svc-admin-test",
+        "/api/admin/gap-heal/svc-admin-test",
     ):
         assert _is_blocked_path(path) is True
 
@@ -670,32 +608,6 @@ def test_analyst_path_b_rejected_with_403_on_admin_overview_routes():
     with pytest.raises(HTTPException) as exc:
         require_admin(fake_req)  # type: ignore[arg-type]
     assert exc.value.status_code == 403
-
-
-def test_storage_info_calendar_and_commit_endpoints(overview_client, override_source):
-    fake_info = {
-        "table_name": "logs",
-        "table_location": "s3://bucket/prefix/ducklake",
-        "snapshots": 5,
-        "data_files": 12,
-        "size_bytes": 1024,
-        "latest_snapshot_at": "2026-08-19T00:00:00Z",
-        "buffer_files": 1,
-        "buffer_size_bytes": 512,
-    }
-    with patch("backend.core.storage.get_table_info", return_value=fake_info) as mock_get:
-        r_info = overview_client.get("/api/admin/storage-info?table_name=logs")
-        assert r_info.status_code == 200 and r_info.json()["size_bytes"] == 1024
-        mock_get.assert_called_once_with(override_source, table_name="logs")
-
-    fake_cal = {"2026-08-19": {"data_files": 5, "size_bytes": 1024}}
-    with patch("backend.core.storage.get_snapshot_calendar", return_value=fake_cal) as mock_cal:
-        r_cal = overview_client.get("/api/admin/storage-calendar?table_name=logs")
-        assert r_cal.status_code == 200 and r_cal.json()["2026-08-19"] == {"data_files": 5, "size_bytes": 1024}
-        mock_cal.assert_called_once_with(override_source, table_name="logs")
-
-    with patch("backend.utils.router_utils.start_or_resume_cron", return_value={"ok": True}) as mock_start:
-        assert overview_client.post("/api/admin/commit-storage").status_code == 202 and mock_start.called
 
 
 @pytest.mark.parametrize(
@@ -728,40 +640,12 @@ def test_reset_endpoints(overview_client, override_source, endpoint, patch_targe
         assert [e["type"] for e in events] == ["status", "done"]
 
 
-def test_metric_history_batch_groups_by_scope_key():
-    t1 = iso_z(datetime.now(UTC) - timedelta(minutes=10))
-    t2 = iso_z(datetime.now(UTC) - timedelta(minutes=5))
-    metric_snapshots.record_snapshot("cpu_load_1m", 0.7, ts=t1)
-    metric_snapshots.record_snapshot("cpu_load_1m", 0.9, ts=t2)
-    metric_snapshots.record_snapshot("pool_wait_p95_ms", 5.0, service_id="svc-a", ts=t2)
-    metric_snapshots.record_snapshot("cron_duration_ms", 800.0, service_id="svc-a", task="sync", ts=t2)
-
-    with TestClient(app) as c:
-        r = c.get("/api/admin/metric-history/batch?since=1h")
-    assert r.status_code == 200
-    series = r.json()["series"]
-    assert {"cpu_load_1m", "pool_wait_p95_ms|svc-a", "cron_duration_ms|svc-a|sync"} <= set(series)
-    cpu_points = series["cpu_load_1m"]
-    assert len(cpu_points) >= 2 and cpu_points[-2]["value"] == pytest.approx(0.7)
-    assert cpu_points[-1]["value"] == pytest.approx(0.9) and cpu_points[-2]["ts"] < cpu_points[-1]["ts"]
-
-
-@pytest.mark.parametrize(("window", "expected_points"), [("30m", 1), ("1h", 2), ("6h", 3), ("24h", 4), ("7d", 5)])
-def test_metric_history_batch_windows(window: str, expected_points: int):
-    metric_name = f"test_window_metric_{window}"
-    now = datetime.now(UTC)
-    for val, delta in [
-        (10.0, timedelta(minutes=10)),
-        (20.0, timedelta(minutes=45)),
-        (30.0, timedelta(hours=3)),
-        (40.0, timedelta(hours=12)),
-        (50.0, timedelta(days=3)),
-    ]:
-        metric_snapshots.record_snapshot(metric_name, val, ts=iso_z(now - delta))
-
+@pytest.mark.parametrize("window", ["30m", "1h", "6h", "24h", "7d"])
+def test_metric_history_batch_windows(window: str):
     with TestClient(app) as c:
         r = c.get(f"/api/admin/metric-history/batch?since={window}")
-    assert r.status_code == 200 and len(r.json()["series"].get(metric_name, [])) == expected_points
+    assert r.status_code == 200
+    assert r.json()["series"] == {}
 
 
 @pytest.mark.parametrize("bad_window", ["invalid", "0h", "-5h", "1w", "abc", ""])
@@ -1128,11 +1012,11 @@ def test_admin_can_query_request_facts(client, test_service_source):
     assert body["next_cursor"]
 
 
-def test_analyst_request_facts_masks_client_ip(client, in_memory_duckdb, test_service_source):
+def test_analyst_request_facts_masks_client_ip(client, test_service_source):
     from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
     app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
-    app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, in_memory_duckdb)
+    app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, None)
     response = client.post(
         f"/api/high-scale/services/{test_service_source['service_id']}/request-facts",
         json={"start_time": "2026-09-11T20:00:00Z", "end_time": "2026-09-11T21:00:00Z"},
@@ -1533,62 +1417,11 @@ def test_request_facts_clickhouse_filters_and_telemetry(client, test_service_sou
     assert len(body["_debug_queries"]) >= 1
 
 
-def test_request_facts_standard_mode_duckdb_emulation_and_filters(client, in_memory_duckdb, test_service_source):
+def test_request_facts_root_get_and_post_clickhouse(client, test_service_source):
     from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
-    in_memory_duckdb.execute(
-        """
-        CREATE OR REPLACE TABLE logs (
-            timestamp TIMESTAMP WITH TIME ZONE,
-            status INTEGER,
-            method VARCHAR,
-            host VARCHAR,
-            url VARCHAR,
-            pop VARCHAR,
-            geo_country_code VARCHAR,
-            client_ip VARCHAR,
-            cache_status VARCHAR,
-            time_elapsed BIGINT
-        )
-        """
-    )
-    in_memory_duckdb.execute(
-        """
-        INSERT INTO logs VALUES
-        ('2026-09-11T20:01:00Z', 200, 'GET', 'www.example.com', '/home', 'IAD', 'US', '198.51.100.10', 'HIT', 1200),
-        ('2026-09-11T20:02:00Z', 503, 'POST', 'api.example.com', '/pay', 'LHR', 'GB', '198.51.100.25', 'PASS', 45000)
-        """
-    )
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
 
-    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry()
-
-    # Service-scoped POST with emulate_standard=True falls back cleanly to DuckDB
-    res_post = client.post(
-        f"/api/high-scale/services/{test_service_source['service_id']}/request-facts",
-        headers={"X-Page-Load-ID": "page-load-emul-test"},
-        json={
-            "start_time": "2026-09-11T20:00:00Z",
-            "end_time": "2026-09-11T21:00:00Z",
-            "status": 503,
-            "domain": "api.example.com",
-            "pop": "LHR",
-            "country": "GB",
-            "emulate_standard": True,
-        },
-    )
-    assert res_post.status_code == 200, res_post.text
-    body = res_post.json()
-    assert body["metadata"]["mode"] == "duckdb_emulation"
-    assert len(body["rows"]) == 1
-    assert body["rows"][0]["status"] == 503
-    assert body["rows"][0]["host"] == "api.example.com"
-    assert body["rows"][0]["pop"] == "LHR"
-    assert body["rows"][0]["country"] == "GB"
-    assert body["rows"][0]["client_ip"] == "198.51.100.25"
-    assert isinstance(body.get("_debug_queries"), list)
-    assert len(body["_debug_queries"]) >= 1
-
-    # Direct GET /api/high-scale/request-facts
     res_get = client.get(
         "/api/high-scale/request-facts",
         params={
@@ -1600,37 +1433,16 @@ def test_request_facts_standard_mode_duckdb_emulation_and_filters(client, in_mem
     )
     assert res_get.status_code == 200, res_get.text
     get_body = res_get.json()
-    assert get_body["metadata"]["mode"] == "duckdb_emulation"
-    assert len(get_body["rows"]) == 1
-    assert get_body["rows"][0]["url"] == "/home"
+    assert get_body["metadata"]["mode"] == "clickhouse"
+    assert len(get_body["rows"]) == 2
+    assert get_body["rows"][0]["url"] == "/"
 
 
-def test_request_facts_standard_emulation_masks_analyst_ip(client, in_memory_duckdb, test_service_source):
+def test_request_facts_root_get_masks_analyst_ip(client, test_service_source):
     from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
-    in_memory_duckdb.execute(
-        """
-        CREATE OR REPLACE TABLE logs (
-            timestamp TIMESTAMP WITH TIME ZONE,
-            status INTEGER,
-            method VARCHAR,
-            host VARCHAR,
-            url VARCHAR,
-            pop VARCHAR,
-            geo_country_code VARCHAR,
-            client_ip VARCHAR
-        )
-        """
-    )
-    in_memory_duckdb.execute(
-        """
-        INSERT INTO logs VALUES
-        ('2026-09-11T20:01:00Z', 200, 'GET', 'www.example.com', '/home', 'IAD', 'US', '198.51.100.77')
-        """
-    )
-
-    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry()
-    app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, in_memory_duckdb)
+    app.dependency_overrides[get_high_scale_service_registry] = lambda: _registry(_service())
+    app.dependency_overrides[build_request_context] = lambda: _analyst_context(test_service_source, None)
 
     response = client.get(
         "/api/high-scale/request-facts",
@@ -1642,16 +1454,12 @@ def test_request_facts_standard_emulation_masks_analyst_ip(client, in_memory_duc
     )
     assert response.status_code == 200, response.text
     rows = response.json()["rows"]
-    assert len(rows) == 1
-    assert rows[0]["client_ip"] == "198.51.100.xxx"
+    assert len(rows) == 2
+    assert rows[0]["client_ip"] == "203.0.113.xxx"
 
 
 def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(client, override_source, monkeypatch):
-    from backend.routers.admin.compaction import (
-        _METADATA_STORAGE_CACHE,
-        _STORAGE_CALENDAR_CACHE,
-        _STORAGE_INFO_CACHE,
-    )
+    from backend.routers.admin.compaction import _METADATA_STORAGE_CACHE
     from backend.routers.admin.downloads import _RAW_TREE_CACHE, _STORAGE_TREE_CACHE
     from backend.routers.admin.sync_status import _INGESTED_FILES_CACHE
     from backend.routers.services.views import _AUDIT_LOGS_CACHE, _CRON_LOGS_CACHE
@@ -1660,8 +1468,6 @@ def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(clien
         _RAW_TREE_CACHE,
         _STORAGE_TREE_CACHE,
         _INGESTED_FILES_CACHE,
-        _STORAGE_INFO_CACHE,
-        _STORAGE_CALENDAR_CACHE,
         _METADATA_STORAGE_CACHE,
         _AUDIT_LOGS_CACHE,
         _CRON_LOGS_CACHE,
@@ -1670,44 +1476,20 @@ def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(clien
 
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     try:
-        with patch("backend.core.duckdb.get_raw_tree_node", return_value={"children": []}) as m_raw:
+        with patch("backend.core.fos_client.get_raw_tree_node", return_value={"children": []}) as m_raw:
             assert client.get("/api/admin/raw-tree?prefix=p").status_code == 200
             assert client.get("/api/admin/raw-tree?prefix=p").status_code == 200
             assert m_raw.call_count == 1
 
-        with patch("backend.core.duckdb.get_storage_tree_node", return_value={"children": []}) as m_st:
+        with patch("backend.core.fos_client.get_storage_tree_node", return_value={"children": []}) as m_st:
             assert client.get("/api/admin/storage-tree?prefix=p").status_code == 200
             assert client.get("/api/admin/storage-tree?prefix=p").status_code == 200
             assert m_st.call_count == 1
 
-        with patch("backend.core.duckdb.get_ingested_files", return_value=[]) as m_ing:
+        with patch("backend.core.fos_client.get_ingested_files", return_value=[]) as m_ing:
             assert client.get("/api/admin/ingested-files").status_code == 200
             assert client.get("/api/admin/ingested-files").status_code == 200
             assert m_ing.call_count == 1
-
-        fake_info = {
-            "table_name": "logs",
-            "snapshots": 1,
-            "data_files": 2,
-            "size_bytes": 100,
-            "buffer_files": 0,
-            "buffer_size_bytes": 0,
-            "latest_snapshot_at": None,
-            "table_location": "s3://b/p",
-            "region": "us-east",
-        }
-        with patch("backend.core.storage.get_table_info", return_value=fake_info) as m_info:
-            assert client.get("/api/admin/storage-info").status_code == 200
-            assert client.get("/api/admin/storage-info").status_code == 200
-            assert m_info.call_count == 1
-
-        with patch(
-            "backend.core.storage.get_snapshot_calendar",
-            return_value={"2026-10-29": {"data_files": 1, "size_bytes": 10}},
-        ) as m_cal:
-            assert client.get("/api/admin/storage-calendar").status_code == 200
-            assert client.get("/api/admin/storage-calendar").status_code == 200
-            assert m_cal.call_count == 1
 
         fake_meta_stats = {
             "tables": {"usage_log": {"rows": 1, "bytes": 10}},
@@ -1737,8 +1519,6 @@ def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(clien
             _RAW_TREE_CACHE,
             _STORAGE_TREE_CACHE,
             _INGESTED_FILES_CACHE,
-            _STORAGE_INFO_CACHE,
-            _STORAGE_CALENDAR_CACHE,
             _METADATA_STORAGE_CACHE,
             _AUDIT_LOGS_CACHE,
             _CRON_LOGS_CACHE,
@@ -1747,11 +1527,9 @@ def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(clien
 
 
 def test_admin_suite_caches_hit_when_pytest_env_unset(client, monkeypatch):
-    from backend.cron.jobs import metric_snapshots
     from backend.routers.admin import admin_queries, health
 
     for c in (
-        metric_snapshots._BATCH_CACHE,
         health._HEALTH_SNAPSHOT_CACHE,
         health._CELERY_STATUS_CACHE,
         admin_queries._SLOW_QUERIES_CACHE,
@@ -1760,13 +1538,6 @@ def test_admin_suite_caches_hit_when_pytest_env_unset(client, monkeypatch):
 
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     try:
-        since = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
-        assert metric_snapshots.get_batch(since=since) == {}
-        assert len(metric_snapshots._BATCH_CACHE) == 1
-        assert metric_snapshots.get_batch(since=since) == {}
-        metric_snapshots.reset_for_tests()
-        assert len(metric_snapshots._BATCH_CACHE) == 0
-
         assert client.get("/api/admin/slow-queries/count?since_hours=24&threshold_ms=1000").status_code == 200
         assert len(admin_queries._SLOW_QUERIES_CACHE) == 1
         assert client.get("/api/admin/slow-queries/count?since_hours=24&threshold_ms=1000").status_code == 200
@@ -1786,7 +1557,6 @@ def test_admin_suite_caches_hit_when_pytest_env_unset(client, monkeypatch):
         assert len(health._CELERY_STATUS_CACHE) == 0
     finally:
         for c in (
-            metric_snapshots._BATCH_CACHE,
             health._HEALTH_SNAPSHOT_CACHE,
             health._CELERY_STATUS_CACHE,
             admin_queries._SLOW_QUERIES_CACHE,

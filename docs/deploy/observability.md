@@ -1,15 +1,15 @@
 # Optional private deployment telemetry
 
-This extends the existing application SDK → Prometheus/Tempo path for **Standard
+This extends the existing application SDK → Prometheus/Tempo path for **Docker
 Compose**, locally and on a single Linux VM. It adds no Collector, Grafana,
 exporters, packages, application endpoint or edge traffic. Deployments that omit
 the overlays keep their existing behavior, including production's disabled
-exporter default. The existing experimental Helm chart also has a separate
+exporter default. The Helm chart also has a separate
 minimal receiver opt-in, described below.
 
 The existing `docker-compose.observability.yml` remains the **multipod** overlay.
 It still includes Grafana and infrastructure exporters on `app-network`; do not
-merge it into Standard or host-network production.
+merge it into single-VM host-network production.
 
 ## Configure an opt-in
 
@@ -29,8 +29,8 @@ Append the appropriate files to the deployment's existing Compose file list:
 
 | Deployment | Append in this order |
 |---|---|
-| Local Standard | `docker-compose.observability.standard.yml` |
-| GCE/Linux Standard | `docker-compose.observability.standard.yml`, then `docker-compose.observability.standard.prod.yml` |
+| Local Compose | `docker-compose.observability.standard.yml` |
+| GCE/Linux VM Compose | `docker-compose.observability.standard.yml`, then `docker-compose.observability.standard.prod.yml` |
 
 Retain the original base/prod files and every existing mTLS/public-HTTPS overlay.
 In particular, do not replace the current `COMPOSE_FILE` with a shortened list

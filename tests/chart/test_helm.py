@@ -29,20 +29,13 @@ import yaml
 
 CHART = "./deploy/chart/fastly-log-analytics/"
 
-_PG = "postgresql://fla:pw@postgres:5432/ducklake"
+_PG = "postgresql://fla:pw@postgres:5432/fla"
 
-STANDARD = (
-    f"config.ducklakeCatalog={_PG}",
-    f"secrets.metadataDsn={_PG}",
-)
+STANDARD = (f"secrets.metadataDsn={_PG}",)
 
-# The minimum an operator must supply to select the scaled topology. Kept as
-# one constant so a new requirement shows up as one edit here rather than as
-# a scatter of --set flags.
+# The minimum an operator must supply to select the scaled Valkey SSE backplane topology.
 CELERY = (
-    "config.deploymentMode=high_scale",
     "config.sseBackplane=valkey",
-    f"config.ducklakeCatalog={_PG}",
     f"secrets.metadataDsn={_PG}",
     "secrets.celeryBrokerUrl=redis://valkey-master:6379/0",
 )
@@ -113,59 +106,44 @@ def test_helm_template():
 
 
 def test_default_values_render_a_self_contained_install():
-    """Standard mode with Postgres DSNs renders single-node ingest, no broker,
-    and no Celery worker pods."""
+    """Default values with Postgres metadata DSN render unified ClickHouse backend and stateless ingest worker."""
     docs = _render(*STANDARD)
     env = _env(_deployment(docs, "backend"))
 
-    assert env["DEPLOYMENT_MODE"]["value"] == "standard"
-    assert "INGEST_MODE" not in env
-    assert "SERVING_MODE" not in env
+    assert env["HIGH_SCALE_ENABLED"]["value"] == "1"
+    assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
+    assert "DEPLOYMENT_MODE" not in env
+    assert "DUCKLAKE_CATALOG" not in env
     assert env["SSE_BACKPLANE"]["value"] == "local"
 
-    assert env["DUCKLAKE_CATALOG"]["value"] == _PG
     assert "CELERY_BROKER_URL" in env
     assert env["METADATA_DSN"]["valueFrom"]["secretKeyRef"]["optional"] is False
     secret = next(doc for doc in docs if doc["kind"] == "Secret")
     assert secret["stringData"]["METADATA_DSN"] == _PG
     assert "CELERY_BROKER_URL" not in secret["stringData"]
 
-    # No worker pods to sit in CrashLoopBackOff against a broker that
-    # the default install does not have.
     names = _deployments(docs)
-    assert not [name for name in names if "worker" in name], names
-
-
-def test_standard_without_postgres_dsns_fails_at_template_time():
-    """ADR-22 requires Postgres DSNs in standard mode too."""
-    stderr = _render_error()
-    assert "config.ducklakeCatalog" in stderr
-    assert "postgresql://" in stderr
-
-    stderr = _render_error(f"config.ducklakeCatalog={_PG}")
-    assert "secrets.metadataDsn" in stderr
-    assert "secrets.existingSecret" in stderr
+    assert "test-release-fastly-log-analytics-worker" in names, names
+    worker = _deployment(docs, "worker")
+    assert worker["spec"]["template"]["spec"]["containers"][0]["command"] == [
+        "python",
+        "-m",
+        "backend.high_scale.worker",
+    ]
 
 
 def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
-    """Mirror of backend/config.py::validate_deployment_mode() over the rendered
-    pod specs. The real gate runs in the backend lifespan AND in
-    worker_process_init, so every pod carrying DEPLOYMENT_MODE=standard or
-    high_scale has to satisfy it or it CrashLoops."""
+    """Every backend/worker pod must have ClickHouse + High-Scale enabled and METADATA_DSN wired."""
     for doc in docs:
         if doc["kind"] != "Deployment":
             continue
-        env = _env(doc)
-        mode = env.get("DEPLOYMENT_MODE", {}).get("value")
-        if mode not in ("standard", "high_scale"):
-            continue
         name = doc["metadata"]["name"]
-        assert "INGEST_MODE" not in env, name
-        assert "SERVING_MODE" not in env, name
-        assert env["DUCKLAKE_CATALOG"]["value"].startswith(("postgres://", "postgresql://")), name
+        if not name.endswith(("-backend", "-worker")):
+            continue
+        env = _env(doc)
+        assert env["HIGH_SCALE_ENABLED"]["value"] == "1", name
+        assert env["CLICKHOUSE_ENABLED"]["value"] == "true", name
         assert "METADATA_DSN" in env, name
-        if mode == "high_scale":
-            assert "CELERY_BROKER_URL" in env, name
 
 
 def test_no_rendered_pod_would_fail_the_app_boot_gate():
@@ -173,71 +151,24 @@ def test_no_rendered_pod_would_fail_the_app_boot_gate():
     _assert_boot_gate_would_pass(_render(*CELERY))
 
 
-# ── Celery mode is a validated opt-in ────────────────────────────────────────
-
-
-def test_high_throughput_fails_at_template_time():
-    stderr = _render_error("config.deploymentMode=high_throughput")
-    assert 'config.deploymentMode=high_throughput has been removed; use "standard" or "high_scale"' in stderr
-
-
-def test_celery_without_ducklake_catalog_fails_at_template_time():
-    stderr = _render_error("config.deploymentMode=high_scale")
-
-    assert "config.ducklakeCatalog" in stderr
-    assert "postgresql://" in stderr
-
-
-def test_celery_without_metadata_dsn_fails_at_template_time():
-    stderr = _render_error(
-        "config.deploymentMode=high_scale",
-        f"config.ducklakeCatalog={_PG}",
-    )
-
-    assert "secrets.metadataDsn" in stderr
-    assert "secrets.existingSecret" in stderr
+# ── Template validation gates ────────────────────────────────────────────────
 
 
 def test_celery_without_broker_fails_at_template_time():
     stderr = _render_error(
-        "config.deploymentMode=high_scale",
         "config.sseBackplane=valkey",
-        f"config.ducklakeCatalog={_PG}",
         f"secrets.metadataDsn={_PG}",
     )
 
     assert "secrets.celeryBrokerUrl" in stderr
 
 
-def test_celery_rejects_a_file_ducklake_catalog():
-    """A file catalog is single-process; the boot gate rejects it, so the
-    template must too rather than deferring to a CrashLoop."""
-    stderr = _render_error(
-        "config.deploymentMode=high_scale",
-        "config.ducklakeCatalog=/app/data/catalog.ducklake",
-    )
-
-    assert "config.ducklakeCatalog" in stderr
-    assert "/app/data/catalog.ducklake" in stderr
-
-
 def test_celery_rejects_a_non_postgres_metadata_dsn():
     stderr = _render_error(
-        "config.deploymentMode=high_scale",
-        f"config.ducklakeCatalog={_PG}",
         "secrets.metadataDsn=sqlite:///app/data/metadata.db",
     )
 
     assert "secrets.metadataDsn" in stderr
-
-
-def test_unrecognised_deployment_mode_fails_at_template_time():
-    """A typo in the deployment mode must fail at template time rather than
-    silently disable the whole ingest fleet."""
-    stderr = _render_error("config.deploymentMode=Celery")
-
-    assert "config.deploymentMode" in stderr
-    assert "Celery" in stderr
 
 
 def test_valkey_backplane_without_a_broker_fails_at_template_time():
@@ -254,28 +185,28 @@ def test_celery_mode_renders_the_full_ingest_fleet():
 
     for component in ("backend", "worker"):
         env = _env(_deployment(docs, component))
-        assert env["DEPLOYMENT_MODE"]["value"] == "high_scale"
-        assert "INGEST_MODE" not in env
-        assert "SERVING_MODE" not in env
-        assert env["DUCKLAKE_CATALOG"]["value"] == _PG
-        # Non-optional: a Secret missing the key must stop the pod with
-        # "couldn't find key" rather than boot it into the config gate.
+        assert env["HIGH_SCALE_ENABLED"]["value"] == "1"
+        assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
         assert env["METADATA_DSN"]["valueFrom"]["secretKeyRef"]["optional"] is False
         assert "CELERY_BROKER_URL" in env
-        assert env["DUCKDB_EXTENSION_DIRECTORY"]["value"] == "/tmp/duckdb-extensions"
+
+    worker_env = _env(_deployment(docs, "worker"))
+    assert worker_env["HIGH_SCALE_WORKER_THREADS"]["value"] == "1"
+    assert worker_env["HIGH_SCALE_MAX_BATCH_BYTES"]["value"] == "6291456"
+    assert worker_env["HIGH_SCALE_MAX_BATCH_OBJECTS"]["value"] == "10"
 
     secret = next(doc for doc in docs if doc["kind"] == "Secret")
     assert secret["stringData"]["METADATA_DSN"] == _PG
     assert secret["stringData"]["CELERY_BROKER_URL"] == "redis://valkey-master:6379/0"
 
 
-def test_backend_and_worker_share_duckdb_and_otel_env():
+def test_backend_and_worker_share_clickhouse_and_otel_env():
     for observability, exporter in (("false", "prometheus"), ("true", "otlp")):
-        docs = _render(*CELERY, f"observability.enabled={observability}", "config.duckdbThreads=3")
+        docs = _render(*CELERY, f"observability.enabled={observability}")
         for component in ("backend", "worker"):
             env = _env(_deployment(docs, component))
-            assert env["DUCKDB_MEMORY_LIMIT"]["value"] == "4GB"
-            assert env["DUCKDB_THREADS"]["value"] == "3"
+            assert env["HIGH_SCALE_ENABLED"]["value"] == "1"
+            assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
             assert env["OTEL_EXPORTER"]["value"] == exporter
             assert ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" in env) == (exporter == "otlp")
             assert ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" in env) == (exporter == "otlp")
@@ -288,11 +219,6 @@ def test_backend_and_worker_share_duckdb_and_otel_env():
         if exporter == "otlp":
             service_names = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Service"}
             assert {"prometheus", "tempo"} <= service_names
-
-    backend = _env(_deployment(_render(*CELERY), "backend"))
-    worker = _env(_deployment(_render(*CELERY), "worker"))
-    assert "DUCKDB_POOL_MAX_SIZE" in backend
-    assert "DUCKDB_POOL_MAX_SIZE" not in worker
 
 
 def test_operator_otlp_endpoints_render_for_high_scale_backend_and_worker():
@@ -334,8 +260,6 @@ def test_existing_secret_satisfies_the_dsn_requirement():
     """The production path: connection strings pre-created out of band, so
     the chart templates no Secret and cannot inspect the keys."""
     docs = _render(
-        "config.deploymentMode=high_scale",
-        f"config.ducklakeCatalog={_PG}",
         "secrets.existingSecret=fla-connections",
     )
 
@@ -368,7 +292,7 @@ def test_backend_stays_single_pod_when_autoscaling_and_replicacount_are_raised()
 
 
 def test_backend_stays_single_pod_in_celery_mode_too():
-    """Celery mode is the topology an operator reaches for to scale out, so
+    """Scaled mode is the topology an operator reaches for to scale out, so
     the replica pin has to hold there, not only under the defaults."""
     docs = _render(*CELERY, "autoscaling.enabled=true", "replicaCount=5", "workers.replicaCount=4")
     backend = _deployment(docs, "backend")
@@ -390,9 +314,9 @@ def test_worker_autoscaling_still_works():
 
 
 def test_no_worker_scaledobject_without_a_worker_fleet():
-    """In sync mode there is no worker Deployment, so a ScaledObject would
+    """When workers.enabled=false there is no worker Deployment, so a ScaledObject would
     target a workload that does not exist."""
-    docs = _render(*STANDARD, "autoscaling.enabled=true")
+    docs = _render(*STANDARD, "workers.enabled=false", "autoscaling.enabled=true")
 
     assert not [doc for doc in docs if doc["kind"] == "ScaledObject"]
     assert all("worker" not in name for name in _autoscaler_targets(docs))
@@ -403,7 +327,6 @@ def test_no_worker_scaledobject_without_a_worker_fleet():
 
 def _high_scale_docs(*extra: str) -> list[dict]:
     return _render(
-        f"config.ducklakeCatalog={_PG}",
         "secrets.existingSecret=fla-connections",
         "highScale.enabled=true",
         "highScale.sharedState.existingClaim=shared-app-state",
@@ -417,6 +340,7 @@ def test_high_scale_is_disabled_without_opt_in():
     assert {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"} == {
         "test-release-fastly-log-analytics-backend",
         "test-release-fastly-log-analytics-frontend",
+        "test-release-fastly-log-analytics-worker",
     }
 
 
@@ -446,7 +370,7 @@ def test_high_scale_renders_only_application_workloads_and_invariants():
         pod = deployment["spec"]["template"]["spec"]
         assert pod["serviceAccountName"].endswith("-high-scale")
         assert pod["containers"][0]["image"] == "example.invalid/fla-high-scale:test"
-        assert pod["containers"][0]["resources"]["requests"]["cpu"] == "250m"
+        assert pod["containers"][0]["resources"]["requests"]["cpu"] == "500m"
         assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
         # Packaging must not silently select an application runtime mode.
         assert not any(entry["name"] == "DEPLOYMENT_MODE" for entry in pod["containers"][0].get("env", []))
@@ -457,7 +381,7 @@ def test_high_scale_renders_only_application_workloads_and_invariants():
             "subPath": "data",
         } in pod["containers"][0]["volumeMounts"]
         assert pod["volumes"] == [
-            {"name": "tmp", "emptyDir": {}},
+            {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}},
             {
                 "name": "shared-state",
                 "persistentVolumeClaim": {"claimName": "shared-app-state"},
@@ -488,7 +412,7 @@ def test_high_scale_ingest_runs_continuous_worker_without_placeholder_workloads(
         "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
     }
     assert {"name": "tmp", "mountPath": "/tmp"} in ingest["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    assert {"name": "tmp", "emptyDir": {}} in ingest["spec"]["template"]["spec"]["volumes"]
+    assert {"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}} in ingest["spec"]["template"]["spec"]["volumes"]
 
 
 def test_high_scale_rejects_unimplemented_workload_without_command():

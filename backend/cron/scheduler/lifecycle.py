@@ -232,7 +232,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         return 0.0 if self._start_time is None else time.time() - self._start_time
 
     def __enter__(self) -> cron_run:
-        from backend.core.duckdb import get_source_for_service, start_cron_run
+        from backend.core.fos_client import get_source_for_service, start_cron_run
         from backend.core.metadata.usage_log import CronLeaseHeldError
 
         if self._source is None:
@@ -274,7 +274,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         error_message: str | None = None,
         **log_kwargs: Any,
     ) -> None:
-        from backend.core.duckdb import log_cron_run
+        from backend.core.fos_client import log_cron_run
 
         if self._source is None:
             return
@@ -327,7 +327,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
                     self._finalize_duration()
 
         if self.finalize_running_backstop and self._source is not None:
-            from backend.core.duckdb import finalize_cron_run_if_running
+            from backend.core.fos_client import finalize_cron_run_if_running
 
             backstop_kwargs: dict[str, Any] = {}
             if self.backstop_summary is not None or self.backstop_error_message is not None:
@@ -361,21 +361,9 @@ def record_skip_row(
     error_message: str | None = None,
     run_id: int | None = None,
 ) -> None:
-    from backend.core.duckdb import log_cron_run
+    from backend.core.fos_client import log_cron_run
 
     log_cron_run(source, task, duration_s, status, summary=summary, error_message=error_message, run_id=run_id)
-
-
-def partial_hour_merge_enabled() -> bool:
-    return os.environ.get("PARTIAL_HOUR_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
-
-
-def partial_hour_merge_interval_sec() -> int:
-    try:
-        val = int(os.environ.get("PARTIAL_HOUR_MERGE_INTERVAL_SEC", "30"))
-        return max(10, min(120, val))
-    except (ValueError, TypeError):
-        return 30
 
 
 def dev_local_crons_enabled() -> bool:
@@ -470,11 +458,8 @@ def _extract_log_text(run_id: int | None) -> str:
 
 JOB_COLORS = {
     "sync": "\x1b[94m",  # Bright Blue
-    "commit": "\x1b[95m",  # Bright Magenta
     "metadata_cleanup": "\x1b[35m",  # Magenta
     "alerts": "\x1b[93m",  # Bright Yellow
-    "optimize": "\x1b[92m",  # Bright Green
-    "expire": "\x1b[90m",  # Gray
     "ngwaf_sync": "\x1b[36m",  # Cyan
     "usage_log": "\x1b[32m",  # Green
 }
@@ -486,9 +471,6 @@ TYPE_ICONS = {
     "status": "ℹ️ ",
     "progress": "⏳ ",
     "sync": "⬇️  ",
-    "commit": "💾 ",
-    "optimize": "🔨 ",
-    "expire": "🗑️ ",
     "alerts": "🔔 ",
     "ngwaf_sync": "👾 ",
     "usage_log": "📊 ",
@@ -548,43 +530,6 @@ def _check_disk_space(cache_dir: str, service_id: str, job_name: str) -> tuple[b
     return True, ""
 
 
-_BACKLOG_FILE_COUNT_WARN = 200
-_BACKLOG_AGE_MULTIPLIER = 3
-_BACKLOG_BYTES_WARN = 1 * 1024 * 1024 * 1024
-
-
-def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int) -> str:
-    try:
-        from backend.core import storage as db_storage
-
-        stats = db_storage.buffer_backlog_stats(src)
-    except Exception as e:
-        logger.warning("[scheduler] %s: buffer backlog probe failed: %s", service_id, e)
-        return ""
-    file_count = int(stats.get("file_count", 0) or 0)
-    total_bytes = int(stats.get("total_bytes", 0) or 0)
-    oldest_age_s = int(stats.get("oldest_age_seconds", 0) or 0)
-    if file_count == 0:
-        return ""
-    max_oldest_age_s = max(60, commit_interval_mins * 60 * _BACKLOG_AGE_MULTIPLIER)
-    problems: list[str] = []
-    if file_count > _BACKLOG_FILE_COUNT_WARN:
-        problems.append(f"{file_count} files")
-    if oldest_age_s > max_oldest_age_s:
-        problems.append(f"oldest {oldest_age_s // 60}m old")
-    if total_bytes > _BACKLOG_BYTES_WARN:
-        problems.append(f"{total_bytes // (1024 * 1024)}MB on disk")
-    if not problems:
-        return ""
-    msg = "buffer backlog: " + ", ".join(problems)
-    logger.warning(
-        "🪣 \x1b[33m[backlog]\x1b[0m %s: %s — commits may be failing silently or ingest is outrunning commit",
-        service_id,
-        msg,
-    )
-    return f" ⚠ {msg}"
-
-
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh_cost", _last_heavy_refresh_cost)
 
@@ -594,9 +539,6 @@ __all__ = [
     "JOB_COLORS",
     "RESET_COLOR",
     "TYPE_ICONS",
-    "_BACKLOG_AGE_MULTIPLIER",
-    "_BACKLOG_BYTES_WARN",
-    "_BACKLOG_FILE_COUNT_WARN",
     "_CRON_HARD_CAP_S",
     "_DISK_FREE_HARD_FLOOR_BYTES",
     "_DISK_FREE_HARD_FLOOR_PCT",
@@ -605,7 +547,6 @@ __all__ = [
     "_JOIN_TIMEOUT_S",
     "_ROOT",
     "_WATCHDOG_MAX_WORKERS",
-    "_check_buffer_backlog",
     "_check_disk_space",
     "_claim_heavy_refresh",
     "_display_label",
@@ -635,8 +576,6 @@ __all__ = [
     "global_job",
     "iso_z_now",
     "logger",
-    "partial_hour_merge_enabled",
-    "partial_hour_merge_interval_sec",
     "record_job_run",
     "record_skip_row",
     "start_progress",

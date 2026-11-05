@@ -931,8 +931,8 @@ describe('extractApiError & openapi-fetch error paths', () => {
 })
 
 const rejected: Record<string, string> = {
-  METADATA_DSN: 'postgresql://example.invalid/operator', DUCKLAKE_CATALOG: 'postgres:example.invalid/operator',
-  DUCKLAKE_DATA_PATH: 's3://operator-placeholder/', CELERY_BROKER_URL: 'redis://example.invalid/0',
+  METADATA_DSN: 'postgresql://example.invalid/operator',
+  CELERY_BROKER_URL: 'redis://example.invalid/0',
   CELERY_RESULT_BACKEND: 'redis://example.invalid/1', CLICKHOUSE_PASSWORD: 'operator-placeholder',
   HOT_S3_SECRET: 'operator-placeholder', FASTLY_API_KEY: 'operator-placeholder',
   AWS_SECRET_ACCESS_KEY: 'operator-placeholder', REMOTE_SHARE_DB_DIR: '/operator-placeholder',
@@ -953,7 +953,6 @@ describe('backend harness child isolation', () => {
     vi.clearAllMocks()
     for (const [key, value] of Object.entries(rejected)) vi.stubEnv(key, value)
     for (const key of ['FLA_DEV_NO_CRONS', 'FASTLY_MOCK_MODE']) vi.stubEnv(key, '0')
-    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
     vi.stubEnv('SSE_BACKPLANE', 'valkey')
     vi.stubEnv('OTEL_EXPORTER', 'otlp')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
@@ -993,7 +992,7 @@ describe('backend harness child isolation', () => {
       for (const [key, value] of Object.entries(rejected)) expect(env[key], key).not.toBe(value)
       expect(env).toMatchObject({
         PATH: process.env.PATH, DEBUG_RESPONSES: 'true', FASTLY_MOCK_MODE: '1', FLA_DEV_NO_CRONS: '1',
-        DEPLOYMENT_MODE: 'standard', SSE_BACKPLANE: 'local', OTEL_EXPORTER: 'none',
+        SSE_BACKPLANE: 'local', OTEL_EXPORTER: 'none',
         UV_NO_ENV_FILE: '1', UV_NO_CONFIG: '1', PYTHON_DOTENV_DISABLED: '1',
       })
       expect(env.CONTRACT_CONFIGS_DIR).toBe(join(env.CONTRACT_DATA_DIR!, '..', 'configs'))
@@ -1020,13 +1019,8 @@ describe('backend harness child isolation', () => {
     expect(() => contract.backendTestEnvironment('/tmp/data')).toThrow(/isolated test database/i)
 
     vi.stubEnv('FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/test_fla_contract')
-    vi.stubEnv('FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/ducklake_live')
-    expect(() => contract.backendTestEnvironment('/tmp/data')).toThrow(/isolated test database/i)
-
-    vi.stubEnv('FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/ducklake_contract_test')
     const validEnv = contract.backendTestEnvironment('/tmp/data')
     expect(validEnv.METADATA_DSN).toBe('postgresql://fla:pw@localhost:5432/test_fla_contract')
-    expect(validEnv.DUCKLAKE_CATALOG).toBe('postgresql://fla:pw@localhost:5432/ducklake_contract_test')
   })
 })
 

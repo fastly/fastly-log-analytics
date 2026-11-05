@@ -53,18 +53,11 @@ Name of the Secret holding CELERY_BROKER_URL / METADATA_DSN.
 {{- end }}
 
 {{/*
-Whether this chart templates its own connection-string Secret. Non-empty
-("true") only when there is something to put in it: celery mode always needs
-a broker, and either DSN may be supplied on its own (sync ingest against a
-shared Postgres metadata database is a supported combination).
-
-secret.yaml and sharedEnv both read this so they cannot disagree about
-whether the Secret exists — a secretKeyRef pointing at a Secret that was
-never templated leaves the pod stuck in CreateContainerConfigError.
+Whether this chart templates its own connection-string Secret.
 */}}
 {{- define "fastly-log-analytics.managedSecret" -}}
 {{- if .Values.secrets.existingSecret -}}
-{{- else if or (eq .Values.config.deploymentMode "high_scale") .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl -}}
+{{- else if or .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl .Values.secrets.clickhousePassword -}}
 true
 {{- end -}}
 {{- end }}
@@ -80,7 +73,7 @@ true
 {{- end }}
 
 {{/*
-Name of the PVC holding configs/data/cache.
+Name of the PVC holding configs/data.
 */}}
 {{- define "fastly-log-analytics.pvcName" -}}
 {{- if .Values.persistence.existingClaim }}
@@ -92,17 +85,39 @@ Name of the PVC holding configs/data/cache.
 
 {{/*
 Env block shared by backend and worker: broker/DSN via secretKeyRef
-plus the DuckLake settings.
-
-In high-scale mode the metadata DSN is marked non-optional. That is the only check the
-chart has left for a pre-created secrets.existingSecret it cannot read: a
-missing key stops the pod at CreateContainerConfigError naming the key,
-instead of starting it and letting validate_deployment_mode() CrashLoop it.
+plus ClickHouse analytical store settings.
 */}}
 {{- define "fastly-log-analytics.sharedEnv" -}}
-{{- $highScale := eq .Values.config.deploymentMode "high_scale" -}}
-- name: DEPLOYMENT_MODE
-  value: {{ .Values.config.deploymentMode | quote }}
+- name: HIGH_SCALE_ENABLED
+  value: "1"
+- name: CLICKHOUSE_ENABLED
+  value: "true"
+{{- if .Values.config.clickhouseUrl }}
+- name: CLICKHOUSE_URL
+  value: {{ .Values.config.clickhouseUrl | quote }}
+- name: HIGH_SCALE_CLICKHOUSE_URL
+  value: {{ .Values.config.clickhouseUrl | quote }}
+{{- end }}
+{{- if .Values.config.clickhouseHost }}
+- name: CLICKHOUSE_HOST
+  value: {{ .Values.config.clickhouseHost | quote }}
+{{- end }}
+{{- if .Values.config.clickhousePort }}
+- name: CLICKHOUSE_PORT
+  value: {{ .Values.config.clickhousePort | quote }}
+{{- end }}
+{{- if .Values.config.clickhouseDatabase }}
+- name: CLICKHOUSE_DATABASE
+  value: {{ .Values.config.clickhouseDatabase | quote }}
+{{- end }}
+{{- if .Values.config.clickhouseUser }}
+- name: CLICKHOUSE_USER
+  value: {{ .Values.config.clickhouseUser | quote }}
+{{- end }}
+{{- if .Values.config.clickhouseSecure }}
+- name: CLICKHOUSE_SECURE
+  value: {{ .Values.config.clickhouseSecure | quote }}
+{{- end }}
 {{- if include "fastly-log-analytics.hasSecret" . }}
 - name: CELERY_BROKER_URL
   valueFrom:
@@ -115,39 +130,22 @@ instead of starting it and letting validate_deployment_mode() CrashLoop it.
     secretKeyRef:
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: METADATA_DSN
-      optional: {{ not (or $highScale .Values.secrets.metadataDsn) }}
-{{- end }}
-{{- if .Values.config.ducklakeCatalog }}
-- name: DUCKLAKE_CATALOG
-  value: {{ .Values.config.ducklakeCatalog | quote }}
-{{- end }}
-{{- if .Values.config.ducklakeDataPath }}
-- name: DUCKLAKE_DATA_PATH
-  value: {{ .Values.config.ducklakeDataPath | quote }}
+      optional: {{ not (or .Values.secrets.existingSecret .Values.secrets.metadataDsn) }}
+- name: CLICKHOUSE_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fastly-log-analytics.secretName" . }}
+      key: CLICKHOUSE_PASSWORD
+      optional: true
 {{- end }}
 {{- if .Values.config.hotS3Endpoint }}
 - name: HOT_S3_ENDPOINT
   value: {{ .Values.config.hotS3Endpoint | quote }}
 {{- end }}
-{{- if .Values.config.duckdbExtensionDirectory }}
-- name: DUCKDB_EXTENSION_DIRECTORY
-  value: {{ .Values.config.duckdbExtensionDirectory | quote }}
-{{- end }}
 {{- end }}
 
 {{/*
-DuckDB resource caps shared by the backend and the ingest worker. The backend
-adds its pool/recycle knobs on top; the worker has no connection pool.
-*/}}
-{{- define "fastly-log-analytics.duckdbEnv" -}}
-- name: DUCKDB_MEMORY_LIMIT
-  value: {{ .Values.config.duckdbMemoryLimit | quote }}
-- name: DUCKDB_THREADS
-  value: {{ .Values.config.duckdbThreads | quote }}
-{{- end }}
-
-{{/*
-OTEL exporter selection shared by the backend and Celery worker. Explicit
+OTEL exporter selection shared by the backend and worker. Explicit
 operator settings override the chart defaults; otherwise OTLP targets the
 in-cluster Prometheus/Tempo when observability is on and Prometheus scraping
 is used when it is off.
@@ -185,7 +183,8 @@ Volume + volumeMount blocks for pods that need the shared PVC.
   persistentVolumeClaim:
     claimName: {{ include "fastly-log-analytics.pvcName" . }}
 {{- else }}
-  emptyDir: {}
+  emptyDir:
+    sizeLimit: 1Gi
 {{- end }}
 {{- end }}
 
@@ -196,7 +195,4 @@ Volume + volumeMount blocks for pods that need the shared PVC.
 - name: app-state
   mountPath: /app/data
   subPath: data
-- name: app-state
-  mountPath: /app/cache
-  subPath: cache
 {{- end }}

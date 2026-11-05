@@ -36,23 +36,6 @@ export const RUM_PERIOD_OPTIONS = [
   ["600", "10 minutes"],
   ["900", "15 minutes"],
 ] as const
-export const COMMIT_INTERVAL_OPTIONS = [
-  ["1", "Every 1 min — most real-time"],
-  ["2", "Every 2 min"],
-  ["3", "Every 3 min"],
-  ["5", "Every 5 min — recommended"],
-  ["15", "Every 15 min"],
-  ["30", "Every 30 min"],
-  ["60", "Every 60 min — fewest snapshots"],
-] as const
-export const ROLLUP_MONTH_OPTIONS = [
-  ["1", "1 month"],
-  ["3", "3 months"],
-  ["6", "6 months"],
-  ["12", "12 months"],
-  ["24", "24 months"],
-  ["0", "Forever"],
-] as const
 
 export function RumVersionPicker({
   serviceId,
@@ -361,7 +344,7 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
           <div className="space-y-0.5">
             <LabelWithInfo
               label="Background Sync"
-              info={`Automatically polls FOS for new ${isLogging ? "log" : "RUM telemetry"} files (every ${pollFreqLong}) and writes them into the local buffer. The buffer is then committed to the shared DuckLake table at the Cloud Commit Interval below.`}
+              info={`Automatically polls FOS for new ${isLogging ? "log" : "RUM telemetry"} files (every ${pollFreqLong}), checkpoints canonical Archive Parquet batches to Fastly Object Storage, and publishes verified batches into ClickHouse.`}
             />
             <p className="text-[10px] text-muted-foreground">Polls FOS every {pollFreqShort}</p>
           </div>
@@ -380,7 +363,7 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
           <div className="space-y-0.5">
             <LabelWithInfo
               label="Auto-Delete Raw Logs"
-              info={`Deletes the raw .zst ${isLogging ? "log" : "RUM beacon"} files from FOS after they are ingested into DuckLake. Recommended — the DuckLake table holds the same data in a more efficient format.`}
+              info={`Deletes the raw .zst ${isLogging ? "log" : "RUM beacon"} files from FOS after they are archived to Parquet and published into ClickHouse. Recommended — the Archive Parquet and ClickHouse tables hold the same data in a more efficient format.`}
             />
             <p className="text-[10px] text-muted-foreground">
               {isLogging ? "Remove .zst files after ingest" : "Remove .zst RUM files after ingest"}
@@ -394,48 +377,11 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
         </div>
       </div>
 
-      <div className={cn("p-4 border rounded-md bg-muted/5 space-y-3 transition-opacity", syncDisabledClass)}>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
-            <LabelWithInfo
-              label="Cloud Commit Interval"
-              info="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to Fastly Object Storage. The cloud copy is what lets you rebuild your data if the local disk is lost. More frequent commits mean fresher data and a more current backup, but create more small files — the daily DuckLake optimization consolidates them."
-            />
-            <p className="text-[10px] text-muted-foreground leading-relaxed">
-              Controls data freshness and how current the cloud copy is. Every commit creates one DuckLake snapshot.
-            </p>
-          </div>
-          <Select
-            value={String(config.commit_interval_mins)}
-            onValueChange={(v) => v && update("commit_interval_mins", Number(v))}
-          >
-            <SelectTrigger className="h-8 w-[220px] shrink-0 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {COMMIT_INTERVAL_OPTIONS.map(([val, label]) => (
-                <SelectItem key={val} value={val} className="text-xs">
-                  {label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="text-[10px] text-muted-foreground bg-muted/30 rounded px-3 py-2 leading-relaxed">
-          {isLogging
-            ? `With a ${config.log_period >= 60 ? `${config.log_period / 60}-minute` : `${config.log_period}-second`} log period`
-            : "With a 1-minute RUM poll period"}{" "}
-          and a {config.commit_interval_mins}-minute commit interval, the system will create ~
-          {Math.round(1440 / config.commit_interval_mins)} DuckLake snapshots per day before the daily
-          optimization consolidates them.
-        </div>
-      </div>
-
       <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
         <div>
           <LabelWithInfo
             label="Data Retention Policy"
-            info="Control how long data is stored in your DuckLake table before being deleted to manage storage size and billing. General edge logs are high-volume, while RUM beacons are low-volume."
+            info="Control how long data is stored in ClickHouse and Fastly Object Storage (FOS) Archive Parquet before being pruned to manage storage size and billing. General edge logs are high-volume, while RUM beacons are low-volume."
           />
           <p className="text-[10px] text-muted-foreground leading-relaxed">
             Configure separate retention windows to optimize storage billing and historical trend depth.
@@ -506,75 +452,6 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
             />
           </div>
         )}
-      </div>
-
-      <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
-        <div>
-          <LabelWithInfo
-            label="Local Dashboard Cache Retention"
-            info="Control how long data is stored on this server's local NVMe disk for instantaneous dashboard querying. Data older than this is seamlessly queried directly from S3 (slower, but saves local disk space)."
-          />
-          <p className="text-[10px] text-muted-foreground leading-relaxed">
-            Configure local hot-cache windows. Rollups are tiny and should be kept long-term; raw logs are
-            huge and can be evicted early. If your local disk gets &gt;85% full, the oldest cache is
-            automatically evicted regardless of these settings to prevent disk exhaustion.
-          </p>
-        </div>
-        <div className="grid grid-cols-2 gap-6">
-          <div className="space-y-1.5">
-            <LabelWithInfo
-              label="Local Raw Log Cache"
-              info="How many days of raw logs to keep on the local NVMe disk. Older logs are automatically queried directly from S3 Object Storage."
-            />
-            <RetentionSelect
-              value={String(config.cache_retention_days)}
-              onValueChange={(v) => update("cache_retention_days", Number(v))}
-              triggerClassName="h-8 text-xs"
-              itemClassName="text-xs"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <LabelWithInfo
-              label="Local Rollups & Metrics"
-              info="How many MONTHS of pre-aggregated time-series rollups to keep locally. These are very small and allow instant loading of 90-day dashboard charts."
-            />
-            <Select
-              value={String(config.rollup_retention_months)}
-              onValueChange={(v) => update("rollup_retention_months", Number(v))}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {ROLLUP_MONTH_OPTIONS.map(([val, label]) => (
-                  <SelectItem key={val} value={val} className="text-xs">
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-      </div>
-
-      <div
-        className={cn(
-          "flex items-center justify-between p-3 border rounded-md bg-muted/5 transition-opacity",
-          syncDisabledClass,
-        )}
-      >
-        <div className="space-y-0.5">
-          <LabelWithInfo
-            label="Daily DuckLake Optimization"
-            info="Every night at 04:00 UTC, rewrites many small DuckLake snapshot files into larger, optimized Parquet files. This is storage-side housekeeping that keeps cloud storage costs down — dashboard query speed is handled separately by always-on local compaction. Strongly recommended when using frequent commit intervals."
-          />
-          <p className="text-[10px] text-muted-foreground">Runs at 04:00 UTC — consolidates daily snapshots</p>
-        </div>
-        <Switch
-          aria-label="Daily DuckLake Optimization"
-          checked={config.enable_cron_compact}
-          onCheckedChange={(v) => update("enable_cron_compact", v)}
-        />
       </div>
     </div>
   )

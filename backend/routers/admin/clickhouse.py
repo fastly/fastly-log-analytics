@@ -182,8 +182,6 @@ def api_high_scale_retention_recommendation(
 ) -> HighScaleRetentionRecommendationResponse:
     """Recommend hot/warm retention for sizing; an explicit per-service setting always wins."""
     service_id = require_service_id(service_id)
-    if not config.is_high_scale_mode():
-        raise HTTPException(404, detail=make_error("high_scale_not_enabled", "High-scale mode is not enabled"))
     cfg = load_service_config_or_503(service_id)
 
     volume_source: Literal["request", "sampled"] = "request"

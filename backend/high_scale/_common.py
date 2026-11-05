@@ -394,7 +394,7 @@ def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int
     asn_list = list(asns)
     if not asn_list:
         return {}
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     try:
         names = _db.get_asn_names(service_id, asn_list)

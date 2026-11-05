@@ -6,12 +6,14 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
-from backend.core.request_context import get_con, get_service_id, get_source
+from backend.core.fos_client import _safe_table_name, get_source_for_service
+from backend.core.request_context import get_service_id, get_source
 from backend.models.analytics import InsightsAvailabilityResponse, PageTelemetryResponse
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
@@ -22,14 +24,31 @@ from backend.models.common import (
     RecentSqliteResponse,
     SchemaResponse,
 )
-from backend.repositories import assets as service_stats_repo
-from backend.repositories import rum as rum_repo
-from backend.repositories._base import SectionTimer
 from backend.utils import telemetry as statement_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import query_errors
+
+_T = TypeVar("_T")
+
+
+class SectionTimer:
+    """Lightweight wall-clock section timer for bootstrap diagnostics."""
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+
+    def mark(self, section: str, started_at: float) -> None:
+        self.entries.append({"section": section, "time_ms": round((time.perf_counter() - started_at) * 1000.0, 2)})
+
+    def call(self, section: str, fn: Callable[[], _T]) -> _T:
+        t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            self.mark(section, t0)
+
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +165,6 @@ def _bootstrap_sync(
     request: Request,
     service_id: str | None,
 ) -> BootstrapResponse:
-    from backend.core import duckdb as _db
     from backend.services.service_manager import get_enriched_services
     from backend.utils.countries import COUNTRY_MAP
     from backend.utils.pop_utils import get_pop_lat_lon_map, get_pop_location_map
@@ -219,7 +237,7 @@ def _bootstrap_sync(
     # Resolve once and reuse across closures. Previously each closure called
     # get_source_for_service(valid_active_id) independently — 3 redundant
     # stat() + json.loads passes on the cold-load admin bootstrap path.
-    active_src = _db.get_source_for_service(valid_active_id) if valid_active_id else None
+    active_src = get_source_for_service(valid_active_id) if valid_active_id else None
 
     schema: list = []
     table_name: str | None = None
@@ -237,32 +255,15 @@ def _bootstrap_sync(
         active_svc = next((s for s in services if s.get("service_id") == valid_active_id), None)
         if active_svc and active_svc.get("status"):
             schema = active_svc["status"].get("schema", []) or []
-        from backend.core.duckdb import _safe_table_name
 
         if active_src:
             table_name = _safe_table_name(active_src["name"])
 
     timer.call("schema_lookup", _resolve_schema_and_table)
 
-    # NOTE: the previous fallback opened a read-only DuckDB connection here
-    # and ran get_schema() against the source on cold-cache loads. That call
-    # acquired the per-service lock + did a parquet glob, costing 1-3s on
-    # the very first /api/bootstrap after a backend restart and blocking
-    # the whole admin UI from rendering. With the status-refresh cron
-    # populating active_svc["status"]["schema"], the cache is the source
-    # of truth — drop the fallback. If schema is empty here, the dashboard
-    # renders without a hint banner; the user can refresh once the cron
-    # has run (typically <60s after startup).
-
     pops = timer.call("get_pop_lat_lon_map", get_pop_lat_lon_map)
     pop_geo = timer.call("get_pop_location_map", get_pop_location_map)
 
-    # Per the perf audit (F6): bootstrap's custom_fields_catalog was a
-    # ~10-15 KB duplicate of what every chart page already fetches
-    # separately from /api/log-fields/catalog, so the field was dropped
-    # from the response. The dashboard card hook only needs
-    # custom_dashboard_cards and active_log_field_ids — both derived
-    # from the catalog here.
     custom_dashboard_cards: list[dict] = []
     active_log_field_ids: list[str] = []
     ngwaf_configured = False
@@ -289,14 +290,6 @@ def _bootstrap_sync(
 
     timer.call("custom_fields_catalog", _resolve_custom_fields)
 
-    # Perf audit Phase D: fold the log-fields catalog into the
-    # bootstrap response so the frontend can seed its
-    # ['log-fields-catalog', service_id] React Query cache from the
-    # same payload (mirrors how `views` is already seeded). Saves one
-    # HTTP round-trip + ~35 KB transfer on every cold page load
-    # without changing the dedicated /api/log-fields/catalog endpoint
-    # (other consumers / direct callers still work). Analyst-scope is
-    # already enforced for valid_active_id above.
     log_fields_catalog_payload: dict | None = None
 
     def _resolve_log_fields_catalog():
@@ -305,14 +298,11 @@ def _bootstrap_sync(
             return
         log_fields_catalog_payload = _compute_log_fields_catalog(valid_active_id)
         if not schema and active_src and log_fields_catalog_payload:
-            from backend import config as svcconfig
-
-            if svcconfig.is_durable_serving_mode(active_src):
-                schema = [
-                    {"name": f["id"], "type": f.get("duckdb_type", "VARCHAR")}
-                    for f in log_fields_catalog_payload.get("fields", [])
-                    if f.get("id")
-                ]
+            schema = [
+                {"name": f["id"], "type": f.get("duckdb_type", "VARCHAR")}
+                for f in log_fields_catalog_payload.get("fields", [])
+                if f.get("id")
+            ]
 
     timer.call("log_fields_catalog", _resolve_log_fields_catalog)
 
@@ -434,7 +424,6 @@ def _bootstrap_sync(
             request_total = request_payload.get("total_rows", 0)
             request_last_sync = request_payload.get("last_sync_at")
         else:
-            # Fallback if the bg cron hasn't populated them yet
             rum_latest = None
             rum_total = 0
             rum_last_sync = None
@@ -444,63 +433,39 @@ def _bootstrap_sync(
 
             try:
                 from backend.core.metadata.usage_log import latest_cron_per_task
+                from backend.high_scale.dashboard import header_metrics as hs_header_metrics
+                from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
-                # RUM metrics from DuckDB RUM views
-                try:
-                    from backend.core.duckdb import rum_source_for
-                    from backend.core.request_context import _ConnectionHolder
-                    from backend.core.storage import execute_with_stale_view_retry
-
-                    rum_source = rum_source_for(active_src)
-                    with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-                        rum_count, rum_last_dt = execute_with_stale_view_retry(
-                            rum_con, rum_source, rum_repo.get_header_stats
-                        )
-
-                    if rum_count > 0:
-                        rum_total = rum_count
-                        if rum_last_dt:
-                            if isinstance(rum_last_dt, datetime):
-                                rum_latest = rum_last_dt.isoformat()
-                            else:
-                                rum_latest = str(rum_last_dt)
-                except Exception:
-                    logger.warning("[bootstrap] RUM header fallback scan failed; reporting zero", exc_info=True)
-
-                # REQUEST metrics from DuckDB main table
-                try:
-                    from backend.core.duckdb import _safe_table_name, get_connection
-
-                    duckdb_con = get_connection(active_src)
+                hs_service = get_high_scale_service_registry().resolve(valid_active_id)
+                if hs_service is not None:
                     try:
-                        req_count, req_latest = service_stats_repo.get_request_row_stats(
-                            duckdb_con, _safe_table_name(active_src["name"])
+                        hm = hs_header_metrics(hs_service)
+                        hm_rum = hm.get("rum") or {}
+                        hm_req = hm.get("request") or {}
+                        rum_latest = hm_rum.get("latest_log_at")
+                        rum_total = int(hm_rum.get("total_rows") or 0)
+                        rum_last_sync = hm_rum.get("last_sync_at")
+                        request_latest = hm_req.get("latest_log_at")
+                        request_total = int(hm_req.get("total_rows") or 0)
+                        request_last_sync = hm_req.get("last_sync_at")
+                    except Exception:
+                        logger.warning(
+                            "[bootstrap] ClickHouse header_metrics fallback failed; reporting zero", exc_info=True
                         )
-                        if req_count > 0:
-                            request_total = req_count
-                            # RUM beacons are in metadata SQLite, so REQUEST is everything in DuckDB
-                            # Get latest log timestamp from DuckDB
-                            if req_latest:
-                                request_latest = (
-                                    req_latest.isoformat() if hasattr(req_latest, "isoformat") else req_latest
-                                )
-                    finally:
-                        duckdb_con.close()
-                except Exception:
-                    logger.warning("[bootstrap] request header fallback scan failed; reporting zero", exc_info=True)
 
-                # Get last sync times for each type.
                 cron_data = latest_cron_per_task(valid_active_id)
-                rum_last_sync = (
-                    cron_data.get("rum_discovery", {}).get("started_at")
-                    or cron_data.get("rum_sync", {}).get("started_at")
-                    or cron_data.get("ledger_rum_sweep", {}).get("started_at")
-                )
-                request_last_sync = (
-                    cron_data.get("log_discovery", {}).get("started_at")
-                    or cron_data.get("commit", {}).get("started_at")
-                    or cron_data.get("ledger_sweep", {}).get("started_at")
-                )
+                if not rum_last_sync:
+                    rum_last_sync = (
+                        cron_data.get("rum_discovery", {}).get("started_at")
+                        or cron_data.get("rum_sync", {}).get("started_at")
+                        or cron_data.get("ledger_rum_sweep", {}).get("started_at")
+                    )
+                if not request_last_sync:
+                    request_last_sync = (
+                        cron_data.get("log_discovery", {}).get("started_at")
+                        or cron_data.get("commit", {}).get("started_at")
+                        or cron_data.get("ledger_sweep", {}).get("started_at")
+                    )
 
             except Exception:
                 logger.warning("[bootstrap] header badge fallback failed; reporting zero", exc_info=True)
@@ -772,34 +737,15 @@ def _bootstrap_sync(
 
 
 def _resolve_schema_for_source(request: Request, source: dict, *, stats: bool = True) -> list[dict]:
-    """Resolve schema for ``source`` without eagerly opening a DuckDB connection on cache hits."""
+    """Resolve schema for ``source`` from cached status or the log-fields catalog."""
     from backend import config as svcconfig
-    from backend.core.duckdb import _safe_table_name, get_schema
-    from backend.core.duckdb_status import _schema_cache
-    from backend.core.request_context import _ConnectionHolder
 
     cached_status = svcconfig.get_status(source["name"])
     if cached_status and "schema" in cached_status and (stats or cached_status["schema"]):
         return cached_status["schema"]
 
-    table_name = _safe_table_name(source["name"])
-    for key in ((source["name"], table_name, stats), (source["name"], table_name, True)):
-        if (cached := _schema_cache.get(key)) is not None:
-            return cached
-
-    if svcconfig.is_durable_serving_mode(source):
-        catalog_fields = _compute_log_fields_catalog(source.get("service_id") or source["name"]).get("fields", [])
-        schema = [{"name": f["id"], "type": f.get("duckdb_type", "VARCHAR")} for f in catalog_fields if f.get("id")]
-        _schema_cache[(source["name"], table_name, stats)] = schema
-        return schema
-
-    override_get_con = request.app.dependency_overrides.get(get_con)
-    if override_get_con is not None:
-        con = override_get_con()
-        return get_schema(con, source) if stats else get_schema(con, source, stats=False)
-
-    with _ConnectionHolder(source, read_only=True) as con:
-        return get_schema(con, source) if stats else get_schema(con, source, stats=False)
+    catalog_fields = _compute_log_fields_catalog(source.get("service_id") or source["name"]).get("fields", [])
+    return [{"name": f["id"], "type": f.get("duckdb_type", "VARCHAR")} for f in catalog_fields if f.get("id")]
 
 
 @bootstrap_router.get("/schema", response_model=SchemaResponse, response_model_exclude_unset=True)
@@ -808,8 +754,6 @@ def schema_endpoint(
     request: Request,
     source: dict = Depends(get_source),
 ):
-    from backend.core.duckdb import _safe_table_name
-
     # Cross-tenant guard: an analyst session scoped to ``svc-A`` must not
     # be able to read ``svc-B``'s schema (custom-field names, types, and
     # PII flags). Mirrors the check in ``log_fields_catalog``.

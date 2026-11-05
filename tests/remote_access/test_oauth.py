@@ -1595,7 +1595,7 @@ def test_strip_envelope_non_json_and_invalid_json():
             {
                 "columns": ["x"],
                 "data": [{"x": 1}],
-                "debug_queries": [{"sql": "-- DuckDB Storage View Resolution\nCREATE VIEW logs ..."}],
+                "debug_queries": [{"sql": "SELECT 1 FROM request_facts"}],
                 "debug_sqlite": [{"seq": 1, "sql": "SELECT * FROM cron_runs"}],
             },
             ["debug_queries", "debug_sqlite"],

@@ -102,7 +102,7 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
           Retrain scoring matrix
         </DialogTitle>
         <DialogDescription>
-          Builds a fresh transition matrix from the last N days of DuckDB traffic and evaluates AUC against your
+          Builds a fresh transition matrix from the last N days of ClickHouse traffic and evaluates AUC against your
           labels. Saves matrix.json + publishes to FOS so every backend host sees the new matrix. The Wasm rebuild +
           Compute deploy is a separate step (requires Fastly CLI on your local box).
         </DialogDescription>

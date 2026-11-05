@@ -385,8 +385,8 @@ describe('useQueryMonitorUrlState: legacy URLs parse', () => {
   })
 
   it('hydrates every param from a fully-specified shared link', () => {
-    expect(setupQueryMonitorUrl('?q=COMPACT&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1').result.current).toMatchObject({
-      search: 'COMPACT', kindFilter: 'cron', viewMode: 'live', slowThresholdMs: 250, dbFilter: 'DuckDB', groupCrons: false,
+    expect(setupQueryMonitorUrl('?q=COMPACT&kind=cron&view=live&slow=250&db=ClickHouse&nogroup=1').result.current).toMatchObject({
+      search: 'COMPACT', kindFilter: 'cron', viewMode: 'live', slowThresholdMs: 250, dbFilter: 'ClickHouse', groupCrons: false,
     })
   })
 
@@ -422,7 +422,7 @@ describe('useQueryMonitorUrlState: writes', () => {
   })
 
   it('strips params that return to their defaults', async () => {
-    const { result, onUrlUpdate } = setupQueryMonitorUrl('?q=x&kind=cron&view=live&slow=250&db=DuckDB&nogroup=1')
+    const { result, onUrlUpdate } = setupQueryMonitorUrl('?q=x&kind=cron&view=live&slow=250&db=ClickHouse&nogroup=1')
     act(() => {
       result.current.setSearch('')
       result.current.setKindFilter('all')
@@ -517,7 +517,7 @@ const attr = (over: Partial<Attribution> = {}): Attribution => ({
 })
 
 const active = (qid: number, durationMs: number, over: Partial<ActiveRow> = {}): ActiveRow => ({
-  query_id: qid, db_type: 'DuckDB', sql_preview: `SELECT ${qid}`, sql: null, sql_len: 10,
+  query_id: qid, db_type: 'ClickHouse', sql_preview: `SELECT ${qid}`, sql: null, sql_len: 10,
   attribution: attr(), service_id: 'svc-1', started_at_utc: 0, duration_ms: durationMs,
   cancellable: true, cancelled_at: null, ...over,
 })

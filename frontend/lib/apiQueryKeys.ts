@@ -83,8 +83,6 @@ export const queryKeys = {
 
     storage: (serviceId: string | null | undefined) => ["admin", "storage", serviceId] as const,
     storageAll: () => ["admin", "storage"] as const,
-    storageCalendar: (serviceId: string | null | undefined) => ["admin", "storage", "calendar", serviceId] as const,
-    storageInfo: (serviceId: string | null | undefined) => ["admin", "storage-info", serviceId] as const,
     storageTree: (serviceId: string | null | undefined) => ["admin", "storage-tree", serviceId] as const,
     rawTree: (serviceId: string | null | undefined) => ["admin", "raw-tree", serviceId] as const,
     fileTree: (type: "storage" | "raw", serviceId: string | null | undefined, prefix: string) =>

@@ -53,8 +53,6 @@ export interface ProvisionConfig {
   cdn_secret: string
   enable_cron_sync: boolean
   delete_after: boolean
-  commit_interval_mins: number
-  enable_cron_compact: boolean
   log_fields: LogFieldsConfig
   ngwaf_workspace_id: string
   cmcd_enabled: boolean
@@ -65,8 +63,6 @@ export interface ProvisionConfig {
   rum_log_period: number
   log_retention_days: number
   rum_retention_days: number
-  cache_retention_days: number
-  rollup_retention_months: number
   rum_custom_condition: string
   faro_version: string | null
 }
@@ -91,8 +87,6 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cdn_secret: "",
   enable_cron_sync: true,
   delete_after: true,
-  commit_interval_mins: 5,
-  enable_cron_compact: true,
   log_fields: { groups: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,
@@ -102,8 +96,6 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   rum_enabled: false,
   log_retention_days: 30,
   rum_retention_days: 30,
-  cache_retention_days: 14,
-  rollup_retention_months: 12,
   rum_custom_condition: "",
   faro_version: null,
 }

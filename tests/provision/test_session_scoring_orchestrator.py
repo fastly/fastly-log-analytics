@@ -1390,14 +1390,12 @@ def test_provision_collects_repeated_enable_group_into_list(mock_provision):
 @patch("backend.provision.orchestrator.provision", return_value=[])
 def test_provision_applies_documented_default_values(mock_provision):
     """Defaults match the docker-compose-relied-upon contract:
-    commit_interval_mins=5, log_retention_days=30, disable_*=False."""
+    log_retention_days=30, disable_*=False."""
     with patch("backend.provision.cli.wizard") as mock_wizard:
         runner.invoke(app, ["provision", "--yes", "--service-id", "s"])
     args = mock_wizard.call_args.args[0]
-    assert args.commit_interval_mins == 5
     assert args.log_retention_days == 30
     assert args.disable_cron_sync is False
-    assert args.disable_cron_compact is False
     assert args.disable_delete_after is False
 
 
@@ -1437,7 +1435,7 @@ def test_teardown_propagates_no_remove_flags_to_handler():
 
 def test_teardown_remove_data_default_is_false():
     """``--remove-data`` is opt-in — default True would auto-delete
-    the local DuckDB/cache on every teardown."""
+    the local metadata/cache on every teardown."""
     with patch("backend.provision.cli.handle_teardown") as mock_handler:
         runner.invoke(app, ["teardown", "--yes", "--bucket", "b", "--token", "t"])
     args = mock_handler.call_args.args[0]
@@ -2103,18 +2101,15 @@ def test_wizard_disable_delete_after_overrides_yes_default():
 
 
 def test_wizard_disable_cron_flags_propagate_to_config():
-    """Cron sync + cron compact default to enabled; the two
-    ``--disable-*`` flags flip them off. Pinned because the cron
-    scheduler reads these flags exactly once at startup."""
+    """Cron sync defaults to enabled; the ``--disable-cron-sync`` flag flips it off."""
     with (
         patch("backend.provision.cli.validate_log_format", return_value=[]),
         patch("backend.provision.cli.fastly", return_value={"name": "x"}),
     ):
         cfg = cli.wizard(
-            _args(token="t", service_id="s", disable_cron_sync=True, disable_cron_compact=True),
+            _args(token="t", service_id="s", disable_cron_sync=True),
         )
     assert cfg["enable_cron_sync"] is False
-    assert cfg["enable_cron_compact"] is False
 
 
 def test_wizard_passes_log_fields_args_through_to_builder():

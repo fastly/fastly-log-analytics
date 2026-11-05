@@ -14,7 +14,7 @@ import { BackfillRangeModal } from '@/components/SyncStatusBadge/SyncStatusBadge
 import { ingestedFilesColumns } from '@/components/DataTable'
 import Loading from '../loading'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
-import { StorageStatus, StorageCalendar, MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
+import { MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
 import { useLogsPageState, type CronRun, type CatalogMaps } from './useLogsPageState'
 import {
   CRON_EXPLANATIONS,
@@ -52,10 +52,10 @@ const LOG_TABS = [
   { value: 'cron', label: 'Cron Runs', icon: History },
   { value: 'service_history', label: 'Service History', icon: ClipboardList },
   { value: 'ingestion', label: 'Ingestion History', icon: Database },
-  { value: 'storage', label: 'DuckLake Storage', icon: Archive },
+  { value: 'storage', label: 'Archive Storage', icon: Archive },
   { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
   { value: 'raw', label: 'Available Logs', icon: FileCode },
-  { value: 'schema', label: 'DuckDB Schema', icon: FileCode },
+  { value: 'schema', label: 'ClickHouse Schema', icon: FileCode },
 ] as const
 
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
@@ -148,20 +148,15 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
         </TabsContent>
         <TabsContent value="storage" className="mt-4 space-y-4">
           {s.activeTab === 'storage' && (
-            <>
-              <StorageStatus />
-              <StorageCalendar />
-              <div className="border rounded-lg overflow-hidden bg-card">
-                <div className="p-4 border-b">
-                  <h3 className="text-sm font-medium">DuckLake Data Layout</h3>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Direct view of the DuckLake Parquet data files (the local data directory in Standard, Object Storage
-                    in High-Scale).
-                  </p>
-                </div>
-                <FileBrowser type="storage" />
+            <div className="border rounded-lg overflow-hidden bg-card">
+              <div className="p-4 border-b">
+                <h3 className="text-sm font-medium">Archive Parquet Layout</h3>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Canonical Archive Parquet batches stored in Fastly Object Storage.
+                </p>
               </div>
-            </>
+              <FileBrowser type="storage" />
+            </div>
           )}
         </TabsContent>
         <TabsContent value="metadata_storage" className="mt-4 space-y-4">

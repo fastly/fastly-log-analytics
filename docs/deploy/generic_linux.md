@@ -10,11 +10,10 @@ the same as every other platform; only the host-provisioning steps differ.
   that has a current `docker-ce` package. Alpine works but requires the
   community Docker package and a couple of glibc workarounds — stick with
   glibc distros for the production VM.
-- **Sizing**: 2 vCPU / 8 GB RAM is the minimum. DuckDB and pyarrow load the
-  active session's parquet shards into memory, and the OS plus the Next.js
-  frontend eat ~1 GB before the backend starts. 4 vCPU / 16 GB RAM is the
-  comfortable size for a busy single-tenant deploy. Provider-specific
-  starting points:
+- **Sizing**: 2 vCPU / 8 GB RAM is the minimum for running ClickHouse 24.8,
+  PostgreSQL 16, the stateless ingest worker, the FastAPI backend, and the
+  Next.js frontend together. 4 vCPU / 16 GB RAM is the comfortable size for a
+  busy single-tenant deploy. Provider-specific starting points:
   - Linode: `g6-standard-2` (4 GB) is too small; use `g6-standard-4` (8 GB)
     or `g6-standard-6` (16 GB).
   - DigitalOcean: `s-2vcpu-8gb` (Basic) or `g-2vcpu-8gb` (General Purpose).
@@ -97,7 +96,7 @@ Either way:
 
 ```sh
 sudo chown -R $USER:$USER /mnt/app-data
-mkdir -p /mnt/app-data/{data,cache,configs,postgres}
+mkdir -p /mnt/app-data/{data,configs,postgres,clickhouse}
 ```
 
 ## 4. Caddy / SSL
@@ -121,10 +120,10 @@ DNS-01 is the recommended path on bare metal — you do not have to open port
 cd /mnt/app-data
 git clone https://github.com/fastly/fastly-log-analytics.git
 cd fastly-log-analytics
-# Create .env from .env.example and set DUCKLAKE_PG_PASSWORD.
+# Create .env from .env.example and set POSTGRES_PASSWORD and CLICKHOUSE_PASSWORD.
 # Copy configs from your local dev box or restore from a backup bucket.
-# The backend runs as UID/GID 1000: make data/, cache/, and configs/ writable
-# by that user (sudo chown -R 1000:1000 /mnt/app-data/{data,cache,configs}).
+# The backend and worker run as UID/GID 1000: make data/ and configs/ writable
+# by that user (sudo chown -R 1000:1000 /mnt/app-data/{data,configs}).
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 

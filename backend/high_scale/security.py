@@ -652,8 +652,20 @@ def _sec_combined_overview(
         ],
     }
     if sec_base_key is not None:
+        from backend.core.request_telemetry.tracker import current_clickhouse_scope
+        from backend.utils.telemetry import get_queries
+
+        sec_id = current_clickhouse_scope().get("section_id")
+        sec_queries = [
+            {**q, "is_cached": True}
+            for q in get_queries()
+            if isinstance(q, dict) and (sec_id is None or q.get("clickhouse", {}).get("section_id") == sec_id)
+        ]
         for k, val in bundle.items():
-            _security_memo.cache[f"{sec_base_key}:{k}"] = val
+            s_key = f"{sec_base_key}:{k}"
+            _security_memo.cache[s_key] = val
+            if sec_queries:
+                _security_memo._telemetry_cache[s_key] = sec_queries
     return bundle
 
 
@@ -720,10 +732,28 @@ def security_aggregates(
             s_key = f"{sec_base_key}:{sec_name}"
 
             def _wrapped() -> Any:
+                from backend.core.request_telemetry.tracker import current_clickhouse_scope
+                from backend.utils.telemetry import get_queries
+
                 if (hit := _security_memo.cache.get(s_key)) is not None:
+                    if cached_qs := _security_memo._telemetry_cache.get(s_key):
+                        qs = get_queries()
+                        existing_sqls = {q.get("sql") for q in qs if isinstance(q, dict)}
+                        for cq in cached_qs:
+                            if isinstance(cq, dict) and cq.get("sql") not in existing_sqls:
+                                qs.append(cq.copy())
+                                existing_sqls.add(cq.get("sql"))
                     return hit
+                sec_id = current_clickhouse_scope().get("section_id")
                 val = fn()
                 _security_memo.cache[s_key] = val
+                sec_queries = [
+                    {**q, "is_cached": True}
+                    for q in get_queries()
+                    if isinstance(q, dict) and (sec_id is None or q.get("clickhouse", {}).get("section_id") == sec_id)
+                ]
+                if sec_queries:
+                    _security_memo._telemetry_cache[s_key] = sec_queries
                 return val
 
             return _wrapped

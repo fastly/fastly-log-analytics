@@ -36,24 +36,10 @@ services:
       - "80:80"
     volumes:
       - ./configs:/app/configs
-      - backend-cache:/app/cache
       - ./scripts:/app/scripts
       - backend-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
-      - DUCKDB_MEMORY_LIMIT=2GB
-      # Bound per-op DuckDB parallelism on the shared Colima host. Unset,
-      # DUCKDB_THREADS defaults to min(cpu,8)=6 and the pool to 8, so
-      # in-process ingest/rollup/compaction/insights-prewarmer crons fan out
-      # to ~48 CPU-bound threads; two local stacks then drive load to ~100 on
-      # 6 cores and starve the single-threaded serving loop (health times out
-      # at 20s+). Caps leave headroom so serving stays responsive while crons
-      # grind. (.env sets these but compose uses an explicit env list, not
-      # env_file, so they never reached the container.)
-      - DUCKDB_THREADS=2
-      - DUCKDB_POOL_MAX_SIZE=4
-      - DUCKDB_RECYCLE_INTERVAL_MIN=5
-      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=2500
       # Friendly local hostnames added to the backend's Host allowlist
       # (localhost / 127.0.0.1 are allowed by default). fastly.localhost
       # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a
@@ -76,22 +62,71 @@ services:
       - LOCAL_ADMIN_CIDRS=172.29.0.0/16
       - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
       - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
-      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
-      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@postgres:5432/fla
+      - CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
+      - HIGH_SCALE_CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      - HIGH_SCALE_ENABLED=1
     depends_on:
       postgres:
+        condition: service_healthy
+      clickhouse:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      # Cold start imports the full DuckLake stack (pyarrow, pandas,
-      # duckdb) and takes ~107s idle, more
-      # under the deploy's double-stack + build load. 45s falsely marked the
-      # still-importing backend unhealthy, aborting `docker compose up` (and
-      # the whole deploy under set -e). prod uses 25m for the same reason.
-      start_period: 300s
+      start_period: 60s
+    networks:
+      - app-network
+
+  worker:
+    image: fastly-log-analytics-backend:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "backend.high_scale.worker"]
+    mem_limit: 2g
+    memswap_limit: 2g
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+    volumes:
+      - ./configs:/app/configs
+      - backend-data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
+      - HIGH_SCALE_ENABLED=1
+      - HIGH_SCALE_WORKER_THREADS=1
+      - HIGH_SCALE_MAX_BATCH_BYTES=6291456
+      - HIGH_SCALE_MAX_BATCH_OBJECTS=10
+      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@postgres:5432/fla
+      - CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
+      - HIGH_SCALE_CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://clickhouse:8123}
+      - CLICKHOUSE_ENABLED=true
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
     networks:
       - app-network
 
@@ -111,7 +146,7 @@ services:
       - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:-}
       - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:-}
       - COMMIT_HASH=${COMMIT_HASH:-unknown}
-      - ENV_NAME=local-standard
+      - ENV_NAME=local
     depends_on:
       backend:
         condition: service_healthy
@@ -140,6 +175,36 @@ services:
     networks:
       - app-network
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 4g
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fla}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge
@@ -149,5 +214,5 @@ networks:
 
 volumes:
   backend-data:
-  backend-cache:
   postgres-data:
+  clickhouse-data:

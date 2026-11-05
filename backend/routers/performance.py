@@ -7,6 +7,15 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 
 from backend.core.request_context import RequestContext, build_request_context
+from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd
+from backend.high_scale.ingest_controller import HighScaleService
+from backend.high_scale.ingest_controller import assets_aggregates as hs_assets_aggregates
+from backend.high_scale.performance import (
+    performance_aggregates as hs_performance,
+)
+from backend.high_scale.performance import (
+    value_summary as hs_value_summary,
+)
 from backend.models.analytics import (
     AssetsAggregatesResponse,
     AssetsRequest,
@@ -21,15 +30,10 @@ from backend.models.analytics import (
     ValueSummaryResponse,
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES, CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
-from backend.repositories import assets as assets_repo
-from backend.repositories import cmcd as cmcd_repo
-from backend.repositories import performance as perf_repo
-from backend.repositories import value as value_repo
 from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import (
     make_section_expander,
     query_errors,
-    run_cached_repo_endpoint,
 )
 from backend.utils.router_utils import (
     resolve_fastly_token as _resolve_token,
@@ -38,8 +42,6 @@ from backend.utils.sse import stream_iac_reconcile
 from backend.utils.telemetry import process_context_scope
 
 logger = logging.getLogger(__name__)
-
-repo = perf_repo
 
 router = APIRouter(prefix="/api", responses=DEFAULT_ERROR_RESPONSES)
 performance_router = router
@@ -54,6 +56,15 @@ _expand_cmcd_sections = make_section_expander(CmcdSectionName)
 _expand_value_sections = make_section_expander(ValueSectionName)
 
 
+def _require_high_scale(ctx: RequestContext) -> HighScaleService:
+    if ctx.high_scale is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "ClickHouse service is not available for this service"},
+        )
+    return ctx.high_scale
+
+
 @router.post("/performance/aggregates", tags=["performance"], response_model=PerformanceAggregatesResponse)
 @query_errors()
 def performance_aggregates(
@@ -61,27 +72,9 @@ def performance_aggregates(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.resolve_window(req)
-
-    high_scale_service = ctx.high_scale
     sections = _expand_performance_sections(req.sections)
-    if high_scale_service is not None:
-        from backend.high_scale.performance import performance_aggregates as hs_performance
-
-        return hs_performance(high_scale_service, req, start_time, end_time, sections=sections)
-    return run_cached_repo_endpoint(
-        ctx,
-        repo_module="backend.repositories.performance",
-        get_fn=perf_repo.get_performance_aggregates,
-        peek_fn=perf_repo.peek_performance_aggregates,
-        kwargs={
-            "start_time": start_time,
-            "end_time": end_time,
-            "filters": req.filters,
-            "sort_by": req.sort_by,
-            "sections": sections,
-        },
-        wrap=lambda r: PerformanceAggregatesResponse.with_telemetry(**r),
-    )
+    high_scale_service = _require_high_scale(ctx)
+    return hs_performance(high_scale_service, req, start_time, end_time, sections=sections)
 
 
 def _assets_aggregates_impl(
@@ -90,24 +83,8 @@ def _assets_aggregates_impl(
 ) -> AssetsAggregatesResponse:
     with process_context_scope("assets:aggregates"):
         start_time, end_time = ctx.resolve_window(req)
-        high_scale_service = ctx.high_scale
-        if high_scale_service is not None:
-            from backend.high_scale.ingest_controller import assets_aggregates as hs_assets_aggregates
-
-            return hs_assets_aggregates(high_scale_service, req, start_time, end_time)
-
-        return run_cached_repo_endpoint(
-            ctx,
-            repo_module="backend.repositories.assets",
-            get_fn=assets_repo.get_assets_aggregates,
-            peek_fn=assets_repo.check_assets_cache,
-            kwargs={
-                "start_time": start_time,
-                "end_time": end_time,
-                "filters": req.filters,
-            },
-            wrap=lambda r: AssetsAggregatesResponse.with_telemetry(**r),
-        )
+        high_scale_service = _require_high_scale(ctx)
+        return hs_assets_aggregates(high_scale_service, req, start_time, end_time)
 
 
 @router.post("/assets/aggregates", tags=["assets"], response_model=AssetsAggregatesResponse)
@@ -144,46 +121,10 @@ def cmcd_aggregates(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.resolve_window(req)
-
     sections = _expand_cmcd_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
-
-    high_scale_service = ctx.high_scale
-    if high_scale_service is not None:
-        from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd
-
-        res = hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
-        return CmcdAggregatesResponse.with_telemetry(**res)
-
-    t_entered = ctx.telemetry.elapsed_ms()
-    acquire_ms = 0.0
-
-    def _acquire_con():
-        nonlocal acquire_ms
-        t0 = ctx.telemetry.elapsed_ms()
-        c = ctx.con
-        acquire_ms = ctx.telemetry.elapsed_ms() - t0
-        return c
-
-    _is_real_repo = getattr(cmcd_repo.get_cmcd_aggregates, "__module__", "") == "backend.repositories.cmcd"
-    con_arg = _acquire_con() if (ctx.has_eager_con or not _is_real_repo) else _acquire_con
-
-    res = cmcd_repo.get_cmcd_aggregates(
-        con=con_arg,
-        src=ctx.source,
-        start_time=start_time,
-        end_time=end_time,
-        filters=req.filters,
-        bucket_seconds=req.bucket_seconds,
-        top_n=req.top_n,
-        sections=sections,
-        mask_ips=mask_ips,
-    )
-    res["section_timings"] = [
-        {"section": "request_setup", "time_ms": round(t_entered, 2)},
-        {"section": "connection_acquire", "time_ms": round(acquire_ms, 2)},
-        *res.get("section_timings", []),
-    ]
+    high_scale_service = _require_high_scale(ctx)
+    res = hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
     return CmcdAggregatesResponse.with_telemetry(**res)
 
 
@@ -193,33 +134,10 @@ def value_summary(
     req: ValueSummaryRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time: str | None
-    end_time: str | None
     start_time, end_time = ctx.resolve_window(req)
-
     sections = _expand_value_sections(req.sections)
-    high_scale_service = ctx.high_scale
-    if high_scale_service is not None:
-        from backend.high_scale.performance import value_summary as hs_value_summary
-
-        return hs_value_summary(high_scale_service, req, start_time, end_time, sections=sections)
-    service_id = ctx.source.get("service_id")
-
-    return run_cached_repo_endpoint(
-        ctx,
-        repo_module="backend.repositories.value",
-        get_fn=value_repo.get_summary,
-        peek_fn=value_repo.peek_value_summary,
-        kwargs={
-            "start_time": start_time,
-            "end_time": end_time,
-            "filters": req.filters,
-            "chart_interval": req.chart_interval,
-            "sections": sections,
-            "service_id": service_id,
-        },
-        wrap=lambda r: ValueSummaryResponse.with_telemetry(**r),
-    )
+    high_scale_service = _require_high_scale(ctx)
+    return hs_value_summary(high_scale_service, req, start_time, end_time, sections=sections)
 
 
 @router.get(

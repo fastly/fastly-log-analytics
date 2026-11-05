@@ -146,6 +146,48 @@ def get_hll_sketch(precision: int = DEFAULT_PRECISION) -> HyperLogLog:
     return HyperLogLog(precision=precision)
 
 
+def sketches_from_ip_lists(
+    ip_lists: Any,
+    precision: int = DEFAULT_PRECISION,
+    *,
+    cache: dict[str, tuple[int, int]] | None = None,
+) -> list[bytes]:
+    """Serialized sketches for an Arrow ``list<string>`` array, one per list, byte-identical to calling
+    ``HyperLogLog.add`` for each non-empty item. Each distinct item is hashed once; pass the same ``cache`` (for one
+    precision) across calls to reuse hashes."""
+    import pyarrow as pa
+
+    lists = ip_lists.combine_chunks() if isinstance(ip_lists, pa.ChunkedArray) else ip_lists
+    registers = np.zeros((len(lists), 1 << precision), dtype=np.uint8)
+    flat = lists.flatten()
+    if len(flat):
+        parents = lists.value_parent_indices().to_numpy()
+        encoded = flat.dictionary_encode()
+        codes = encoded.indices.fill_null(-1).to_numpy()
+        width = _HASH_BITS - precision
+        low_mask = (1 << width) - 1
+        known = {} if cache is None else cache
+        distinct = encoded.dictionary.to_pylist()
+        bucket_of = np.zeros(len(distinct), dtype=np.int64)
+        rank_of = np.zeros(len(distinct), dtype=np.uint8)
+        hashable = np.zeros(len(distinct), dtype=bool)
+        for i, item in enumerate(distinct):
+            if not item:
+                continue
+            hit = known.get(item)
+            if hit is None:
+                h = _hash64(item)
+                hit = known[item] = (h >> width, _leading_zero_count(h & low_mask, width))
+            bucket_of[i], rank_of[i] = hit
+            hashable[i] = True
+        keep = codes >= 0
+        keep[keep] = hashable[codes[keep]]
+        kept = codes[keep]
+        np.maximum.at(registers, (parents[keep], bucket_of[kept]), rank_of[kept])
+    header = bytes([SERIALIZATION_VERSION, precision])
+    return [header + row.tobytes() for row in registers]
+
+
 def merge_hll_sketches(blobs: Iterable[bytes | bytearray], precision: int = DEFAULT_PRECISION) -> int:
     acc: HyperLogLog | None = None
     for blob in blobs:
@@ -190,4 +232,5 @@ __all__ = [
     "query_hll_distinct",
     "query_hll_distinct_by_bucket",
     "query_hll_distinct_filtered",
+    "sketches_from_ip_lists",
 ]

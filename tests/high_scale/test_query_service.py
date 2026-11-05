@@ -815,7 +815,7 @@ def test_waterfall_scatter_and_top_asn_labels(monkeypatch) -> None:
     sc_sql, sc_params = sc_client.sql_for("scatter")
     assert "FROM performance_scatter_samples" in sc_sql and "ORDER BY sample_key" in sc_sql and sc_params["scatter_limit"] == 300  # fmt: skip
 
-    monkeypatch.setattr("backend.core.duckdb.get_asn_names", lambda service_id, asns: {7922: "Comcast Cable"} if asns else {})  # fmt: skip
+    monkeypatch.setattr("backend.core.fos_client.get_asn_names", lambda service_id, asns: {7922: "Comcast Cable"} if asns else {})  # fmt: skip
     row = {**_PERCENTILE_ROW, "value": "7922", "req_count": 40}
     res_asn = _run_perf(_PerfClient({"top_asns": [row, {**row, "value": "64512"}]}), sections={"top_asns", "top_urls"})
     assert [a.asn for a in res_asn.top_asns] == [7922, 64512]
@@ -839,7 +839,7 @@ def test_asn_enrichment_is_disjoint_overhead_and_cache_reuse_is_historical(monke
         clock[0] += 0.04
         return {7922: "Comcast Cable"}
 
-    monkeypatch.setattr("backend.core.duckdb.get_asn_names", labels)
+    monkeypatch.setattr("backend.core.fos_client.get_asn_names", labels)
     client = Client({"top_asns": [{**_PERCENTILE_ROW, "value": "7922", "req_count": 40}]})
     req = _perf_req(filters={"country": FilterSpec(mode="include", values=["US"])} if filtered else {})
     token = current_attribution.set(Attribution(kind="admin", request_id="request-perf"))
@@ -1078,7 +1078,8 @@ def _net_service(responder=lambda sql, params: []) -> tuple[HighScaleService, Re
 @pytest.fixture(autouse=True)
 def _no_asn_network_lookup():
     with patch(
-        "backend.core.duckdb.get_asn_names", side_effect=lambda _s, asns: {a: _ASN_NAMES.get(a, f"AS{a}") for a in asns}
+        "backend.core.fos_client.get_asn_names",
+        side_effect=lambda _s, asns: {a: _ASN_NAMES.get(a, f"AS{a}") for a in asns},
     ):
         yield
 
@@ -2281,7 +2282,8 @@ def test_insights_failures_masking_asn_and_window_clamping(monkeypatch: pytest.M
     # ASN ISP resolution
     seen: list[tuple[str, list]] = []
     monkeypatch.setattr(
-        "backend.core.duckdb.get_asn_names", lambda sid, asns: (seen.append((sid, list(asns))), {7922: "Comcast"})[1]
+        "backend.core.fos_client.get_asn_names",
+        lambda sid, asns: (seen.append((sid, list(asns))), {7922: "Comcast"})[1],
     )
     asn_rows = [{"asn": 7922, "w_cnt": 90, "b_cnt": 5, "b_total": 1000, "w_total": 120}]
     asn_card = _insight_cards(_run_insights(_InsightsClient({"asn_concentration": asn_rows})))["asn_concentration"]
@@ -2440,81 +2442,6 @@ def test_cache_collapse_detail_bucket_size_follows_the_lookback(window: float, b
     assert interval in next(sql for sql, _ in client.calls if "cache_collapse_timeline" in sql)
 
 
-def test_request_facts_emulation_caches_schema_extents_and_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    import duckdb
-
-    from backend.routers.admin import compaction, high_scale
-    from backend.routers.admin.high_scale import HighScaleRequestFactRequest
-
-    compaction._EMULATION_SCHEMA_CACHE.clear()
-    compaction._EMULATION_EXTENTS_CACHE.clear()
-    high_scale._REQUEST_FACTS_CACHE.clear()
-    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
-    monkeypatch.setattr("backend.config.get_status", lambda sid: {})
-
-    con = duckdb.connect(":memory:")
-    con.execute(
-        "CREATE TABLE logs ("
-        "timestamp TIMESTAMPTZ, year VARCHAR, month VARCHAR, day VARCHAR, hour VARCHAR, "
-        "country VARCHAR, client_ip VARCHAR, url VARCHAR, status INTEGER, pop VARCHAR, host VARCHAR)"
-    )
-    con.execute(
-        "INSERT INTO logs VALUES "
-        "('2026-10-20T10:00:00Z', '2026', '10', '20', '10', 'US', '203.0.113.5', '/a', 200, 'IAD', 'ex.com'), "
-        "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.6', '/b', 200, 'SJC', 'ex.com')"
-    )
-
-    req = HighScaleRequestFactRequest(
-        start_time="2026-10-01T00:00:00Z",
-        end_time="2026-10-28T00:00:00Z",
-        limit=10,
-        emulate_standard=True,
-    )
-    t0 = datetime(2026, 10, 1, tzinfo=UTC)
-    t1 = datetime(2026, 10, 28, tzinfo=UTC)
-    cursor_ts = datetime(2026, 10, 24, tzinfo=UTC)
-
-    rows, cov_start, cov_end = compaction.fetch_request_facts_emulation(
-        con,
-        ["logs"],
-        req,
-        start=t0,
-        end=t1,
-        cursor_ts=cursor_ts,
-        service_id="svc-emul",
-    )
-    assert len(rows) == 1 and rows[0][3] == "/b"
-    assert cov_start is not None and cov_end is not None
-    assert ("svc-emul", ("logs",)) in compaction._EMULATION_SCHEMA_CACHE
-    assert ("svc-emul", "logs") in compaction._EMULATION_EXTENTS_CACHE
-
-    ctx = SimpleNamespace(
-        service_id="svc-emul",
-        source={"name": "logs"},
-        con=con,
-        analyst_session=None,
-    )
-    registry = SimpleNamespace(resolve=lambda _sid: None)
-    with patch("backend.routers.admin.high_scale._clamp_and_parse_window", return_value=(t0, t1)):
-        first = high_scale._execute_request_facts_query(
-            ctx,  # type: ignore[arg-type]
-            req,
-            registry,  # type: ignore[arg-type]
-            allow_standard_emulation=True,
-            default_window_if_missing=False,
-        )
-        second = high_scale._execute_request_facts_query(
-            ctx,  # type: ignore[arg-type]
-            req,
-            registry,  # type: ignore[arg-type]
-            allow_standard_emulation=True,
-            default_window_if_missing=False,
-        )
-    assert len(first.rows) == 2
-    assert second.is_cached is True
-    con.close()
-
-
 def test_high_scale_readers_subminute_windows_do_not_collide_in_memo_cache() -> None:
     from backend.high_scale import cmcd as hs_cmcd
     from backend.high_scale.ingest_controller import service as hs_service
@@ -2614,70 +2541,6 @@ def test_dashboard_includes_exact_end_time_without_overcounting_later_minute_eve
         assert sum(v.count for v in fv.values) == 3
     finally:
         client.db.close()
-
-
-def test_request_facts_emulation_paginates_tied_timestamps_without_skipping_rows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import duckdb
-
-    from backend.routers.admin import compaction, high_scale
-    from backend.routers.admin.high_scale import HighScaleRequestFactRequest
-
-    compaction._EMULATION_SCHEMA_CACHE.clear()
-    compaction._EMULATION_EXTENTS_CACHE.clear()
-    compaction._EMULATION_CURSOR_TIE_CACHE.clear()
-    high_scale._REQUEST_FACTS_CACHE.clear()
-    monkeypatch.setattr("backend.config.get_status", lambda sid: {})
-
-    con = duckdb.connect(":memory:")
-    try:
-        con.execute(
-            "CREATE TABLE logs ("
-            "timestamp TIMESTAMPTZ, year VARCHAR, month VARCHAR, day VARCHAR, hour VARCHAR, "
-            "country VARCHAR, client_ip VARCHAR, url VARCHAR, status INTEGER, pop VARCHAR, host VARCHAR)"
-        )
-        con.execute(
-            "INSERT INTO logs VALUES "
-            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.1', '/u1', 200, 'IAD', 'ex.com'), "
-            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.2', '/u2', 200, 'IAD', 'ex.com'), "
-            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.3', '/u3', 200, 'IAD', 'ex.com'), "
-            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.4', '/u4', 200, 'IAD', 'ex.com')"
-        )
-        t0 = datetime(2026, 10, 1, tzinfo=UTC)
-        t1 = datetime(2026, 10, 28, tzinfo=UTC)
-        ctx = SimpleNamespace(
-            service_id="svc-tied",
-            source={"name": "logs"},
-            con=con,
-            analyst_session=None,
-        )
-        registry = SimpleNamespace(resolve=lambda _sid: None)
-        collected_urls: list[str] = []
-        cursor: str | None = None
-        with patch("backend.routers.admin.high_scale._clamp_and_parse_window", return_value=(t0, t1)):
-            for _ in range(3):
-                req = HighScaleRequestFactRequest(
-                    start_time="2026-10-01T00:00:00Z",
-                    end_time="2026-10-28T00:00:00Z",
-                    limit=2,
-                    cursor=cursor,
-                    emulate_standard=True,
-                )
-                page = high_scale._execute_request_facts_query(
-                    ctx,  # type: ignore[arg-type]
-                    req,
-                    registry,  # type: ignore[arg-type]
-                    allow_standard_emulation=True,
-                    default_window_if_missing=False,
-                )
-                collected_urls.extend(r["url"] for r in page.rows)
-                cursor = page.next_cursor
-                if not cursor:
-                    break
-        assert sorted(collected_urls) == ["/u1", "/u2", "/u3", "/u4"]
-    finally:
-        con.close()
 
 
 def test_top_bots_unfiltered_reads_request_aggregates_and_filtered_reads_facts() -> None:

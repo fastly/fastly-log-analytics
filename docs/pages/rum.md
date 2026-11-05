@@ -32,9 +32,7 @@ Routes under `/api/services/{service_id}/rum/...` in [`backend/routers/rum/`](..
 - `GET .../rum/status`, `GET .../rum/versions`, `POST .../rum/enable`, `.../disable`, `.../upgrade`, `.../settings` (admin provisioning; see [admin/rum.md](admin/rum.md)).
 - Asset routes `/js/rum.js` and `/js/faro-sdk.js` (and the beacon ingest route) in `beacon_ingest.py`.
 
-Standard mode reads DuckLake `client_vitals` and `client_errors`, fed by the `rum_sync` / `rum_commit` crons ([rum-sync](../cron/jobs/rum-sync.md), [rum-commit](../cron/jobs/rum-commit.md)).
-
-High-scale mode (`backend/high_scale/rum.py::rum_analytics`) reads the service's visible `rum_vitals_facts` and `rum_error_facts` through the instrumented ClickHouse client:
+The RUM analytics reader (`backend/high_scale/rum.py::rum_analytics`) reads the service's visible `rum_vitals_facts` and `rum_error_facts` in ClickHouse through the instrumented ClickHouse client (ingested from `raw/rum/` via the [`rum_discovery`](../cron/jobs/rum-discovery.md) cron and the stateless ingest worker):
 
 - Percentiles are continuous p75 over facts (counts and sums cannot supply them). Query failures propagate; they are never turned into zero-count responses.
 - Bounds are inclusive UTC event times; missing bounds default to the last 24 hours. Windows up to 48 hours use hourly buckets, longer windows daily buckets including both endpoint buckets. Empty buckets have null measurements and zero counts.

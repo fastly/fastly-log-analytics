@@ -107,13 +107,13 @@ _VIDEO = "ot = 'v'"
 
 
 def _asn_names(service_id: str, asns: list[int]) -> dict[int, str]:
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     return _db.get_asn_names(service_id, asns)
 
 
 def _asn_label(asn: int, names: Mapping[int, str]) -> str:
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     return _db.format_asn_label(asn, names.get(asn, ""))
 

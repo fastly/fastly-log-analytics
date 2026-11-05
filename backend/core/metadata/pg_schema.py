@@ -989,27 +989,6 @@ def cleanup_metadata(
     )
 
     rollups_deleted = 0
-    try:
-        rollups_days = int(cfg.get("rollups_days") or 0)
-    except (TypeError, ValueError):
-        rollups_days = 0
-    if rollups_days > 0:
-        try:
-            from backend.core import rollups as _rollups
-            from backend.core.duckdb import get_source_for_service
-
-            src = get_source_for_service(service_id)
-            if src is not None:
-                rollups_deleted = _rollups.cleanup_old_rollups(service_id, src, rollups_days)
-                if rollups_deleted:
-                    _emit(
-                        {
-                            "type": "status",
-                            "message": f"Rollups: dropped {rollups_deleted} hour-dir(s) older than {rollups_days}d",
-                        }
-                    )
-        except Exception as e:
-            logger.warning("[metadata_cleanup] %s: rollups cleanup skipped — %s", service_id, e)
 
     invalidate_storage_stats_cache(service_id)
     return {

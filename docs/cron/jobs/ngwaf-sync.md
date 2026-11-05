@@ -24,10 +24,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod, `executor="maintenance"`) | Calls Fastly NGWAF API, enriches with known bot signatures, upserts into PostgreSQL `ngwaf_bots` and `ngwaf_sync_state`. | PostgreSQL connection pool (`get_pg_thread_connection()`). Gated by `FLA_DEV_NO_CRONS=1` (outbound API suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only, `executor="maintenance"`) | Calls NGWAF API and populates shared PostgreSQL `ngwaf_bots` and `ngwaf_sync_state` tables. | Dedicated serving pod; decorated with `@cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")`. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod, `executor="maintenance"`) | Calls Fastly NGWAF API, enriches with known bot signatures, upserts into shared PostgreSQL `ngwaf_bots` and `ngwaf_sync_state`. | PostgreSQL connection pool (`get_pg_thread_connection()`). Gated by `FLA_DEV_NO_CRONS=1` (outbound API suppressed). |
 
 ---
 

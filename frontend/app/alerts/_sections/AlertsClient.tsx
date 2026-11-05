@@ -323,7 +323,7 @@ export default function AlertsClient() {
                 </p>
                 <div className="bg-muted p-2 rounded text-xs mt-2 text-muted-foreground">
                   Note: Alert queries execute in the background server process, so they do not
-                  appear in the DuckDB Queries debug panel.
+                  appear in the Data Queries debug panel.
                 </div>
               </div>
             </PopoverContent>

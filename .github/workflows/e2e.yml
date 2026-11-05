@@ -61,18 +61,40 @@ jobs:
         env:
           POSTGRES_USER: fla
           POSTGRES_PASSWORD: fla_test_password
-          POSTGRES_DB: ducklake_test
+          POSTGRES_DB: fla_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-cmd "pg_isready -U fla -d fla_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_DB: fla
+          CLICKHOUSE_USER: fla
+          CLICKHOUSE_PASSWORD: fla_local_dev
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
-      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
-      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+      TEST_METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+      CLICKHOUSE_ENABLED: "true"
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: fla
+      CLICKHOUSE_USER: fla
+      CLICKHOUSE_PASSWORD: fla_local_dev
+      HIGH_SCALE_ENABLED: "1"
+      HIGH_SCALE_CURSOR_SECRET: e2e-cursor-secret-0123456789 # gitleaks:allow
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

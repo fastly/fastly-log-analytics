@@ -2241,7 +2241,7 @@ def test_no_sections_runs_every_section_including_bots_and_proxies():
     client = _Client()
     with (
         patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
-        patch("backend.core.duckdb.get_asn_names", return_value={}),
+        patch("backend.core.fos_client.get_asn_names", return_value={}),
     ):
         hs.security_aggregates(_service(client), _req(), START, END)
     expected = {
@@ -2269,7 +2269,7 @@ def test_request_filters_are_bound_into_every_request_facts_query():
     client = _Client()
     with (
         patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
-        patch("backend.core.duckdb.get_asn_names", return_value={}),
+        patch("backend.core.fos_client.get_asn_names", return_value={}),
     ):
         hs.security_aggregates(_service(client), _req(_COUNTRY_US), START, END)
     assert client.calls
@@ -2419,7 +2419,7 @@ def _proxy_client() -> _Client:
 
 
 def test_proxies_report_real_counts_quality_isps_and_clients():
-    with patch("backend.core.duckdb.get_asn_names", return_value={15169: "Example Net"}):
+    with patch("backend.core.fos_client.get_asn_names", return_value={15169: "Example Net"}):
         res = hs.security_aggregates(_service(_proxy_client()), _req(), START, END, sections={"proxies"})
     assert (res.active_proxies_count, res.tunnel_requests_count, res.distance_mismatches_count) == (3, 40, 2)
     assert [(q.label, q.value) for q in res.traffic_quality] == [
@@ -2436,7 +2436,7 @@ def test_proxies_report_real_counts_quality_isps_and_clients():
 
 
 def test_proxies_mask_client_ips_for_analyst_sessions():
-    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+    with patch("backend.core.fos_client.get_asn_names", return_value={}):
         masked = hs.security_aggregates(
             _service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=True
         )
@@ -2453,20 +2453,20 @@ def test_top_ips_header_masks_ips_for_analyst_sessions():
 
 
 def test_proxies_section_is_served_inside_aggregates_with_masking():
-    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+    with patch("backend.core.fos_client.get_asn_names", return_value={}):
         res = hs.security_aggregates(_service(_proxy_client()), _req(), START, END, sections={"proxies"}, mask_ips=True)
     assert res.active_proxies_count == 3 and res.active_clients[0].ip == "198.51.100.xxx"
 
 
 def test_proxies_with_no_rows_report_zero_without_dividing_by_nothing():
-    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+    with patch("backend.core.fos_client.get_asn_names", return_value={}):
         res = hs.security_aggregates(_service(_Client()), _req(), START, END, sections={"proxies"})
     assert res.active_proxies_count == 0 and res.traffic_quality == [] and res.active_clients == []
 
 
 def test_active_clients_list_high_risk_first():
     client = _proxy_client()
-    with patch("backend.core.duckdb.get_asn_names", return_value={}):
+    with patch("backend.core.fos_client.get_asn_names", return_value={}):
         hs.security_aggregates(_service(client), _req(), START, END, sections={"proxies"})
     assert "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2)" in client.call("active_clients")[0]
 

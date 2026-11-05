@@ -94,13 +94,6 @@ export function CronTab({
     ['full_sync', 'Full Sync'],
     ['gap_heal', 'Gap Heal'],
     ['alerts', 'Alerts'],
-    ['commit', 'Commit'],
-    ['rum_commit', 'RUM Commit'],
-    ['optimize', 'Optimize'],
-    ['local_compact', 'Local Compact'],
-    ['rollup_compact_daily', 'Rollup Compact'],
-    ['rollup_hour_heal', 'Rollup Heal'],
-    ['expire_snapshots', 'Expire'],
     ...(status?.ngwaf_workspace_id ? [['ngwaf_sync', 'NGWAF Sync'] as [string, string]] : []),
     ['metadata_cleanup', 'Metadata Cleanup'],
   ]

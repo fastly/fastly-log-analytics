@@ -3,31 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import sqlite3
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import duckdb
-import httpx
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from starlette.requests import Request
 
 import backend.core.request_context as deps
 from backend import config as svcconfig
-from backend.core import duckdb_pool
-from backend.core import rollups as rr
-from backend.core.duckdb import DBBusyError
-from backend.core.duckdb_pool import _Pool, _PoolBusy
 from backend.core.request_telemetry import (
     _HISTORY_CAP,
-    Attribution,
-    InstrumentedDuckDBConnection,
     QueryRegistry,
     current_attribution,
     query_registry,
@@ -36,7 +27,6 @@ from backend.cron.scheduler import global_job
 from backend.main import (
     _background_startup,
     _bounded_scheduler_shutdown,
-    _ensure_persistent_view,
     _ensure_pop_cache,
     _ensure_scoring_matrix,
     _initialize_service,
@@ -44,7 +34,6 @@ from backend.main import (
     health_check,
     telemetry_middleware,
 )
-from backend.repositories._base import QueryRunner
 from backend.utils.remote_access import _new_request_id
 
 # ── Shared Helpers ───────────────────────────────────────────────────────────
@@ -85,7 +74,6 @@ def _deep_health(
     ingest_minutes_ago: int = 1,
     service_id: str = "svc",
     is_remote: bool = False,
-    durable: bool | None = None,
 ):
     """Drive health_check(deep=True) against an in-memory metadata.db."""
     con = _make_health_db(service_id=service_id, ingest_minutes_ago=ingest_minutes_ago, cron_rows=cron_rows)
@@ -95,13 +83,21 @@ def _deep_health(
         patch("backend.core.metadata.get_con", return_value=con),
         patch("backend.utils.remote_access.is_request_remote", return_value=is_remote),
     ):
-        if durable is not None:
-            with patch("backend.config.is_durable_serving_mode", return_value=durable):
-                result = health_check(fake_request, deep=True)
-        else:
-            result = health_check(fake_request, deep=True)
+        result = health_check(fake_request, deep=True)
 
     return (200, result) if isinstance(result, dict) else (result.status_code, json.loads(result.body))
+
+
+def test_default_sse_backplane_resolution(monkeypatch):
+    monkeypatch.delenv("SSE_BACKPLANE", raising=False)
+    monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "")
+    assert svcconfig._default_sse_backplane() == "local"
+
+    monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "redis://localhost:6379/0")
+    assert svcconfig._default_sse_backplane() == "valkey"
+
+    monkeypatch.setenv("SSE_BACKPLANE", "local")
+    assert svcconfig._default_sse_backplane() == "local"
 
 
 def _call_get_service_id(service=None, sid=None, x_fastly_service_id=None, x_service_id=None) -> str | None:
@@ -127,15 +123,14 @@ def _run_init_service(
     src_kw = {"side_effect": src_ret} if isinstance(src_ret, Exception) else {"return_value": src_ret}
     with (
         patch("backend.core.metadata.reap_running_cron_runs", **reap_kw) as mock_reap,
-        patch("backend.core.duckdb.get_source_for_service", **src_kw) as mock_get_src,
-        patch("backend.core.duckdb.refresh_config_status") as mock_refresh,
-        patch("backend.main._ensure_persistent_view") as mock_ensure,
-        patch("backend.routers.admin.compute_sync_status_cached"),
+        patch("backend.core.fos_client.get_source_for_service", **src_kw) as mock_get_src,
+        patch("backend.core.fos_client.refresh_config_status") as mock_refresh,
+        patch("backend.routers.admin.compute_sync_status_cached") as mock_sync_status,
         patch("backend.core.metadata.usage_log.get_con"),
         patch("backend.main.logger.info") as mock_log_info,
     ):
         _initialize_service(cfg)
-    return mock_reap, mock_get_src, mock_refresh, mock_ensure, mock_log_info
+    return mock_reap, mock_get_src, mock_refresh, mock_sync_status, mock_log_info
 
 
 # ── _initialize_service ──────────────────────────────────────────────────────
@@ -151,12 +146,12 @@ def test_initialize_service_skips_when_no_service_id():
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_reaps_orphans_and_refreshes_status():
     fake_src = {"name": "svc-1", "service_id": "svc-1"}
-    mock_reap, _, mock_refresh, mock_ensure, _ = _run_init_service(
+    mock_reap, _, mock_refresh, mock_sync_status, _ = _run_init_service(
         {"service_id": "svc-1"}, reap_ret=3, src_ret=fake_src
     )
     mock_reap.assert_called_once_with("svc-1")
     mock_refresh.assert_called_once_with("svc-1")
-    mock_ensure.assert_called_once_with("svc-1", fake_src)
+    mock_sync_status.assert_called_once_with("svc-1")
 
 
 @pytest.mark.usefixtures("_clean_registry")
@@ -182,70 +177,6 @@ def test_initialize_service_skips_status_refresh_when_no_source():
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_swallows_unexpected_outer_exception():
     _run_init_service({"service_id": "svc-1"}, src_ret=RuntimeError("unexpected"))
-
-
-@pytest.mark.usefixtures("_clean_registry")
-@pytest.mark.parametrize(
-    ("service_id", "mode", "durable"),
-    [
-        ("svc-durable", "high_scale", True),
-        ("svc-file", "standard", False),
-    ],
-)
-def test_initialize_service_defers_or_skips_rollup_catchup(service_id: str, mode: str, durable: bool):
-    rr.reset_rollup_coverage_ready()
-    fake_src = {"service_id": service_id, "deployment_mode": mode}
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
-        patch("backend.core.duckdb.refresh_config_status"),
-        patch("backend.main._ensure_persistent_view"),
-        patch("backend.routers.admin.compute_sync_status_cached"),
-        patch("backend.config.is_durable_serving_mode", return_value=durable),
-        patch(
-            "backend.core.rollups.recompute.backfill_missing_hour_bundles",
-            side_effect=AssertionError("startup rollup catch-up must be deferred"),
-        ) as mock_backfill,
-    ):
-        _initialize_service({"service_id": service_id})
-
-    mock_backfill.assert_not_called()
-    assert rr.rollup_coverage_ready(service_id) is False
-
-
-# ── _ensure_persistent_view ──────────────────────────────────────────────────
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_ensure_persistent_view_always_rebuilds_at_startup():
-    fake_src = {"name": "svc-1"}
-    writer_con = MagicMock()
-    with (
-        patch("backend.core.duckdb.get_connection", return_value=writer_con) as mock_get_conn,
-        patch("backend.core.storage.update_storage_view") as mock_update,
-    ):
-        _ensure_persistent_view("svc-1", fake_src)
-
-    assert mock_get_conn.call_count == 1
-    assert mock_get_conn.call_args.kwargs.get("read_only") is False
-    mock_update.assert_called_once_with(writer_con, fake_src)
-    writer_con.close.assert_called_once()
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_ensure_persistent_view_closes_writer_on_update_failure():
-    writer_con = MagicMock()
-    with (
-        patch("backend.core.duckdb.get_connection", return_value=writer_con),
-        patch("backend.core.storage.update_storage_view", side_effect=RuntimeError("catalog corrupt")),
-    ):
-        _ensure_persistent_view("svc-1", {"name": "svc-1"})
-    writer_con.close.assert_called_once()
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_ensure_persistent_view_swallows_outer_exceptions():
-    with patch("backend.core.duckdb.get_connection", side_effect=RuntimeError("db locked")):
-        _ensure_persistent_view("svc-1", {"name": "svc-1"})
 
 
 # ── _ensure_pop_cache ────────────────────────────────────────────────────────
@@ -369,7 +300,7 @@ def test_background_startup_reloads_db_and_initialises_each_service():
     fake_scheduler = MagicMock()
     configs = [{"service_id": "a"}, {"service_id": "b"}]
     with (
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.main._ensure_pop_cache"),
         patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
         patch("backend.config.list_configs", return_value=configs),
@@ -385,7 +316,7 @@ def test_background_startup_reloads_db_and_initialises_each_service():
 def test_background_startup_tolerates_reload_and_scheduler_failures():
     fake_scheduler = MagicMock()
     with (
-        patch("backend.core.duckdb.reload_default_source", side_effect=RuntimeError("S3 down")),
+        patch("backend.core.fos_client.reload_default_source", side_effect=RuntimeError("S3 down")),
         patch("backend.main._ensure_pop_cache"),
         patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
         patch("backend.config.list_configs", return_value=[]),
@@ -394,7 +325,7 @@ def test_background_startup_tolerates_reload_and_scheduler_failures():
     fake_scheduler.start.assert_called_once()
 
     with (
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.main._ensure_pop_cache"),
         patch("backend.cron.scheduler.get_scheduler", side_effect=RuntimeError("scheduler oom")),
     ):
@@ -590,118 +521,13 @@ def test_get_source_raises_400_when_missing(service_id: str | None):
     assert exc.value.detail["no_service"] is True
 
 
-# ── _ConnectionHolder: enter / DBBusyError / exit ────────────────────────────
-
-
-@pytest.fixture
-def disable_pool(monkeypatch):
-    monkeypatch.setenv("DUCKDB_CONNECTION_POOL", "0")
-    yield
+# ── removed symbols ──────────────────────────────────────────────────────────
 
 
 @pytest.mark.usefixtures("_clean_registry")
-def test_connection_holder_opens_and_closes(disable_pool):
-    fake_con = MagicMock()
-    src = {"name": "x"}
-    with patch("backend.core.request_context.get_connection", return_value=fake_con) as mock_get:
-        holder = deps._ConnectionHolder(src, read_only=True)
-        assert holder.__enter__() is fake_con
-        mock_get.assert_called_once_with(source=src, max_wait=ANY, skip_view_update=False, read_only=True)
-        holder.__exit__(None, None, None)
-        fake_con.close.assert_called_once()
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_connection_holder_skip_view_update_forwarded():
-    with patch("backend.core.request_context.get_connection") as mock_get:
-        deps._ConnectionHolder({"name": "x"}, skip_view_update=True).__enter__()
-        assert mock_get.call_args.kwargs["skip_view_update"] is True
-
-
-@pytest.mark.usefixtures("_clean_registry")
-@pytest.mark.parametrize(("env_val", "expected_wait"), [(None, 10.0), ("9.5", 9.5)])
-def test_connection_holder_max_wait(disable_pool, monkeypatch, env_val: str | None, expected_wait: float):
-    if env_val is None:
-        monkeypatch.delenv("DUCKDB_POOL_MAX_WAIT_S", raising=False)
-    else:
-        monkeypatch.setenv("DUCKDB_POOL_MAX_WAIT_S", env_val)
-    with patch("backend.core.request_context.get_connection", return_value=MagicMock()) as mock_get:
-        deps._ConnectionHolder({"name": "x"}, read_only=True).__enter__()
-        assert mock_get.call_args.kwargs["max_wait"] == expected_wait
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_connection_holder_db_busy_and_exit_edge_cases(disable_pool):
-    with patch("backend.core.request_context.get_connection", side_effect=DBBusyError("locked")):
-        with pytest.raises(HTTPException) as exc:
-            deps._ConnectionHolder({"name": "x"}).__enter__()
-    assert exc.value.status_code == 503 and exc.value.detail["busy"] is True
-
-    fake_con = MagicMock()
-    fake_con.close.side_effect = RuntimeError("already closed")
-    with patch("backend.core.request_context.get_connection", return_value=fake_con):
-        holder = deps._ConnectionHolder({"name": "x"})
-        holder.__enter__()
-        holder.__exit__(None, None, None)
-
-    deps._ConnectionHolder({"name": "x"}).__exit__(None, None, None)
-
-
-# ── get_con & removed symbols ────────────────────────────────────────────────
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_get_con_yields_connection_and_closes_after(disable_pool):
-    fake_con = MagicMock()
-    with patch("backend.core.request_context.get_connection", return_value=fake_con) as mock_get:
-        gen = deps.get_con(source={"name": "x"})
-        assert next(gen) is fake_con
-        assert mock_get.call_args.kwargs["read_only"] is True
-        with pytest.raises(StopIteration):
-            next(gen)
-        fake_con.close.assert_called_once()
-
-
-@pytest.mark.usefixtures("_clean_registry")
-@pytest.mark.parametrize("symbol", ["get_meta_con", "AnalyticsDeps"])
+@pytest.mark.parametrize("symbol", ["get_meta_con", "AnalyticsDeps", "_ConnectionHolder", "get_con"])
 def test_removed_deps_symbols(symbol: str):
-    assert not hasattr(deps, symbol), f"{symbol} was removed at the v2.0 cut"
-
-
-# ── _ConnectionHolder: pool path ─────────────────────────────────────────────
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_connection_holder_pool_path_checkout_return_and_error():
-    fake_con = MagicMock()
-    cm = MagicMock()
-    cm.__enter__ = MagicMock(return_value=fake_con)
-    cm.__exit__ = MagicMock(return_value=False)
-
-    with patch.object(duckdb_pool, "checkout_connection", return_value=cm) as mock_checkout:
-        holder = deps._ConnectionHolder({"name": "x"}, read_only=True)
-        assert holder.__enter__() is fake_con
-        mock_checkout.assert_called_once()
-        holder.__exit__(None, None, None)
-        cm.__exit__.assert_called_once()
-        fake_con.close.assert_not_called()
-
-        cm.reset_mock()
-        holder2 = deps._ConnectionHolder({"name": "x"}, read_only=True)
-        holder2.__enter__()
-        holder2.__exit__(RuntimeError, RuntimeError("boom"), None)
-        assert cm.__exit__.call_args[0][0] is RuntimeError
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_connection_holder_pool_path_skipped_when_skip_view_update():
-    with (
-        patch.object(duckdb_pool, "checkout_connection") as mock_checkout,
-        patch("backend.core.request_context.get_connection", return_value=MagicMock()) as mock_get,
-    ):
-        deps._ConnectionHolder({"name": "x"}, skip_view_update=True).__enter__()
-        mock_checkout.assert_not_called()
-        mock_get.assert_called_once()
+    assert not hasattr(deps, symbol), f"{symbol} was removed"
 
 
 # ── Merged from test_sre_observability.py ────────────────────────────────────
@@ -755,26 +581,6 @@ def test_global_job_runs_in_cron_attribution_scope(monkeypatch):
 
 
 @pytest.mark.usefixtures("_clean_registry")
-def test_pool_stats_and_reject_counters():
-    p = _Pool("svc-sre12", max_size=2)
-    s = p.stats()
-    assert s["saturated_rejects_total"] == 0 and s["drain_rejects_total"] == 0
-    assert "last_warmed_at" in s and s["last_warmed_at"] is None
-
-    p_sat = _Pool("svc-sat", max_size=1)
-    p_sat._in_use = 1
-    with pytest.raises(_PoolBusy):
-        p_sat.acquire({"name": "svc-sat"}, max_wait=0)
-    assert p_sat.stats()["saturated_rejects_total"] == 1 and p_sat.stats()["drain_rejects_total"] == 0
-
-    p_drain = _Pool("svc-drain", max_size=2)
-    p_drain.begin_drain()
-    with pytest.raises(_PoolBusy):
-        p_drain.acquire({"name": "svc-drain"}, max_wait=0)
-    assert p_drain.stats()["drain_rejects_total"] == 1 and p_drain.stats()["saturated_rejects_total"] == 0
-
-
-@pytest.mark.usefixtures("_clean_registry")
 def test_history_cap_is_400():
     assert _HISTORY_CAP == 400
     assert QueryRegistry()._history.maxlen == 400
@@ -787,7 +593,7 @@ def test_history_cap_is_400():
 @pytest.mark.parametrize(
     ("cron_rows", "expected_code", "expected_status", "reason_substr"),
     [
-        ([("log_discovery", "success", 2, None), ("commit", "success", 3, None)], 200, "ok", None),
+        ([("log_discovery", "success", 2, None), ("ledger_sweep", "success", 3, None)], 200, "ok", None),
         (
             [("log_discovery", "success", 120, None), ("log_discovery", "running", 20, None)],
             503,
@@ -796,10 +602,10 @@ def test_history_cap_is_400():
         ),
         ([("log_discovery", "success", 30, None), ("log_discovery", "running", 2, None)], 200, "ok", None),
         (
-            [("log_discovery", "success", 2, None), ("commit", "error", 1, "boom")],
+            [("log_discovery", "success", 2, None), ("ledger_sweep", "error", 1, "boom")],
             503,
             "degraded",
-            "commit cron errored",
+            "ledger_sweep cron errored",
         ),
     ],
 )
@@ -846,16 +652,9 @@ def test_health_snapshot_has_new_observability_fields(client, monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER", raising=False)
     monkeypatch.delenv("STRUCTLOG_FORMAT", raising=False)
     body = client.get("/api/admin/health-snapshot").json()
-    for key in ("scheduler_last_tick_age_s", "recent_cron_failures", "observability", "config_backup"):
+    for key in ("recent_cron_failures", "observability", "config_backup"):
         assert key in body, f"{key} missing from health-snapshot"
     assert body["observability"] == {"log_format": "console", "otel_exporter": "none"}
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_health_snapshot_scheduler_tick_age_surfaced(client):
-    with patch("backend.cron.jobs.metric_snapshots.last_snapshot_age_s", return_value=12.5):
-        body = client.get("/api/admin/health-snapshot").json()
-    assert body["scheduler_last_tick_age_s"] == 12.5
 
 
 @pytest.mark.usefixtures("_clean_registry")
@@ -897,7 +696,7 @@ def test_health_snapshot_fos_probe_opt_in(client):
     with (
         patch("backend.config.list_configs", return_value=[{"service_id": "svc-a", "name": "svc-a"}]),
         patch("backend.config.config_to_source", side_effect=lambda c: c),
-        patch("backend.core.duckdb.fos_reachable", return_value={"reachable": True, "error": None}),
+        patch("backend.core.fos_client.fos_reachable", return_value={"reachable": True, "error": None}),
     ):
         body = client.get("/api/admin/health-snapshot?probe_fos=1").json()
     assert body["fos"]["svc-a"]["reachable"] is True
@@ -951,7 +750,7 @@ def test_a_cancelled_request_interrupts_the_queries_it_started():
     conn = _Conn()
 
     async def call_next(request):
-        query_registry.register("DuckDB", "SELECT slow()", service_id="svc", con=conn, pool_slot="svc#1")
+        query_registry.register("ClickHouse", "SELECT slow()", service_id="svc", con=conn, pool_slot="svc#1")
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
@@ -964,7 +763,7 @@ def test_a_request_that_completes_normally_interrupts_nothing():
     conn = _Conn()
 
     async def call_next(request):
-        query_registry.register("DuckDB", "SELECT 1", service_id="svc", con=conn, pool_slot="svc#1")
+        query_registry.register("ClickHouse", "SELECT 1", service_id="svc", con=conn, pool_slot="svc#1")
         return _Resp(200)
 
     asyncio.run(telemetry_middleware(_request(), call_next))
@@ -978,7 +777,9 @@ def test_a_cancelled_request_never_interrupts_another_requests_queries():
 
     async def other_request_query():
         async def inner(request):
-            qid = query_registry.register("DuckDB", "SELECT other()", service_id="svc", con=theirs, pool_slot="svc#2")
+            qid = query_registry.register(
+                "ClickHouse", "SELECT other()", service_id="svc", con=theirs, pool_slot="svc#2"
+            )
             other_registered.append(qid)
             return _Resp(200)
 
@@ -988,7 +789,7 @@ def test_a_cancelled_request_never_interrupts_another_requests_queries():
         await other_request_query()
 
         async def call_next(request):
-            query_registry.register("DuckDB", "SELECT mine()", service_id="svc", con=mine, pool_slot="svc#1")
+            query_registry.register("ClickHouse", "SELECT mine()", service_id="svc", con=mine, pool_slot="svc#1")
             raise asyncio.CancelledError
 
         with pytest.raises(asyncio.CancelledError):
@@ -999,58 +800,7 @@ def test_a_cancelled_request_never_interrupts_another_requests_queries():
 
 
 @pytest.mark.usefixtures("_clean_registry")
-def test_a_real_duckdb_query_is_killed_when_its_request_is_abandoned():
-    app = FastAPI()
-    app.middleware("http")(telemetry_middleware)
-    outcome: dict[str, object] = {}
-    started = threading.Event()
-    finished = threading.Event()
-
-    @app.get("/slow")
-    async def slow():
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="svc")
-        safety = threading.Timer(15, raw.interrupt)
-        safety.daemon = True
-        safety.start()
-
-        def run() -> None:
-            started.set()
-            t0 = time.monotonic()
-            try:
-                con.execute("SELECT count(*) FROM range(100000000000) a, range(100000000000) b").fetchall()
-                outcome["result"] = "finished"
-            except Exception as exc:  # noqa: BLE001
-                outcome["result"] = type(exc).__name__
-            finally:
-                outcome["seconds"] = time.monotonic() - t0
-                safety.cancel()
-                finished.set()
-
-        asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, run)
-        await asyncio.sleep(3600)
-
-    async def scenario() -> None:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            request_task = asyncio.create_task(client.get("/slow"))
-            deadline = time.monotonic() + 10
-            while not started.is_set() and time.monotonic() < deadline:
-                await asyncio.sleep(0.05)
-            await asyncio.sleep(0.3)
-            request_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await request_task
-            await asyncio.get_running_loop().run_in_executor(None, finished.wait, 12)
-
-    asyncio.run(scenario())
-    assert finished.is_set(), "the orphaned query must be interrupted, not left to run to completion"
-    assert outcome["result"] == "InterruptException"
-    assert outcome["seconds"] < 8  # type: ignore[operator]
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_tcp_disconnect_via_asgi_receive_interrupts_sync_duckdb_query():
+def test_tcp_disconnect_via_asgi_receive_interrupts_sync_clickhouse_query():
     conn = _Conn()
     disconnected = False
 
@@ -1064,7 +814,7 @@ def test_tcp_disconnect_via_asgi_receive_interrupts_sync_duckdb_query():
     req._stream_consumed = True  # type: ignore[attr-defined]
 
     async def call_next(request):
-        query_registry.register("DuckDB", "SELECT slow_post()", service_id="svc", con=conn, pool_slot="svc#1")
+        query_registry.register("ClickHouse", "SELECT slow_post()", service_id="svc", con=conn, pool_slot="svc#1")
         nonlocal disconnected
         disconnected = True
         for _ in range(20):
@@ -1077,66 +827,14 @@ def test_tcp_disconnect_via_asgi_receive_interrupts_sync_duckdb_query():
     assert conn.interrupts == 1
 
 
-@pytest.mark.usefixtures("_clean_registry")
-def test_cancelled_key_blocks_subsequent_queries_but_allows_drop_table_cleanup():
-    raw = duckdb.connect(":memory:")
-    con = InstrumentedDuckDBConnection(raw, service_id="svc")
-    con.execute("CREATE TEMP TABLE tmp_cleanup AS SELECT 1 AS x")
-
-    token = current_attribution.set(
-        Attribution(
-            kind="admin", admin_id="local", request_path="/api/security/aggregates", cancel_key="ck-multi-query"
-        )
-    )
-    try:
-        query_registry.cancel_for_key("ck-multi-query")
-        with pytest.raises(duckdb.InterruptException):
-            con.execute("SELECT * FROM tmp_cleanup").fetchall()
-        con.execute('DROP TABLE IF EXISTS "tmp_cleanup"')
-    finally:
-        current_attribution.reset(token)
-        raw.close()
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_query_runner_lazy_con_factory_defers_connection_checkout():
-    calls = 0
-    raw = duckdb.connect(":memory:")
-
-    def factory():
-        nonlocal calls
-        calls += 1
-        return raw
-
-    try:
-        runner = QueryRunner(factory, {"name": "test_svc"})
-        assert calls == 0, "con_factory must not be called on QueryRunner construction"
-        res = runner.try_network_rtt_from_rollup(
-            "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", top_asns=[15169], has_filters=True
-        )
-        assert res is None and calls == 0
-        assert runner.execute("SELECT 42").fetchone()[0] == 42 and calls == 1
-        assert runner.execute("SELECT 43").fetchone()[0] == 43 and calls == 1
-    finally:
-        raw.close()
-
-
-# ── Merged from tests/test_e2e_pipeline.py ──
+# ── Metadata concurrency & environment connectivity ──
 
 import copy
-import glob
-import gzip
 import importlib
-import io
 import os
-import shutil
-import tempfile
-import uuid
 from contextlib import asynccontextmanager
 from functools import partial
 
-import pyarrow as pa
-import pytest
 from fastapi.testclient import TestClient
 from scripts.check_environment_health import (
     ENVIRONMENTS,
@@ -1147,489 +845,14 @@ from scripts.check_environment_health import (
 
 import backend.core.metadata as metadata_db
 import backend.core.request_telemetry as module
-import backend.core.storage._core as _dl
-import backend.core.storage._core as buffer_mod
 import backend.cron.scheduler as cron_progress
 from backend.celery_app import SyncStatusPublisher
-from backend.core import ingest as ing
-from backend.core import storage as ice
-from backend.core.duckdb import _cache_dir
 from backend.cron.scheduler import CronRunsPublisher, compute_sync_status_cached
 from backend.high_scale.archive import ServingWatermark
 from backend.high_scale.ingest_controller import HighScaleService
 from backend.main import app
-from backend.repositories._base import _safe_table
-from backend.repositories.dashboard import _dashboard_cache, get_aggregates
-from backend.repositories.insights import _insights_cache, get_insights
 from tests._helpers.sources import make_source
 from tests._helpers.wire import await_until
-from tests.conftest import MOCK_SERVICE_ID
-
-
-@pytest.fixture
-def pipeline_env(monkeypatch):
-    """Stand up a full pipeline environment with a local-FS DuckLake warehouse."""
-    tmpdir = tempfile.mkdtemp(prefix="e2e_pipeline_")
-    warehouse_path = os.path.join(tmpdir, "warehouse")
-    cache_path = os.path.join(tmpdir, "cache")
-    for p in (warehouse_path, cache_path, os.path.join(tmpdir, "ducklake_data")):
-        os.makedirs(p, exist_ok=True)
-
-    sfx = uuid.uuid4().hex[:6]
-    source = {
-        "name": f"e2e_svc_{sfx}",
-        "service_id": f"e2e-svc-{sfx}",
-        "service_name": f"E2E Test {sfx}",
-        "bucket": "e2e-bucket",
-        "prefix": "logs",
-        "region": "us-east-1",
-        "endpoint": "us-east-1.object.fastlystorage.app",
-        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
-        "access_key_id": "test-key",
-        "secret_access_key": "test-secret",
-        "storage_mode": "cloud",
-        "duckdb_path": os.path.join(tmpdir, f"e2e_{sfx}.duckdb"),
-    }
-
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
-    monkeypatch.setattr("backend.config.DUCKLAKE_CATALOG", os.path.join(tmpdir, "ducklake"))
-    monkeypatch.setattr("backend.config.DUCKLAKE_DATA_PATH", os.path.join(tmpdir, "ducklake_data/"))
-
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-    yield {"src": source, "tmpdir": tmpdir, "warehouse": warehouse_path, "cache": cache_path}
-    shutil.rmtree(tmpdir, ignore_errors=True)
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-
-
-def _simulate_sync(src, warehouse_path, cache_path):
-    """Copy parquet files from the warehouse into the local cache/data/ dir."""
-    data_dir = os.path.join(cache_path, "data")
-    os.makedirs(data_dir, exist_ok=True)
-    for src_path in glob.glob(os.path.join(warehouse_path, "**", "*.parquet"), recursive=True):
-        dst = os.path.join(data_dir, os.path.basename(src_path))
-        if not os.path.exists(dst):
-            shutil.copy2(src_path, dst)
-
-
-def _make_log_batch(n: int = 20, *, ip_octet: int = 0, path_prefix: str | None = None) -> pa.Table:
-    """Build a PyArrow table shaped like a buffer batch from real ingest."""
-    base = datetime.now(UTC) - timedelta(hours=1)
-    urls = (
-        [f"/{path_prefix}/{i}" for i in range(n)] if path_prefix is not None else [f"/path/{i % 10}" for i in range(n)]
-    )
-    countries = ["US"] * n if path_prefix is not None else ["US" if i % 3 == 0 else "GB" for i in range(n)]
-    pops = ["LAX"] * n if path_prefix is not None else [["LAX", "JFK", "LHR"][i % 3] for i in range(n)]
-    return pa.table(
-        {
-            "timestamp": pa.array(
-                [base + timedelta(minutes=i * 2) for i in range(n)], type=pa.timestamp("us", tz="UTC")
-            ),
-            "ip": pa.array([f"10.{ip_octet}.0.{i}" for i in range(n)]),
-            "status": pa.array([200 if i % 5 else 500 for i in range(n)], type=pa.uint16()),
-            "url": pa.array(urls),
-            "country": pa.array(countries),
-            "method": pa.array(["GET"] * n),
-            "ua": pa.array(["Mozilla/5.0"] * n),
-            "pop": pa.array(pops),
-        }
-    )
-
-
-def _seed_and_commit(src: dict, n: int, fname: str) -> dict:
-    ice.init_storage_table(src)
-    ice.write_to_buffer(src, _make_log_batch(n=n), fname)
-    return ice.commit_buffer(src)
-
-
-def test_e2e_buffer_to_commit_produces_queryable_snapshot(pipeline_env):
-    """Full lifecycle: write buffer parquet -> commit -> update DuckDB view -> query."""
-    src = pipeline_env["src"]
-    assert ice.init_storage_table(src) is not None
-    ice.write_to_buffer(src, _make_log_batch(n=20), "batch_test_0.parquet")
-    assert len(ice.buffer_files(src)) == 1
-
-    result = ice.commit_buffer(src)
-    assert result["files_committed"] >= 1
-    assert result["rows_committed"] == 20
-    assert result["snapshot_id"] is not None
-    assert ice.buffer_files(src) == []
-
-    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
-    con = duckdb.connect(":memory:")
-    ice.update_storage_view(con, src)
-    row = con.execute(f"SELECT COUNT(*) FROM {_safe_table(src['name'])}").fetchone()
-    assert row[0] == 20
-
-
-def test_e2e_aggregates_via_full_pipeline(pipeline_env):
-    """Pipeline -> get_aggregates returns the ingested row count."""
-    src = pipeline_env["src"]
-    _seed_and_commit(src, 15, "batch_agg_0.parquet")
-    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
-    con = duckdb.connect(":memory:")
-    ice.update_storage_view(con, src)
-
-    _dashboard_cache.clear()
-    out = get_aggregates(
-        con=con, src=src, start_time=None, end_time=None, filters={}, chart_interval="1 minute", chart_metric="requests"
-    )
-    assert out["total_rows"] == 15
-    assert out["total_rows_total"] >= 15
-
-
-def test_e2e_insights_via_full_pipeline(pipeline_env):
-    """Pipeline -> get_insights runs all registered insights without error."""
-    src = pipeline_env["src"]
-    _seed_and_commit(src, 30, "batch_insights_0.parquet")
-    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
-    con = duckdb.connect(":memory:")
-    ice.update_storage_view(con, src)
-
-    _insights_cache.clear()
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value={"LAX": (33.94, -118.4)}):
-        result = get_insights(con, src, window_hours=1, baseline_hours=1)
-
-    errors = [i for i in result["insights"] if i.get("severity") == "error"]
-    assert not errors, "Insights errored:\n" + "\n".join(f"  {i['id']}: {i.get('summary', '')[:120]}" for i in errors)
-
-
-def test_commit_buffer_does_no_redundant_catalog_work_per_call(pipeline_env, monkeypatch):
-    """Single-chunk commit attaches DuckLake RW once and does not re-enter catalog init."""
-    src = pipeline_env["src"]
-    ice.init_storage_table(src)
-    ice.write_to_buffer(src, _make_log_batch(n=5), "batch_load_pin_0.parquet")
-
-    counts = {"public": 0, "locked": 0, "write_attach": 0}
-    real_public, real_locked, real_write_conn = (
-        ice.init_storage_table,
-        ice._init_storage_table_locked,
-        buffer_mod._ducklake_write_connection,
-    )
-
-    def counting_public(source, create=True, table_name="logs"):
-        counts["public"] += 1
-        return real_public(source, create=create, table_name=table_name)
-
-    def counting_locked(source, create=True, table_name="logs"):
-        counts["locked"] += 1
-        return real_locked(source, create=create, table_name=table_name)
-
-    def counting_write_conn(source):
-        counts["write_attach"] += 1
-        return real_write_conn(source)
-
-    monkeypatch.setattr(ice, "init_storage_table", counting_public)
-    monkeypatch.setattr(ice, "_init_storage_table_locked", counting_locked)
-    monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", counting_write_conn)
-
-    result = ice.commit_buffer(src)
-    assert result["rows_committed"] == 5
-    assert counts == {"public": 0, "locked": 0, "write_attach": 1}
-
-
-def test_e2e_empty_buffer_commit_is_noop(pipeline_env):
-    """commit_buffer with no buffer files is a clean no-op."""
-    src = pipeline_env["src"]
-    ice.init_storage_table(src)
-    result = ice.commit_buffer(src)
-    assert (result["files_committed"], result["rows_committed"], result["snapshot_id"]) == (0, 0, None)
-
-
-def test_e2e_two_commits_append_rather_than_overwrite(pipeline_env):
-    """Two separate commit cycles append rather than overwrite."""
-    src = pipeline_env["src"]
-    _seed_and_commit(src, 10, "batch_a.parquet")
-    ice.write_to_buffer(src, _make_log_batch(n=12), "batch_b.parquet")
-    ice.commit_buffer(src)
-
-    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
-    con = duckdb.connect(":memory:")
-    ice.update_storage_view(con, src)
-    row = con.execute(f"SELECT COUNT(*) FROM {_safe_table(src['name'])}").fetchone()
-    assert row[0] == 22
-
-
-def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatch, tmp_path, pipeline_env):
-    """End-to-end through the RAW .gz ingest path: upload to moto S3 -> ingest -> commit -> query."""
-    cache_path, warehouse_path = str(tmp_path / "cache"), str(tmp_path / "warehouse")
-    os.makedirs(cache_path, exist_ok=True)
-    os.makedirs(warehouse_path, exist_ok=True)
-
-    fos_source["duckdb_path"] = os.path.join(tmp_path, "e2e.duckdb")
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _src: cache_path)
-    monkeypatch.setattr("backend.core.duckdb._configure_fos", lambda *a, **kw: None)
-
-    class _CallerHintShim:
-        def __init__(self, client):
-            self._client = client
-
-        def get_paginator(self, op, caller_hint=None):
-            return self._client.get_paginator(op)
-
-        def __getattr__(self, name):
-            return getattr(self._client, name)
-
-    monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: _CallerHintShim(s3_mock))
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-
-    unique_id = uuid.uuid4().hex[:8]
-    unique_prefix = f"pipe_{unique_id}"
-    fos_source = {
-        **fos_source,
-        "prefix": unique_prefix,
-        "service_id": f"svc_{unique_id}",
-        "name": f"tbl_{unique_id}",
-    }
-
-    base = datetime.now(UTC) - timedelta(hours=2)
-    rows_per_file = 5
-    files = [
-        (f"{unique_prefix}/raw/request/year=2026/month=05/day=20/hour=10/minute=00/2026-05-20T10-00-00.svc.gz", base),
-        (
-            f"{unique_prefix}/raw/request/year=2026/month=05/day=20/hour=10/minute=05/2026-05-20T10-05-00.svc.gz",
-            base + timedelta(minutes=5),
-        ),
-    ]
-    for key, ts in files:
-        rows = [
-            {
-                "timestamp": (ts + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S+0000"),
-                "ip": f"10.0.0.{i}",
-                "status": 200 if i % 2 == 0 else 404,
-                "url": f"/path/{i}",
-                "method": "GET",
-                "cache": "HIT",
-                "resp_bytes": 1024 + i,
-                "elapsed": 1500 + i * 10,
-            }
-            for i in range(rows_per_file)
-        ]
-        body = io.BytesIO()
-        with gzip.GzipFile(fileobj=body, mode="wb") as gz:
-            gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
-        s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
-
-    ice.init_storage_table(fos_source)
-    events = list(ing.ingest(source=fos_source))
-    done = next((e for e in events if e["type"] == "done"), None)
-    assert done is not None
-    assert done["new_files"] == len(files)
-    assert done["rows_inserted"] == rows_per_file * len(files)
-    assert len(ice.buffer_files(fos_source)) >= 1
-
-    result = ice.commit_buffer(fos_source)
-    assert result["rows_committed"] == rows_per_file * len(files)
-    assert result["snapshot_id"] is not None
-    assert ice.buffer_files(fos_source) == []
-
-    _simulate_sync(fos_source, warehouse_path, cache_path)
-    con = duckdb.connect(":memory:")
-    ice.update_storage_view(con, fos_source)
-
-    view_name = _safe_table(fos_source["name"])
-    (count,) = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()
-    assert count == rows_per_file * len(files)
-
-    sample = con.execute(
-        f"SELECT status, url, method, cache, resp_bytes FROM {view_name} ORDER BY url LIMIT 1"
-    ).fetchone()
-    assert sample is not None
-    status, url, method, cache, resp_bytes = sample
-    assert isinstance(status, int) and status in (200, 404)
-    assert url.startswith("/path/") and method == "GET" and cache == "HIT"
-    assert isinstance(resp_bytes, int) and resp_bytes >= 1024
-
-    service_name = fos_source["name"]
-    ingested_names = {row["file_name"] for row in metadata_db.list_ingested_files(service_name)}
-    for key, _ in files:
-        assert any(name.endswith(key) for name in ingested_names)
-    assert metadata_db.list_in_flight(service_name) == []
-
-
-def test_e2e_readonly_dashboard_query_path(pipeline_env):
-    """Writer commits buffer -> builds persistent view; separate RO connection hits fast-path cache."""
-    src = pipeline_env["src"]
-    db_path = os.path.join(pipeline_env["tmpdir"], "e2e.duckdb")
-
-    _seed_and_commit(src, 8, "batch_ro_e2e.parquet")
-    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
-
-    rw = duckdb.connect(db_path)
-    ice.update_storage_view(rw, src)
-    view_name = _safe_table(src["name"])
-    assert rw.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
-    rw.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT NULL::INTEGER AS x WHERE false")
-    rw.close()
-
-    ro = duckdb.connect(db_path, read_only=True)
-    try:
-        ice.update_storage_view(ro, src)
-        assert ro.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
-        _dashboard_cache.clear()
-        out = get_aggregates(
-            con=ro,
-            src=src,
-            start_time=None,
-            end_time=None,
-            filters={},
-            chart_interval="1 hour",
-            chart_metric="requests",
-        )
-        assert out["total_rows"] == 8
-    finally:
-        ro.close()
-
-
-def test_e2e_readonly_dashboard_cold_cache_path(pipeline_env):
-    """Fresh RO connection + evicted caches rebuilds TEMP view via slow path."""
-    src = pipeline_env["src"]
-    db_path = os.path.join(pipeline_env["tmpdir"], "e2e_cold.duckdb")
-
-    _seed_and_commit(src, 8, "batch_ro_cold.parquet")
-    _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
-
-    rw = duckdb.connect(db_path)
-    ice.update_storage_view(rw, src)
-    view_name = _safe_table(src["name"])
-    assert rw.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
-    rw.close()
-
-    ice._view_cache.pop(src["name"], None)
-
-    ro = duckdb.connect(db_path, read_only=True)
-    try:
-        ice.update_storage_view(ro, src)
-        assert ro.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
-        _dashboard_cache.clear()
-        out = get_aggregates(
-            con=ro,
-            src=src,
-            start_time=None,
-            end_time=None,
-            filters={},
-            chart_interval="1 hour",
-            chart_metric="requests",
-        )
-        assert out["total_rows"] == 8
-    finally:
-        ro.close()
-
-
-# ── Merged from test_multi_service_e2e.py ──────────────────────────────────────────────
-
-_make_source = partial(
-    make_source,
-    kind="cloud",
-    prefix="logs",
-    fos_native_endpoint="us-east-1.object.fastlystorage.app",
-    access_key_id="test-key",
-    secret_access_key="test-secret",
-)
-
-
-@pytest.fixture
-def two_service_env(monkeypatch):
-    """Two local warehouses, one per service."""
-    tmpdir = tempfile.mkdtemp(prefix="multi_svc_e2e_")
-    warehouses = {
-        "svc_a": os.path.join(tmpdir, "warehouse_a"),
-        "svc_b": os.path.join(tmpdir, "warehouse_b"),
-    }
-    for p in warehouses.values():
-        os.makedirs(p, exist_ok=True)
-    src_a = _make_source(
-        name="svc_a",
-        service_id="svc-a-id",
-        bucket="svc-a-bucket",
-        service_name="Multi-Svc svc_a",
-        duckdb_path=svcconfig.duckdb_path("svc-a-id"),
-    )
-    src_b = _make_source(
-        name="svc_b",
-        service_id="svc-b-id",
-        bucket="svc-b-bucket",
-        service_name="Multi-Svc svc_b",
-        duckdb_path=svcconfig.duckdb_path("svc-b-id"),
-    )
-
-    monkeypatch.setattr(_dl, "_default_data_path", lambda s: warehouses[s["name"]])
-    monkeypatch.setattr("backend.config.load_config", lambda sid: {"service_id": sid})
-    if hasattr(ice, "_view_cache"):
-        ice._view_cache.clear()
-
-    yield {"src_a": src_a, "src_b": src_b, "warehouses": warehouses}
-    shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def _simulate_sync_one(source: dict, warehouse_path: str) -> None:
-    data_dir = os.path.join(_cache_dir(source), "data")
-    os.makedirs(data_dir, exist_ok=True)
-    for sp in glob.glob(os.path.join(warehouse_path, "**", "*.parquet"), recursive=True):
-        dst = os.path.join(data_dir, os.path.basename(sp))
-        if not os.path.exists(dst):
-            shutil.copy2(sp, dst)
-
-
-def test_concurrent_storage_commits_two_services_no_cross_contamination(two_service_env):
-    """Two services run buffer-write + commit concurrently without cross-tenant contamination."""
-    src_a, src_b = two_service_env["src_a"], two_service_env["src_b"]
-    ice.init_storage_table(src_a)
-    ice.init_storage_table(src_b)
-    ice.write_to_buffer(src_a, _make_log_batch(n=12, ip_octet=1, path_prefix="alpha"), "svc_a.parquet")
-    ice.write_to_buffer(src_b, _make_log_batch(n=18, ip_octet=2, path_prefix="bravo"), "svc_b.parquet")
-
-    barrier = threading.Barrier(2)
-    results: dict[str, dict] = {}
-    rlock = threading.Lock()
-
-    def commit_worker(label: str, src: dict) -> None:
-        outcome: dict = {"label": label}
-        try:
-            barrier.wait()
-            res = ice.commit_buffer(src)
-            outcome["rows_committed"] = res.get("rows_committed")
-            outcome["snapshot_id"] = res.get("snapshot_id")
-        except Exception as exc:
-            outcome["error"] = repr(exc)
-        with rlock:
-            results[label] = outcome
-
-    threads = [
-        threading.Thread(target=commit_worker, args=("a", src_a)),
-        threading.Thread(target=commit_worker, args=("b", src_b)),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=60)
-        assert not t.is_alive()
-
-    for label, expected in (("a", 12), ("b", 18)):
-        r = results[label]
-        assert "error" not in r, f"svc_{label} commit raised: {r['error']}"
-        assert r["rows_committed"] == expected
-        assert r["snapshot_id"] is not None
-    assert ice.buffer_files(src_a) == [] and ice.buffer_files(src_b) == []
-
-    _simulate_sync_one(src_a, two_service_env["warehouses"]["svc_a"])
-    _simulate_sync_one(src_b, two_service_env["warehouses"]["svc_b"])
-    con_a, con_b = duckdb.connect(":memory:"), duckdb.connect(":memory:")
-    ice.update_storage_view(con_a, src_a)
-    ice.update_storage_view(con_b, src_b)
-
-    view_a, view_b = _safe_table(src_a["name"]), _safe_table(src_b["name"])
-    assert con_a.execute(f"SELECT COUNT(*) FROM {view_a}").fetchone()[0] == 12
-    assert con_b.execute(f"SELECT COUNT(*) FROM {view_b}").fetchone()[0] == 18
-    assert (
-        con_b.execute(f"SELECT COUNT(*) FROM {view_b} WHERE ip LIKE '10.1.%' OR url LIKE '/alpha/%'").fetchone()[0] == 0
-    )
-    assert (
-        con_a.execute(f"SELECT COUNT(*) FROM {view_a} WHERE ip LIKE '10.2.%' OR url LIKE '/bravo/%'").fetchone()[0] == 0
-    )
 
 
 def test_concurrent_metadata_db_writes_two_services_no_cross_contamination():
@@ -1676,240 +899,6 @@ def test_concurrent_metadata_db_writes_two_services_no_cross_contamination():
     assert {r["file_name"] for r in metadata_db.list_ingested_files(svc_b)} == {seed_key, new_key}
 
 
-# ── Merged from test_smoke_end_to_end.py ──────────────────────────────────────────────
-
-
-@pytest.fixture
-def seeded_service(in_memory_duckdb, test_service_source):
-    """Seed the test DuckDB with 50 log rows spanning the last 2 hours."""
-    table = _safe_table(test_service_source["name"])
-    catalog_fields = [
-        ("timestamp", "TIMESTAMPTZ"),
-        ("dt", "VARCHAR"),
-        ("timestamp_hour", "VARCHAR"),
-        ("status", "INTEGER"),
-        ("country", "VARCHAR"),
-        ("url", "VARCHAR"),
-        ("ip", "VARCHAR"),
-        ("method", "VARCHAR"),
-        ("ua", "VARCHAR"),
-        ("pop", "VARCHAR"),
-        ("asn", "INTEGER"),
-        ("city", "VARCHAR"),
-        ("region", "VARCHAR"),
-        ("elapsed", "INTEGER"),
-        ("cache", "VARCHAR"),
-        ("ottfb", "DOUBLE"),
-        ("ttfb", "DOUBLE"),
-        ("waf_sig", "VARCHAR"),
-        ("edge", "BOOLEAN"),
-        ("lat", "DOUBLE"),
-        ("lon", "DOUBLE"),
-        ("resp_bytes", "INTEGER"),
-        ("oip", "VARCHAR"),
-        ("ost", "INTEGER"),
-    ]
-    cols_def = ", ".join(f'"{n}" {t}' for n, t in catalog_fields)
-    in_memory_duckdb.execute(f"CREATE TABLE {table} ({cols_def})")
-
-    base = datetime.now(UTC) - timedelta(hours=2)
-    statuses = [200, 200, 200, 404, 500] * 10
-    pops = ["LAX", "JFK", "LHR"] * 17
-    countries = ["US", "US", "GB", "DE", "JP"] * 10
-    rows = [
-        (
-            (ts := base + timedelta(minutes=i * 2)),
-            ts.strftime("%Y-%m-%d"),
-            ts.strftime("%Y-%m-%d-%H"),
-            statuses[i],
-            countries[i],
-            f"/path-{i % 10}",
-            f"10.0.{i // 10}.{i % 10}",
-            "GET",
-            "Mozilla/5.0",
-            pops[i % 3],
-            15169 + (i % 5),
-            "San Francisco",
-            "CA",
-            50 + i * 5,
-            "HIT" if i % 3 == 0 else "MISS",
-            50000.0 + i * 100,
-            0.05 + i * 0.001,
-            "",
-            True,
-            37.7749,
-            -122.4194,
-            500 + i * 50,
-            "origin-1.example.com",
-            statuses[i],
-        )
-        for i in range(50)
-    ]
-    placeholders = ", ".join(["?"] * len(catalog_fields))
-    in_memory_duckdb.executemany(
-        f"INSERT INTO {table} ({', '.join(f'''\"{n}\"''' for n, _ in catalog_fields)}) VALUES ({placeholders})",
-        rows,
-    )
-    return test_service_source
-
-
-def test_smoke_dashboard_aggregates_returns_real_counts(client, seeded_service):
-    resp = client.post(
-        "/api/dashboard/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"start_time": None, "end_time": None, "filters": {}},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total_rows"] > 0
-    assert body["total_rows_total"] >= body["total_rows"]
-    for key in ("data", "time_series", "interval", "metric"):
-        assert key in body
-    assert any(entry.get("top") for entry in body["data"].values())
-
-
-def test_smoke_dashboard_aggregates_with_filter_narrows_results(client, seeded_service):
-    unfiltered = client.post(
-        "/api/dashboard/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"start_time": None, "end_time": None, "filters": {}},
-    ).json()
-    gb_only = client.post(
-        "/api/dashboard/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"start_time": None, "end_time": None, "filters": {"country": {"mode": "include", "values": ["GB"]}}},
-    ).json()
-    assert 0 < gb_only["total_rows"] < unfiltered["total_rows"]
-
-
-def test_smoke_dashboard_aggregates_with_numeric_filter_on_string_column_does_not_crash(client, seeded_service):
-    resp = client.post(
-        "/api/dashboard/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"start_time": None, "end_time": None, "filters": {"country": {"mode": "include", "values": [0]}}},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["total_rows"] == 0
-
-
-def test_smoke_insights_endpoint_returns_insight_cards_with_distinct_ids(client, seeded_service):
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value={"LAX": (33.94, -118.4)}):
-        resp = client.post(
-            "/api/insights",
-            headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-            json={"window_size_hrs": 1, "baseline_hours": 1, "filters": {}},
-        )
-    assert resp.status_code == 200
-    insights = resp.json()["insights"]
-    assert len(insights) >= 15
-    for card in insights:
-        for key in ("id", "title", "severity", "summary", "items"):
-            assert key in card
-    ids = [c["id"] for c in insights]
-    assert len(ids) == len(set(ids))
-
-
-def test_smoke_origin_timeseries_with_sub_minute_bucket(client, seeded_service):
-    resp = client.post(
-        "/api/origin/timeseries",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={
-            "start_time": None,
-            "end_time": None,
-            "filters": {},
-            "bucket_minutes": 1.0 / 60.0,
-            "split_by_leg": False,
-            "metric": "ttfb",
-            "percentile": "p95",
-        },
-    )
-    assert resp.status_code == 200
-    assert "has_data" in resp.json()
-
-
-def test_query_errors_decorator_returns_documented_envelope_for_malformed_sql(client, seeded_service):
-    resp = client.post(
-        "/api/dashboard/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"start_time": None, "end_time": None, "filters": {"status": {"mode": "", "values": [200]}}},
-    )
-    if resp.status_code != 200:
-        assert "detail" in resp.json()
-
-
-def test_query_errors_envelope_for_filter_type_mismatch(client, seeded_service):
-    resp = client.post(
-        "/api/dashboard/aggregates",
-        headers={"x-fastly-service-id": MOCK_SERVICE_ID},
-        json={"start_time": None, "end_time": None, "filters": {"country": {"mode": "include", "values": [0]}}},
-    )
-    if resp.status_code != 200:
-        assert "detail" in resp.json()
-
-
-# ── Merged from test_performance_smoke.py ──────────────────────────────────────────────
-
-
-@pytest.fixture
-def one_million_row_service(in_memory_duckdb, test_service_source):
-    """Seed 1,000,000 rows into DuckDB using native generation for speed."""
-    table = _safe_table(test_service_source["name"])
-    in_memory_duckdb.execute(f"""
-        CREATE TABLE {table} (
-            timestamp TIMESTAMPTZ, status INTEGER, country VARCHAR, pop VARCHAR,
-            url VARCHAR, method VARCHAR, ip VARCHAR, elapsed INTEGER,
-            cache VARCHAR, ttfb DOUBLE, edge BOOLEAN, resp_bytes INTEGER, backend VARCHAR
-        )
-    """)
-    in_memory_duckdb.execute(f"""
-        INSERT INTO {table}
-        SELECT
-            now() - interval (random() * 24) hour as timestamp,
-            (case when random() > 0.95 then 500 when random() > 0.90 then 404 else 200 end) as status,
-            (case when random() > 0.5 then 'US' when random() > 0.3 then 'GB' else 'DE' end) as country,
-            (case when random() > 0.7 then 'LAX' when random() > 0.4 then 'JFK' else 'LHR' end) as pop,
-            '/path/' || (random() * 100)::int as url,
-            'GET' as method,
-            '10.0.0.1' as ip,
-            (random() * 1000)::int as elapsed,
-            (case when random() > 0.3 then 'HIT' else 'MISS' end) as cache,
-            random() as ttfb,
-            true as edge,
-            (random() * 10000)::int as resp_bytes,
-            'origin-1' as backend
-        FROM range(1000000)
-    """)
-    return test_service_source
-
-
-def test_performance_dashboard_aggregates_1m_rows(in_memory_duckdb, one_million_row_service):
-    start = time.time()
-    res = get_aggregates(
-        con=in_memory_duckdb,
-        src=one_million_row_service,
-        start_time=None,
-        end_time=None,
-        filters={},
-        chart_interval="1 hour",
-        chart_metric="requests",
-    )
-    duration = time.time() - start
-    assert res["total_rows"] == 1000000
-    assert duration < 5.0
-
-
-def test_performance_insights_1m_rows(in_memory_duckdb, one_million_row_service):
-    start = time.time()
-    with patch(
-        "backend.utils.pop_utils.get_pop_lat_lon_map",
-        return_value={"LAX": (33.9, -118.4), "JFK": (40.6, -73.7), "LHR": (51.4, -0.4)},
-    ):
-        res = get_insights(con=in_memory_duckdb, src=one_million_row_service, window_hours=1, baseline_hours=24)
-    duration = time.time() - start
-    assert len(res["insights"]) > 0
-    assert duration < 10.0
-
-
 # ── Merged from test_environment_connectivity.py ──────────────────────────────────────────────
 
 
@@ -1948,14 +937,13 @@ class TestEnvironmentConnectivity:
 # ── Merged from test_helpers_sources.py ──────────────────────────────────────────────
 
 
-def test_lake_kind_creates_cache_dirs_and_duckdb_path(tmp_path):
+def test_lake_kind_creates_cache_dirs(tmp_path):
     src = make_source(tmp_path, "svc", kind="lake", buffer_dir=True)
     assert src == {
         "name": "svc",
         "service_id": "svc",
         "fos_local_warehouse": True,
         "_cache_dir_override": str(tmp_path / "cache_svc"),
-        "duckdb_path": str(tmp_path / "svc.duckdb"),
     }
     assert (tmp_path / "cache_svc" / "buffer").is_dir()
 
@@ -2018,17 +1006,15 @@ def snapshot_state(monkeypatch):
     ledger.execute.return_value.fetchone.return_value = None
     monkeypatch.setattr("backend.config.get_status", lambda _: copy.deepcopy(state))
     monkeypatch.setattr("backend.config.load_config", lambda _: {})
+    monkeypatch.setattr("backend.core.fos_client.get_source_for_service", lambda _: {"name": "snapshot-svc"})
     monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service", lambda _: {"name": "snapshot-svc", "duckdb_path": __file__}
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        lambda: type("Registry", (), {"resolve": lambda _, sid: None})(),
     )
-    monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _: ".")
     monkeypatch.setattr("backend.cron.scheduler._get_dir_size", lambda _: 0)
     monkeypatch.setattr("backend.core.metadata.get_ingested_files_status_summary", lambda _: summary)
     monkeypatch.setattr("backend.core.metadata.base.get_con", lambda _: ledger)
     monkeypatch.setattr("backend.cron.scheduler.get_latest_progress_for_service", lambda _: None)
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_connection", lambda *a, **kw: pytest.fail("cached status must not acquire DuckDB")
-    )
     return state, summary, ledger
 
 
@@ -2045,7 +1031,6 @@ def test_file_overlay_preserves_current_request_extent(snapshot_state, request_l
 
     snap = compute_sync_status_cached("snapshot-svc")
     assert snap["latest_log_at"] == snap["request"]["latest_log_at"] == request_latest
-    assert snap["latest_ingested_file_at"] == snap["latest_available_file_at"] == "2026-09-06 17:19:00"
     assert snap["local_rows"] == state["local_rows"] and snap["rum"] == state["rum"]
 
 
@@ -2097,7 +1082,7 @@ def _bind_high_scale_service(monkeypatch, *, include_rum: bool) -> None:
     service = HighScaleService(
         service_id="high-scale-svc", client=Client(), cursor_secret=b"secret", request_watermark=wm
     )
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _: {"name": "high-scale-svc"})
+    monkeypatch.setattr("backend.core.fos_client.get_source_for_service", lambda _: {"name": "high-scale-svc"})
     monkeypatch.setattr(
         "backend.high_scale.ingest_controller.get_high_scale_service_registry",
         lambda: type("Registry", (), {"resolve": lambda _, sid: service})(),
@@ -2275,7 +1260,6 @@ def test_log_extents_stream_requires_service_id_and_projects_safe_fields():
         "cdn_service_id": "ExampleCdnId0000000001",
         "logging_service_id": "ExampleSvcId0000000001",
         "schema": [{"name": "ip", "type": "VARCHAR"}],
-        "duckdb_size_bytes": 451_651_568,
         "storage_files": 1238,
     }
     pushed_full = {**full_snapshot, "latest_log_at": "2026-06-15T22:48:00+00:00", "local_rows": 6_660_000}
@@ -2491,138 +1475,33 @@ def test_list_active_runs_and_reap_zombies():
 # ── RequestMetricsObserver ───────────────────────────────────────────────────
 
 
-@pytest.fixture
-def observer_state(monkeypatch):
-    monkeypatch.setattr(module.config, "is_durable_serving_mode", lambda source=None: True)
-    monkeypatch.setattr(module.config, "list_configs", lambda: [{"name": "test-service"}])
-    monkeypatch.setattr(module.config, "config_to_source", lambda cfg: cfg)
-    state = {"request": {"total_rows": 1, "latest_log_at": "2026-09-07T00:00:00Z", "last_sync_at": None}}
-    persisted: dict = {}
-    calls: list[str] = []
-
-    def refresh(source, **kwargs):
-        persisted.clear()
-        persisted.update(copy.deepcopy(state))
-        calls.append("persist")
-        return copy.deepcopy(state)
-
-    def publish(sid, snapshot):
-        assert snapshot == persisted
-        calls.append("publish")
-
-    monkeypatch.setattr(module, "refresh_durable_request_metrics", refresh)
-    monkeypatch.setattr(module, "compute_sync_status_cached", lambda sid: copy.deepcopy(persisted))
-    monkeypatch.setattr(module.publisher, "publish", publish)
-    return module.RequestMetricsObserver(), state, persisted, calls
+def test_refresh_durable_request_metrics_is_noop_in_clickhouse_mode():
+    assert module.refresh_durable_request_metrics({"name": "test_service"}) is None
+    assert module.refresh_durable_request_metrics({}) is None
 
 
-def test_observer_persistence_dedup_failure_backoff_and_high_scale_skip(observer_state, monkeypatch, caplog):
-    observer, state, persisted, calls = observer_state
-    observer.reconcile()
-    observer.reconcile()
-    assert calls == ["persist", "publish", "persist"]
-    state["request"]["last_sync_at"] = "2026-09-08T18:00:00Z"
-    observer.reconcile()
-    assert calls[-2:] == ["persist", "publish"]
-    state["request"].update(latest_log_at=None, total_rows=0)
-    observer.reconcile()
-    assert calls[-2:] == ["persist", "publish"]
+def test_observer_lifecycle_noop_and_bounded_stop(monkeypatch):
+    obs = module.RequestMetricsObserver()
+    assert obs.reconcile() is None
+    assert obs.start() is None
+    assert obs._thread is None
+    obs.stop()
+    assert obs._stop.is_set()
 
-    # Failed observation preserves last success and backs off
-    before = copy.deepcopy(persisted)
-    calls.clear()
-    refresh_fail = MagicMock(side_effect=RuntimeError("unavailable"))
-    monkeypatch.setattr(module, "refresh_durable_request_metrics", refresh_fail)
-    monkeypatch.setattr(module, "FAILURE_BACKOFF_BASE_S", 10.0)
-    observer.reconcile()
-    observer.reconcile()
-    assert persisted == before and calls == [] and "request_metrics.refresh_failed" in caplog.text
-    assert refresh_fail.call_count == 1 and observer._failure_backoff_s["test-service"] == 20.0
-
-    # High-scale registered service is skipped
-    refresh_hs = MagicMock()
-    monkeypatch.setattr(module, "refresh_durable_request_metrics", refresh_hs)
-    monkeypatch.setattr(
-        module,
-        "get_high_scale_service_registry",
-        lambda: type("Registry", (), {"resolve": lambda self, sid: object()})(),
-    )
-    module.RequestMetricsObserver().reconcile()
-    refresh_hs.assert_not_called()
-
-
-def test_concurrent_passes_coalesce_without_overlapping(observer_state, monkeypatch):
-    observer, _, _, calls = observer_state
-    entered, release = threading.Event(), threading.Event()
-    refresh = module.refresh_durable_request_metrics
-
-    def slow(*args, **kwargs):
-        entered.set()
-        assert release.wait(2)
-        return refresh(*args, **kwargs)
-
-    monkeypatch.setattr(module, "refresh_durable_request_metrics", slow)
-    thread = threading.Thread(target=observer.reconcile)
-    thread.start()
-    try:
-        assert entered.wait(2)
-        observer.reconcile()
-        assert calls == []
-    finally:
-        release.set()
-        thread.join(2)
-    assert not thread.is_alive() and calls == ["persist", "publish"]
-
-
-def test_observer_lifecycle_modes_and_bounded_stop(observer_state, monkeypatch, caplog):
-    # Disabled in file mode
-    monkeypatch.setattr(module.config, "is_durable_serving_mode", lambda source=None: False)
-    file_obs = module.RequestMetricsObserver()
-    file_obs.start()
-    assert file_obs._thread is None
-    file_obs.stop()
-
-    # Periodic reconciliation continues and stops cleanly even with FLA_DEV_NO_CRONS=1
-    monkeypatch.setattr(module.config, "is_durable_serving_mode", lambda source=None: True)
-    monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
-    observer, _, _, calls = observer_state
-    monkeypatch.setattr(module, "RECONCILE_INTERVAL_S", 0.01)
-    twice = threading.Event()
-    orig_reconcile = observer.reconcile
-
-    def observed_pass():
-        orig_reconcile()
-        if calls.count("persist") >= 2:
-            twice.set()
-
-    monkeypatch.setattr(observer, "reconcile", observed_pass)
-    observer.start()
-    first_thread = observer._thread
-    try:
-        assert twice.wait(2)
-        observer.start()
-        assert observer._thread is first_thread
-    finally:
-        observer.stop()
-    assert not first_thread.is_alive() and observer._thread is None and calls.count("publish") == 1
-
-    # Bounded stop timeout prevents overlapping restart
-    entered, release = threading.Event(), threading.Event()
+    # Bounded stop joins an attached thread and clears _thread once it exits
+    release = threading.Event()
     monkeypatch.setattr(module, "STOP_TIMEOUT_S", 0.01)
-    monkeypatch.setattr(observer, "reconcile", lambda: (entered.set(), release.wait(2)))
-    observer.start()
-    blocked_thread = observer._thread
+    t = threading.Thread(target=lambda: release.wait(2))
+    t.start()
+    obs._thread = t
     try:
-        assert entered.wait(2)
-        observer.stop()
-        assert blocked_thread.is_alive()
-        observer.start()
-        assert observer._thread is blocked_thread and "request_metrics.stop_timeout" in caplog.text
+        obs.stop()
+        assert obs._thread is t and t.is_alive()
     finally:
         release.set()
-        blocked_thread.join(2)
-        observer.stop()
-    assert observer._thread is None
+        t.join(2)
+        obs.stop()
+    assert obs._thread is None
 
 
 @pytest.mark.asyncio

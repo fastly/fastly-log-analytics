@@ -11,10 +11,13 @@ a single source of truth for:
 from __future__ import annotations
 
 import math as math  # noqa: F401
+import re
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence  # noqa: F401
 from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import TYPE_CHECKING, Any
 
+from backend.core.fos_client import _safe_table_name
 from backend.repositories.utils.response_shaping import asn as _asn_mod
 from backend.repositories.utils.response_shaping import domains as _domains_mod
 from backend.repositories.utils.response_shaping import time_buckets as _time_buckets_mod
@@ -168,6 +171,47 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+_PARQUET_LIST_RE = re.compile(
+    r"read_parquet\(\s*\[\s*'([^']+)'(?:\s*,\s*'[^']*')+\s*\]",
+    re.IGNORECASE,
+)
+
+
+def _compact_sql_for_debug(sql: str) -> str:
+    """Collapse long ``read_parquet([...])`` file lists in debug SQL payloads."""
+
+    def _sub(m: re.Match[str]) -> str:
+        first = m.group(1)
+        n = m.group(0).count("'") // 2
+        return f"read_parquet(['{first}', ... ({n} files)"
+
+    return _PARQUET_LIST_RE.sub(_sub, sql)
+
+
+class SectionTimer:
+    """Collects per-section timing entries (``[{"section": ..., "time_ms": ...}]``)."""
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries: list[dict[str, Any]] | None = None) -> None:
+        self.entries: list[dict[str, Any]] = entries if entries is not None else []
+
+    def mark(self, name: str, t0: float, **observation: Any) -> None:
+        self.entries.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2), **observation})
+
+    def call(self, name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        t0 = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self.mark(name, t0)
+
+
+def _safe_table(name: str) -> str:
+    """Validate and return a safe SQL identifier for table names."""
+    return _safe_table_name(name)
+
+
 _SUBMODULES = (
     _asn_mod,
     _time_buckets_mod,
@@ -194,7 +238,10 @@ __all__ = [
     "SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG",
     "SESSIONS_DEFAULT_MIN_REQS_FLAG",
     "SESSIONS_SORTABLE_COLUMNS",
+    "SectionTimer",
     "WATERFALL_KEYS",
+    "_compact_sql_for_debug",
+    "_safe_table",
     "avg_bucket_health_score",
     "build_asn_label_map",
     "build_asn_speed_mix",

@@ -1,6 +1,5 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -16,12 +15,10 @@ import {
   Trash2,
   AlertCircle,
   HardDrive,
-  Cloud,
 } from 'lucide-react'
 import { useSSE } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
-import { client, unwrapClient, queryKeys } from "@/lib/api";
-import { formatBytes, formatCount, cn } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type { ServiceConfig } from '@/types/api'
 
 interface DeleteDataDialogProps {
@@ -41,18 +38,6 @@ function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: Delet
   const [isExecuting, setIsExecuting] = useState(false)
   const [confirmText, setConfirmText] = useState('')
   const { lines, status, error: sseError, start, stop } = useSSE()
-
-  const serviceId = service?.service_id
-  const { data: storageInfo, isLoading: storageLoading } = useQuery({
-    queryKey: queryKeys.admin.storageInfo(serviceId),
-    queryFn: async () => {
-      return unwrapClient(client.GET('/api/admin/storage-info', {
-        params: { query: { service_id: serviceId } as Record<string, string> },
-      }))
-    },
-    enabled: open && !isExecuting && !!serviceId,
-    staleTime: 30_000,
-  })
 
   if (!service) return null
 
@@ -104,60 +89,23 @@ function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: Delet
         <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription className="text-[13px] ml-1 font-medium">
-            {service.is_high_scale
-              ? "This permanently deletes all of this service's log data from the high-scale ClickHouse cluster. New logs from the live edge will start populating immediately afterward. This cannot be undone."
-              : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the DuckLake copy in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
-            }
+            This permanently deletes all of this service&apos;s log data from ClickHouse and canonical Archive Parquet in Fastly Object Storage. New logs from the live edge will start populating immediately afterward. This cannot be undone.
           </AlertDescription>
         </Alert>
 
-        {!service.is_high_scale ? (
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
-              <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                <HardDrive className="h-3 w-3" /> Local
-              </div>
-              <div className="text-lg font-mono font-bold tracking-tight">
-                {formatBytes(service.duckdb_size_bytes ?? 0)}
-              </div>
-              <div className="text-[11px] text-muted-foreground">
-                {formatCount(service.cache_file_count ?? 0)} file{service.cache_file_count === 1 ? '' : 's'}
-              </div>
+        <div className="grid gap-3">
+          <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              <HardDrive className="h-3 w-3" /> Analytics Cluster
             </div>
-
-            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
-              <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                <Cloud className="h-3 w-3" /> Cloud
-              </div>
-              {storageLoading ? (
-                <div className="text-lg font-mono font-bold tracking-tight text-muted-foreground">…</div>
-              ) : (
-                <>
-                  <div className="text-lg font-mono font-bold tracking-tight">
-                    {formatBytes(storageInfo?.size_bytes ?? 0)}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    {formatCount(storageInfo?.data_files ?? 0)} file{storageInfo?.data_files === 1 ? '' : 's'}
-                  </div>
-                </>
-              )}
+            <div className="text-sm font-medium tracking-tight">
+              ClickHouse &amp; FOS Archive Parquet
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              Data deletion is synchronous across ClickHouse tables and archive manifests.
             </div>
           </div>
-        ) : (
-          <div className="grid gap-3">
-            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-1">
-              <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                <HardDrive className="h-3 w-3" /> Analytics Cluster
-              </div>
-              <div className="text-sm font-medium tracking-tight">
-                High-Scale ClickHouse Backend
-              </div>
-              <div className="text-[11px] text-muted-foreground">
-                Data deletion is synchronous and cluster-wide.
-              </div>
-            </div>
-          </div>
-        )}
+        </div>
 
         <p className="text-xs text-muted-foreground">
           Preserved: saved views, alerts, source configuration, audit history, and scoring labels.
@@ -423,7 +371,7 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                   <div className="flex items-center justify-between group">
                     <div className="space-y-0.5">
                       <Label htmlFor="rem-cache-new" className="text-sm font-medium cursor-pointer">Purge local database and cache</Label>
-                      <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes the local DuckDB file, DuckLake catalog entries, and buffer cache.</p>
+                      <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes ClickHouse table rows, FOS Archive Parquet manifests, and service metadata.</p>
                     </div>
                     <Switch id="rem-cache-new" checked={removeCache} onCheckedChange={setRemoveCache} />
                   </div>

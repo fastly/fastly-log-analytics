@@ -551,23 +551,13 @@ def health_check(
                 except Exception:
                     logger.debug("deep health stuck-sync probe failed", exc_info=True)
 
-            # SRE-05: the probe is otherwise task='sync'-blind. A commit cron
-            # erroring every run (buffer growing, nothing reaching DuckLake)
-            # stays ok. Degrade if the latest terminal run of any critical
-            # ingest task errored. Maintenance tasks (optimize /
-            # expire / *_cleanup / rollup_compact) are intentionally excluded
-            # — their failure doesn't freeze ingestion. Additive + fail-safe
-            # for the same reason as SRE-04 above.
+            # SRE-05: degrade if the latest terminal run of any critical
+            # ingest task errored. Maintenance tasks are intentionally excluded
+            # — their failure doesn't freeze ingestion.
             if svc_state["status"] == "ok":
                 try:
-                    # Recency window: only degrade on errors from the last 24h.
-                    # A per-task-latest scan with no window pins 'degraded'
-                    # FOREVER on a task that never runs again, so nothing ever
-                    # supersedes its last error. A live failing cron keeps
-                    # re-erroring inside the window, so real incidents still
-                    # degrade.
                     crit_cutoff = iso_z(datetime.now(UTC) - timedelta(hours=24))
-                    critical_tasks = ["commit"]
+                    critical_tasks = ["ledger_sweep"]
                     placeholders = ", ".join("?" for _ in critical_tasks)
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
@@ -575,10 +565,6 @@ def health_check(
                         f"         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC{order_suffix}) AS rn "
                         f"  FROM cron_runs WHERE {where_service}task IN ({placeholders}) AND status != 'running'"
                         "  AND started_at >= ?"
-                        # Boot-reap rows are lifecycle artifacts (the process
-                        # stopped mid-run), not failing crons — a task that is
-                        # never scheduled again would otherwise hold 'degraded'
-                        # for the whole window on every restart.
                         "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
                         ") WHERE rn = 1 AND status = 'error' LIMIT 1",
                         (*service_args, *critical_tasks, crit_cutoff),
@@ -598,13 +584,6 @@ def health_check(
                 norm_last = str(last_ingest).replace(" ", "T").rstrip("Z")
                 norm_cutoff = str(cutoff).replace(" ", "T").rstrip("Z")
                 if norm_last < norm_cutoff:
-                    # SRE-22: a fixed stale_minutes cutoff false-positives on a
-                    # low-traffic service's organic quiet periods. Before
-                    # degrading, widen the cutoff to this service's own
-                    # historical p95 inter-ingest gap (never narrower than
-                    # stale_minutes) and re-check against that. Only reached
-                    # once the naive check already looks stale, so the
-                    # common healthy path pays zero extra query cost.
                     effective_minutes = metadata_db.adaptive_stale_minutes(
                         con, default_minutes=stale_minutes, service_id=sid if has_service_id else None
                     )
@@ -623,6 +602,17 @@ def health_check(
         if svc_state["status"] not in ("ok", "stale"):
             overall_ok = False
         services_report.append(svc_state)
+
+    try:
+        from backend.core.clickhouse import get_clickhouse_client
+
+        ch_client = get_clickhouse_client()
+        if ch_client is not None and hasattr(ch_client, "health"):
+            ch_health = ch_client.health()
+            if isinstance(ch_health, dict) and ch_health.get("ok") is False:
+                overall_ok = False
+    except Exception:
+        logger.debug("deep health ClickHouse probe skipped/failed", exc_info=True)
 
     payload["services"] = services_report
     payload["status"] = "ok" if overall_ok else "degraded"

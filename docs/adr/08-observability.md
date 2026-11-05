@@ -5,11 +5,11 @@
 
 > [!NOTE]
 > **Architectural Amendments (v3.0):**
-> - **PostgreSQL 16 Unified Storage ([ADR-22](22-postgres-only-metadata.md)):** Layer 4 (`usage_log`) has migrated from per-service SQLite `metadata.db` to unified PostgreSQL 16 (`usage_log` and `usage_log_hourly_summary`), queryable across all deployment modes via `/api/admin/log-accounting`.
-> - **High-Scale Telemetry ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ClickHouse and micro-batch worker telemetry are integrated into system vitals and Prometheus/OpenTelemetry metrics.
+> - **PostgreSQL 16 Unified Storage ([ADR-22](22-postgres-only-metadata.md)):** Layer 4 (`usage_log`) has migrated from per-service SQLite `metadata.db` to unified PostgreSQL 16 (`usage_log` and `usage_log_hourly_summary`), queryable across all deployments via `/api/admin/log-accounting`.
+> - **Unified ClickHouse Telemetry ([ADR-21](21-high-scale-serving-architecture.md)):** ClickHouse query spans and stateless worker telemetry are integrated into system vitals and Prometheus/OpenTelemetry metrics.
 > - **Optional private receivers (2026-10):** The existing OTLP/HTTP
 >   exporters can send directly to private Prometheus/Tempo receivers through
->   the opt-in Standard overlays or the existing Helm chart's separate minimal
+>   the opt-in Compose overlays or the Helm chart's separate minimal
 >   profile. No Collector or Grafana is required; existing defaults are unchanged.
 >   See the [deployment guide](../deploy/observability.md) for resource/retention
 >   bounds, private Prometheus UI access, and the distinct container-SDK and
@@ -17,7 +17,7 @@
 
 ## 1. Context & Motivation
 
-Phase 1 of the v2.0 cleanup wired OpenTelemetry (spans + metrics + structlog correlation), and Phase 6 added a custom pool-wait histogram. The mechanics work; what's missing is a doc that says **what** is monitored, **what** the operator should look at when something is wrong, and **how** the exporter is supposed to be turned on in a real production environment.
+Phase 1 of the v2.0 cleanup wired OpenTelemetry (spans + metrics + structlog correlation), and Phase 6 added a custom wait histogram. The mechanics work; what's missing is a doc that says **what** is monitored, **what** the operator should look at when something is wrong, and **how** the exporter is supposed to be turned on in a real production environment.
 
 The 2026-06-10 OTel-spam incident is the canonical motivating failure: `OTEL_EXPORTER` defaulted to `console`, so every metric tick wrote a 50-line JSON blob to backend stdout and every request emitted a span dump. ~1 MB/min of unconsumable noise polluted prod logs for weeks before anyone noticed. The fix was structural — make the exporter opt-in — but the absence of a strategy doc meant nobody had a checklist that would have caught it pre-ship.
 
@@ -33,8 +33,8 @@ Observability is structured as four layers, each with a named owner, a defined o
 |---|---|---|---|
 | **HTTP responses** | per-request status, `BaseResponse._section_timings`, `_debug_queries` when `DEBUG_RESPONSES=1` | response body | browser devtools, ad-hoc `curl` |
 | **Structlog (stdlib bridge)** | named events (`logger.info("event", key=val)`), warnings, errors, exceptions, OTel trace_id/span_id when a span is active; **uvicorn access/server logs** too — `bridge_uvicorn_loggers()` (lifespan startup) re-points uvicorn's loggers onto the root handler, so they render through the same chain (the two pre-startup boot lines are the only exception) | container stdout — console by default (what dev **and prod** emit today, since prod doesn't set `STRUCTLOG_FORMAT`); JSON lines when `STRUCTLOG_FORMAT=json`, wired but dormant until a log aggregator exists (TBD per §3) | `docker compose logs backend`, future log aggregator (TBD per §3) |
-| **OpenTelemetry spans + metrics** | request-scoped spans, query/call sub-events, `app.thread_wait_ms` histogram, `app.duckdb_pool.*` counters | configurable via `OTEL_EXPORTER` (`none` / `console` / `otlp` when wired) | exporter destination |
-| **Per-service usage_log SQLite** | every FOS/CDN op with byte count, duration, function caller, Class-A/B classification | per-service `metadata.db` → `/api/admin/log-accounting` endpoint | admin UI's cost panel |
+| **OpenTelemetry spans + metrics** | request-scoped spans, query/call sub-events, `app.thread_wait_ms` histogram | configurable via `OTEL_EXPORTER` (`none` / `console` / `otlp` when wired) | exporter destination |
+| **PostgreSQL usage_log** | every FOS/CDN op with byte count, duration, function caller, Class-A/B classification | PostgreSQL `usage_log` / `usage_log_hourly_summary` → `/api/admin/log-accounting` endpoint | admin UI's cost panel |
 
 ### 2.2 Endpoint-class p95 targets (initial, revise on real data)
 
@@ -43,8 +43,8 @@ These are the budgets [ADR-07](07-feature-budgets.md) endpoints declare against.
 | Class | p95 warm | p95 cold | Notes |
 |---|---|---|---|
 | `/api/health`, `/api/log-extents`, nav/bootstrap | < 200ms | < 500ms | Cache-only or trivial |
-| Dashboard analytics panels | < 800ms | < 1.5s | ADR-06 view warming covers cold |
-| Sessions / raw-logs tables (paginated) | < 3s | < 5s | DuckDB query bound |
+| Dashboard analytics panels | < 800ms | < 1.5s | ClickHouse minute projections / facts |
+| Sessions / raw-logs tables (paginated) | < 3s | < 5s | ClickHouse query bound |
 | Admin one-shot reports (`/api/admin/health-snapshot`, `/api/admin/log-accounting`) | < 10s | n/a | Manual operator pull |
 
 These are not SLOs (we make no uptime promise). They are the line at which a regression is worth investigating; budget misses get revised, not fire-drilled, per ADR-07 §2.4.
@@ -114,7 +114,7 @@ Minimum bar for "good citizen" instrumentation. Reviewer enforces at PR time:
 | OTel SDK init fails at boot | `request_telemetry.py` catches and logs at warning; SDK falls back to no-op providers. Recovery: the app starts; instrumentation is silently no-op. Look at boot logs for "OTel SDK init failed". |
 | structlog config breaks (e.g. processor exception) | Process exit at boot. Recovery: revert the structlog change; structlog is load-bearing for the access log. Verify locally with `STRUCTLOG_FORMAT=json` before shipping any structlog-config change. |
 | `usage_log` per-service SQLite locks / fills disk | Cron writes start failing with `database is locked` or `disk full`. Recovery: archive or truncate `usage_log` table (it's a rolling log, no retention contract). Investigate disk pressure. |
-| `app.thread_wait_ms` histogram reports p95 > 200ms sustained | Real pool saturation. Recovery: per ADR-06 escalation order — verify warm_pool_for_service is wired, then consider raising `DUCKDB_POOL_MAX_SIZE` per-service, then consider separate cron-side pool. |
+| `app.thread_wait_ms` histogram reports p95 > 200ms sustained | Thread/connection saturation. Recovery: inspect `/api/admin/health-snapshot` and `/admin/queries` for long-running queries. |
 | `cron_progress` shows a stuck "running" status for a job that's actually dead | Process restart should have reaped via `_check_terminal_status_from_db`. Recovery: if it didn't, mark manually via SQL: `UPDATE cron_runs SET status='error' WHERE id=...`. |
 
 ## 5. Verification

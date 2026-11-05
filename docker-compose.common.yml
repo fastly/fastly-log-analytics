@@ -24,9 +24,9 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=fla
-      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
-      - POSTGRES_DB=ducklake
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-fla_local_dev}
+      - POSTGRES_DB=fla
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fla -d ducklake"]
+      test: ["CMD-SHELL", "pg_isready -U fla -d fla"]
       interval: 10s
       retries: 5

@@ -1,4 +1,4 @@
-{{- if eq .Values.config.deploymentMode "high_scale" -}}
+{{- if .Values.workers.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -33,43 +33,32 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: celery-worker
+        - name: worker
           image: "{{ .Values.image.repository }}-backend:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          # Prefork pool (celery default) so task_time_limit is enforceable.
-          # `celery` covers tasks not matched by task_routes (default queue).
           command:
-            - celery
-            - -A
-            - backend.celery_app
-            - worker
-            - --loglevel=info
-            - -Q
-            - q.ingest,q.control,celery
-            - --concurrency=2
-            {{- if .Values.observability.enabled }}
-            # Task events off by default; celery-exporter needs them.
-            - -E
-            {{- end }}
+            - python
+            - -m
+            - backend.high_scale.worker
           env:
             {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
             - name: SSE_BACKPLANE
               value: {{ .Values.config.sseBackplane | quote }}
-            {{- include "fastly-log-analytics.duckdbEnv" . | nindent 12 }}
+            - name: HIGH_SCALE_WORKER_THREADS
+              value: {{ .Values.workers.env.HIGH_SCALE_WORKER_THREADS | default "1" | quote }}
+            - name: HIGH_SCALE_MAX_BATCH_BYTES
+              value: {{ .Values.workers.env.HIGH_SCALE_MAX_BATCH_BYTES | default "6291456" | quote }}
+            - name: HIGH_SCALE_MAX_BATCH_OBJECTS
+              value: {{ .Values.workers.env.HIGH_SCALE_MAX_BATCH_OBJECTS | default "10" | quote }}
+            - name: HIGH_SCALE_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             {{- include "fastly-log-analytics.otelEnv" . | nindent 12 }}
-          livenessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - celery -A backend.celery_app inspect ping -d celery@$HOSTNAME --timeout 10
-            initialDelaySeconds: 60
-            periodSeconds: 60
-            timeoutSeconds: 15
           {{- with .Values.workers.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

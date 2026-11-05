@@ -33,19 +33,17 @@ import backend.routers.session_scoring as scoring_admin
 import backend.scoring as _labels
 import backend.utils.telemetry as statement_profiler
 from backend import config as svcconfig
-from backend.core import duckdb, share_db
 from backend.core import log_fields as lf
-from backend.core.metadata import usage_log
+from backend.core import share_db
 from backend.core.realtime import RealtimeMetricsPublisher, error_tick_payload
 from backend.core.realtime import publisher as rt_publisher
-from backend.core.request_context import get_con, get_service_id, get_source, require_admin, require_service_access
+from backend.core.request_context import get_service_id, get_source, require_admin, require_service_access
 from backend.core.request_telemetry import query_registry
 from backend.core.share_db import get_setting, set_setting
 from backend.cron import scheduler as _sched
 from backend.high_scale.archive import ServingWatermark
 from backend.main import _APP_VERSION, app
 from backend.models import common as m_common
-from backend.repositories._base import _safe_table
 from backend.routers import alerts as alerts_router
 from backend.routers import bootstrap, share_admin
 from backend.routers import control_room as cr_mod
@@ -56,10 +54,8 @@ from backend.routers.services import core as services_core_router
 from backend.scoring import ALLOWED_LABELS
 from backend.utils import telemetry, tunnel
 from backend.utils.remote_access import RemoteAccessMiddleware, _is_blocked_path
-from backend.utils.telemetry import set_page_load_id
 from backend.utils.tunnel import AnalystSession, get_tunnel_manager
 from tests._helpers.config_fakes import fake_mutate_config
-from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID
 
 _SVC_HDR = {"x-fastly-service-id": MOCK_SERVICE_ID}
@@ -82,10 +78,7 @@ def test_log_fields_catalog_endpoint(client):
     assert {"minimal", "standard", "security"} <= set(data["presets"])
 
 
-def test_insight_availability_endpoint(client, in_memory_duckdb, test_service_source):
-    insert_mock_logs(
-        in_memory_duckdb, _safe_table(test_service_source["name"]), generate_mock_logs(test_service_source, num_logs=1)
-    )
+def test_insight_availability_endpoint(client, test_service_source):
     resp = client.get("/api/insight-availability", headers=_SVC_HDR)
     assert resp.status_code == 200
     data = resp.json()
@@ -216,16 +209,13 @@ def test_bootstrap_uses_cached_schema_from_config_status(client, tmp_path, monke
             "backend.services.service_manager.get_enriched_services",
             return_value=[{"service_id": MOCK_SERVICE_ID, "status": {"schema": cached_schema}}],
         ),
-        patch("backend.core.duckdb.get_source_for_service", return_value=None),
+        patch("backend.routers.bootstrap.get_source_for_service", return_value=None),
     ):
         resp = _get(client)
     assert resp.status_code == 200 and resp.json()["schema"] == cached_schema
 
 
-def test_bootstrap_falls_back_to_live_schema_when_cache_empty(client, in_memory_duckdb, test_service_source):
-    insert_mock_logs(
-        in_memory_duckdb, _safe_table(test_service_source["name"]), generate_mock_logs(test_service_source, num_logs=1)
-    )
+def test_bootstrap_falls_back_to_live_schema_when_cache_empty(client, test_service_source):
     resp = _get(client)
     assert resp.status_code == 200 and isinstance(resp.json()["schema"], list)
 
@@ -308,7 +298,7 @@ def test_bootstrap_keeps_last_sync_share_banner_ops_overview_seeds(client, tmp_p
     assert data["ops_overview"] is not None
 
 
-def test_schema_endpoint_uses_cached_status_when_available(client, in_memory_duckdb, test_service_source):
+def test_schema_endpoint_uses_cached_status_when_available(client, test_service_source):
     cached_schema = [{"name": "from_cache", "type": "VARCHAR"}]
     with patch("backend.config.get_status", return_value={"schema": cached_schema}):
         resp = client.get("/api/schema", headers=_SVC_HDR)
@@ -318,7 +308,7 @@ def test_schema_endpoint_uses_cached_status_when_available(client, in_memory_duc
 def test_schema_endpoint_500s_when_get_schema_raises(client, test_service_source):
     with (
         patch("backend.config.get_status", return_value={}),
-        patch("backend.core.duckdb.get_schema", side_effect=RuntimeError("schema fetch failed")),
+        patch("backend.routers.bootstrap._compute_log_fields_catalog", side_effect=RuntimeError("schema fetch failed")),
     ):
         resp = client.get("/api/schema", headers=_SVC_HDR)
     assert resp.status_code == 500 and "error" in resp.json()["detail"]
@@ -344,17 +334,16 @@ def test_log_fields_catalog_500s_on_exception(client):
 
 
 def test_insight_availability_500s_on_schema_failure(client):
-    with patch("backend.core.duckdb.get_schema", side_effect=RuntimeError("schema gone")):
+    with patch("backend.routers.bootstrap._resolve_schema_for_source", side_effect=RuntimeError("schema gone")):
         assert client.get("/api/insight-availability", headers=_SVC_HDR).status_code == 500
 
 
-def test_insight_availability_marks_unavailable_when_required_cols_missing(
-    client, in_memory_duckdb, test_service_source
-):
-    in_memory_duckdb.execute(
-        f"CREATE TABLE {_safe_table(test_service_source['name'])} (timestamp TIMESTAMP, status INTEGER)"
-    )
-    resp = client.get("/api/insight-availability", headers=_SVC_HDR)
+def test_insight_availability_marks_unavailable_when_required_cols_missing(client, test_service_source):
+    with patch(
+        "backend.routers.bootstrap._resolve_schema_for_source",
+        return_value=[{"name": "timestamp", "type": "TIMESTAMP"}, {"name": "status", "type": "INTEGER"}],
+    ):
+        resp = client.get("/api/insight-availability", headers=_SVC_HDR)
     assert resp.status_code == 200 and any(not i["available"] for i in resp.json()["insights"])
 
 
@@ -370,25 +359,19 @@ def test_bootstrap_remote_unauth_stub_omits_section_timings():
 
 def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkeypatch):
     _seed_active_service(monkeypatch, tmp_path)
+    monkeypatch.setattr(_sched, "compute_sync_status_cached", lambda sid: None)
     monkeypatch.setattr(
         svcconfig, "get_status", lambda sid: {"local_rows": 7400000, "latest_log_at": "2026-06-29T12:00:00Z"}
     )
-
-    class MockConnectionHolder:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return MagicMock()
-
-        def __exit__(self, *args):
-            pass
-
-    monkeypatch.setattr("backend.core.request_context._ConnectionHolder", MockConnectionHolder)
-    monkeypatch.setattr("backend.core.storage.execute_with_stale_view_retry", lambda *a, **kw: (800, None))
-    mock_duckdb_con = MagicMock()
-    mock_duckdb_con.execute.return_value.fetchone.side_effect = [(33000,), (None,)]
-    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda src: mock_duckdb_con)
+    mock_hm = MagicMock(
+        return_value={
+            "rum": {"total_rows": 800, "latest_log_at": None, "last_sync_at": None},
+            "request": {"total_rows": 33000, "latest_log_at": None, "last_sync_at": None},
+        }
+    )
+    fake_reg = SimpleNamespace(resolve=lambda sid: SimpleNamespace(service_id=sid))
+    monkeypatch.setattr("backend.high_scale.ingest_controller.get_high_scale_service_registry", lambda: fake_reg)
+    monkeypatch.setattr("backend.high_scale.dashboard.header_metrics", mock_hm)
 
     resp = _get(client)
     assert resp.status_code == 200
@@ -398,10 +381,11 @@ def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkey
     assert data["header_badge"]["request"]["latest_log_at"] == "2026-06-29T12:00:00Z"
     assert data["header_badge"]["local_rows"] == 7400000
 
-    scan_calls = mock_duckdb_con.execute.call_count
+    scan_calls = mock_hm.call_count
+    bootstrap._bootstrap_cache.clear()
     again = _get(client)
     assert again.status_code == 200 and again.json()["header_badge"] == data["header_badge"]
-    assert mock_duckdb_con.execute.call_count == scan_calls
+    assert mock_hm.call_count == scan_calls
 
 
 @pytest.mark.parametrize("request_latest", ["2026-09-07T19:31:22Z", "2026-09-04T01:00:00Z", None])
@@ -417,10 +401,6 @@ def test_bootstrap_header_badge_uses_live_sync_snapshot(client, tmp_path, monkey
         "request": {"latest_log_at": request_latest, "total_rows": rows, "last_sync_at": None},
     }
     monkeypatch.setattr(svcconfig, "get_status", lambda sid: current_status.copy())
-    monkeypatch.setattr(
-        "backend.core.metadata.get_ingested_files_status_summary",
-        lambda _: {"latest_file_name": "logs_2026-09-06T17-19-00.gz", "total_rows": 99},
-    )
     if warm_cache:
         monkeypatch.setitem(
             bootstrap._header_badge_cache,
@@ -439,7 +419,6 @@ def test_bootstrap_header_badge_uses_live_sync_snapshot(client, tmp_path, monkey
     assert data["header_badge"]["request"]["latest_log_at"] == request_latest
     assert data["log_extents"]["latest_log_at"] == request_latest
     assert data["sync_status"]["latest_log_at"] == request_latest
-    assert data["sync_status"]["latest_ingested_file_at"] == "2026-09-06 17:19:00"
     assert data["header_badge"]["rum"]["latest_log_at"] == "2026-09-08T10:00:00Z"
     assert data["header_badge"]["local_rows"] == rows
 
@@ -556,8 +535,7 @@ STUB_TABS = [t for t in ALL_TABS if t not in LIVE_TABS]
 MUTATION_ENDPOINTS = ["mitigations", "rules", "allowlist", "big-red-button", "cost-governor"]
 
 
-def _make_cr_client(in_memory_duckdb, test_service_source, admin_fn):
-    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
+def _make_cr_client(test_service_source, admin_fn):
     app.dependency_overrides[get_service_id] = lambda: test_service_source["service_id"]
     app.dependency_overrides[require_service_access] = lambda: MOCK_SERVICE_ID
     app.dependency_overrides[require_admin] = admin_fn
@@ -567,18 +545,18 @@ def _make_cr_client(in_memory_duckdb, test_service_source, admin_fn):
 
 
 @pytest.fixture
-def admin_client(in_memory_duckdb, test_service_source):
-    yield from _make_cr_client(in_memory_duckdb, test_service_source, lambda: None)
+def admin_client(test_service_source):
+    yield from _make_cr_client(test_service_source, lambda: None)
 
 
 @pytest.fixture
-def analyst_client(in_memory_duckdb, test_service_source):
+def analyst_client(test_service_source):
     def _reject():
         raise HTTPException(
             status_code=403, detail={"error": "admin_only", "message": "This operation requires admin access."}
         )
 
-    yield from _make_cr_client(in_memory_duckdb, test_service_source, _reject)
+    yield from _make_cr_client(test_service_source, _reject)
 
 
 @pytest.mark.parametrize("tab", STUB_TABS)
@@ -613,60 +591,6 @@ def test_error_stream_not_shadowed_by_tab_route(monkeypatch):
     err_idx = route_paths.index("/api/services/{service_id}/control-room/error-stream")
     tab_idx = route_paths.index("/api/services/{service_id}/control-room/{tab}")
     assert err_idx < tab_idx, "error-stream route must be registered before /{tab} catch-all"
-
-
-def test_correlate_top_values_windowed_freshness_and_telemetry(monkeypatch):
-    recorded: list[dict] = []
-    monkeypatch.setattr(usage_log, "log_telemetry_query", lambda **kwargs: recorded.append(kwargs))
-    executed_sql: list[str] = []
-
-    class _MockResult:
-        def __init__(self, rows):
-            self._rows = rows
-
-        def fetchall(self):
-            return self._rows
-
-        def fetchone(self):
-            return self._rows[0] if self._rows else None
-
-    class _MockCon:
-        def execute(self, sql, params=None):
-            executed_sql.append(sql)
-            rows = [("/home", 42)] if "GROUP BY" in sql else [(datetime(2026, 10, 20, 12, 0, tzinfo=UTC),)]
-            return _MockResult(rows)
-
-    set_page_load_id("cr-telemetry-test")
-    try:
-        rows, latest_ts = cr_mod.correlate_top_values(
-            _MockCon(), "logs_test", "url", datetime(2026, 10, 20, 11, 0, tzinfo=UTC), 10, service_id="svc_cr"
-        )
-    finally:
-        set_page_load_id(None)
-
-    assert rows == [("/home", 42)] and latest_ts is not None
-    assert len(executed_sql) == 2 and "WHERE timestamp >= ?" in executed_sql[1]
-    assert len(recorded) == 2 and all(
-        r["engine"] == "duckdb" and r["page_load_id"] == "cr-telemetry-test" for r in recorded
-    )
-
-
-def test_recent_standard_errors_maps_rows(monkeypatch):
-    row = ("event-1", datetime(2026, 7, 7, tzinfo=UTC), "404", "/missing", "DEN", "192.0.2.10")
-
-    class _Connection:
-        def execute(self, query, params=None):
-            assert "FROM logs_test_service" in query
-            return SimpleNamespace(fetchall=lambda: [row])
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(duckdb, "get_connection", lambda **kwargs: _Connection())
-    events = cr_mod._recent_standard_errors({"service_id": MOCK_SERVICE_ID}, "test-service")
-    exp = {"event_id": "event-1", "timestamp": "2026-07-07T00:00:00+00:00", "status": 404}
-    exp |= {"url": "/missing", "pop": "DEN", "client_ip": "192.0.2.10"}
-    assert events == [exp]
 
 
 def test_recent_high_scale_errors_maps_rows():
@@ -859,38 +783,52 @@ def test_realtime_seed_with_fetch_fallback(admin_client, monkeypatch):
     assert resp.status_code == 200 and resp.json()["ticks"] == [{"timestamp": "2026-07-07T00:01:00Z"}]
 
 
-def test_correlate_success(admin_client, monkeypatch):
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": "svc"})
-    mock_con = MagicMock()
-    mock_con.execute().fetchall.return_value = [("200", 100)]
-    mock_con.execute().fetchone.return_value = (datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC),)
-    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda source, read_only: mock_con)
-
-    resp = admin_client.post(
-        f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate",
-        headers=_SVC_HDR,
-        json={"dimension": "status", "window_minutes": 10, "limit": 5},
+def test_correlate_success(admin_client):
+    watermark = ServingWatermark(
+        service_id=MOCK_SERVICE_ID,
+        domain="request",
+        owner_epoch=1,
+        coverage_start=datetime(2026, 8, 19, 11, 50, tzinfo=UTC),
+        coverage_end=datetime(2026, 8, 19, 12, 0, tzinfo=UTC),
+        last_accepted_cursor=None,
+        last_archived_event_id=None,
+        last_visible_event_id=None,
+        exact=True,
     )
+    service = SimpleNamespace(
+        client=SimpleNamespace(execute=lambda sql, params=None: [{"value": "200", "aggregate_count": 100}]),
+        watermark_for=lambda domain: watermark,
+    )
+    app.dependency_overrides[cr_mod.get_high_scale_service_registry] = lambda: SimpleNamespace(
+        resolve=lambda sid: service
+    )
+    try:
+        resp = admin_client.post(
+            f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate",
+            headers=_SVC_HDR,
+            json={"dimension": "status", "window_minutes": 10, "limit": 5},
+        )
+    finally:
+        app.dependency_overrides.pop(cr_mod.get_high_scale_service_registry, None)
     assert resp.status_code == 200
     data = resp.json()
     assert data["dimension"] == "status" and data["top"] == [{"value": "200", "count": 100}] and "freshness" in data
 
 
 @pytest.mark.asyncio
-async def test_correlate_masks_client_ips_for_analyst(monkeypatch):
-    mock_con = MagicMock()
-    mock_con.execute().fetchall.return_value = [("203.0.113.45", 7)]
-    mock_con.execute().fetchone.return_value = (datetime.now(UTC),)
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: {"name": "svc"})
-    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda source, read_only: mock_con)
-
+async def test_correlate_masks_client_ips_for_analyst():
+    watermark = SimpleNamespace(coverage_end=datetime.now(UTC), validate=lambda: None)
+    service = SimpleNamespace(
+        client=SimpleNamespace(execute=lambda sql, params=None: [{"value": "203.0.113.45", "aggregate_count": 7}]),
+        watermark_for=lambda domain: watermark,
+    )
     request = SimpleNamespace(state=SimpleNamespace(analyst_session=SimpleNamespace(pii_policy={"mask_ips": True})))
     response = await cr_mod.control_room_correlate(
         cr_mod.CorrelateRequest(dimension="ip"),
         MOCK_SERVICE_ID,
         request,
         None,
-        SimpleNamespace(resolve=lambda service_id: None),
+        SimpleNamespace(resolve=lambda service_id: service),
     )
     assert response["top"] == [{"value": "203.0.113.xxx", "count": 7}]
 
@@ -937,10 +875,14 @@ async def test_correlate_uses_high_scale_aggregate_path():
 
 
 def test_correlate_unknown_service_source_404(admin_client, monkeypatch):
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
-    resp = admin_client.post(
-        f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate", headers=_SVC_HDR, json={"dimension": "status"}
-    )
+    monkeypatch.setattr("backend.routers.control_room.get_source_for_service", lambda sid: None)
+    app.dependency_overrides[cr_mod.get_high_scale_service_registry] = lambda: SimpleNamespace(resolve=lambda sid: None)
+    try:
+        resp = admin_client.post(
+            f"/api/services/{MOCK_SERVICE_ID}/control-room/correlate", headers=_SVC_HDR, json={"dimension": "status"}
+        )
+    finally:
+        app.dependency_overrides.pop(cr_mod.get_high_scale_service_registry, None)
     assert resp.status_code == 404 and resp.json()["detail"]["error"] == "no_data_source"
 
 
@@ -1287,14 +1229,9 @@ def _audit_logs(client):
     return client.get("/api/audit-logs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
 
-def _storage_calendar(client):
-    from backend.core.request_context import get_source
-
-    app.dependency_overrides[get_source] = lambda: {"service_id": "service123", "name": "service123"}
-    with patch(
-        "backend.core.storage.get_snapshot_calendar", return_value={"2026-08-19": {"data_files": 5, "size_bytes": 1}}
-    ):
-        return client.get("/api/admin/storage-calendar?table_name=logs")
+def _ingested_files(client):
+    with patch("backend.core.fos_client.get_ingested_files", return_value=[]):
+        return client.get("/api/admin/ingested-files", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
 
 def _log_fields_get(client):
@@ -1308,7 +1245,7 @@ _SITES = [
     pytest.param(lambda c: _check_fos(c, fail=False), id="provision-check-fos-ok"),
     pytest.param(lambda c: _check_fos(c, fail=True), id="provision-check-fos-failed"),
     pytest.param(_audit_logs, id="audit-logs"),
-    pytest.param(_storage_calendar, id="storage-calendar"),
+    pytest.param(_ingested_files, id="ingested-files"),
     pytest.param(_log_fields_get, id="service-log-fields"),
 ]
 
@@ -1451,27 +1388,6 @@ def test_admin_bot_sources_rdns_and_duckdb_match_producer(client):
         assert _body(client.post("/api/admin/rdns/enrich?limit=100")) == {"ok": True, "summary": summary}
     enrich.assert_called_once_with(limit=100)
 
-    mb = 1024 * 1024
-    with (
-        patch("backend.core.duckdb.current_rss_bytes", return_value=100 * mb),
-        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
-    ):
-        assert _body(client.post("/api/admin/duckdb/recycle")) == dict(
-            ok=True, status="skipped", reason="RSS 100MB < threshold 500MB", rss_mb=100.0, threshold_mb=500.0
-        )
-    with (
-        patch("backend.core.duckdb.current_rss_bytes", side_effect=[300 * mb, 200 * mb]),
-        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
-        patch("backend.cron.jobs.duckdb_recycle.recycle_once", return_value="manual_admin: recycled 1/1"),
-    ):
-        exp_recycled = {"ok": True, "status": "recycled", "detail": "manual_admin: recycled 1/1"}
-        exp_recycled |= {"rss_before_mb": 300.0, "rss_after_mb": 200.0, "freed_mb": 100.0}
-        assert _body(client.post("/api/admin/duckdb/recycle?force=true")) == exp_recycled
-    status_body = _body(client.get("/api/admin/duckdb/status"))
-    assert set(status_body) == {"ok", "memory", "barrier", "pools", "retired_pools"}
-    assert set(status_body["memory"]) == {"current_rss_mb", "recycle_threshold_mb", "recycle_interval_min"}
-    assert set(status_body["barrier"]) == {"is_active", "active_paths"}
-
 
 def test_ngwaf_share_purge_calendar_and_telemetry_match_producer(client, monkeypatch):
     stats = {"total_cached_bots": 2, "workspaces": {"w": None}, "top_bots": {"bot": 2}}
@@ -1479,11 +1395,11 @@ def test_ngwaf_share_purge_calendar_and_telemetry_match_producer(client, monkeyp
         patch("backend.config.load_config", return_value={"service_id": "svc-n"}),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
         patch("backend.cron.jobs.metadata._run_ngwaf_bot_sync"),
-        patch("backend.core.rollups.security_dims.get_cache_stats", return_value=stats),
+        patch("backend.cron.jobs.metadata.get_cache_stats", return_value=stats),
     ):
         exp_sync = {"ok": True, "service_id": "svc-n", "workspace_id": "ws-1", "stats": stats}
         assert _body(client.post("/api/admin/ngwaf/sync/svc-n")) == exp_sync
-    monkeypatch.setattr("backend.core.rollups.security_dims.get_cache_stats", lambda: dict(stats))
+    monkeypatch.setattr("backend.cron.jobs.metadata.get_cache_stats", lambda: dict(stats))
     assert _body(client.get("/api/admin/ngwaf/status")) == {"ok": True, **stats}
     monkeypatch.setattr("backend.utils.bot_sources.get_stats", lambda: {"entries": 4, "hit_rate": 0.5})
     assert _body(client.get("/api/admin/rdns/stats")) == {"ok": True, "stats": {"entries": 4, "hit_rate": 0.5}}
@@ -1491,9 +1407,6 @@ def test_ngwaf_share_purge_calendar_and_telemetry_match_producer(client, monkeyp
     purge_stats |= {"deleted_claim_tokens": 0, "audit_retention_days": 90, "max_idle_session_days": 30}
     with patch("backend.core.share_db.purge_all_share_records", return_value=purge_stats):
         assert _body(client.post("/api/admin/share/purge")) == {"ok": True, **purge_stats}
-    calendar = {"2026-10-01": {"data_files": 4, "size_bytes": 0}, "2026-10-02": {"data_files": 9, "size_bytes": 0}}
-    with patch("backend.core.storage.get_snapshot_calendar", return_value=calendar):
-        assert _body(client.get("/api/admin/storage-calendar")) == calendar
 
     call_row = {
         "service": "FOS",
@@ -1505,7 +1418,7 @@ def test_ngwaf_share_purge_calendar_and_telemetry_match_producer(client, monkeyp
         "bytes": 10,
     }
     payload = {
-        "queries": [{"engine": "duckdb", "sql_query": "SELECT 1", "duration_ms": 1.5}],
+        "queries": [{"engine": "clickhouse", "sql_query": "SELECT 1", "duration_ms": 1.5}],
         "sections": [{"section_name": "summary", "duration_ms": 2.0}],
         "calls": [call_row],
     }
@@ -1528,13 +1441,7 @@ def test_ngwaf_share_purge_calendar_and_telemetry_match_producer(client, monkeyp
 def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(client, monkeypatch):
     started = {"ok": True, "message": "started", "run_id": 41}
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
-        assert _body(client.post("/api/admin/commit-storage"), status=202) == started
         assert _body(client.post("/api/admin/ingest-logs")) == started
-    with patch("backend.core.storage.clear_source_caches"), patch("threading.Thread"):
-        assert _body(client.post("/api/admin/rebuild-local-view"), status=202) == {
-            "ok": True,
-            "message": "Local view rebuild started.",
-        }
     cfg = {"service_id": "svc-t", "remote_frontend": {"service_id": "remote-1"}}
     with (
         patch("backend.utils.router_utils.load_service_config", return_value=cfg),
@@ -1787,16 +1694,23 @@ def test_catalog_bootstrap_schema_audit_cmcd_and_query_contracts(client, monkeyp
         "debug_calls": [],
         "section_timings": [],
     }
-    with patch("backend.repositories.query.execute_query", return_value=dict(base_result)):
+    fake_hs_reg = SimpleNamespace(resolve=lambda sid: SimpleNamespace(service_id=sid))
+    with (
+        patch("backend.high_scale.ingest_controller.get_high_scale_service_registry", return_value=fake_hs_reg),
+        patch("backend.high_scale.query.query_endpoint", return_value=dict(base_result)),
+    ):
         body = _body(client.post("/api/query", headers=_SVC_HDR, json={"sql": "SELECT 1"}))
     assert (
         body["data"] == _roundtrip(base_result["data"])
         and body["data"][0]["tz_ts"].endswith("+00:00")
         and body["data"][0]["amount"] == 12.5
     )
-    with patch(
-        "backend.repositories.query.execute_query",
-        return_value={k: v for k, v in base_result.items() if k != "explain_plan"},
+    with (
+        patch("backend.high_scale.ingest_controller.get_high_scale_service_registry", return_value=fake_hs_reg),
+        patch(
+            "backend.high_scale.query.query_endpoint",
+            return_value={k: v for k, v in base_result.items() if k != "explain_plan"},
+        ),
     ):
         assert "explain_plan" not in _body(client.post("/api/query", headers=_SVC_HDR, json={"sql": "SELECT 1"}))
 
@@ -2179,53 +2093,15 @@ def test_deploy_and_teardown_frontend_persistence_and_errors(client):
 
 
 def test_schema_endpoint_durable_mode_uses_catalog_without_duckdb_con(client, test_service_source):
-    from backend.core.duckdb_status import _clear_schema_cache
-
-    _clear_schema_cache()
-    with (
-        patch("backend.config.get_status", return_value={}),
-        patch("backend.config.is_durable_serving_mode", return_value=True),
-        patch("backend.core.duckdb.get_schema", side_effect=AssertionError("should not call get_schema")),
-    ):
+    with patch("backend.config.get_status", return_value={}):
         resp = client.get("/api/schema", headers=_SVC_HDR)
         assert resp.status_code == 200
         schema_cols = {c["name"] for c in resp.json()["schema"]}
         assert "timestamp" in schema_cols and "url" in schema_cols
-        # Second call hits _schema_cache directly
-        resp2 = client.get("/api/schema", headers=_SVC_HDR)
-        assert resp2.status_code == 200
-    _clear_schema_cache()
 
 
-def test_correlate_filters_to_4xx_5xx_error_cohort_in_standard_and_high_scale(in_memory_duckdb):
-    in_memory_duckdb.execute("CREATE TABLE logs_cr_err_test (timestamp TIMESTAMPTZ, url VARCHAR, status INTEGER)")
+def test_correlate_filters_to_4xx_5xx_error_cohort_in_standard_and_high_scale():
     ts = datetime(2026, 10, 20, 11, 30, tzinfo=UTC)
-    in_memory_duckdb.executemany(
-        "INSERT INTO logs_cr_err_test VALUES (?, ?, ?)",
-        [
-            (ts, "/ok", 200),
-            (ts, "/ok", 200),
-            (ts, "/redir", 302),
-            (ts, "/notfound", 404),
-            (ts, "/notfound", 404),
-            (ts, "/notfound", 404),
-            (ts, "/boom", 503),
-        ],
-    )
-    try:
-        rows, latest_ts = cr_mod.correlate_top_values(
-            in_memory_duckdb,
-            "logs_cr_err_test",
-            "url",
-            datetime(2026, 10, 20, 11, 0, tzinfo=UTC),
-            10,
-            service_id="svc_cr",
-        )
-        assert rows == [("/notfound", 3), ("/boom", 1)]
-        assert latest_ts is not None
-    finally:
-        in_memory_duckdb.execute("DROP TABLE IF EXISTS logs_cr_err_test")
-
     captured_ch: list[tuple[str, dict]] = []
 
     class _HSClient:

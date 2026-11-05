@@ -24,7 +24,7 @@ Routes in [`backend/routers/rum/provisioning.py`](../../../backend/routers/rum/p
 - `POST .../rum/settings` (`RumSettingsUpdateRequest`: the four `capture_*` booleans, `custom_condition`, `token`): updates config and redeploys the tracker; returns `skipped` when nothing changed.
 - `GET .../rum/versions` (`RumVersionsResponse`: `available`, `current`, `latest`, `update_available`) and `POST .../rum/upgrade` (SSE, `version`, `token`): pin a different Faro SDK version; unknown versions are `400 unknown_faro_version`.
 
-RUM ingest is driven by the `rum_sync` / `rum_commit` crons in standard mode and by the high-scale worker in high-scale mode (see [docs/cron](../../cron/README.md)); the tables and read contract are described in [rum.md](../rum.md).
+RUM ingest is driven by `rum_discovery` and the stateless ingest worker (`python -m backend.high_scale.worker`), publishing into ClickHouse (`rum_vitals` and `rum_errors`) with `ledger_rum_sweep` as the crash-recovery sweep (see [docs/cron](../../cron/README.md)); the tables and read contract are described in [rum.md](../rum.md).
 
 ## Tests
 

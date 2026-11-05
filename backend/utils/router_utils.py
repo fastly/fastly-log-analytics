@@ -224,7 +224,7 @@ def start_or_resume_cron(
     else: raise HTTPException(503)`` shape with only the task name +
     target kwargs varying.
     """
-    from backend.core.duckdb import start_cron_run
+    from backend.core.fos_client import start_cron_run
     from backend.cron.scheduler import list_active_runs, start_progress
 
     service_id = source["name"]
@@ -258,24 +258,16 @@ def run_admin_cron_trigger(
     success_msg: str,
     in_progress_msg: str,
     invalidate_cache: bool = True,
-    require_high_scale: bool = False,
-    high_scale_detail: Any = None,
     precheck: Callable[[], None] | None = None,
 ) -> SyncStartResponse:
     """Shared execution wrapper for manual admin cron trigger routes."""
-    if require_high_scale and not svcconfig.is_high_scale_mode(source):
-        raise HTTPException(
-            status_code=400,
-            detail=high_scale_detail or f"{task_name} is only supported under high-scale mode.",
-        )
-
     if precheck is not None:
         precheck()
 
     if invalidate_cache:
-        from backend.repositories.dashboard import invalidate_service
+        from backend.repositories.utils.response_cache import invalidate_service_cache
 
-        invalidate_service(source["name"])
+        invalidate_service_cache(source["name"])
 
     res = start_or_resume_cron(
         source,

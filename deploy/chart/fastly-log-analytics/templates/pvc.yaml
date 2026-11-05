@@ -1,5 +1,5 @@
 {{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) -}}
-# Shared app state (configs/data/cache). ReadWriteOnce — every pod mounting
+# Shared app state (configs/data). ReadWriteOnce — every pod mounting
 # it is pinned to one node. See values.yaml for the >1-replica requirements.
 apiVersion: v1
 kind: PersistentVolumeClaim

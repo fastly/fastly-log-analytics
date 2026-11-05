@@ -48,7 +48,7 @@ from backend.core.clickhouse.params import (
     digest_rows,
     utc,
 )
-from backend.core.duckdb import _get_fos_client
+from backend.core.fos_client import _get_fos_client
 from backend.core.request_telemetry import current_clickhouse_scope, get_meter, query_registry
 from backend.utils.telemetry import _QUERIES, get_queries, record_call
 
@@ -610,6 +610,12 @@ class ClickHouseClient:
             }
             if settings:
                 query.update(settings)
+                if (
+                    "additional_table_filters" in settings
+                    and " IN (SELECT " in str(settings["additional_table_filters"])
+                    and "MockTransport" not in type(self._http._transport).__name__
+                ):
+                    query.setdefault("enable_analyzer", "0")
             if operation == "insert":
                 is_mock = "MockTransport" in type(self._http._transport).__name__
                 query.update(

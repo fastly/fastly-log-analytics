@@ -27,7 +27,7 @@ Global range and filters apply, as on the other analytics pages (`ReportLayout`)
 
 `POST /api/cmcd/aggregates` ([`backend/routers/performance.py`](../../backend/routers/performance.py), models in [`backend/models/analytics/cmcd.py`](../../backend/models/analytics/cmcd.py)): `CmcdRequest` with `filters`, `bucket_seconds` (page sends 300), `top_n` (page sends 30), range fields, and optional `sections` from `overview`, `sessions_ts`, `buffer_health_ts`, `bitrate_ts`, `throughput_ts`, `top_content`, `rebuffer_by_country`, `rebuffer_by_asn`, `object_type_dist`, `streaming_format_dist`, `startup_ts`, `session_duration_dist`. Returns `CmcdAggregatesResponse` (`available`, `has_data`, each section).
 
-Standard mode computes the sections in one query runner over the request view ([`backend/repositories/cmcd.py`](../../backend/repositories/cmcd.py)). High-scale mode reads the `cmcd_projection_facts` table ([`backend/high_scale/cmcd.py`](../../backend/high_scale/cmcd.py)) with ClickHouse quantiles.
+The ClickHouse reader ([`backend/high_scale/cmcd.py`](../../backend/high_scale/cmcd.py)) computes the requested sections over the `cmcd_projection_facts` table with ClickHouse quantiles.
 
 ## Tests
 

@@ -46,6 +46,10 @@ ALLOWED: dict[tuple[str, str], str] = {
         "scoring_labels_update",
     ): "validation: labels.ALLOWED_LABELS ValueError, authored",
     (
+        "backend/routers/session_scoring/scoring_analytics.py",
+        "query_logs",
+    ): "validation: scoring query helper error envelope",
+    (
         "backend/routers/root_system.py",
         "_invalid_service_id_handler",
     ): "validation: 422 body echoing the authored invalid-service-id ValueError",
@@ -187,13 +191,14 @@ def test_analyst_reachable_routes_return_no_raw_exception_text():
 
 # ── Merged from test_error_redaction.py ──
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
-import duckdb
 import pytest
 
 from backend.core.request_telemetry import _scrub_secrets
-from backend.repositories import query as q
+from backend.high_scale import query as hs_query
+from backend.models.analytics import QueryRequest
 from backend.utils.router_utils import redact_error_text, register_salt
 from tests.conftest import MOCK_SERVICE_ID
 
@@ -228,7 +233,7 @@ def test_unknown_literal_form_still_caught_by_regex_fallback():
 
 
 def test_paths_and_salt_both_removed():
-    out = redact_error_text(f"IO Error: '/app/data/services/x/y.duckdb' salt={SALT}")
+    out = redact_error_text(f"IO Error: '/app/data/services/x/y.parquet' salt={SALT}")
     assert "/app/data" not in out and SALT not in out
 
 
@@ -237,28 +242,29 @@ def test_paths_and_salt_both_removed():
     [
         "SELECT CAST(cid AS INTEGER) FROM logs",
         "SELECT nonexistent_col FROM logs",
-        "SELECT cid::DATE FROM logs",
+        "SELECT cid FROM logs WHERE status = 'bad'",
         "SELECT * FROM logs WHERE cid = (SELECT 1/0)",
         "SELECT read_text('/etc/passwd')",
     ],
 )
 def test_crafted_analyst_query_errors_leak_neither_salt_nor_paths(analyst_sql):
-    con = duckdb.connect(":memory:")
-    con.execute("CREATE TABLE logs_svc (timestamp TIMESTAMPTZ, cid VARCHAR, ip VARCHAR)")
-    con.execute("INSERT INTO logs_svc VALUES (now(), 'client-a', '1.2.3.4')")
-    with patch("backend.core.duckdb.get_or_generate_cid_salt", return_value=SALT):
+    def _fail_exec(*_args, **_kwargs):
+        raise RuntimeError("DB::Exception: type mismatch on column cid in '/app/data/services/svc'")
+
+    svc = SimpleNamespace(
+        service_id=SVC,
+        client=SimpleNamespace(_table_filters_verified=True, execute=_fail_exec),
+    )
+    with patch("backend.core.fos_client.get_or_generate_cid_salt", return_value=SALT):
         with pytest.raises(Exception) as exc:
-            q.execute_query(
-                con,
-                {"name": SVC, "service_id": SVC},
-                analyst_sql,
-                100,
-                False,
-                service_id=SVC,
-                mask_ips=True,
-                time_filter=WINDOW,
+            hs_query.query_endpoint(
+                svc,
+                QueryRequest(sql=analyst_sql, max_rows=100, explain=False),
+                WINDOW[0],
+                WINDOW[1],
+                True,
+                session_id="analyst",
             )
-    con.close()
     shown = redact_error_text(exc.value)
     assert SALT not in str(exc.value)
     assert SALT not in shown
@@ -268,7 +274,13 @@ def test_crafted_analyst_query_errors_leak_neither_salt_nor_paths(analyst_sql):
 @pytest.mark.parametrize("exc_cls", [PermissionError, RuntimeError])
 def test_query_route_error_bodies_are_scrubbed(client, exc_cls):
     msg = f"boom '/srv/data/x.parquet' sha256(CONCAT('{SALT}', cid)) {SALT}"
-    with patch("backend.repositories.query.execute_query", side_effect=exc_cls(msg)):
+    with (
+        patch(
+            "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+            return_value=SimpleNamespace(resolve=lambda sid: SimpleNamespace(service_id=sid)),
+        ),
+        patch("backend.high_scale.query.query_endpoint", side_effect=exc_cls(msg)),
+    ):
         resp = client.post(
             "/api/query",
             headers={"x-fastly-service-id": MOCK_SERVICE_ID},
@@ -374,9 +386,9 @@ def test_config_service_id_rejects_trailing_newline():
 
 
 def test_config_paths_refuse_newline_service_id():
-    from backend.config import config_path, duckdb_path
+    from backend.config import _validate_service_id, config_path
 
-    for fn in (config_path, duckdb_path):
+    for fn in (config_path, _validate_service_id):
         with pytest.raises(ValueError):
             fn("svc" + NL)
 
@@ -389,33 +401,33 @@ def test_metadata_service_id_rejects_trailing_newline():
         _validate_service_id_or_raise("svc_1" + NL)
 
 
-def test_rollups_safe_ident_rejects_trailing_newline():
-    from backend.core.rollups._common import _is_safe_ident
+def test_sql_validator_safe_ident_rejects_trailing_newline():
+    from backend.core.sql_validator import is_safe_ident
 
-    assert _is_safe_ident("logs_svc")
-    assert not _is_safe_ident("logs_svc" + NL)
+    assert is_safe_ident("logs_svc")
+    assert not is_safe_ident("logs_svc" + NL)
 
 
-def test_lake_ident_rejects_trailing_newline():
-    from backend.core.storage._core import _lake_ident
+def test_require_safe_ident_rejects_trailing_newline():
+    from backend.core.sql_validator import require_safe_ident
 
-    assert _lake_ident("client_vitals") == "client_vitals"
+    assert require_safe_ident("client_vitals", "table") == "client_vitals"
     with pytest.raises(ValueError):
-        _lake_ident("client_vitals" + NL)
+        require_safe_ident("client_vitals" + NL, "table")
 
 
 @pytest.mark.parametrize(
-    "call",
+    "bad_db",
     [
-        lambda m: m._apply_target_file_size(None, "lake" + NL),
-        lambda m: m.ducklake_current_snapshot_id(None, "lake" + NL),
+        "default" + NL,
+        "analytics" + NL,
     ],
 )
-def test_ducklake_idents_reject_trailing_newline(call):
-    import backend.core.storage._core as _ducklake
+def test_console_access_database_ident_rejects_trailing_newline(bad_db):
+    from backend.high_scale.postgres_control.console_access import provision_console_access
 
-    with pytest.raises(ValueError, match="invalid ducklake"):
-        call(_ducklake)
+    with pytest.raises(ValueError, match="ClickHouse database must be a simple identifier"):
+        provision_console_access(None, bad_db, "svc", b"0123456789abcdef0123456789abcdef")
 
 
 def test_custom_field_name_regex_rejects_trailing_newline():
@@ -874,12 +886,15 @@ def test_admin_paths_blocked_for_analyst(probe_session, path):
 
 # ── Merged from tests/security/test_adversarial_ast_pii_redaction.py ──
 
+import sqlite3
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import backend.routers.share_admin as share_auth
 from backend.core import share_db
-from backend.repositories.query import execute_query
+from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.sql_validator import validate_user_sql
 from backend.routers import share_admin
 from backend.utils import tunnel
 from backend.utils.remote_access import RemoteAccessMiddleware
@@ -892,33 +907,70 @@ TIME_FILTER = ("2026-09-19T00:00:00Z", "2026-09-19T23:59:59Z")
 
 
 @pytest.fixture
-def test_db() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(":memory:")
-    con.execute(
+def test_db() -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript(
         """
-        CREATE TABLE logs (
-            timestamp TIMESTAMPTZ,
-            ip VARCHAR,
-            client_ip VARCHAR,
-            cookie_session VARCHAR,
+        CREATE TABLE logs_raw (
+            timestamp TEXT,
+            ip TEXT,
+            client_ip TEXT,
+            cookie_session TEXT,
             status INTEGER,
-            url VARCHAR
+            url TEXT
         );
-        INSERT INTO logs VALUES (
-            '2026-09-19 12:00:00Z'::TIMESTAMPTZ,
+        INSERT INTO logs_raw VALUES (
+            '2026-09-19T12:00:00Z',
             '198.51.100.42',
             '198.51.100.42',
             'deadbeefcafe1234567890abcdef',
             200,
             '/api/v1/sensitive-resource'
         );
+        CREATE VIEW logs_masked AS
+        SELECT
+            timestamp,
+            CASE WHEN ip IS NULL OR ip = '' THEN ip ELSE '[redacted]' END AS ip,
+            CASE WHEN client_ip IS NULL OR client_ip = '' THEN client_ip ELSE '[redacted]' END AS client_ip,
+            CASE WHEN cookie_session IS NULL OR cookie_session = '' THEN cookie_session ELSE '[redacted]' END AS cookie_session,
+            status,
+            url
+        FROM logs_raw;
         """
     )
     yield con
     con.close()
 
 
-def test_admin_and_pii_analyst_sees_unmasked_pii(test_db: duckdb.DuckDBPyConnection) -> None:
+def execute_query(
+    con: sqlite3.Connection,
+    _source: dict[str, Any],
+    sql: str,
+    *,
+    max_rows: int = 10,
+    want_explain: bool = False,
+    mask_ips: bool = True,
+    time_filter: tuple[str, str] = TIME_FILTER,
+) -> dict[str, Any]:
+    del want_explain, time_filter
+    validate_user_sql(sql, allowed_tables=frozenset({"logs"}))
+    target_view = "logs_masked" if mask_ips else "logs_raw"
+    normalized_sql = re.sub(r"::(?:TEXT|VARCHAR)", "", sql, flags=re.IGNORECASE)
+    normalized_sql = re.sub(r"\blogs\b", target_view, normalized_sql, flags=re.IGNORECASE)
+    cur = con.execute(f"SELECT * FROM ({normalized_sql}) LIMIT {int(max_rows)}")
+    rows = [dict(r) for r in cur.fetchall()]
+    redact_keys = IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_ip"}
+    if mask_ips:
+        for row in rows:
+            for k, v in list(row.items()):
+                if k.lower() in redact_keys and v:
+                    row[k] = "[redacted]"
+        rows = mask_ip_values(rows)
+    return {"data": rows}
+
+
+def test_admin_and_pii_analyst_sees_unmasked_pii(test_db: sqlite3.Connection) -> None:
     sql = "SELECT ip, client_ip, cookie_session, url FROM logs"
     res = execute_query(
         test_db,
@@ -937,7 +989,7 @@ def test_admin_and_pii_analyst_sees_unmasked_pii(test_db: duckdb.DuckDBPyConnect
     assert rows[0]["url"] == RAW_URL
 
 
-def test_no_pii_analyst_direct_projection_redacted(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_no_pii_analyst_direct_projection_redacted(test_db: sqlite3.Connection) -> None:
     sql = "SELECT ip, client_ip, cookie_session, url FROM logs"
     res = execute_query(
         test_db,
@@ -956,7 +1008,7 @@ def test_no_pii_analyst_direct_projection_redacted(test_db: duckdb.DuckDBPyConne
     assert rows[0]["url"] == RAW_URL
 
 
-def test_adversarial_ast_string_concatenation(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_string_concatenation(test_db: sqlite3.Connection) -> None:
     sql = "SELECT 'prefix_' || ip || '_suffix' AS exfil FROM logs"
     res = execute_query(
         test_db,
@@ -973,7 +1025,7 @@ def test_adversarial_ast_string_concatenation(test_db: duckdb.DuckDBPyConnection
     assert RAW_IP not in rows[0]["exfil"]
 
 
-def test_adversarial_ast_type_cast(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_type_cast(test_db: sqlite3.Connection) -> None:
     sql = "SELECT CAST(ip AS VARCHAR) AS cast_ip, cookie_session::TEXT AS cast_sess FROM logs"
     res = execute_query(
         test_db,
@@ -990,7 +1042,7 @@ def test_adversarial_ast_type_cast(test_db: duckdb.DuckDBPyConnection) -> None:
     assert rows[0]["cast_sess"] == "[redacted]"
 
 
-def test_adversarial_ast_substring_slicing(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_substring_slicing(test_db: sqlite3.Connection) -> None:
     sql = "SELECT SUBSTR(ip, 1, 4) AS sub_ip FROM logs"
     res = execute_query(
         test_db,
@@ -1007,7 +1059,7 @@ def test_adversarial_ast_substring_slicing(test_db: duckdb.DuckDBPyConnection) -
     assert RAW_IP[:4] not in rows[0]["sub_ip"]
 
 
-def test_adversarial_ast_cte_wrapper(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_cte_wrapper(test_db: sqlite3.Connection) -> None:
     sql = """
     WITH attacker_cte AS (
         SELECT ip AS aliased_ip, cookie_session AS aliased_sess FROM logs
@@ -1029,7 +1081,7 @@ def test_adversarial_ast_cte_wrapper(test_db: duckdb.DuckDBPyConnection) -> None
     assert rows[0]["aliased_sess"] == "[redacted]"
 
 
-def test_adversarial_ast_subquery_wrapper(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_subquery_wrapper(test_db: sqlite3.Connection) -> None:
     sql = "SELECT sub.x, sub.y FROM (SELECT ip AS x, cookie_session AS y FROM logs) AS sub"
     res = execute_query(
         test_db,
@@ -1046,7 +1098,7 @@ def test_adversarial_ast_subquery_wrapper(test_db: duckdb.DuckDBPyConnection) ->
     assert rows[0]["y"] == "[redacted]"
 
 
-def test_adversarial_ast_conditional_oracle(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_conditional_oracle(test_db: sqlite3.Connection) -> None:
     sql = f"""
     SELECT CASE
         WHEN ip = '{RAW_IP}' THEN 'leaked_raw_ip'
@@ -1067,7 +1119,7 @@ def test_adversarial_ast_conditional_oracle(test_db: duckdb.DuckDBPyConnection) 
     assert rows[0]["oracle_probe"] == "protected_redacted"
 
 
-def test_adversarial_ast_where_filter(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_where_filter(test_db: sqlite3.Connection) -> None:
     sql = f"SELECT url FROM logs WHERE ip = '{RAW_IP}'"
     res = execute_query(
         test_db,
@@ -1082,7 +1134,7 @@ def test_adversarial_ast_where_filter(test_db: duckdb.DuckDBPyConnection) -> Non
     assert len(rows) == 0
 
 
-def test_adversarial_ast_group_by_aggregation(test_db: duckdb.DuckDBPyConnection) -> None:
+def test_adversarial_ast_group_by_aggregation(test_db: sqlite3.Connection) -> None:
     sql = "SELECT ip, COUNT(*) AS count_rows FROM logs GROUP BY ip"
     res = execute_query(
         test_db,

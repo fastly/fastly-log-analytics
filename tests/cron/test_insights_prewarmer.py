@@ -32,8 +32,14 @@ def stub_source(monkeypatch) -> dict:
     insights request so existing active-path tests run through the prewarm body."""
     src = {"name": "fos-test-svc", "service_id": "svc-1", "bucket": "fos-test-bkt"}
     monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service",
+        "backend.core.fos_client.get_source_for_service",
         lambda sid: src,
+    )
+    hs_reg = MagicMock()
+    hs_reg.resolve.return_value = MagicMock(service_id="svc-1")
+    monkeypatch.setattr(
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        lambda: hs_reg,
     )
     if hasattr(insights_prewarmer, "record_insights_request"):
         insights_prewarmer.record_insights_request("svc-1")
@@ -42,21 +48,18 @@ def stub_source(monkeypatch) -> dict:
 
 @pytest.fixture
 def stub_cron_run(monkeypatch) -> dict[str, MagicMock]:
-    """Mock the cron-run + connection lifecycle so the inner body runs.
-
-    Also stubs the analyst-side dependencies to a deterministic *inactive*
-    default (sharing off, no invites) so the admin-only path is exercised
-    unless a test explicitly opts into analyst shapes, and pins the service
-    status snapshot to "no extents" so the adaptive picker falls back to the
-    static (1h, 168h) pair unless a test provides extents.
-    """
+    """Mock the cron-run lifecycle so the inner body runs."""
     start = MagicMock(return_value=99)
     log = MagicMock()
-    con = MagicMock()
-    get_conn = MagicMock(return_value=con)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log)
-    monkeypatch.setattr("backend.core.duckdb.get_connection", get_conn)
+    hs_service = MagicMock(service_id="svc-1")
+    hs_reg = MagicMock()
+    hs_reg.resolve.return_value = hs_service
+    monkeypatch.setattr(
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        lambda: hs_reg,
+    )
+    monkeypatch.setattr("backend.core.fos_client.start_cron_run", start)
+    monkeypatch.setattr("backend.core.fos_client.log_cron_run", log)
     monkeypatch.setattr("backend.cron.scheduler._display_label", lambda src, sid: src.get("name", sid))
     get_status = MagicMock(return_value={})
     monkeypatch.setattr("backend.config.get_status", get_status)
@@ -68,8 +71,8 @@ def stub_cron_run(monkeypatch) -> dict[str, MagicMock]:
     return {
         "start": start,
         "log": log,
-        "con": con,
-        "get_conn": get_conn,
+        "hs_service": hs_service,
+        "hs_reg": hs_reg,
         "mgr": mgr,
         "invites": invites,
         "get_status": get_status,
@@ -80,10 +83,10 @@ def stub_cron_run(monkeypatch) -> dict[str, MagicMock]:
 
 
 def test_returns_when_source_missing(monkeypatch):
-    """No source = no work. Must not raise, must not call get_insights."""
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
+    """No source = no work. Must not raise, must not call insights_endpoint."""
+    monkeypatch.setattr("backend.core.fos_client.get_source_for_service", lambda sid: None)
     get_insights_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("missing-svc")
 
@@ -91,17 +94,17 @@ def test_returns_when_source_missing(monkeypatch):
 
 
 def test_skips_when_start_cron_run_raises(monkeypatch, stub_source, caplog):
-    """``start_cron_run`` raises RuntimeError when another instance of this
+    """``start_cron_run`` raises CronLeaseHeldError when another instance of this
     cron is in-flight. The prewarmer should log a skip and return without
-    calling get_insights."""
+    calling insights_endpoint."""
     monkeypatch.setattr(
-        "backend.core.duckdb.start_cron_run",
+        "backend.core.fos_client.start_cron_run",
         MagicMock(side_effect=CronLeaseHeldError("already running")),
     )
     get_insights_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
     log_cron = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
+    monkeypatch.setattr("backend.core.fos_client.log_cron_run", log_cron)
 
     with caplog.at_level(logging.INFO, logger="backend.scheduler"):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
@@ -118,31 +121,23 @@ def test_success_admin_only_logs_and_records(monkeypatch, stub_source, stub_cron
     """Sharing inactive → only the admin/unclamped default is warmed, with
     force_refresh so every tick rewrites the entry (resets the TTL)."""
     get_insights_mock = MagicMock(return_value={"results": [{"foo": 1}]})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
-    # Called once (admin) with window/baseline at the static default (the
-    # fixture pins a no-extents status snapshot) and force_refresh=True; no
-    # clamp (admin/unclamped key).
     get_insights_mock.assert_called_once()
     args, kwargs = get_insights_mock.call_args
-    assert args[0] is stub_cron_run["con"]
-    assert args[1] is stub_source
-    assert kwargs["window_hours"] == 24.0
-    assert kwargs["baseline_hours"] == 168.0
+    assert args[0] is stub_cron_run["hs_service"]
+    assert args[1].window_size_hrs == 24.0
+    assert args[1].baseline_hours == 168.0
     assert kwargs["force_refresh"] is True
     assert kwargs.get("clamp_cache_key") is None
 
-    # log_cron_run records success + the admin-only summary.
     stub_cron_run["log"].assert_called_once()
     log_args, log_kwargs = stub_cron_run["log"].call_args
     assert log_args[3] == "success"
     assert "admin + 0 analyst" in log_kwargs["summary"]
     assert log_kwargs["run_id"] == 99
-
-    # Connection closed in finally.
-    stub_cron_run["con"].close.assert_called_once()
 
 
 def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub_cron_run):
@@ -171,7 +166,7 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
         },
     ]
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
@@ -181,12 +176,11 @@ def test_warms_analyst_shapes_when_sharing_active(monkeypatch, stub_source, stub
     assert len(analyst_calls) == 2
     for c in analyst_calls:
         assert c.kwargs["force_refresh"] is True
-        assert c.kwargs["max_workers"] == 1
-        assert c.kwargs["clamp_start"] is not None and c.kwargs["clamp_end"] is not None
+        assert c.args[2] is not None and c.args[3] is not None
     # The two shapes warm distinct stable keys + the masking split is preserved.
     keys = {c.kwargs["clamp_cache_key"] for c in analyst_calls}
     assert keys == {"||24", "||168"}
-    masks = {c.kwargs["mask_ips"] for c in analyst_calls}
+    masks = {c.args[4] for c in analyst_calls}
     assert masks == {True, False}
 
     log_args, log_kwargs = stub_cron_run["log"].call_args
@@ -202,16 +196,15 @@ def test_adaptive_shape_from_extents(monkeypatch, stub_source, stub_cron_run):
     earliest = (datetime.now(UTC) - timedelta(days=53)).isoformat()
     stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     stub_cron_run["get_status"].assert_called_once_with(stub_source["name"])
     get_insights_mock.assert_called_once()
     primary_call = get_insights_mock.call_args_list[0]
-    assert primary_call.kwargs["window_hours"] == 24.0
-    assert primary_call.kwargs["baseline_hours"] == 168.0
-    assert primary_call.kwargs["max_workers"] == 1
+    assert primary_call.args[1].window_size_hrs == 24.0
+    assert primary_call.args[1].baseline_hours == 168.0
     summary = stub_cron_run["log"].call_args.kwargs["summary"]
     assert "24h/168h" in summary
     assert "month option" not in summary
@@ -224,14 +217,14 @@ def test_adaptive_shape_without_month_preload(monkeypatch, stub_source, stub_cro
     earliest = (datetime.now(UTC) - timedelta(days=10)).isoformat()
     stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     assert get_insights_mock.call_count == 1
     call = get_insights_mock.call_args
-    assert call.kwargs["window_hours"] == 24.0
-    assert call.kwargs["baseline_hours"] == 168.0
+    assert call.args[1].window_size_hrs == 24.0
+    assert call.args[1].baseline_hours == 168.0
 
     summary = stub_cron_run["log"].call_args.kwargs["summary"]
     assert "24h/168h" in summary
@@ -259,16 +252,16 @@ def test_adaptive_shape_applies_to_analyst_warms(monkeypatch, stub_source, stub_
         },
     ]
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     assert get_insights_mock.call_count == 2  # admin + 1 analyst shape
     analyst_call = next(c for c in get_insights_mock.call_args_list if c.kwargs.get("clamp_cache_key") is not None)
-    assert analyst_call.kwargs["window_hours"] == 24.0
-    assert analyst_call.kwargs["baseline_hours"] == 168.0
+    assert analyst_call.args[1].window_size_hrs == 24.0
+    assert analyst_call.args[1].baseline_hours == 168.0
     assert analyst_call.kwargs["clamp_cache_key"] == "||24"
-    assert analyst_call.kwargs["mask_ips"] is True
+    assert analyst_call.args[4] is True
 
 
 def test_adaptive_shape_young_service(monkeypatch, stub_source, stub_cron_run):
@@ -279,12 +272,12 @@ def test_adaptive_shape_young_service(monkeypatch, stub_source, stub_cron_run):
     earliest = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
     stub_cron_run["get_status"].return_value = {"earliest_log_at": earliest}
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
-    kwargs = get_insights_mock.call_args.kwargs
-    assert (kwargs["window_hours"], kwargs["baseline_hours"]) == (1.0, 1.0)
+    req = get_insights_mock.call_args.args[1]
+    assert (req.window_size_hrs, req.baseline_hours) == (1.0, 1.0)
 
 
 def test_kill_switch_skips_analyst_shapes(monkeypatch, stub_source, stub_cron_run):
@@ -303,7 +296,7 @@ def test_kill_switch_skips_analyst_shapes(monkeypatch, stub_source, stub_cron_ru
         },
     ]
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
@@ -314,7 +307,7 @@ def test_kill_switch_skips_analyst_shapes(monkeypatch, stub_source, stub_cron_ru
 def test_success_logs_info_line(monkeypatch, stub_source, stub_cron_run, caplog):
     """The success path emits a structured INFO line on the scheduler logger."""
     monkeypatch.setattr(
-        "backend.repositories.insights.get_insights",
+        "backend.high_scale.insights.insights_endpoint",
         MagicMock(return_value={"_is_cached": False}),
     )
 
@@ -328,17 +321,12 @@ def test_success_logs_info_line(monkeypatch, stub_source, stub_cron_run, caplog)
 
 def test_display_label_falls_back_to_service_id(monkeypatch, stub_source, stub_cron_run, caplog):
     """When _display_label returns the service_id itself, no '(svc-id)' suffix."""
-    # The prewarmer binds _display_label at module import time, so we
-    # patch the prewarmer's own reference rather than the scheduler
-    # module. ``_display_label`` is the post-rename name (was
-    # ``_display_name``); tests that patch by
-    # name must use the current symbol.
     monkeypatch.setattr(
         "backend.cron.jobs.insights_prewarmer._display_label",
         lambda src, sid: sid,
     )
     monkeypatch.setattr(
-        "backend.repositories.insights.get_insights",
+        "backend.high_scale.insights.insights_endpoint",
         MagicMock(return_value={}),
     )
 
@@ -354,14 +342,13 @@ def test_display_label_falls_back_to_service_id(monkeypatch, stub_source, stub_c
 
 
 def test_get_insights_raises_records_error_no_rethrow(monkeypatch, stub_source, stub_cron_run, caplog):
-    """If get_insights blows up, the prewarmer must:
+    """If insights_endpoint blows up, the prewarmer must:
     - not rethrow,
     - record an 'error' cron run with the exception message,
-    - emit a WARNING log,
-    - still close the connection."""
+    - emit a WARNING log."""
     monkeypatch.setattr(
-        "backend.repositories.insights.get_insights",
-        MagicMock(side_effect=RuntimeError("duckdb exploded")),
+        "backend.high_scale.insights.insights_endpoint",
+        MagicMock(side_effect=RuntimeError("clickhouse exploded")),
     )
 
     with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
@@ -370,49 +357,11 @@ def test_get_insights_raises_records_error_no_rethrow(monkeypatch, stub_source, 
 
     log_args, log_kwargs = stub_cron_run["log"].call_args
     assert log_args[3] == "error"
-    assert "duckdb exploded" in log_kwargs["summary"]
-    assert log_kwargs["error_message"] == "duckdb exploded"
+    assert "clickhouse exploded" in log_kwargs["summary"]
+    assert log_kwargs["error_message"] == "clickhouse exploded"
     assert log_kwargs["run_id"] == 99
     # Warning line emitted.
-    assert any("duckdb exploded" in r.message for r in caplog.records)
-    # Connection still closed in finally.
-    stub_cron_run["con"].close.assert_called_once()
-
-
-def test_get_connection_raises_records_error(monkeypatch, stub_source, stub_cron_run):
-    """get_connection failure also funnels through the error branch.
-    Since ``con`` was never assigned, the finally block skips close()."""
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_connection",
-        MagicMock(side_effect=RuntimeError("pool empty")),
-    )
-    get_insights_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
-
-    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
-
-    get_insights_mock.assert_not_called()
-    log_args, log_kwargs = stub_cron_run["log"].call_args
-    assert log_args[3] == "error"
-    assert "pool empty" in log_kwargs["error_message"]
-
-
-def test_connection_close_failure_swallowed(monkeypatch, stub_source, stub_cron_run):
-    """A blow-up while closing the connection is suppressed so the cron
-    exits cleanly."""
-    monkeypatch.setattr(
-        "backend.repositories.insights.get_insights",
-        MagicMock(return_value={"_is_cached": False}),
-    )
-    stub_cron_run["con"].close.side_effect = RuntimeError("close failed")
-
-    # Must not raise.
-    insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
-
-    stub_cron_run["con"].close.assert_called_once()
-    # Success still recorded — the close error doesn't escape.
-    log_args, _ = stub_cron_run["log"].call_args
-    assert log_args[3] == "success"
+    assert any("clickhouse exploded" in r.message for r in caplog.records)
 
 
 # ── _active_analyst_shapes: filtering / dedup / cap ──────────────────────────
@@ -462,13 +411,13 @@ def test_active_analyst_shapes_caps(monkeypatch, caplog):
 
 
 def test_run_insights_prewarmer_defers_when_active_requests_present(monkeypatch):
-    """When active requests are executing on the dashboard, prewarmer defers to avoid DuckDB contention."""
+    """When active requests are executing on the dashboard, prewarmer defers."""
     src = {"name": "svc-1", "service_id": "svc-1"}
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.core.fos_client.get_source_for_service", lambda sid: src)
     monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, sid: True)
 
     started_runs = []
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: started_runs.append((s, t)))
+    monkeypatch.setattr("backend.core.fos_client.start_cron_run", lambda s, t: started_runs.append((s, t)))
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
     assert len(started_runs) == 0
@@ -477,22 +426,21 @@ def test_run_insights_prewarmer_defers_when_active_requests_present(monkeypatch)
 def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatch):
     """Prewarmer initializes progress, emits completion event, and finalizes duration in finally block."""
     src = {"name": "svc-1", "service_id": "svc-1"}
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
+    monkeypatch.setattr("backend.core.fos_client.get_source_for_service", lambda sid: src)
+    hs_reg = MagicMock()
+    hs_reg.resolve.return_value = MagicMock(service_id="svc-1")
+    monkeypatch.setattr(
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        lambda: hs_reg,
+    )
     if hasattr(insights_prewarmer, "record_insights_request"):
         insights_prewarmer.record_insights_request("svc-1")
     monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, sid: False)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: 99)
+    monkeypatch.setattr("backend.core.fos_client.start_cron_run", lambda s, t: 99)
     monkeypatch.setattr("backend.config.get_status", lambda name: {})
     monkeypatch.setattr("backend.utils.time_window.pick_insights_default", lambda h: (1, 168), raising=False)
-    try:
-        monkeypatch.setattr(
-            "backend.utils." + "insights_defaults.pick_insights_default", lambda h: (1, 168), raising=False
-        )
-    except ImportError:
-        pass
-    monkeypatch.setattr("backend.core.duckdb.get_connection", lambda **kwargs: MagicMock())
-    monkeypatch.setattr("backend.repositories.insights.get_insights", lambda *args, **kwargs: None)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.core.fos_client.log_cron_run", lambda *args, **kwargs: None)
     monkeypatch.setattr(insights_prewarmer, "_analyst_prewarm_enabled", lambda: False)
 
     prog_started = []
@@ -522,7 +470,6 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
 
 
 def test_prewarmer_source_never_changes_global_threads():
-    """threads is DuckDB-instance-global; changing it mid-flight deadlocked GCE (2026-10-07)."""
     import inspect
 
     from backend.cron.jobs import insights_prewarmer
@@ -532,19 +479,19 @@ def test_prewarmer_source_never_changes_global_threads():
 
 def test_error_row_is_single_with_exact_summary_and_no_log_output(monkeypatch, stub_source, stub_cron_run):
     monkeypatch.setattr(
-        "backend.repositories.insights.get_insights",
-        MagicMock(side_effect=RuntimeError("duckdb exploded")),
+        "backend.high_scale.insights.insights_endpoint",
+        MagicMock(side_effect=RuntimeError("clickhouse exploded")),
     )
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     stub_cron_run["log"].assert_called_once()
     _, log_kwargs = stub_cron_run["log"].call_args
-    assert log_kwargs["summary"] == "Prewarm failed: duckdb exploded"
+    assert log_kwargs["summary"] == "Prewarm failed: clickhouse exploded"
     assert log_kwargs["log_output"] is None
 
 
-# ── ingest yield: defer to in-flight log_discovery / rum_sync ────────────────
+# ── ingest yield: defer to in-flight log_discovery / rum_discovery ───────────
 
 
 def _mark_warm(service_id: str, age_s: float) -> None:
@@ -560,13 +507,13 @@ def _start_ingest(run_id: int, service_id: str, task: str) -> None:
     add_progress(run_id, {"type": "status", "message": "ingesting"})
 
 
-@pytest.mark.parametrize("ingest_task", ["log_discovery", "rum_sync"])
+@pytest.mark.parametrize("ingest_task", ["log_discovery", "rum_discovery"])
 def test_defers_tick_when_ingest_running_for_service(monkeypatch, stub_source, stub_cron_run, caplog, ingest_task):
     """Warm cache + in-flight ingest for this service → the tick yields: no
-    lease, no cron_runs row, no DuckDB connection, no recompute — the same
+    lease, no cron_runs row, no recompute — the same
     shape as the active-request gate's deferral."""
     get_insights_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
     _mark_warm("svc-1", 100)
     _start_ingest(501, "svc-1", ingest_task)
 
@@ -576,7 +523,6 @@ def test_defers_tick_when_ingest_running_for_service(monkeypatch, stub_source, s
     get_insights_mock.assert_not_called()
     stub_cron_run["start"].assert_not_called()
     stub_cron_run["log"].assert_not_called()
-    stub_cron_run["get_conn"].assert_not_called()
     deferrals = [r for r in caplog.records if "deferring" in r.message and ingest_task in r.message]
     assert len(deferrals) == 1
     assert deferrals[0].levelno == logging.INFO
@@ -588,12 +534,12 @@ def test_no_deferral_when_ingest_idle_or_other_service(monkeypatch, stub_source,
     from backend.cron.scheduler import end_progress
 
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
     _mark_warm("svc-1", 100)
     _start_ingest(601, "svc-other", "log_discovery")
-    _start_ingest(602, "svc-1", "rum_sync")
+    _start_ingest(602, "svc-1", "rum_discovery")
     end_progress(602)
-    _start_ingest(603, "svc-1", "local_compact")
+    _start_ingest(603, "svc-1", "metadata_cleanup")
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
@@ -610,7 +556,7 @@ def test_stale_progress_entry_does_not_defer(monkeypatch, stub_source, stub_cron
     import backend.cron.scheduler as cron_progress
 
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
     _mark_warm("svc-1", 100)
     _start_ingest(701, "svc-1", "log_discovery")
     cron_progress._last_update[701] = time.time() - cron_progress._STALE_AFTER_SECONDS - 1
@@ -625,7 +571,7 @@ def test_runs_anyway_when_cache_would_go_cold(monkeypatch, stub_source, stub_cro
     """Never warmed in this process, or last full warm at/past the TTL → the
     entry is cold, so the tick runs despite in-flight ingest (warmth bound)."""
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
     if age_s is not None:
         _mark_warm("svc-1", age_s)
     _start_ingest(801, "svc-1", "log_discovery")
@@ -648,9 +594,9 @@ def test_forced_run_does_not_stop_early_between_shapes(monkeypatch, stub_source,
         {"revoked": 0, "service_ids": ["svc-1"], "query_window_hours": 168},
     ]
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
     _mark_warm("svc-1", 400)
-    _start_ingest(851, "svc-1", "rum_sync")
+    _start_ingest(851, "svc-1", "rum_discovery")
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
@@ -674,7 +620,7 @@ def test_stops_early_between_shapes_when_ingest_starts(monkeypatch, stub_source,
             _start_ingest(901, "svc-1", "log_discovery")
         return {}
 
-    monkeypatch.setattr("backend.repositories.insights.get_insights", fake_get_insights)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", fake_get_insights)
     _mark_warm("svc-1", 100)
     before = insights_prewarmer._last_full_warm["svc-1"]
 
@@ -696,7 +642,7 @@ def test_full_warm_records_timestamp(monkeypatch, stub_source, stub_cron_run):
     """A complete tick stamps the per-service full-warm clock the bound reads."""
     import time
 
-    monkeypatch.setattr("backend.repositories.insights.get_insights", MagicMock(return_value={}))
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", MagicMock(return_value={}))
     t0 = time.monotonic()
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
@@ -706,8 +652,8 @@ def test_full_warm_records_timestamp(monkeypatch, stub_source, stub_cron_run):
 
 def test_failed_warm_does_not_record_timestamp(monkeypatch, stub_source, stub_cron_run):
     monkeypatch.setattr(
-        "backend.repositories.insights.get_insights",
-        MagicMock(side_effect=RuntimeError("duckdb exploded")),
+        "backend.high_scale.insights.insights_endpoint",
+        MagicMock(side_effect=RuntimeError("clickhouse exploded")),
     )
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
@@ -720,11 +666,10 @@ def test_failed_warm_does_not_record_timestamp(monkeypatch, stub_source, stub_cr
 
 def test_demand_driven_skips_when_never_requested(monkeypatch, stub_source, stub_cron_run, caplog):
     """When no /api/insights request has ever been recorded for the service,
-    the prewarmer skips without acquiring a lease, opening a DuckDB connection,
-    or calling get_insights."""
+    the prewarmer skips without acquiring a lease or calling insights_endpoint."""
     insights_prewarmer._last_insights_request.clear()
     get_insights_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     with caplog.at_level(logging.INFO, logger="backend.scheduler"):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
@@ -732,7 +677,6 @@ def test_demand_driven_skips_when_never_requested(monkeypatch, stub_source, stub
     get_insights_mock.assert_not_called()
     stub_cron_run["start"].assert_not_called()
     stub_cron_run["log"].assert_not_called()
-    stub_cron_run["get_conn"].assert_not_called()
     assert any("idle" in r.message.lower() or "no /api/insights" in r.message.lower() for r in caplog.records)
 
 
@@ -744,14 +688,13 @@ def test_demand_driven_skips_when_idle_past_default_30_minutes(monkeypatch, stub
     insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (31 * 60)
     insights_prewarmer._last_full_warm.clear()  # cache is cold
     get_insights_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     with caplog.at_level(logging.INFO, logger="backend.scheduler"):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
     get_insights_mock.assert_not_called()
     stub_cron_run["start"].assert_not_called()
-    stub_cron_run["get_conn"].assert_not_called()
 
 
 def test_demand_driven_warms_when_active_within_window(monkeypatch, stub_source, stub_cron_run):
@@ -761,7 +704,7 @@ def test_demand_driven_warms_when_active_within_window(monkeypatch, stub_source,
 
     insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (10 * 60)
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
@@ -787,7 +730,7 @@ def test_demand_driven_resumes_after_new_request_and_warms_analyst_shapes(monkey
         },
     ]
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     # Tick 1: idle (45m ago) -> skips completely
     insights_prewarmer._last_insights_request["svc-1"] = time.monotonic() - (45 * 60)
@@ -803,7 +746,7 @@ def test_demand_driven_resumes_after_new_request_and_warms_analyst_shapes(monkey
     analyst_calls = [c for c in get_insights_mock.call_args_list if c.kwargs.get("clamp_cache_key") is not None]
     assert len(analyst_calls) == 1
     assert analyst_calls[0].kwargs["clamp_cache_key"] == "||24"
-    assert analyst_calls[0].kwargs["mask_ips"] is True
+    assert analyst_calls[0].args[4] is True
 
 
 def test_demand_driven_idle_minutes_setting_and_env(monkeypatch, stub_source, stub_cron_run):
@@ -812,7 +755,7 @@ def test_demand_driven_idle_minutes_setting_and_env(monkeypatch, stub_source, st
     import time
 
     get_insights_mock = MagicMock(return_value={})
-    monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
+    monkeypatch.setattr("backend.high_scale.insights.insights_endpoint", get_insights_mock)
 
     # 1) Service config sets idle_minutes=10; request 12m ago -> skips
     stub_source["provisioning"] = {"cron_insights_prewarmer": {"idle_minutes": 10}}
@@ -851,17 +794,11 @@ async def test_insights_router_records_request_timestamp(monkeypatch):
     ctx.service_id = "svc-router-active"
     ctx.source = {"name": "svc-router-active", "service_id": "svc-router-active"}
     ctx.analyst_session = None
-    ctx.high_scale = None
-
-    async def _noop_prewarm():
-        return None
-
-    ctx.prewarm_con = _noop_prewarm
-    ctx.con = MagicMock()
+    ctx.high_scale = MagicMock()
 
     monkeypatch.setattr(
-        "backend.routers.insights.execute_with_stale_view_retry",
-        lambda con, src, fn: {"status": "success", "window_hours": 1.0, "baseline_hours": 168.0, "results": []},
+        "backend.routers.insights.hs_insights",
+        lambda *a, **kw: {"status": "success", "window_hours": 1.0, "baseline_hours": 168.0, "results": []},
     )
 
     req = InsightsRequest(window_size_hrs=1.0, baseline_hours=168.0)
@@ -914,8 +851,8 @@ def test_contract_dynamic_registration_gating_and_rescheduling():
     }
     with (
         patch("backend.config.list_configs", return_value=[cfg_default]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-default")),
-        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.core.fos_client.get_source_for_service", return_value=_fake_src("svc-ip-default")),
+        patch("backend.core.fos_client.is_configured", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -928,8 +865,8 @@ def test_contract_dynamic_registration_gating_and_rescheduling():
     cfg_disabled = _fake_cfg("svc-ip-disabled", ip_enabled=False)
     with (
         patch("backend.config.list_configs", return_value=[cfg_disabled]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-disabled")),
-        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.core.fos_client.get_source_for_service", return_value=_fake_src("svc-ip-disabled")),
+        patch("backend.core.fos_client.is_configured", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -945,8 +882,8 @@ def test_contract_dynamic_registration_gating_and_rescheduling():
     cfg_resched = _fake_cfg("svc-ip-resched", ip_enabled=True, ip_interval=180)
     with (
         patch("backend.config.list_configs", return_value=[cfg_resched]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-ip-resched")),
-        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.core.fos_client.get_source_for_service", return_value=_fake_src("svc-ip-resched")),
+        patch("backend.core.fos_client.is_configured", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -966,8 +903,8 @@ def test_contract_pod_safety_registers_on_apscheduler():
     cfg = _fake_cfg("svc-highscale-pod")
     with (
         patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-highscale-pod")),
-        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.core.fos_client.get_source_for_service", return_value=_fake_src("svc-highscale-pod")),
+        patch("backend.core.fos_client.is_configured", return_value=True),
         patch("backend.config.get_ngwaf_workspace_id", return_value=None),
         patch("backend.core.metadata.count_alerts", return_value=0),
     ):
@@ -990,8 +927,8 @@ def test_contract_local_safety_permitted_under_dev_no_crons():
     with (
         patch.dict("os.environ", {"FLA_DEV_NO_CRONS": "1", "FLA_DEV_LOCAL_CRONS": "1"}),
         patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-dev-safe")),
-        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.core.fos_client.get_source_for_service", return_value=_fake_src("svc-dev-safe")),
+        patch("backend.core.fos_client.is_configured", return_value=True),
         patch("backend.high_scale.ingest_controller.get_high_scale_service_registry") as mock_hs_reg,
     ):
         mock_hs_reg.return_value.resolve.return_value = None
@@ -1006,59 +943,70 @@ def test_contract_local_safety_permitted_under_dev_no_crons():
 
 
 def test_contract_cache_warming_and_reuse_across_subsequent_dashboard_queries(monkeypatch, stub_source, stub_cron_run):
-    """When the prewarmer runs, it warms the in-memory _insights_cache for the adaptive
-    selection. Subsequent calls to get_insights hit the cache without invoking queries.
+    """When the prewarmer runs, it warms the in-memory ClickHouse insights cache for the adaptive
+    selection. Subsequent calls to hs_insights_endpoint hit the cache without invoking ClickHouse queries.
     """
-    from datetime import UTC, datetime
     from unittest.mock import patch
 
-    from backend.repositories.insights.repository import (
-        _insights_cache,
-        _insights_cache_lock,
-        get_insights,
-    )
+    from backend.high_scale.ingest_controller import HighScaleService
+    from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
+    from backend.high_scale.insights.evaluator import _INSIGHTS_CACHE
+    from backend.models.analytics import InsightsRequest
 
-    source_name = stub_source["name"]
     window_hours, baseline_hours = 24.0, 168.0
-    cache_key = f"{source_name}:{window_hours}:{baseline_hours}::0"
+    mock_client = MagicMock()
+    hs_svc = MagicMock(spec=HighScaleService, service_id="svc-1", client=mock_client)
+    stub_cron_run["hs_reg"].return_value.resolve.return_value = hs_svc
 
-    with _insights_cache_lock:
-        _insights_cache.pop(cache_key, None)
+    cache_key = (
+        "svc-1",
+        id(mock_client),
+        window_hours,
+        baseline_hours,
+        "",
+        0,
+        "",
+        (),
+    )
+    _INSIGHTS_CACHE.clear()
 
     prewarmed_payload = {
-        "status": "success",
+        "insights": [],
+        "window_start": "2026-04-11T00:00:00Z",
+        "window_end": "2026-04-12T00:00:00Z",
+        "baseline_start": "2026-04-04T00:00:00Z",
+        "baseline_end": "2026-04-11T00:00:00Z",
+        "computed_at": "2026-04-12T00:00:00Z",
         "window_hours": window_hours,
         "baseline_hours": baseline_hours,
-        "results": [{"metric": "prewarmed_test", "value": 42}],
+        "window_total_requests": 0,
     }
 
-    def fake_get_insights(con, src, **kwargs):
-        if kwargs.get("force_refresh"):
-            with _insights_cache_lock:
-                _insights_cache[cache_key] = (datetime.now(UTC).isoformat(), prewarmed_payload)
+    def fake_hs_insights(svc, req, clamp_start, clamp_end, mask_ips=False, clamp_cache_key=None, force_refresh=False):
+        if force_refresh:
+            _INSIGHTS_CACHE[cache_key] = prewarmed_payload
         return prewarmed_payload
 
-    with patch("backend.repositories.insights.get_insights", side_effect=fake_get_insights):
+    with patch("backend.high_scale.insights.insights_endpoint", side_effect=fake_hs_insights):
         insights_prewarmer._run_insights_prewarmer.__wrapped__("svc-1")
 
-    with _insights_cache_lock:
-        cached_entry = _insights_cache.get(cache_key)
+    cached_entry = _INSIGHTS_CACHE.get(cache_key)
     assert cached_entry is not None, f"Expected cache key {cache_key} to be populated by prewarmer"
 
-    mock_con = MagicMock()
-    result = get_insights(
-        con=mock_con,
-        src=stub_source,
-        window_hours=window_hours,
-        baseline_hours=baseline_hours,
-        service_id="svc-1",
+    req = InsightsRequest(window_size_hrs=window_hours, baseline_hours=baseline_hours, force_refresh=False)
+    result = hs_insights_endpoint(
+        hs_svc,
+        req,
+        None,
+        None,
+        False,
+        clamp_cache_key=None,
         force_refresh=False,
     )
 
-    assert result.get("is_cached") is True
-    assert result["results"] == [{"metric": "prewarmed_test", "value": 42}]
-    mock_con.cursor.assert_not_called()
-    mock_con.execute.assert_not_called()
+    assert result.is_cached is True
+    assert result.window_hours == window_hours
+    mock_client.execute.assert_not_called()
 
 
 # ── Merged from tests/cron/test_alerts_evaluation_contract.py ──
@@ -1069,10 +1017,8 @@ def test_contract_cache_warming_and_reuse_across_subsequent_dashboard_queries(mo
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
-import duckdb
 import pytest
 
-import backend.repositories.assets as alert_repo
 from backend.cron.jobs import metadata as metadata_job
 from backend.cron.scheduler import Scheduler
 
@@ -1127,28 +1073,6 @@ def _make_alert(
     }
 
 
-@pytest.fixture
-def alert_db():
-    """In-memory DuckDB table simulating recent request logs."""
-    con = duckdb.connect(":memory:")
-    con.execute(
-        "CREATE TABLE logs_svc_alerts_contract ("
-        "timestamp TIMESTAMPTZ, status INTEGER, edge BOOLEAN, ottfb DOUBLE, "
-        "elapsed BIGINT, cache VARCHAR, resp_bytes BIGINT, req_bytes BIGINT, req_header_bytes BIGINT)"
-    )
-    now = datetime.now(UTC)
-    rows = []
-    # 50 successful requests within the last 2 minutes
-    for i in range(50):
-        rows.append((now - timedelta(seconds=i * 2), 200, True, 20.0, 50, "HIT", 1024, 200, 100))
-    # 5 error requests within the last minute
-    for i in range(5):
-        rows.append((now - timedelta(seconds=i * 5), 500, True, 60.0, 200, "MISS", 2048, 300, 100))
-    con.executemany("INSERT INTO logs_svc_alerts_contract VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
-    yield con
-    con.close()
-
-
 # ── 1. Kill-Switch Protection (FLA_DEV_NO_CRONS=1) ───────────────────────────
 
 
@@ -1159,7 +1083,7 @@ def test_contract_dev_mode_no_crons_skips_execution(monkeypatch):
     mock_get_alerts = MagicMock()
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", mock_src),
+        patch("backend.core.fos_client.get_source_for_service", mock_src),
         patch("backend.repositories.assets.get_alerts", mock_get_alerts),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
@@ -1257,9 +1181,9 @@ def test_contract_unregistration_when_all_alerts_deleted():
     with (
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.config.load_config", return_value=cfg),
-        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.core.fos_client.is_configured", return_value=True),
         patch("backend.cron.scheduler._service_has_alerts", return_value=False),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"service_id": service_id}),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"service_id": service_id}),
     ):
         s._sync_jobs()
 
@@ -1274,21 +1198,18 @@ def test_contract_politeness_deferral_when_active_requests_present():
     """When should_defer_cron returns True, evaluation defers without touching alerts or DB."""
     src = _sample_source()
     mock_get_alerts = MagicMock()
-    mock_get_conn = MagicMock()
     mock_log_cron = MagicMock()
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=True) as mock_defer,
         patch("backend.repositories.assets.get_alerts", mock_get_alerts),
-        patch("backend.core.duckdb.get_connection", mock_get_conn),
-        patch("backend.core.duckdb.log_cron_run", mock_log_cron),
+        patch("backend.core.fos_client.log_cron_run", mock_log_cron),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
     mock_defer.assert_called_once_with("alerts", "svc-alerts-contract")
     mock_get_alerts.assert_not_called()
-    mock_get_conn.assert_not_called()
     mock_log_cron.assert_not_called()
 
 
@@ -1296,20 +1217,18 @@ def test_contract_politeness_deferral_when_active_requests_present():
 
 
 def test_contract_early_exit_when_no_alerts_configured():
-    """When alerts list is empty, logs 'skipped' with summary and does not open DuckDB."""
+    """When alerts list is empty, logs 'skipped' with summary."""
     src = _sample_source()
     log_calls = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=[]),
-        patch("backend.core.duckdb.get_connection") as mock_conn,
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
-    mock_conn.assert_not_called()
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
     assert args[3] == "skipped"
@@ -1317,7 +1236,7 @@ def test_contract_early_exit_when_no_alerts_configured():
 
 
 def test_contract_early_exit_when_all_alerts_disabled():
-    """When all alerts are enabled=False, logs 'skipped' without opening DuckDB or evaluating."""
+    """When all alerts are enabled=False, logs 'skipped' without evaluating."""
     src = _sample_source()
     alerts = [
         _make_alert("svc-alerts-contract", alert_id="a1", enabled=False),
@@ -1326,16 +1245,14 @@ def test_contract_early_exit_when_all_alerts_disabled():
     log_calls = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection") as mock_conn,
         patch("backend.repositories.assets.evaluate_alert") as mock_eval,
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
-    mock_conn.assert_not_called()
     mock_eval.assert_not_called()
     assert len(log_calls) == 1
     args, kwargs = log_calls[0]
@@ -1343,11 +1260,13 @@ def test_contract_early_exit_when_all_alerts_disabled():
     assert kwargs.get("summary") == "No alerts configured"
 
 
-# ── 5. DuckDB Metrics Evaluation, Lookback Window & Query Timing ──────────────
+# ── 5. ClickHouse Metrics Evaluation & Lookback Window ───────────────────────
 
 
-def test_contract_duckdb_metrics_evaluation_and_query_attribution(alert_db):
-    """Evaluates metrics against DuckDB with window_min and instruments query via track_query."""
+def test_contract_duckdb_metrics_evaluation_and_query_attribution():
+    """Evaluates metrics against ClickHouse request_facts with window_min."""
+    from backend.routers.alerts import _evaluate_alert
+
     src = _sample_source("svc_alerts_contract")
     alert = _make_alert(
         "svc_alerts_contract",
@@ -1357,21 +1276,21 @@ def test_contract_duckdb_metrics_evaluation_and_query_attribution(alert_db):
         webhook_url="https://hooks.example.com/alerts",
     )
 
-    tracked_queries = []
-    from backend.utils import telemetry
+    now = datetime.now(UTC)
+    mock_ch = MagicMock()
+    mock_ch.execute.side_effect = [
+        [{"max_ts": now, "cnt": 55}],
+        [{"val": 5.0, "req_count": 55}],
+    ]
 
-    orig_track_query = telemetry.track_query
-
-    def recording_track_query(con, sql, params, category="query"):
-        tracked_queries.append((sql, category))
-        return orig_track_query(con, sql, params, category)
-
-    with patch("backend.repositories.assets.track_query", side_effect=recording_track_query):
-        fired, webhook_url, payload, max_ts = alert_repo.evaluate_alert(
-            alert_db, src, alert, display_name="Test Service", service_id="svc_alerts_contract"
+    with (
+        patch("backend.routers.alerts._resolve_ch_client", return_value=mock_ch),
+        patch("backend.routers.alerts.visible_publication_fence_sql", return_value="1=1"),
+    ):
+        fired, webhook_url, payload, max_ts = _evaluate_alert(
+            "svc_alerts_contract", src, alert, display_name="Test Service"
         )
 
-    # 5 errors > threshold of 2.0 -> fired
     assert fired is True
     assert max_ts is not None
     assert payload is not None
@@ -1380,25 +1299,24 @@ def test_contract_duckdb_metrics_evaluation_and_query_attribution(alert_db):
     assert "*Metric:* 5xx is 5.00 (Threshold: > 2.0)" in payload["text"]
     assert "*Service:* Test Service" in payload["text"]
 
-    # Confirm track_query attribution was category "alerts"
-    assert any(cat == "alerts" for _, cat in tracked_queries)
-
 
 def test_contract_skips_evaluation_if_logs_are_stale():
-    """If MAX(timestamp) is older than 30 minutes, evaluate_alert returns not fired."""
-    con = duckdb.connect(":memory:")
-    con.execute("CREATE TABLE logs_stale_svc (timestamp TIMESTAMPTZ, status INTEGER)")
+    """If MAX(event_timestamp) is older than 30 minutes, _evaluate_alert returns not fired."""
+    from backend.routers.alerts import _evaluate_alert
+
     stale_ts = datetime.now(UTC) - timedelta(minutes=45)
-    con.execute("INSERT INTO logs_stale_svc VALUES (?, 500)", (stale_ts,))
+    mock_ch = MagicMock()
+    mock_ch.execute.return_value = [{"max_ts": stale_ts, "cnt": 10}]
 
     src = {"name": "stale_svc", "service_id": "stale_svc"}
     alert = _make_alert("stale_svc", metric="5xx", threshold=0.0)
 
-    try:
-        fired, _, _, _ = alert_repo.evaluate_alert(con, src, alert)
+    with (
+        patch("backend.routers.alerts._resolve_ch_client", return_value=mock_ch),
+        patch("backend.routers.alerts.visible_publication_fence_sql", return_value="1=1"),
+    ):
+        fired, _, _, _ = _evaluate_alert("stale_svc", src, alert)
         assert fired is False
-    finally:
-        con.close()
 
 
 def test_contract_resilience_per_alert_eval_failure_continues():
@@ -1416,14 +1334,12 @@ def test_contract_resilience_per_alert_eval_failure_continues():
             raise RuntimeError("Corrupt SQL fragment in custom metric")
         return (True, None, None, "2026-01-01T00:00:00Z")
 
-    fake_con = MagicMock()
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=101),
-        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.core.fos_client.start_cron_run", return_value=101),
+        patch("backend.core.fos_client.log_cron_run"),
         patch("backend.repositories.assets.evaluate_alert", side_effect=fake_eval),
         patch("backend.repositories.assets.update_last_triggered"),
         patch("backend.core.metadata.base.export_admin_state"),
@@ -1435,8 +1351,6 @@ def test_contract_resilience_per_alert_eval_failure_continues():
 
     # Both alerts were attempted
     assert eval_order == ["broken-1", "healthy-2"]
-    # Connection closed in finally
-    fake_con.close.assert_called()
 
 
 # ── 6. Two-Phase Execution (Debouncing Before Dispatch) ────────────────────────
@@ -1448,13 +1362,7 @@ def test_contract_two_phase_execution_timestamps_and_state_export_before_webhook
     alerts = [
         _make_alert("svc-alerts-contract", alert_id="a1", webhook_url="https://webhook.example/hook"),
     ]
-    fake_con = MagicMock()
     execution_timeline: list[str] = []
-
-    def mock_close():
-        execution_timeline.append("duckdb_closed")
-
-    fake_con.close.side_effect = mock_close
 
     def mock_update(sid, aid, ts):
         execution_timeline.append(f"update_timestamp:{aid}")
@@ -1467,12 +1375,11 @@ def test_contract_two_phase_execution_timestamps_and_state_export_before_webhook
         return MagicMock(status_code=200)
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=102),
-        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.core.fos_client.start_cron_run", return_value=102),
+        patch("backend.core.fos_client.log_cron_run"),
         patch(
             "backend.repositories.assets.evaluate_alert",
             return_value=(True, "https://webhook.example/hook", {"test": "payload"}, "2026-01-01T00:00:00Z"),
@@ -1486,13 +1393,7 @@ def test_contract_two_phase_execution_timestamps_and_state_export_before_webhook
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
-    # Strict sequence:
-    # 1. duckdb_closed
-    # 2. update_timestamp:a1
-    # 3. export_admin_state:svc-alerts-contract
-    # 4. http_post
     assert execution_timeline == [
-        "duckdb_closed",
         "update_timestamp:a1",
         "export_admin_state:svc-alerts-contract",
         "http_post",
@@ -1521,7 +1422,6 @@ def test_contract_notification_dispatch_channel_payloads_and_timeouts():
             channels=channels,
         ),
     ]
-    fake_con = MagicMock()
     captured_posts: list[dict] = []
 
     def fake_post(url, **kwargs):
@@ -1533,12 +1433,11 @@ def test_contract_notification_dispatch_channel_payloads_and_timeouts():
     payload = {"alert_name": "Latency High", "metric": "latency_p95"}
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=103),
-        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.core.fos_client.start_cron_run", return_value=103),
+        patch("backend.core.fos_client.log_cron_run"),
         patch(
             "backend.repositories.assets.evaluate_alert",
             return_value=(True, "https://legacy.webhook.example/alert", payload, "2026-01-01T00:00:00Z"),
@@ -1597,7 +1496,6 @@ def test_contract_notification_failure_resilience_and_collection():
             channels=channels,
         ),
     ]
-    fake_con = MagicMock()
     attempted_urls: list[str] = []
 
     def mock_post(url, **kwargs):
@@ -1611,12 +1509,11 @@ def test_contract_notification_failure_resilience_and_collection():
     log_calls = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=104),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.start_cron_run", return_value=104),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch(
             "backend.repositories.assets.evaluate_alert",
             return_value=(True, "https://broken-legacy.example", {"test": 1}, "2026-01-01T00:00:00Z"),
@@ -1655,7 +1552,6 @@ def test_contract_status_warning_when_alert_triggers():
         _make_alert("svc-alerts-contract", alert_id="a1", name="Alert 1"),
         _make_alert("svc-alerts-contract", alert_id="a2", name="Alert 2"),
     ]
-    fake_con = MagicMock()
     log_calls = []
 
     def mock_eval(con, s, alert, **kwargs):
@@ -1664,12 +1560,11 @@ def test_contract_status_warning_when_alert_triggers():
         return (False, None, None, None)
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=105),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.start_cron_run", return_value=105),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch("backend.repositories.assets.evaluate_alert", side_effect=mock_eval),
         patch("backend.repositories.assets.update_last_triggered"),
         patch("backend.core.metadata.base.export_admin_state"),
@@ -1693,16 +1588,14 @@ def test_contract_status_success_when_no_alerts_trigger():
     alerts = [
         _make_alert("svc-alerts-contract", alert_id="a1", name="Alert 1"),
     ]
-    fake_con = MagicMock()
     log_calls = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=106),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.start_cron_run", return_value=106),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch(
             "backend.repositories.assets.evaluate_alert",
             return_value=(False, None, None, None),
@@ -1725,16 +1618,14 @@ def test_contract_status_error_on_unhandled_exception():
     """When an unexpected exception occurs during Phase 2, status='error' with error_message."""
     src = _sample_source()
     alerts = [_make_alert("svc-alerts-contract", alert_id="a1")]
-    fake_con = MagicMock()
     log_calls = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=107),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.start_cron_run", return_value=107),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch(
             "backend.repositories.assets.evaluate_alert",
             return_value=(True, None, None, "2026-01-01T00:00:00Z"),
@@ -1760,16 +1651,14 @@ def test_contract_progress_events_and_duration_finalization():
     """Emits start, status, and done progress events and finalizes duration in guaranteed finally block."""
     src = _sample_source()
     alerts = [_make_alert("svc-alerts-contract", alert_id="a1", name="Bandwidth Surge")]
-    fake_con = MagicMock()
     progress_events = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.duckdb.start_cron_run", return_value=108),
-        patch("backend.core.duckdb.log_cron_run"),
+        patch("backend.core.fos_client.start_cron_run", return_value=108),
+        patch("backend.core.fos_client.log_cron_run"),
         patch(
             "backend.repositories.assets.evaluate_alert",
             return_value=(True, None, None, "2026-01-01T00:00:00Z"),
@@ -1814,21 +1703,18 @@ def test_lease_held_skips_without_opening_duckdb_or_recording_a_row():
     src = _sample_source()
     alerts = [_make_alert("svc-alerts-contract", alert_id="a1")]
     log_calls = []
-    get_conn = MagicMock()
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", get_conn),
-        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("held")),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.start_cron_run", side_effect=CronLeaseHeldError("held")),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch("backend.cron.scheduler.end_progress") as end_progress,
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
     assert log_calls == []
-    get_conn.assert_not_called()
     end_progress.assert_not_called()
 
 
@@ -1838,12 +1724,11 @@ def test_error_row_has_zero_counters_run_id_and_no_log_output():
     log_calls = []
 
     with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
+        patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
         patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.repositories.assets.get_alerts", return_value=alerts),
-        patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
-        patch("backend.core.duckdb.start_cron_run", return_value=108),
-        patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+        patch("backend.core.fos_client.start_cron_run", return_value=108),
+        patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch("backend.repositories.assets.evaluate_alert", return_value=(True, None, None, "t")),
         patch("backend.repositories.assets.update_last_triggered", side_effect=RuntimeError("boom")),
         patch("backend.cron.scheduler.start_progress"),
