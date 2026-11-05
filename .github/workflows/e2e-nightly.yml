@@ -44,9 +44,32 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_DB: fla
+          CLICKHOUSE_USER: fla
+          CLICKHOUSE_PASSWORD: fla_local_dev
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
       METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+
+      TEST_METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+      CLICKHOUSE_ENABLED: "true"
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: fla
+      CLICKHOUSE_USER: fla
+      CLICKHOUSE_PASSWORD: fla_local_dev
+      HIGH_SCALE_CURSOR_SECRET: e2e-cursor-secret-0123456789 # gitleaks:allow
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
