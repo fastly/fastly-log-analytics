@@ -614,6 +614,7 @@ class ClickHouseClient:
                     "additional_table_filters" in settings
                     and " IN (SELECT " in str(settings["additional_table_filters"])
                     and "MockTransport" not in type(self._http._transport).__name__
+                    and not getattr(self, "_analyzer_mandatory", False)
                 ):
                     query.setdefault("enable_analyzer", "0")
             if operation == "insert":
@@ -642,6 +643,25 @@ class ClickHouseClient:
                         timeout, connect=self._settings.connect_timeout_s, pool=self._settings.pool_timeout_s
                     ),
                 )
+                if (
+                    response.status_code == 500
+                    and query.get("enable_analyzer") == "0"
+                    and (
+                        response.headers.get("X-ClickHouse-Exception-Code") == "452"
+                        or "enable_analyzer" in response.text
+                    )
+                ):
+                    self._analyzer_mandatory = True
+                    query.pop("enable_analyzer", None)
+                    response = self._http.post(
+                        "/",
+                        params=query,
+                        files={key: (None, value) for key, value in data.items()} if data else None,
+                        content=content,
+                        timeout=httpx.Timeout(
+                            timeout, connect=self._settings.connect_timeout_s, pool=self._settings.pool_timeout_s
+                        ),
+                    )
             finally:
                 stats["network_ms"] = (time.perf_counter() - network_started) * 1000
             stats["status_code"] = response.status_code

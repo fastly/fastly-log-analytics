@@ -842,6 +842,36 @@ def test_query_settings_and_credential_redaction(clients):
         telemetry._QUERIES.reset(token)
     assert "hunter2-super-secret" not in recorded and "BY '[REDACTED]'" in recorded
 
+    analyzer_seen: list[httpx.Request] = []
+
+    class AnalyzerTransport(httpx.BaseTransport):
+        def handle_request(self, req: httpx.Request) -> httpx.Response:
+            analyzer_seen.append(req)
+            if "enable_analyzer" in req.url.params:
+                return httpx.Response(
+                    500,
+                    headers={"X-ClickHouse-Exception-Code": "452"},
+                    text="Code: 452. DB::Exception: Setting 'enable_analyzer' cannot be disabled",
+                )
+            return response([{"n": 1}])
+
+    subquery_filter = "{'request_facts': 'batch_id IN (SELECT batch_id FROM pub)'}"
+    ch_client = ch.ClickHouseClient(
+        ch.config.ClickHouseConfig(
+            host="localhost", port=8123, database="analytics", user="default", password="", secure=False
+        ),
+        transport=AnalyzerTransport(),
+    )
+    try:
+        assert ch_client.execute("SELECT 1 AS n", settings={"additional_table_filters": subquery_filter}) == [{"n": 1}]
+        assert ch_client.execute("SELECT 1 AS n", settings={"additional_table_filters": subquery_filter}) == [{"n": 1}]
+    finally:
+        ch_client.close()
+    assert len(analyzer_seen) == 3
+    assert "enable_analyzer" in analyzer_seen[0].url.params
+    assert "enable_analyzer" not in analyzer_seen[1].url.params
+    assert "enable_analyzer" not in analyzer_seen[2].url.params
+
 
 @pytest.fixture
 def instruments(monkeypatch):

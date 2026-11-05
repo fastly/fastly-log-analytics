@@ -242,7 +242,7 @@ def register_high_scale_services_from_environment(
         )
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS must contain at least one service id (none found in configs/)")
-    cursor_secret = os.getenv("HIGH_SCALE_CURSOR_SECRET", "").encode("utf-8")
+    cursor_secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET") or "fla-default-cursor-secret").encode("utf-8")
     manifest_catalog = (control_factory or _default_control_factory)()
 
     def _archive_for(service_id: str) -> ArchivePublication | None:
