@@ -122,7 +122,7 @@ async def telemetry_middleware(request: Request, call_next):
 
     # Active-request gate (perf #84): cron ticks check this counter at
     # their entry point and defer up to 30 s if non-zero, so a cold-cache
-    # API request doesn't lose its DuckDB pool slot + Fastly bandwidth to
+    # API request doesn't lose its database pool slot + Fastly bandwidth to
     # a sync tick that fired the same second.
     _inc_active_requests()
     start_call_tracking()
@@ -223,7 +223,7 @@ async def telemetry_middleware(request: Request, call_next):
         try:
             response = await call_next(request)
         except asyncio.CancelledError:
-            # The client went away (a reload aborts its fetches) and Starlette cancelled the handler. The DuckDB
+            # The client went away (a reload aborts its fetches) and Starlette cancelled the handler. The database
             # statements it already started keep running in worker threads, each holding a scarce pool slot; every
             # further reload would add another orphan until the pool saturates ("pool for <svc> saturated at 4").
             # Interrupt this request's queries (and only this request's) so the slots free immediately.

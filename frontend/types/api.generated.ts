@@ -4248,7 +4248,7 @@ export interface paths {
         };
         /**
          * Get Page Telemetry Endpoint
-         * @description Retrieve all unified SQLite queries, DuckDB queries, FOS calls, and section timings
+         * @description Retrieve all unified PostgreSQL queries, ClickHouse queries, FOS calls, and section timings
          *     matching the page_load_id.
          */
         get: operations["get_page_telemetry_endpoint_api_debug_page_telemetry_get"];
@@ -5842,8 +5842,6 @@ export interface components {
             rum_enabled?: boolean | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
-            /** Is High Scale */
-            is_high_scale?: boolean | null;
         } & {
             [key: string]: unknown;
         };
@@ -6387,12 +6385,6 @@ export interface components {
          *     summed across services, so both keep open string keys.
          */
         CeleryStatusResponse: {
-            /**
-             * Deployment Mode
-             * @default standard
-             * @enum {string}
-             */
-            deployment_mode: "standard" | "high_scale";
             /** Broker Reachable */
             broker_reachable?: boolean | null;
             workers?: components["schemas"]["CeleryWorkers"] | null;
@@ -6408,7 +6400,6 @@ export interface components {
             inprocess_schedules?: components["schemas"]["InProcessScheduleEntry"][] | null;
             /** Inprocess Active Runs */
             inprocess_active_runs?: components["schemas"]["InProcessActiveRun"][] | null;
-            standard_ingest?: components["schemas"]["StandardIngestSummary"] | null;
         } & {
             [key: string]: unknown;
         };
@@ -7146,50 +7137,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * CompactionStatsResponse
-         * @description File-count distribution across local cache partitions.
-         *
-         *     Returned by ``GET /api/admin/compaction-stats`` and consumed by the
-         *     admin System Health card.
-         */
-        CompactionStatsResponse: {
-            /**
-             * Total Files
-             * @default 0
-             */
-            total_files: number;
-            /**
-             * Partitions
-             * @default 0
-             */
-            partitions: number;
-            /**
-             * Partitions Above 3
-             * @default 0
-             */
-            partitions_above_3: number;
-            /**
-             * Partitions Above 10
-             * @default 0
-             */
-            partitions_above_10: number;
-            /**
-             * Daily Files
-             * @default 0
-             */
-            daily_files: number;
-            /**
-             * Weekly Files
-             * @default 0
-             */
-            weekly_files: number;
-            /**
-             * Avg Files Per Partition
-             * @default 0
-             */
-            avg_files_per_partition: number;
-        };
         /** CompletedQueryRow */
         CompletedQueryRow: {
             /** Query Id */
@@ -7763,11 +7710,11 @@ export interface components {
              */
             origin_log_frequency: "all" | "miss_pass";
             /**
-             * Duckdb Type
+             * Sql Type
              * @default VARCHAR
              * @enum {string}
              */
-            duckdb_type: "VARCHAR" | "INTEGER" | "BIGINT" | "DOUBLE" | "BOOLEAN";
+            sql_type: "VARCHAR" | "INTEGER" | "BIGINT" | "DOUBLE" | "BOOLEAN";
             /**
              * Value Type
              * @default string
@@ -7831,11 +7778,11 @@ export interface components {
              */
             origin_log_frequency: "all" | "miss_pass";
             /**
-             * Duckdb Type
+             * Sql Type
              * @default VARCHAR
              * @enum {string}
              */
-            duckdb_type: "VARCHAR" | "INTEGER" | "BIGINT" | "DOUBLE" | "BOOLEAN";
+            sql_type: "VARCHAR" | "INTEGER" | "BIGINT" | "DOUBLE" | "BOOLEAN";
             /**
              * Value Type
              * @default string
@@ -7917,8 +7864,8 @@ export interface components {
             collection_stage?: ("edge" | "origin" | "deliver") | null;
             /** Origin Log Frequency */
             origin_log_frequency?: ("all" | "miss_pass") | null;
-            /** Duckdb Type */
-            duckdb_type?: ("VARCHAR" | "INTEGER" | "BIGINT" | "DOUBLE" | "BOOLEAN") | null;
+            /** Sql Type */
+            sql_type?: ("VARCHAR" | "INTEGER" | "BIGINT" | "DOUBLE" | "BOOLEAN") | null;
             /** Value Type */
             value_type?: ("string" | "numeric" | "boolean" | "ip" | "url") | null;
             /** Bytes Estimate */
@@ -8301,7 +8248,7 @@ export interface components {
         };
         /**
          * HealthHighScale
-         * @description High-scale-only health block; absent from the payload in standard mode.
+         * @description High-scale health block (disk guard and topology profile).
          */
         HealthHighScale: {
             disk?: components["schemas"]["HealthHighScaleDisk"] | null;
@@ -8427,11 +8374,10 @@ export interface components {
          * @description One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
          *
          *     The endpoint synthesises independent sub-system probes (load / memory /
-         *     per-mount disk / in-flight runs / per-service compaction / DuckDB pool
-         *     waits / scheduler-liveness / recent cron failures). Any individual probe
-         *     that fails returns the null sentinel of its slot rather than failing the
-         *     whole response, so the UI can render partial data when one subsystem is
-         *     sick.
+         *     per-mount disk / in-flight runs / scheduler-liveness / recent cron
+         *     failures). Any individual probe that fails returns the null sentinel of its
+         *     slot rather than failing the whole response, so the UI can render partial
+         *     data when one subsystem is sick.
          */
         HealthSnapshotResponse: {
             load?: components["schemas"]["HealthLoadAverages"] | null;
@@ -8442,14 +8388,6 @@ export interface components {
             root_disk?: components["schemas"]["HealthDiskStats"] | null;
             /** In Flight Runs */
             in_flight_runs?: components["schemas"]["HealthInFlightRun"][];
-            /** Compaction */
-            compaction?: {
-                [key: string]: components["schemas"]["CompactionStatsResponse"] | null;
-            };
-            /** Pool Wait */
-            pool_wait?: {
-                [key: string]: unknown;
-            }[];
             /** Scheduler Last Tick Age S */
             scheduler_last_tick_age_s?: number | null;
             /** Recent Cron Failures */
@@ -11133,9 +11071,9 @@ export interface components {
          *     Sibling of ``SyncStatusResponse`` but strips every field that the
          *     middleware blocks ``/api/sync-status`` for an analyst over: no
          *     ``ngwaf_workspace_id``, no ``active_run``, no cron task state, no
-         *     DuckDB size, no storage mode. Just the two timestamps the
-         *     FilterBar needs to snap its range, plus a ``configured`` flag so
-         *     the frontend can short-circuit when a service has no source.
+         *     storage mode. Just the two timestamps the FilterBar needs to snap
+         *     its range, plus a ``configured`` flag so the frontend can
+         *     short-circuit when a service has no source.
          */
         LogExtentsResponse: {
             /** Earliest Log At */
@@ -11202,8 +11140,8 @@ export interface components {
             label: string;
             /** Description */
             description: string;
-            /** Duckdb Type */
-            duckdb_type: string;
+            /** Sql Type */
+            sql_type: string;
             /** Typical Bytes */
             typical_bytes?: number | null;
             /** Required By */
@@ -11557,8 +11495,7 @@ export interface components {
         };
         /**
          * MetadataTableStat
-         * @description Per-table row count + estimated bytes (``None`` when SQLite lacks
-         *     the ``dbstat`` vtable).
+         * @description Per-table row count + estimated bytes.
          */
         MetadataTableStat: {
             /** Rows */
@@ -13990,7 +13927,7 @@ export interface components {
          * PrefillRatesResponse
          * @description Fast-path subset of PrefillResponse for /api/usage/prefill/rates.
          *     Omits ``requests_per_day`` / ``edge_requests_per_day`` (Fastly stats)
-         *     and ``edge_ratio`` (DuckDB) since those gate on the lazy /prefill call.
+         *     and ``edge_ratio`` (ClickHouse) since those gate on the lazy /prefill call.
          */
         PrefillRatesResponse: {
             /** Debug Queries */
@@ -14074,11 +14011,6 @@ export interface components {
              * @default 30
              */
             rum_retention_days: number;
-            /**
-             * Deployment Mode
-             * @default standard
-             */
-            deployment_mode: string;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
         };
@@ -14165,11 +14097,6 @@ export interface components {
              * @default 30
              */
             rum_retention_days: number;
-            /**
-             * Deployment Mode
-             * @default standard
-             */
-            deployment_mode: string;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
             /** Requests Per Day */
@@ -14785,9 +14712,9 @@ export interface components {
             /**
              * Mode
              * @default clickhouse
-             * @enum {string}
+             * @constant
              */
-            mode: "clickhouse" | "duckdb_emulation";
+            mode: "clickhouse";
         };
         /** QuerySchemaResponse */
         QuerySchemaResponse: {
@@ -16966,8 +16893,6 @@ export interface components {
             log_period?: number | null;
             /** Storage Mode */
             storage_mode?: string | null;
-            /** Duckdb Size Bytes */
-            duckdb_size_bytes?: number | null;
             /** Cache File Count */
             cache_file_count?: number | null;
             /** Log Row Count */
@@ -16986,8 +16911,6 @@ export interface components {
             rum?: components["schemas"]["RumConfigSection"] | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
-            /** Is High Scale */
-            is_high_scale?: boolean | null;
         };
         /**
          * ServiceCredentialsBody
@@ -17995,21 +17918,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** StandardIngestSummary */
-        StandardIngestSummary: {
-            /**
-             * Ingested Files
-             * @default 0
-             */
-            ingested_files: number;
-            /**
-             * Quarantined Items
-             * @default 0
-             */
-            quarantined_items: number;
-        } & {
-            [key: string]: unknown;
-        };
         /** StreamMetrics */
         StreamMetrics: {
             /** Latest Log At */
@@ -18097,10 +18005,6 @@ export interface components {
             latest_ingested_file_at?: string | null;
             /** Latest Available File At */
             latest_available_file_at?: string | null;
-            /** Duckdb Size Bytes */
-            duckdb_size_bytes?: number | null;
-            /** Duckdb Exists */
-            duckdb_exists?: boolean | null;
             /** Active Run */
             active_run?: {
                 [key: string]: unknown;
@@ -18800,8 +18704,6 @@ export interface components {
             enabled?: boolean | null;
             /** Retention Days */
             retention_days?: number | null;
-            /** Track Duckdb Httpfs */
-            track_duckdb_httpfs?: boolean | null;
         } & {
             [key: string]: unknown;
         };

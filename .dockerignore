@@ -3,7 +3,6 @@
 **/__pycache__
 **/*.py[cod]
 *$py.class
-logs.duckdb
 cache/
 data/
 configs/
@@ -16,7 +15,6 @@ frontend/public/maplibre-gl-worker.mjs
 frontend/public/maplibre-gl-shared.mjs
 .env
 .DS_Store
-*.duckdb*
 .claude/
 
 # Test / lint caches

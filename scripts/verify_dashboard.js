@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 const { adminGatewayContextOptions } = require('./lib/admin_gateway_client.cjs');
 const { collectResponseMeasurements, budgets } = require('./lib/section_measurements.cjs');
-const { isTransientConsoleBlip, logPoolAtStart = async () => {}, logPoolStats = async () => {}, logPagePerf = async () => {} } = require('./lib/console_blip');
+const { isTransientConsoleBlip, logPagePerf = async () => {} } = require('./lib/console_blip');
 const { execSync } = require('child_process');
 // Usage: node verify_dashboard.js URL COMMIT ARCH ENV [--no-traffic]
 const baseUrl = process.argv[2], expectedCommit = process.argv[3], expectedArch = process.argv[4], expectedEnv = process.argv[5];
@@ -176,7 +176,6 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   const pageUrl = getUrlWithParam(baseUrl.replace('/dashboard', routePath), "range", "24h");
   const context = await browser.newContext(adminTlsOptions);
   await attachGceFallbackAuth(context, Boolean(adminTlsOptions.clientCertificates));
-  await logPoolAtStart(context, baseUrl, name);
   const page = await context.newPage();
   registerErrorListeners(page, browser, name);
   const measurements = collectResponseMeasurements(page);
@@ -200,7 +199,6 @@ async function verifyDataPage(browser, adminTlsOptions, spec) {
   }
   await logPagePerf(page, name, budgets, await measurements.snapshot(), measurements.gaps());
   measurements.close();
-  if (name === 'Streaming') await logPoolStats(context, baseUrl, name);
   await page.close();
   await context.close();
 }
@@ -262,7 +260,7 @@ async function verifyAnalyticsRouteWithPlotly(browser, adminTlsOptions, certific
       await page.waitForSelector('main', { timeout: 30000 });
       try { await page.waitForFunction(() => { const m = document.body.innerText.match(/total:\s*([\d,]+)/i); return m && parseInt(m[1].replace(/,/g, ''), 10) > 0; }, undefined, { timeout: 30000 }); } catch {}
       bodyText24h = await page.evaluate(() => document.body.innerText);
-      if ((bodyText24h.includes("Failed to load") && !bodyText24h.includes("Faro version")) || bodyText24h.includes("saturated at") || bodyText24h.includes("PoolBusy") || bodyText24h.includes("No data for this filter")) {
+      if ((bodyText24h.includes("Failed to load") && !bodyText24h.includes("Faro version")) || bodyText24h.includes("saturated at") || bodyText24h.includes("No data for this filter")) {
         if (attempt === 3) await failAndExit(browser, `[Dashboard 24h] Verification Failed: 24h page shows errors or empty state!`);
         await page.waitForTimeout(4000); continue;
       }

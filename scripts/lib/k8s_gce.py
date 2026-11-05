@@ -502,7 +502,18 @@ def build_targets() -> dict[str, list[str]]:
 def compute_all(targets: dict[str, list[str]] | None = None) -> dict[str, dict[str, object]]:
     build_targets_fn = _env_attr("build_targets", build_targets)
     run_check_fn = _env_attr("run_check", run_check)
-    effective_targets = targets if targets is not None else build_targets_fn()
+    if targets is not None:
+        effective_targets = targets
+    else:
+        effective_targets = dict(build_targets_fn())
+        if os.getenv("IGNORE_LOCAL_STD") == "1":
+            effective_targets.pop("local-std", None)
+        if os.getenv("SKIP_GCE") == "1" or os.getenv("SKIP_REMOTE_STD") == "1":
+            effective_targets.pop("remote-std", None)
+        if os.getenv("SKIP_REMOTE_HS") == "1":
+            effective_targets.pop("remote-hs", None)
+    if not effective_targets:
+        return {}
     with ThreadPoolExecutor(max_workers=len(effective_targets)) as pool:
         futures = {name: pool.submit(run_check_fn, command) for name, command in effective_targets.items()}
         return {name: future.result() for name, future in futures.items()}

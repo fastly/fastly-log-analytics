@@ -15,17 +15,16 @@ import os
 mimetypes.add_type("application/javascript", ".mjs")
 
 # Mitigate macOS malloc/free C++ heap corruption (Abort trap 6)
-# DuckDB and PyArrow both use jemalloc internally which causes fatal crashes
-# when passing memory back and forth. Forcing PyArrow to use system malloc segregates them.
+# Force PyArrow to use the system allocator on macOS.
 os.environ["ARROW_DEFAULT_MEMORY_POOL"] = "system"
 
 import resource  # noqa: E402
 
 try:
-    # Increase file descriptor limit for DuckDB and DuckLake operations
+    # Increase file descriptor limit for high-parallelism ingest and query operations
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     # Target 65k or the hard limit, whichever is lower.
-    # 256/1024 is often too low for high-parallelism DuckDB/DuckLake scans.
+    # 256/1024 is often too low for high-parallelism ingest and query workloads.
     target = min(hard, 65536)
     if soft < target:
         resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))

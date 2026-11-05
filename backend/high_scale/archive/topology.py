@@ -111,7 +111,6 @@ def build_topology_profile(profile_name: str) -> TopologyProfile:
 
 @dataclass(frozen=True)
 class HighScaleConfig:
-    enabled: bool
     clickhouse_url: str | None
     fos_bucket: str | None
     archive_manifest_dsn: str | None
@@ -123,8 +122,6 @@ class HighScaleConfig:
         return _resolve_topology_profile(self.profile)
 
     def validate(self) -> None:
-        if not self.enabled:
-            return
         for value, message in (
             (self.clickhouse_url, "high-scale mode requires a ClickHouse URL"),
             (self.fos_bucket, "high-scale mode requires an FOS archive bucket"),
@@ -157,7 +154,6 @@ def from_environment(env: Mapping[str, str] | None = None) -> HighScaleConfig:
         )
     metadata_dsn = source.get("METADATA_DSN")
     config = HighScaleConfig(
-        enabled=source.get("HIGH_SCALE_ENABLED", "").lower() in {"1", "true", "yes"},
         clickhouse_url=source.get("HIGH_SCALE_CLICKHOUSE_URL") or source.get("CLICKHOUSE_URL"),
         fos_bucket=fos_bucket,
         archive_manifest_dsn=source.get("HIGH_SCALE_ARCHIVE_MANIFEST_DSN") or metadata_dsn,

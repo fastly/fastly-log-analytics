@@ -93,7 +93,6 @@ jobs:
       CLICKHOUSE_DATABASE: fla
       CLICKHOUSE_USER: fla
       CLICKHOUSE_PASSWORD: fla_local_dev
-      HIGH_SCALE_ENABLED: "1"
       HIGH_SCALE_CURSOR_SECRET: e2e-cursor-secret-0123456789 # gitleaks:allow
 
     steps:

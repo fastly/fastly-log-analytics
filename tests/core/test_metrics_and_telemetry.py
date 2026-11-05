@@ -36,13 +36,11 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 import backend.core.metadata.usage_log as slow_queries
 import backend.core.metadata.usage_log as usage_log_db
-import backend.core.request_telemetry as request_metrics
 from backend import config
 from backend.core import clickhouse as _ch_mod  # noqa: F401
 from backend.core import fos_client, metric_expressions, request_telemetry
 from backend.core import metadata as _meta
 from backend.core import request_context as rc
-from backend.core import request_telemetry as observer_mod
 from backend.core import request_telemetry as qr_mod
 from backend.core import request_telemetry as web_vitals_store
 from backend.core.log_fields import METRIC_DEFINITIONS, get_metric_sql
@@ -731,15 +729,7 @@ def test_request_context_resolve_window_variants(monkeypatch):
     assert datetime.fromisoformat(s2).hour == 0 and datetime.fromisoformat(e2).hour == 6
 
 
-# ── Section 5: Request Metrics Observer & Web Vitals ─────────────────────────
-
-
-def test_request_metrics_observer_and_refresh_noop():
-    assert request_metrics.refresh_durable_request_metrics({"name": "svc-test"}) is None
-    observer = observer_mod.RequestMetricsObserver()
-    assert observer.start() is None
-    assert observer.reconcile() is None
-    observer.stop()
+# ── Section 5: Web Vitals & Telemetry Schema ─────────────────────────────────
 
 
 def test_telemetry_schema_helpers_and_page_load_middleware(monkeypatch, tmp_path):

@@ -1,4 +1,4 @@
-# Standard mode receives the application's existing OTLP/HTTP metrics directly.
+# Single-host OTLP receiver: accepts the application's existing OTLP/HTTP metrics directly.
 # No multipod exporter DNS targets, Collector, remote write or extra dependencies.
 global:
   scrape_interval: 15s

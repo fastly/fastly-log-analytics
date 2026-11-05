@@ -35,7 +35,7 @@ Use the Teardown action in the admin UI or the CLI (`uv run python -m backend.pr
 
 ### 4. Note what does not carry forward
 
-- **The analyst "independent instance" (Path A) is removed in v3.** Use live shared-instance access (remote sharing) instead. See [ADR-17](adr/17-analyst-path-a-ducklake.md).
+- **The analyst "independent instance" (Path A) is removed in v3.** Use live shared-instance access (remote sharing) instead. See [ADR-21](adr/21-high-scale-serving-architecture.md) and [ADR-22](adr/22-postgres-only-metadata.md).
 - **SQLite metadata and file-backed local engines are retired.** PostgreSQL 16 (`METADATA_DSN`) and ClickHouse (`CLICKHOUSE_URL`) are used across every environment.
 
 ---

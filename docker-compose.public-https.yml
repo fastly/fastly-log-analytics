@@ -1,4 +1,4 @@
-# Optional Local Standard public TLS listener; NOT a production overlay.
+# Optional local Compose public TLS listener; NOT a production overlay.
 # Combine with docker-compose.yml and docker-compose.admin-mtls.yml.
 # Operator-local .env supplies the exact host and a trusted server certificate
 # bundle (server.crt/server.key). The base HTTP-only quickstart stays unchanged.

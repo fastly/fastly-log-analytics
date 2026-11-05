@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0-rc3] - 2026-11-05
+
+> **Upgrading from v2:** there is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision. All v2 data is discarded. See [the migration guide](docs/MIGRATION_v3.0.0_GUIDE.md).
+
+### Changes since 3.0.0-rc1
+
+- **Unified ClickHouse + PostgreSQL 16 + FOS Archive Parquet architecture** — ClickHouse serves all analytical queries across every deployment footprint (from single-worker Docker Compose on a laptop up to 1,000,000 RPS on Kubernetes), PostgreSQL 16 stores all operational metadata and ingest control-plane state, and stateless ingest workers write canonical Archive Parquet batches to Fastly Object Storage (`{prefix}/archive/`).
+- **Removed legacy mode flags and catalog fields** — removed single-mode compatibility shims, legacy catalog/pool status fields, and obsolete custom-field `sql_type` aliases across backend models, frontend components, Helm templates, Docker Compose manifests, and operational scripts.
+
 ## [3.0.0-rc1] - 2026-11-02
 
 > **Upgrading from v2:** there is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision. All v2 data is discarded. See [the migration guide](docs/MIGRATION_v3.0.0_GUIDE.md).
@@ -14,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Removed
 
 - The `backend.core.local_compaction` import alias and the `backend/__init__.py` module-alias machinery behind it (nothing else used it). Import compaction helpers from `backend.core.storage`.
-- Dead legacy SQLite `db_path()` and `_DATA_DIR` compatibility shims from `backend.core.metadata`, and the unused DuckDB `avro` extension from `backend/Dockerfile`.
+- Dead legacy SQLite `db_path()` and `_DATA_DIR` compatibility shims from `backend.core.metadata`, and the unused `avro` extension from `backend/Dockerfile`.
 
 #### Added
 
@@ -24,8 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Changed
 
 - **Zstd S3 log compression and batched RUM beacons** — Fastly S3 logging endpoints now provision with `zstd` compression (and `ingest` transparently decodes both `.zst` and `.gz`), RUM collector snippets batch sub-events per flush and strip redundant `service_id`/request query parameters before logging, and the cost calculator / UI field-size estimators reflect `zstd` compression ratios and batched RUM beacon overhead.
-- **Standard-mode Dashboard and DuckDB query fast paths** — `POST /api/dashboard/bundle` reuses an inclusive shared active-hour temp table (`t_active_direct_*`) across total-row counts, exact endpoint counts, Top-N cards, connection-request histograms, time series, and bot summaries, pushes contiguous boundary ranges down via `UNION ALL` in `verified_boundary_table`, and caches DuckLake view resolution when local cache and buffer state match.
-- Dashboard aggregate queries (`POST /api/aggregates`) now project only the columns required by the currently visible Dashboard cards (`fields` parameter) in both Standard and High-Scale modes, defaulting to all fields only when `fields` is omitted while honoring an explicit empty list.
+- **Dashboard and analytical query fast paths** — `POST /api/dashboard/bundle` reuses an inclusive shared active-hour temp table (`t_active_direct_*`) across total-row counts, exact endpoint counts, Top-N cards, connection-request histograms, time series, and bot summaries, pushes contiguous boundary ranges down via `UNION ALL` in `verified_boundary_table`, and caches lake view resolution when local cache and buffer state match.
+- Dashboard aggregate queries (`POST /api/aggregates`) now project only the columns required by the currently visible Dashboard cards (`fields` parameter), defaulting to all fields only when `fields` is omitted while honoring an explicit empty list.
 - `rum_commit` log summaries now label captured client exception files as `js files` instead of `errors files` so normal RUM beacon commits are not mistaken for ingestion failures.
 - Versioned `v*` release branches now run full GitHub Actions CI/E2E gates and Jenkins container image builds.
 
@@ -33,11 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Bot-source fetcher & alert webhook SSRF hardening** — `backend/utils/bot_sources/fetcher.py` and `backend/routers/alerts.py` resolve hostnames across all `A`/`AAAA` records, reject private, loopback, link-local, multicast, CGNAT, and IPv4-mapped IPv6 addresses, and validate every redirect hop.
 - **Analyst service-scope tenancy enforcement** — `/api/sync-status`, `/api/log-extents`, `/api/presets` (`backend/routers/admin/sync_status.py`), and session-scoring events (`backend/routers/session_scoring/scoring_analytics.py`) strictly enforce `require_service_access` against the analyst's allowed services.
-- **Helm chart credential & Postgres DSN guards** — `deploy/chart/fastly-log-analytics` requires an explicit ClickHouse password or `existingSecret` and enforces `postgresql://` DSNs for `ducklakeCatalog` and `metadataDsn`.
+- **Helm chart credential & Postgres DSN guards** — `deploy/chart/fastly-log-analytics` requires an explicit ClickHouse password or `existingSecret` and enforces `postgresql://` DSNs for `metadataDsn`.
 
 #### Fixed
 
-- **Log accounting and 30-day rolling retention boundary verification** — `/api/admin/log-accounting` and `/api/admin/health-snapshot` reconcile RUM beacon rows, active-hour committed DuckLake rows, and `table_name`/`file_date` filters without false ingest-gap warnings, and `minute_reference_proofs` allows idle in-window hours on 30-day retention-pruned leading boundary days without demanding pruned pre-window hours.
+- **Log accounting and 30-day rolling retention boundary verification** — `/api/admin/log-accounting` and `/api/admin/health-snapshot` reconcile RUM beacon rows, active-hour committed lake rows, and `table_name`/`file_date` filters without false ingest-gap warnings, and `minute_reference_proofs` allows idle in-window hours on 30-day retention-pruned leading boundary days without demanding pruned pre-window hours.
 - Hiding all Dashboard cards no longer leaves infinite loading skeletons; the Dashboard UI now distinguishes a pending field catalog from an explicitly empty card selection.
 - Running `python -m backend.provision.cli` no longer emits a `RuntimeWarning` from `backend/provision/__init__.py`.
 - **High-Scale ingest coordinator, projection recovery, and reader parity** — `backend/high_scale/ingest_controller/coordinator.py` and `backend/high_scale/recovery.py` hold batch acknowledgement when derived projection writes fail and replay derived projections during recovery; `backend/high_scale/dashboard.py`, `backend/high_scale/cmcd.py`, `backend/high_scale/performance.py`, `backend/high_scale/rum.py`, and `backend/high_scale/security.py` filter non-event archive rows, preserve sub-minute cache-key bounds, and include the exact `end_time` endpoint.
@@ -46,12 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Breaking
 
-- Renamed the storage admin API: `/api/admin/iceberg-info` is now `/api/admin/storage-info`, `/api/admin/iceberg-calendar` is `/api/admin/storage-calendar`, `/api/admin/iceberg-tree` is `/api/admin/storage-tree` (it now lists the DuckLake data files: the local data directory in Standard, the FOS `ducklake/` prefix in High-Scale), and `/api/admin/commit-iceberg` is `/api/admin/commit-storage`. The status fields `iceberg_bytes` and `iceberg_files` are now `storage_bytes` and `storage_files`, and the `Iceberg*` response models are `Storage*`.
+- Renamed the storage admin API: `/api/admin/iceberg-info` is now `/api/admin/storage-info`, `/api/admin/iceberg-calendar` is `/api/admin/storage-calendar`, `/api/admin/iceberg-tree` is `/api/admin/storage-tree` (it now lists the archive data files in FOS), and `/api/admin/commit-iceberg` is `/api/admin/commit-storage`. The status fields `iceberg_bytes` and `iceberg_files` are now `storage_bytes` and `storage_files`, and the `Iceberg*` response models are `Storage*`.
 - Admin state, the scoring matrix and its history moved from `{prefix}/iceberg/meta/` to `{prefix}/meta/` in the FOS bucket, and the CDN never-cache rule now matches `/meta/admin_state.json`. There is no read fallback: re-provision beta services (the old objects can be deleted).
-- Removed `POST /api/admin/backfill-window` (it only called a no-op under DuckLake). New CDN services no longer get the `iceberg-metadata-pointer-ttl` snippet, and the DuckDB `iceberg` extension is no longer installed in the backend image.
-- Removed analyst Path A (the "independent instance" analyst join that used read-only FOS credentials; it could not work against DuckLake). Remote sharing (Path B) is the only analyst access model. Removed endpoints: `POST /api/services/{service_id}/generate-viewer-key`, `GET /api/services/{service_id}/lake-info` and `POST /api/provision/lake-info`. Also removed: the `invite-analyst` CLI command, the Provision Wizard "Analyst: Join" mode and its analyze, settings and confirm steps, the `metadata_sync` cron job and `import_admin_state`, the read-only `access_level` service setting (the `access_level` and `analyst_path_a_supported` fields are gone from API responses), and the `iceberg_metadata_location` field.
+- Removed `POST /api/admin/backfill-window` (it only called a no-op). New CDN services no longer get the `iceberg-metadata-pointer-ttl` snippet, and the `iceberg` extension is no longer installed in the backend image.
+- Removed analyst Path A (the "independent instance" analyst join that used read-only FOS credentials). Remote sharing (Path B) is the only analyst access model. Removed endpoints: `POST /api/services/{service_id}/generate-viewer-key`, `GET /api/services/{service_id}/lake-info` and `POST /api/provision/lake-info`. Also removed: the `invite-analyst` CLI command, the Provision Wizard "Analyst: Join" mode and its analyze, settings and confirm steps, the `metadata_sync` cron job and `import_admin_state`, the read-only `access_level` service setting (the `access_level` and `analyst_path_a_supported` fields are gone from API responses), and the `iceberg_metadata_location` field.
 - `POST /api/admin/rebuild-local-view` now rebuilds the view in a background thread and no longer returns a `run_id`; it no longer starts a `metadata_sync` run.
-- Service reset and teardown now remove DuckLake data (the FOS `ducklake/` prefix for High-Scale, the local DuckLake data directory, and the service's DuckLake tables) instead of the legacy `iceberg/default/` prefix.
+- Service reset and teardown now remove archive data (the FOS `archive/` prefix and the service's analytical tables) instead of the legacy `iceberg/default/` prefix.
 
 - Removed the raw-logs and live-tail endpoints `POST /api/logs`, `POST /api/logs/query`, `GET /api/logs`, `GET /api/logs/{service_id}`, `GET /api/stream/{service_id}` and `GET /api/services/{service_id}/stream`. Their only consumers, the `/logs` Raw Logs and Live Tail tabs, were removed; use `POST /api/query` raw-query mode instead.
 
@@ -62,31 +71,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **High-Scale reader parity and 30-day ClickHouse projection backfill tooling** — High-Scale ClickHouse readers across Dashboard, Logs, Sessions, Security, Network, Origin, Performance, CMCD, RUM, and all 51 Insights detections now serve filtered analytics, merged histogram percentiles, and visibility-fenced availability natively from ClickHouse projections and `request_facts`. Added `scripts/backfill_high_scale.py` (`--projection {origin,cmcd,rum_vitals,rum_errors,performance,security} --replace-existing`, which prints its `rebuild_id` up front so an interrupted run can resume via `--rebuild-id`) to backfill historical ClickHouse projections from verified archive Parquet artifacts.
 - **Ratchet gates for hand-rolled retry loops and inline `COALESCE(` SQL** — `make retry-guard` and `make coalesce-guard` (wired into `make ci` and CI) fail on new copies of either pattern; baselines only go down.
 - **Shared null-default SQL helpers** — `sum_or_zero`, `column_or_default`, `coalesce` and `HIT_STATES` in `metric_expressions`, with golden-string tests per call site.
-- **Single SQL identifier validator** — `backend.core.sql_ident` replaces the private identifier regexes in the DuckLake, buffer and rollup modules.
+- **Single SQL identifier validator** — `backend.core.sql_ident` replaces the private identifier regexes in the lake, buffer and rollup modules.
 - **Shared-helpers documentation** — AGENTS.md, the architecture guide, ADR-09 and the cron docs now describe `cron_run`, `draft_version`, the service-config lock and snapshot helpers, `retry_call`, the cache registry, the date helpers, the error and SSE helpers, and the Postgres busy-connection rule.
 
 ### Changed
 
-- **Insights prewarmer now runs only on active `/api/insights` demand** — `insights_prewarmer` skips ticks when `/api/insights` has not been requested for a service within the configurable idle window (`provisioning.cron_insights_prewarmer.idle_minutes` / `INSIGHTS_PREWARM_IDLE_MINUTES`, default 30 minutes), avoiding background DuckDB scans when the Insights page is unused.
+- **Insights prewarmer now runs only on active `/api/insights` demand** — `insights_prewarmer` skips ticks when `/api/insights` has not been requested for a service within the configurable idle window (`provisioning.cron_insights_prewarmer.idle_minutes` / `INSIGHTS_PREWARM_IDLE_MINUTES`, default 30 minutes), avoiding background analytical scans when the Insights page is unused.
 - **Insights cold-compute SQL prunes 30-day baseline scans to window candidates** — window-first `AS NOT MATERIALIZED` CTEs, distinct-dimension regex pre-evaluation, pre-filtered window-function sorts, and schema-driven scratch column pruning reduce cold `/api/insights` wall p50 by 28% (p95 by 35%) and process CPU p50 by 21% with identical outputs across all 51 detections.
-- **Schema cache is now a bounded TTL cache** — the DuckDB per-source schema cache expires and evicts through `BoundedTTLCache` and is cleared in place, so modules that import it by name no longer read a stale copy after a clear.
+- **Schema cache is now a bounded TTL cache** — the per-source schema cache expires and evicts through `BoundedTTLCache` and is cleared in place, so modules that import it by name no longer read a stale copy after a clear.
 - **Metadata retention cleanup no longer carries a constant Postgres flag** — the `usage_log` table keeps its dedicated statements; behavior is unchanged.
 - **Repository null-default SQL now renders through shared helpers** — rendered SQL is byte-identical.
 
 ### Fixed
 
-- The Usage page cost calculator and `/api/usage` now follow each service's own settings and the cleanup. The prefill used an unrelated `log_retention_days` instead of the service's `data_retention_days`; it now also returns `rum_retention_days` and `deployment_mode`, and the calculator models request and RUM retention separately, the High-Scale archive (measured per-artifact and per-row size, deleted a day after retention) and the 30-day billing of deleted objects. `current-storage` adds the live archive and recently expired archive bytes in High-Scale.
+- The Usage page cost calculator and `/api/usage` now follow each service's own settings and the cleanup. The prefill used an unrelated `log_retention_days` instead of the service's `data_retention_days`; it now also returns `rum_retention_days`, and the calculator models request and RUM retention separately, the High-Scale archive (measured per-artifact and per-row size, deleted a day after retention) and the 30-day billing of deleted objects. `current-storage` adds the live archive and recently expired archive bytes.
 - High-Scale archive artifacts are now deleted after the service's retention. The design said the archive follows `data_retention_days` (`rum_retention_days` for RUM), but nothing enforced it: every artifact since the first day was still in FOS. The worker's deletion sweep now removes a manifest's artifact, manifest and commit marker one day after the retention window (0 keeps forever), once its raw source is gone, and marks the manifest expired so replay skips it.
-- Standard mode pushes committed DuckLake Parquet to Fastly Object Storage again. Since the DuckLake cutover the commit interval only committed locally, so with delete-after-ingest on there was no off-box copy of committed data. Every commit (and RUM commit, optimize and expire run) now mirrors the catalog's live files to `{prefix}/ducklake/`, and `python -m backend.provision.cli restore-data --service-id <id>` rebuilds local data from that copy. Reset now also deletes the cloud copy. A fresh catalog after a full loss never deletes the old copy: pushes only delete files this catalog wrote until the catalog adopts the copy (a `_catalog.json` marker, written by `restore-data` or when the copy holds nothing foreign).
+- Committed Parquet artifacts are mirrored to Fastly Object Storage. Every commit (and RUM commit, optimize and expire run) mirrors the catalog's live files to `{prefix}/archive/`, and `python -m backend.provision.cli restore-data --service-id <id>` rebuilds data from that copy. Reset now also deletes the cloud copy. A fresh catalog after a full loss never deletes the old copy: pushes only delete files this catalog wrote until the catalog adopts the copy (a `_catalog.json` marker, written by `restore-data` or when the copy holds nothing foreign).
 - **High-Scale SQL console (`POST /api/query`) scope pinning and HTTP settings enforcement** — `backend/high_scale/query.py` and `backend/core/clickhouse/client.py` now pin every allowed ClickHouse fact table (`request_facts`, `rum_vitals_facts`, `rum_error_facts`, `cmcd_projection_facts`) with `additional_table_filters` and row-cap settings (`max_result_rows`, `result_overflow_mode = break`) passed as HTTP query parameters alongside an outer `SELECT * FROM (\n{sql}\n) LIMIT {row_cap}` wrapper, verify filter enforcement with a `system.one` probe (`_assert_table_filters_enforced`), and reject unsafe ClickHouse table/dictionary functions (`_reject_unsafe_functions`), preventing user `OR` clauses or trailing `--` comments from escaping service, visibility-fence, or time-window scope.
 - **Filtered High-Scale Origin queries served from `request_facts`** — `backend/high_scale/origin.py` and `backend/high_scale/query_service.py` now route filtered `/api/origin/*` and `/api/origin/aggregates` requests to `request_facts` when filters reference fields outside `origin_minute_dimensions`, instead of failing or dropping filter predicates.
 - **High-Scale Network and header readers no longer swallow ClickHouse failures** — `backend/high_scale/network.py` and `backend/high_scale/query_service.py` propagate unexpected ClickHouse query failures instead of silently returning empty fallback responses.
 - **Active proxy client risk-level sort order** — `GET_ACTIVE_PROXY_CLIENTS` in `backend/repositories/security/sql.py` now orders rows by severity rank (`High` → `Medium` → `Low`) rather than lexicographical `risk_level DESC` (which placed `'Medium'` ahead of `'High'`).
 - **Rollup gap warning on freshly booted hosts** — `backend/core/rollups/_common.py` now emits the first rollup-gap warning even when `time.monotonic()` is below the throttle interval (`_GAP_WARN_THROTTLE_SECS`).
-- **Standard-mode RUM queries dropped live rows when racing `rum_commit` buffer unlinks** — `_view_cache` was keyed by `source_name` alone so `logs`, `client_vitals`, and `client_errors` overwrote each other's view fingerprints, and `fetch_rum_analytics` / `fetch_rum_live_events` did not retry on stale buffer file errors (`is_stale_view_error`). `_view_cache` is now keyed by `(source_name, table_name)`, pooled connections track RUM buffer mtimes, and RUM reads self-heal and re-glob on concurrent buffer unlinks.
+- **RUM queries dropped live rows when racing `rum_commit` buffer unlinks** — `_view_cache` was keyed by `source_name` alone so `logs`, `client_vitals`, and `client_errors` overwrote each other's view fingerprints, and `fetch_rum_analytics` / `fetch_rum_live_events` did not retry on stale buffer file errors (`is_stale_view_error`). `_view_cache` is now keyed by `(source_name, table_name)`, pooled connections track RUM buffer mtimes, and RUM reads self-heal and re-glob on concurrent buffer unlinks.
 - **Long-window (`> 6h`) RUM views lagged behind `1h` by the rollup interval** — windows over 6 hours (`24h`, `7d`, `30d`) read only pre-aggregated `rum_vitals_aggregates` / `rum_error_aggregates`. They now merge the deduplicated active/un-rolled tail since `MAX(hour_bucket)` from `client_vitals` and `client_errors` (keyed by composite natural key) on read so newly ingested RUM beacons appear immediately across all windows without double-counting rolled-up hours.
-- **High-Scale RUM decoder emitted only one row per multi-event Faro `rum_body` beacon** — `decode_source_object` in `backend/high_scale/ingest_controller/service.py` now expands multi-measurement and multi-exception Faro payloads via `extract_metrics_from_faro_payload` with deterministic per-sub-event UUIDs, matching Standard-mode row emission.
-- **Historical Standard-mode RUM hours written by earlier builds lacked `total_beacons` rollup rows** — `backfill_missing_rum_aggregates()` previously skipped hours that already had any `rum_vitals_aggregates` row, leaving pre-existing hours without `(dimension='total', value='total_beacons')` rows on 7d/30d RUM views. It now detects and recomputes any hour within the 30-day lookback window missing `total_beacons` (or missing `rum_error_aggregates` for `client_errors` hours) during `rum_commit` and `rollup_heal`.
+- **High-Scale RUM decoder emitted only one row per multi-event Faro `rum_body` beacon** — `decode_source_object` in `backend/high_scale/ingest_controller/service.py` now expands multi-measurement and multi-exception Faro payloads via `extract_metrics_from_faro_payload` with deterministic per-sub-event UUIDs, matching multi-event row emission.
+- **Historical RUM hours written by earlier builds lacked `total_beacons` rollup rows** — `backfill_missing_rum_aggregates()` previously skipped hours that already had any `rum_vitals_aggregates` row, leaving pre-existing hours without `(dimension='total', value='total_beacons')` rows on 7d/30d RUM views. It now detects and recomputes any hour within the 30-day lookback window missing `total_beacons` (or missing `rum_error_aggregates` for `client_errors` hours) during `rum_commit` and `rollup_heal`.
 - **Next.js frontend logged recurring `ECONNRESET` errors when proxying to `backend-svc`** — `NextResponse.rewrite` in `frontend/proxy.ts` routed `/api/*` and `/js/*` through Next.js's internal `httpxy` rewrite proxy, which enforced a 30-second `proxyTimeout` (dropping `/api/events` SSE streams every 30s) and logged `Failed to proxy ... ECONNRESET` on normal client aborts or upstream keep-alive socket recycling, while SSR fetches in `frontend/lib/ssr/upstream.ts` reused pooled keep-alive sockets across uvicorn's 5s `--timeout-keep-alive` boundary. Replaced rewrite proxying with streaming Route Handlers (`frontend/app/api/[...path]/route.ts`, `frontend/app/js/[...path]/route.ts`) and `frontend/lib/apiSsrProxy.ts` (`agent: false`, `Connection: close`, no timeout on SSE, quiet client-disconnect handling, and one-shot `GET`/`HEAD` retry on `ECONNRESET`/`EPIPE`), and disabled keep-alive pooling with one-shot retry in `frontend/lib/ssr/upstream.ts`.
 - **High-Scale RUM archive replay failed on mixed vitals/error manifests and downloaded Parquet artifacts twice** — `replay_manifest` in `backend/high_scale/recovery.py` now filters archived rows with `row_matches_serving_domain` and skips empty serving batches (matching live ingest), and `ArchivePublication.read_artifact` in `backend/high_scale/archive/jobs.py` reuses the verified artifact bytes instead of issuing a second object-store GET.
 
@@ -97,24 +106,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Background Postgres queries could be cut off at shutdown** — draining connections now leaves a connection with a statement in flight to its owning thread.
 - **Insights prewarm competed with ingest** — the prewarmer now yields to in-flight request and RUM ingest for the same service while the cached result is still fresh.
 
-- **Standard-mode RUM ingestion unified with request ingestion** — `rum_sync` previously listed the full `raw/rum/` prefix on every tick, never deleted raw objects inline, used a divergent parser that silently dropped unparseable timestamps, lacked a time budget, and left `ingested_files` untrimmed. Standard RUM now shares discovery (incremental minute-prefixes via `rum_minute_list_prefix`), inline raw deletion (`_delete_objects_robust_with_failures` under `resolve_raw_delete_after`), Trap #41 time budgeting (`max_seconds`), parser and exact-byte quarantine (`_parse_rum_beacon_file`, `_quarantine_rum_corrupt_lines`), and durable row bookkeeping. Re-enabled RUM `ingested_files` trimming in `metadata_cleanup` using a window strictly larger than raw retention (`log_retention_days + 1`).
+- **RUM ingestion unified with request ingestion** — `rum_sync` previously listed the full `raw/rum/` prefix on every tick, never deleted raw objects inline, used a divergent parser that silently dropped unparseable timestamps, lacked a time budget, and left `ingested_files` untrimmed. RUM ingest now shares discovery (incremental minute-prefixes via `rum_minute_list_prefix`), inline raw deletion (`_delete_objects_robust_with_failures` under `resolve_raw_delete_after`), Trap #41 time budgeting (`max_seconds`), parser and exact-byte quarantine (`_parse_rum_beacon_file`, `_quarantine_rum_corrupt_lines`), and durable row bookkeeping. Re-enabled RUM `ingested_files` trimming in `metadata_cleanup` using a window strictly larger than raw retention (`log_retention_days + 1`).
 - **Daily metadata cleanup re-ingested RUM beacons as duplicates** — `metadata_cleanup` trimmed RUM `ingested_files` rows after 1 day, but RUM raw objects are kept far longer and `rum_sync` lists `raw/rum/` in full, so every aged-out beacon file was ingested again (about 50k files in one run, which also tripped the 300 s cron watchdog). RUM dedup rows are no longer trimmed.
-- **Dashboard traffic delayed request ingest by 20–30 s** — `log_discovery` used the active-request start gate, so any in-flight API request (including the dashboard's own polling) made a tick return silently and wait a full interval. Back-to-back skips pushed Remote Standard lag past 30 s. The freshness-critical tick now always runs; in-flight requests still get priority mid-tick through `yield_to_api`.
+- **Dashboard traffic delayed request ingest by 20–30 s** — `log_discovery` used the active-request start gate, so any in-flight API request (including the dashboard's own polling) made a tick return silently and wait a full interval. Back-to-back skips pushed ingest lag past 30 s. The freshness-critical tick now always runs; in-flight requests still get priority mid-tick through `yield_to_api`.
 - **Filter-suggestion refresh held back the newest request rows** — once a minute the request-discovery tick rebuilt filter suggestions (about 5 s on a busy host) before publishing the header status, so the rows that tick ingested appeared that much later. Status now publishes first.
 - **Usage-log bookkeeping ran on every request-discovery tick** — the ~3 s backfill, reconciliation, and retention purge sat between one tick's last ingest pass and the next tick's first, adding to request lag. It now runs once per 60 s heavy-refresh window.
 - **Usage-log backfill delayed the next FOS poll by ~5 s** — every `log_discovery` tick loaded every historical `fastly.edge` URL from `usage_log` (~450k on long-lived services) to find the last hour's unbackfilled files. The lookup now queries only those files' URLs.
 - **Adaptive polling hid ingested rows for up to 20 s** — `log_discovery` re-polls FOS up to twice within a tick, but only published the view and header extents after the last pass. Each follow-up pass now publishes the previous pass's rows first.
-- **Post-ingest view refresh stalled behind DuckLake commits** — every buffer commit and table optimize paginated through all legacy Iceberg `metadata.json` objects in FOS while holding the per-service lock (30 s+ on services with long Iceberg history), so the dashboard view kept serving stale buffer paths. DuckLake writes no Iceberg metadata, so both calls are removed.
-- **Standard-mode request lag exceeded one minute** — `log_discovery` ran hourly rollup recomputes inline (90–170 s on a busy service), so most ticks were skipped. Rollups now run on a per-service single-flight background worker that coalesces queued hours.
+- **Post-ingest view refresh stalled behind lake commits** — every buffer commit and table optimize paginated through all legacy Iceberg `metadata.json` objects in FOS while holding the per-service lock (30 s+ on services with long Iceberg history), so the dashboard view kept serving stale buffer paths. The lake catalog writes no Iceberg metadata, so both calls are removed.
+- **Single-node request lag exceeded one minute** — `log_discovery` ran hourly rollup recomputes inline (90–170 s on a busy service), so most ticks were skipped. Rollups now run on a per-service single-flight background worker that coalesces queued hours.
 - **High-scale request lag reached minutes under load** — the isolated high-scale worker processed each page's source objects serially at about 3 s per object. Objects in a page now run concurrently (`HIGH_SCALE_OBJECT_CONCURRENCY`, default 4).
-- **DuckDB scheduler deadlock froze the backend** — the pool and insights prewarmer changed the instance-global `threads` setting at runtime, deadlocking DuckDB's worker relaunch against an in-flight DuckLake scan. Threads are now set once from `DUCKDB_THREADS`; `DUCKDB_POOL_CONN_THREADS` is removed.
-- **Dashboard failed with `schema "lake" does not exist`** — returning a pooled connection detached `lake` from the shared per-service DuckDB instance, evicting it from sibling requests still mid-query. Pool release no longer detaches.
+- **Local analytical scheduler deadlock froze the backend** — the pool and insights prewarmer changed the instance-global `threads` setting at runtime, deadlocking worker relaunch against an in-flight lake scan. Threads are now set once at startup.
+- **Dashboard failed with `schema "lake" does not exist`** — returning a pooled connection detached `lake` from the shared per-service analytical instance, evicting it from sibling requests still mid-query. Pool release no longer detaches.
 - **High-scale source cursor stalled under multiple worker replicas** — every replica lists the same page, and a claim lost to a sibling counted as a failure, which blocked cursor advancement. Contended claims now count as duplicates; expired sibling leases are still recovered independently.
 - **High-scale deletion sweeps stalled ingest for minutes** — each worker ran its raw-source deletion sweep inline after every page, and each deletion re-verifies the archive in FOS (about 1 s), so a 100-object sweep blocked ingest for over a minute. Sweeps now run on a background thread that never overlaps itself.
 
 ### Breaking
 
-- **Removed `DEPLOYMENT_MODE=high_throughput`** — The intermediate Celery ledger mode has been completely removed in favor of `DEPLOYMENT_MODE=standard` (sync DuckDB + DuckLake) and `DEPLOYMENT_MODE=high_scale` (ClickHouse and dedicated micro-batching workers). Setting `DEPLOYMENT_MODE=high_throughput` is explicitly rejected at boot and Helm template time.
+- **Removed intermediate Celery ledger mode** — The intermediate Celery ledger mode has been completely removed in favor of ClickHouse and dedicated stateless micro-batching workers.
 - The legacy `GET /api/admin/quarantine/export` and
   `GET /api/admin/quarantine/{quarantine_id}/download` endpoints were removed.
   Quarantine now exposes paginated per-item evidence and exact-byte downloads
@@ -127,15 +136,14 @@ Scalable ingest architecture. The commit-path storage engine, the ingest data
 plane, and the metadata backend were all replaced to allow ingestion to scale
 horizontally across many worker processes.
 
-**Read before upgrading:** [ADR-14](docs/adr/14-ducklake-replacement.md)
-(DuckLake), [ADR-15](docs/adr/15-multi-writer-topology.md) (multi-writer
+**Read before upgrading:** [ADR-15](docs/adr/15-multi-writer-topology.md) (multi-writer
 topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
-[ADR-18](docs/adr/18-serving-tier-single-pod.md) (what does *not* scale yet).
+[ADR-18](docs/adr/18-serving-tier-single-pod.md) (serving tier).
 
 ### Added
 
-- **DuckLake commit path** — DuckDB's DuckLake extension replaces Apache Iceberg/pyiceberg as the catalog and write path. The catalog is a local `.ducklake` file for single-node deployments or a Postgres DSN for multi-writer ones; committed parquet lands in Fastly Object Storage for cloud-backed sources.
-- **Distributed ingest (`DEPLOYMENT_MODE=high_throughput`)** — discovery and conversion fan out across Celery workers coordinated by an `ingest_ledger` state machine (`discovered → claimed → committed`, with `quarantined` / `dead_letter` terminal states) instead of running in one process's scheduler loop. Converts are idempotent, so at-least-once redelivery is safe, and a sweeper reclaims dead-worker claims, re-dispatches lost messages, and diffs a lookback window against object storage to catch anything discovery missed.
+- **Parquet lake commit path** — replaces Apache Iceberg/pyiceberg as the catalog and write path; committed parquet lands in Fastly Object Storage for cloud-backed sources.
+- **Distributed ingest ledger** — discovery and conversion fan out across workers coordinated by an `ingest_ledger` state machine (`discovered → claimed → committed`, with `quarantined` / `dead_letter` terminal states) instead of running in one process's scheduler loop. Converts are idempotent, so at-least-once redelivery is safe, and a sweeper reclaims dead-worker claims, re-dispatches lost messages, and diffs a lookback window against object storage to catch anything discovery missed.
 - **Batched commits** — a batch of objects costs one catalog transaction rather than one per file, keeping catalog snapshots proportional to batches instead of to file count. Tunable via `LEDGER_CONVERT_BATCH_SIZE` (default 50).
 - **Postgres metadata backend** — `METADATA_DSN` switches cron state, the ingest ledger, and ingested-file manifests from per-node SQLite to a shared Postgres database, which is what allows more than one ingest process to coordinate. Cron leases are acquired atomically via a partial unique index so two processes can never run the same job.
 - **RUM beacon ingest on the ledger** — client vitals and client errors ingest through the same ledger/worker path, writing both tables in one transaction.
@@ -144,33 +152,33 @@ topology), [ADR-16](docs/adr/16-ingest-ledger.md) (ingest ledger), and
 
 ### Changed
 
-- **Scheduled jobs run on the unified in-process APScheduler.** Jobs that fan out conversion work dispatch tasks to Celery workers; jobs that read or write node-local state execute directly on the serving pod's scheduler. Two job families were renamed as part of this: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read.
-- Retention deletion, snapshot expiry, table info, and the snapshot calendar all read and write DuckLake rather than the previous catalog.
+- **Scheduled jobs run on the unified in-process APScheduler.** Jobs that fan out conversion work dispatch tasks to workers; jobs that read or write node-local state execute directly on the serving pod's scheduler. Two job families were renamed as part of this: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read.
+- Retention deletion, snapshot expiry, table info, and the snapshot calendar all read and write the Parquet catalog rather than the previous catalog.
 
 ### Breaking
 
-- **`DEPLOYMENT_MODE=high_throughput` requires Postgres.** Both `DUCKLAKE_CATALOG` and `METADATA_DSN` must be Postgres DSNs, and the backend and workers refuse to boot otherwise. A file-based catalog cannot serve concurrent worker writers, and per-node SQLite metadata cannot serialize a cron lease across processes.
+- **Distributed ingest requires Postgres.** `METADATA_DSN` must be a Postgres DSN, and the backend and workers refuse to boot otherwise. Per-node SQLite metadata cannot serialize a cron lease across processes.
 - `POST /api/security/top-bots` and `POST /api/security/proxies` were removed in favor of `POST /api/security/aggregates`.
-- Deployments that set `DUCKLAKE_CATALOG` empty while running `DEPLOYMENT_MODE=high_throughput` will not start until it is configured. The Helm chart now defaults to `config.deploymentMode: standard` (installable with no `--set` flags) and rejects a high-throughput install that is missing the Postgres DSNs or the broker at `helm template` time.
+- Deployments missing the required Postgres DSN will not start until it is configured, and the Helm chart rejects an install that is missing the Postgres DSN at `helm template` time.
 
 ### Upgrading from 2.x
 
 Upgrading is code-and-restart: the app migrates itself.
 
-- **The Postgres metadata schema is created at startup** when `METADATA_DSN` is set — by the backend lifespan and by each Celery worker, idempotently and safe against several pods booting at once. `scripts/setup_pg_schema.py` still works and remains the explicit ops command for provisioning a database ahead of a deploy.
-- **Pre-3.0 log history is adopted into DuckLake on first boot**, once per service, in the background. The legacy Iceberg table's own data files are enumerated from object storage — not from the local cache, which only holds `cache_retention_days` of history — and registered in place, so nothing is copied and no egress is incurred. Progress and outcome appear as `ducklake_adopt` rows in `cron_runs` (Cron UI). A failure is recorded there and never blocks startup; retry with `POST /api/admin/ducklake/migrate`, which also serves as the manual trigger.
+- **The Postgres metadata schema is created at startup** when `METADATA_DSN` is set — by the backend lifespan and by each worker, idempotently and safe against several pods booting at once. `scripts/setup_pg_schema.py` still works and remains the explicit ops command for provisioning a database ahead of a deploy.
+- **Pre-3.0 log history is adopted on first boot**, once per service, in the background. The legacy Iceberg table's own data files are enumerated from object storage — not from the local cache, which only holds `cache_retention_days` of history — and registered in place, so nothing is copied and no egress is incurred.
 
 ### Known limitations
 
-- **Only the ingest tier scales horizontally.** The tier that serves API requests remains single-node: the per-service DuckDB file is process-exclusive, and several scheduled jobs write node-local output under a cross-node lease. The Helm chart pins the backend to one replica for this reason. See [ADR-18](docs/adr/18-serving-tier-single-pod.md).
-- **Analyst "independent instance" (Path A) is unsupported against a DuckLake-backed service.** The previous catalog could be reconstructed from object-storage contents alone, which is what let an analyst run a self-sufficient copy with only read-only bucket credentials; a DuckLake catalog cannot. See [ADR-17](docs/adr/17-analyst-path-a-ducklake.md).
+- **Only the ingest tier scales horizontally in beta1.** Several scheduled jobs write node-local output under a cross-node lease. See [ADR-18](docs/adr/18-serving-tier-single-pod.md).
+- **Analyst "independent instance" (Path A) is unsupported.** The previous catalog could be reconstructed from object-storage contents alone, which is what let an analyst run a self-sufficient copy with only read-only bucket credentials; the v3 catalog cannot.
 - Under a shared catalog, snapshot retention and file cleanup are catalog-global rather than per-service, so one service's retention window applies to every service sharing that catalog.
 
 ## [2.4.1] - 2026-08-25
 
 ### Added
 
-- **Diagnostic Tools**: Enhanced frontend `DebugPanel` with copy-to-clipboard actions (for DuckDB, SQLite, and FOS/API calls) fully formatted and annotated for copy-pasting to AI code assistants.
+- **Diagnostic Tools**: Enhanced frontend `DebugPanel` with copy-to-clipboard actions (for SQL, metadata, and FOS/API calls) fully formatted and annotated for copy-pasting to AI code assistants.
 - **Advanced Bot-Detection Insights**: Implemented 11 beautiful, highly descriptive help modals explaining what each insight measures, how it works, why it is valuable, and what actions to take. Also added security regression test suite for advanced bot metrics.
 - **Statically Served MapLibre Workers**: Served the MapLibre GL worker statically from the public directory, solving several layout and WebGL incompatibilities.
 
@@ -270,7 +278,7 @@ Upgrading is code-and-restart: the app migrates itself.
 - The sync-status SSE now publishes before the slower config-status rescan
   runs, instead of after — the "latest log" badge no longer lags behind a
   slow refresh.
-- NGWAF bot-cache reads go through a real in-memory DuckDB catalog instead of
+- NGWAF bot-cache reads go through a real in-memory analytical catalog instead of
   a same-named schema, and no longer read the SQLite file directly.
 - `/api/cron-schedule` cache now busts instantly when a cron job's status
   changes, instead of waiting for the next poll.
@@ -299,7 +307,7 @@ Upgrading is code-and-restart: the app migrates itself.
 - **Dashboard performance.** SQLite-backed metadata reads (log accounting,
   usage reconciliation, schema reflection, the query-monitor and NGWAF bot
   caches) are faster under load — self-healing file-existence checks,
-  covering indexes, and reduced write contention — and DuckDB scan overhead
+  covering indexes, and reduced write contention — and analytical scan overhead
   on log-accounting counts is lower.
 - **Session rollups** resolve the streaming-session indicator from the fast
   rollup path instead of falling back to a raw scan, and stream-detail links
@@ -313,7 +321,7 @@ Upgrading is code-and-restart: the app migrates itself.
   rollup-backed query never matched any row, so miss-latency stats read as
   zero; verified-bot counts are now computed instead of always reporting
   "unknown." The network-summary rollup also falls back to a live scan
-  instead of erroring when a DuckDB read fails.
+  instead of erroring when a rollup read fails.
 - **Deep-linking to a service via URL no longer gets overridden by
   localStorage.** Loading a page with `?service=` in the URL (e.g. a shared
   stream-detail or dashboard link) previously had its service silently
@@ -413,10 +421,10 @@ Upgrading is code-and-restart: the app migrates itself.
   vs "Log Lines Emitted" for the ingestion chart. The Fastly overlay now uses
   request counts rather than log counts to match Fastly's billing model.
 
-- **Log-activity row counts read from DuckDB rollups.** The log-activity
-  panel's row counts now come from a precomputed DuckDB rollup instead of
+- **Log-activity row counts read from precomputed rollups.** The log-activity
+  panel's row counts now come from a precomputed rollup instead of
   SQLite metadata, and the reader skips the writer-behind check for rollup
-  reads. Parquet reads use in-memory DuckDB, dropping the live-hour scan.
+  reads. Parquet reads use an in-memory query context, dropping the live-hour scan.
 
 - **Active Fastly version lookups are faster.** The backend now queries the
   active-version endpoint directly instead of listing all versions, with
@@ -509,7 +517,7 @@ Upgrading is code-and-restart: the app migrates itself.
   sub-millisecond SSE delivery. Replay buffer and progressive chart rendering
   keep initial loads fast. Plotly is lazy-loaded to reduce bundle size.
 
-- **DuckDB and SQLite tuning.** Optimized DuckDB temp-table configs, reduced
+- **Analytical and SQLite tuning.** Optimized temp-table configs, reduced
   SQLite WAL contention under concurrent access, and deduped alert subqueries.
   `ILIKE` filters are rewritten to `starts_with` where possible.
 
@@ -517,7 +525,7 @@ Upgrading is code-and-restart: the app migrates itself.
   processing. Backgrounded browser tabs stop polling queries.
 
 - **Overview rollup.** A precomputed overview rollup powers the Service Summary
-  page, and merged overview + caching queries into a single DuckDB scan.
+  page, and merged overview + caching queries into a single analytical scan.
 
 - **CMCD query optimization.** CMCD queries use a temp table with combined
   time-series and eliminated self-joins.
@@ -1135,7 +1143,7 @@ Feature work shipped alongside the cleanup sweep below.
   attribution, so a slow request can be pivoted to the queries it ran.
   The admin health snapshot gains scheduler-tick liveness, recent
   cross-service cron failures, the effective log/exporter mode,
-  config-backup freshness, an opt-in FOS reachability probe, DuckDB pool
+  config-backup freshness, an opt-in FOS reachability probe, query pool
   saturation-reject / last-warmed counters, and a traffic-normalized
   scoring fail-open rate; deep `/api/health` additionally degrades on a
   stuck `running` sync row and on errored commit / metadata-sync crons.
@@ -1171,7 +1179,7 @@ Feature work shipped alongside the cleanup sweep below.
 ### Dependencies
 
 - **Dependency freshness sweep** across all ecosystems. Python in-range:
-  `fastapi 0.136.3 → 0.138.0`, `duckdb 1.5.3 → 1.5.4`, `uvicorn 0.48.0 →
+  `fastapi 0.136.3 → 0.138.0`, `uvicorn 0.48.0 →
   0.49.0`, `sqlalchemy 2.0.50 → 2.0.51`, `pytest 9.0.3 → 9.1.1`, `ruff
   0.15.15 → 0.15.18`. Frontend majors: `@types/node 25 → 26`,
   `react-plotly.js 2 → 4` (drops the redundant `@types/react-plotly.js`);
@@ -1314,12 +1322,11 @@ that survived the package carve-up.
   ledger trim re-listed it; the sync reconcile now re-issues the delete
   from durable state (default-deny: only files positively proven to hold
   ingested data are removed).
-- **DuckDB object-cache leak** that grew unbounded under continuous
+- **Analytical object-cache leak** that grew unbounded under continuous
   buffer + compaction file churn (and OOM-killed the container) is bounded
   by a periodic, timeout-guarded instance-recycle job that briefly drains
   connections — reads queue rather than fail during the drain — to free the
-  cache and let it re-warm lazily. Off by default
-  (`DUCKDB_RECYCLE_INTERVAL_MIN=0`), opt-in via deploy config.
+  cache and let it re-warm lazily. Off by default, opt-in via deploy config.
 - **SQLite connection leak that drove the backend into an OOM-restart
   loop.** A jemalloc heap profile attributed ~93% of the unbounded RSS
   growth to live SQLite memory: the cron watchdog built a fresh
@@ -1334,7 +1341,7 @@ that survived the package carve-up.
 - **Process-level memory guard** converts a destructive cgroup
   OOM-`SIGKILL` into a graceful self-restart (SIGTERM → uvicorn drains →
   container restart) when RSS crosses a configurable ceiling
-  (`BACKEND_GRACEFUL_RESTART_RSS_MB`, opt-in). The DuckDB connection pool
+  (`BACKEND_GRACEFUL_RESTART_RSS_MB`, opt-in). The query connection pool
   is also capped to the host core count with a lower recycle RSS threshold
   so the object-cache recycle can actually drain and free the cache.
 - **Fresh-install provisioning** no longer aborts step 1 with
@@ -1379,7 +1386,7 @@ that survived the package carve-up.
 - `TunnelState.use_tunnel` + `tunnel_url` + the
   `share_admin` response keys that exposed them (always
   False/None since v2.0 deleted the SSH path).
-- Per-checkin `_cleanup_temp_tables` sweep in `duckdb_pool` —
+- Per-checkin `_cleanup_temp_tables` sweep in the query pool —
   the "safety net" was unreachable because the failure path
   discards the connection before the sweep can run.
 
@@ -1527,7 +1534,7 @@ deleted.
 - **`escape_sql_literal`** applied at every `read_parquet()` /
   `glob()` site that interpolates a computed path. Closes the
   injection surface a partially-validated path could open through
-  DuckDB's `read_parquet()` glob expansion.
+  `read_parquet()` glob expansion.
 - **Caddy container drops privileges** — `caddy/Dockerfile` adds
   `USER caddy` (the base image ships the user). Caddy is the only
   externally-facing socket and binds nothing below port 1024, so
@@ -1580,7 +1587,7 @@ deleted.
 - **`tool.mypy.overrides` `ignore_errors` list: 36 modules → 0.**
   Every backend module type-checks under default settings. Three real
   bugs surfaced + fixed during the burndown
-  (`repositories/network.py:260` was passing the DuckDB connection
+  (`repositories/network.py:260` was passing the query connection
   where `get_asn_names` expected `service_id`;
   `routers/share_auth.py:125,203` had an `iso_z_now() and 24*60*60`
   cookie `max_age` expression where the `and` was a no-op leftover;
@@ -1591,7 +1598,7 @@ deleted.
   Live-query-monitor surface + every module the v2.0 waves added
   tests for. Full mypy: 221 source files clean.
 - **Load-harness CI step**: `scripts/emit_perf_latest.py` runs a
-  100K-row synthetic DuckDB workload (~2 s wall); `scripts/perf_gate.sh`
+  100K-row synthetic analytical workload (~2 s wall); `scripts/perf_gate.sh`
   fails on > 50 % regression vs `tests/perf/baseline.json`. Production
   targets (≤ 2,800 / ≤ 1,900 ms on 36 M rows) documented in
   `baseline.json` `production_targets_comment` and validated by the
@@ -1637,7 +1644,7 @@ deleted.
 
 ## [1.2.0] - 2026-06-09
 
-Dashboard performance overhaul plus capability-focused security hardening. Cold and warm dashboard loads drop from seconds to sub-second on large services; sustained concurrent load no longer wedges the backend. Read-path I/O is structurally cut by a per-service DuckDB connection pool, a per-minute time-series rollup bundle, size-capped bin-packing local compaction, composite endpoints that collapse multi-card admin pages into one request, and a frontend pre-warm / hover-prefetch pattern that makes navigation feel instant. Security hardening tightens cross-tenant boundaries, closes a ContextVar propagation hole in the s3fs proxy hook, removes a secret-in-URL leak on downloads, and adds strict validation across the destructive-op surface.
+Dashboard performance overhaul plus capability-focused security hardening. Cold and warm dashboard loads drop from seconds to sub-second on large services; sustained concurrent load no longer wedges the backend. Read-path I/O is structurally cut by a per-service query connection pool, a per-minute time-series rollup bundle, size-capped bin-packing local compaction, composite endpoints that collapse multi-card admin pages into one request, and a frontend pre-warm / hover-prefetch pattern that makes navigation feel instant. Security hardening tightens cross-tenant boundaries, closes a ContextVar propagation hole in the s3fs proxy hook, removes a secret-in-URL leak on downloads, and adds strict validation across the destructive-op surface.
 
 ### Performance
 
@@ -1645,8 +1652,8 @@ Structural:
 
 - **Per-minute time-series rollup bundle** (`backend/core/rollups.py`) precomputes a hour-bundled per-minute aggregate for the dashboard chart, eliminating the wide Iceberg scan on chart render. Generated alongside the existing Top-N rollups.
 - **Per-day compaction tier for rollups** — closed days are compacted into per-day parquet files; the reader prefers the per-day file and falls back to hourly only for the current day, cutting file-handle pressure on long-running services.
-- **Size-capped bin-packing local compaction** (backend/core/local_compaction.py) replaces single-file daily/weekly rollups with sequential bin-packing capped at `_MAX_PARTITION_BYTES` (default 256 MB). Hourly partitions older than 7 days bin-pack into daily files; daily files older than 30 days bin-pack into weekly files. DuckDB query parallelism is preserved on multi-month services where the prior single-file approach degraded to scan-of-one-huge-file.
-- **DuckDB connection-pool tuning knobs** — `DUCKDB_POOL_CONN_MEMORY_LIMIT` and `DUCKDB_POOL_CONN_THREADS` env vars cap per-pool-connection memory and thread count so 8 concurrent queries don't oversubscribe physical cores or balloon RSS. Pool view-binding moved outside the `Condition` lock to eliminate a deadlock under stale-Iceberg-snapshot reload.
+- **Size-capped bin-packing local compaction** (backend/core/local_compaction.py) replaces single-file daily/weekly rollups with sequential bin-packing capped at `_MAX_PARTITION_BYTES` (default 256 MB). Hourly partitions older than 7 days bin-pack into daily files; daily files older than 30 days bin-pack into weekly files. Query parallelism is preserved on multi-month services where the prior single-file approach degraded to scan-of-one-huge-file.
+- **Connection-pool tuning knobs** — per-pool-connection memory and thread count caps prevent 8 concurrent queries from oversubscribing physical cores or ballooning RSS. Pool view-binding moved outside the `Condition` lock to eliminate a deadlock under stale-Iceberg-snapshot reload.
 - **Composite read endpoints** collapse multi-card mounts into single requests:
   - `POST /api/scoring/dashboard` (8 per-card requests → 1)
   - `GET /api/scoring/analytics` and `GET /api/scoring/config`
@@ -1660,7 +1667,7 @@ Structural:
 
 Tuning:
 
-- Dashboard live-hour TEMP TABLE shared across CTEs; Python-side bot match + memoised `ngwaf_top` cut DuckDB round-trips.
+- Dashboard live-hour TEMP TABLE shared across CTEs; Python-side bot match + memoised `ngwaf_top` cut query round-trips.
 - Insights coalesce four city/region/country queries into one and four URL-keyed insights into one CTE (Option C pattern).
 - Sessions split the monolithic CTE into measurable stages and eliminate the temp-table materialisation on the hot path.
 - Origin summary combines two sequential scans into one via `GROUPING SETS`.
@@ -1687,11 +1694,11 @@ Frontend:
 ### Reliability
 
 - **Multi-worker login loop fixed** — `tunnel.py` now rehydrates a share session on-demand from SQLite when an in-memory cache miss happens on a different uvicorn worker. Previously, login on worker A would loop because worker B couldn't see the freshly-minted session.
-- **DuckDB lock conflict resolved** between the connection pool and cron writes — `get_connection` forces `read_only=False` so pool readers and cron writers no longer trip DuckDB's "different configuration" error on the same file.
+- **Connection lock conflict resolved** between the connection pool and cron writes — `get_connection` forces `read_only=False` so pool readers and cron writers no longer trip a "different configuration" error on the same file.
 - **Stale-view self-heal** — `QueryRunner` clears `_view_cache` before the `force=True` rebuild on the post-empty recovery path so the next query doesn't see the stale schema.
 - **Iceberg s3fs proxy hook** falls back to the process-global source so the hook always registers, even when the ContextVar is empty (e.g. cold-start LIST before any `_get_catalog` has fired).
 - **Top-N current-hour merge** — a silent `ImportError` was dropping the current-hour merge; restored with an explicit fail-loud import.
-- **Rollup compaction** — `run_id` threaded through the error branch and the compaction step now uses an in-memory DuckDB so a corrupted on-disk catalog can't wedge the cron.
+- **Rollup compaction** — `run_id` threaded through the error branch and the compaction step now uses an in-memory query connection so a corrupted on-disk catalog can't wedge the cron.
 - **Dashboard response cache** — write to `is_cached` (not the aliased `_is_cached`) so Pydantic doesn't drop the flag on serialise.
 - **Dashboard cache hit rate** — disabled the 30 s response-level cache that was masking the rollup wins for fast-changing queries.
 - **Usage-log rollup drift** — reconcile cycle changed from DELETE+INSERT to UPSERT so concurrent flushes can't lose rows.
@@ -1719,7 +1726,7 @@ Capability-focused hardening across the backend and frontend trust boundaries.
 
 - 3500+ backend tests (+450).
 - 290+ frontend vitest tests (+25).
-- New coverage: `tests/core/test_duckdb_pool.py`, `test_local_compaction.py`, `test_rollups_compaction.py`, `test_rollups_hour_bundling.py`, `test_iceberg_helpers.py`, `tests/services/test_service_manager.py`, `tests/utils/test_sql_validator.py`, `test_telemetry_response_middleware.py`, `test_router_utils.py`, `test_state_sync.py`, `test_terraform_gen.py`, plus router coverage for the new composite endpoints and the destructive-op-auth surface.
+- New coverage: `test_local_compaction.py`, `test_rollups_compaction.py`, `test_rollups_hour_bundling.py`, `test_iceberg_helpers.py`, `tests/services/test_service_manager.py`, `tests/utils/test_sql_validator.py`, `test_telemetry_response_middleware.py`, `test_router_utils.py`, `test_state_sync.py`, `test_terraform_gen.py`, plus router coverage for the new composite endpoints and the destructive-op-auth surface.
 - `make ci` green: lint + format + mypy + pytest + vcl-test + verify-deps + typecheck-frontend + test-frontend + osv + secret-scan.
 
 ### Infrastructure
@@ -1729,21 +1736,21 @@ Capability-focused hardening across the backend and frontend trust boundaries.
 
 ### Documentation
 
-- `AGENTS.md` — added Key Systems entries for the DuckDB connection pool, the hourly Top-N rollup pipeline, and the response telemetry middleware. Updated the local-compaction section to reflect the bin-packing tiers.
+- `AGENTS.md` — added Key Systems entries for the query connection pool, the hourly Top-N rollup pipeline, and the response telemetry middleware. Updated the local-compaction section to reflect the bin-packing tiers.
 - `MONKEYPATCHES.md` — documents the new `ThreadPoolExecutor.submit` patch.
 
 ## [1.1.0] - 2026-06-03
 
-Edge session scoring. Every request is classified in real-time at the edge by a Fastly Compute service that runs an L1 (cookie compliance + timing rules) + L2 (PageRank-trained transition matrix) scorer, returning a combined 0-100 score that lands in DuckDB for analyst review. Operators can label sessions, watch live ROC-AUC, retrain the matrix, roll back to a prior matrix, rotate the AES cookie key, and push a hard enforcement threshold that rejects flagged requests at the edge with an operator-chosen HTTP status code (default 429).
+Edge session scoring. Every request is classified in real-time at the edge by a Fastly Compute service that runs an L1 (cookie compliance + timing rules) + L2 (PageRank-trained transition matrix) scorer, returning a combined 0-100 score that lands in the analytical store for analyst review. Operators can label sessions, watch live ROC-AUC, retrain the matrix, roll back to a prior matrix, rotate the AES cookie key, and push a hard enforcement threshold that rejects flagged requests at the edge with an operator-chosen HTTP status code (default 429).
 
 ### Highlights
 
 - **Edge scoring** — Fastly Compute scorer + 6-snippet VCL preflight pattern (recv/pass/fetch/deliver/miss/enforce), AES-GCM-encrypted session cookie carrying rotating sid + transition state, `fastly.ddos_detected` gate so Compute is bypassed under L7 attack.
-- **Admin UI** at `/admin/session-scoring` — StatusPanel with live AUC against accumulated labels, ScoringHealthCard with fire rate / score distribution / top reasons / matrix-staleness alert, ThresholdSlider with counterfactual flag/pass preview + precision/recall + commit-threshold persistence, RocPrCurves with ROC + Precision-Recall plots, TopFlaggedTable + LabelsTab with click-to-view-events per sid, RetrainButton (DuckDB traces → train.py → publish matrix to FOS), SinceHoursPicker driving all six cards on one shared time window.
+- **Admin UI** at `/admin/session-scoring` — StatusPanel with live AUC against accumulated labels, ScoringHealthCard with fire rate / score distribution / top reasons / matrix-staleness alert, ThresholdSlider with counterfactual flag/pass preview + precision/recall + commit-threshold persistence, RocPrCurves with ROC + Precision-Recall plots, TopFlaggedTable + LabelsTab with click-to-view-events per sid, RetrainButton (session traces → train.py → publish matrix to FOS), SinceHoursPicker driving all six cards on one shared time window.
 - **Labels CRUD** — POST/PATCH/DELETE per-sid labels (good/bad/neutral) feed `evaluate_from_persisted_scores` to compute live ROC-AUC. Min-samples gate (≥3 per class) prevents noisy display.
 - **ROC + PR curves** + per-reason AUC breakdown (split by L1/L2 rule: cookie-missing, impossibly-fast, robotic-consistency, rare-transition, low-transition-prob).
 - **Composite `/scoring/dashboard`** endpoint collapses the 8 per-card requests into one in-flight-collapsed payload; the existing per-card endpoints stay mounted for back-compat.
-- **`edge_score_reason` virtual field** — CSV-split via DuckDB `unnest(string_split(...))`, top-N cards + click-to-filter same as NGWAF signals.
+- **`edge_score_reason` virtual field** — CSV-split via `unnest(string_split(...))`, top-N cards + click-to-filter same as NGWAF signals.
 - **FOS matrix persistence** — `enable_scoring` publishes the trained matrix to FOS; backend auto-fetches on startup (no more per-host scp).
 - **Matrix version history + rollback** — every publish snapshots the prior matrix to `iceberg/meta/scoring_matrix_history/{version}.json`; new `/scoring/matrix-versions` lists them and `/scoring/matrix-versions/{v}/restore?confirm=true` copies a historical matrix back. AUC reflects the rollback immediately; Wasm at edge keeps the embedded matrix until `deploy_wasm.sh` re-runs (deploy_hint surfaced).
 - **Threshold enforcement (live blocking)** — operator commits a threshold, scorer reads it from `scoring_config` ConfigStore, emits `X-Edge-Score-Enforce: 1` when score≥threshold, the new `Session Scoring - Enforce` VCL snippet rejects those requests on the post-scoring restart. Effective at the edge within seconds. Confirm-dialog-gated PUT endpoint + LIVE warning chip in the slider UI. The response code defaults to 429 (Too Many Requests) and is operator-overridable per-service via a new `Enforce response code` selector (403 / 429 / 451 / 503; backend accepts any 4xx/5xx) — picks land via a focused `update_enforce_status_code` orchestrator that swaps only the enforce snippet (~5–10s end-to-end vs. the full enable_scoring flow). Audit-logged as `scoring_enforce_status_code_changed`.
@@ -1764,7 +1771,7 @@ Edge session scoring. Every request is classified in real-time at the edge by a 
 
 Structural:
 
-- **DuckDB connection pool** (`backend/core/duckdb_pool.py`) replaces per-request connection setup; eliminates the per-request DuckDB initialisation cost on hot paths.
+- **Query connection pool** replaces per-request connection setup; eliminates the per-request connection initialisation cost on hot paths.
 - **Hourly Top-N rollup pipeline** (`backend/core/rollups.py` + `scripts/backfill_rollups.py`) precomputes the dashboard's most-asked aggregates; cold-load dashboard scans drop from seconds to tens of ms.
 - **Bounded cache primitive** (`backend/utils/bounded_cache.py`, 13-test `tests/utils/test_bounded_cache.py`) replaces several previously-unbounded dict caches across the request path (also referenced under Security → `_StaticAssetLimiter` and the analytics cache in `session_scoring._cached`).
 
@@ -1772,7 +1779,7 @@ Tuning:
 
 - `security/top-bots` consolidated UA + NGWAF onto one temp table (was 2 independent Iceberg scans per dashboard mount).
 - `dashboard/raw` uses `get_source_extent` for cached steady-state extent.
-- `usage/prefill` cached-status fast path skips DuckDB hop when the sync cron has populated it.
+- `usage/prefill` cached-status fast path skips the analytical hop when the sync cron has populated it.
 - `get_enriched_services` 60s TTL cache on the recursive cache-dir `scandir` (was 200-1500ms per `/api/bootstrap`).
 - `loading.tsx` Suspense skeletons + dynamic imports (LabelsTab, ChoroplethMap) cut admin-page click lag.
 
@@ -1795,8 +1802,8 @@ Capability-focused hardening across the FastAPI backend, Fastly VCL, Next.js fro
 - **Destructive-op auth**:
   - `/api/provision/teardown` validates a caller-supplied Fastly token via `/tokens/self` for the `global` scope before any destructive op; never falls back to server-stored credentials. Frontend TeardownDialog prompts admin for the token.
   - `/api/provision/ngwaf-workspaces` token-gated (constant-time stored-key match OR validated `global`-scope token); NGWAF workspace mutation enforces analyst-session scope.
-- **DuckDB user-SQL safety**:
-  - New `backend/utils/sql_validator.py` enforces a statement-type whitelist + recursive parse-tree walker with catalog blocklist (`duckdb_*` / `pg_*` prefixes, `information_schema` / `pg_catalog` / `system` schemas, non-`main` catalogs) + function denylist (`read_csv` / `read_parquet` / `iceberg_scan` / `glob` / `lsdir` / `getenv` / `current_setting` / `duckdb_secrets` / postgres / sqlite / mysql scanners) + fail-closed parse + audit logging + perf budget. Replaces a regex-based blocklist that missed `read_csv_auto`, `information_schema`, `duckdb_secrets`, `INSTALL/LOAD`, and `getenv`.
+- **User-SQL safety**:
+  - New `backend/utils/sql_validator.py` enforces a statement-type whitelist + recursive parse-tree walker with catalog blocklist (`pg_*` prefixes, `information_schema` / `pg_catalog` / `system` schemas, non-`main` catalogs) + function denylist (`read_csv` / `read_parquet` / `iceberg_scan` / `glob` / `lsdir` / `getenv` / `current_setting` / postgres / sqlite / mysql scanners) + fail-closed parse + audit logging + perf budget. Replaces a regex-based blocklist that missed `read_csv_auto`, `information_schema`, `INSTALL/LOAD`, and `getenv`.
   - `escape_sql_literal` helper applied at four ingest call sites; characterisation tests cover the PoC payload + multi-byte UTF-8 + backslash + empty + long-with-many-quotes.
   - `time_range` validated via `dateutil.isoparse` before SQL interpolation.
   - `get_con` / `get_meta_con` dropped the auto-query-param `read_only` flag.
@@ -1858,7 +1865,7 @@ Initial public release. Self-hosted dashboard for searching, filtering, and visu
 - **Automated provisioning** — guided wizard (and equivalent `backend/provision.py` CLI) creates the FOS bucket, scoped access key, CDN-fronting Fastly Delivery service, and the logging endpoint on your VCL service. Auto-rollback on failure.
 - **Crash-safe ingestion** — buffered locally, atomically committed; interrupted imports never corrupt the table.
 - **CDN-accelerated reads** — every FOS data read goes through a Fastly Delivery service for free egress and edge caching.
-- **Multi-source support** — analyze logs from multiple Fastly services side by side, each with its own DuckDB engine and Iceberg table.
+- **Multi-source support** — analyze logs from multiple Fastly services side by side, each with its own analytical engine and table.
 - **Interactive dashboards** — traffic over time, global request map, top-N aggregations across every dimension, paginated raw-log viewer with click-to-filter.
 - **Insights** — automated anomaly detection for error spikes, regional traffic surges, new IPs, WAF signal changes, cache efficiency collapses, and latency regressions.
 - **Usage & Cost** — live storage breakdown, FOS Class A / B operation counts, period totals, and an interactive cost estimator pre-filled from your traffic stats.
@@ -1870,6 +1877,7 @@ Initial public release. Self-hosted dashboard for searching, filtering, and visu
 
 See [docs/features.md](docs/features.md) for the full feature reference.
 
+[3.0.0-rc3]: https://github.com/fastly/fastly-log-analytics/releases/tag/v3.0.0-rc3
 [3.0.0-rc1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v3.0.0-rc1
 [3.0.0-beta4]: https://github.com/fastly/fastly-log-analytics/releases/tag/v3.0.0-beta4
 [3.0.0-beta1]: https://github.com/fastly/fastly-log-analytics/releases/tag/v3.0.0-beta1

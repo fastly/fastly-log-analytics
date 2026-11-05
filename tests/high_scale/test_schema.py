@@ -558,7 +558,7 @@ def test_decode_normalizes_rum_fields_and_querystring_fallback(
         assert res.events[0][k] == v
 
 
-def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
+def test_decode_expands_faro_rum_body_matching_canonical_parity() -> None:
     faro_payload = {
         "meta": {
             "browser": {"name": "Firefox", "mobile": True},
@@ -648,7 +648,7 @@ def test_decode_expands_faro_rum_body_matching_standard_mode_parity() -> None:
         assert len(ch_tuples) == expected_len and len({row[1] for row in ch_tuples}) == expected_len
 
 
-def test_decode_expands_batched_querystring_matching_standard_mode_parity() -> None:
+def test_decode_expands_batched_querystring_matching_canonical_parity() -> None:
     batched_url = (
         "/rum-beacon?service_id=svc"
         "&rum_metric_name=FCP&rum_metric_value=450&rum_metric_rating=good"
@@ -1561,8 +1561,7 @@ def test_export_can_be_cancelled() -> None:
 
 def test_high_scale_config_validation() -> None:
     with pytest.raises(ValueError, match="ClickHouse"):
-        HighScaleConfig(True, None, None, None).validate()
-    HighScaleConfig(False, None, None, None).validate()
+        HighScaleConfig(None, None, None).validate()
 
 
 def test_retention_recommendation_preserves_disk_reserve_and_accounts_for_fields() -> None:
@@ -1657,7 +1656,6 @@ def test_register_high_scale_services_rejects_empty_secret_and_missing_env_servi
     with pytest.raises(ValueError, match="high-scale cursor secret is required"):
         _reg_svc(cursor_secret=b"")
 
-    monkeypatch.setenv("HIGH_SCALE_ENABLED", "1")
     monkeypatch.delenv("HIGH_SCALE_SERVICE_IDS", raising=False)
     with pytest.raises(ValueError, match="HIGH_SCALE_SERVICE_IDS"):
         register_high_scale_services_from_environment(HighScaleServiceRegistry(), client=FakeClickHouse())
@@ -1676,7 +1674,6 @@ def test_register_high_scale_services_cold_tier_wiring() -> None:
 
 
 def test_environment_registration_wires_and_degrades_cold_tier(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HIGH_SCALE_ENABLED", "1")
     monkeypatch.setenv("HIGH_SCALE_SERVICE_IDS", "svc")
     monkeypatch.setenv("HIGH_SCALE_CURSOR_SECRET", "local-test-secret")
 

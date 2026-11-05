@@ -18,7 +18,7 @@ import { AlertTriangle, CheckCircle2, Loader2, Activity } from 'lucide-react'
 
 export type FormState = Omit<CustomField, "created_at" | "updated_at">
 
-export const DUCKDB_TYPES: readonly CustomField['duckdb_type'][] = ['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']
+export const SQL_TYPES: readonly CustomField['sql_type'][] = ['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']
 export const VALUE_TYPES: readonly CustomField['value_type'][] = ['string', 'numeric', 'boolean', 'ip', 'url']
 
 export const customFieldFormSchema = z.object({
@@ -28,7 +28,7 @@ export const customFieldFormSchema = z.object({
   vcl_log_expression: z.string().min(1, 'VCL expression is required'),
   collection_stage: z.enum(['edge', 'origin']),
   origin_log_frequency: z.enum(['all', 'once']).optional(),
-  duckdb_type: z.enum(['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']),
+  sql_type: z.enum(['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']),
   value_type: z.enum(['string', 'numeric', 'boolean', 'ip', 'url']),
   bytes_estimate: z.number().int().min(1),
   nullable: z.boolean(),
@@ -45,7 +45,7 @@ export const DEFAULT_FIELD: FormState = {
   vcl_log_expression: "",
   collection_stage: "edge",
   origin_log_frequency: "all",
-  duckdb_type: "VARCHAR",
+  sql_type: "VARCHAR",
   value_type: "string",
   bytes_estimate: 20,
   nullable: true,
@@ -272,7 +272,7 @@ export function CustomFieldStorageSection({
       <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
         <div className="space-y-2">
           <LabelWithInfo labelClassName="text-xs" info="The underlying column type. VARCHAR is safest for strings, while numeric types (BIGINT, DOUBLE) save space and enable mathematical operations." label="Data Type" />
-          <Select value={formData.duckdb_type} onValueChange={v => { const t = oneOf(DUCKDB_TYPES, v); if (t) onChange('duckdb_type', t) }}>
+          <Select value={formData.sql_type} onValueChange={v => { const t = oneOf(SQL_TYPES, v); if (t) onChange('sql_type', t) }}>
             <SelectTrigger className="h-8 text-xs">
               <SelectValue />
             </SelectTrigger>

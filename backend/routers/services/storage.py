@@ -1,4 +1,4 @@
-"""Service DuckDB/DuckLake storage schema and type-lock helpers."""
+"""Service storage schema and type-lock helpers."""
 
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
-def _committed_duckdb_field_types(src: dict) -> dict[str, str]:
+def _committed_field_types(src: dict) -> dict[str, str]:
     """Return committed custom field types (empty in ClickHouse JSON custom fields mode)."""
     del src
     return {}
 
 
 def _check_storage_type_lock(
-    service_id: str, field_name: str, new_duckdb_type: str | None = None, new_value_type: str | None = None
+    service_id: str, field_name: str, new_sql_type: str | None = None, new_value_type: str | None = None
 ) -> None:
     """Ensure we don't mutate the core type of an existing field in the committed table."""
     del new_value_type
@@ -40,10 +40,10 @@ def _check_storage_type_lock(
     if not src or src.get("storage_mode", "cloud") == "local":
         return
     try:
-        existing_duckdb_type = _committed_duckdb_field_types(src).get(field_name)
-        if existing_duckdb_type and new_duckdb_type:
-            current_mapped = _TYPE_ALIASES.get(existing_duckdb_type.upper(), existing_duckdb_type.upper())
-            target_mapped = _TYPE_ALIASES.get(new_duckdb_type.upper(), new_duckdb_type.upper())
+        existing_sql_type = _committed_field_types(src).get(field_name)
+        if existing_sql_type and new_sql_type:
+            current_mapped = _TYPE_ALIASES.get(existing_sql_type.upper(), existing_sql_type.upper())
+            target_mapped = _TYPE_ALIASES.get(new_sql_type.upper(), new_sql_type.upper())
             if current_mapped != target_mapped:
                 raise HTTPException(
                     status_code=422,
@@ -68,11 +68,11 @@ def _check_storage_type_lock(
 
 
 def _locked_storage_field_names(src: dict | None, *, error_lead: str, error_tail: str) -> set[str]:
-    """Return committed DuckLake/DuckDB-schema field names for ``src``; fail closed (503) on error."""
+    """Return committed schema field names for ``src``; fail closed (503) on error."""
     if not src or src.get("storage_mode", "cloud") == "local":
         return set()
     try:
-        return set(_committed_duckdb_field_types(src).keys())
+        return set(_committed_field_types(src).keys())
     except Exception as e:
         raise HTTPException(
             status_code=503,

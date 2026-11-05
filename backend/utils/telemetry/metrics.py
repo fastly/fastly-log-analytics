@@ -471,7 +471,7 @@ def record_call(
                 if not code:
                     break
                 fn = code.co_filename
-                if "telemetry.py" in fn or "/telemetry/" in fn or "contextlib.py" in fn or "duckdb.py" in fn:
+                if "telemetry.py" in fn or "/telemetry/" in fn or "contextlib.py" in fn:
                     frame = frame.f_back
                     continue
                 caller = code.co_name
@@ -523,8 +523,8 @@ class track_query:
     def __exit__(self, exc_type, exc_val, exc_tb):
         elapsed = round((time.time() - self.t0) * 1000, 2)
         sql_stripped = self.query.strip()
-        get_queries().append({"sql": sql_stripped, "time_ms": elapsed, "engine": "DuckDB"})
-        record_telemetry_query(engine="duckdb", sql=sql_stripped, duration_ms=elapsed)
+        get_queries().append({"sql": sql_stripped, "time_ms": elapsed, "engine": "ClickHouse"})
+        record_telemetry_query(engine="clickhouse", sql=sql_stripped, duration_ms=elapsed)
         _add_span_event(
             "db.query",
             {

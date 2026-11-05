@@ -543,7 +543,7 @@ def compute_lag_statistics(
 
 def print_active_scorecard(results: list[dict[str, Any]]) -> None:
     print(
-        f"\n{'=' * 110}\n                      REQUEST WATERMARK RECENCY SCORECARD (ACTIVE TRAFFIC)\n{'=' * 110}\n{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}\n{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}",
+        f"\n{'=' * 96}\n                      REQUEST WATERMARK RECENCY SCORECARD (ACTIVE TRAFFIC)\n{'=' * 96}\n{'Environment':<28} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}\n{'-' * 28}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}",
         flush=True,
     )
     for r in results:
@@ -554,7 +554,7 @@ def print_active_scorecard(results: list[dict[str, Any]]) -> None:
         hl, dl = bench.get("header_lag", {}), bench.get("dashboard_lag", {})
         fmt = lambda d, k: f"{d[k]}s" if d.get(k) is not None else "—"  # noqa: E731
         print(
-            f"{r['name']:<28} │ {r.get('deployment_mode', '—'):<11} │ {fmt(hl, 'min'):>8} │ {fmt(hl, 'max'):>8} │ {fmt(hl, 'avg'):>8} │ {fmt(hl, 'p95'):>8} │ {fmt(dl, 'avg'):>9} │ {bench.get('requests_sent', 0):>9,} │ {bench.get('target_status', '—'):<15}",
+            f"{r['name']:<28} │ {fmt(hl, 'min'):>8} │ {fmt(hl, 'max'):>8} │ {fmt(hl, 'avg'):>8} │ {fmt(hl, 'p95'):>8} │ {fmt(dl, 'avg'):>9} │ {bench.get('requests_sent', 0):>9,} │ {bench.get('target_status', '—'):<15}",
             flush=True,
         )
     valid = [r for r in results if "error" not in r]

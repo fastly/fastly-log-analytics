@@ -51,7 +51,7 @@ app.conf.update(
     task_reject_on_worker_lost=True,
     # Long-running converts must not let one worker hoard the queue.
     worker_prefetch_multiplier=1,
-    # Hard cap a wedged FOS download / DuckDB insert (prefork pool only;
+    # Hard cap a wedged FOS download / ClickHouse insert (prefork pool only;
     # the threads pool does not support time limits).
     task_time_limit=15 * 60,
     task_soft_time_limit=13 * 60,
@@ -92,14 +92,9 @@ def _worker_process_init(**_kwargs):
 
     configure_structlog()
 
-    # Fail the worker fast on incoherent celery-mode config (missing broker,
-    # file-based DuckLake catalog) instead of degrading invisibly — same
-    # guard the backend lifespan runs.
-    from backend.config import validate_deployment_mode
     from backend.utils.runtime_modes import validate_mock_modes
 
     validate_mock_modes()
-    validate_deployment_mode()
 
     # Start Prometheus metrics server for worker if configured
     if os.environ.get("OTEL_EXPORTER") == "prometheus":
@@ -352,7 +347,7 @@ def inprocess_active_runs_entries() -> list[dict[str, Any]]:
 
 
 def standard_ingest_summary() -> dict[str, int]:
-    """Aggregate standard-mode ingested_files and quarantine counts across all configured services."""
+    """Aggregate ingested_files and quarantine counts across all configured services."""
     ingested_files = 0
     quarantined_items = 0
     try:
@@ -395,8 +390,6 @@ def standard_ingest_summary() -> dict[str, int]:
 
 def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
-    deployment_mode = "high_scale"
-
     queues, broker_reachable = celery_queue_depths()
 
     workers_error: str | None = None
@@ -421,7 +414,6 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     ledger = ingest_ledger_summary()
 
     return {
-        "deployment_mode": deployment_mode,
         "broker_reachable": broker_reachable,
         "workers": {
             "active_tasks": active,

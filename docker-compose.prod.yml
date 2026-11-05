@@ -174,7 +174,6 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
       - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
       - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
-      - HIGH_SCALE_ENABLED=1
     depends_on:
       - postgres
       - clickhouse
@@ -207,7 +206,6 @@ services:
           memory: 2G
     environment:
       - PYTHONUNBUFFERED=1
-      - HIGH_SCALE_ENABLED=1
       - HIGH_SCALE_WORKER_THREADS=1
       - HIGH_SCALE_MAX_BATCH_BYTES=6291456
       - HIGH_SCALE_MAX_BATCH_OBJECTS=10

@@ -220,7 +220,7 @@ def _parse_timestamp(value: str | None) -> datetime | None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    # Some backends (notably a DuckLake-backed request view) can
+    # Some analytical query paths can
     # return a naive timestamp with no UTC offset. Without this, comparing it
     # against an offset-aware `now` in freshness_lag_seconds() raises
     # `TypeError: can't subtract offset-naive and offset-aware datetimes` and

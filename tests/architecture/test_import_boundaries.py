@@ -214,7 +214,7 @@ def test_guard_flags_new_raw_site_in_new_file(tmp_path: Path) -> None:
 
 def test_guard_flags_count_above_baseline(tmp_path: Path) -> None:
     body = "a = datetime.fromisoformat(x)\nb = datetime.fromisoformat(y)\n"
-    assert _run(_repo(tmp_path, {"backend/core/duckdb.py": body}), DATEPARSE).returncode == 1
+    assert _run(_repo(tmp_path, {"backend/core/fos_client.py": body}), DATEPARSE).returncode == 1
 
 
 def test_guard_ignores_comments_and_tests(tmp_path: Path) -> None:
@@ -299,7 +299,7 @@ ALLOWED_STRING_DETAILS: set[tuple[int, str]] = {
     (403, "Read-only services cannot run ledger sweep."),
     (400, "Ledger sweep is only supported under high-scale mode."),
     (403, "Read-only services cannot run RUM sync."),
-    (400, "RUM sync is only supported in standard deployment mode."),
+    (400, "RUM sync requires a configured service."),
     (403, "Read-only services cannot run RUM discovery."),
     (400, "RUM discovery is only supported under high-scale mode."),
     (501, "Prometheus client not installed"),
@@ -751,7 +751,7 @@ def test_unrelated_runtime_listener_in_same_checkout_is_not_killed(executable, c
     assert system.signals == []
 
 
-def test_duckdb_holder_requires_python_executable():
+def test_lock_holder_requires_python_executable():
     system = FakeSystem(
         [
             process(42, command="python3 -c 'spawn_main()'"),
@@ -835,7 +835,7 @@ def test_permission_denied_is_not_silently_ignored():
 
 def test_system_uses_argument_arrays_for_ps_lsof_and_preserves_literal_paths(monkeypatch):
     commands = []
-    path = ROOT / "data/services/file [a]+.duckdb"
+    path = ROOT / "data/services/file [a]+.lock"
 
     def fake_run(args, **kwargs):
         assert isinstance(args, list) and not kwargs.get("shell")
@@ -879,14 +879,14 @@ def test_stop_only_inspects_exact_existing_service_databases(monkeypatch, tmp_pa
     checkout = tmp_path / "repo"
     db_dir = checkout / "data/services"
     db_dir.mkdir(parents=True)
-    expected = db_dir / "example.duckdb"
+    expected = db_dir / "example.lock"
     expected.touch()
-    (db_dir / "example.duckdb.wal").touch()
+    (db_dir / "example.lock.wal").touch()
     (db_dir / "nested").mkdir()
-    (db_dir / "nested/other.duckdb").touch()
-    outside = tmp_path / "outside.duckdb"
+    (db_dir / "nested/other.lock").touch()
+    outside = tmp_path / "outside.lock"
     outside.touch()
-    (db_dir / "linked.duckdb").symlink_to(outside)
+    (db_dir / "linked.lock").symlink_to(outside)
     system = FakeSystem([])
     calls = []
     system.holding_pids = lambda paths: (calls.append(paths), set())[1]

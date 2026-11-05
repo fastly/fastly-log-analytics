@@ -3,7 +3,7 @@ import type { components } from '@/types/api.generated'
 
 export type PrefillResponse = Omit<
   components['schemas']['PrefillResponse'],
-  'commit_interval_mins' | 'compaction_enabled' | 'deployment_mode'
+  'commit_interval_mins' | 'compaction_enabled'
 >
 export type BillingZone = 'MBZ100' | 'MBZ200' | 'Global'
 

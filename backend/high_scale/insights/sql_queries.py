@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from backend.high_scale._common import visible_fact_clauses
 from backend.repositories.insights.shaping import fingerprint_column as _fingerprint_column
 
-# DuckDB column name -> ClickHouse expression over request_facts.
+# Logical column name -> ClickHouse expression over request_facts.
 COLUMNS: dict[str, str] = {
     "timestamp": "event_timestamp",
     "url": "url",

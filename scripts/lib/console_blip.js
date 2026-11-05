@@ -3,33 +3,6 @@ function isTransientConsoleBlip(text) {
   return /ERR_CONNECTION_REFUSED|ERR_ABORTED|ERR_NETWORK_CHANGED|net::ERR_CONNECTION|net::ERR_FAILED|ChunkLoadError|Failed to load chunk/i.test(text);
 }
 
-async function logPoolAtStart(context, baseUrl, name) {
-  try {
-    const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 15000 });
-    if (!res.ok()) return;
-    const pools = (await res.json()).pool_wait || [];
-    const busy = pools.reduce((n, p) => n + Math.max(0, (p.in_use || 0) - (p.idle || 0)), 0);
-    console.log(`[POOL-START ${name}] busy=${busy}`);
-  } catch (err) {
-    console.log(`[POOL-START ${name}] unavailable: ${err.message}`);
-  }
-}
-
-async function logPoolStats(context, baseUrl, name) {
-  try {
-    const res = await context.request.get(`${new URL(baseUrl).origin}/api/admin/health`, { timeout: 20000 });
-    if (!res.ok()) throw new Error(`status ${res.status()}`);
-    const pools = ((await res.json()).pool_wait || []).map(p => ({
-      max: p.max_size, open: p.in_use, idle: p.idle, busy: Math.max(0, (p.in_use || 0) - (p.idle || 0)),
-      created: p.created_total, reused: p.reused_total, discarded: p.discarded_total,
-      saturated: p.saturated_rejects_total, wait: p.wait, rebindWait: p.rebind_wait, heavy: p.heavy,
-    }));
-    console.log(`[POOL ${name}] ${JSON.stringify(pools)}`);
-  } catch (err) {
-    console.log(`[POOL ${name}] unavailable: ${err.message}`);
-  }
-}
-
 async function logPagePerf(page, name, budgets, responseMeasurements = [], measurementGaps = []) {
   try {
     const perf = await page.evaluate(() => new Promise(resolve => {
@@ -88,4 +61,4 @@ async function logPagePerf(page, name, budgets, responseMeasurements = [], measu
   }
 }
 
-module.exports = { isTransientConsoleBlip, logPoolAtStart, logPoolStats, logPagePerf };
+module.exports = { isTransientConsoleBlip, logPagePerf };

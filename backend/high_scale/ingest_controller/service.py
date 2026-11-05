@@ -229,8 +229,6 @@ def register_high_scale_services_from_environment(
     control_factory: Callable[[], ArchiveManifestCatalog] | None = None,
     archive_factory: Callable[[str], ArchivePublication | None] | None = None,
 ) -> tuple[str, ...]:
-    if os.getenv("HIGH_SCALE_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
-        return ()
     if client is None:
         raise RuntimeError("high-scale mode requires a ClickHouse client")
     service_ids = tuple(s.strip() for s in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if s.strip())

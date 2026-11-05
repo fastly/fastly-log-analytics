@@ -122,33 +122,6 @@ def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     }
 
 
-def assert_manual_trigger_standard_mode_rejected(
-    endpoint_path: str,
-    service_id: str,
-    base_source: dict[str, Any],
-) -> Any:
-    """Assert that a High-Scale-only manual trigger endpoint returns 400 in standard mode."""
-    from starlette.testclient import TestClient
-
-    from backend.core.request_context import get_service_id, get_source
-    from backend.main import app
-
-    standard_src = {**base_source, "deployment_mode": "standard"}
-    app.dependency_overrides[get_source] = lambda: standard_src
-    app.dependency_overrides[get_service_id] = lambda: service_id
-    try:
-        client = TestClient(app)
-        resp = client.post(endpoint_path, headers={"x-fastly-service-id": service_id})
-        assert resp.status_code == 400
-        detail = resp.json()["detail"]
-        msg = detail["message"] if isinstance(detail, dict) else str(detail)
-        assert "high-scale" in msg.lower()
-        return resp
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
-
-
 def assert_manual_trigger_non_admin_rejected(
     endpoint_path: str,
     service_id: str,

@@ -430,7 +430,6 @@ def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.Mon
         "https://10.0.0.10:8443",
         "https://10.0.0.10:8443/dashboard",
         "svc-hs",
-        True,
     )
     res = audit.audit_target(env, timeout=1.0)
     assert not res.reachable
@@ -1476,20 +1475,19 @@ def test_correlated_query_uses_exact_safe_literals_and_separate_datasets(monkeyp
             (200, {"data": [], "truncated": False, "_response_cache": {"state": "bypass"}}),
         )[1],
     )
-    for high_scale in (False, True):
-        for stream in ("request", "vitals", "errors"):
-            key = "10000001" if stream == "vitals" else "/?customer=O'Brien&probe=owned"
-            probe = {"key": key, "sent": 0.0}
-            result = freshness.poll_correlated_stream("https://admin.example.test", "svc", stream, [probe], high_scale)
-            assert result["error"] is None and "last_absent" in probe
-            body = calls[-1]
-            column = {"request": "url", "vitals": "metric_value", "errors": "error_message"}[stream]
-            literal = "10000001" if stream == "vitals" else "'/?customer=O''Brien&probe=owned'"
-            assert f"{column} IN ({literal})" in body["sql"]
-            assert "cid" not in body["sql"] and "client_id" not in body["sql"]
-            assert body["dataset"] == {"request": "logs", "vitals": "client_vitals", "errors": "client_errors"}[stream]
-            assert "LIMIT 100" in body["sql"] and "INTERVAL 1 HOUR" in body["sql"] and body["max_rows"] == 100
-            assert ("metric_name = 'LCP'" in body["sql"]) == (stream == "vitals")
+    for stream in ("request", "vitals", "errors"):
+        key = "10000001" if stream == "vitals" else "/?customer=O'Brien&probe=owned"
+        probe = {"key": key, "sent": 0.0}
+        result = freshness.poll_correlated_stream("https://admin.example.test", "svc", stream, [probe])
+        assert result["error"] is None and "last_absent" in probe
+        body = calls[-1]
+        column = {"request": "url", "vitals": "metric_value", "errors": "error_message"}[stream]
+        literal = "10000001" if stream == "vitals" else "'/?customer=O''Brien&probe=owned'"
+        assert f"{column} IN ({literal})" in body["sql"]
+        assert "cid" not in body["sql"] and "client_id" not in body["sql"]
+        assert body["dataset"] == {"request": "logs", "vitals": "client_vitals", "errors": "client_errors"}[stream]
+        assert "LIMIT 100" in body["sql"] and "INTERVAL 1 HOUR" in body["sql"] and body["max_rows"] == 100
+        assert ("metric_name = 'LCP'" in body["sql"]) == (stream == "vitals")
 
 
 def test_correlated_upper_bound_and_censoring_and_population_floor(monkeypatch):
@@ -1647,7 +1645,6 @@ def test_print_active_scorecard_verified_and_ended_span_guard(capsys):
         [
             {
                 "name": "Local Standard",
-                "deployment_mode": "standard",
                 "qualification": "verified",
                 "active_benchmark": {
                     "header_lag": {"min": 1.0, "max": 3.0, "avg": 2.0, "p95": 3.0},

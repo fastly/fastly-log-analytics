@@ -1,7 +1,6 @@
-"""Cross-engine insight post-processing, severity scoring, evidence formatting, and card assembly.
+"""Insight post-processing, severity scoring, evidence formatting, and card assembly.
 
-Shared between the DuckDB insights repository (``backend/repositories/insights/repository.py``)
-and the High-Scale ClickHouse insights service (``backend/high_scale/insights/``).
+Used by the ClickHouse insights service (``backend/high_scale/insights/``).
 """
 
 from __future__ import annotations
@@ -469,7 +468,7 @@ def shape_cache_collapse_detail(
     iso_formatter: Callable[[Any], str] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Assemble the complete cache-collapse drill-down payload across DuckDB and ClickHouse."""
+    """Assemble the complete cache-collapse drill-down payload."""
     fmt = iso_formatter or iso_or_str
     w_hits, w_miss, w_pass, w_total, b_hits, b_miss, b_pass, b_total = rates
     w_rate, b_rate, w_pass_rate, b_pass_rate = compute_cache_collapse_rates(

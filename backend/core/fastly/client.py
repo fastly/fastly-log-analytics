@@ -84,7 +84,7 @@ def render_vcl_sigv4_signing_block(
         else []
     )
     bucket_comment = (
-        "# Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)"
+        "# Only prepend bucket if not already present (handles direct S3-style paths from Boto3)"
         if detailed_comments
         else "# Prepend bucket if not already present"
     )

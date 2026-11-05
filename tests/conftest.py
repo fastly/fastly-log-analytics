@@ -22,8 +22,8 @@ _os.environ.setdefault("DEBUG_RESPONSES_FORCE_INCLUDE", "1")
 
 
 # Silence the "--- Logging error --- ValueError: I/O operation on closed file"
-# tracebacks that pytest's capture plugin provokes. Background storage/startup
-# daemon threads (backend/core/storage/) may keep running a metadata scan + ``logger.info(...)``
+# tracebacks that pytest's capture plugin provokes. Background startup
+# daemon threads may keep running a metadata scan + ``logger.info(...)``
 # after the test that spawned it has finished; by then pytest has already
 # closed that test item's captured stderr, so the StreamHandler's
 # ``stream.write`` raises and ``logging.Handler.handleError`` prints a
@@ -258,7 +258,7 @@ def _pg_worker_schema():
 
     base_dsn = _os.environ.get(
         "METADATA_DSN",
-        "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
+        "postgresql://fla:fla_test_password@localhost:5432/fla_test",
     )
     from urllib.parse import urlparse, urlunparse
 
@@ -271,17 +271,18 @@ def _pg_worker_schema():
     slot = 0
     while not admin_conn.execute("SELECT pg_try_advisory_lock(%s)", (_PG_SLOT_LOCK_BASE + slot,)).fetchone()[0]:
         slot += 1
-    worker_db = f"ducklake_test_slot{slot}"
-    if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (worker_db,)).fetchone():
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
-                break
-            except psycopg.errors.ObjectInUse:
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(0.25)
+    worker_db = f"fla_test_slot{slot}"
+    for db_to_ensure in ("fla_test", worker_db):
+        if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_to_ensure,)).fetchone():
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    admin_conn.execute(f'CREATE DATABASE "{db_to_ensure}"')
+                    break
+                except (psycopg.errors.ObjectInUse, psycopg.errors.DuplicateDatabase):
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.25)
 
     worker_dsn = urlunparse(parsed._replace(path=f"/{worker_db}"))
     with psycopg.connect(worker_dsn, autocommit=True) as reset_conn:

@@ -132,7 +132,7 @@ describe('ProvisionWizard modes and ingest connect step', () => {
     expect(s.setStep).toHaveBeenCalledWith('token')
   })
 
-  it('renders the ingest connect form without DuckLake or analyst-invite inputs', () => {
+  it('renders the ingest connect form without legacy catalog or analyst-invite inputs', () => {
     render(<ConnectStep s={makeConnectState()} />)
     expect(screen.getByText(/connect to existing storage/i)).toBeVisible()
     expect(screen.getByText('Logging Service', { selector: 'label, span, div' })).toBeVisible()
@@ -1131,7 +1131,7 @@ test('submits valid custom field and displays validation errors when invalid', a
         vcl_log_expression: 'req.http.Host',
         collection_stage: 'edge',
         origin_log_frequency: 'all',
-        duckdb_type: 'VARCHAR',
+        sql_type: 'VARCHAR',
         value_type: 'string',
         bytes_estimate: 32,
         nullable: true,
@@ -1194,7 +1194,7 @@ test('renders custom fields and handles deletion', async () => {
         vcl_log_expression: 'req.http.Host',
         collection_stage: 'edge',
         origin_log_frequency: 'all',
-        duckdb_type: 'VARCHAR',
+        sql_type: 'VARCHAR',
         value_type: 'string',
         bytes_estimate: 20,
         nullable: true,

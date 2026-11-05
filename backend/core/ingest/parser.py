@@ -151,14 +151,14 @@ def _corrupt_gzip_error(local_file: str) -> BaseException | None:
 
 def get_ingest_type_hints(log_fields_config: dict | None = None) -> dict[str, str]:
     hints = {
-        f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else f["duckdb_type"])
+        f["id"]: ("TIMESTAMPTZ" if f["id"] == "timestamp" else f["sql_type"])
         for f in LOG_FIELD_CATALOG
         if f.get("group") not in _INGEST_EXCLUDED_GROUPS and f.get("vcl") is not None
     }
     if log_fields_config:
         for cf in log_fields_config.get("custom_fields", []):
             if cf.get("enabled", True):
-                hints[cf["name"]] = cf.get("duckdb_type", "VARCHAR")
+                hints[cf["name"]] = cf.get("sql_type", "VARCHAR")
     return hints
 
 

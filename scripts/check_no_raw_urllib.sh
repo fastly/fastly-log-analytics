@@ -16,7 +16,6 @@ ALLOWLIST=(
   # 002e76e8: download_file moved byte-for-byte from admin/compaction.py.
   "backend/routers/admin/downloads.py"
   "backend/routers/admin/ingest.py"
-  "backend/core/storage/_core.py"
   # 04759853: pinned FOS/CDN fetch + redirect validation moved byte-for-byte
   # from metadata/base.py; originally sanctioned in metadata/state.py (bcb5fe6c).
   "backend/core/metadata/state_sync.py"

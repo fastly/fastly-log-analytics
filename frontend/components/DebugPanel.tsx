@@ -281,7 +281,7 @@ export function DebugPanel() {
   )
   const engineLabel = queryEngines.length > 0 ? queryEngines.join(' / ') : defaultEngine
 
-  const duckDbCopyText = `Data Queries (${engineLabel}) (Total Time: ${totalQueryTime.toFixed(2)}ms)
+  const queryCopyText = `Data Queries (${engineLabel}) (Total Time: ${totalQueryTime.toFixed(2)}ms)
 ${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.engine ? `, ${q.engine}` : ''}${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
@@ -317,7 +317,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                 {isCached && <span className="text-blue-500 font-bold mr-2 uppercase tracking-wider text-[10px] bg-blue-500/10 px-1.5 py-0.5 rounded">Cached Result</span>}
                 <span>Total query time: <span className="font-bold text-foreground">{totalQueryTime.toFixed(2)}ms</span></span>
                 <span className="w-[1px] h-3 bg-border" />
-                <CopyButton text={duckDbCopyText} />
+                <CopyButton text={queryCopyText} />
               </div>
             </div>
           </div>

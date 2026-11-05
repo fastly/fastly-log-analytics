@@ -203,7 +203,8 @@ Capture at least 30 requests after warm-up, with dataset size, fixed query
 corpus, concurrency, achieved throughput, p50/p95/p99, errors, ingest lag, and
 freshness. Compare the same data watermark and report caching behavior.
 
-ADR-18's single-backend deployment constraint remains in force. This proposal
+ADR-18's single-backend deployment constraint remains in force for this rejected prototype. This proposal
 does not establish horizontal serving scalability, ClickHouse replication,
 or million-request-per-second capacity. The failed measured latency gate
 requires rejection rather than promotion; the terminal decision above records it.
+In `v3.0.0-rc3`, `DEPLOYMENT_MODE=standard` and DuckLake were retired completely and [ADR-21](21-high-scale-serving-architecture.md) became the sole unified serving and ingest architecture across all deployments.

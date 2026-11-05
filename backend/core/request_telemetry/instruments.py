@@ -203,7 +203,7 @@ def thread_wait_histogram() -> Any:
             if _thread_wait_histogram is None:
                 _thread_wait_histogram = get_meter().create_histogram(
                     name="app.thread_wait_ms",
-                    description="DuckDB connection-pool acquire wait time",
+                    description="Database connection-pool acquire wait time",
                     unit="ms",
                 )
     return _thread_wait_histogram

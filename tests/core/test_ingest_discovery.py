@@ -152,8 +152,8 @@ def test_capture_corrupt_container_records_quarantine(tmp_path: Path):
 def test_catalog_field_ids_and_type_hints():
     cfg = {
         "custom_fields": [
-            {"name": "cf_enabled", "duckdb_type": "BIGINT", "enabled": True},
-            {"name": "cf_disabled", "duckdb_type": "VARCHAR", "enabled": False},
+            {"name": "cf_enabled", "sql_type": "BIGINT", "enabled": True},
+            {"name": "cf_disabled", "sql_type": "VARCHAR", "enabled": False},
         ]
     }
     hints = ingest_mod.get_ingest_type_hints(cfg)

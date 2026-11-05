@@ -534,7 +534,7 @@ def test_maybe_reap_swallows_exceptions():
 # the ISO 8601 Z-suffix format is pinned by tests/utils/test_date_utils.py.
 
 
-# ── _discover_new_ips: branch coverage via mocked DuckDB ──────────────────
+# ── _discover_new_ips: branch coverage via mocked ClickHouse ──────────────
 
 
 @pytest.mark.usefixtures("isolated_db")
@@ -548,7 +548,7 @@ def test_discover_new_ips_returns_zero_when_no_sources_configured():
 
 @pytest.mark.usefixtures("isolated_db")
 def test_discover_new_ips_gen_yields_zero_count_when_import_fails():
-    """If the duckdb module can't be imported (unlikely but defensive),
+    """If the analytical engine module can't be imported (unlikely but defensive),
     the generator yields a count=0 event and exits."""
     # We can't easily mock the ImportError after it's been imported,
     # but we can simulate the "no configs" branch which goes through
@@ -1504,14 +1504,14 @@ def test_refresh_all_sources_skips_disabled_sources():
 def test_get_bot_regex_pattern_returns_none_for_empty_sources():
     """No cached sources → no literals → None. The caller treats None
     as "skip this prefilter" rather than running an empty regex
-    (which DuckDB rejects)."""
+    (which ClickHouse rejects)."""
     assert bot_sources.get_bot_regex_pattern() is None
 
 
 @pytest.mark.usefixtures("_isolated_cache_dir")
 def test_get_bot_regex_pattern_builds_case_insensitive_alternation():
     """Pattern is ``(?i)alt1|alt2|...`` with each literal re.escaped.
-    Pinned because losing the (?i) would make the DuckDB filter
+    Pinned because losing the (?i) would make the ClickHouse filter
     case-sensitive and miss most real bot UAs."""
     _seed_cache(
         "well-known-bots",
@@ -1533,7 +1533,7 @@ def test_get_bot_regex_pattern_respects_limit():
     """When literals exceed ``limit``, only the first N (sorted by
     length desc) are included. Pinned because RE2's compiled NFA size
     grows with the alternation count, and exceeding the limit would
-    surface as DuckDB regex-compile errors."""
+    surface as ClickHouse regex-compile errors."""
     entries = [{"id": f"b{i}", "pattern": {"accepted": [f"BotLiteral{i:04d}"]}} for i in range(20)]
     _seed_cache("well-known-bots", entries)
 

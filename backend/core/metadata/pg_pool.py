@@ -110,8 +110,7 @@ def get_pg_pool() -> ConnectionPool:
         # back after the first sizing pass. 64 clears 40 + slack.
         #
         # Keep METADATA_PG_POOL_MAX * (backend + worker processes) below
-        # the server's max_connections (192 of 300 at this default), and
-        # remember DuckLake's own catalog connections share that budget.
+        # the server's max_connections (192 of 300 at this default).
         max_size = int(os.environ.get("METADATA_PG_POOL_MAX", "64"))
         min_size = min(int(os.environ.get("METADATA_PG_POOL_MIN", "2")), max_size)
         _pool = ConnectionPool(

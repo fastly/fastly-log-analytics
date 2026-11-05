@@ -17,7 +17,7 @@ from .core import (  # noqa: E402, F401
     _ServicesShimModule,
     _check_storage_type_lock,
     _cmcd_settings_response,
-    _committed_duckdb_field_types,
+    _committed_field_types,
     _cron_schedule_cache,
     _db,
     _filter_user_custom_fields,

@@ -1,7 +1,10 @@
 # ADR-16 — The Ingest Ledger: State-Machine Discovery and At-Least-Once Convert
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-21](21-high-scale-serving-architecture.md) and [ADR-22](22-postgres-only-metadata.md) (historical record)
 **Decided by:** v3 scalability rework
+
+> [!NOTE]
+> **Superseded in `v3.0.0-rc3`:** The Celery `convert_batch_objects()` / DuckLake commit pipeline described below was replaced by the unified stateless ingest worker (`python -m backend.high_scale.worker`) and PostgreSQL control-plane tables (`high_scale_source_ledger`, `high_scale_source_cursors`, `high_scale_partition_cursors`, `high_scale_archive_manifests`, `high_scale_publication_batches`) in [ADR-21](21-high-scale-serving-architecture.md) and [ADR-22](22-postgres-only-metadata.md). The `ingest_ledger` table remains for `/admin/queue` operational visibility.
 
 ## Context
 

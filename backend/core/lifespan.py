@@ -332,16 +332,9 @@ def _enforce_proxy_headers_configured() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Own ClickHouse cleanup even if a later startup/shutdown step raises."""
-    from backend.core.request_telemetry import observer as request_metrics_observer
-
     try:
         async with _application_lifespan(app):
-            try:
-                # Serving observation is independent of ingestion cron guards.
-                request_metrics_observer.start()
-                yield
-            finally:
-                await asyncio.to_thread(request_metrics_observer.stop)
+            yield
     finally:
         await asyncio.to_thread(request_telemetry.force_flush)
         await asyncio.to_thread(clickhouse_observer.stop_clickhouse_observer)
@@ -392,9 +385,6 @@ async def _application_lifespan(app: FastAPI):
     from backend.core.metadata.base import ensure_pg_schema
 
     ensure_pg_schema()
-
-    # Deployment-mode sanity: validate Postgres METADATA_DSN configuration.
-    svcconfig.validate_deployment_mode()
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
     # or silently switch engines when this startup probe fails.

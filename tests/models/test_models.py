@@ -1396,37 +1396,6 @@ def test_rum_enable_done_event_reports_the_shared_resolution(final_cfg, expected
     assert next(e for e in events if e["type"] == "done")["rum"]["enabled"] is expected
 
 
-# ── Merged from test_validate_ingest_mode.py ──
-_PG = "postgresql://fla:pw@pg:5432/fla_meta"
-
-
-@pytest.fixture
-def high_scale_env(monkeypatch):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
-    monkeypatch.setenv("METADATA_DSN", _PG)
-    return monkeypatch
-
-
-def test_deployment_mode_validation(high_scale_env):
-    assert svcconfig.validate_deployment_mode() is None
-    for scheme in ("postgres", "postgresql"):
-        dsn = f"{scheme}://fla:pw@pg:5432/db"
-        high_scale_env.setenv("METADATA_DSN", dsn)
-        assert svcconfig.validate_deployment_mode() is None
-
-
-@pytest.mark.parametrize("dsn", [None, "", "/app/data/services/svc.metadata.db", "sqlite:///app/data/svc.metadata.db"])
-def test_high_scale_rejects_non_postgres_metadata_dsn(high_scale_env, dsn):
-    if dsn is None:
-        high_scale_env.delenv("METADATA_DSN", raising=False)
-    else:
-        high_scale_env.setenv("METADATA_DSN", dsn)
-    with pytest.raises(RuntimeError, match="METADATA_DSN must be a Postgres DSN") as exc:
-        svcconfig.validate_deployment_mode()
-    if dsn is None:
-        assert all(s in str(exc.value) for s in ("job_runs", "ingest ledger", "pod-local"))
-
-
-def test_config_to_source_emits_deployment_mode():
+def test_config_to_source_omits_legacy_mode_keys():
     source = svcconfig.config_to_source({"service_id": "svc", "raw_layout_version": 3})
-    assert source["deployment_mode"] == "high_scale" and "ingest_mode" not in source and "serving_mode" not in source
+    assert "ingest_mode" not in source and "serving_mode" not in source

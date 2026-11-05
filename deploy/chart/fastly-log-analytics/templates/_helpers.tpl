@@ -88,8 +88,6 @@ Env block shared by backend and worker: broker/DSN via secretKeyRef
 plus ClickHouse analytical store settings.
 */}}
 {{- define "fastly-log-analytics.sharedEnv" -}}
-- name: HIGH_SCALE_ENABLED
-  value: "1"
 - name: CLICKHOUSE_ENABLED
   value: "true"
 {{- if .Values.config.clickhouseUrl }}

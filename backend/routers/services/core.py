@@ -96,7 +96,7 @@ from .custom_fields import (
 )
 from .storage import (
     _check_storage_type_lock,
-    _committed_duckdb_field_types,
+    _committed_field_types,
     _locked_storage_field_names,
 )
 from .vcl import (
@@ -232,7 +232,7 @@ __all__ = [
     "_LOGGING_SETTINGS_CACHE_TTL",
     "_check_storage_type_lock",
     "_cmcd_settings_response",
-    "_committed_duckdb_field_types",
+    "_committed_field_types",
     "_cron_schedule_cache",
     "_db",
     "_filter_user_custom_fields",

@@ -1,10 +1,10 @@
-"""Admin health snapshot, metric history, compaction stats, tree/POP/quarantine, sync status, and log accounting models."""
+"""Admin health snapshot, metric history, tree/POP/quarantine, sync status, and log accounting models."""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import BaseModel, Field
 
 from backend.models.common.base import BaseResponse, LogExtentsMixin, WireSafeModel
 
@@ -28,25 +28,6 @@ class MetricHistoryBatchResponse(BaseModel):
     """
 
     series: dict[str, list[MetricHistoryPoint]] = Field(default_factory=dict)
-
-
-# ── Compaction stats ───────────────────────────────────────────────────────
-
-
-class CompactionStatsResponse(BaseModel):
-    """File-count distribution across local cache partitions.
-
-    Returned by ``GET /api/admin/compaction-stats`` and consumed by the
-    admin System Health card.
-    """
-
-    total_files: int = 0
-    partitions: int = 0
-    partitions_above_3: int = 0
-    partitions_above_10: int = 0
-    daily_files: int = 0
-    weekly_files: int = 0
-    avg_files_per_partition: float = 0.0
 
 
 # ── Health snapshot ──────────────────────────────────────────────────────
@@ -158,7 +139,7 @@ class HealthHighScaleTopology(BaseModel):
 
 
 class HealthHighScale(BaseModel):
-    """High-scale-only health block; absent from the payload in standard mode."""
+    """High-scale health block (disk guard and topology profile)."""
 
     disk: HealthHighScaleDisk | None = None
     topology: HealthHighScaleTopology | None = None
@@ -168,11 +149,10 @@ class HealthSnapshotResponse(BaseModel):
     """One-shot health snapshot served by ``GET /api/admin/health-snapshot``.
 
     The endpoint synthesises independent sub-system probes (load / memory /
-    per-mount disk / in-flight runs / per-service compaction / DuckDB pool
-    waits / scheduler-liveness / recent cron failures). Any individual probe
-    that fails returns the null sentinel of its slot rather than failing the
-    whole response, so the UI can render partial data when one subsystem is
-    sick.
+    per-mount disk / in-flight runs / scheduler-liveness / recent cron
+    failures). Any individual probe that fails returns the null sentinel of its
+    slot rather than failing the whole response, so the UI can render partial
+    data when one subsystem is sick.
     """
 
     load: HealthLoadAverages | None = None
@@ -181,8 +161,6 @@ class HealthSnapshotResponse(BaseModel):
     data_mount: HealthDiskStats | None = None
     root_disk: HealthDiskStats | None = None
     in_flight_runs: list[HealthInFlightRun] = Field(default_factory=list)
-    compaction: dict[str, CompactionStatsResponse | None] = Field(default_factory=dict)
-    pool_wait: list[dict[str, Any]] = Field(default_factory=list)
     # SRE-06: age of the newest metric_snapshots row. The 60s sampler is a
     # global scheduler job, so a large/None value witnesses a dead scheduler
     # (vs. a healthy-idle one). None = no samples yet (fresh boot).
@@ -200,16 +178,8 @@ class HealthSnapshotResponse(BaseModel):
     fos: dict[str, HealthFosProbe] | None = None
     # Scaling Phase 10: Celery metrics (queue depth and worker count)
     celery: HealthCeleryStats | None = None
-    # High-scale topology only (serving-volume disk guard). Omitted entirely in
-    # standard mode so that mode's payload is unchanged.
+    # Serving-volume disk guard and topology profile.
     high_scale: HealthHighScale | None = None
-
-    @model_serializer(mode="wrap")
-    def _omit_inactive_high_scale(self, handler):  # type: ignore[no-untyped-def]
-        data = handler(self)
-        if isinstance(data, dict) and data.get("high_scale") is None:
-            data.pop("high_scale", None)
-        return data
 
 
 class TreeNode(BaseModel):
@@ -298,8 +268,6 @@ class SyncStatus(ShareHeaderBadgeResponse, LogExtentsMixin):
     storage_mode: str | None = None
     latest_ingested_file_at: str | None = None
     latest_available_file_at: str | None = None
-    duckdb_size_bytes: int | None = None
-    duckdb_exists: bool | None = None
     active_run: dict[str, Any] | None = None
     ngwaf_workspace_id: str | None = None
 
@@ -314,9 +282,9 @@ class LogExtentsResponse(BaseResponse, LogExtentsMixin):
     Sibling of ``SyncStatusResponse`` but strips every field that the
     middleware blocks ``/api/sync-status`` for an analyst over: no
     ``ngwaf_workspace_id``, no ``active_run``, no cron task state, no
-    DuckDB size, no storage mode. Just the two timestamps the
-    FilterBar needs to snap its range, plus a ``configured`` flag so
-    the frontend can short-circuit when a service has no source.
+    storage mode. Just the two timestamps the FilterBar needs to snap
+    its range, plus a ``configured`` flag so the frontend can
+    short-circuit when a service has no source.
     """
 
     configured: bool = True
@@ -353,22 +321,6 @@ class SystemJobStatus(BaseModel):
 
 class SystemJobsResponse(BaseResponse):
     jobs: list[SystemJobStatus]
-
-
-class StorageTableInfo(BaseModel):
-    table_name: str
-    table_location: str | None = None
-    snapshots: int
-    data_files: int
-    size_bytes: int
-    latest_snapshot_at: str | None = None
-    buffer_files: int = 0
-    buffer_size_bytes: int = 0
-    region: str | None = None
-
-
-class StorageTableInfoResponse(BaseResponse, StorageTableInfo):
-    pass
 
 
 class UsageLogEntry(BaseModel):

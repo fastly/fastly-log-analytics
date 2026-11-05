@@ -31,7 +31,6 @@ function _clickhouseEnv(): Record<string, string> {
     CLICKHOUSE_USER: process.env.FLA_E2E_CLICKHOUSE_USER || 'fla',
     CLICKHOUSE_PASSWORD: process.env.FLA_E2E_CLICKHOUSE_PASSWORD ?? 'fla_local_dev',
     CLICKHOUSE_SECURE: 'false',
-    HIGH_SCALE_ENABLED: '1',
     HIGH_SCALE_CURSOR_SECRET: 'e2e-cursor-secret-0123456789', // gitleaks:allow
   }
 }
@@ -83,8 +82,8 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
 
 async function poll(url: string, timeoutMs = 180_000): Promise<void> {
   // Default 180s: the playwright config webServer timeout is 120s for the
-  // FRONTEND, but the BACKEND boot cost (DuckDB init + httpfs load + DuckLake
-  // catalog open + every router import) is the lion's share of cold-start.
+  // FRONTEND, but the BACKEND boot cost (Postgres + ClickHouse initialization
+  // + schema bootstrap + every router import) is the lion's share of cold-start.
   // The prior 60s default failed on slow CI runners with the misleading
   // 'backend never returned 200' before the frontend even got a chance to
   // start. 180s clears realistic CI variance with margin.
@@ -142,7 +141,7 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     // writes them here). With both present, GET /api/usage/current-storage
     // uses them instead of falling back to a live FOS ListObjectsV2 scan
     // against the mock bucket, which only logged `FOS Scan failed ... 400`
-    // on every /usage page load. The sandbox has no committed DuckLake data.
+    // on every /usage page load. The sandbox has no committed archive data.
     status: { storage_bytes: 0, storage_files: 0 },
     log_fields: {
       schema_version: 2,

@@ -19,7 +19,7 @@ Admin only (`/api/admin/` is analyst-blocked and every route here uses `require_
 
 Routes in [`backend/routers/admin/health.py`](../../../backend/routers/admin/health.py); models in [`backend/models/admin/high_scale.py`](../../../backend/models/admin/high_scale.py).
 
-- `GET /api/admin/celery/status` (`CeleryStatusResponse`): `deployment_mode`, `broker_reachable`, `workers`, `queues` (name to depth), `ledger` (status to count), `inprocess_schedules`, `inprocess_active_runs`.
+- `GET /api/admin/celery/status` (`CeleryStatusResponse`): `broker_reachable`, `workers`, `queues` (name to depth), `ledger` (status to count), `inprocess_schedules`, `inprocess_active_runs`.
 - `GET /api/admin/celery/ledger` (`status`: `problem` default, `all`, `dead_letter`, `quarantined`, `discovered`, `claimed`, `committed`; optional `service_id`; `limit` 1 to 500; `offset`).
 - `POST /api/admin/celery/ledger/retry` and `POST /api/admin/celery/ledger/purge` (`IngestLedgerActionRequest`).
 - `GET /api/admin/metric-history/batch?since=1h`: sparkline series.

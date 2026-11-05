@@ -730,7 +730,7 @@ def build_share_live_payload() -> dict:
 
     Lives here (not in the share router) so the admin-events router can import
     it without an import-linter ``routers.admin -> routers.share_admin`` edge.
-    Pure in-memory tunnel-manager getters — no SQLite / DuckDB / FOS — so it's
+    Pure in-memory tunnel-manager getters — no Postgres / ClickHouse / FOS — so it's
     cheap enough to sample per connection."""
     mgr = get_tunnel_manager()
     return {

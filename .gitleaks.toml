@@ -58,7 +58,6 @@ paths = [
     # runs. Scope to the actual runtime artifact types rather than the whole
     # tree, so a stray plaintext secret accidentally dropped under data/ (a
     # NEW file type) is still scanned instead of blanket-allowlisted.
-    '''^data/.*\.duckdb(-wal|-shm)?$''',                      # DuckDB runtime stores (binary blobs)
     '''^data/.*\.tmp$''',                                     # transient store files
     '''^data/system/usage_logging\.json$''',                  # runtime state blobs
     '''.*/__pycache__/''',                                    # Python bytecode

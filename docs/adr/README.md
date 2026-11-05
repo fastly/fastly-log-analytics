@@ -19,7 +19,7 @@ Each ADR captures one significant design decision — the context, the choice, a
 | [ADR-13](13-backup-dr.md) | Backup, Disaster Recovery, and Data Replay | Partially superseded (ADR-21/22) | Recovering state and replaying data; FOS is source of truth |
 | [ADR-14](14-ducklake-replacement.md) | DuckLake Replaces PyIceberg | **Superseded by ADR-21** (historical) | Legacy DuckLake catalog swap; retired in v3.0.0-rc3 |
 | [ADR-15](15-multi-writer-topology.md) | Multi-Writer Topology | **Superseded by ADR-22** (historical) | Postgres metadata backend, split cron scheduling; dual SQLite/Postgres mode retired |
-| [ADR-16](16-ingest-ledger.md) | Ingest Ledger | Accepted | discovered/claimed/committed/quarantined/dead_letter state machine for ingest |
+| [ADR-16](16-ingest-ledger.md) | Ingest Ledger | **Superseded by ADR-21/22** (historical) | discovered/claimed/committed/quarantined/dead_letter state machine for ingest |
 | [ADR-17](17-analyst-path-a-ducklake.md) | Analyst Path A Under DuckLake | **Withdrawn** | Path A removed in v3; remote sharing is the only analyst access model |
 | [ADR-18](18-serving-tier-single-pod.md) | Durable Serving Mode Removes Native DuckDB File Ownership | **Superseded by ADR-21** (historical) | Transitional serving tier analysis; superseded by unified ClickHouse serving |
 | [ADR-19](19-fos-native-v3-topology.md) | FOS-native v3 Topology | **Superseded by ADR-21** (historical) | Transitional v3 4-plane topology; superseded by unified ClickHouse + FOS archive |

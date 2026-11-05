@@ -520,7 +520,7 @@ def test_path_within_dir_and_sql_quote_helpers(tmp_path, monkeypatch):
     offenders = [
         str(p.relative_to(root))
         for p in root.rglob("*.py")
-        if needle in p.read_text(encoding="utf-8") and p.name not in {"sql_validator.py", "duckdb.py"}
+        if needle in p.read_text(encoding="utf-8") and p.name not in {"sql_validator.py"}
     ]
     assert offenders == []
 

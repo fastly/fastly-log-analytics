@@ -1,8 +1,6 @@
 .env
 .env.deploy.local
 setup-state.json
-*.duckdb
-*.duckdb.wal
 /configs/*
 # Keep the configs/ directory present on a fresh clone so "drop a JSON
 # config here" works without a manual mkdir; the dir's real contents stay
@@ -142,5 +140,3 @@ configs-hs/
 
 # pytest-benchmark default output dir
 .benchmarks/
-# stray DuckLake test artifact dir
-catalog_test.db.files/

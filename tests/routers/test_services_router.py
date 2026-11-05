@@ -46,7 +46,7 @@ _FIELD_CREATE_BODY = {
     "label": "Environment",
     "vcl_log_expression": "req.http.X-Env",
     "collection_stage": "edge",
-    "duckdb_type": "VARCHAR",
+    "sql_type": "VARCHAR",
     "value_type": "string",
     "bytes_estimate": 10,
     "enabled": True,
@@ -196,7 +196,7 @@ def test_log_fields_set_reinjects_cmcd_fields_when_cmcd_enabled():
                     "preset": "standard",
                     "groups": ["A", "B", "C"],
                     "schema_version": 2,
-                    "custom_fields": [{"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}],
+                    "custom_fields": [{"name": "my_custom", "sql_type": "VARCHAR", "enabled": True}],
                 }
             },
         )
@@ -218,8 +218,8 @@ def test_log_fields_set_strips_cmcd_fields_when_cmcd_disabled():
                     "groups": ["A", "B", "C"],
                     "schema_version": 2,
                     "custom_fields": [
-                        {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
-                        {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+                        {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True},
+                        {"name": "cmcd_sid", "sql_type": "VARCHAR", "enabled": True},
                     ],
                 }
             },
@@ -334,16 +334,16 @@ def test_custom_field_patch_rejects_type_change_when_field_in_storage():
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
-        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={"cf_env": "VARCHAR"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={"cf_env": "VARCHAR"}),
     ) as saved:
         response = _client().patch(
             "/api/services/svc1/custom-fields/cf_env",
-            json={"duckdb_type": "BIGINT", "value_type": "numeric"},
+            json={"sql_type": "BIGINT", "value_type": "numeric"},
         )
 
     assert response.status_code == 422
     errors = response.json().get("detail", {}).get("errors", [])
-    assert any("duckdb_type" in e.lower() or "data type" in e.lower() for e in errors)
+    assert any("sql_type" in e.lower() or "data type" in e.lower() for e in errors)
     assert saved == {}
 
 
@@ -352,16 +352,16 @@ def test_custom_field_patch_allows_type_change_before_storage_write():
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
-        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={}),
+        patch("backend.routers.services.core._committed_field_types", return_value={}),
     ) as saved:
         response = _client().patch(
             "/api/services/svc1/custom-fields/cf_env",
-            json={"duckdb_type": "BIGINT", "value_type": "numeric"},
+            json={"sql_type": "BIGINT", "value_type": "numeric"},
         )
 
     assert response.status_code == 200
     updated = response.json()["field"]
-    assert updated["duckdb_type"] == "BIGINT" and updated["value_type"] == "numeric"
+    assert updated["sql_type"] == "BIGINT" and updated["value_type"] == "numeric"
     assert saved
 
 
@@ -907,7 +907,7 @@ _BASE_PAYLOAD = {
     "description": "",
     "vcl_log_expression": "req.http.Host",
     "collection_stage": "edge",
-    "duckdb_type": "VARCHAR",
+    "sql_type": "VARCHAR",
     "value_type": "string",
     "bytes_estimate": 20,
     "nullable": True,
@@ -1477,7 +1477,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
                         "label": "Existing",
                         "enabled": True,
                         "vcl_log_expression": "req.http.x-keep-me",
-                        "duckdb_type": "VARCHAR",
+                        "sql_type": "VARCHAR",
                         "value_type": "string",
                         "bytes_estimate": 20,
                     }
@@ -1512,7 +1512,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
                         "name": "new_one",
                         "label": "New",
                         "enabled": True,
-                        "duckdb_type": "VARCHAR",
+                        "sql_type": "VARCHAR",
                         "value_type": "string",
                         "vcl_log_expression": "req.http.x-new-one",
                         "bytes_estimate": 20,
@@ -1527,18 +1527,18 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
     # Locked type change on import & PATCH
     with (
         patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc"}),
-        patch("backend.routers.services.core._committed_duckdb_field_types", return_value={"keep_me": "VARCHAR"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={"keep_me": "VARCHAR"}),
         patch("backend.provision.validate_log_format", return_value=[]),
     ):
         imp_locked = client.post(
             f"/api/services/{MOCK_SERVICE_ID}/custom-fields/import",
             headers=_SVC_HEADERS,
-            json={"custom_fields": [{"name": "keep_me", "label": "x", "duckdb_type": "INTEGER"}]},
+            json={"custom_fields": [{"name": "keep_me", "label": "x", "sql_type": "INTEGER"}]},
         )
         patch_locked = client.patch(
             f"/api/services/{MOCK_SERVICE_ID}/custom-fields/keep_me",
             headers=_SVC_HEADERS,
-            json={"duckdb_type": "INTEGER"},
+            json={"sql_type": "INTEGER"},
         )
     assert imp_locked.status_code == 422 and any("keep_me" in e for e in imp_locked.json()["detail"]["errors"])
     assert patch_locked.status_code == 422 and any(
@@ -1559,7 +1559,7 @@ def test_export_and_import_custom_fields(client, tmp_path, monkeypatch):
                         "name": "x",
                         "label": "x",
                         "vcl_log_expression": "req.http.x",
-                        "duckdb_type": "VARCHAR",
+                        "sql_type": "VARCHAR",
                         "value_type": "string",
                         "bytes_estimate": 20,
                     }

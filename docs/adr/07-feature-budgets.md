@@ -1,9 +1,9 @@
 # ADR-07 — Per-Feature Performance & Cost Budgets
 
-**Status:** Accepted (storage references updated to DuckLake per [ADR-14](14-ducklake-replacement.md))
+**Status:** Accepted (storage references superseded by [ADR-21](21-high-scale-serving-architecture.md) and [ADR-22](22-postgres-only-metadata.md))
 
 > [!NOTE]
-> The Iceberg/PyIceberg references below describe the earlier design. Storage is DuckLake now ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` (removed) was replaced by `backend/core/storage/`.
+> The Iceberg/PyIceberg and DuckDB references below describe the earlier design. Analytical storage is now ClickHouse + FOS batch archive ([ADR-21](21-high-scale-serving-architecture.md)) and metadata is PostgreSQL 16 ([ADR-22](22-postgres-only-metadata.md)).
 **Decided by:** Engineering retrospective
 
 ## 1. Context & Motivation

@@ -107,8 +107,8 @@ def shape_pop_latency_rows(
 ) -> dict[str, Any]:
     """Shape POP latency breakdown rows and compute ``median_p95_ms`` + per-POP ``elevated`` flag.
 
-    Supports both tuple rows ``(pop, requests, p50_ms, p95_ms)`` (DuckDB) and pre-extracted
-    dicts ``{"pop": ..., "requests": ..., "p50_ms": ..., "p95_ms": ...}`` (ClickHouse).
+    Supports both tuple rows ``(pop, requests, p50_ms, p95_ms)`` and pre-extracted
+    dicts ``{"pop": ..., "requests": ..., "p50_ms": ..., "p95_ms": ...}``.
     """
     if not rows:
         base: dict[str, Any] = {"has_data": False, "requires_group_c": False}
@@ -448,7 +448,7 @@ def build_insights_envelope(
     window_total_requests: int = 0,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Build the standard insights response envelope across DuckDB and ClickHouse."""
+    """Build the standard insights response envelope."""
     return {
         "insights": list(insights) if insights is not None else [],
         "window_start": window_start,
@@ -476,7 +476,7 @@ def build_query_response_envelope(
     explain_plan: str | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Build the canonical ``/api/query`` response envelope across DuckDB and ClickHouse."""
+    """Build the canonical ``/api/query`` response envelope."""
     resp: dict[str, Any] = {
         "columns": columns,
         "data": data,
@@ -735,7 +735,7 @@ def shape_origin_summary(
     ndigits: int | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Build a normalized Origin ``summary`` payload across DuckDB and ClickHouse."""
+    """Build a normalized Origin ``summary`` payload."""
     return {
         "has_data": True,
         "total_misses": int(total_misses) if total_misses is not None else None,
@@ -1115,7 +1115,7 @@ def shape_sessions_envelope(
     telemetry: dict[str, Any] | None = None,
     rollup_served: bool = False,
 ) -> dict[str, Any]:
-    """Build the standard Sessions paginated response envelope shared by DuckDB and ClickHouse."""
+    """Build the standard Sessions paginated response envelope."""
     if asn_names is None:
         resolver = asn_label_resolver or build_asn_label_map
         asns = sorted({int(s["asn"]) for s in sessions if s.get("asn") is not None})

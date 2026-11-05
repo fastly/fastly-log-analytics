@@ -73,7 +73,7 @@ def get_arrow_schema(log_fields: dict[str, Any] | None = None) -> pa.Schema:
         "BOOLEAN": pa.bool_(),
     }
     fields = [
-        pa.field(f["id"], type_map.get(str(f.get("duckdb_type", "VARCHAR")).upper(), pa.string()))
+        pa.field(f["id"], type_map.get(str(f.get("sql_type", "VARCHAR")).upper(), pa.string()))
         for f in LOG_FIELD_CATALOG
         if f.get("group") not in ("METRICS", "VIRTUAL", "INTERNAL")
     ]

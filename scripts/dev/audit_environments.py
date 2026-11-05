@@ -43,7 +43,6 @@ class EnvironmentConfig:
     backend_url: str
     frontend_url: str
     service_id: str
-    is_high_scale: bool = False
 
 
 def load_dotenv_manually() -> None:
@@ -55,7 +54,7 @@ load_dotenv_manually()
 ENVIRONMENTS: dict[str, EnvironmentConfig] = {
     name: EnvironmentConfig(
         name=spec.name, architecture=spec.architecture, backend_url=spec.backend_url,
-        frontend_url=spec.frontend_url, service_id=_registry_service_id(name), is_high_scale=spec.is_high_scale,
+        frontend_url=spec.frontend_url, service_id=_registry_service_id(name),
     )
     for name, spec in ENVIRONMENT_SPECS.items()
 }
@@ -112,16 +111,8 @@ class AuditResult:
     ingest_state: str = "UNKNOWN"
     fos_reachable: bool = False
     fos_error: str | None = None
-    compaction_total_files: int = 0
-    compaction_daily_files: int = 0
-    compaction_weekly_files: int = 0
-    compaction_partitions_above_3: int = 0
-    compaction_partitions_above_10: int = 0
-    duckdb_size_bytes: int = 0
     storage_bytes: int = 0
     storage_files: int = 0
-    pool_saturated_rejects: int = 0
-    pool_wait_p95_ms: float = 0.0
     clickhouse_health: str | None = None
     clickhouse_pending: int | None = None
     clickhouse_published: int | None = None
@@ -215,9 +206,8 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         "health_snapshot": (http_get_json, (f"{env.backend_url}/api/admin/health-snapshot?probe_fos=1",), {"headers": req_headers, "timeout": timeout}),
         "cron_runs": (http_get_json, (f"{env.backend_url}/api/cron-runs?service_id={active_sid}&task=log_discovery&per_page=3",), {"headers": req_headers, "timeout": timeout}),
         "dashboard_bundle": (http_post_json, (f"{env.backend_url}/api/dashboard/bundle?service_id={active_sid}",), {"payload": {"range_token": "24h"}, "headers": req_headers, "timeout": max(timeout, 45.0)}),
+        "clickhouse_status": (http_get_json, (f"{env.backend_url}/api/admin/clickhouse/status?service_id={active_sid}",), {"headers": req_headers, "timeout": timeout}),
     }
-    if env.is_high_scale:
-        probes["clickhouse_status"] = (http_get_json, (f"{env.backend_url}/api/admin/clickhouse/status?service_id={active_sid}",), {"headers": req_headers, "timeout": timeout})
 
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:
         outcomes = {name: fut.result() for name, fut in {n: pool.submit(fn, *a, **kw) for n, (fn, a, kw) in probes.items()}.items()}
@@ -239,7 +229,6 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         res.rum_latest_log_at = rum_sec.get("latest_log_at")
         res.rum_latest_log_age_s = parse_timestamp_age(res.rum_latest_log_at)
         res.rum_total_rows, res.rum_last_sync_at = rum_sec.get("total_rows"), rum_sec.get("last_sync_at")
-        res.duckdb_size_bytes = status_sec.get("duckdb_size_bytes") or 0
         res.storage_bytes, res.storage_files = status_sec.get("storage_bytes") or 0, status_sec.get("storage_files") or 0
 
     if hs_status == 200 and isinstance(hs_data, dict):
@@ -299,19 +288,6 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             res.fos_reachable, res.fos_error = svc_fos.get("reachable", False), svc_fos.get("error")
             if not res.fos_reachable and res.fos_error:
                 res.errors.append(f"FOS probe failed: {res.fos_error}")
-
-        svc_comp = (hs_data.get("compaction") or {}).get(active_sid) or {}
-        res.compaction_total_files, res.compaction_daily_files, res.compaction_weekly_files = svc_comp.get("total_files") or 0, svc_comp.get("daily_files") or 0, svc_comp.get("weekly_files") or 0
-        res.compaction_partitions_above_3, res.compaction_partitions_above_10 = svc_comp.get("partitions_above_3") or 0, svc_comp.get("partitions_above_10") or 0
-        if res.compaction_partitions_above_10 > 0:
-            res.warnings.append(f"Uncompacted partitions: {res.compaction_partitions_above_10} partitions have >10 files")
-
-        for p in hs_data.get("pool_wait") or []:
-            if p.get("service") == active_sid:
-                res.pool_saturated_rejects += p.get("saturated_rejects_total", 0)
-                res.pool_wait_p95_ms = max(res.pool_wait_p95_ms, float((p.get("wait") or {}).get("p95_ms", 0.0)))
-        if res.pool_saturated_rejects > 0:
-            res.warnings.append(f"DuckDB pool saturated: {res.pool_saturated_rejects} rejected queries (lifetime)")
     elif hs_status == 401:
         res.errors.append("Authentication required for /api/admin/health-snapshot")
 
@@ -329,7 +305,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     else:
         res.ingest_state = "NO LOGS"
 
-    if env.is_high_scale and ch_status == 200 and isinstance(ch_data, dict):
+    if ch_status == 200 and isinstance(ch_data, dict):
         res.clickhouse_health = ch_data.get("health")
         pub_counts = ch_data.get("publication_counts") or {}
         res.clickhouse_pending, res.clickhouse_published = pub_counts.get("pending", 0), pub_counts.get("published", 0)
@@ -376,17 +352,12 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         ingest_color = GREEN if "STREAMING" in r.ingest_state else (CYAN if "IDLE" in r.ingest_state else YELLOW)
         print(f"  {BOLD}Ingest:{RESET}    State: {ingest_color}{r.ingest_state}{RESET} │ Request: {r.request_total_rows or 0:,} rows (latest {format_duration(r.request_latest_log_age_s)} ago) │ RUM: {r.rum_total_rows or 0:,} rows (latest {format_duration(r.rum_latest_log_age_s)} ago)")
 
-        sched_color, comp_color = (RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN), (YELLOW if (r.compaction_partitions_above_10 or 0) > 0 else GREEN)
+        sched_color = RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN
         sched_str = f"{r.scheduler_tick_age_s:.0f}s ago" if r.scheduler_tick_age_s is not None else "—"
         storage_parts = [f"Scheduler Tick: {sched_color}{sched_str}{RESET}"]
-        if (r.duckdb_size_bytes or 0) > 0:
-            storage_parts.append(f"DuckDB: {format_bytes(r.duckdb_size_bytes)}")
         if (r.storage_files or 0) > 0 or (r.storage_bytes or 0) > 0:
-            storage_parts.append(f"DuckLake: {format_bytes(r.storage_bytes)} ({r.storage_files} files)")
-        storage_parts.append(f"Compaction: {comp_color}{r.compaction_total_files or 0} files ({r.compaction_daily_files or 0} daily, {r.compaction_weekly_files or 0} weekly){RESET}")
+            storage_parts.append(f"Archive: {format_bytes(r.storage_bytes)} ({r.storage_files} files)")
         storage_line = f"  {BOLD}Pipeline:{RESET}  {' │ '.join(storage_parts)}"
-        if (r.compaction_partitions_above_10 or 0) > 0:
-            storage_line += f" {YELLOW}[sprawl: {r.compaction_partitions_above_10} dirs >10 files]{RESET}"
         print(storage_line)
 
         extra_parts: list[str] = []
@@ -396,8 +367,6 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         if r.clickhouse_health:
             ch_color = GREEN if r.clickhouse_health == "ok" else YELLOW
             extra_parts.append(f"ClickHouse: {ch_color}{r.clickhouse_health}{RESET} ({r.clickhouse_published} published, {r.clickhouse_pending} pending)")
-        if r.pool_wait_p95_ms > 0:
-            extra_parts.append(f"DuckDB Pool p95: {r.pool_wait_p95_ms:.2f}ms")
         if extra_parts:
             print(f"  {BOLD}Scale/Pool:{RESET} {' │ '.join(extra_parts)}")
 
@@ -423,6 +392,10 @@ def run_audit(target_names: list[str] | None = None, timeout: float = 5.0) -> li
                 print(f"{YELLOW}Warning: Unknown environment '{name}'. Available: {list(ENVIRONMENTS.keys())}{RESET}", file=sys.stderr)
     else:
         envs_to_check = list(ENVIRONMENTS.values())
+        if os.getenv("SKIP_REMOTE_STD") == "1" or os.getenv("SKIP_GCE") == "1":
+            envs_to_check = [e for e in envs_to_check if e.name != "remote-standard"]
+        if os.getenv("SKIP_REMOTE_HS") == "1":
+            envs_to_check = [e for e in envs_to_check if e.name != "remote-high-scale"]
 
     if os.getenv("IGNORE_LOCAL_STD") == "1":
         envs_to_check = [e for e in envs_to_check if e.name != "local-standard"]

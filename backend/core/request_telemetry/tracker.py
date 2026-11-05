@@ -1,4 +1,4 @@
-"""RequestTelemetry facade, High-Scale section tracking, and request metrics observer."""
+"""RequestTelemetry facade and High-Scale section tracking."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
-from backend.core.fos_client import _safe_table_name
 from backend.core.request_telemetry.instruments import get_tracer
 from backend.core.request_telemetry.query_registry import current_attribution
 from backend.utils.telemetry import get_page_load_id
@@ -239,72 +238,3 @@ def get_high_scale_service_registry(*args: Any, **kwargs: Any) -> Any:
     from backend.high_scale.ingest_controller import get_high_scale_service_registry as _get_registry
 
     return _get_registry(*args, **kwargs)
-
-
-QUERY_TIMEOUT_S = 30.0
-RECONCILE_INTERVAL_S = 15.0
-STOP_TIMEOUT_S = 5.0
-FAILURE_BACKOFF_BASE_S = 15.0
-FAILURE_BACKOFF_MAX_S = 300.0
-
-_refresh_lock = threading.Lock()
-_query_lock = threading.Lock()
-_active_query: Any | None = None
-_cancelled = threading.Event()
-
-
-def interrupt_request_metrics() -> None:
-    """Interrupt only this observer's dedicated connection, never a reader."""
-    with _query_lock:
-        if _active_query is not None:
-            _cancelled.set()
-            _active_query.interrupt()
-
-
-def _interrupt_until_finished(finished: threading.Event) -> None:
-    while not finished.is_set():
-        interrupt_request_metrics()
-        finished.wait(0.1)
-
-
-def _check_cancelled(stop_event: threading.Event | None) -> None:
-    if _cancelled.is_set() or (stop_event is not None and stop_event.is_set()):
-        raise InterruptedError("request metrics observation cancelled")
-
-
-def refresh_durable_request_metrics(
-    source: dict, *, stop_event: threading.Event | None = None, extra_status: dict | None = None
-) -> dict | None:
-    """No-op after DuckLake removal; ClickHouse services use high-scale watermarks."""
-    del stop_event, extra_status
-    _safe_table_name(str(source.get("name") or ""))
-    return None
-
-
-class RequestMetricsObserver:
-    def __init__(self) -> None:
-        self._stop = threading.Event()
-        self._pass_lock = threading.Lock()
-        self._lifecycle_lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._published: dict[str, dict] = {}
-        self._failure_backoff_s: dict[str, float] = {}
-        self._next_attempt_mono: dict[str, float] = {}
-
-    def reconcile(self) -> None:
-        return None
-
-    def start(self) -> None:
-        return None
-
-    def stop(self) -> None:
-        with self._lifecycle_lock:
-            self._stop.set()
-            interrupt_request_metrics()
-            if self._thread is not None:
-                self._thread.join(timeout=STOP_TIMEOUT_S)
-                if not self._thread.is_alive():
-                    self._thread = None
-
-
-observer = RequestMetricsObserver()

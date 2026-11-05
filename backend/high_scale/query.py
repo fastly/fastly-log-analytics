@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 import orjson
 import zstandard as zstd
 
-from backend.core.log_fields import DuckType, try_get
+from backend.core.log_fields import SqlType, try_get
 from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
 from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.high_scale._common import _FIELD_DIMENSIONS
@@ -176,17 +176,17 @@ _SKIP_REQUEST_KEYS: frozenset[str] = frozenset(
 _PASSTHROUGH_NON_CATALOG_KEYS: frozenset[str] = frozenset(
     {"timestamp", "time_stamp", "client_ip", "ip", "url", "fastly_pop"}
 )
-_INT_DUCK_TYPES: frozenset[DuckType] = frozenset(
+_INT_SQL_TYPES: frozenset[SqlType] = frozenset(
     {
-        DuckType.UTINYINT,
-        DuckType.USMALLINT,
-        DuckType.UINTEGER,
-        DuckType.UBIGINT,
-        DuckType.BIGINT,
-        DuckType.INTEGER,
+        SqlType.UTINYINT,
+        SqlType.USMALLINT,
+        SqlType.UINTEGER,
+        SqlType.UBIGINT,
+        SqlType.BIGINT,
+        SqlType.INTEGER,
     }
 )
-_FLOAT_DUCK_TYPES: frozenset[DuckType] = frozenset({DuckType.FLOAT, DuckType.DOUBLE})
+_FLOAT_SQL_TYPES: frozenset[SqlType] = frozenset({SqlType.FLOAT, SqlType.DOUBLE})
 _REQUEST_KEY_ACTION: dict[str, int] = {}
 
 
@@ -198,13 +198,13 @@ def _get_request_key_action(k: str) -> int:
     else:
         field = try_get(k) or try_get(_FIELD_ALIASES.get(k, ""))
         if field is not None:
-            if field.duck_type in _INT_DUCK_TYPES:
+            if field.sql_type in _INT_SQL_TYPES:
                 action = 1
-            elif field.duck_type in _FLOAT_DUCK_TYPES:
+            elif field.sql_type in _FLOAT_SQL_TYPES:
                 action = 2
-            elif field.duck_type == DuckType.BOOLEAN:
+            elif field.sql_type == SqlType.BOOLEAN:
                 action = 3
-            elif field.duck_type == DuckType.VARCHAR:
+            elif field.sql_type == SqlType.VARCHAR:
                 action = 4
             else:
                 action = 0
@@ -579,7 +579,7 @@ _RESULT_CLAUSES = re.compile(
 
 
 def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
-    """Reject text DuckDB (which validates the SQL) and ClickHouse (which runs it) could tokenise differently."""
+    """Reject text the SQL validator and ClickHouse could tokenise differently."""
     if "\\" in sql:
         raise PermissionError("backslashes are not allowed in console queries")
     for token in _QUOTE_SCAN.finditer(sql):

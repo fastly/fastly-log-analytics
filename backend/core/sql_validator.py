@@ -34,7 +34,7 @@ _audit_logger = logging.getLogger("backend.sql_validator.audit")
 
 MAX_INPUT_BYTES = 64 * 1024
 ALLOWED_STATEMENT_TYPES = frozenset({"SELECT_NODE", "SET_OPERATION_NODE"})
-_BLOCKED_TABLE_PREFIXES = ("duckdb_", "pg_")
+_BLOCKED_TABLE_PREFIXES = ("pg_",)
 _BLOCKED_SCHEMA_NAMES = frozenset({"information_schema", "pg_catalog", "system"})
 ALLOWED_CATALOG = "main"
 
@@ -42,10 +42,6 @@ _BLOCKED_FUNCTIONS = frozenset(
     {
         "getenv",
         "current_setting",
-        "duckdb_secrets",
-        "duckdb_settings",
-        "duckdb_variables",
-        "duckdb_extensions",
         "read_csv",
         "read_csv_auto",
         "read_parquet",
@@ -84,7 +80,7 @@ _BLOCKED_FUNCTIONS = frozenset(
         "query_table",
     }
 )
-_BLOCKED_FUNCTION_PREFIXES = ("read_", "parquet_", "iceberg_", "duckdb_", "sniff_", "glob")
+_BLOCKED_FUNCTION_PREFIXES = ("read_", "parquet_", "iceberg_", "sniff_", "glob")
 _ALLOWED_TABLE_FUNCTIONS = frozenset(
     {"generate_series", "range", "repeat", "repeat_row", "unnest", "json_each", "json_tree"}
 )
@@ -98,7 +94,6 @@ _BASELINE_TABLE_FUNCTIONS = frozenset(
         "enable_logging",
         "disable_profiling",
         "enable_profiling",
-        "truncate_duckdb_logs",
         "json_execute_serialized_sql",
         "pandas_scan",
         "python_map_function",
@@ -110,7 +105,6 @@ _BASELINE_TABLE_FUNCTIONS = frozenset(
         "query",
         "query_table",
         "sniff_csv",
-        "read_duckdb",
         "parquet_file_metadata",
         "parquet_full_metadata",
         "parquet_bloom_probe",
@@ -338,17 +332,6 @@ def _walk_and_validate(
             _walk_and_validate(
                 item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
             )
-
-
-def apply_user_query_limits(con: Any, *, memory_limit: str = "2GB", timeout_seconds: int = 30) -> None:
-    try:
-        con.execute(f"SET memory_limit = '{memory_limit}'")
-    except Exception as exc:
-        logger.warning("[sql_validator] failed to apply memory_limit=%s: %s", memory_limit, exc)
-    try:
-        con.execute(f"SET statement_timeout = '{timeout_seconds * 1000}ms'")
-    except Exception as exc:
-        logger.debug("[sql_validator] statement_timeout not supported: %s", exc)
 
 
 # ── Pure-Python SQL tokenizer & AST builder ──────────────────────────────────
@@ -952,7 +935,6 @@ __all__ = [
     "_parse_single_select_node",
     "_reject",
     "_walk_and_validate",
-    "apply_user_query_limits",
     "escape_sql_literal",
     "is_safe_ident",
     "is_simple_select_statement",

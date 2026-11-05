@@ -69,7 +69,7 @@ logger = logging.getLogger("backend.utils.telemetry_proxy")
 # instead of the default ``boto3.<op>``. Callers that want their hint to
 # survive across the boto3 paginator's internal threading should keep the
 # token in scope for the entire paginate() iteration — see
-# backend/core/duckdb.py:_ProxyPaginatorShim.
+# backend/core/fos_client.py:_ProxyPaginatorShim.
 _BOTO3_CALLER_HINT: contextvars.ContextVar[str | None] = contextvars.ContextVar("fos_boto3_caller_hint", default=None)
 
 # Module-level state (intentionally process-singleton; reset in tests via

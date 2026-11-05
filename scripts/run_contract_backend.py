@@ -96,20 +96,52 @@ def _maybe_redirect_config_paths() -> None:
     svcconfig._ensured_dirs = set()
 
 
+def _ensure_metadata_database() -> None:
+    dsn = os.environ.setdefault(
+        "METADATA_DSN",
+        "postgresql://fla:fla_test_password@localhost:5432/fla_test",
+    )
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(dsn)
+    db_name = parsed.path.lstrip("/")
+    if not db_name:
+        return
+    maint_dsn = urlunparse(parsed._replace(path="/postgres"))
+    try:
+        import psycopg
+
+        with psycopg.connect(maint_dsn, autocommit=True) as admin_conn:
+            if not admin_conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s",
+                (db_name,),
+            ).fetchone():
+                try:
+                    admin_conn.execute(f'CREATE DATABASE "{db_name}"')
+                except psycopg.errors.DuplicateDatabase:
+                    pass
+    except Exception:
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=13003)
     args = parser.parse_args()
 
+    if os.environ.get("CONTRACT_STREAMING_FIXTURES") == "1" and (
+        not os.environ.get("CONTRACT_CONFIGS_DIR") or not os.environ.get("CONTRACT_DATA_DIR")
+    ):
+        raise ValueError("Streaming fixtures require an isolated contract sandbox")
+
     _maybe_redirect_config_paths()
+    _ensure_metadata_database()
 
     import uvicorn
 
     app: str | FastAPI = "backend.main:app"
     if os.environ.get("CONTRACT_STREAMING_FIXTURES") == "1":
-        if not os.environ.get("CONTRACT_CONFIGS_DIR") or not os.environ.get("CONTRACT_DATA_DIR"):
-            raise ValueError("Streaming fixtures require an isolated contract sandbox")
         from backend.main import app as backend_app
 
         install_streaming_fixture(backend_app)

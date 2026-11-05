@@ -90,9 +90,7 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
     cfg, lf, existing = _load_modifiable_custom_fields(
         request, service_id, field_dict.get("name", ""), "created manually"
     )
-    _check_storage_type_lock(
-        service_id, field_dict["name"], field_dict.get("duckdb_type"), field_dict.get("value_type")
-    )
+    _check_storage_type_lock(service_id, field_dict["name"], field_dict.get("sql_type"), field_dict.get("value_type"))
     now = datetime.now(UTC).isoformat()
     field_dict["created_at"] = field_dict["updated_at"] = now
     return _validate_and_save_custom_field(
@@ -108,7 +106,7 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
         raise HTTPException(status_code=404, detail={"error": f"Custom field '{field_name}' not found"})
     updates = body.model_dump(exclude_unset=True)
     old_field = existing[idx]
-    changing_type = ("duckdb_type" in updates and updates["duckdb_type"] != old_field.get("duckdb_type")) or (
+    changing_type = ("sql_type" in updates and updates["sql_type"] != old_field.get("sql_type")) or (
         "value_type" in updates and updates["value_type"] != old_field.get("value_type")
     )
     if changing_type:
@@ -123,7 +121,7 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
                 status_code=422,
                 detail={
                     "errors": [
-                        "Cannot change 'duckdb_type' or 'value_type' after the field has been created in the database. Please create a new field instead."
+                        "Cannot change 'sql_type' or 'value_type' after the field has been created in the database. Please create a new field instead."
                     ]
                 },
             )
@@ -158,7 +156,7 @@ def api_validate_custom_vcl(request: Request, service_id: str, body: VclLintRequ
         "label": "Lint Check",
         "vcl_log_expression": body.vcl_log_expression,
         "collection_stage": body.collection_stage,
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 20,
         "enabled": True,
@@ -229,7 +227,7 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
             continue
         existing_field = existing_map.get(fname, {})
         if fname in locked_field_names:
-            for tk in ("duckdb_type", "value_type"):
+            for tk in ("sql_type", "value_type"):
                 if field_dict.get(tk) and field_dict[tk] != existing_field.get(tk):
                     type_lock_errors.append(
                         f"Cannot change '{tk}' of '{fname}': field is already committed to the database."

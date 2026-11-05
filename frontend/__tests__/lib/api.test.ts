@@ -266,7 +266,7 @@ describe('X-User-Active request injection', () => {
 const LINT_BODY: VclLintRequest = { vcl_log_expression: 'req.url', collection_stage: 'edge' }
 const FIELD_BODY: Omit<CustomField, 'created_at' | 'updated_at'> = {
   name: 'new_field', label: 'New field', description: '', vcl_log_expression: 'req.url',
-  collection_stage: 'edge', origin_log_frequency: 'all', duckdb_type: 'VARCHAR',
+  collection_stage: 'edge', origin_log_frequency: 'all', sql_type: 'VARCHAR',
   value_type: 'string', bytes_estimate: 32, nullable: true, enabled: true,
   show_in_dashboard: false, show_in_logs: true, filterable: true,
 }
@@ -356,7 +356,7 @@ describe('customFieldsApi', () => {
 
 describe('adminJson & adminJsonResult', () => {
   it('adminJson returns parsed body on 2xx and throws default or custom status message on non-2xx', async () => {
-    server.use(http.get('*/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { duckdb: 2 }, longest_ms: 12 })))
+    server.use(http.get('*/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { clickhouse: 2 }, longest_ms: 12 })))
     expect((await adminJson('/api/admin/queries/summary', '/api/admin/queries/summary')).active_total).toBe(2)
 
     server.use(http.get('*/api/admin/queries/summary', () => HttpResponse.json({}, { status: 503 })))

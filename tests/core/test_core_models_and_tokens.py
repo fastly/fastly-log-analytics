@@ -38,7 +38,7 @@ from backend.core.fos_client import ensure_cid_salt, get_or_generate_cid_salt
 from backend.core.ingest import get_catalog_field_ids, get_ingest_type_hints
 from backend.core.log_fields import (
     _BUILTIN_FIELD_NAMES,
-    _DUCKDB_RESERVED,
+    _SQL_RESERVED,
     DEFAULT_OFF_FIELD_IDS,
     PRESETS,
     check_log_line_budget,
@@ -1041,7 +1041,7 @@ def _base_field(**overrides) -> dict:
         "name": "my_field",
         "label": "My Field",
         "vcl_log_expression": "req.url",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 20,
         **overrides,
@@ -1054,7 +1054,7 @@ _FORBIDDEN_VCL_CHARS = ("\n", ";", "//", "/*", "#")
 
 @given(name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789_", min_size=1, max_size=48))
 def test_regex_match_plus_clean_name_passes_validator(name: str):
-    assume(_NAME_REGEX.match(name) and name not in _DUCKDB_RESERVED and name not in _BUILTIN_FIELD_NAMES)
+    assume(_NAME_REGEX.match(name) and name not in _SQL_RESERVED and name not in _BUILTIN_FIELD_NAMES)
     errors = validate_custom_field(_base_field(name=name), existing_names=[])
     assert not any("lowercase alphanumeric" in e for e in errors)
 
@@ -1122,14 +1122,14 @@ def _save_service_config(service_id: str, custom_fields: list[dict] | None = Non
     return cfg
 
 
-def _cf(name: str, duckdb_type: str = "VARCHAR", value_type: str = "string") -> dict:
+def _cf(name: str, sql_type: str = "VARCHAR", value_type: str = "string") -> dict:
     return {
         "name": name,
         "label": name,
         "description": "",
         "vcl_log_expression": "req.http.X-Test",
         "collection_stage": "edge",
-        "duckdb_type": duckdb_type,
+        "sql_type": sql_type,
         "value_type": value_type,
         "bytes_estimate": 20,
         "nullable": True,
@@ -1198,8 +1198,8 @@ def _cfg(custom_fields: list[dict]) -> dict:
 def test_disable_field_removes_from_ingest_hints_and_catalog_ids():
     cfg = _cfg(
         [
-            {"name": "field_a", "duckdb_type": "VARCHAR", "enabled": True},
-            {"name": "field_b", "duckdb_type": "BIGINT", "enabled": False},
+            {"name": "field_a", "sql_type": "VARCHAR", "enabled": True},
+            {"name": "field_b", "sql_type": "BIGINT", "enabled": False},
         ]
     )
     for fn in (get_ingest_type_hints, get_catalog_field_ids):
@@ -1208,8 +1208,8 @@ def test_disable_field_removes_from_ingest_hints_and_catalog_ids():
 
 
 def test_disable_then_reenable_restores_ingest_hints():
-    disabled = _cfg([{"name": "round_trip", "duckdb_type": "VARCHAR", "enabled": False}])
-    reenabled = _cfg([{"name": "round_trip", "duckdb_type": "VARCHAR", "enabled": True}])
+    disabled = _cfg([{"name": "round_trip", "sql_type": "VARCHAR", "enabled": False}])
+    reenabled = _cfg([{"name": "round_trip", "sql_type": "VARCHAR", "enabled": True}])
     assert "round_trip" not in get_ingest_type_hints(disabled)
     assert get_ingest_type_hints(reenabled).get("round_trip") == "VARCHAR"
 
@@ -1217,9 +1217,9 @@ def test_disable_then_reenable_restores_ingest_hints():
 def test_disable_does_not_affect_other_enabled_fields():
     cfg = _cfg(
         [
-            {"name": "keep_me", "duckdb_type": "DOUBLE", "enabled": True},
-            {"name": "drop_me", "duckdb_type": "BIGINT", "enabled": False},
-            {"name": "also_keep", "duckdb_type": "VARCHAR", "enabled": True},
+            {"name": "keep_me", "sql_type": "DOUBLE", "enabled": True},
+            {"name": "drop_me", "sql_type": "BIGINT", "enabled": False},
+            {"name": "also_keep", "sql_type": "VARCHAR", "enabled": True},
         ]
     )
     hints = get_ingest_type_hints(cfg)
@@ -1342,7 +1342,7 @@ def _valid_field(**overrides) -> dict:
         "name": "my_field",
         "label": "My Field",
         "vcl_log_expression": "req.url",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 20,
     }
@@ -1367,9 +1367,9 @@ def _valid_field(**overrides) -> dict:
         ({"vcl_log_expression": "req.url; set req.x = 1"}, [], "semicolons"),
         ({"vcl_log_expression": "req.url // hack"}, [], "comments"),
         ({"vcl_log_expression": "req.url # hack"}, [], "comments"),
-        ({"duckdb_type": "QUANTUM"}, [], "duckdb_type"),
+        ({"sql_type": "QUANTUM"}, [], "sql_type"),
         ({"value_type": "unknown"}, [], "value_type"),
-        ({"duckdb_type": "INTEGER", "value_type": "ip"}, [], "not compatible"),
+        ({"sql_type": "INTEGER", "value_type": "ip"}, [], "not compatible"),
         ({"bytes_estimate": 0}, [], "bytes_estimate"),
         ({"bytes_estimate": 2000}, [], "bytes_estimate"),
         ({"bytes_estimate": "not-a-number"}, [], "bytes_estimate"),
@@ -1398,7 +1398,7 @@ def _make_custom_fields(count: int, bytes_each: int) -> list[dict]:
             "description": "",
             "vcl_log_expression": "req.http.Host",
             "collection_stage": "edge",
-            "duckdb_type": "VARCHAR",
+            "sql_type": "VARCHAR",
             "value_type": "string",
             "bytes_estimate": bytes_each,
             "nullable": True,
@@ -1521,8 +1521,8 @@ def test_rejects_non_strings_and_error_message_shape() -> None:
     with pytest.raises(ValueError):
         sql_ident.require_safe_ident(None, "bad ident")  # type: ignore[arg-type]
     with pytest.raises(ValueError) as exc:
-        sql_ident.require_safe_ident("a-b", "invalid ducklake alias")
-    assert str(exc.value) == "invalid ducklake alias: 'a-b'"
+        sql_ident.require_safe_ident("a-b", "invalid table alias")
+    assert str(exc.value) == "invalid table alias: 'a-b'"
 
 
 def test_bare_identifier_regex_has_one_owner() -> None:
@@ -1530,7 +1530,7 @@ def test_bare_identifier_regex_has_one_owner() -> None:
     needles = ("[A-Za-z_][A-Za-z0-9_]*",)
     offenders = []
     for path in BACKEND.rglob("*.py"):
-        if path.name in {"sql_ident.py", "sql_validator.py", "duckdb.py"}:
+        if path.name in {"sql_ident.py", "sql_validator.py"}:
             continue
         text = path.read_text()
         if path.name in {"pg_connection.py", "clickhouse_client.py", "base.py", "clickhouse.py"}:

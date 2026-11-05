@@ -128,17 +128,6 @@ class RdnsEnrichResponse(_OkWireSafeBase):
     summary: RdnsEnrichSummary
 
 
-class DuckdbRecycleResponse(_OkWireSafeBase):
-    status: str
-    reason: str | None = None
-    rss_mb: float | None = None
-    threshold_mb: float | None = None
-    detail: str | None = None
-    rss_before_mb: float | None = None
-    rss_after_mb: float | None = None
-    freed_mb: float | None = None
-
-
 class NgwafSyncResponse(_OkWireSafeBase):
     service_id: str
     workspace_id: str

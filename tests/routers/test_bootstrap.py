@@ -225,14 +225,14 @@ def test_bootstrap_includes_custom_dashboard_cards_when_configured(client, tmp_p
         {
             "name": "my_dashboard_field",
             "label": "Dashboard Field",
-            "duckdb_type": "VARCHAR",
+            "sql_type": "VARCHAR",
             "enabled": True,
             "show_in_dashboard": True,
         },
         {
             "name": "my_silent_field",
             "label": "Silent Field",
-            "duckdb_type": "VARCHAR",
+            "sql_type": "VARCHAR",
             "enabled": True,
             "show_in_dashboard": False,
         },
@@ -315,7 +315,7 @@ def test_schema_endpoint_500s_when_get_schema_raises(client, test_service_source
 
 
 def test_log_fields_catalog_with_service_id_includes_field_limits_and_custom(client, tmp_path, monkeypatch):
-    cf = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True, "label": "My Custom Field"}
+    cf = {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True, "label": "My Custom Field"}
     _seed_active_service(monkeypatch, tmp_path, {"log_fields": {"schema_version": 2, "custom_fields": [cf]}})
     resp = client.get("/api/log-fields/catalog", headers=_SVC_HDR)
     assert resp.status_code == 200
@@ -969,7 +969,7 @@ _VALID_CF_BODY = {
     "label": "Test Field",
     "vcl_log_expression": "req.http.X-Test",
     "collection_stage": "deliver",
-} | {"duckdb_type": "VARCHAR", "value_type": "string", "bytes_estimate": 20, "enabled": True}
+} | {"sql_type": "VARCHAR", "value_type": "string", "bytes_estimate": 20, "enabled": True}
 
 
 def _scope_403(resp) -> bool:
@@ -1375,7 +1375,7 @@ def _assert_same_bytes(model_cls: type, payload: dict[str, Any]) -> None:
     )
 
 
-def test_admin_bot_sources_rdns_and_duckdb_match_producer(client):
+def test_admin_bot_sources_and_rdns_match_producer(client):
     meta = {"id": "arcjet", "entry_count": 42, "last_updated": "2026-10-11T00:00:00Z", "enabled": True}
     with patch("backend.utils.bot_sources.fetch_and_cache_source", return_value=meta):
         assert _body(client.post("/api/admin/bot-sources/arcjet/refresh")) == {"ok": True, "source": meta}
@@ -2092,7 +2092,7 @@ def test_deploy_and_teardown_frontend_persistence_and_errors(client):
             assert r_err.status_code == expected_status
 
 
-def test_schema_endpoint_durable_mode_uses_catalog_without_duckdb_con(client, test_service_source):
+def test_schema_endpoint_durable_mode_uses_catalog(client, test_service_source):
     with patch("backend.config.get_status", return_value={}):
         resp = client.get("/api/schema", headers=_SVC_HDR)
         assert resp.status_code == 200

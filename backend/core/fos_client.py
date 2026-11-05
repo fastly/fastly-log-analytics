@@ -105,7 +105,6 @@ def _build_default_source() -> dict:
         "cdn_secret": "",
         "cdn_service_id": "",
         "logging_service_id": "",
-        "duckdb_path": "logs.duckdb",
         "storage_mode": "cloud",
     }
 
@@ -156,15 +155,8 @@ def current_rss_bytes() -> int | None:
             return None
 
 
-def rum_duckdb_path(path: str) -> str:
-    return path.removesuffix(".duckdb") + ".rum.duckdb"
-
-
 def rum_source_for(source: dict) -> dict:
-    rum_source = {**source, "name": f"{source.get('name') or source.get('service_id') or 'default'}::rum"}
-    if source.get("duckdb_path"):
-        rum_source["duckdb_path"] = rum_duckdb_path(source["duckdb_path"])
-    return rum_source
+    return {**source, "name": f"{source.get('name') or source.get('service_id') or 'default'}::rum"}
 
 
 _cid_salt_lock = threading.Lock()
@@ -228,7 +220,7 @@ def rotate_cid_salt(service_id: str) -> str:
 
 _fos_client_cache: BoundedLRUCache[tuple[str, str, str, str], Any] = BoundedLRUCache(maxsize=128)
 _fos_client_lock = threading.Lock()
-_CacheRegistry.register("duckdb._fos_client_cache", _fos_client_cache)
+_CacheRegistry.register("fos_client._fos_client_cache", _fos_client_cache)
 
 
 class _ProxyPaginatorShim:
@@ -793,7 +785,6 @@ __all__ = [
     "refresh_config_status",
     "reload_default_source",
     "rotate_cid_salt",
-    "rum_duckdb_path",
     "rum_source_for",
     "start_cron_run",
     "update_cron_duration",

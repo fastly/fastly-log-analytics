@@ -289,8 +289,6 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
 
     validate_mock_modes()
     high_scale_config = from_environment()
-    if not high_scale_config.enabled:
-        raise RuntimeError("high-scale worker requires HIGH_SCALE_ENABLED=1")
     topology = high_scale_config.topology_profile()
     _worker_logger.info(
         "high_scale.topology_profile",

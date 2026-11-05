@@ -688,7 +688,11 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
         patch("backend.main._enforce_data_dir_mounted"),
         patch("backend.main._enforce_proxy_headers_configured"),
         patch("backend.core.metadata.base.ensure_pg_schema"),
-        patch("backend.config.validate_deployment_mode"),
+        patch(
+            "backend.main.register_high_scale_services_from_environment",
+            side_effect=RuntimeError("startup") if failure == "startup" else None,
+            return_value=(),
+        ),
         patch("backend.utils.telemetry.start_proxy_server"),
         patch("backend.utils.tunnel.get_tunnel_manager"),
         patch("backend.main._bounded_scheduler_shutdown"),
@@ -703,10 +707,6 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
                 if failure == "serving":
                     raise RuntimeError("serving failure")
 
-        if failure == "startup":
-            monkeypatch.setattr(
-                main, "register_high_scale_services_from_environment", MagicMock(side_effect=RuntimeError("startup"))
-            )
         if failure:
             with pytest.raises((RuntimeError, ch.ClickHouseError)):
                 asyncio.run(run_lifespan())

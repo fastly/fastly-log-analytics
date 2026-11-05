@@ -633,8 +633,8 @@ def test_write_service_config_preserves_scoring_and_ngwaf(tmp_path, monkeypatch)
         "log_fields": {
             "groups": ["A"],
             "custom_fields": [
-                {"name": "edge_score", "duckdb_type": "INTEGER", "enabled": True},
-                {"name": "my_field", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "edge_score", "sql_type": "INTEGER", "enabled": True},
+                {"name": "my_field", "sql_type": "VARCHAR", "enabled": True},
             ],
         },
     }

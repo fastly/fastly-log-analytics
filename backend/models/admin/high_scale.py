@@ -1,4 +1,4 @@
-"""High-Scale topology, ClickHouse status/replay, Celery/ingest ledger, and DuckDB/NGWAF/rDNS status models."""
+"""High-Scale topology, ClickHouse status/replay, Celery/ingest ledger, and NGWAF/rDNS status models."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.models.admin.health_and_sync import MAX_PAGE_SIZE
-from backend.models.common.base import BaseResponse, ErrorDetail, JsonAny, JsonDict, WireSafeModel
+from backend.models.common.base import BaseResponse, ErrorDetail, JsonDict, WireSafeModel
 
 # ── High-Scale Models (folded from high_scale.py) ─────────────────────────────
 
@@ -65,7 +65,7 @@ class QueryResponseMetadataResponse(BaseModel):
     watermark: ServingWatermarkResponse
     approximation_error: float | None
     error: str | None
-    mode: Literal["clickhouse", "duckdb_emulation"] = "clickhouse"
+    mode: Literal["clickhouse"] = "clickhouse"
 
 
 class HighScaleRequestFactResponse(BaseResponse):
@@ -285,23 +285,16 @@ class InProcessActiveRun(WireSafeModel):
     started_at: float | None = None
 
 
-class StandardIngestSummary(WireSafeModel):
-    ingested_files: int = 0
-    quarantined_items: int = 0
-
-
 class CeleryStatusResponse(WireSafeModel):
     """``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
     summed across services, so both keep open string keys."""
 
-    deployment_mode: Literal["standard", "high_scale"] = "standard"
     broker_reachable: bool | None = None
     workers: CeleryWorkers | None = None
     queues: dict[str, int] | None = None
     ledger: dict[str, int] | None = None
     inprocess_schedules: list[InProcessScheduleEntry] | None = None
     inprocess_active_runs: list[InProcessActiveRun] | None = None
-    standard_ingest: StandardIngestSummary | None = None
 
 
 class IngestLedgerEntry(WireSafeModel):
@@ -347,14 +340,6 @@ class IngestLedgerActionResponse(WireSafeModel):
     ok: bool = True
     affected: int = 0
     dispatched: int = 0
-
-
-class DuckdbStatusResponse(WireSafeModel):
-    ok: bool
-    memory: JsonDict | None = None
-    barrier: JsonDict | None = None
-    pools: JsonAny = None
-    retired_pools: JsonAny = None
 
 
 class NgwafStatusResponse(WireSafeModel):

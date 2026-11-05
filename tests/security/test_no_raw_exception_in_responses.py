@@ -1,6 +1,6 @@
 """Raw exception text must not be interpolated into HTTP error bodies.
 
-``str(e)`` / ``{e}`` from DuckDB, boto3, Fastly or the OS can carry SQL excerpts, absolute paths, upstream
+``str(e)`` / ``{e}`` from ClickHouse, boto3, Fastly or the OS can carry SQL excerpts, absolute paths, upstream
 response bodies and URLs. Router/dependency/middleware code must return a static message plus a correlation
 id (``raise_internal`` / ``make_error(..., error_id=...)``) or wrap the text in ``redact_error_text``.
 
@@ -437,7 +437,7 @@ def test_custom_field_name_regex_rejects_trailing_newline():
         "name": "my_field" + NL,
         "label": "L",
         "vcl_log_expression": "req.url",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 20,
     }
@@ -455,7 +455,7 @@ def test_custom_field_model_rejects_trailing_newline():
     base = {
         "label": "L",
         "vcl_log_expression": "req.url",
-        "duckdb_type": "VARCHAR",
+        "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 20,
     }
@@ -1370,7 +1370,6 @@ _SKIP_SUFFIXES = {
     ".pdf",
     ".zip",
     ".gz",
-    ".duckdb",
     ".db",
     ".wasm",
 }

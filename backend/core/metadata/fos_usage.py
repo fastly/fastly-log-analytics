@@ -81,7 +81,7 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_ts ON telemetry_sections (timestamp)",
-    # Bytes the Standard-mode cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
+    # Bytes the cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
     # days, so the Usage page needs them; rows older than the billing window are pruned on insert.
     """CREATE TABLE IF NOT EXISTS cloud_copy_deletions (
         service_id TEXT NOT NULL,
@@ -179,7 +179,7 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         # Apply shield egress multiplier for CDN operations
         op_bytes = c.get("bytes")
         if op_class == "CDN" and op_bytes is not None:
-            # X-Cache values are stored at the beginning of details: "HIT, MISS · duckdb httpfs"
+            # X-Cache values are stored at the beginning of details: "HIT, MISS · boto3"
             # Fastly X-Cache order is: Shield POP first, Edge POP second.
             # If there's a comma (multiple POPs) AND the Edge POP (the last value)
             # is MISS or PASS, the Edge fetched the payload from the Shield.

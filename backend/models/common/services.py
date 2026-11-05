@@ -16,7 +16,7 @@ class LogFieldCatalogEntry(WireSafeModel):
     group: str | None
     label: str
     description: str
-    duckdb_type: str
+    sql_type: str
     # Built-in entries only.
     typical_bytes: int | None = None
     required_by: list[str] | None = None
@@ -98,9 +98,7 @@ class CronSettingsPartial(BaseModel):
     cache_retention_days: int | None = None
     rollup_retention_months: int | None = None
     # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
-    # the scheduler's expire job). keep_snapshot_days drives metadata.json size
-    # and therefore per-commit cost; expire_interval_mins is how often it's
-    # enforced.
+    # the scheduler's expire job).
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
     delete_after: bool | None = None
@@ -146,7 +144,6 @@ class ServiceConfig(BaseModel):
     fos_bucket: str | None = None
     log_period: int | None = None
     storage_mode: str | None = None
-    duckdb_size_bytes: int | None = None
     cache_file_count: int | None = None
     log_row_count: int | None = None
     is_active: bool | None = None
@@ -158,7 +155,6 @@ class ServiceConfig(BaseModel):
     rum_enabled: bool | None = None
     rum: RumConfigSection | None = None
     rum_log_period: int | None = None
-    is_high_scale: bool | None = None
 
 
 class ServicesListResponse(BaseResponse):
@@ -333,7 +329,7 @@ class CustomField(BaseModel):
     vcl_log_expression: str
     collection_stage: Literal["edge", "origin", "deliver"] = "edge"
     origin_log_frequency: Literal["all", "miss_pass"] = "all"
-    duckdb_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] = "VARCHAR"
+    sql_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] = "VARCHAR"
     value_type: Literal["string", "numeric", "boolean", "ip", "url"] = "string"
     bytes_estimate: int = 20
     nullable: bool = True
@@ -369,7 +365,7 @@ class CustomFieldUpdate(BaseModel):
     vcl_log_expression: str | None = None
     collection_stage: Literal["edge", "origin", "deliver"] | None = None
     origin_log_frequency: Literal["all", "miss_pass"] | None = None
-    duckdb_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] | None = None
+    sql_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] | None = None
     value_type: Literal["string", "numeric", "boolean", "ip", "url"] | None = None
     bytes_estimate: int | None = None
     nullable: bool | None = None

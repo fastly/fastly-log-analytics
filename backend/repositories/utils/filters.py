@@ -238,7 +238,7 @@ def build_where_clause(
                 from backend.core import log_fields as field_registry
 
                 field = field_registry.try_get(clean_col)
-                is_varchar = field is not None and field.duck_type == field_registry.DuckType.VARCHAR
+                is_varchar = field is not None and field.sql_type == field_registry.SqlType.VARCHAR
                 col_varchar = clean_col if is_varchar else f"CAST({clean_col} AS VARCHAR)"
                 if exact_vals:
                     placeholders = ", ".join(_add_param(str(v)) for v in exact_vals)

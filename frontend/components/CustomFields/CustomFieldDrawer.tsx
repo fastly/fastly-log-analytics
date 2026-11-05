@@ -117,9 +117,9 @@ export function CustomFieldsManager({ serviceId }: { serviceId: string }) {
     {
       id: 'type',
       header: 'Type',
-      accessorFn: (f) => f.duckdb_type,
+      accessorFn: (f) => f.sql_type,
       size: 120,
-      cell: ({ row }) => <span className="text-xs font-mono">{row.original.duckdb_type}</span>,
+      cell: ({ row }) => <span className="text-xs font-mono">{row.original.sql_type}</span>,
     },
     {
       id: 'dashboard',

@@ -329,7 +329,7 @@ retry-guard:
 	bash scripts/check_no_handrolled_retry.sh
 
 # B3/B6/B11: ban new inline COALESCE( null-default SQL in repositories and
-# rollup writers (use backend/core/metric_expressions.py).
+# analytical query builders (use backend/core/metric_expressions.py).
 coalesce-guard:
 	bash scripts/check_no_inline_metric_coalesce.sh
 

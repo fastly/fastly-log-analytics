@@ -8,7 +8,7 @@ user after a cold start lands on a warm cache hit instead of paying the
 seconds-to-tens-of-seconds cold-path cost. With no extents the pair falls
 back to the static (window=1h, baseline=168h).
 
-Tests stub out the duckdb helpers, ``get_insights``, and (where
+Tests stub out the clickhouse helpers, ``get_insights``, and (where
 relevant) ``start_cron_run`` to exercise every branch of the
 prewarmer body. We unwrap the cron decorator via ``__wrapped__`` so
 we exercise the inner function directly without spinning up the
@@ -1263,7 +1263,7 @@ def test_contract_early_exit_when_all_alerts_disabled():
 # ── 5. ClickHouse Metrics Evaluation & Lookback Window ───────────────────────
 
 
-def test_contract_duckdb_metrics_evaluation_and_query_attribution():
+def test_contract_clickhouse_metrics_evaluation_and_query_attribution():
     """Evaluates metrics against ClickHouse request_facts with window_min."""
     from backend.routers.alerts import _evaluate_alert
 
@@ -1699,7 +1699,7 @@ def test_contract_alerts_job_module_exports():
     assert hasattr(metadata_job, "_post_pagerduty_notification")
 
 
-def test_lease_held_skips_without_opening_duckdb_or_recording_a_row():
+def test_lease_held_skips_without_opening_clickhouse_or_recording_a_row():
     src = _sample_source()
     alerts = [_make_alert("svc-alerts-contract", alert_id="a1")]
     log_calls = []

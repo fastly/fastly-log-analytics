@@ -3,24 +3,17 @@
 Two invariants live here.
 
 **The backend replica invariant.** The chart keeps the backend at one replica
-until all pod-local accelerators are shared. Sync/file serving still relies on
-DuckDB's process-exclusive per-service file lock; durable Celery serving uses
-ephemeral read-only connections but does not yet make rollups and other
-accelerators fleet-wide (see docs/adr/18-serving-tier-single-pod.md). The chart
+while the stateless ingest workers scale independently via KEDA. The chart
 used to gate a backend HPA on the same `autoscaling.enabled` flag as the
 worker KEDA ScaledObject, so turning on worker autoscaling — the tier that
 DOES scale — also scaled the backend to maxReplicas: 10.
 
-**The installable-defaults invariant.** `values.yaml` used to ship
-`config.deploymentMode: high_throughput` with both required Postgres DSNs
-empty, so a `helm install` with no `--set` flags deployed a backend, worker
-and beat that `config.validate_deployment_mode()` correctly refused to start — three
-CrashLoopBackOffs whose cause was only visible in pod logs. The chart now
-defaults to the single-node `sync` topology, which needs no external
-datastores, and celery mode is an opt-in that fails at TEMPLATE time naming
-each missing value. These tests pin both directions: defaults render a
-self-contained install, and every incoherent celery configuration is a
-`helm template` error.
+**The installable-defaults invariant.** `values.yaml` requires a valid
+PostgreSQL 16 `secrets.metadataDsn` and fails at TEMPLATE time if required
+connection values are missing or invalid (such as a non-Postgres DSN or
+Valkey SSE backplane without `secrets.celeryBrokerUrl`). These tests pin both
+directions: valid defaults render a unified ClickHouse + stateless worker
+install, and every incoherent configuration is a `helm template` error.
 """
 
 import subprocess
@@ -110,10 +103,7 @@ def test_default_values_render_a_self_contained_install():
     docs = _render(*STANDARD)
     env = _env(_deployment(docs, "backend"))
 
-    assert env["HIGH_SCALE_ENABLED"]["value"] == "1"
     assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
-    assert "DEPLOYMENT_MODE" not in env
-    assert "DUCKLAKE_CATALOG" not in env
     assert env["SSE_BACKPLANE"]["value"] == "local"
 
     assert "CELERY_BROKER_URL" in env
@@ -133,7 +123,7 @@ def test_default_values_render_a_self_contained_install():
 
 
 def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
-    """Every backend/worker pod must have ClickHouse + High-Scale enabled and METADATA_DSN wired."""
+    """Every backend/worker pod must have ClickHouse enabled and METADATA_DSN wired."""
     for doc in docs:
         if doc["kind"] != "Deployment":
             continue
@@ -141,7 +131,6 @@ def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
         if not name.endswith(("-backend", "-worker")):
             continue
         env = _env(doc)
-        assert env["HIGH_SCALE_ENABLED"]["value"] == "1", name
         assert env["CLICKHOUSE_ENABLED"]["value"] == "true", name
         assert "METADATA_DSN" in env, name
 
@@ -185,7 +174,6 @@ def test_celery_mode_renders_the_full_ingest_fleet():
 
     for component in ("backend", "worker"):
         env = _env(_deployment(docs, component))
-        assert env["HIGH_SCALE_ENABLED"]["value"] == "1"
         assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
         assert env["METADATA_DSN"]["valueFrom"]["secretKeyRef"]["optional"] is False
         assert "CELERY_BROKER_URL" in env
@@ -205,7 +193,6 @@ def test_backend_and_worker_share_clickhouse_and_otel_env():
         docs = _render(*CELERY, f"observability.enabled={observability}")
         for component in ("backend", "worker"):
             env = _env(_deployment(docs, component))
-            assert env["HIGH_SCALE_ENABLED"]["value"] == "1"
             assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
             assert env["OTEL_EXPORTER"]["value"] == exporter
             assert ("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" in env) == (exporter == "otlp")
@@ -372,8 +359,6 @@ def test_high_scale_renders_only_application_workloads_and_invariants():
         assert pod["containers"][0]["image"] == "example.invalid/fla-high-scale:test"
         assert pod["containers"][0]["resources"]["requests"]["cpu"] == "500m"
         assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
-        # Packaging must not silently select an application runtime mode.
-        assert not any(entry["name"] == "DEPLOYMENT_MODE" for entry in pod["containers"][0].get("env", []))
         assert pod["containers"][0]["envFrom"][0]["secretRef"]["name"] == "fla-high-scale-connections"
         assert {
             "name": "shared-state",

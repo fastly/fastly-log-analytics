@@ -62,7 +62,7 @@ class BenchmarkReport(_StrictReport):
     """
 
     schema_version: Annotated[int, Field(ge=1, le=1)]
-    engine: Literal["ducklake", "clickhouse_hybrid"]
+    engine: Literal["baseline", "clickhouse_hybrid"]
     dataset_size_rows: PositiveCount
     eligible_window_rows: PositiveCount
     concurrency: PositiveCount
@@ -90,10 +90,10 @@ class BenchmarkReport(_StrictReport):
         expected_rps = (self.measured_requests - self.error_count) / self.elapsed_seconds
         if not math.isclose(self.achieved_throughput_rps, expected_rps, rel_tol=1e-6, abs_tol=1e-9):
             raise ValueError("throughput must equal successful requests / measured wall time")
-        if self.engine == "ducklake" and (
+        if self.engine == "baseline" and (
             self.clickhouse_ingest_lag_seconds is not None or self.clickhouse_rebuild_seconds is not None
         ):
-            raise ValueError("DuckLake baseline must explicitly leave ClickHouse-only measurements null")
+            raise ValueError("Baseline must explicitly leave ClickHouse-only measurements null")
         return self
 
 
@@ -134,7 +134,7 @@ count(*) FILTER (WHERE timestamp >= TIMESTAMPTZ '2026-09-06T00:00:00Z'
 FROM logs
 """
 Kind = Literal["bundle", "top_n", "time_series", "empty"]
-Engine = Literal["ducklake", "clickhouse_hybrid"]
+Engine = Literal["baseline", "clickhouse_hybrid"]
 StageStatus = Literal["complete", "deadline", "memory_abort", "monitor_error", "warmup_failed"]
 
 
@@ -143,9 +143,9 @@ class Sample(_StrictReport):
     duration_ms: Nonnegative
     status_code: Annotated[int, Field(ge=100, le=599)] | None
     error: Literal["http", "timeout", "transport", "semantic", "engine", "telemetry"] | None
-    dispatch: Literal["ducklake", "disabled", "hybrid", "unsupported_sections", "outside_coverage", "other", "unknown"]
+    dispatch: Literal["baseline", "disabled", "hybrid", "unsupported_sections", "outside_coverage", "other", "unknown"]
     response_cached: bool | None
-    duckdb_queries: Count
+    debug_queries: Count
     clickhouse_calls: Count
     clickhouse_errors: Count
     rows_read: Count | None
@@ -240,13 +240,13 @@ class RecoveryEvidence(_StrictReport):
     new_generation: bool
     canonical_digest_matches: bool
     duplicate_visible_rows: Count
-    ch_success_without_ducklake_marker_deleted: Count
+    ch_success_without_ledger_marker_deleted: Count
     fixture_rows: Count
     stopped_clickhouse_publication_seconds: Nonnegative
     publication_error_kind: Literal["ClickHouseError"]
     outage_state: Literal["pending", "failed"]
     false_publication: bool
-    fixture_ducklake_marker_authorized_raw_deletes: Count
+    fixture_ledger_marker_authorized_raw_deletes: Count
     retained_artifact_survives_raw_delete: bool
     outage_resume_seconds: Nonnegative
     outage_resume_published: Count
@@ -265,7 +265,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-prototype", action="store_true")
     p.add_argument("--base-url", default=None)
     p.add_argument("--backend-container", default=None)
-    p.add_argument("--engine", choices=("ducklake", "clickhouse_hybrid"), required=True)
+    p.add_argument("--engine", choices=("baseline", "clickhouse_hybrid"), required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--attempts", type=int, default=64)
     p.add_argument("--timeout", type=float, default=45)
@@ -322,10 +322,8 @@ def runtime(container: str) -> tuple[str, int]:
                 "docker-compose.clickhouse-prototype.yml",
             )
         )
-        or env.get("DEPLOYMENT_MODE") != "high_scale"
         or env.get("CLICKHOUSE_ENABLED") not in ("true", "false")
         or not env.get("METADATA_DSN", "").startswith("postgres")
-        or not env.get("DUCKLAKE_CATALOG", "").startswith("postgres")
         or not env.get("CLICKHOUSE_HOST")
     ):
         raise ValueError("backend is not the explicitly configured prototype")
@@ -405,14 +403,14 @@ def summarize_payload(payload: dict, kind: Kind, engine: Engine) -> dict:
     sections = a.get("_section_timings", [])
     dispatch = next((s["section"][7:] for s in sections if s["section"].startswith("engine:")), "unknown")
     calls = [json.loads(c["details"]) for c in payload.get("_debug_calls", []) if c.get("service") == "ClickHouse"]
-    if engine == "ducklake" and dispatch == "unknown" and payload.get("_debug_queries") and not calls:
-        dispatch = "ducklake"
+    if engine == "baseline" and dispatch == "unknown" and payload.get("_debug_queries") and not calls:
+        dispatch = "baseline"
     result = {
         "dispatch": dispatch
-        if dispatch in ("ducklake", "disabled", "hybrid", "unsupported_sections", "outside_coverage")
+        if dispatch in ("baseline", "disabled", "hybrid", "unsupported_sections", "outside_coverage")
         else "other",
         "response_cached": payload.get("_is_cached"),
-        "duckdb_queries": len(payload.get("_debug_queries", [])),
+        "debug_queries": len(payload.get("_debug_queries", [])),
         "clickhouse_calls": len(calls),
         "clickhouse_errors": sum(c["outcome"] != "success" for c in calls),
         "rows_read": sum(c["rows_read"] for c in calls),
@@ -426,8 +424,8 @@ def summarize_payload(payload: dict, kind: Kind, engine: Engine) -> dict:
     except (AssertionError, KeyError, TypeError, ValueError):
         result["error"] = "semantic"
     expected = (
-        ("ducklake" if dispatch == "ducklake" else "disabled")
-        if engine == "ducklake"
+        ("baseline" if dispatch == "baseline" else "disabled")
+        if engine == "baseline"
         else (
             "hybrid"
             if kind == "bundle"
@@ -456,7 +454,7 @@ async def attempt(client: httpx.AsyncClient, service: str, kind: Kind, engine: E
         error=None,
         dispatch="unknown",
         response_cached=None,
-        duckdb_queries=0,
+        debug_queries=0,
         clickhouse_calls=0,
         clickhouse_errors=0,
         rows_read=None,

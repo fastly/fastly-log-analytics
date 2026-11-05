@@ -1,5 +1,5 @@
 """URL → canonical route ID normalization, Layer 2 (route transition) scoring,
-admin session labels CRUD, and DuckDB log-to-sessionized-JSONL trace fixtures.
+admin session labels CRUD, and log-to-sessionized-JSONL trace fixtures.
 
 Per research doc §5.3: collapse high-cardinality path segments (numeric ids,
 UUIDs, slugs that look like keys) into ``*`` placeholders so the transition
@@ -513,7 +513,7 @@ def _ts_iso(value: Any) -> str:
 
 
 def rows_to_events(rows: Iterable[tuple[Any, ...]]) -> Iterator[tuple[str, str, Event]]:
-    """Convert raw DuckDB row tuples (in ``_TRACE_COLUMNS`` order) into ``(client_ip, user_agent, Event)`` triples."""
+    """Convert raw row tuples (in ``_TRACE_COLUMNS`` order) into ``(client_ip, user_agent, Event)`` triples."""
     for ts, ip, ua, url, method, status, referer, ttfb, country, asn in rows:
         yield (
             ip or "",
@@ -575,7 +575,7 @@ def extract_traces(
     limit: int | None = None,
     gap_seconds: int = SESSION_GAP_SECONDS,
 ) -> Iterator[Session]:
-    """Stream sessions from the per-service DuckDB logs view."""
+    """Stream sessions from the per-service logs view."""
     view = f"logs_{service_id.lower()}"
     where_clauses = []
     if start is not None:
@@ -903,7 +903,7 @@ def evaluate_from_persisted_scores(
     *,
     min_auc: float = DEFAULT_MIN_AUC,
 ) -> EvaluationResult:
-    """AUC using the score that was ALREADY persisted in DuckDB."""
+    """AUC using the score that was ALREADY persisted in ClickHouse."""
 
     def _extract_persisted(session: dict) -> tuple[int, int] | None:
         max_score = session.get("max_edge_score")

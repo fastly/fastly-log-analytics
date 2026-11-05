@@ -71,7 +71,6 @@ services:
     - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
     - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
     - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
-    - HIGH_SCALE_ENABLED=1
     # Pass through DEBUG_RESPONSES from the host env (defaults to true) —
     # without it the backend redacts the _debug_queries envelopes and the
     # dashboard Debug Panel shows 0 queries.
@@ -232,7 +231,6 @@ services:
     - PYTHONUNBUFFERED=1
     - CELERY_BROKER_URL=redis://valkey:6379/0
     - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
-    - HIGH_SCALE_ENABLED=1
     - HIGH_SCALE_WORKER_THREADS=1
     - HIGH_SCALE_MAX_BATCH_BYTES=6291456
     - HIGH_SCALE_MAX_BATCH_OBJECTS=10

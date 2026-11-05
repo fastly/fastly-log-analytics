@@ -69,11 +69,6 @@ NGWAF_DATA_DIR = DATA_DIR / "ngwaf"
 CACHE_DATA_DIR = DATA_DIR / "cache"
 SYSTEM_DATA_DIR = DATA_DIR / "system"
 
-# Deployment topology is deployment-wide rather than per-service. Define this
-# before the default source is built so config_to_source() can safely include
-# it during module import.
-DEPLOYMENT_MODE = "high_scale"
-
 
 @dataclass(frozen=True)
 class ClickHouseConfig:
@@ -622,7 +617,6 @@ class _SourceConfigModel(BaseModel):
     cdn_secret: Any = ""
     cdn_service_id: Any = ""
     logging_service_id: Any = Field("", validation_alias="service_id")
-    deployment_mode: str = DEPLOYMENT_MODE
     storage_mode: Any = "cloud"
     log_period: int = 60
     log_fields: Annotated[dict[str, Any], BeforeValidator(lambda v: dict(v) if v else {})] = Field(default_factory=dict)
@@ -655,7 +649,6 @@ class _SourceConfigModel(BaseModel):
 def config_to_source(cfg: dict) -> dict:
     """Convert a service config dict to the normalized 'source' dict format."""
     out = _SourceConfigModel.model_validate(cfg).model_dump()
-    out["deployment_mode"] = DEPLOYMENT_MODE
     out["rum_enabled"] = is_rum_enabled(cfg)
     return out
 
@@ -965,24 +958,6 @@ def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) ->
     if requested is not None:
         return bool(requested)
     return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
-
-
-def validate_deployment_mode() -> None:
-    """Fail fast on incoherent deployment configuration.
-
-    Requires METADATA_DSN to be a Postgres DSN per ADR-22.
-    """
-    metadata_dsn = os.getenv("METADATA_DSN", "")
-    if not metadata_dsn.startswith(("postgres://", "postgresql://")):
-        raise RuntimeError(
-            "METADATA_DSN must be a Postgres DSN — "
-            "per-service SQLite metadata is a pod-local file, so the cron lease "
-            "(job_runs), the ingest ledger, and the ingested-file manifest would "
-            "each be private to one process: every worker would re-discover and "
-            "re-convert the same objects and no lease could serialize them. A "
-            "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
-            f"Got: {metadata_dsn!r}"
-        )
 
 
 def service_id_from_source(

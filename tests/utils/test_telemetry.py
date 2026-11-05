@@ -1376,7 +1376,7 @@ async def test_proxy_strips_hop_by_hop_headers_before_forwarding(proxy_server):
         "/x",
         headers={
             "X-Fos-Target": "fake.cdn.net",
-            "X-Telemetry-Caller": "duckdb.httpfs",
+            "X-Telemetry-Caller": "fos.client",
             "Connection": "close",
             "TE": "trailers",
             "User-Agent": "myclient/1.0",
@@ -1454,7 +1454,7 @@ async def test_proxy_writes_one_usage_log_row_per_request(proxy_server):
         headers={
             "X-Fos-Target": "bucket.s3.amazonaws.com",
             "X-Telemetry-Service-Id": "test-svc",
-            "X-Telemetry-Caller": "duckdb.httpfs",
+            "X-Telemetry-Caller": "fos.client",
             "X-Telemetry-Context": "api:GET /api/dashboard/aggregates",
         },
         resp_headers={"Content-Length": "11", "X-Cache": "HIT"},
@@ -1467,7 +1467,7 @@ async def test_proxy_writes_one_usage_log_row_per_request(proxy_server):
         "/key.parquet",
         11,
         "OK",
-        "duckdb.httpfs",
+        "fos.client",
         "FOS",
     )
     assert row["details"].startswith("HIT")
@@ -1497,7 +1497,7 @@ async def test_proxy_keeps_get_for_non_list_fos_reads(proxy_server):
         headers={
             "X-Fos-Target": "bucket.s3.amazonaws.com",
             "X-Telemetry-Service-Id": "test-svc",
-            "X-Telemetry-Caller": "duckdb.httpfs",
+            "X-Telemetry-Caller": "fos.client",
         },
         resp_headers={"Content-Length": "32"},
         chunks=(b"x" * 32,),
@@ -1512,7 +1512,7 @@ async def test_proxy_encodes_xcache_chain_in_details_for_shield_doubling(proxy_s
         headers={
             "X-Fos-Target": "cdn.example.net",
             "X-Telemetry-Service-Id": "test-svc",
-            "X-Telemetry-Caller": "duckdb.httpfs",
+            "X-Telemetry-Caller": "fos.client",
         },
         resp_headers={"X-Cache": "MISS, MISS"},
         chunks=(b"x" * 1024,),
@@ -1587,7 +1587,7 @@ async def test_proxy_does_not_synthesize_when_cdn_chain_has_a_hit(proxy_server, 
         headers={
             "X-Fos-Target": "cdn.example.net",
             "X-Telemetry-Service-Id": "test-svc",
-            "X-Telemetry-Caller": "duckdb.httpfs",
+            "X-Telemetry-Caller": "fos.client",
         },
         resp_headers={"X-Cache": x_cache},
         chunks=(b"x" * 100,),
@@ -1611,7 +1611,7 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
                 headers={
                     "X-Fos-Target": "cdn.example.net",
                     "X-Telemetry-Service-Id": "real-svc-task6",
-                    "X-Telemetry-Caller": "duckdb.httpfs",
+                    "X-Telemetry-Caller": "fos.client",
                 },
             ) as resp,
         ):

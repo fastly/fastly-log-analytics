@@ -190,7 +190,7 @@ def test_generate_capture_vcl_custom_edge_and_origin_fields():
                     "name": "my_custom",
                     "enabled": True,
                     "collection_stage": "edge",
-                    "duckdb_type": "VARCHAR",
+                    "sql_type": "VARCHAR",
                     "value_type": "string",
                     "vcl_log_expression": "req.url",
                     "bytes_estimate": 20,
@@ -209,7 +209,7 @@ def test_generate_capture_vcl_custom_edge_and_origin_fields():
                     "name": "my_origin_field",
                     "enabled": True,
                     "collection_stage": "origin",
-                    "duckdb_type": "VARCHAR",
+                    "sql_type": "VARCHAR",
                     "value_type": "string",
                     "vcl_log_expression": "beresp.status",
                     "bytes_estimate": 20,
@@ -236,7 +236,7 @@ def _miss_pass_cfg(frequency: str) -> dict:
                 "name": "origin_cache_state",
                 "enabled": True,
                 "collection_stage": "origin",
-                "duckdb_type": "VARCHAR",
+                "sql_type": "VARCHAR",
                 "value_type": "string",
                 "vcl_log_expression": "beresp.http.X-Cache",
                 "origin_log_frequency": frequency,
@@ -698,8 +698,8 @@ def test_update_logging_endpoint_cmcd_and_custom_fields_convergence():
             "schema_version": 2,
             "groups": ["A", "B"],
             "custom_fields": [
-                {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True},
+                {"name": "cmcd_sid", "sql_type": "VARCHAR", "enabled": True},
             ],
         },
     }
@@ -1916,7 +1916,7 @@ def test_storage_caches_are_registered_at_import():
     for required in (
         "config._config_cache",
         "config._name_cache",
-        "duckdb._fos_client_cache",
+        "fos_client._fos_client_cache",
     ):
         assert required in names, f"missing registration: {required}"
 

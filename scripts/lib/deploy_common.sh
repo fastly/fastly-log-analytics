@@ -54,6 +54,11 @@ PY
 }
 
 setup_deploy_gce_ssh() {
+  if [[ "${SKIP_GCE:-0}" == "1" || "${SKIP_REMOTE_STD:-0}" == "1" ]]; then
+    GCE_SSH=(false)
+    GCE_ADMIN_TAG=fla-admin-gateway
+    return 0
+  fi
   if [[ -n "$GCE_VM_NAME" ]] && gcloud compute ssh "$GCE_VM_NAME" --project="$GCE_PROJECT" --zone="$GCE_ZONE" --command "true" >/dev/null 2>&1; then
     GCE_SSH=(gcloud compute ssh "$GCE_VM_NAME" --project="$GCE_PROJECT" --zone="$GCE_ZONE")
   else
@@ -530,7 +535,7 @@ start_log_monitor() {
   echo "=== Remote High-Scale Container Logs (Post-Rollout Watch) ===" > "${REPORT_DIR}/logs/remote_hs_backend.log"
   echo "=== Remote High-Scale Frontend Logs (Post-Rollout Watch) ===" > "${REPORT_DIR}/logs/remote_hs_frontend.log"
   (
-    tail -f -n +1 "${REPORT_DIR}/logs/local_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "Logging errors to|control-room/error-stream|/rum/errors|overcommit|SSR upstream timeout|ducklake advisory lock timed out.*attempt 1|['\"]errors['\"]:[[:space:]]*0|and [0-9]+ (js_errors|errors) files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED|active-request-gate" | sed -u 's/^/[Local Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
+    tail -f -n +1 "${REPORT_DIR}/logs/local_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "Logging errors to|control-room/error-stream|/rum/errors|overcommit|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|and [0-9]+ (js_errors|errors) files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED|active-request-gate" | sed -u 's/^/[Local Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     tail -f -n +1 "${REPORT_DIR}/logs/local_std_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Local Standard\/frontend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     docker compose logs -f --tail=0 caddy 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "context canceled|incomplete response|use of closed network connection|failed to sufficiently increase receive buffer size" | sed -u 's/^/[Local Standard\/caddy] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     tail -f -n +1 "${REPORT_DIR}/logs/remote_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|and [0-9]+ (js_errors|errors) files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED|active-request-gate" | sed -u 's/^/[Remote Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &

@@ -52,7 +52,7 @@ KEYS_STORE = "KEYS_STORE_ID"
 CFG_STORE = "CFG_STORE_ID"
 SID = "svc"
 _MERGE_SID = "logsvc1"
-_USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
+_USER_FIELD = {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True}
 
 
 @pytest.fixture
@@ -1012,7 +1012,7 @@ def test_write_service_config_merges_and_preserves_state():
             "status": {"state": "ok"},
             "last_activated_version": 7,
             "rum_vcl_sha": "sha",
-            "log_fields": {"groups": ["A"], "custom_fields": [{"name": "mine", "duckdb_type": "VARCHAR"}]},
+            "log_fields": {"groups": ["A"], "custom_fields": [{"name": "mine", "sql_type": "VARCHAR"}]},
         },
     )
     orchestrator.write_service_config(_state())
@@ -1059,15 +1059,15 @@ def test_cmcd_and_system_custom_fields_reconciliation():
     assert _CMCD_FIELD_NAMES <= _names(out_cmcd) and "my_custom" in _names(out_cmcd)
 
     out_off = reconcile_system_custom_fields(
-        [_USER_FIELD, {"name": "cmcd_sid", "duckdb_type": "VARCHAR"}], scoring_enabled=False, cmcd_enabled=False
+        [_USER_FIELD, {"name": "cmcd_sid", "sql_type": "VARCHAR"}], scoring_enabled=False, cmcd_enabled=False
     )
     assert _names(out_off) == {"my_custom"}
 
     out_stale = reconcile_system_custom_fields(
-        [{"name": "cmcd_sid", "duckdb_type": "WRONG", "enabled": False}], scoring_enabled=False, cmcd_enabled=True
+        [{"name": "cmcd_sid", "sql_type": "WRONG", "enabled": False}], scoring_enabled=False, cmcd_enabled=True
     )
     sids = [cf for cf in out_stale if cf["name"] == "cmcd_sid"]
-    assert len(sids) == 1 and (sids[0]["duckdb_type"], sids[0]["enabled"]) == ("VARCHAR", True)
+    assert len(sids) == 1 and (sids[0]["sql_type"], sids[0]["enabled"]) == ("VARCHAR", True)
 
     out_both = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True)
     assert (_CMCD_FIELD_NAMES | _SCORING_FIELD_NAMES | {"my_custom"}) <= _names(out_both)
@@ -1094,7 +1094,7 @@ def test_cmcd_and_system_custom_fields_reconciliation():
     cfg3 = {
         "log_fields": {
             "schema_version": 2,
-            "custom_fields": [_USER_FIELD, {"name": "cmcd_br", "duckdb_type": "INTEGER"}],
+            "custom_fields": [_USER_FIELD, {"name": "cmcd_br", "sql_type": "INTEGER"}],
         }
     }
     reconcile_cfg_system_custom_fields(cfg3)
@@ -1823,7 +1823,7 @@ def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
     def _record_update(cfg, token):
         return iter([{"type": "done", "version": 1}])
 
-    pre_scoring_field = {"name": "edge_score", "duckdb_type": "INTEGER", "enabled": True}
+    pre_scoring_field = {"name": "edge_score", "sql_type": "INTEGER", "enabled": True}
 
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),

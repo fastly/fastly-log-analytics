@@ -832,7 +832,6 @@ def test_tcp_disconnect_via_asgi_receive_interrupts_sync_clickhouse_query():
 import copy
 import importlib
 import os
-from contextlib import asynccontextmanager
 from functools import partial
 
 from fastapi.testclient import TestClient
@@ -844,7 +843,6 @@ from scripts.check_environment_health import (
 )
 
 import backend.core.metadata as metadata_db
-import backend.core.request_telemetry as module
 import backend.cron.scheduler as cron_progress
 from backend.celery_app import SyncStatusPublisher
 from backend.cron.scheduler import CronRunsPublisher, compute_sync_status_cached
@@ -1470,58 +1468,3 @@ def test_list_active_runs_and_reap_zombies():
         cron_progress._progress[1][-1]["type"] == "error"
         and "zombie" in cron_progress._progress[1][-1]["message"].lower()
     )
-
-
-# ── RequestMetricsObserver ───────────────────────────────────────────────────
-
-
-def test_refresh_durable_request_metrics_is_noop_in_clickhouse_mode():
-    assert module.refresh_durable_request_metrics({"name": "test_service"}) is None
-    assert module.refresh_durable_request_metrics({}) is None
-
-
-def test_observer_lifecycle_noop_and_bounded_stop(monkeypatch):
-    obs = module.RequestMetricsObserver()
-    assert obs.reconcile() is None
-    assert obs.start() is None
-    assert obs._thread is None
-    obs.stop()
-    assert obs._stop.is_set()
-
-    # Bounded stop joins an attached thread and clears _thread once it exits
-    release = threading.Event()
-    monkeypatch.setattr(module, "STOP_TIMEOUT_S", 0.01)
-    t = threading.Thread(target=lambda: release.wait(2))
-    t.start()
-    obs._thread = t
-    try:
-        obs.stop()
-        assert obs._thread is t and t.is_alive()
-    finally:
-        release.set()
-        t.join(2)
-        obs.stop()
-    assert obs._thread is None
-
-
-@pytest.mark.asyncio
-async def test_application_lifespan_owns_observer_order(monkeypatch):
-    from backend import main
-
-    calls = []
-
-    @asynccontextmanager
-    async def application(app):
-        calls.append("application_start")
-        yield
-        calls.append("application_stop")
-
-    monkeypatch.setattr(main, "_application_lifespan", application)
-    monkeypatch.setattr(module.observer, "start", lambda: calls.append("observer_start"))
-    monkeypatch.setattr(module.observer, "stop", lambda: calls.append("observer_stop"))
-    monkeypatch.setattr(main.request_telemetry, "force_flush", lambda: None)
-    monkeypatch.setattr(main.clickhouse_observer, "stop_clickhouse_observer", lambda: None)
-    monkeypatch.setattr(main.clickhouse_client, "close_clickhouse_client", lambda: None)
-    async with main.lifespan(main.app):
-        calls.append("serving")
-    assert calls == ["application_start", "observer_start", "serving", "observer_stop", "application_stop"]

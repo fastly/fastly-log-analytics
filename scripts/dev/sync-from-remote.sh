@@ -138,7 +138,7 @@ if [ "$PRUNE_ONLY" != 1 ]; then
   REMOTE_BYTES_TOTAL=0
   # shellcheck disable=SC2016
   REMOTE_BYTES_RAW="$(gce_ssh_script "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- \
-      'cd "$1" && s=$2 && shift 2 && for d in "$@"; do $s du -sb --exclude="*-wal" --exclude="*-shm" --exclude="*.duckdb.wal" "$d" 2>/dev/null; done' \
+      'cd "$1" && s=$2 && shift 2 && for d in "$@"; do $s du -sb --exclude="*-wal" --exclude="*-shm" "$d" 2>/dev/null; done' \
       "$REMOTE_PATH" "$SUDO" "${ACTIVE_ARR[@]}" 2>/dev/null || true)"
   for c in $ACTIVE_CATEGORIES; do
     LSIZE="(absent)"
@@ -193,7 +193,7 @@ if [ "$PRUNE_ONLY" != 1 ]; then
     step "expected ~$(fmt_bytes "$REMOTE_BYTES_TOTAL") on the wire"
     gce_ssh_run "$REMOTE_INSTANCE" "$REMOTE_ZONE" --quiet -- \
       ${SUDO_ARGV[@]+"${SUDO_ARGV[@]}"} tar -C "$REMOTE_PATH" \
-      --exclude='*-wal' --exclude='*-shm' --exclude='*.duckdb.wal' \
+      --exclude='*-wal' --exclude='*-shm' \
       -cf - "${ACTIVE_ARR[@]}" \
       | stream_tar_with_progress "$REMOTE_BYTES_TOTAL" "$REPO_ROOT"
     ok "sync complete"

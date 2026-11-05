@@ -134,7 +134,7 @@ def test_high_scale_celery_status_full_payload(client):
         assert data["ledger"] == {"discovered": 4, "claimed": 2, "committed": 200, "quarantined": 1, "dead_letter": 3}
 
 
-def test_standard_mode_idle_and_unreachable_broker_fallbacks(client):
+def test_celery_status_idle_and_unreachable_broker_fallbacks(client):
     mock_i = MagicMock()
     mock_i.active.return_value = mock_i.stats.return_value = {}
     mock_i.registered.return_value = mock_i.scheduled.return_value = {}
@@ -163,7 +163,7 @@ def test_standard_mode_idle_and_unreachable_broker_fallbacks(client):
         assert "Broker connection timeout" in d2["workers"]["error"] and d2["queues"] == {} and d2["ledger"] == {}
 
 
-def test_standard_mode_inprocess_scheduler_and_metric_history(client):
+def test_celery_status_inprocess_scheduler_and_metric_history(client):
     nxt = SimpleNamespace(timestamp=lambda: 1700000010.0)
     fake_job = SimpleNamespace(
         id="log_discovery_svc-a", name="log_discovery_svc-a", trigger="interval[0:00:10]", next_run_time=nxt
@@ -183,7 +183,7 @@ def test_standard_mode_inprocess_scheduler_and_metric_history(client):
         resp = client.get("/api/admin/celery/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["broker_reachable"] is False and data["deployment_mode"] == "high_scale"
+        assert data["broker_reachable"] is False
         sched_exp = [{"name": "log_discovery_svc-a", "trigger": "interval[0:00:10]", "next_run_at": 1700000010.0}]
         assert data["inprocess_schedules"] == sched_exp
         assert data["inprocess_active_runs"] == active_entry and data["standard_ingest"] == std_summary
@@ -1214,19 +1214,17 @@ def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monk
     cfg = {"provisioning": {"cron_sync": {"data_retention_days": 14, "rum_retention_days": 7}}}
     with patch("backend.config.load_config", return_value=cfg):
         result, _ = _compute_prefill_rates({"name": "svc-retention"})
-    assert (result["log_retention_days"], result["rum_retention_days"], result["deployment_mode"]) == (
+    assert (result["log_retention_days"], result["rum_retention_days"]) == (
         14,
         7,
-        "high_scale",
     )
 
     # RUM retention defaults to the data retention; unset data retention is the 30 days the cleanup enforces.
     with patch("backend.config.load_config", return_value={"provisioning": {"cron_sync": {"data_retention_days": 21}}}):
         result, _ = _compute_prefill_rates({"name": "svc-retention"})
-    assert (result["log_retention_days"], result["rum_retention_days"], result["deployment_mode"]) == (
+    assert (result["log_retention_days"], result["rum_retention_days"]) == (
         21,
         21,
-        "high_scale",
     )
     with patch("backend.config.load_config", return_value={"provisioning": {"cron_sync": {}}}):
         result, _ = _compute_prefill_rates({"name": "svc-retention"})

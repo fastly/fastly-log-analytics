@@ -958,7 +958,7 @@ def scoring_curves(
                 "min_per_class": _MIN_LABELS_PER_CLASS,
                 "n_good": n_good,
                 "n_bad": n_bad,
-                "note": "labels exist but none of their sids have landed in DuckDB yet",
+                "note": "labels exist but none of their sids have landed in ClickHouse yet",
             }
         total_pos = sum(1 for _, lbl in scored if lbl == "bad")
         total_neg = sum(1 for _, lbl in scored if lbl == "good")

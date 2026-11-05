@@ -92,7 +92,7 @@ def _extract_fos_ops(record: dict[str, Any]) -> tuple[int, int]:
 def _compute_prefill_rates(
     source: dict[str, Any], *, include_metadata_averages: bool = True
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Local-config-only prefill payload (FAST path — no Fastly, no DuckDB)."""
+    """Local-config-only prefill payload (FAST path — no Fastly, no ClickHouse)."""
     from backend import config as svcconfig
 
     global_rates = svcconfig.load_usage_logging_config()
@@ -108,7 +108,6 @@ def _compute_prefill_rates(
         "delete_after": True,
         "log_retention_days": 30,
         "rum_retention_days": 30,
-        "deployment_mode": "high_scale",
         "class_a_rate_per_1k": float(global_rates.get("class_a_rate_per_1k", 0.005)),
         "class_b_rate_per_10k": float(global_rates.get("class_b_rate_per_10k", 0.01)),
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
@@ -131,7 +130,6 @@ def _compute_prefill_rates(
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cron_sync.get("data_retention_days", 30))
             result["rum_retention_days"] = int(cron_sync.get("rum_retention_days", result["log_retention_days"]))
-            result["deployment_mode"] = "high_scale"
             try:
                 from backend.core.log_fields import estimate_log_line_bytes
 

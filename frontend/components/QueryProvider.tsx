@@ -356,7 +356,7 @@ export default function QueryProvider({ children, dehydratedState }: QueryProvid
         // CORS preflight failure used to fan one user click into 4
         // identical /api/sessions POSTs visible in HAR.
         //
-        // E-5 (audit): 503 with err.busy = true (DuckDB pool saturation)
+        // E-5 (audit): 503 with err.busy = true (query pool saturation)
         // gets one extra retry (3 total) because the failure mode is
         // explicitly transient — the backend is telling us "try again
         // shortly" rather than "this is broken". Exponential backoff

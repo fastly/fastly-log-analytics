@@ -64,7 +64,7 @@ PostgreSQL 16 is the sole, mandatory operational metadata and control-plane stor
 
 ### Operational Changes
 - **PostgreSQL Dependency:** Local development now requires a running PostgreSQL container (`docker compose up postgres` or `make start-dev`). Zero-dependency SQLite execution is no longer supported.
-- **Test Isolation:** Pytest suites (`tests/conftest.py`) automatically isolate test execution by provisioning dedicated per-worker PostgreSQL databases (`ducklake_test_slot<N>`, claimed via a Postgres advisory lock so concurrent runs never share one).
+- **Test Isolation:** Pytest suites (`tests/conftest.py`) automatically isolate test execution by provisioning dedicated per-worker PostgreSQL databases (`fla_test_slot<N>`, claimed via a Postgres advisory lock so concurrent runs never share one).
 
 ---
 

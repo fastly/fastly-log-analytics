@@ -150,7 +150,7 @@ function QueryPageInner() {
   const activeFieldTypes = useMemo<Record<string, string>>(() => {
     const out: Record<string, string> = {}
     if (dataset === 'logs') {
-      for (const f of catalog?.fields ?? []) if (f.id && f.duckdb_type) out[f.id] = f.duckdb_type
+      for (const f of catalog?.fields ?? []) if (f.id && f.sql_type) out[f.id] = f.sql_type
     } else {
       for (const f of RUM_SCHEMAS[dataset] || []) out[f.name] = f.type
     }
@@ -168,7 +168,7 @@ function QueryPageInner() {
     if (catalog?.fields?.length) {
       return catalog.fields
         .filter((f) => Boolean(f.id))
-        .map((f) => ({ name: f.id, type: f.duckdb_type || 'VARCHAR' }))
+        .map((f) => ({ name: f.id, type: f.sql_type || 'VARCHAR' }))
     }
     return DEFAULT_LOG_SCHEMA
   }, [dataset, schemaData, catalog])

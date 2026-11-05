@@ -1,6 +1,6 @@
 """Per-service operational metadata store, backed by Postgres.
 
-DuckDB is reserved for analytical queries over DuckLake log data. Everything
+ClickHouse serves analytical queries over log data. Everything
 else — alerts, saved views, audit logs, ingested-file dedup tracking, cron run
 history, ASN name cache, source registration, FOS/CDN usage telemetry — lives
 here, in a single shared Postgres database (``METADATA_DSN``), with every

@@ -122,7 +122,7 @@ _SCHEMA = [
     # write itself crashed — files will re-LIST on the next tick). Combined
     # with deterministic buffer filenames (sha256 of sorted source filenames)
     # this makes the ingest → buffer → metadata commit sequence crash-safe
-    # without ever double-committing a row to DuckLake.
+    # without ever double-committing a row.
     """CREATE TABLE IF NOT EXISTS ingest_in_flight (
         buffer_filename TEXT NOT NULL,
         source_name TEXT NOT NULL,

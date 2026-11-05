@@ -23,7 +23,7 @@ import backend.core.metadata.base as pg_connection
 import backend.core.metadata.base as pg_schema
 import backend.core.metadata.ingest_log as quarantine
 import backend.core.metadata.usage_log as usage_log_db
-from backend import config, main
+from backend import main
 from backend.core import share_db as share_db_connection
 from backend.core.metadata import base, ingest_log, usage_log
 from backend.core.metadata.base import InvalidServiceIdError, get_con
@@ -586,11 +586,7 @@ def test_connection_openers_raise_without_dsn(no_dsn, opener):
     assert isinstance(exc, RuntimeError) and "METADATA_DSN is not set" in str(exc)
 
 
-def test_deployment_validation_and_usage_log_ddl(monkeypatch):
-    monkeypatch.setenv("METADATA_DSN", "sqlite:///tmp/x.db")
-    with pytest.raises(RuntimeError, match="METADATA_DSN must be a Postgres DSN"):
-        config.validate_deployment_mode()
-
+def test_usage_log_ddl():
     statements = pg_schema.pg_schema_statements()
     joined = "\n".join(statements)
     assert "CREATE TABLE IF NOT EXISTS usage_log (" in joined

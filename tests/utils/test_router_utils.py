@@ -30,7 +30,6 @@ from backend.core.sql_validator import (
     _TABLE_FUNCTIONS,
     MAX_INPUT_BYTES,
     SQLValidationError,
-    apply_user_query_limits,
     escape_sql_literal,
     validate_user_sql,
 )
@@ -53,7 +52,7 @@ def _isolate_module_globals():
     """``PUBLISH_STATS``, the rate-limit clock and the cached sync client are
     all module-global — without a reset, assertions here would be cumulative
     and order-dependent (the same test-isolation trap as
-    ``_lock_retry_count`` in tests/core/test_duckdb_concurrency.py)."""
+    ``_lock_retry_count`` in tests/core/test_fos_client.py)."""
     saved_stats = dict(vp.PUBLISH_STATS)
     saved_client = vp._sync_redis
     for k in vp.PUBLISH_STATS:
@@ -958,12 +957,12 @@ async def test_subscribe_reconnects_after_broker_loss():
 
 # ── Merged from tests/utils/test_sql_validator.py ──
 #
-# Acceptance tests for the DuckDB user-SQL validator (security).
+# Acceptance tests for the user-SQL validator (security).
 # The Decision B policy is defined in security_remediation_final_v6.md §2 and
 # implemented in backend/utils/sql_validator.py. This file pins every
 # acceptance criterion called out in that document so a future refactor
 # can't silently weaken the policy.
-# The validator runs against a real DuckDB connection (the same engine the
+# The validator runs against a SQL parser connection (the same engine the
 # production app uses), so test coverage is end-to-end on the parse-tree
 # walker — no mocking the json_serialize_sql output.
 
@@ -1012,14 +1011,14 @@ def test_valid_user_queries_pass(con, sql):
         ("SELECT * FROM read_blob('/etc/passwd')", "read_blob"),
         ("SELECT getenv('AWS_SECRET_ACCESS_KEY')", "getenv"),
         ("SELECT current_setting('s3_secret_access_key')", "current_setting"),
-        ("SELECT * FROM duckdb_secrets()", "duckdb_secrets"),
+        ("SELECT * FROM current_setting('s3_access_key_id')", "current_setting"),
         ("SELECT * FROM glob('/etc/*')", "glob"),
         ("SELECT * FROM lsdir('/')", "lsdir"),
         ("SELECT * FROM postgres_scan('host=evil', 'public', 't')", "postgres_scan"),
         ("SELECT * FROM sqlite_scan('/tmp/x.db', 't')", "sqlite_scan"),
         ("SELECT * FROM iceberg_scan('/tmp/iceberg')", "iceberg_scan"),
         # Regression for audit finding 014: parquet_scan / parquet_metadata
-        # / parquet_schema / parquet_kv_metadata are DuckDB aliases that
+        # / parquet_schema / parquet_kv_metadata are table-function aliases that
         # bypassed the denylist before. They must be rejected for the same
         # reason as read_parquet (arbitrary path → exfil).
         ("SELECT * FROM parquet_scan('/etc/passwd.parquet')", "parquet_scan"),
@@ -1036,22 +1035,22 @@ def test_blocked_functions_rejected(con, sql, blocked_function):
 
 # ── REGRESSION (C1): denylist→allowlist for table functions ─────────────────
 #
-# The pre-fix gate was a function-NAME denylist. DuckDB 1.5.x ships file/
+# The pre-fix gate was a function-NAME denylist. SQL engines ship file/
 # external-resource table functions that were never in that list, so an
 # authenticated analyst could read arbitrary server files and other tenants'
 # databases through /api/query. The fix adds (a) a static name-prefix
 # denylist and (b) a table-function ALLOWLIST derived from the live engine's
-# duckdb_functions(). These tests pin both halves.
+# function catalog. These tests pin both halves.
 
 
 @pytest.mark.parametrize(
     ("sql", "expected_prefix"),
     [
         # The exact five functions the old denylist missed (verified file/
-        # external-resource readers in DuckDB 1.5.3). Each is now caught by
+        # external-resource readers). Each is now caught by
         # the static prefix layer.
         ("SELECT * FROM sniff_csv('/srv/app/config/other.json')", "sniff_"),
-        ("SELECT * FROM read_duckdb('/srv/app/data/metadata.duckdb')", "read_"),
+        ("SELECT * FROM read_sqlite('/srv/app/data/metadata.db')", "read_"),
         ("SELECT * FROM parquet_file_metadata('s3://other-tenant/raw/x.parquet')", "parquet_"),
         ("SELECT * FROM parquet_full_metadata('/tmp/x.parquet')", "parquet_"),
         ("SELECT * FROM parquet_bloom_probe('/tmp/x.parquet', 'c', 1)", "parquet_"),
@@ -1145,10 +1144,10 @@ def test_c1_allowlist_tracks_live_engine_enumeration(con):
 @pytest.mark.parametrize(
     ("sql", "blocked_prefix"),
     [
-        ("SELECT * FROM duckdb_secrets", "duckdb_"),
-        ("SELECT * FROM duckdb_settings", "duckdb_"),
-        ("SELECT * FROM duckdb_variables", "duckdb_"),
-        ("SELECT * FROM duckdb_extensions", "duckdb_"),
+        ("SELECT * FROM pg_shadow", "pg_"),
+        ("SELECT * FROM pg_roles", "pg_"),
+        ("SELECT * FROM pg_user", "pg_"),
+        ("SELECT * FROM pg_authid", "pg_"),
         ("SELECT * FROM pg_settings", "pg_"),
     ],
 )
@@ -1265,7 +1264,7 @@ def test_show_ref_statements_rejected(con, sql):
     """SHOW / DESCRIBE / SUMMARIZE all parse as SELECT_NODE with from_table
     of type SHOW_REF — they slip past the statement-type whitelist. Live-
     confirmed that SHOW TABLES leaks foreign service table names from the
-    pooled DuckDB connection; SUMMARIZE and DESCRIBE leak schemas. Reject
+    pooled connection; SUMMARIZE and DESCRIBE leak schemas. Reject
     them on the user-query path."""
     with pytest.raises(SQLValidationError) as exc:
         validate_user_sql(sql, parser_con=con)
@@ -1314,10 +1313,10 @@ def test_allowed_tables_permits_valid_queries(con, sql, allowed):
         # A JOIN against a foreign table must be rejected.
         ("SELECT * FROM logs a JOIN logs_other b ON a.id = b.id", frozenset({"logs"})),
         # Finding 009 (run 80e9f210): a CTE declared in an INNER subquery must not whitelist its name
-        # for a SIBLING outer reference, which DuckDB resolves to the real base table.
+        # for a SIBLING outer reference, which resolves to the real base table.
         ("SELECT * FROM logs_other, (WITH logs_other AS (SELECT 1) SELECT * FROM logs_other) sub", frozenset({"logs"})),
         # Finding 017 (run 80e9f210): a same-named CTE must not excuse a schema/catalog-qualified
-        # reference — ``main.logs_other`` resolves to the base table in DuckDB, not the CTE.
+        # reference — ``main.logs_other`` resolves to the base table, not the CTE.
         ("WITH logs_other AS (SELECT 1) SELECT * FROM main.logs_other", frozenset({"logs"})),
         # CTE expansion only whitelists the declared alias names — not an unrelated foreign table.
         ("WITH x AS (SELECT 1) SELECT * FROM logs_other", frozenset({"logs"})),
@@ -1327,17 +1326,6 @@ def test_allowed_tables_blocks_foreign_references(con, sql, allowed):
     with pytest.raises(SQLValidationError) as exc:
         validate_user_sql(sql, parser_con=con, allowed_tables=allowed)
     assert exc.value.reason == "catalog_blocklist:foreign_table"
-
-
-# ── apply_user_query_limits ─────────────────────────────────────────────────
-
-
-def test_apply_user_query_limits_sets_memory_limit():
-    mock_con = MagicMock()
-    apply_user_query_limits(mock_con, memory_limit="256MB", timeout_seconds=5)
-    executed = [c.args[0] for c in mock_con.execute.call_args_list]
-    assert "SET memory_limit = '256MB'" in executed
-    assert "SET statement_timeout = '5000ms'" in executed
 
 
 # ── escape_sql_literal characterization tests (security) ───────────────
@@ -1366,7 +1354,7 @@ def _roundtrip(con: sqlite3.Connection, value: str) -> str:
             " CREATE TABLE pwned AS SELECT 1 AS flag;"
             " SELECT ignore(--"
         ),  # exact payload shape from the audit's proof-of-concept
-        r"a\nb\tc\\d",  # backslash is literal in standard SQL mode
+        r"a\nb\tc\\d",  # backslash is literal in standard SQL
         "a\tb\nc",  # control chars pass through unchanged
         "café'résumé",  # multibyte UTF-8 with U+0027
         "smart ’quote",  # U+2019 right single quotation mark
@@ -1406,7 +1394,7 @@ def test_escape_rejects_non_string(bad_input):
     ("sql", "reason"),
     [
         # Finding 010: Ensure query() table function is blocked.
-        ("SELECT * FROM query('SELECT * FROM duckdb_secrets()')", "function_denylist:query"),
+        ("SELECT * FROM query('SELECT * FROM pg_shadow')", "function_denylist:query"),
         # Finding 029: Ensure table names containing slashes, backslashes, or dots (replacement scans) are rejected.
         ("SELECT * FROM '/etc/passwd'", "catalog_blocklist:table_name_path"),
         ("SELECT * FROM 'data.parquet'", "catalog_blocklist:table_name_path"),

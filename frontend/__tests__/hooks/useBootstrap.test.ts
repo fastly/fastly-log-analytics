@@ -301,7 +301,7 @@ describe('useLogFieldsCatalog & useActiveLogFields', () => {
         observedSid = new URL(request.url).searchParams.get('service_id')
         return HttpResponse.json({
           fields: [{ id: 'status', label: 'HTTP Status' }],
-          custom_fields: [{ name: 'x-edge-ts', duckdb_type: 'VARCHAR' }],
+          custom_fields: [{ name: 'x-edge-ts', sql_type: 'VARCHAR' }],
           groups: [],
           presets: { default: { columns: ['status'] } },
         })
@@ -312,7 +312,7 @@ describe('useLogFieldsCatalog & useActiveLogFields', () => {
     expect(observedSid).toBe('svc-1')
     expect(result.current.data?.fields).toEqual([{ id: 'status', label: 'HTTP Status' }])
     expect((result.current.data as { custom_fields?: unknown } | undefined)?.custom_fields).toEqual([
-      { name: 'x-edge-ts', duckdb_type: 'VARCHAR' },
+      { name: 'x-edge-ts', sql_type: 'VARCHAR' },
     ])
     unmount()
 

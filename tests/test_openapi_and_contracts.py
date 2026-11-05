@@ -835,49 +835,12 @@ def _changelog_breaking_section() -> str:
     return "\n".join(sections)
 
 
-_RETIRED_STANDARD_MODE_PATHS = frozenset(
-    {
-        "/api/admin/backfill-bundle-rollups",
-        "/api/admin/commit-storage",
-        "/api/admin/commit/{service_id}",
-        "/api/admin/compact/{service_id}",
-        "/api/admin/compaction-stats",
-        "/api/admin/compaction-status",
-        "/api/admin/compaction-status/{service_id}",
-        "/api/admin/consolidate-rollups",
-        "/api/admin/duckdb/recycle",
-        "/api/admin/duckdb/status",
-        "/api/admin/expire-snapshots/{service_id}",
-        "/api/admin/local-compact-now",
-        "/api/admin/optimize-now",
-        "/api/admin/optimize/{service_id}",
-        "/api/admin/partial-hour-merge",
-        "/api/admin/partial-hour-merge/{service_id}",
-        "/api/admin/partial-hour-status",
-        "/api/admin/partial-hour-status/{service_id}",
-        "/api/admin/rebuild-local-view",
-        "/api/admin/rebuild-time-series-rollups",
-        "/api/admin/rollup-heal",
-        "/api/admin/rollup-heal/{service_id}",
-        "/api/admin/rollups/compact",
-        "/api/admin/rollups/compact/{service_id}",
-        "/api/admin/rollups/heal",
-        "/api/admin/rollups/heal/{service_id}",
-        "/api/admin/rollups/status",
-        "/api/admin/rollups/status/{service_id}",
-        "/api/admin/rum/sync/{service_id}",
-        "/api/admin/storage-calendar",
-        "/api/admin/storage-info",
-    }
-)
-
-
 def test_removed_paths_are_noted_in_changelog():
     with open(_BASELINE_PATH) as f:
         baseline = json.load(f)
     live = app.openapi()
 
-    baseline_paths = set(baseline.get("paths", {})) - _RETIRED_STANDARD_MODE_PATHS
+    baseline_paths = set(baseline.get("paths", {}))
     live_paths = set(live.get("paths", {}))
     removed = sorted(baseline_paths - live_paths)
 

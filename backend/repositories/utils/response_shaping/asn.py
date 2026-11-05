@@ -281,7 +281,7 @@ def build_network_asn_leaderboard(
     asn_speed_mix: Mapping[int, Mapping[str, float]],
     asn_rtt_pct: Mapping[int, Mapping[str, float | None]],
 ) -> list[dict[str, Any]]:
-    """Build the ASN health leaderboard with 1h/1w trend analysis across DuckDB and ClickHouse."""
+    """Build the ASN health leaderboard with 1h/1w trend analysis."""
     leaderboard: list[dict[str, Any]] = []
     for asn in top_asns:
         buckets_data = asn_bucket_data.get(asn, {})

@@ -90,7 +90,6 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "service_id": sid,
                 "name": name,
                 "storage_mode": cfg.get("storage_mode", "cloud"),
-                "is_high_scale": True,
                 "log_period": cfg.get("log_period", 60),
                 "fos_bucket": cfg.get("fos_bucket", ""),
                 "fos_region": cfg.get("fos_region", ""),

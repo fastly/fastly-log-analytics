@@ -474,7 +474,7 @@ interface MockOAuth {
   registryPath: string
 }
 
-const DEFAULT_CONTRACT_TEST_POSTGRES_DSN = 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test'
+const DEFAULT_CONTRACT_TEST_POSTGRES_DSN = 'postgresql://fla:fla_test_password@localhost:5432/fla_test'
 
 function assertIsolatedTestPostgresDsn(dsn: string, envName: string): string {
   let parsed: URL

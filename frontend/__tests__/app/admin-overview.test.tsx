@@ -267,7 +267,7 @@ test('Loading skeleton and AdminPage render zero-CLS contain-intrinsic-size rese
 
 test('OperationsOverview renders live query, ingest gap, slow query, and worker status cards', async () => {
   server.use(
-    http.get('/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { duckdb: 2 }, recent_count: 15 })),
+    http.get('/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { clickhouse: 2 }, recent_count: 15 })),
     http.get('/api/admin/log-accounting', () => HttpResponse.json({
       configured: true, service_id: 'test-svc', hours: 24, buckets: [],
       totals: { requests: 1000, log_lines: 1000, log_bytes: 50000, ingested_rows: 1000, gap: 0, gap_pct: 0 }, sustained_loss: null,

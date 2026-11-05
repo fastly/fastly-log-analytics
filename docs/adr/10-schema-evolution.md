@@ -1,12 +1,12 @@
 # ADR-10 — Schema Evolution Contract
 
-**Status:** Accepted for field-schema rules; storage mechanics superseded by [ADR-14](14-ducklake-replacement.md) and [ADR-22](22-postgres-only-metadata.md)
+**Status:** Accepted for field-schema rules; storage mechanics superseded by [ADR-21](21-high-scale-serving-architecture.md) and [ADR-22](22-postgres-only-metadata.md)
 **Decided by:** Engineering retrospective
 
 > [!NOTE]
 > **Architectural Amendments (v3.0):**
 > - **Metadata Storage ([ADR-22](22-postgres-only-metadata.md)):** Per-service SQLite metadata and `sqlite_migrations.py` (`PRAGMA user_version`) have been eliminated. Metadata schema evolution is defined in `backend/core/metadata/pg_schema.py` against unified PostgreSQL 16.
-> - **Table Schema ([ADR-14](14-ducklake-replacement.md)):** Durable analytical table schema evolution is handled through DuckLake rather than PyIceberg schema alteration methods.
+> - **Table Schema ([ADR-21](21-high-scale-serving-architecture.md)):** Durable analytical serving runs on ClickHouse (`backend/high_scale/sql/clickhouse_schema.sql`) and canonical FOS Archive Parquet rather than PyIceberg or DuckLake schema alteration methods.
 > - **Strict Invariants Preserved:** Additive-only schema changes and positional stability rules (`_FIELD_ORDER` and `WIRE_ORDER` in `field_registry.py` matching the Rust Scorer in `compute/scorer/`) remain active and mandatory.
 
 ## 1. Context & Motivation

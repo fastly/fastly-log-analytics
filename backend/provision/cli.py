@@ -689,7 +689,7 @@ def handle_list_fields(args):
     print(f"\n  {'Field':<20} {'Group':<6} {'Type':<12} {'Bytes':>6}    Description")
     for f in lf.LOG_FIELD_CATALOG:
         print(
-            f"  {f['id']:<20} {(f['group'] or '(core)'):<6} {f['duckdb_type']:<12} {f['typical_bytes']:>6}    {f['description'][:60]}"
+            f"  {f['id']:<20} {(f['group'] or '(core)'):<6} {f['sql_type']:<12} {f['typical_bytes']:>6}    {f['description'][:60]}"
         )
 
 

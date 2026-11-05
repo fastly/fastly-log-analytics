@@ -71,7 +71,7 @@ interface SinceHoursPickerProps {
  *
  * Capped at 168h (7d) because the backend's threshold-preview /
  * health endpoints already enforce `le=168` — going wider needs a
- * separate "deep history" endpoint that paginates the DuckDB scan.
+ * separate "deep history" endpoint that paginates the ClickHouse scan.
  */
 export function SinceHoursPicker({ value, onChange, compact = false }: SinceHoursPickerProps) {
   return (

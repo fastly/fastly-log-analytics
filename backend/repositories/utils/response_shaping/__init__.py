@@ -1,8 +1,7 @@
-"""Cross-engine response shaping and post-processing helpers.
+"""Response shaping and post-processing helpers.
 
-Shared between DuckDB repositories (``backend/repositories/*``) and ClickHouse
-high-scale services (``backend/high_scale/*``) so both analytical engines share
-a single source of truth for:
+Shared across analytical services (``backend/high_scale/*``) and repositories
+(``backend/repositories/*``) for:
 1. ASN label enrichment (``asn.py``)
 2. Time-bucket alignment & zero-filling (``time_buckets.py``)
 3. Latency & percentile normalization, empty-response scaffolding, and domain shaping (``domains.py``)

@@ -57,8 +57,6 @@ spec:
             # public ingress path.
             - name: API_PROXY_URL
               value: "http://{{ include "fastly-log-analytics.fullname" . }}-backend:8000"
-            - name: HIGH_SCALE_ENABLED
-              value: "1"
           # Same Host-header fix as the backend's probes (see that file's
           # comment) -- applied here defensively even though the frontend's
           # Next.js server doesn't enforce a Host allowlist today, so the

@@ -234,7 +234,7 @@ def asn_ints_for_search(service_id: str, name_ilike: str) -> list[int]:
     """Return ASN integers whose cached name matches the given LIKE pattern.
 
     Used by the dashboard ASN search to pre-fetch matching ASNs and inline them
-    into a DuckDB IN clause (avoids cross-engine JOINs).
+    into a ClickHouse IN clause (avoids cross-engine JOINs).
     """
     with contextlib.closing(get_con_readonly(service_id)) as con:
         rows = con.execute(

@@ -489,7 +489,7 @@ def run_cached_repo_endpoint(
     """Run a repository aggregate endpoint with peek-before-checkout caching.
 
     When ``get_fn`` has not been monkeypatched away from ``repo_module``, peeks
-    the cache before checking out a pooled DuckDB connection.
+    the cache before checking out a pooled database connection.
     """
     is_real_repo = getattr(get_fn, "__module__", "") == repo_module
     if is_real_repo:

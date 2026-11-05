@@ -198,7 +198,7 @@
               set bereq.http.x-amz-date = strftime({"%Y%m%dT%H%M00Z"}, now);
               set bereq.http.host = var.fosHost;
       
-              # Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)
+              # Only prepend bucket if not already present (handles direct S3-style paths from Boto3)
               if (regsub(bereq.url.path, "^/([^/]+)/.*$", "\1") != var.fosBucket) {
                    set bereq.url = "/" var.fosBucket bereq.url;
               }

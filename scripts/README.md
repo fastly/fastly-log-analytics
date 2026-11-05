@@ -46,7 +46,7 @@ from env vars or config, never hard-coded infra.
 | `dev/measure_e2e_freshness.py` | End-to-end ingestion freshness probe across environments. |
 | `dev/verify_observability.py` | Diagnostic CLI verifying OTel traces, Prometheus metrics, and structured log delivery. |
 | `dev/scale_harness.py` | Bounded staged edge-load runner with FOS freshness, cron, pool, OTel, and analytics checkpoints. |
-| `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for DuckLake, FOS, and ClickHouse. |
+| `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for FOS and ClickHouse. |
 
 The scale harness defaults to `100:10,500:10,1000:10` stages. It measures
 achieved RPS separately from the requested target and writes JSON plus

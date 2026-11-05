@@ -142,21 +142,9 @@ from backend.core.request_telemetry.query_registry import (  # noqa: F401
 )
 from backend.core.request_telemetry.tracker import (  # noqa: F401
     _CURRENT,
-    FAILURE_BACKOFF_BASE_S,
-    FAILURE_BACKOFF_MAX_S,
-    QUERY_TIMEOUT_S,
-    RECONCILE_INTERVAL_S,
-    STOP_TIMEOUT_S,
     HighScaleSections,
-    RequestMetricsObserver,
     RequestTelemetry,
-    _active_query,
-    _cancelled,
-    _check_cancelled,
-    _interrupt_until_finished,
     _logger,
-    _query_lock,
-    _refresh_lock,
     _Result,
     _Source,
     clickhouse_source,
@@ -164,10 +152,7 @@ from backend.core.request_telemetry.tracker import (  # noqa: F401
     current_clickhouse_scope,
     get_high_scale_service_registry,
     get_page_load_id,
-    interrupt_request_metrics,
     logger,
-    observer,
-    refresh_durable_request_metrics,
 )
 from backend.utils.module_shim import install_shim_module
 
@@ -181,7 +166,6 @@ _SYNC_MODULES = (
 _DELEGATED_ATTRS = {
     "_initialised": instruments,
     "_thread_wait_histogram": instruments,
-    "_active_query": tracker,
     "_metric_active_count": _query_registry_mod,
     "_metric_duration_ms": _query_registry_mod,
     "_metric_cancelled_total": _query_registry_mod,

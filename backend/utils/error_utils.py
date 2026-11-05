@@ -123,7 +123,7 @@ def _handle_query_error(
     if isinstance(e, HTTPException):
         raise e
     if _caused_by_out_of_memory(e):
-        # A scan that exhausts DuckDB memory or the temp-spill cap is a capacity limit, not a server bug: tell the user
+        # A scan that exhausts query memory or the temp-spill cap is a capacity limit, not a server bug: tell the user
         # how to get unstuck. The engine message carries server paths, so it stays in the log.
         raise_internal(
             logger_obj,

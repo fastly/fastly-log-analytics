@@ -33,7 +33,7 @@ export default defineConfig({
   forbidOnly: isCI,
   // Retries are opt-in so CI surfaces backend failures instead of masking them
   // or doubling suite time. The E2E workflow sets workers=1 because every
-  // browser worker shares one backend and DuckLake serializes catalog attaches.
+  // browser worker shares one contract backend instance.
   retries: process.env.PLAYWRIGHT_RETRIES ? parseInt(process.env.PLAYWRIGHT_RETRIES, 10) : 0,
   workers: process.env.PLAYWRIGHT_WORKERS ? parseInt(process.env.PLAYWRIGHT_WORKERS, 10) : 2,
   reporter: isCI ? [['list'], ['html', { open: 'never' }]] : 'list',

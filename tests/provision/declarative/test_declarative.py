@@ -320,10 +320,10 @@ SID = "srv_123"
 MOD = "backend.provision.declarative.reconciler"
 
 
-SCORING_FIELD = {"name": sorted(_SCORING_FIELD_NAMES)[0], "duckdb_type": "VARCHAR", "enabled": True}
+SCORING_FIELD = {"name": sorted(_SCORING_FIELD_NAMES)[0], "sql_type": "VARCHAR", "enabled": True}
 
 
-USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
+USER_FIELD = {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True}
 
 
 def _lock_held() -> bool:
@@ -747,11 +747,11 @@ class TestFeatureStateDependencyInjection:
         cmcd_fields = {f["name"]: f for f in state.log_fields.custom_fields if "cmcd" in f["name"]}
         assert len(cmcd_fields) == 14
         for name in ("cmcd_sid", "cmcd_cid", "cmcd_ot", "cmcd_sf", "cmcd_st"):
-            assert cmcd_fields[name]["value_type"] == "string" and cmcd_fields[name]["duckdb_type"] == "VARCHAR"
+            assert cmcd_fields[name]["value_type"] == "string" and cmcd_fields[name]["sql_type"] == "VARCHAR"
         for name in ("cmcd_br", "cmcd_bl", "cmcd_d", "cmcd_dl", "cmcd_mtp", "cmcd_tb", "cmcd_rtp"):
-            assert cmcd_fields[name]["value_type"] == "numeric" and cmcd_fields[name]["duckdb_type"] == "INTEGER"
+            assert cmcd_fields[name]["value_type"] == "numeric" and cmcd_fields[name]["sql_type"] == "INTEGER"
         for name in ("cmcd_bs", "cmcd_su"):
-            assert cmcd_fields[name]["value_type"] == "boolean" and cmcd_fields[name]["duckdb_type"] == "BOOLEAN"
+            assert cmcd_fields[name]["value_type"] == "boolean" and cmcd_fields[name]["sql_type"] == "BOOLEAN"
 
     def test_featurestate_from_config_does_not_duplicate_injected_fields(self):
         state = _state(

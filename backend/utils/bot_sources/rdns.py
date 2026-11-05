@@ -410,7 +410,7 @@ def _get_pending_count() -> int:
 
 def enrich_batch(limit: int | None = None) -> dict:
     """Resolve pending IPs with FCrDNS validation, then discover new IPs from
-    DuckDB sources.
+    ClickHouse sources.
 
     If limit is None, dynamically scales the batch size based on the pending
     queue depth:

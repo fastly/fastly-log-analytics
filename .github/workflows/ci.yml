@@ -224,9 +224,9 @@ jobs:
         # raise it as backend coverage clears the next floor. `make ratchet` prints actual.
         #
         # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
-        # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
-        # tmp_path give file isolation; autouse `_reset_module_caches` resets
-        # the 8 module-level caches between tests; moto fixtures are per-test.
+        # Verified safe: PostgreSQL per-worker test DBs (`fla_test_slot<N>`) + per-test
+        # tmp_path give isolation; autouse `_reset_module_caches` resets
+        # the module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
         #
         # Two runs (mirrors Makefile `test-ci`; the only divergence is `nice`,

@@ -40639,7 +40639,7 @@
           "debug"
         ],
         "summary": "Get Page Telemetry Endpoint",
-        "description": "Retrieve all unified SQLite queries, DuckDB queries, FOS calls, and section timings\nmatching the page_load_id.",
+        "description": "Retrieve all unified PostgreSQL queries, ClickHouse queries, FOS calls, and section timings\nmatching the page_load_id.",
         "operationId": "get_page_telemetry_endpoint_api_debug_page_telemetry_get",
         "parameters": [
           {
@@ -48646,17 +48646,6 @@
               }
             ],
             "title": "Rum Log Period"
-          },
-          "is_high_scale": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is High Scale"
           }
         },
         "additionalProperties": true,
@@ -50103,15 +50092,6 @@
       },
       "CeleryStatusResponse": {
         "properties": {
-          "deployment_mode": {
-            "type": "string",
-            "enum": [
-              "standard",
-              "high_scale"
-            ],
-            "title": "Deployment Mode",
-            "default": "standard"
-          },
           "broker_reachable": {
             "anyOf": [
               {
@@ -50188,16 +50168,6 @@
               }
             ],
             "title": "Inprocess Active Runs"
-          },
-          "standard_ingest": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/StandardIngestSummary"
-              },
-              {
-                "type": "null"
-              }
-            ]
           }
         },
         "additionalProperties": true,
@@ -52268,48 +52238,6 @@
         ],
         "title": "CmcdTopContentRow"
       },
-      "CompactionStatsResponse": {
-        "properties": {
-          "total_files": {
-            "type": "integer",
-            "title": "Total Files",
-            "default": 0
-          },
-          "partitions": {
-            "type": "integer",
-            "title": "Partitions",
-            "default": 0
-          },
-          "partitions_above_3": {
-            "type": "integer",
-            "title": "Partitions Above 3",
-            "default": 0
-          },
-          "partitions_above_10": {
-            "type": "integer",
-            "title": "Partitions Above 10",
-            "default": 0
-          },
-          "daily_files": {
-            "type": "integer",
-            "title": "Daily Files",
-            "default": 0
-          },
-          "weekly_files": {
-            "type": "integer",
-            "title": "Weekly Files",
-            "default": 0
-          },
-          "avg_files_per_partition": {
-            "type": "number",
-            "title": "Avg Files Per Partition",
-            "default": 0.0
-          }
-        },
-        "type": "object",
-        "title": "CompactionStatsResponse",
-        "description": "File-count distribution across local cache partitions.\n\nReturned by ``GET /api/admin/compaction-stats`` and consumed by the\nadmin System Health card."
-      },
       "CompletedQueryRow": {
         "properties": {
           "query_id": {
@@ -53904,7 +53832,7 @@
             "title": "Origin Log Frequency",
             "default": "all"
           },
-          "duckdb_type": {
+          "sql_type": {
             "type": "string",
             "enum": [
               "VARCHAR",
@@ -53913,7 +53841,7 @@
               "DOUBLE",
               "BOOLEAN"
             ],
-            "title": "Duckdb Type",
+            "title": "Sql Type",
             "default": "VARCHAR"
           },
           "value_type": {
@@ -54005,7 +53933,7 @@
             "title": "Origin Log Frequency",
             "default": "all"
           },
-          "duckdb_type": {
+          "sql_type": {
             "type": "string",
             "enum": [
               "VARCHAR",
@@ -54014,7 +53942,7 @@
               "DOUBLE",
               "BOOLEAN"
             ],
-            "title": "Duckdb Type",
+            "title": "Sql Type",
             "default": "VARCHAR"
           },
           "value_type": {
@@ -54206,7 +54134,7 @@
             ],
             "title": "Origin Log Frequency"
           },
-          "duckdb_type": {
+          "sql_type": {
             "anyOf": [
               {
                 "type": "string",
@@ -54222,7 +54150,7 @@
                 "type": "null"
               }
             ],
-            "title": "Duckdb Type"
+            "title": "Sql Type"
           },
           "value_type": {
             "anyOf": [
@@ -55246,7 +55174,7 @@
         },
         "type": "object",
         "title": "HealthHighScale",
-        "description": "High-scale-only health block; absent from the payload in standard mode."
+        "description": "High-scale health block (disk guard and topology profile)."
       },
       "HealthHighScaleDisk": {
         "properties": {
@@ -55605,28 +55533,6 @@
             "type": "array",
             "title": "In Flight Runs"
           },
-          "compaction": {
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/CompactionStatsResponse"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "type": "object",
-            "title": "Compaction"
-          },
-          "pool_wait": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Pool Wait"
-          },
           "scheduler_last_tick_age_s": {
             "anyOf": [
               {
@@ -55707,7 +55613,7 @@
         },
         "type": "object",
         "title": "HealthSnapshotResponse",
-        "description": "One-shot health snapshot served by ``GET /api/admin/health-snapshot``.\n\nThe endpoint synthesises independent sub-system probes (load / memory /\nper-mount disk / in-flight runs / per-service compaction / DuckDB pool\nwaits / scheduler-liveness / recent cron failures). Any individual probe\nthat fails returns the null sentinel of its slot rather than failing the\nwhole response, so the UI can render partial data when one subsystem is\nsick."
+        "description": "One-shot health snapshot served by ``GET /api/admin/health-snapshot``.\n\nThe endpoint synthesises independent sub-system probes (load / memory /\nper-mount disk / in-flight runs / scheduler-liveness / recent cron\nfailures). Any individual probe that fails returns the null sentinel of its\nslot rather than failing the whole response, so the UI can render partial\ndata when one subsystem is sick."
       },
       "HighScale5xxInsightCard": {
         "properties": {
@@ -64304,7 +64210,7 @@
         },
         "type": "object",
         "title": "LogExtentsResponse",
-        "description": "Minimal extents projection for the FilterBar's time-range snap.\n\nSibling of ``SyncStatusResponse`` but strips every field that the\nmiddleware blocks ``/api/sync-status`` for an analyst over: no\n``ngwaf_workspace_id``, no ``active_run``, no cron task state, no\nDuckDB size, no storage mode. Just the two timestamps the\nFilterBar needs to snap its range, plus a ``configured`` flag so\nthe frontend can short-circuit when a service has no source."
+        "description": "Minimal extents projection for the FilterBar's time-range snap.\n\nSibling of ``SyncStatusResponse`` but strips every field that the\nmiddleware blocks ``/api/sync-status`` for an analyst over: no\n``ngwaf_workspace_id``, no ``active_run``, no cron task state, no\nstorage mode. Just the two timestamps the FilterBar needs to snap\nits range, plus a ``configured`` flag so the frontend can\nshort-circuit when a service has no source."
       },
       "LogFieldAuditFeature": {
         "properties": {
@@ -64396,9 +64302,9 @@
             "type": "string",
             "title": "Description"
           },
-          "duckdb_type": {
+          "sql_type": {
             "type": "string",
-            "title": "Duckdb Type"
+            "title": "Sql Type"
           },
           "typical_bytes": {
             "anyOf": [
@@ -64576,7 +64482,7 @@
           "group",
           "label",
           "description",
-          "duckdb_type"
+          "sql_type"
         ],
         "title": "LogFieldCatalogEntry"
       },
@@ -65654,7 +65560,7 @@
         "additionalProperties": true,
         "type": "object",
         "title": "MetadataTableStat",
-        "description": "Per-table row count + estimated bytes (``None`` when SQLite lacks\nthe ``dbstat`` vtable)."
+        "description": "Per-table row count + estimated bytes."
       },
       "MethodDriftInsightCard": {
         "properties": {
@@ -72365,11 +72271,6 @@
             "title": "Rum Retention Days",
             "default": 30
           },
-          "deployment_mode": {
-            "type": "string",
-            "title": "Deployment Mode",
-            "default": "standard"
-          },
           "avg_nodes_per_flush": {
             "anyOf": [
               {
@@ -72384,7 +72285,7 @@
         },
         "type": "object",
         "title": "PrefillRatesResponse",
-        "description": "Fast-path subset of PrefillResponse for /api/usage/prefill/rates.\nOmits ``requests_per_day`` / ``edge_requests_per_day`` (Fastly stats)\nand ``edge_ratio`` (DuckDB) since those gate on the lazy /prefill call."
+        "description": "Fast-path subset of PrefillResponse for /api/usage/prefill/rates.\nOmits ``requests_per_day`` / ``edge_requests_per_day`` (Fastly stats)\nand ``edge_ratio`` (ClickHouse) since those gate on the lazy /prefill call."
       },
       "PrefillResponse": {
         "properties": {
@@ -72579,11 +72480,6 @@
             "type": "integer",
             "title": "Rum Retention Days",
             "default": 30
-          },
-          "deployment_mode": {
-            "type": "string",
-            "title": "Deployment Mode",
-            "default": "standard"
           },
           "avg_nodes_per_flush": {
             "anyOf": [
@@ -74262,10 +74158,7 @@
           },
           "mode": {
             "type": "string",
-            "enum": [
-              "clickhouse",
-              "duckdb_emulation"
-            ],
+            "const": "clickhouse",
             "title": "Mode",
             "default": "clickhouse"
           }
@@ -81300,17 +81193,6 @@
             ],
             "title": "Storage Mode"
           },
-          "duckdb_size_bytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Duckdb Size Bytes"
-          },
           "cache_file_count": {
             "anyOf": [
               {
@@ -81427,17 +81309,6 @@
               }
             ],
             "title": "Rum Log Period"
-          },
-          "is_high_scale": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Is High Scale"
           }
         },
         "type": "object",
@@ -84453,23 +84324,6 @@
         ],
         "title": "StaleBrowserVersionMeta"
       },
-      "StandardIngestSummary": {
-        "properties": {
-          "ingested_files": {
-            "type": "integer",
-            "title": "Ingested Files",
-            "default": 0
-          },
-          "quarantined_items": {
-            "type": "integer",
-            "title": "Quarantined Items",
-            "default": 0
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "title": "StandardIngestSummary"
-      },
       "StreamMetrics": {
         "properties": {
           "latest_log_at": {
@@ -84729,28 +84583,6 @@
               }
             ],
             "title": "Latest Available File At"
-          },
-          "duckdb_size_bytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Duckdb Size Bytes"
-          },
-          "duckdb_exists": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Duckdb Exists"
           },
           "active_run": {
             "anyOf": [
@@ -86720,17 +86552,6 @@
               }
             ],
             "title": "Retention Days"
-          },
-          "track_duckdb_httpfs": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Track Duckdb Httpfs"
           }
         },
         "additionalProperties": true,

@@ -989,7 +989,7 @@ def test_compose_prod_bounds_worker_and_backend_memory_below_container_limit():
     assert "HIGH_SCALE_WORKER_THREADS=1" in compose
     assert "HIGH_SCALE_MAX_BATCH_BYTES=6291456" in compose
     assert "HIGH_SCALE_MAX_BATCH_OBJECTS=10" in compose
-    assert "DUCKDB" not in compose
+    assert "CLICKHOUSE_URL" in compose
 
 
 # ── 3. backend/main.py middleware order (ADR-04) ─────────────────────────────

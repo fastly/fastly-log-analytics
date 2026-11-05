@@ -1,1 +1,1 @@
-"""Repository layer for analytical queries and rollup planning."""
+"""Repository layer for response shaping, filtering, caching, and insight definitions."""

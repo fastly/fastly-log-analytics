@@ -1996,7 +1996,7 @@ def args(*extra):
     return parser().parse_args(
         [
             "--engine",
-            "ducklake",
+            "baseline",
             "--output",
             "local-docs/test-evidence.json",
             "--apply",
@@ -2076,24 +2076,22 @@ def test_removed_dashboard_route_cannot_be_reported_as_hybrid():
     assert summary["clickhouse_calls"] == 0
 
 
-def test_current_ducklake_dashboard_needs_no_retired_dispatch_marker():
+def test_current_baseline_dashboard_needs_no_retired_dispatch_marker():
     payload = top_n_payload()
     payload["_section_timings"] = [{"section": "agg:query", "time_ms": 1.0}]
-    summary = summarize_payload(payload, "top_n", "ducklake")
+    summary = summarize_payload(payload, "top_n", "baseline")
     assert summary["error"] is None
-    assert summary["dispatch"] == "ducklake"
-    assert summary["duckdb_queries"] == 1
+    assert summary["dispatch"] == "baseline"
+    assert summary["debug_queries"] == 1
 
 
 @pytest.mark.parametrize("enabled", ["true", "false"])
-def test_ducklake_benchmark_does_not_require_disabling_diagnostics(enabled):
+def test_baseline_benchmark_does_not_require_disabling_diagnostics(enabled):
     container = {
         "Config": {
             "Env": [
-                "DEPLOYMENT_MODE=high_scale",
                 f"CLICKHOUSE_ENABLED={enabled}",
                 "METADATA_DSN=postgresql://fixture",
-                "DUCKLAKE_CATALOG=postgresql://fixture",
                 "CLICKHOUSE_HOST=clickhouse",
             ],
             "Labels": {
@@ -2126,7 +2124,7 @@ def test_failures_retained_and_response_secrets_omitted(status):
                 lambda _: httpx.Response(status, json={"secret": "NEVER_COPY_SECRET", "sql": "SELECT PRIVATE"})
             ),
         ) as client:
-            return await attempt(client, "PRIVATE_SERVICE", "bundle", "ducklake", 1)
+            return await attempt(client, "PRIVATE_SERVICE", "bundle", "baseline", 1)
 
     sample = asyncio.run(run())
     assert sample.error == "http" and sample.status_code == status and sample.duration_ms > 0
@@ -2141,7 +2139,7 @@ def test_deadline_retains_slow_attempt():
 
     async def run():
         async with httpx.AsyncClient(base_url="http://127.0.0.1", transport=httpx.MockTransport(handler)) as client:
-            return await attempt(client, "fixture", "bundle", "ducklake", 0.01)
+            return await attempt(client, "fixture", "bundle", "baseline", 0.01)
 
     sample = asyncio.run(run())
     assert sample.error == "timeout" and sample.duration_ms >= 10
@@ -2180,14 +2178,14 @@ def top_n_payload(dispatch="disabled"):
 
 
 def test_top_n_has_no_chart_and_uses_existing_minute_metadata():
-    summary = summarize_payload(top_n_payload(), "top_n", "ducklake")
+    summary = summarize_payload(top_n_payload(), "top_n", "baseline")
     assert summary["error"] is None
     assert summary["semantic_digest"] is not None
     assert "PRIVATE" not in json.dumps(summary)
 
 
 def test_disabled_engine_must_not_be_mislabeled_fallback():
-    summary = summarize_payload(top_n_payload("unsupported_sections"), "top_n", "ducklake")
+    summary = summarize_payload(top_n_payload("unsupported_sections"), "top_n", "baseline")
     assert summary["error"] == "engine"
     assert summarize_payload(top_n_payload("unsupported_sections"), "top_n", "clickhouse_hybrid")["error"] is None
 
@@ -2232,7 +2230,7 @@ def test_scheduler_respects_budget_and_records_errors(monkeypatch, memory):
             error=None if n <= 3 else "http",
             dispatch="disabled",
             response_cached=False,
-            duckdb_queries=0,
+            debug_queries=0,
             clickhouse_calls=0,
             clickhouse_errors=0,
             rows_read=0,
@@ -2280,7 +2278,7 @@ def test_recovery_contract_never_accepts_credentials_or_nonfinite_durations():
 def report():
     return {
         "schema_version": 1,
-        "engine": "ducklake",
+        "engine": "baseline",
         "dataset_size_rows": 190334,
         "eligible_window_rows": 184374,
         "concurrency": 1,

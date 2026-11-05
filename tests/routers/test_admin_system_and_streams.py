@@ -438,10 +438,7 @@ def test_health_snapshot_collector_failures_degrade_gracefully(client, target, e
 
 
 def test_health_snapshot_celery_and_disk_failures(client):
-    with (
-        patch("backend.config.DEPLOYMENT_MODE", "high_scale"),
-        patch("backend.celery_app.app.control.inspect", side_effect=RuntimeError("broker down")),
-    ):
+    with patch("backend.celery_app.app.control.inspect", side_effect=RuntimeError("broker down")):
         assert _get_health(client)["celery"] is None
 
     with patch("shutil.disk_usage", side_effect=OSError("missing mount")):

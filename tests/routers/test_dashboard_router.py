@@ -468,7 +468,7 @@ def test_redact_paths_rules():
         assert _redact_paths(unredacted) == unredacted
 
     for msg, leaked in [
-        ("Cannot open '/var/lib/duckdb/foo.db'", "/var/lib/duckdb/foo.db"),
+        ("Cannot open '/var/lib/clickhouse/foo.db'", "/var/lib/clickhouse/foo.db"),
         ('No such file: "/srv/cache/x.parquet"', "/srv/cache/x.parquet"),
         ("Path was /tmp/buffer.json on disk", "/tmp/buffer.json"),
         ("/data/services/svc.metadata.db corrupted", "/data/services/svc.metadata.db"),
@@ -1576,7 +1576,7 @@ def test_web_vitals_collection_and_page_telemetry(monkeypatch, tmp_path, caplog)
     assert rec["name"] == "LCP" and rec["value"] == 2412.0 and rec["cohort"] == "admin" and rec["ts"].endswith("Z")
 
     monkeypatch.setattr(svcconfig, "get_active_service_id", lambda: "demo_service")
-    usage_log.log_telemetry_query("demo_service", "page-456", "req-789", "duckdb", "SELECT 42", 12.3)
+    usage_log.log_telemetry_query("demo_service", "page-456", "req-789", "clickhouse", "SELECT 42", 12.3)
 
     res_pt = client.get("/api/debug/page-telemetry?page_load_id=page-456")
     assert res_pt.status_code == 200 and res_pt.json()["queries"][0]["sql_query"] == "SELECT 42"

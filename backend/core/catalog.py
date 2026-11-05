@@ -22,7 +22,7 @@ _NUMERIC_FIELD_MAX_LEN = 20
 
 VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 
-_DUCKDB_RESERVED = frozenset(
+_SQL_RESERVED = frozenset(
     "select from where table column index view join on as is in not null true false "
     "and or case when then else end order group by having limit offset union all "
     "distinct with insert update delete create drop alter add set values into exists "
@@ -30,7 +30,7 @@ _DUCKDB_RESERVED = frozenset(
     "varchar boolean double bigint float struct list map dt timestamp_hour".split()
 )
 
-_DUCKDB_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
+_SQL_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
     "VARCHAR": {"string", "ip", "url"},
     "INTEGER": {"numeric"},
     "BIGINT": {"numeric"},
@@ -43,7 +43,7 @@ _DUCKDB_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
 
 def _f(
     id: str, group: str | None, label: str, description: str, vcl: str | None,
-    duckdb_type: str = "VARCHAR", typical_bytes: int = 0, required_by: list[str] | None = None, *,
+    sql_type: str = "VARCHAR", typical_bytes: int = 0, required_by: list[str] | None = None, *,
     formatter: str | None = None, precision: int | None = None, unit: str | None = None,
     note: str | None = None, individually_toggleable: bool | None = None,
     pii: bool | None = None, default_off: bool | None = None,
@@ -52,7 +52,7 @@ def _f(
     for k, v in (("formatter", formatter), ("precision", precision), ("unit", unit), ("note", note)):
         if v is not None:
             d[k] = v
-    d.update({"vcl": vcl, "duckdb_type": duckdb_type, "typical_bytes": typical_bytes})
+    d.update({"vcl": vcl, "sql_type": sql_type, "typical_bytes": typical_bytes})
     for k, v in (("individually_toggleable", individually_toggleable), ("pii", pii), ("default_off", default_off)):
         if v is not None:
             d[k] = v
@@ -60,8 +60,8 @@ def _f(
     return d
 
 
-def _m(id: str, label: str, description: str, formatter: str, duckdb_type: str = "DOUBLE", unit: str | None = None) -> dict[str, Any]:
-    return _f(id, "METRICS", label, description, None, duckdb_type, 0, formatter=formatter, unit=unit)
+def _m(id: str, label: str, description: str, formatter: str, sql_type: str = "DOUBLE", unit: str | None = None) -> dict[str, Any]:
+    return _f(id, "METRICS", label, description, None, sql_type, 0, formatter=formatter, unit=unit)
 
 
 def _v(id: str, label: str, description: str) -> dict[str, Any]:
@@ -286,7 +286,7 @@ def get_catalog_for_api(field_limits: dict[str, int] | None = None) -> list:
             "group": f["group"],
             "label": f["label"],
             "description": f["description"],
-            "duckdb_type": f["duckdb_type"],
+            "sql_type": f["sql_type"],
             "typical_bytes": f["typical_bytes"],
             "required_by": f.get("required_by", []),
             "formatter": f.get("formatter"),
@@ -335,7 +335,7 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
     """Validate a custom field definition dict; returns list of error/WARN strings."""
     errors: list[str] = []
     name = field.get("name", "")
-    for key in ("name", "label", "vcl_log_expression", "duckdb_type", "value_type", "bytes_estimate"):
+    for key in ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate"):
         if key not in field or field[key] is None:
             errors.append(f"Missing required field: '{key}'")
     if errors:
@@ -343,8 +343,8 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
 
     if not VALID_NAME_RE.fullmatch(name):
         errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
-    if name in _DUCKDB_RESERVED:
-        errors.append(f"'{name}' is a DuckDB/SQL reserved word and cannot be used as a field name")
+    if name in _SQL_RESERVED:
+        errors.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
     if name in _BUILTIN_FIELD_NAMES:
         errors.append(f"'{name}' is already a built-in field name")
     if name in existing_names:
@@ -367,21 +367,21 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
         if "//" in expr or "/*" in expr or "#" in expr:
             errors.append("'vcl_log_expression' must not contain VCL comments (//, /*, or #)")
 
-    valid_types = set(_DUCKDB_TYPE_VALUE_TYPE_COMPAT)
-    duckdb_type = field.get("duckdb_type", "")
-    if duckdb_type not in valid_types:
-        errors.append(f"'duckdb_type' must be one of: {', '.join(sorted(valid_types))}")
+    valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
+    sql_type = field.get("sql_type", "")
+    if sql_type not in valid_types:
+        errors.append(f"'sql_type' must be one of: {', '.join(sorted(valid_types))}")
 
     all_value_types = {"string", "numeric", "boolean", "ip", "url"}
     value_type = field.get("value_type", "")
     if value_type not in all_value_types:
         errors.append(f"'value_type' must be one of: {', '.join(sorted(all_value_types))}")
 
-    if duckdb_type in _DUCKDB_TYPE_VALUE_TYPE_COMPAT and value_type in all_value_types:
-        if value_type not in _DUCKDB_TYPE_VALUE_TYPE_COMPAT[duckdb_type]:
-            compat = ", ".join(sorted(_DUCKDB_TYPE_VALUE_TYPE_COMPAT[duckdb_type]))
+    if sql_type in _SQL_TYPE_VALUE_TYPE_COMPAT and value_type in all_value_types:
+        if value_type not in _SQL_TYPE_VALUE_TYPE_COMPAT[sql_type]:
+            compat = ", ".join(sorted(_SQL_TYPE_VALUE_TYPE_COMPAT[sql_type]))
             errors.append(
-                f"'value_type' '{value_type}' is not compatible with 'duckdb_type' '{duckdb_type}'. "
+                f"'value_type' '{value_type}' is not compatible with 'sql_type' '{sql_type}'. "
                 f"Compatible value_types: {compat}"
             )
 
@@ -414,7 +414,7 @@ def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
             "id": cf["name"],
             "label": cf["label"],
             "group": "custom",
-            "duckdb_type": cf.get("duckdb_type", "VARCHAR"),
+            "sql_type": cf.get("sql_type", "VARCHAR"),
             "description": cf.get("description", ""),
             "show_in_dashboard": cf.get("show_in_dashboard", False),
             "show_in_logs": cf.get("show_in_logs", True),
@@ -428,15 +428,26 @@ def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
 
 
 _DEFAULT_LF_CONFIG: dict = {"schema_version": 2, "custom_fields": []}
+_VALUE_TYPE_TO_SQL_TYPE: dict[str, str] = {
+    "integer": "BIGINT",
+    "numeric": "BIGINT",
+    "float": "DOUBLE",
+    "number": "DOUBLE",
+    "boolean": "BOOLEAN",
+}
 
 
 def get_lf_config(cfg: dict) -> dict:
     """Return the log_fields config from a service config dict, with a safe default."""
-    return cfg.get("log_fields") or _DEFAULT_LF_CONFIG.copy()
+    lf = cfg.get("log_fields") or _DEFAULT_LF_CONFIG.copy()
+    for cf in lf.get("custom_fields", []):
+        if isinstance(cf, dict) and "sql_type" not in cf:
+            cf["sql_type"] = _VALUE_TYPE_TO_SQL_TYPE.get(str(cf.get("value_type", "")).lower(), "VARCHAR")
+    return lf
 
 
-class DuckType(StrEnum):
-    """DuckDB column types in use across the field catalog."""
+class SqlType(StrEnum):
+    """Logical SQL column types in use across the field catalog."""
 
     TIMESTAMP = "TIMESTAMP"
     VARCHAR = "VARCHAR"
@@ -484,7 +495,7 @@ class LogField:
     code: str
     label: str
     group: Group
-    duck_type: DuckType
+    sql_type: SqlType
     description: str = ""
     vcl: str | None = None
     typical_bytes: int = 0
@@ -536,7 +547,7 @@ def _field_from_dict(d: Mapping[str, Any]) -> LogField:
         code=code,
         label=str(d.get("label", code)),
         group=Group.from_legacy(raw_group if raw_group is None else str(raw_group)),
-        duck_type=DuckType(str(d["duckdb_type"])),
+        sql_type=SqlType(str(d["sql_type"])),
         description=str(d.get("description", "")),
         vcl=vcl,
         typical_bytes=int(d.get("typical_bytes", 0) or 0),
@@ -639,14 +650,3 @@ def vcl_encode_chain(vcl_var: str, encode: dict[str, str]) -> str:
         expr = f'if({vcl_var} == "{value}", "{code}", {expr})'
     expr = f'if({vcl_var} == "?", "", {expr})'
     return expr
-
-
-def duckdb_decode_case(col: str, encode: dict[str, str]) -> str:
-    """Return a SQL CASE expression that maps single-char codes back to full values."""
-    decode = {code: value for value, code in encode.items()}
-    clauses = []
-    for code, value in decode.items():
-        clauses.append(f"WHEN \"{col}\" = '{code}' THEN '{value}'")
-    for value in encode:
-        clauses.append(f"WHEN \"{col}\" = '{value}' THEN '{value}'")
-    return f'CASE {" ".join(clauses)} ELSE "{col}" END'
