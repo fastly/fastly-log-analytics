@@ -13,7 +13,7 @@ ALLOWLIST=(
   # 002e76e8: _fetch_file_to_zip moved byte-for-byte from admin/health.py.
   "backend/routers/admin/_helpers.py"
   "backend/routers/admin/high_scale.py"
-  # 002e76e8: download_file moved byte-for-byte from admin/compaction.py.
+  # 002e76e8: download_file moved byte-for-byte from admin/metadata_storage.py.
   "backend/routers/admin/downloads.py"
   "backend/routers/admin/ingest.py"
   # 04759853: pinned FOS/CDN fetch + redirect validation moved byte-for-byte

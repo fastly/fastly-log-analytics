@@ -819,7 +819,6 @@ def _fake_cfg(
 ) -> dict:
     prov: dict = {
         "cron_sync": {"enabled": True},
-        "cron_compact": {"enabled": False},
     }
     cron_ip: dict = {"enabled": ip_enabled}
     if ip_interval is not None:

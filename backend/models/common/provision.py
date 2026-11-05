@@ -118,8 +118,6 @@ class ProvisionExecuteRequest(BaseModel):
     cdn_shield: str = "none"
     enable_cron_sync: bool = True
     delete_after: bool = True
-    commit_interval_mins: int = 5
-    enable_cron_compact: bool = True
     log_retention_days: int = 30
     rum_retention_days: int = 30
     log_fields: str | None = None
@@ -223,8 +221,6 @@ class ProvisionConfigRequest(PassthroughModel):
     cdn_secret: str | None = None
     enable_cron_sync: bool | None = None
     delete_after: bool | None = None
-    commit_interval_mins: int | None = None
-    enable_cron_compact: bool | None = None
     log_retention_days: int | None = None
     log_fields: str | dict[str, Any] | None = None
     logging_enabled: bool | None = None

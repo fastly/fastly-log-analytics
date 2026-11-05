@@ -27,7 +27,6 @@ from backend.core.fos_client import (
     backfill_fastly_edge_writes,
     get_source_for_service,
     reconcile_fastly_stats,
-    refresh_config_status,
 )
 from backend.cron.jobs import _common
 from backend.cron.jobs._common import (
@@ -227,23 +226,13 @@ def _run_log_discovery_cron(
                 logger.exception("[ledger] %s: log discovery failed: %s", service_id, e)
                 return
 
-    # ── 2. Refresh cached status, invalidate response caches & publish SSE ────
+    # ── 2. Invalidate response caches & publish SSE ───────────────────────────
     from backend.utils.telemetry import should_defer_cron
 
     do_heavy_refresh = (
         False if (not force and should_defer_cron("log_discovery", service_id)) else _claim_heavy_refresh(service_id)
     ) or bool(force)
     needs_status_publish = bool(discovered > 0 or do_heavy_refresh or force)
-    if needs_status_publish:
-        if (sync_enabled or force) and run_id is not None:
-            _progress_status(
-                f"Refreshing sync status {'+ filter suggestions' if do_heavy_refresh else '(header only)'}..."
-            )
-        _t0 = time.time()
-        try:
-            refresh_config_status(service_id, include_top_values=False)
-        except Exception:
-            pass
 
     try:
         invalidate_service_cache(src.get("name", ""))
@@ -255,19 +244,6 @@ def _run_log_discovery_cron(
             "publish_sync_status_safe", _common.publish_sync_status_safe, _orig_publish_sync_status_safe
         )
         publish_fn(service_id, "scheduler")
-        if run_id is not None:
-            _progress_status(f"refresh_config_status: {int((time.time() - _t0) * 1000)}ms")
-
-    if do_heavy_refresh:
-        _t0 = time.time()
-        try:
-            refresh_config_status(service_id, include_top_values=True)
-        except Exception:
-            pass
-        _heavy_cost_s = time.time() - _t0
-        _record_heavy_refresh_cost(service_id, _heavy_cost_s)
-        if run_id is not None:
-            _progress_status(f"refresh_config_status (heavy): {int(_heavy_cost_s * 1000)}ms")
 
     # ── 3. Usage log bookkeeping ──────────────────────────────────────────────
     if (sync_enabled or force) and run_id is not None and do_heavy_refresh:
@@ -306,6 +282,7 @@ def _run_log_discovery_cron(
             run_usage_log_cleanup(service_id)
         except Exception as e:
             logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
+        _record_heavy_refresh_cost(service_id, time.time() - _t0)
         if run_id is not None:
             _progress_status(f"usage_log phase: {int((time.time() - _t0) * 1000)}ms")
 

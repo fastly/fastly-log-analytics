@@ -206,15 +206,6 @@ def test_metadata_cleanup_skip_gates_and_zero_fos_calls(monkeypatch, mc_contract
 def test_metadata_cleanup_retention_windows_and_dedup_suppression(monkeypatch, mc_contract_source):
     sid = mc_contract_source["service_id"]
 
-    # Dedup suppression when delete_after=False
-    mc_contract_source["provisioning"]["cron_sync"]["delete_after"] = False
-    _seed_ingested_files(sid, 5, days_ago=20)
-    events: list[dict] = []
-    res = reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 7}, on_event=events.append)
-    assert res["deleted"]["ingested_files"] == 0 and res["after"]["ingested_files"] == 5
-    override_msgs = [e["message"] for e in events if "cron_sync.delete_after=false" in e.get("message", "")]
-    assert len(override_msgs) == 1 and "ingested_files retention (7d) ignored" in override_msgs[0]
-
     # RUM window calculation when delete_after=True
     mc_contract_source["provisioning"]["cron_sync"]["delete_after"] = True
     mc_contract_source["log_retention_days"] = 90
@@ -225,14 +216,7 @@ def test_metadata_cleanup_retention_windows_and_dedup_suppression(monkeypatch, m
         _seed_ingested_files(sid, 1, days_ago=20, table_name=tbl, prefix="raw/rum")
 
     res_rum = reconciliation.cleanup_metadata(sid, retention={"ingested_files_days": 7})
-    assert res_rum["deleted"]["ingested_files"] == 12 and res_rum["after"]["ingested_files"] == 4
-    summary_row = (
-        metadata_db.get_con(sid)
-        .execute("SELECT file_count FROM ingested_files_summary WHERE source_name = 'fos'")
-        .fetchone()
-    )
-    if summary_row:
-        assert summary_row[0] == 4
+    assert res_rum["deleted"]["ingested_files"] == 7 and res_rum["after"]["ingested_files"] == 4
 
     # Usage log chunked deletion preserves hourly summary
     _seed_usage_log(sid, 20, days_ago=5)

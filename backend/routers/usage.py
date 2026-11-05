@@ -101,10 +101,8 @@ def _compute_prefill_rates(
         "estimated_bytes_per_line": None,
         "data_days": 0,
         "log_period_seconds": None,
-        "commit_interval_mins": 5,
         "sample_rate": 100,
         "edge_only": False,
-        "compaction_enabled": True,
         "delete_after": True,
         "log_retention_days": 30,
         "rum_retention_days": 30,
@@ -125,9 +123,7 @@ def _compute_prefill_rates(
             cron_sync = prov.get("cron_sync", {})
             result["sample_rate"] = int(prov.get("sample_rate", 100))
             result["edge_only"] = prov.get("edge_only", True)
-            result["compaction_enabled"] = prov.get("cron_compact", {}).get("enabled", True)
             result["delete_after"] = bool(cron_sync.get("delete_after", True))
-            result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
             result["log_retention_days"] = int(cron_sync.get("data_retention_days", 30))
             result["rum_retention_days"] = int(cron_sync.get("rum_retention_days", result["log_retention_days"]))
             try:

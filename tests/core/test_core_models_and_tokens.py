@@ -578,10 +578,6 @@ def _seed_metadata_rows():
             (MOCK_SERVICE_ID,),
         ),
         (
-            "INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json) VALUES ('buf1', ?, '[]')",
-            (MOCK_SERVICE_ID,),
-        ),
-        (
             "INSERT INTO quarantined_files (file_name, source_name, fos_key, error_key, meta_key) VALUES ('bad.gz', ?, 'raw/bad.gz', 'errors/bad.bad.jsonl', 'errors/bad.meta.json')",
             (MOCK_SERVICE_ID,),
         ),
@@ -649,7 +645,6 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     for table in (
         "ingested_files",
         "ingested_files_summary",
-        "ingest_in_flight",
         "quarantined_files",
         "quarantine_evidence",
     ):

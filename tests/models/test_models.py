@@ -1253,13 +1253,7 @@ def test_clickhouse_invalid_settings(clickhouse_env, monkeypatch, key, value, ch
         assert value not in str(error.value)
 
 
-def test_high_scale_shared_source_and_raw_delete_after():
-    for empty in (None, {}, {"provisioning": {"cron_sync": {}}}):
-        assert svcconfig.high_scale_shared_source_enabled(empty) is False
-    assert (
-        svcconfig.high_scale_shared_source_enabled({"provisioning": {"cron_sync": {"high_scale_shared_source": True}}})
-        is True
-    )
+def test_resolve_raw_delete_after():
     assert svcconfig.resolve_raw_delete_after(None) is True and svcconfig.resolve_raw_delete_after({}) is True
     assert svcconfig.resolve_raw_delete_after({"provisioning": {"cron_sync": {"delete_after": False}}}) is False
     assert (
@@ -1267,11 +1261,6 @@ def test_high_scale_shared_source_and_raw_delete_after():
         is False
     )
     assert svcconfig.resolve_raw_delete_after({}, requested=True) is True
-    shared = {"provisioning": {"cron_sync": {"delete_after": True, "high_scale_shared_source": True}}}
-    assert (
-        svcconfig.resolve_raw_delete_after(shared) is False
-        and svcconfig.resolve_raw_delete_after(shared, requested=True) is False
-    )
 
 
 def test_snapshot_and_concurrent_mutate_config():

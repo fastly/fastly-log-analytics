@@ -853,7 +853,6 @@ class TestLogCronRunDurationIsFloat:
             patch("backend.core.fos_client.get_source_for_service", return_value=mock_src),
             patch("backend.core.fos_client.start_cron_run", return_value=1),
             patch("backend.core.fos_client.log_cron_run", side_effect=fake_log_cron_run),
-            patch("backend.cron.jobs.sync.refresh_config_status"),
             patch("backend.cron.jobs.sync.discover_prefix", return_value=0),
             patch("backend.cron.scheduler.lifecycle.cleanup_progress_and_reap"),
             patch("backend.cron.scheduler.lifecycle.start_progress"),

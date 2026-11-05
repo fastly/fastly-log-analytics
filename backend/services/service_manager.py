@@ -110,9 +110,6 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                         "delete_after": True,
                     },
                 ),
-                "cron_compact": prov.get(
-                    "cron_compact", {"enabled": True, "interval_mins": 30, "log_enabled": True, "log_retention_days": 7}
-                ),
                 "cron_ngwaf": prov.get(
                     "cron_ngwaf", {"interval_mins": 15, "log_enabled": True, "log_retention_days": 7}
                 ),

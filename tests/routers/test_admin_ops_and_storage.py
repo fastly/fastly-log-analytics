@@ -1,4 +1,4 @@
-"""Tests for Admin Task Queue, Ingest Ledger, ClickHouse, Compaction, Downloads, Quarantine, and Query Monitor APIs."""
+"""Tests for Admin Task Queue, Ingest Ledger, ClickHouse, Metadata Storage, Downloads, Quarantine, and Query Monitor APIs."""
 
 from __future__ import annotations
 
@@ -171,13 +171,11 @@ def test_celery_status_inprocess_scheduler_and_metric_history(client):
     fake_scheduler = SimpleNamespace(scheduler=SimpleNamespace(get_jobs=lambda: [fake_job]))
     active_entry = [{"run_id": 101, "service_id": "svc-a", "task": "sync", "started_at": 1700000000.0}]
     err = ConnectionError("Celery broker not configured (CELERY_BROKER_URL is unset)")
-    std_summary = {"ingested_files": 420, "quarantined_items": 1}
     with _patches(
         ("backend.celery_app._get_redis", {"side_effect": err}),
         ("backend.config.list_configs", [{"service_id": "svc-a"}]),
         ("backend.cron.scheduler.get_scheduler", fake_scheduler),
         ("backend.celery_app.inprocess_active_runs_entries", active_entry),
-        ("backend.celery_app.standard_ingest_summary", std_summary),
         ("backend.celery_app.ingest_ledger_summary", {"committed": 420, "quarantined": 1}),
     ):
         resp = client.get("/api/admin/celery/status")
@@ -186,7 +184,7 @@ def test_celery_status_inprocess_scheduler_and_metric_history(client):
         assert data["broker_reachable"] is False
         sched_exp = [{"name": "log_discovery_svc-a", "trigger": "interval[0:00:10]", "next_run_at": 1700000010.0}]
         assert data["inprocess_schedules"] == sched_exp
-        assert data["inprocess_active_runs"] == active_entry and data["standard_ingest"] == std_summary
+        assert data["inprocess_active_runs"] == active_entry
         assert data["ledger"] == {"committed": 420, "quarantined": 1}
 
     resp_hist = client.get("/api/admin/metric-history/batch?since=1h")
@@ -508,7 +506,6 @@ def _patch_retention(client, payload: dict, **opts):
     with _patches(
         ("backend.config.load_config", load_val),
         ("backend.config.mutate_config", {"side_effect": _fake_mutate(base_cfg, saved=saved)}),
-        ("backend.core.metadata.is_ingested_files_dedup_active", opts.get("dedup", True)),
         ("backend.core.metadata.record_audit", {"side_effect": audit_fn}),
     ):
         resp = client.patch("/api/admin/metadata-retention", json=payload)
@@ -539,21 +536,18 @@ def test_metadata_retention_patch_and_storage_endpoints(client):
     mr_clamp = saved_clamp["metadata_retention"]
     assert resp_clamp.status_code == 200 and mr_clamp["usage_log_days"] == 0 and mr_clamp["cron_runs_days"] == 0
 
-    resp_dedup, saved_dedup, _ = _patch_retention(client, {"ingested_files_days": 30}, dedup=False)
-    assert resp_dedup.status_code == 200 and saved_dedup["metadata_retention"]["ingested_files_days"] == 0
     r_boom, _, _ = _patch_retention(client, {"usage_log_days": 7}, audit_side_effect=RuntimeError("audit-boom"))
     assert r_boom.status_code == 200
 
     st_full = {"by_table": {"usage_log": {"rows": 1000, "bytes": 50000}}}
     cfg_full = {"name": "svc", "service_id": "svc", "metadata_retention": {"usage_log_days": 14}}
-    for stats, cfg, dedup, expected_lock in ((st_full, cfg_full, True, False), ({}, {"name": "svc"}, False, True)):
+    for stats, cfg in ((st_full, cfg_full), ({}, {"name": "svc"})):
         with _patches(
             ("backend.core.metadata.get_metadata_storage_stats", stats),
             ("backend.config.load_config", cfg),
-            ("backend.core.metadata.is_ingested_files_dedup_active", dedup),
         ):
             r_st = client.get("/api/admin/metadata-storage")
-        assert r_st.status_code == 200 and r_st.json()["ingested_files_locked"] is expected_lock
+        assert r_st.status_code == 200
         if stats:
             assert r_st.json()["by_table"]["usage_log"]["rows"] == 1000
             assert r_st.json()["retention"]["usage_log_days"] == 14

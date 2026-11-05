@@ -49,11 +49,9 @@
    - Calls `start_cron_run(src, "metadata_cleanup")` and registers execution in `cron_progress`.
 4. **Config Resolution:**
    - Loads retention thresholds from `configs/{service_id}.json` under `metadata_retention`. Defaults to 1 day for `usage_log` and `ingested_files`, 7 days for `cron_runs`, and 30 days for `slow_queries`.
-5. **Purge Ingested Files (with Dedup Guard):**
-   - Verifies whether `cron_sync.delete_after` is active via `is_ingested_files_dedup_active(service_id)`. If `delete_after` is `false`, `ingested_files` is preserved as the dedup gate against re-ingestion storms and `ingested_files_days` is force-overridden to 0.
+5. **Purge Ingested Files:**
    - Trims request rows older than `ingested_files_days` (default 1 day). Trims RUM rows (`client_vitals` / `client_errors`) older than a window guaranteed larger than any raw object's lifetime (`max(ingested_files_days, log_retention_days + 1)`), ensuring `ingested_files` does not grow without limit while preventing any re-ingest.
    - Deletes rows in 5,000-row chunks using `ctid IN (SELECT ctid FROM ... LIMIT 5000)`.
-   - If any `ingested_files` rows were deleted, recomputes `recompute_ingested_files_summary(con, service_id)`.
 6. **Purge Usage Log Records:**
    - Deletes raw `usage_log` rows older than `usage_log_days` in 5,000-row chunks.
    - *Note:* Hourly summary rollups in `usage_log_hourly_summary` are preserved indefinitely for billing and audit history.
@@ -78,7 +76,7 @@
   - Full cleanup execution: < 1.0 second.
 - **Audit Checklist:**
   - Confirm `usage_log_hourly_summary` is NOT deleted (billing history preserved).
-  - Verify `ingested_files` deletion is suppressed when `cron_sync.delete_after=false`.
+  - Verify request `ingested_files` rows older than `ingested_files_days` are trimmed.
   - Verify RUM `ingested_files` rows are trimmed once past the raw retention window (`max(ingested_files_days, log_retention_days + 1)`).
   - Confirm zero FOS calls executed during cleanup.
 
@@ -112,7 +110,7 @@
 - 6. Streaming progress on manual trigger.
 - 7. Kill-switch protection under `FLA_DEV_NO_CRONS=1` and scheduler registration check.
 - 8. Zero FOS calls contract.
-- 9. Retention window pruning of `ingested_files` (dedup suppression on `delete_after=false` and RUM window `max(ingested_files_days, log_retention_days + 1)`).
+- 9. Retention window pruning of `ingested_files` (request rows past `ingested_files_days` and RUM window `max(ingested_files_days, log_retention_days + 1)`).
 - 10. `usage_log` chunked deletion in 5,000-row batches while preserving `usage_log_hourly_summary`.
 - 11. `cron_runs` (7d) and `slow_queries` (30d unix-epoch) retention.
 - 12. Manual trigger path parity (`POST /api/admin/metadata-cleanup/{service_id}` and `POST /api/admin/metadata-cleanup`).

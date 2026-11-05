@@ -433,27 +433,25 @@ def health_check(
     """Liveness/readiness probe.
 
     Default (``?deep=0``) is a cheap liveness response — 200 as soon as the
-    HTTP server is answering. Pass ``?deep=1`` to also verify ingest
-    freshness per configured service. A service is reported ``degraded``
-    when ANY of:
-      - its newest ``ingested_files.ingested_at`` is older than
-        ``stale_minutes`` (default 30) — SRE-22: before degrading on this
-        check, the cutoff is widened to the service's own historical p95
-        gap between non-empty ingests (never narrower than
-        ``stale_minutes``), so a low-traffic service's organic quiet
-        periods don't false-positive;
-      - the last terminal ``sync`` cron run ended in ``error``;
-      - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``
-        (SRE-04 — the orphan-stall / OOM-leak the success-only filter hides);
-      - the latest terminal run of a critical non-sync ingest task
-        (``commit``) ended in ``error`` (SRE-05).
-    The endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.
+    HTTP server is answering. Pass ``?deep=1`` to also verify ClickHouse
+    connectivity (``get_clickhouse_client().health()``) and per-service ingest
+    freshness in PostgreSQL. A service is reported ``degraded`` when ANY of:
+      - the last terminal ``log_discovery`` cron run ended in ``error``;
+      - a ``log_discovery`` row is stuck in ``running`` past
+        ``_STUCK_SYNC_RUNNING_MINS`` (SRE-04);
+      - the latest terminal run of the critical ingest task ``ledger_sweep``
+        in the last 24h ended in ``error`` (SRE-05).
+    A service is reported ``stale`` when its newest
+    ``ingested_files.ingested_at`` is older than ``stale_minutes`` (default 30),
+    widened to the service's historical p95 gap between non-empty ingests
+    (SRE-22). The endpoint returns HTTP 503 when ClickHouse is unhealthy or ANY
+    service is ``degraded``; otherwise 200.
 
-    Cost: hits PostgreSQL metadata only — no FOS, no CDN, no Fastly API. Safe to wire
-    into a load-balancer health check.
+    Cost: hits PostgreSQL metadata and ClickHouse health only — no FOS, no CDN,
+    no Fastly API. Safe to wire into a load-balancer health check.
 
     Security (finding 003): the deep variant enumerates every configured
-    service_id and reports per-service sync errors / staleness, which is
+    service_id and reports per-service discovery errors / staleness, which is
     operational metadata an analyst should not see. Force ``deep`` to
     False for remote (live-share) callers so analysts only ever get the
     shallow ok/degraded liveness signal.

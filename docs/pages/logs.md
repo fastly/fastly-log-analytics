@@ -37,7 +37,7 @@ The Cron Runs tab delta-polls `GET /api/cron-runs?since_id=` (15 s, faster while
 | `GET /api/audit-logs` | Paged audit events (`event_type`, `page`, `per_page`, `sort`, `dir`), `views.py`. |
 | `GET /api/admin/ingested-files` | Ingested file list ([`backend/routers/admin/sync_status.py`](../../backend/routers/admin/sync_status.py)). |
 | `GET /api/schema` | Columns and types of the logs table ([`backend/routers/bootstrap.py`](../../backend/routers/bootstrap.py)). |
-| `GET /api/admin/metadata-storage`, `GET /api/admin/metadata-retention`, `PATCH /api/admin/metadata-retention`, `POST /api/admin/metadata-cleanup`, `POST /api/admin/reset-logs`, `POST /api/admin/reset-rum` | Metadata storage inspection, retention configuration, cleanup, and ClickHouse/PostgreSQL ledger reset ([`backend/routers/admin/compaction.py`](../../backend/routers/admin/compaction.py)). |
+| `GET /api/admin/metadata-storage`, `GET /api/admin/metadata-retention`, `PATCH /api/admin/metadata-retention`, `POST /api/admin/metadata-cleanup`, `POST /api/admin/reset-logs`, `POST /api/admin/reset-rum` | Metadata storage inspection, retention configuration, cleanup, and ClickHouse/PostgreSQL ledger reset ([`backend/routers/admin/metadata_storage.py`](../../backend/routers/admin/metadata_storage.py)). |
 | `GET /api/admin/raw-tree` | FOS raw log file browser ([`backend/routers/admin/downloads.py`](../../backend/routers/admin/downloads.py)). |
 | `POST /api/admin/ingest-logs` | Manual import or ranged backfill ([`backend/routers/admin/ingest.py`](../../backend/routers/admin/ingest.py)). |
 | `POST /api/services/{service_id}/ngwaf-sync` | NGWAF bot sync (SSE). |

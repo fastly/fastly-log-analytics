@@ -73,7 +73,6 @@ def _initialize_service(cfg: dict):
 
             src = _fos.get_source_for_service(sid)
             if src:
-                _fos.refresh_config_status(sid)
                 # Pre-warm compute_sync_status_cached so the very first
                 # /api/sync-status?skip_fos=true after restart is warm.
                 try:

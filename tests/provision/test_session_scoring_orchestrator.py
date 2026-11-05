@@ -1536,8 +1536,6 @@ def _args(**overrides):
         "delete_after": True,
         "disable_delete_after": False,
         "disable_cron_sync": False,
-        "commit_interval_mins": 5,
-        "disable_cron_compact": False,
         "log_retention_days": 30,
         "preset": None,
         "enable_group": None,

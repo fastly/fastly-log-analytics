@@ -1267,7 +1267,7 @@ that survived the package carve-up.
   `refresh_view_and_warm_pool` puts the success log inside the
   try/except so failure means no event.
 - `start_cron_run` non-sync task types fell back to
-  `cron_compact.log_retention_days` via a buggy ternary; the
+  the compaction schedule's log_retention_days via a buggy ternary; the
   promoted `_TASK_TO_CRON_KEY` mapping plus a default 7-day
   fallback gets the correct retention applied per task.
 - `query_instrumentation._safe_weakref` silently no-op'd the

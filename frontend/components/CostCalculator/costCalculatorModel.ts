@@ -1,10 +1,7 @@
 import { formatAbbreviatedCount } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 
-export type PrefillResponse = Omit<
-  components['schemas']['PrefillResponse'],
-  'commit_interval_mins' | 'compaction_enabled'
->
+export type PrefillResponse = components['schemas']['PrefillResponse']
 export type BillingZone = 'MBZ100' | 'MBZ200' | 'Global'
 
 export const BILLING_ZONE_RATES: Record<BillingZone, number> = {

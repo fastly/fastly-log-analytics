@@ -97,7 +97,6 @@ class CronRunEntry(WireSafeModel):
     rows_ingested: int | None = None
     corrupt_rows: int | None = None
     parquet_files_created: int | None = None
-    parquet_files_optimized: int | None = None
     parquet_keys: list[str] = []
     summary: str | None = None
 

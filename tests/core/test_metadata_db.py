@@ -424,10 +424,10 @@ def _reapply_schema() -> None:
 
 
 _EXPECTED_TABLES = set(
-    "sources ingested_files ingested_files_summary ingest_in_flight cron_runs asn_names audit_logs views alerts scoring_labels".split()
+    "sources ingested_files ingested_files_summary cron_runs asn_names audit_logs views alerts scoring_labels".split()
 )
 _EXPECTED_INDEXES = set(
-    "idx_ingested_files_source_ingested_at idx_in_flight_source idx_cron_task_started idx_cron_started "
+    "idx_ingested_files_source_ingested_at idx_cron_task_started idx_cron_started "
     "idx_audit_source idx_scoring_labels_svc_sid idx_scoring_labels_svc_label".split()
 )
 
@@ -1839,9 +1839,3 @@ def test_ingest_log_atomic_rollback_and_rum_summary_isolation():
     assert summary["total_rows"] == 10
     assert summary["total_bytes"] == 100
     assert summary["latest_file_name"] == "s3://b/2026-01-01T00:00:00.000-a.gz"
-
-    recomputed = ingest_log.recompute_ingested_files_summary(con, sid)
-    assert recomputed["file_count"] == 1
-    assert recomputed["total_rows"] == 10
-    assert recomputed["total_bytes"] == 100
-    assert recomputed["latest_file_name"] == "s3://b/2026-01-01T00:00:00.000-a.gz"

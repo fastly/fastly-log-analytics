@@ -454,7 +454,6 @@ def handle_teardown(args):
 def handle_reset_logs(args):
     banner("Fastly Log Analysis — Delete Data")
     from backend import config as svcconfig
-    from backend.core.metadata.base import is_ingested_files_dedup_active
     from backend.core.reset import reset_service_logs
     from backend.cron.scheduler import get_scheduler
 
@@ -478,13 +477,6 @@ def handle_reset_logs(args):
         print(
             f"  {_c(BLU, 'Preserved:')} saved views, alerts, source registration, audit history, scoring labels/audit."
         )
-        if args.delete_raw and not is_ingested_files_dedup_active(service_id):
-            blank()
-            warn(
-                "This source keeps request logs after ingest (delete_after=False). Deleting raw/request/ now "
-                "means the next full sync has no dedup record left and will re-ingest this "
-                "service's ENTIRE history."
-            )
         blank()
         if not ask_yes(_c(YLW + BOLD, "This cannot be undone. Continue?"), default=False):
             sys.exit(0)

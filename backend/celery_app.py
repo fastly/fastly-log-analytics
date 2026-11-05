@@ -346,48 +346,6 @@ def inprocess_active_runs_entries() -> list[dict[str, Any]]:
     return out
 
 
-def standard_ingest_summary() -> dict[str, int]:
-    """Aggregate ingested_files and quarantine counts across all configured services."""
-    ingested_files = 0
-    quarantined_items = 0
-    try:
-        from backend.config import list_configs
-        from backend.core.metadata.base import get_con
-
-        sids = list(dict.fromkeys(sid for svc in list_configs() if (sid := (svc.get("service_id") or svc.get("name")))))
-        if sids:
-            placeholders = ", ".join("?" for _ in sids)
-            con = get_con(sids[0])
-            cur = con.cursor()
-            try:
-                cur.execute(
-                    f"SELECT COALESCE(SUM(file_count), 0) FROM ingested_files_summary WHERE source_name IN ({placeholders})",
-                    tuple(sids),
-                )
-                rows = cur.fetchall()
-                if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                    ingested_files = int(rows[0][0])
-            except Exception:
-                pass
-            if ingested_files == 0:
-                try:
-                    cur.execute(
-                        f"SELECT count(*) FROM ingested_files WHERE source_name IN ({placeholders})",
-                        tuple(sids),
-                    )
-                    rows = cur.fetchall()
-                    if rows and len(rows[0]) == 1 and isinstance(rows[0][0], (int, float)):
-                        ingested_files = int(rows[0][0])
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.debug("[celery_status] standard_ingest_summary failed: %s", e)
-    return {
-        "ingested_files": ingested_files,
-        "quarantined_items": quarantined_items,
-    }
-
-
 def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
     queues, broker_reachable = celery_queue_depths()
@@ -427,7 +385,6 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
         "ledger": ledger,
         "inprocess_schedules": inprocess_schedule_entries(),
         "inprocess_active_runs": inprocess_active_runs_entries(),
-        "standard_ingest": standard_ingest_summary(),
     }
 
 

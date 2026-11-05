@@ -72,7 +72,7 @@ class LogFieldsCatalogResponse(WireSafeModel):
 
 
 class CronSettingsPartial(BaseModel):
-    """Partial-update slice of a single cron block (sync / compact / ngwaf).
+    """Partial-update slice of a single cron block (sync / ngwaf).
 
     Distinct from ``ServiceCronSync`` etc. below which model the full
     persisted config (``enabled`` required). Here every field is
@@ -90,7 +90,6 @@ class CronSettingsPartial(BaseModel):
     # config (observed 2026-08-13). Pydantic ignores unknown fields, so an
     # absent field on this partial is a silent no-op, not an error.
     interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
@@ -102,19 +101,11 @@ class CronSettingsPartial(BaseModel):
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
     delete_after: bool | None = None
-    high_scale_shared_source: bool | None = None
 
 
 class ServiceCronSync(CronSettingsPartial):
     enabled: bool
     polling_mode: Literal["regular", "adaptive"] = "adaptive"
-
-
-class ServiceCronCompact(BaseModel):
-    enabled: bool
-    interval_mins: int | None = None
-    log_enabled: bool | None = None
-    log_retention_days: int | None = None
 
 
 class ServiceCronNgwaf(BaseModel):
@@ -129,7 +120,6 @@ class RumConfigSection(WireSafeModel):
     enabled: bool | None = None
     log_period: int | None = None
     sync_interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
     delete_after: bool | None = None
 
 
@@ -148,7 +138,6 @@ class ServiceConfig(BaseModel):
     log_row_count: int | None = None
     is_active: bool | None = None
     cron_sync: ServiceCronSync | None = None
-    cron_compact: ServiceCronCompact | None = None
     cron_ngwaf: ServiceCronNgwaf | None = None
     ngwaf_workspace_id: str | None = None
     logging_enabled: bool | None = None
@@ -234,19 +223,17 @@ class RumSettingsPartial(BaseModel):
     enabled: bool | None = None
     log_period: int | None = None
     sync_interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
     delete_after: bool | None = None
 
 
 class ServiceCronSettingsBody(BaseModel):
     """Body for ``POST /api/services/{service_id}/cron-settings``.
 
-    Every cron block is optional — operators can update one or all
-    three without re-sending the others. Fields inside each block are
+    Every cron block is optional — operators can update one or both
+    without re-sending the others. Fields inside each block are
     also optional (see :class:`CronSettingsPartial`)."""
 
     cron_sync: CronSettingsPartial | None = None
-    cron_compact: CronSettingsPartial | None = None
     cron_ngwaf: CronSettingsPartial | None = None
     rum: RumSettingsPartial | None = None
 

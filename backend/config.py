@@ -929,32 +929,13 @@ def _default_sse_backplane() -> str:
 SSE_BACKPLANE = _default_sse_backplane()
 
 
-def high_scale_shared_source_enabled(cfg: dict | None) -> bool:
-    """Return whether this service's raw request/RUM stream is shared with an
-    out-of-band high-scale consumer (``provisioning.cron_sync.high_scale_shared_source``).
-
-    While this is set, the high-scale archive deletion controller
-    (``backend/high_scale/archive/jobs.py``) is the sole raw-deletion authority for
-    this service's stream — every legacy raw-deletion path (standard sync's
-    ``delete_after``, celery-mode ``finalize_committed_raw``, RUM cleanup) must
-    stand down regardless of its own ``delete_after`` setting. See
-    ``resolve_raw_delete_after``, the single place that enforces this.
-    """
-    return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("high_scale_shared_source", False))
-
-
 def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) -> bool:
     """Resolve the effective delete_after decision for raw FOS objects.
 
-    ``requested`` lets a caller pass an explicit override the way a cron
-    argument normally would; ``None`` falls back to the configured
-    ``provisioning.cron_sync.delete_after`` (default True). A high-scale
-    shared source always forces this to False — see
-    ``high_scale_shared_source_enabled`` — because raw-deletion authority for
-    that stream belongs to the high-scale deletion controller, not legacy sync.
+    ``requested`` lets a caller pass an explicit override; ``None`` falls back to
+    the configured ``provisioning.cron_sync.delete_after`` (default True), enforced
+    by the archive deletion controller.
     """
-    if high_scale_shared_source_enabled(cfg):
-        return False
     if requested is not None:
         return bool(requested)
     return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))

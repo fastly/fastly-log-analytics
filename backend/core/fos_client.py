@@ -27,7 +27,7 @@ from backend.utils.telemetry import parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
-_TASK_TO_CRON_KEY = {"sync": "cron_sync", "local_compact": "cron_compact"}
+_TASK_TO_CRON_KEY = {"sync": "cron_sync"}
 
 _CDN_URL_ALLOWED_HOST_SUFFIXES = (
     ".fastly.net",
@@ -558,13 +558,6 @@ def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:
     return values
 
 
-def refresh_config_status(service_id: str, include_top_values: bool = True) -> None:
-    """No-op compatibility hook for ClickHouse-backed services."""
-    if not svcconfig.load_config(service_id):
-        return
-    logger.debug("[refresh_status] %s: ClickHouse-backed service status managed by ingest controller", service_id)
-
-
 def start_cron_run(source: dict, task: str) -> int | None:
     from backend.core import metadata as metadata_db
 
@@ -582,7 +575,6 @@ def log_cron_run(
     rows_ingested: int = 0,
     corrupt_rows: int = 0,
     parquet_files_created: int = 0,
-    parquet_files_optimized: int = 0,
     parquet_keys: list | None = None,
     summary: str | None = None,
     log_output: str | None = None,
@@ -616,7 +608,6 @@ def log_cron_run(
             rows_ingested=rows_ingested or 0,
             corrupt_rows=corrupt_rows or 0,
             parquet_files_created=parquet_files_created or 0,
-            parquet_files_optimized=parquet_files_optimized or 0,
             parquet_keys=parquet_keys or [],
             summary=summary,
             log_output=log_output,
@@ -782,7 +773,6 @@ __all__ = [
     "log_usage_calls",
     "purge_usage_log",
     "reconcile_fastly_stats",
-    "refresh_config_status",
     "reload_default_source",
     "rotate_cid_salt",
     "rum_source_for",

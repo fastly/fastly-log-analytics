@@ -1456,8 +1456,8 @@ def test_request_facts_root_get_masks_analyst_ip(client, test_service_source):
 
 
 def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(client, override_source, monkeypatch):
-    from backend.routers.admin.compaction import _METADATA_STORAGE_CACHE
     from backend.routers.admin.downloads import _RAW_TREE_CACHE, _STORAGE_TREE_CACHE
+    from backend.routers.admin.metadata_storage import _METADATA_STORAGE_CACHE
     from backend.routers.admin.sync_status import _INGESTED_FILES_CACHE
     from backend.routers.services.views import _AUDIT_LOGS_CACHE, _CRON_LOGS_CACHE
 
@@ -1496,7 +1496,6 @@ def test_logs_page_admin_and_service_view_caches_hit_when_pytest_env_unset(clien
         with (
             patch("backend.core.metadata.get_metadata_storage_stats", return_value=fake_meta_stats) as m_meta,
             patch("backend.config.load_config", return_value={}),
-            patch("backend.core.metadata.is_ingested_files_dedup_active", return_value=True),
         ):
             assert client.get("/api/admin/metadata-storage").status_code == 200
             assert client.get("/api/admin/metadata-storage").status_code == 200

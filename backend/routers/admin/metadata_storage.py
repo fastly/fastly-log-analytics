@@ -28,7 +28,7 @@ from ._router import router
 logger = logging.getLogger(__name__)
 
 _METADATA_STORAGE_CACHE: BoundedTTLCache[str, MetadataStorageResponse] = BoundedTTLCache(maxsize=64, ttl_seconds=30.0)
-CacheRegistry.register("compaction._METADATA_STORAGE_CACHE", _METADATA_STORAGE_CACHE)
+CacheRegistry.register("metadata_storage._METADATA_STORAGE_CACHE", _METADATA_STORAGE_CACHE)
 
 
 @router.patch(
@@ -41,7 +41,7 @@ def update_metadata_retention(
 ) -> MetadataRetentionResponse:
     """Update the per-service ``metadata_retention`` config block."""
     from backend.core import metadata as _mdb
-    from backend.core.metadata import DEFAULT_METADATA_RETENTION, is_ingested_files_dedup_active
+    from backend.core.metadata import DEFAULT_METADATA_RETENTION
     from backend.utils.router_utils import load_service_config, mutate_service_config
 
     service_id = source["name"]
@@ -57,13 +57,9 @@ def update_metadata_retention(
                 v = 0
             updates[key] = max(0, v)
 
-    dedup_active = is_ingested_files_dedup_active(service_id)
-
     def _apply(cfg: dict[str, Any]) -> None:
         merged = dict(cfg.get("metadata_retention") or {})
         merged.update(updates)
-        if not dedup_active and int(merged.get("ingested_files_days") or 0) > 0:
-            merged["ingested_files_days"] = 0
         cfg["metadata_retention"] = merged
 
     current = mutate_service_config(service_id, _apply)["metadata_retention"]
@@ -91,7 +87,6 @@ def metadata_storage(source: dict[str, Any] = Depends(get_source)) -> MetadataSt
     from backend.core.metadata import (
         DEFAULT_METADATA_RETENTION,
         get_metadata_storage_stats,
-        is_ingested_files_dedup_active,
     )
 
     service_id = source["name"]
@@ -102,11 +97,9 @@ def metadata_storage(source: dict[str, Any] = Depends(get_source)) -> MetadataSt
     stats = get_metadata_storage_stats(service_id)
     cfg = svcconfig.load_config(service_id) or {}
     retention = {**DEFAULT_METADATA_RETENTION, **(cfg.get("metadata_retention") or {})}
-    ingested_files_locked = not is_ingested_files_dedup_active(service_id)
     resp = MetadataStorageResponse(
         **stats,
         retention=MetadataRetentionValues(**retention),
-        ingested_files_locked=ingested_files_locked,
     )
     if use_cache:
         _METADATA_STORAGE_CACHE.set(service_id, resp)

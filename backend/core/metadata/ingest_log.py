@@ -1,9 +1,8 @@
 """Ingested-files tracking + dedup + activity reporting in the metadata Postgres database.
 
-Covers the ``ingested_files``, ``ingested_files_summary``, ``ingest_in_flight``,
-and ``local_compacted_files`` tables. Also exposes the helpers powering the
-log-accounting / log-activity dashboards which read from these tables and
-join against ``usage_log`` (for the unbackfilled-edge-files sweep).
+Covers the ``ingested_files`` and ``ingested_files_summary`` tables. Also exposes the
+helpers powering the log-accounting / log-activity dashboards which read from these
+tables and join against ``usage_log`` (for the unbackfilled-edge-files sweep).
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ from backend.core.metadata.quarantine_evidence import (
     _service_locks_guard,
     _unlink_evidence,
     capture_evidence,
-    clear_in_flight,
     count_quarantine_evidence,
     delete_quarantine_evidence,
     get_node_count_avg,
@@ -48,11 +46,9 @@ from backend.core.metadata.quarantine_evidence import (
     get_rum_beacons_avg_per_day,
     get_rum_beacons_by_date,
     insert_quarantine_evidence,
-    list_in_flight,
     list_quarantine_evidence,
     purge_evidence,
     read_evidence,
-    record_in_flight,
 )
 from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import atomic_write_bytes
@@ -211,51 +207,6 @@ def _query_ingested_files_aggregate(con: Any, service_id: str, table_name: str |
     }
 
 
-def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
-    """One-time SQL aggregate to seed ``ingested_files_summary`` from existing rows.
-
-    Pays the full ~4 s scan ONCE per service per app lifetime so subsequent
-    ``get_ingested_files_status_summary`` calls are O(1) lookups against the
-    rollup row. Called from the summary getter when the rollup is missing.
-    """
-    summary = _query_ingested_files_aggregate(con, service_id, table_name="logs")
-    con.execute(
-        "INSERT INTO ingested_files_summary AS summary "
-        "(source_name, file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_name) DO UPDATE SET "
-        "file_count = excluded.file_count, total_rows = excluded.total_rows, total_bytes = excluded.total_bytes, "
-        "count_with_bytes = excluded.count_with_bytes, latest_file_name = excluded.latest_file_name, "
-        "last_ingested = excluded.last_ingested",
-        (
-            service_id,
-            summary["file_count"],
-            summary["total_rows"],
-            summary["total_bytes"],
-            summary["count_with_bytes"],
-            summary["latest_file_name"],
-            summary["last_ingested"],
-        ),
-    )
-    con.commit()
-    return summary
-
-
-def recompute_ingested_files_summary(con: Any, service_id: str) -> dict:
-    """Recompute the ``ingested_files_summary`` rollup from the current table.
-
-    Public entry point for callers that mutate ``ingested_files`` *outside* of
-    ``insert_ingested_files`` and must keep the rollup honest. The summary is
-    otherwise maintained as an incremental delta (incremented on ingest) and
-    has no decrement path, so a bulk ``DELETE`` — notably the retention trim in
-    ``cleanup_metadata`` — would leave it over-counting (cumulative-ever)
-    forever. Callers pass the same connection they ran the DELETE on so the
-    overwrite lands in the same per-service writer.
-
-    Delegates to the full-aggregate upsert used to seed a missing rollup.
-    """
-    return _bootstrap_ingested_files_summary(con, service_id)
-
-
 def get_ingested_files_status_summary(service_id: str, table_name: str = "logs") -> dict:
     """O(1) rollup read for ``get_sync_status`` header fields.
 
@@ -279,7 +230,7 @@ def get_ingested_files_status_summary(service_id: str, table_name: str = "logs")
         (service_id,),
     ).fetchone()
     if row is None:
-        return _bootstrap_ingested_files_summary(con, service_id)
+        return _query_ingested_files_aggregate(con, service_id, table_name="logs")
 
     return {
         "file_count": row["file_count"] or 0,
@@ -573,16 +524,6 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
         tx_ctx = con.transaction() if hasattr(con, "transaction") else con
         with tx_ctx:
             if table_name == "logs":
-                # Bootstrap the rollup if missing — without this, the delta UPSERT below
-                # would seed the rollup with only THIS batch's counts when ingested_files
-                # already had a million rows (first insert after upgrade on a populated
-                # service).
-                if (
-                    con.execute("SELECT 1 FROM ingested_files_summary WHERE source_name = ?", (service_id,)).fetchone()
-                    is None
-                ):
-                    _bootstrap_ingested_files_summary(con, service_id)
-
                 # Snapshot existing values for rows that already exist, so we can compute
                 # accurate (new - old) deltas for the rollup even when this batch upserts.
                 existing: dict[str, tuple[int | None, int | None]] = {}
@@ -759,7 +700,6 @@ __all__ = [
     "_QUARANTINE_EVIDENCE_COLUMNS",
     "_RUM_TABLES_SQL",
     "_advisory_key",
-    "_bootstrap_ingested_files_summary",
     "_capture_evidence_locked",
     "_evidence_dir",
     "_evidence_path",
@@ -772,7 +712,6 @@ __all__ = [
     "_unlink_evidence",
     "atomic_write_bytes",
     "capture_evidence",
-    "clear_in_flight",
     "config",
     "count_quarantine_evidence",
     "delete_quarantine_evidence",
@@ -793,15 +732,12 @@ __all__ = [
     "get_storage_stats_window",
     "insert_ingested_files",
     "insert_quarantine_evidence",
-    "list_in_flight",
     "list_ingested_files",
     "list_quarantine_evidence",
     "list_unbackfilled_fastly_edge_files",
     "pg_connection",
     "purge_evidence",
     "read_evidence",
-    "recompute_ingested_files_summary",
-    "record_in_flight",
 ]
 
 install_shim_module(__name__, (_quarantine_evidence,), bidirectional_seed=True)

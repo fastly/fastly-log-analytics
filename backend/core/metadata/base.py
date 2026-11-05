@@ -147,9 +147,7 @@ from backend.core.metadata.pg_schema import (
     ensure_pg_schema,
     get_metadata_storage_stats,
     invalidate_storage_stats_cache,
-    is_ingested_files_dedup_active,
     pg_schema_statements,
-    recompute_ingested_files_summary,
     reset_ensure_flag_for_tests,
 )
 from backend.core.metadata.state_sync import (
@@ -277,7 +275,6 @@ __all__ = [
     "get_scoring_matrix_key",
     "get_source_for_service",
     "invalidate_storage_stats_cache",
-    "is_ingested_files_dedup_active",
     "is_postgres",
     "json",
     "list_alerts",
@@ -291,7 +288,6 @@ __all__ = [
     "pg_schema_statements",
     "psycopg",
     "publish_matrix_to_fos",
-    "recompute_ingested_files_summary",
     "record_audit",
     "release_pg_thread_connection",
     "release_thread_connection",

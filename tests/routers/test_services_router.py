@@ -35,7 +35,6 @@ _BASE_CFG = {
     "log_period": 60,
     "provisioning": {
         "cron_sync": {"enabled": True, "interval_mins": 1},
-        "cron_compact": {"enabled": True, "log_retention_days": 30},
     },
 }
 
@@ -553,7 +552,7 @@ def _post(body: dict, stored_cron_sync: dict) -> dict:
         "service_id": "svc1",
         "name": "Test Service",
         "log_period": 60,
-        "provisioning": {"cron_sync": dict(stored_cron_sync), "cron_compact": {"enabled": True}},
+        "provisioning": {"cron_sync": dict(stored_cron_sync)},
     }
     with _mutate_cfg_ctx(cfg) as saved:
         resp = TestClient(app).post("/api/services/svc1/cron-settings", json=body)
@@ -1630,14 +1629,13 @@ def test_cron_settings_sse_and_clear_time_range(client, tmp_path, monkeypatch):
             f"/api/services/{MOCK_SERVICE_ID}/cron-settings",
             json={
                 "cron_sync": {"enabled": True, "interval_mins": 5, "evil_arbitrary_key": "should-be-dropped"},
-                "cron_compact": {"enabled": True, "log_retention_days": 30},
                 "cron_ngwaf": {"enabled": False, "interval_mins": 10},
             },
         )
     assert resp.status_code == 200 and "done" in resp.text
     prov = config.load_config(MOCK_SERVICE_ID)["provisioning"]
     assert prov["cron_sync"] == {"enabled": True, "interval_mins": 5}
-    assert prov["cron_compact"]["log_retention_days"] == 30 and prov["cron_ngwaf"]["enabled"] is False
+    assert prov["cron_ngwaf"]["enabled"] is False
 
     with (
         patch("backend.provision._sync_crontab", side_effect=CronLeaseHeldError("scheduler busy")),

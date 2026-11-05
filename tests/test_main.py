@@ -124,13 +124,12 @@ def _run_init_service(
     with (
         patch("backend.core.metadata.reap_running_cron_runs", **reap_kw) as mock_reap,
         patch("backend.core.fos_client.get_source_for_service", **src_kw) as mock_get_src,
-        patch("backend.core.fos_client.refresh_config_status") as mock_refresh,
         patch("backend.routers.admin.compute_sync_status_cached") as mock_sync_status,
         patch("backend.core.metadata.usage_log.get_con"),
         patch("backend.main.logger.info") as mock_log_info,
     ):
         _initialize_service(cfg)
-    return mock_reap, mock_get_src, mock_refresh, mock_sync_status, mock_log_info
+    return mock_reap, mock_get_src, mock_sync_status, mock_log_info
 
 
 # ── _initialize_service ──────────────────────────────────────────────────────
@@ -138,7 +137,7 @@ def _run_init_service(
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_skips_when_no_service_id():
-    mock_reap, mock_get_src, _, _, _ = _run_init_service({})
+    mock_reap, mock_get_src, _, _ = _run_init_service({})
     mock_reap.assert_not_called()
     mock_get_src.assert_not_called()
 
@@ -146,32 +145,29 @@ def test_initialize_service_skips_when_no_service_id():
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_reaps_orphans_and_refreshes_status():
     fake_src = {"name": "svc-1", "service_id": "svc-1"}
-    mock_reap, _, mock_refresh, mock_sync_status, _ = _run_init_service(
-        {"service_id": "svc-1"}, reap_ret=3, src_ret=fake_src
-    )
+    mock_reap, _, mock_sync_status, _ = _run_init_service({"service_id": "svc-1"}, reap_ret=3, src_ret=fake_src)
     mock_reap.assert_called_once_with("svc-1")
-    mock_refresh.assert_called_once_with("svc-1")
     mock_sync_status.assert_called_once_with("svc-1")
 
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_logs_reaped_count_only_when_nonzero():
-    _, _, _, _, mock_log_info = _run_init_service({"service_id": "svc-x"}, reap_ret=0, src_ret=None)
+    _, _, _, mock_log_info = _run_init_service({"service_id": "svc-x"}, reap_ret=0, src_ret=None)
     assert [c for c in mock_log_info.call_args_list if "reaped" in str(c)] == []
 
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_tolerates_reap_failure():
-    _, _, mock_refresh, _, _ = _run_init_service(
+    _, _, mock_sync_status, _ = _run_init_service(
         {"service_id": "svc-1"}, reap_ret=RuntimeError("locked"), src_ret={"name": "svc-1"}
     )
-    mock_refresh.assert_called_once_with("svc-1")
+    mock_sync_status.assert_called_once_with("svc-1")
 
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_initialize_service_skips_status_refresh_when_no_source():
-    _, _, mock_refresh, _, _ = _run_init_service({"service_id": "svc-1"}, reap_ret=0, src_ret=None)
-    mock_refresh.assert_not_called()
+    _, _, mock_sync_status, _ = _run_init_service({"service_id": "svc-1"}, reap_ret=0, src_ret=None)
+    mock_sync_status.assert_not_called()
 
 
 @pytest.mark.usefixtures("_clean_registry")

@@ -54,7 +54,7 @@ _SQL_CALL = re.compile(
     r"[\"'`]\s*(SELECT|INSERT INTO|DELETE FROM|UPDATE\s+\w+\s+SET|CREATE\s+(TEMP\s+)?TABLE|WITH\s+\w+\s+AS)\b"
 )
 _INLINE_SQL_EXEMPT_ROUTERS = {
-    "admin/compaction.py",
+    "admin/metadata_storage.py",
     "admin/health.py",
     "admin/log_accounting.py",
     "alerts.py",

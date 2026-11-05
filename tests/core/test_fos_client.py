@@ -413,12 +413,11 @@ def _fake_src(service_id="svc-perf"):
     }
 
 
-def _minimal_cfg(service_id="svc-perf", commit_interval_mins=5):
+def _minimal_cfg(service_id="svc-perf"):
     return {
         "service_id": service_id,
         "log_period": 60,
-        "commit_interval_mins": commit_interval_mins,
-        "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": False}},
+        "provisioning": {"cron_sync": {"enabled": True}},
     }
 
 

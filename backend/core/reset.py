@@ -98,7 +98,6 @@ def reset_service_logs(
     from backend.core import fos_client as _db
     from backend.core import metadata as metadata_db
     from backend.core.fos_client import _delete_objects_robust
-    from backend.core.metadata.base import is_ingested_files_dedup_active
 
     if not (source := _db.get_source_for_service(service_id)):
         raise ValueError(f"No service found with id {service_id!r}")
@@ -130,15 +129,6 @@ def reset_service_logs(
                     reload_scheduler()
                 except Exception as e:
                     logger.warning("reset_service_logs(%s): scheduler reload (pause) failed: %s", service_id, e)
-        if delete_raw_logs and not is_ingested_files_dedup_active(service_id):
-            yield {
-                "type": "status",
-                "message": (
-                    "Warning: this source keeps raw logs after ingest (delete_after=False). "
-                    "Deleting raw cloud logs now means the next full sync has no dedup record "
-                    "left and will re-ingest this service's ENTIRE request/RUM history."
-                ),
-            }
 
         if os.path.exists(cache_dir := _db._cache_dir(source)):
             removed = yield from _remove_tree_with_progress(cache_dir)
@@ -179,7 +169,6 @@ def reset_service_logs(
         con = metadata_db.get_con(service_id)
         for sql in (
             "DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'",
-            "DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'",
             "DELETE FROM quarantined_files WHERE source_name = ?",
             "DELETE FROM ingested_files_summary WHERE source_name = ?",
         ):
@@ -189,8 +178,6 @@ def reset_service_logs(
             (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
         )
         con.commit()
-        if con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
-            metadata_db.recompute_ingested_files_summary(con, service_id)
         if not preserve_usage_history:
             metadata_db.clear_usage_log(service_id)
             yield {"type": "status", "message": "Cleared usage-log (Class A/B) history."}
@@ -308,19 +295,16 @@ def reset_service_rum(
 
         yield {"type": "status", "message": "Truncating local ingestion indexes for RUM..."}
         con = metadata_db.get_con(service_id)
-        for tbl_name in ("ingested_files", "ingest_in_flight"):
-            con.execute(
-                f"DELETE FROM {tbl_name} WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
-                (service_id,),
-            )
+        con.execute(
+            "DELETE FROM ingested_files WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
+            (service_id,),
+        )
         con.execute(
             "DELETE FROM ingest_ledger WHERE service_id = ? AND (object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)",
             (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
         )
         con.commit()
-        if con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
-            metadata_db.recompute_ingested_files_summary(con, service_id)
-        else:
+        if not con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
             con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
             con.commit()
         svcconfig.update_status(service_id, {"rum_total_events": 0, "rum_vitals_count": 0, "rum_errors_count": 0})

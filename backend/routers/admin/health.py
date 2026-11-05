@@ -169,14 +169,12 @@ def _sample_metadata_storage(service_id: str | None) -> dict[str, Any] | None:
     from backend.core.metadata import (
         DEFAULT_METADATA_RETENTION,
         get_metadata_storage_stats,
-        is_ingested_files_dedup_active,
     )
 
     stats = get_metadata_storage_stats(service_id)
     cfg = svcconfig.load_config(service_id) or {}
     retention = {**DEFAULT_METADATA_RETENTION, **(cfg.get("metadata_retention") or {})}
-    ingested_files_locked = not is_ingested_files_dedup_active(service_id)
-    return {**stats, "retention": retention, "ingested_files_locked": ingested_files_locked}
+    return {**stats, "retention": retention}
 
 
 def _sample_system_jobs() -> dict[str, Any]:

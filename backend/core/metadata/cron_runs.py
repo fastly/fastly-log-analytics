@@ -230,7 +230,6 @@ def log_cron_run(
     rows_ingested: int = 0,
     corrupt_rows: int = 0,
     parquet_files_created: int = 0,
-    parquet_files_optimized: int = 0,
     parquet_keys: list | None = None,
     outcome_counters: dict[str, int] | None = None,
     summary: str | None = None,
@@ -301,7 +300,7 @@ def log_cron_run(
                     """UPDATE cron_runs SET
                         duration_s = ?, status = ?, error_message = COALESCE(error_message, ?),
                         files_downloaded = ?, files_deleted_fos = ?, rows_ingested = ?, corrupt_rows = ?,
-                        parquet_files_created = ?, parquet_files_optimized = ?,
+                        parquet_files_created = ?,
                         parquet_keys = ?, outcome_counters = ?, summary = ?, log_output = ?
                        WHERE id = ? AND service_id = ?""",
                     (
@@ -313,7 +312,6 @@ def log_cron_run(
                         final_rows_ingested,
                         final_corrupt_rows,
                         parquet_files_created,
-                        parquet_files_optimized,
                         keys_json,
                         json.dumps(persisted_counters or {}),
                         summary,
@@ -326,8 +324,8 @@ def log_cron_run(
                 con.execute(
                     """INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, error_message,
                         files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
-                        parquet_files_created, parquet_files_optimized, parquet_keys, outcome_counters, summary, log_output)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        parquet_files_created, parquet_keys, outcome_counters, summary, log_output)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         service_id,
                         task,
@@ -340,7 +338,6 @@ def log_cron_run(
                         final_rows_ingested,
                         final_corrupt_rows,
                         parquet_files_created,
-                        parquet_files_optimized,
                         keys_json,
                         json.dumps(outcome_counters or {}),
                         summary,
@@ -895,7 +892,7 @@ def get_cron_runs(
     rows = con.execute(
         f"""SELECT id, task, started_at, duration_s, status, error_message,
                    files_downloaded, files_deleted_fos, rows_ingested, corrupt_rows,
-                   parquet_files_created, parquet_files_optimized, parquet_keys, summary
+                   parquet_files_created, parquet_keys, summary
             FROM cron_runs {where_sql}
             ORDER BY {sort_col_safe} {sort_dir_safe}
             LIMIT ? OFFSET ?""",

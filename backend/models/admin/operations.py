@@ -114,7 +114,6 @@ class MetadataStorageResponse(PassthroughModel):
     db_bytes: int | None = None
     db_path: str | None = None
     retention: MetadataRetentionValues | None = None
-    ingested_files_locked: bool | None = None
 
 
 class MetadataRetentionUpdate(PassthroughModel):
@@ -152,10 +151,8 @@ class _PrefillRatesBase(_BillingRatesMixin, BaseResponse):
     estimated_bytes_per_line: int | None = None
     data_days: int = 0
     log_period_seconds: int | None = None
-    commit_interval_mins: int = 5
     sample_rate: int = 100
     edge_only: bool = False
-    compaction_enabled: bool = True
     delete_after: bool = True
     log_retention_days: int = 30
     rum_retention_days: int = 30

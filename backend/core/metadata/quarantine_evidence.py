@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import threading
@@ -422,63 +421,6 @@ def purge_evidence(service_id: str, item_id: int | None = None) -> dict[str, int
                 raise OSError(f"could not delete quarantine evidence {item['id']}")
         purged = delete_quarantine_evidence(service_id, [int(item["id"]) for item in items])
         return {"purged": purged}
-
-
-def record_in_flight(
-    service_id: str,
-    buffer_filename: str,
-    rows: list[tuple[str, int, int | None]],
-    table_name: str = "logs",
-) -> None:
-    """Persist the (file_name, row_count, file_size) tuples that BELONG to a
-    buffer Parquet, BEFORE the Parquet is written.
-
-    On crash recovery, ``list_in_flight`` returns these tuples so the sweep
-    can promote them into ``ingested_files`` without re-parsing the buffer.
-    Upsert semantics: a re-run of the same chunk (same deterministic
-    buffer filename) overwrites the prior manifest — never raises.
-    """
-    con = get_con(service_id)
-    con.execute(
-        """INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json, started_at, table_name)
-           VALUES (?, ?, ?, datetime('now'), ?)
-           ON CONFLICT(buffer_filename, table_name) DO UPDATE SET
-               source_name = excluded.source_name,
-               files_json = excluded.files_json,
-               started_at = excluded.started_at""",
-        (buffer_filename, service_id, json.dumps(rows), table_name),
-    )
-    con.commit()
-
-
-def clear_in_flight(service_id: str, buffer_filename: str, table_name: str = "logs") -> None:
-    """Drop the in_flight row for ``buffer_filename`` after its files have
-    been committed to ``ingested_files``. Idempotent."""
-    con = get_con(service_id)
-    con.execute(
-        "DELETE FROM ingest_in_flight WHERE source_name = ? AND buffer_filename = ? AND table_name = ?",
-        (service_id, buffer_filename, table_name),
-    )
-    con.commit()
-
-
-def list_in_flight(service_id: str, table_name: str = "logs") -> list[tuple[str, list[tuple[str, int, int | None]]]]:
-    """Return [(buffer_filename, [(file_name, row_count, file_size), ...]), ...]
-    for every pending row belonging to this service. Used by the crash-
-    recovery sweep at the start of every ingest tick."""
-    con = get_con(service_id)
-    rows = con.execute(
-        "SELECT buffer_filename, files_json FROM ingest_in_flight WHERE source_name = ? AND table_name = ?",
-        (service_id, table_name),
-    ).fetchall()
-    out: list[tuple[str, list[tuple[str, int, int | None]]]] = []
-    for r in rows:
-        try:
-            tuples = [tuple(t) for t in json.loads(r["files_json"] or "[]")]
-        except (json.JSONDecodeError, TypeError):
-            tuples = []
-        out.append((r["buffer_filename"], tuples))
-    return out
 
 
 _RUM_TABLES_SQL = "table_name IN ('client_vitals', 'client_errors')"

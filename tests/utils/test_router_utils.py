@@ -1184,8 +1184,8 @@ def test_blocked_schemas_rejected(con, sql, blocked_schema):
     "sql",
     [
         "ATTACH '/etc/passwd' AS x",
-        "INSTALL httpfs",
-        "LOAD httpfs",
+        "OPTIMIZE TABLE logs FINAL",
+        "TRUNCATE TABLE logs",
         "PRAGMA enable_external_access",
         "UPDATE logs SET x = 1",
         "INSERT INTO logs VALUES (1)",

@@ -49,7 +49,6 @@ def stub_sync_env(monkeypatch, stub_source, stub_cron_envelope):
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
     monkeypatch.setattr("backend.config.load_config", lambda sid: _cfg(True))
-    monkeypatch.setattr("backend.cron.jobs.sync.refresh_config_status", MagicMock())
     monkeypatch.setattr("backend.cron.jobs.sync.invalidate_service_cache", MagicMock())
     monkeypatch.setattr("backend.cron.jobs.sync.backfill_fastly_edge_writes", MagicMock(return_value=0))
     monkeypatch.setattr("backend.cron.jobs.sync.reconcile_fastly_stats", MagicMock(return_value=0))
@@ -138,11 +137,9 @@ def test_log_discovery_succeeds_without_celery_broker_url(monkeypatch, stub_sync
 def test_log_discovery_discovers_files_and_refreshes_status(monkeypatch, stub_sync_env):
     monkeypatch.setattr("backend.cron.jobs.sync.discover_prefix", lambda sid, **kw: 2)
     monkeypatch.setattr("backend.cron.jobs.sync._claim_heavy_refresh", lambda sid: True)
-    refresh = MagicMock()
     invalidate = MagicMock()
     publish = MagicMock()
     finalize = MagicMock()
-    monkeypatch.setattr("backend.cron.jobs.sync.refresh_config_status", refresh)
     monkeypatch.setattr("backend.cron.jobs.sync.invalidate_service_cache", invalidate)
     monkeypatch.setattr("backend.cron.jobs._common.publish_sync_status_safe", publish)
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize)
@@ -154,7 +151,6 @@ def test_log_discovery_discovers_files_and_refreshes_status(monkeypatch, stub_sy
     assert args[3] == "success"
     assert kwargs["files_downloaded"] == 10
     assert "Discovered 10 new file(s)" in kwargs["summary"]
-    assert refresh.call_count == 2
     invalidate.assert_called_once_with("fos-test-svc")
     publish.assert_called_once_with("svc-1", "scheduler")
     finalize.assert_called_once()

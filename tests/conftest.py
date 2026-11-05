@@ -322,7 +322,6 @@ _PER_TEST_RESET_TABLES = (
     "cloud_copy_deletions",
     "metric_snapshots",
     "slow_queries",
-    "ingest_in_flight",
     "ngwaf_bots",
     "ngwaf_sync_state",
     "rdns",

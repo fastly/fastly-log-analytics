@@ -99,11 +99,11 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
             if not svcconfig.load_config(service_id):
                 raise ValueError("Service not found")
             yield _sse("progress", current=1, total=4)
-            yield _sse("status", "Updating sync and compaction schedules...")
+            yield _sse("status", "Updating sync and NGWAF schedules...")
 
             def _apply(cfg: dict) -> None:
                 prov = cfg.setdefault("provisioning", {})
-                for cron_key in ("cron_sync", "cron_compact", "cron_ngwaf"):
+                for cron_key in ("cron_sync", "cron_ngwaf"):
                     incoming = body_payload.get(cron_key)
                     if incoming is None:
                         continue
