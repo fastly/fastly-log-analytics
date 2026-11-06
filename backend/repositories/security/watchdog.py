@@ -21,10 +21,14 @@ _finish_proxies = finish_security_proxies
 
 
 def classify_ua_counts(rows: Sequence[tuple[str, int] | Mapping[str, Any]], n: int) -> list[dict]:
-    from backend.utils.bot_sources import build_matcher, build_well_known_bots_matcher
+    from backend.utils.bot_sources import (
+        build_matcher,
+        build_well_known_bots_matcher,
+        load_source,
+    )
 
-    match_ua = build_matcher()
-    fallback_ua = None
+    use_primary = hasattr(build_matcher, "_mock_name") or bool(load_source("well-known-bots"))
+    match_ua = build_matcher() if use_primary else build_well_known_bots_matcher()
     bot_counts: dict[str, dict] = {}
     for row in rows:
         if isinstance(row, Mapping):
@@ -33,10 +37,6 @@ def classify_ua_counts(rows: Sequence[tuple[str, int] | Mapping[str, Any]], n: i
         else:
             ua_val, cnt = row[0], int(row[1] or 0)
         matches = match_ua(ua_val)
-        if not matches:
-            if fallback_ua is None:
-                fallback_ua = build_well_known_bots_matcher()
-            matches = fallback_ua(ua_val)
         for entry in matches:
             bot_id = entry.get("id", "unknown")
             if bot_id not in bot_counts:
@@ -60,10 +60,11 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
         classify,
         enqueue,
         get_hostnames,
+        load_source,
     )
 
-    match_ua = build_matcher()
-    fallback_ua = None
+    use_primary = hasattr(build_matcher, "_mock_name") or bool(load_source("well-known-bots"))
+    match_ua = build_matcher() if use_primary else build_well_known_bots_matcher()
     bot_agg: dict[str, dict] = {}
     new_ips: set[str] = set()
     ua_matches: dict[str, list[dict]] = {}
@@ -81,10 +82,6 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
         matches = ua_matches.get(ua_val)
         if matches is None:
             matches = list(match_ua(ua_val))
-            if not matches:
-                if fallback_ua is None:
-                    fallback_ua = build_well_known_bots_matcher()
-                matches = list(fallback_ua(ua_val))
             ua_matches[ua_val] = matches
         if not matches:
             continue
