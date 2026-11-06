@@ -21,6 +21,7 @@ import {
 import { useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useSSE'
 import { client, queryKeys, unwrapClient } from '@/lib/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
   groupInsightsBySection,
   historyHoursFromExtents,
@@ -123,6 +124,10 @@ function InsightsBody({
     if (!list) return []
     return list.filter((i) => i.available !== false)
   }, [availability])
+  const unsupportedInsights = availability?.unavailable?.filter(
+    (entry) => 'reason' in entry && entry.reason === 'cloud_detector_unsupported',
+  ) ?? []
+  const missingFieldCount = (availability?.unavailable?.length ?? 0) - unsupportedInsights.length
 
   // Group both real cards and skeleton entries by section, in the same fixed
   // order, so the loading tab bar mirrors the loaded tab bar (CLS). Skeleton
@@ -199,6 +204,12 @@ function InsightsBody({
           activeTab={activeTab}
           onTabChange={setActiveTab}
           isLoading={false}
+          emptyMessage={isCloudMode() ? ({ section }) => {
+            const supported = availableInsights.some((entry) => section.key === 'all' || entry.category === section.key)
+            return supported && statusFilter !== 'all'
+              ? { title: 'No insights match this status', description: 'Change the status filter to see the evaluated detectors.' }
+              : { title: 'No detectors available in this category', description: 'No analysis was performed here. Check the Cloud algorithm and log-field availability below.' }
+          } : undefined}
           renderCards={({ cards }) => (
             <div
               className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
@@ -241,14 +252,29 @@ function InsightsBody({
             </AlertTitle>
             <AlertDescription className="text-xs text-muted-foreground mt-1 flex flex-wrap items-center justify-between gap-2">
               <span>
-                {availability.unavailable.length} {availability.unavailable.length === 1 ? 'detector requires' : 'detectors require'} optional log fields to be enabled. Check service configuration.
+                {isCloudMode() ? (
+                  <>
+                    Cloud evaluates {availableInsights.length} detectors using local Parquet data.
+                    {unsupportedInsights.length > 0 && ` ${unsupportedInsights.length} detector algorithms are not implemented in Cloud; enabling log fields will not enable them.`}
+                    {missingFieldCount > 0 && ` ${missingFieldCount} additional detectors need log fields that are missing from the loaded data.`}
+                    {' '}Detectors without enough baseline history are marked as not evaluated, not clean.
+                  </>
+                ) : (
+                  <>{availability.unavailable.length} {availability.unavailable.length === 1 ? 'detector requires' : 'detectors require'} optional log fields to be enabled. Check service configuration.</>
+                )}
               </span>
-              <Link
+              {(!isCloudMode() || missingFieldCount > 0) && <Link
                 href={activeServiceId ? `/admin?service=${activeServiceId}` : '/admin'}
                 className="inline-flex items-center text-xs font-semibold text-primary underline underline-offset-4 hover:text-primary/80"
               >
                 Configure Service Log Fields &rarr;
-              </Link>
+              </Link>}
+              {unsupportedInsights.length > 0 && (
+                <details className="w-full">
+                  <summary className="cursor-pointer">Unavailable Cloud algorithms</summary>
+                  <p className="mt-1">{unsupportedInsights.map((entry) => entry.title).join(', ')}</p>
+                </details>
+              )}
             </AlertDescription>
           </Alert>
         )}
@@ -293,6 +319,7 @@ export function InsightsClient({
 
   const [statusFilter, setStatusFilter] = useQueryState('status', parseAsString.withDefault('all'))
   const [isRescanning, setIsRescanning] = useState(false)
+  const [rescanError, setRescanError] = useState<string | null>(null)
   const { relative, full, abbr } = useDateFormat()
 
   const queryClient = useQueryClient()
@@ -341,6 +368,7 @@ export function InsightsClient({
   const handleRescan = async () => {
     if (!activeServiceId || isRescanning) return
     setIsRescanning(true)
+    setRescanError(null)
     const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
     try {
       const data = await unwrapClient(client.POST('/api/insights', {
@@ -363,7 +391,7 @@ export function InsightsClient({
         queryKey: ['insights', activeServiceId],
       })
     } catch (err) {
-      console.error('Failed to re-scan insights:', err)
+      setRescanError(err instanceof Error ? err.message : 'An unknown error occurred')
     } finally {
       setIsRescanning(false)
     }
@@ -392,17 +420,26 @@ export function InsightsClient({
       headerActions={headerControls}
     >
       {(ctx) => (
-        <InsightsBody
-          activeServiceId={ctx.activeServiceId}
-          windowHours={appliedWindowHours}
-          baselineHours={appliedBaselineHours}
-          statusFilter={statusFilter}
-          filterPayload={ctx.filterPayload}
-          initialTab={initialTab}
-          relative={relative}
-          full={full}
-          abbr={abbr}
-        />
+        <>
+          {rescanError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Rescan failed</AlertTitle>
+              <AlertDescription>{rescanError}</AlertDescription>
+            </Alert>
+          )}
+          <InsightsBody
+            activeServiceId={ctx.activeServiceId}
+            windowHours={appliedWindowHours}
+            baselineHours={appliedBaselineHours}
+            statusFilter={statusFilter}
+            filterPayload={ctx.filterPayload}
+            initialTab={initialTab}
+            relative={relative}
+            full={full}
+            abbr={abbr}
+          />
+        </>
       )}
     </ReportLayout>
   )

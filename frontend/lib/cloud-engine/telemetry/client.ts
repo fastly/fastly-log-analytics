@@ -1,5 +1,7 @@
 import { getPageLoadId } from "@/lib/api";
 import { BaseWorkerRpcClient } from "../worker-rpc";
+import { beginCloudLoading } from "../loading-progress";
+import type { RunProgress } from "../dashboard/engine";
 import {
   readLogs as readLogsInline,
   type LogResult,
@@ -12,12 +14,13 @@ import { browserOpsSource } from "./sources";
 
 type WorkerRequest = {
   id: number;
-  options: Omit<ReadLogsOptions, "signal">;
+  options: Omit<ReadLogsOptions, "signal" | "onProgress">;
   pageLoadId: string | null;
 };
 
 type WorkerMessage =
   | { id: number; type: "result"; result: LogResult }
+  | { id: number; type: "progress"; progress: RunProgress }
   | { id: number; type: "error"; message: string };
 
 class OpsWorkerClient extends BaseWorkerRpcClient<
@@ -25,6 +28,7 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
   WorkerMessage
 > {
   private readonly resolvers = new Map<number, (result: LogResult) => void>();
+  private readonly progressCallbacks = new Map<number, (progress: RunProgress) => void>();
 
   constructor() {
     super(
@@ -36,6 +40,10 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
   }
 
   private handleMessage = (msg: WorkerMessage) => {
+    if (msg.type === "progress") {
+      this.progressCallbacks.get(msg.id)?.(msg.progress);
+      return;
+    }
     if (msg.type === "result") {
       const resolve = this.resolvers.get(msg.id);
       if (this.finishJob(msg.id)) {
@@ -44,7 +52,25 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
     }
   };
 
-  run(options: ReadLogsOptions): Promise<LogResult> {
+  async run(options: ReadLogsOptions): Promise<LogResult> {
+    const loading = beginCloudLoading("listing");
+    let success = false;
+    try {
+      const result = await this.runWithProgress({
+        ...options,
+        onProgress: (progress) => {
+          loading.update({ stage: "files", progress });
+          options.onProgress?.(progress);
+        },
+      });
+      success = true;
+      return result;
+    } finally {
+      loading.finish(success);
+    }
+  }
+
+  private runWithProgress(options: ReadLogsOptions): Promise<LogResult> {
     if (options.signal?.aborted) {
       return Promise.reject(new DOMException("Aborted", "AbortError"));
     }
@@ -60,11 +86,13 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
     }
 
     const id = this.allocateId();
-    const { signal, ...serializable } = options;
+    const { signal, onProgress, ...serializable } = options;
     return new Promise<LogResult>((resolve, reject) => {
       this.resolvers.set(id, resolve);
+      if (onProgress) this.progressCallbacks.set(id, onProgress);
       this.registerJob(id, worker, signal, reject, () => {
         this.resolvers.delete(id);
+        this.progressCallbacks.delete(id);
       });
       const req: WorkerRequest = {
         id,

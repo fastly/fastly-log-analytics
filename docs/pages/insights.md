@@ -38,6 +38,22 @@ Definitions (id, category, title, `required_fields`, `required_groups`, ClickHou
 - Every definition must declare an `InsightCategory` (`INSIGHT_DEFINITIONS`; registration without one fails validation at import). A new insight in an existing category needs no frontend change; a new category needs a tab entry in [`frontend/components/Insights/InsightTabsAndControls.tsx`](../../frontend/components/Insights/InsightTabsAndControls.tsx).
 - Set `required_groups=[]` when the gate should be only core fields — declaring a group grays the card out in previews even if it would run.
 
+## Cloud local analysis
+
+Cloud runs 22 of the 51 catalog detectors over downloaded request Parquet using browser-local DuckDB:
+
+- **Traffic:** all six traffic detectors.
+- **Edge:** `cache_collapse`, `cacheability_regression`, `cache_hit_cliff`, `city_latency_regressions`, `latency_regression`, `tail_latency`, `pop_latency_regression`.
+- **Origin:** `error_spikes`, `city_error_spikes`.
+- **Security:** `credential_enumeration`, `content_discovery`, `proxy_surge`.
+- **Network:** `asn_concentration`, `new_asn_traffic`, `asn_hosting_shift`, `http3_fallback`.
+
+The other 29 algorithms are explicitly unavailable (`cloud_detector_unsupported`), even when their fields exist. Supported detectors also require their actual loaded Parquet columns; a missing field produces `missing_fields`. Availability never assumes the entire catalog exists when schema discovery returns no columns. The page explains these two restrictions separately.
+
+The local scans share the selected filters and analysis bounds, including fractional-hour windows. Comparisons require at least `min(24, selected baseline hours)` of baseline history; insufficient history or an empty current window produces an informational **not evaluated** card, never a clean result. `content_discovery` and `tail_latency` only need current-window samples and can run without baseline history. Credential enumeration only counts authentication paths and scales baseline denials to the selected window duration.
+
+Cache-collapse drill-down reads actual local hit/miss/pass counts, timeline buckets and recent misses. Masked sessions omit original IPs from findings and drill-down evidence. Local query failures remain visible errors; unsupported algorithms never produce clean cards.
+
 ## Roles
 
 | Role | Access |

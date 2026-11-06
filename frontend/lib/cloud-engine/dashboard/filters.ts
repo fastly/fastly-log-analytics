@@ -1,5 +1,5 @@
 import { CARD_FIELDS, CARD_LABELS } from "./summaries";
-import { parseFilterToken } from "@/lib/urlFilter";
+import { parseFilterToken } from "@/lib/filterToken";
 
 export type FilterMode = "include" | "exclude";
 

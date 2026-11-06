@@ -229,7 +229,7 @@ export function useAnalystLogout(): { logout: () => Promise<void>; isLoggingOut:
     if (isLoggingOut) return
     setIsLoggingOut(true)
     try {
-      const { IS_CLOUD_MODE } = await import('@/lib/cloud-engine/adapter')
+      const { IS_CLOUD_MODE } = await import('@/lib/cloud-engine/mode')
       if (IS_CLOUD_MODE) {
         const [{ clearDashboardBrowserCaches }, { clearOpsCaches }] = await Promise.all([
           import('@/lib/cloud-engine/dashboard/sources'),

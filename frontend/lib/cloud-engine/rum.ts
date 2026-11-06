@@ -164,7 +164,7 @@ function parseEpochMs(val: string | number | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function buildRumWhere(params: RumQueryParams): string {
+export function buildRumWhere(params: RumQueryParams): string {
   const clauses: string[] = ["1=1"];
   const startMs = parseEpochMs(params.start_time);
   const endMs = parseEpochMs(params.end_time);
@@ -357,6 +357,8 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
       COALESCE(error_message, message, 'Unknown Error') AS message,
       COALESCE(filename, source, '') AS source,
       COUNT(*)::BIGINT AS count,
+      MIN(lineno)::BIGINT AS lineno,
+      MIN(colno)::BIGINT AS colno,
       COUNT(DISTINCT session_id)::BIGINT AS affected_sessions,
       MAX(ts_ms)::BIGINT AS last_seen_ms
     FROM client_errors
@@ -399,6 +401,8 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
     top_errors: topErrorRows.map((r) => ({
       message: String(r.message ?? "Unknown Error"),
       source: String(r.source ?? ""),
+      lineno: r.lineno == null ? null : Number(r.lineno),
+      colno: r.colno == null ? null : Number(r.colno),
       count: Number(r.count ?? 0),
       affected_sessions: Number(r.affected_sessions ?? 0),
       last_seen: r.last_seen_ms
@@ -424,11 +428,12 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       metric_value,
       COALESCE(page_url, url, path, '/') AS page_url,
       browser_name,
+      os_name,
       device_type,
       country,
       session_id
     FROM client_vitals
-    WHERE ts_ms > ${sinceMs}
+    WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params)}
     ORDER BY ts_ms DESC
     LIMIT ${limit}`,
     [],
@@ -442,11 +447,12 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       COALESCE(error_message, message) AS message,
       COALESCE(page_url, url, path, '/') AS page_url,
       browser_name,
+      os_name,
       device_type,
       country,
       session_id
     FROM client_errors
-    WHERE ts_ms > ${sinceMs}
+    WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params)}
     ORDER BY ts_ms DESC
     LIMIT ${limit}`,
     [],

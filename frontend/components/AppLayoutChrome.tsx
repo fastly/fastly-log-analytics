@@ -20,7 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useTimezoneStore, useSessionRoleStore, useServiceStore } from '@/stores/filterStore'
 import { useMounted, useUrlServiceSync, useIsAnalyst } from '@/hooks/useBootstrap'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 export function SrLiveRegion({ children }: { children: React.ReactNode }) {

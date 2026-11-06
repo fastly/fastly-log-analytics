@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useMutation } from '@tanstack/react-query'
 import { Activity, ChevronRight, Flag, Loader2 } from 'lucide-react'
 import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
@@ -77,7 +78,8 @@ export function FlagSessionPopover({
   const [open, setOpen] = React.useState(false)
   const [notes, setNotes] = React.useState('')
   const [error, setError] = React.useState('')
-  const disabled = !sid
+  const cloudMode = isCloudMode()
+  const disabled = !sid || cloudMode
 
   const submitMutation = useMutation({
     mutationFn: async (label: LabelValue) => {
@@ -130,11 +132,11 @@ export function FlagSessionPopover({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open && !disabled} onOpenChange={(value) => !disabled && setOpen(value)}>
       <PopoverTrigger
         render={(props: React.ComponentPropsWithRef<'button'>) =>
           trigger ? (
-            <button {...props}>{trigger}</button>
+            <button {...props} disabled={disabled} title={cloudMode ? 'Session labels are unavailable in Cloud' : undefined}>{trigger}</button>
           ) : (
             <Button
               {...props}
@@ -142,8 +144,8 @@ export function FlagSessionPopover({
               size="icon"
               className="h-7 w-7"
               disabled={disabled}
-              aria-label={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
-              title={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+              aria-label={cloudMode ? 'Session labels are unavailable in Cloud' : disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+              title={cloudMode ? 'Session labels are unavailable in Cloud' : disabled ? 'No session id (cookieless request)' : 'Flag this session'}
             >
               <Flag
                 className={

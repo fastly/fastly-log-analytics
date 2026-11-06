@@ -14,7 +14,7 @@ import { DeployRemoteFrontendDialog, TeardownRemoteFrontendDialog } from "@/comp
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { client, extractApiError, queryKeys, unwrapClient } from "@/lib/api"
-import { IS_CLOUD_MODE } from "@/lib/cloud-engine/adapter"
+import { IS_CLOUD_MODE } from "@/lib/cloud-engine/mode"
 import { cn } from "@/lib/utils"
 import Loading from "./loading"
 import { InvitationsPanel } from "./InvitationsPanel"

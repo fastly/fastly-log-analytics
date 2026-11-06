@@ -1799,10 +1799,99 @@ fn redact_services(mut response: Response) -> Response {
     let Ok(mut body) = serde_json::from_slice::<Value>(&response.body) else {
         return Response::new(500, "{\"error\":\"internal\"}");
     };
+    let catalog = crate::catalog::get_catalog_for_api(None);
     if let Some(services) = body["services"].as_array_mut() {
         for service in services {
             if let Some(object) = service.as_object_mut() {
+                let log_fields = object.get("log_fields").map(|fields| {
+                    let custom_fields: Vec<Value> = fields["custom_fields"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|field| field["enabled"] != false)
+                        .map(|field| {
+                            let mut field = field.clone();
+                            if let Some(field) = field.as_object_mut() {
+                                field.retain(|key, _| {
+                                    [
+                                        "name",
+                                        "label",
+                                        "description",
+                                        "duckdb_type",
+                                        "sql_type",
+                                        "value_type",
+                                        "filterable",
+                                        "enabled",
+                                        "show_in_dashboard",
+                                        "show_in_logs",
+                                    ]
+                                    .contains(&key.as_str())
+                                });
+                            }
+                            field
+                        })
+                        .collect();
+                    let groups: Vec<&Value> = fields["groups"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|group| {
+                            group.as_str().is_some_and(|id| {
+                                [
+                                    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+                                ]
+                                .contains(&id)
+                            })
+                        })
+                        .collect();
+                    let overrides: serde_json::Map<String, Value> = fields["field_overrides"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter(|(id, value)| {
+                            value.is_boolean()
+                                && catalog
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .any(|field| field["id"].as_str() == Some(id.as_str()))
+                        })
+                        .map(|(id, value)| (id.clone(), value.clone()))
+                        .collect();
+                    json!({
+                        "groups": groups,
+                        "field_overrides": overrides,
+                        "custom_fields": custom_fields,
+                    })
+                });
+                let rum_enabled = json!(object
+                    .get("rum_enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false));
+                let faro_version = json!(object.get("faro_version").and_then(Value::as_str));
+                let cmcd_enabled = object
+                    .get("cmcd")
+                    .and_then(|cmcd| cmcd.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let scoring_enabled = object
+                    .get("scoring")
+                    .and_then(|scoring| scoring.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .or_else(|| object.get("scoring_enabled").and_then(Value::as_bool))
+                    .unwrap_or(false);
                 object.retain(|key, _| KEEP.contains(&key.as_str()));
+                if let Some(fields) = log_fields {
+                    object.insert("log_fields".into(), fields);
+                }
+                object.insert("rum_enabled".into(), rum_enabled.clone());
+                object.insert(
+                    "rum".into(),
+                    json!({"enabled":rum_enabled,"faro_version":faro_version}),
+                );
+                object.insert("faro_version".into(), faro_version);
+                object.insert("cmcd".into(), json!({"enabled":cmcd_enabled}));
+                object.insert("scoring".into(), json!({"enabled":scoring_enabled}));
             }
         }
     }
@@ -1815,6 +1904,41 @@ mod tests {
     use super::*;
     use crate::state::MemoryStore;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn analyst_services_keep_safe_field_metadata_without_management_secrets() {
+        let response = redact_services(json_response(serde_json::json!({"services":[{
+            "service_id":"fixture-service", "name":"Fixture", "fastly_token":"PRIVATE_TOKEN",
+            "fos_secret":"PRIVATE_STORAGE", "generation":"PRIVATE_GENERATION",
+            "rum_enabled":true, "faro_version":"1.0.0",
+            "cmcd":{"enabled":true,"secret":"PRIVATE_CMCD"},
+            "scoring":{"enabled":true,"secret":"PRIVATE_SCORER"},
+            "log_fields":{"groups":["A",{"secret":"PRIVATE_GROUP"}],"field_overrides":{"url":true,"secret":"PRIVATE_OVERRIDE"},
+                "custom_fields":[{"name":"tenant","duckdb_type":"DOUBLE","enabled":true,
+                    "vcl_log_expression":"PRIVATE_EXPRESSION"},
+                    {"name":"disabled","enabled":false}]}
+        }]})));
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        let service = &body["services"][0];
+        assert_eq!(service["log_fields"]["custom_fields"][0]["name"], "tenant");
+        assert_eq!(
+            service["log_fields"]["custom_fields"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(service["rum"]["enabled"], true);
+        assert_eq!(service["cmcd"]["enabled"], true);
+        assert_eq!(service["scoring"]["enabled"], true);
+        assert_eq!(service["log_fields"]["groups"], json!(["A"]));
+        assert_eq!(
+            service["log_fields"]["field_overrides"],
+            json!({"url":true})
+        );
+        assert_eq!(service["faro_version"], "1.0.0");
+        assert!(!body.to_string().contains("PRIVATE_"));
+    }
 
     #[test]
     fn kv_prefix_queries_drop_unsearchable_characters() {

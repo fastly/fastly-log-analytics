@@ -9,8 +9,13 @@ import { useMounted } from '@/hooks/useBootstrap'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 
-const LOG_ACCOUNTING_PRESETS = [
+const LOG_ACCOUNTING_PRESETS = IS_CLOUD_MODE ? [
+  { label: 'Last full day', hours: 24, by: 'day' as const },
+  { label: 'Last 7d', hours: 168, by: 'day' as const },
+  { label: 'Last 30d', hours: 720, by: 'day' as const },
+] : [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },
   { label: 'Last 24h', hours: 24, by: 'hour' as const },
   { label: 'Last 7d', hours: 168, by: 'day' as const },
@@ -19,7 +24,7 @@ const LOG_ACCOUNTING_PRESETS = [
 
 export function LogAccountingPanel() {
   const mounted = useMounted()
-  const [presetIdx, setPresetIdx] = useState(1)
+  const [presetIdx, setPresetIdx] = useState(IS_CLOUD_MODE ? 0 : 1)
   const preset = LOG_ACCOUNTING_PRESETS[presetIdx]
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['log-accounting', preset.hours, preset.by],
@@ -38,6 +43,7 @@ export function LogAccountingPanel() {
   })
 
   const totals = data?.totals
+  const capability = data as { available?: boolean; reason?: string } | undefined
   const buckets = useMemo(() => data?.buckets ?? [], [data?.buckets])
   const gapPct = totals?.gap_pct ?? 0
   const gapAbsPct = Math.abs(gapPct) * 100
@@ -129,7 +135,9 @@ export function LogAccountingPanel() {
   return (
     <AnalyticsCard
       title="Ingest Accounting"
-      description="Fastly's authoritative request counter (Stats API) vs our locally-ingested rows, per bucket. Requests sit 1:1 with our rows, so a positive gap means requests Fastly served that never landed in our table."
+      description={IS_CLOUD_MODE
+        ? 'Completed UTC days: sample-adjusted Fastly request counters versus measured processed rows. Native accounting has daily precision.'
+        : "Fastly's authoritative request counter (Stats API) vs our locally-ingested rows, per bucket. Requests sit 1:1 with our rows, so a positive gap means requests Fastly served that never landed in our table."}
       icon={<Database className="h-4 w-4" />}
       error={error as AnalyticsCardError | null}
       headerAction={
@@ -174,7 +182,9 @@ export function LogAccountingPanel() {
               Loading log accounting…
             </div>
           </div>
-        ) : error ? null : (
+        ) : error ? null : capability?.available === false ? (
+          <p className="py-8 text-sm text-muted-foreground">{capability.reason}</p>
+        ) : (
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
               {summaryTiles.map((tile) => (

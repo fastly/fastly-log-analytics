@@ -330,7 +330,7 @@ export function ScorerLatencyChart({
   sinceHours?: number
 }) {
   const hasLatency = ({ data, rows }: { data?: { has_latency?: boolean }; rows: LatencyRow[] }) =>
-    (data?.has_latency ?? false) && rows.some((r) => r.rtt_p95_us != null)
+    (data?.has_latency ?? false) && rows.some((r) => r.rtt_p95_us != null || r.exec_p95_us != null)
 
   return (
     <ScorerSeriesCard

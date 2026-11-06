@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { client, extractApiError, unwrapClient } from "@/lib/api"
-import { IS_CLOUD_MODE } from "@/lib/cloud-engine/adapter"
+import { IS_CLOUD_MODE } from "@/lib/cloud-engine/mode"
 import { cn, panelDialogContent, panelDialogHeaderSolid } from "@/lib/utils"
 import type { ShareStatus } from "./types"
 

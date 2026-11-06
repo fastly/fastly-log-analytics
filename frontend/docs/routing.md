@@ -81,6 +81,7 @@ Implemented across [`app/layout.tsx`](../app/layout.tsx), [`lib/api.ts`](../lib/
 7. **Prefetch:** `<Link prefetch>` is the default; `prefetch={false}` is used in dense lists. Links whose target needs an API call use `onMouseEnter` → `queryClient.prefetchQuery(...)` (see `AdminPrefetchLinks`).
 8. **`router.replace()` inside effects** is wrapped in `startTransition`.
 9. **React Query defaults** (`QueryProvider`): `staleTime: 30s`, `gcTime: 5min`, `refetchOnWindowFocus: false`.
+10. **Cloud analysis progress:** `AppLayout` mounts `CloudLoadingProgress` only in Cloud mode. The floating panel follows Account → Log range → File list → Analysis and reports processed files plus downloaded/cached bytes. Use `beginCloudLoading(stage)` from `lib/cloud-engine/loading-progress.ts`, update its handle with `{ stage, progress, refreshing }`, and call `finish(success)` in `finally`. Each handle owns one operation, so completing or cancelling it never hides another active run. Dashboard and telemetry clients already track their own runs; do not wrap those calls in a second Analysis handle.
 
 ## Deferred (NOT in this Phase 9a chunk)
 

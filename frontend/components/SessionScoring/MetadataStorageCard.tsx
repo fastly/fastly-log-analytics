@@ -14,6 +14,8 @@ import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { formatBytesTiered, formatCountMaybe } from '@/lib/utils'
 import type { components, Expect, WireParity } from '@/types/api'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { getOperationalLogging } from '@/lib/cloud-engine/telemetry/admin'
 
 type TableStat = { rows: number; bytes: number | null }
 type StorageResponse = {
@@ -184,6 +186,33 @@ function MetadataStorageTable({
 }
 
 export function MetadataStorageCard() {
+  return IS_CLOUD_MODE ? <CloudMetadataStorageCard /> : <StandardMetadataStorageCard />
+}
+
+function CloudMetadataStorageCard() {
+  const { data, isLoading, isFetching, error } = useQuery({
+    queryKey: ['cloud-operational-logging'],
+    queryFn: getOperationalLogging,
+    staleTime: 30_000,
+  })
+  return (
+    <AnalyticsCard title="Cloud Operational Storage" icon={<Database className="h-4 w-4" />}
+      description="Operational records are persisted as FOS Parquet. Cloud has no PostgreSQL database file or host table-size metrics."
+      isLoading={isLoading} isFetching={isFetching} error={error as AnalyticsCardError | null}>
+      {data && <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">Native retention policy by record kind. Saved views remain in this browser; operational history is managed through its native log pages.</p>
+        <Table>
+          <TableHeader><TableRow><TableHead>Record kind</TableHead><TableHead className="text-right">Retention (days)</TableHead></TableRow></TableHeader>
+          <TableBody>{Object.entries(data.settings.retention_days_by_kind).map(([kind, days]) => (
+            <TableRow key={kind}><TableCell className="font-mono text-xs">{kind}</TableCell><TableCell className="text-right">{days}</TableCell></TableRow>
+          ))}</TableBody>
+        </Table>
+      </div>}
+    </AnalyticsCard>
+  )
+}
+
+function StandardMetadataStorageCard() {
   const qc = useQueryClient()
   const mounted = useMounted()
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({

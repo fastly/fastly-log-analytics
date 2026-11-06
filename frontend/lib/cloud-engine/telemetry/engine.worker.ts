@@ -5,7 +5,7 @@ import { browserOpsSource } from "./sources";
 type JobMessage = {
   id: number;
   type?: string;
-  options: Omit<ReadLogsOptions, "signal">;
+  options: Omit<ReadLogsOptions, "signal" | "onProgress">;
   pageLoadId?: string | null;
 };
 
@@ -14,6 +14,10 @@ self.onmessage = createWorkerRpcHost<JobMessage>(async (msg, ctx) => {
     self.location.origin,
     () => msg.pageLoadId ?? null,
   );
-  const result = await readLogs(source, { ...msg.options, signal: ctx.signal });
+  const result = await readLogs(source, {
+    ...msg.options,
+    signal: ctx.signal,
+    onProgress: (progress) => ctx.post({ id: msg.id, type: "progress", progress }),
+  });
   ctx.post({ id: msg.id, type: "result", result });
 });

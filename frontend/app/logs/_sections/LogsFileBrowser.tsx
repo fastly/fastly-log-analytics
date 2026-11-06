@@ -29,14 +29,10 @@ import { Input } from '@/components/ui/input'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { components } from '@/types/api.generated'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
-import { getStoreStats } from '@/lib/cloud-engine/dashboard/client'
-import { clearDashboardBrowserCaches } from '@/lib/cloud-engine/dashboard/sources'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { clearDashboardBrowserCaches, getStoreStats } from '@/lib/cloud-engine/dashboard/sources'
 import { clearOpsCaches } from '@/lib/cloud-engine/telemetry/sources'
-import { parquetColumns, sampleStats } from '@/lib/cloud-engine/schema'
 import type { CronRun } from './useLogsPageState'
-
-export { parquetColumns, sampleStats }
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
 type SchemaColumn = components['schemas']['SchemaResponse']['schema'][number]
@@ -368,6 +364,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
                 variant="ghost"
                 size="icon"
                 aria-label="Download folder as ZIP"
+                hidden={IS_CLOUD_MODE}
                 title="Download folder as ZIP"
                 className="h-6 w-6 text-muted-foreground transition-opacity"
                 onClick={(e) => {
@@ -449,7 +446,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
               <Cloud className="w-3 h-3 mr-1" /> Cloud
             </Badge>
           )}
-          {node.key && (
+          {node.key && (!IS_CLOUD_MODE || type === 'storage') && (
             <Button
               variant="ghost"
               size="icon"
@@ -458,7 +455,9 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
               className="h-6 w-6 text-muted-foreground transition-opacity"
               onClick={(e) => {
                 e.stopPropagation()
-                window.open(`/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
+                window.open(IS_CLOUD_MODE
+                  ? `/api/file?service_id=${encodeURIComponent(activeServiceId ?? '')}&key=${encodeURIComponent(node.key as string)}`
+                  : `/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
               }}
             >
               <Download className="h-3.5 w-3.5" />

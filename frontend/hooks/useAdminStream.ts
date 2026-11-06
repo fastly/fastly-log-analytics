@@ -17,9 +17,8 @@ import {
   makeCronRunsApplier,
 } from './sseStreamAppliers'
 import { useEventStream } from './useEventStream'
-import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import { observeCatalogCommit } from '@/lib/cloud-engine/dashboard/catalog-manifest'
-import { readIngestEvents } from '@/lib/cloud-engine/telemetry/engine'
 import { browserOpsSource } from '@/lib/cloud-engine/telemetry/sources'
 
 // ── Service & Admin Multiplex Streams ────────────────────────────────────────
@@ -84,6 +83,8 @@ export function useHeaderBadgeStream(enabled: boolean) {
     const poll = async () => {
       while (!stopped && !controller.signal.aborted) {
         try {
+          const { readIngestEvents } = await import('@/lib/cloud-engine/telemetry/engine')
+          if (stopped || controller.signal.aborted) return
           const now = Date.now()
           const result = await readIngestEvents(source, {
             from: new Date(cursorRef.current ?? now - 300_000).toISOString(),

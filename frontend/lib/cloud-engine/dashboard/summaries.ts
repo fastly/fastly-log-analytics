@@ -3,7 +3,6 @@ import { fnv1a64 } from "../parquet-key";
 import type { FileRollupData, MinuteBucket, Scalar } from "./engine";
 import { Hll } from "./hll";
 import type { ManifestFile } from "./manifest";
-import { readColumns } from "./parquet";
 
 export type CardTint = { bg: string; border: string; dot: string };
 
@@ -463,6 +462,7 @@ export async function decodeSummary(
     (kv) => kv.key === "flp_summary",
   )?.value;
   if (version !== SUMMARY_VERSION) return null;
+  const { readColumns } = await import("./parquet");
   const { rows, columns } = await readColumns(bytes, SUMMARY_COLUMNS);
   const binary = await readColumns(bytes, ["ip_sketch"], false);
   const col = (name: string) => columns.get(name) ?? [];

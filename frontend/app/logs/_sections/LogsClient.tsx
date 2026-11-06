@@ -15,7 +15,7 @@ import { ingestedFilesColumns } from '@/components/DataTable'
 import Loading from '../loading'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
 import { MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import { useLogsPageState, type CronRun, type CatalogMaps } from './useLogsPageState'
 import {
   CRON_EXPLANATIONS,

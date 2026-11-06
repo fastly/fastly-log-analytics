@@ -4,10 +4,8 @@
  * - `GET /api/insight-availability` (`/api/insight-availability/{service_id}`)
  * - `POST /api/insights/cache-collapse-detail`
  *
- * Implements the 51 detector catalog (`INSIGHT_DEFINITIONS` / `INSIGHT_CARDS`),
- * the 8 coalesced single-pass DuckDB scan builders (`_coalesced_*_aggregates`),
- * the 80% (`0.8`) hourly rollup fastpath coverage threshold, and cache-collapse
- * drill-down shaping with `mask_ips` (`0.0.0.0`) PII protection.
+ * The complete catalog is not a claim of Cloud implementation support.
+ * Availability requires both a local detector and its actual Parquet columns.
  */
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
@@ -122,6 +120,19 @@ export const INSIGHT_DEFINITIONS: readonly InsightDefinitionMeta[] = [
 
 export const INSIGHT_CARDS = INSIGHT_DEFINITIONS;
 
+export const CLOUD_INSIGHT_DETECTORS: ReadonlySet<string> = new Set([
+  "error_spikes", "credential_enumeration", "content_discovery",
+  "city_surges", "city_error_spikes", "city_latency_regressions", "new_city_traffic",
+  "new_country_traffic", "latency_regression", "asn_concentration", "proxy_surge",
+  "ua_monoculture", "cache_collapse", "cacheability_regression", "tail_latency",
+  "referer_monoculture", "method_drift", "new_asn_traffic", "asn_hosting_shift",
+  "pop_latency_regression", "http3_fallback", "cache_hit_cliff",
+]);
+
+export const CURRENT_WINDOW_INSIGHT_DETECTORS: ReadonlySet<string> = new Set([
+  "content_discovery", "tail_latency",
+]);
+
 // ── 8 Coalesced Single-Pass Scan SQL Builders ────────────────────────────────
 
 export function _coalesced_city_aggregates(
@@ -141,6 +152,8 @@ export function _coalesced_city_aggregates(
     SELECT "city", "region", "country",
       COUNT(*) FILTER (WHERE is_w) AS w_cnt,
       COUNT(*) FILTER (WHERE is_b) AS b_cnt,
+      COUNT(elapsed) FILTER (WHERE is_w) AS w_lat_total,
+      COUNT(elapsed) FILTER (WHERE is_b) AS b_lat_total,
       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_errors_4xx,
       SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_errors_4xx,
       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed) FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
@@ -168,6 +181,8 @@ export function _coalesced_url_aggregates(
     SELECT "url",
       COUNT(*) FILTER (WHERE is_w) AS w_total,
       COUNT(*) FILTER (WHERE is_b) AS b_total,
+      COUNT(elapsed) FILTER (WHERE is_w) AS w_lat_total,
+      COUNT(elapsed) FILTER (WHERE is_b) AS b_lat_total,
       SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_5xx,
       SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_5xx,
       SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
@@ -195,15 +210,20 @@ export function _coalesced_ip_security_aggregates(
   return `
     WITH base AS (
       SELECT "ip", "url", status,
+        regexp_matches("url", 'login|signin|sign-in|log-in|auth|oauth|openid|token|sso|saml|session|account|password|passwd|passwrd|credential|xmlrpc|mfa|otp|2fa|verify', 'i') AS is_auth,
         (timestamp < CAST('${wEsc}' AS TIMESTAMPTZ)) AS is_b,
         (timestamp >= CAST('${wEsc}' AS TIMESTAMPTZ)) AS is_w
       FROM ${tbl}
       WHERE "ip" IS NOT NULL AND "ip" != ''
     )
     SELECT "ip",
-      COUNT(*) FILTER (WHERE is_w AND status IN (401, 403)) AS ce_w_denied,
-      COUNT(*) FILTER (WHERE is_b AND status IN (401, 403)) AS ce_b_denied,
+      COUNT(*) FILTER (WHERE is_w AND is_auth AND status IN (401, 403)) AS ce_w_denied,
+      COUNT(*) FILTER (WHERE is_b AND is_auth AND status IN (401, 403)) AS ce_b_denied,
+      COUNT(*) FILTER (WHERE is_w AND is_auth) AS ce_w_attempts,
+      COUNT(DISTINCT "url") FILTER (WHERE is_w AND is_auth) AS ce_w_paths,
+      COUNT(*) FILTER (WHERE is_w) AS w_total,
       COUNT(*) FILTER (WHERE is_w AND status = 404) AS cd_w_404,
+      COUNT(*) FILTER (WHERE is_b AND status = 404) AS cd_b_404,
       COUNT(DISTINCT "url") FILTER (WHERE is_w AND status = 404) AS cd_distinct_404
     FROM base
     GROUP BY "ip"
@@ -246,6 +266,11 @@ export function _coalesced_dim_aggregates(
       FROM ${tbl}
     )
     SELECT "country", "p_type", "method", "referer", "ua",
+      CASE WHEN GROUPING("country") = 0 THEN 'country'
+        WHEN GROUPING("p_type") = 0 THEN 'p_type'
+        WHEN GROUPING("method") = 0 THEN 'method'
+        WHEN GROUPING("referer") = 0 THEN 'referer'
+        ELSE 'ua' END AS dimension,
       COUNT(*) FILTER (WHERE is_w) AS w_cnt,
       COUNT(*) FILTER (WHERE is_b) AS b_cnt
     FROM base
@@ -292,6 +317,8 @@ export function _coalesced_asn_aggregates(
     SELECT "asn",
       COUNT(*) FILTER (WHERE is_w) AS w_cnt,
       COUNT(*) FILTER (WHERE is_b) AS b_cnt,
+      COUNT(*) FILTER (WHERE is_w AND "p_type" IS NOT NULL AND "p_type" != '') AS w_proxy_total,
+      COUNT(*) FILTER (WHERE is_b AND "p_type" IS NOT NULL AND "p_type" != '') AS b_proxy_total,
       COUNT(*) FILTER (WHERE is_w AND "p_type" = 'hosting') AS w_hosting,
       COUNT(*) FILTER (WHERE is_b AND "p_type" = 'hosting') AS b_hosting
     FROM base
@@ -413,6 +440,7 @@ export const buildInsightsEnvelope = build_insights_envelope;
 export interface InsightAvailabilityEntry extends InsightDefinitionMeta {
   available: boolean;
   missing_fields: string[] | null;
+  reason?: "cloud_detector_unsupported" | "missing_fields";
 }
 
 export interface InsightAvailabilityResponse {
@@ -429,26 +457,24 @@ export function handleInsightAvailability(
   _serviceId?: string,
   actualColumns?: Iterable<string>,
 ): InsightAvailabilityResponse {
-  const colSet = actualColumns
-    ? new Set(Array.from(actualColumns))
-    : new Set(
-        INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields),
-      );
+  const colSet = new Set(actualColumns);
 
   const insights: InsightAvailabilityEntry[] = INSIGHT_DEFINITIONS.map((d) => {
     const missing = d.required_fields.filter((f) => !colSet.has(f));
-    const available = missing.length === 0;
+    const supported = CLOUD_INSIGHT_DETECTORS.has(d.id);
+    const available = supported && missing.length === 0;
     return {
       ...d,
       available,
       missing_fields: available ? null : missing,
+      ...(!available ? { reason: supported ? "missing_fields" as const : "cloud_detector_unsupported" as const } : {}),
     };
   });
 
   return {
     insights,
     unavailable: insights.filter((i) => !i.available),
-    available: true,
+    available: insights.some((i) => i.available),
   };
 }
 
@@ -472,7 +498,27 @@ export interface CloudInsightsContext {
   now?: Date;
   urlAggregateRows?: Record<string, unknown>[];
   ipSecurityRows?: Record<string, unknown>[];
+  cityAggregateRows?: Record<string, unknown>[];
+  dimensionAggregateRows?: Record<string, unknown>[];
+  asnAggregateRows?: Record<string, unknown>[];
+  geoLatencyRows?: Record<string, unknown>[];
+  scalarAggregateRows?: Record<string, unknown>[];
   windowTotalRequests?: number;
+  baselineTotalRequests?: number;
+}
+
+export function resolveInsightWindow(body: InsightsRequest, now = new Date()) {
+  const windowHours = Number(body.window_size_hrs ?? 24);
+  const baselineHours = Number(body.baseline_hours ?? 168);
+  const requestedEnd = body.clamp_end == null ? now.getTime() : Date.parse(body.clamp_end);
+  if (!Number.isFinite(windowHours) || windowHours <= 0 ||
+      !Number.isFinite(baselineHours) || baselineHours <= 0 || !Number.isFinite(requestedEnd)) {
+    throw new Error("Invalid insight analysis window");
+  }
+  const end = Math.min(now.getTime(), requestedEnd);
+  const windowStart = end - windowHours * 3_600_000;
+  const start = windowStart - baselineHours * 3_600_000;
+  return { windowHours, baselineHours, end, windowStart, start };
 }
 
 export function canUseInsightsRollupFastpath(
@@ -489,23 +535,10 @@ export async function handleInsights(
   body: InsightsRequest = {},
   ctx: CloudInsightsContext = {},
 ): Promise<InsightsEnvelope> {
-  const windowHours = Math.max(1, Number(body.window_size_hrs ?? 24));
-  const baselineHours = Math.max(1, Number(body.baseline_hours ?? 168));
-  const nowDate = ctx.now ?? new Date();
-  const endDate =
-    body.clamp_end && !Number.isNaN(Date.parse(body.clamp_end))
-      ? new Date(Math.min(nowDate.getTime(), Date.parse(body.clamp_end)))
-      : nowDate;
-  const windowStartDate = new Date(
-    endDate.getTime() - windowHours * 3_600_000,
-  );
-  const baselineStartDate = new Date(
-    endDate.getTime() - (windowHours + baselineHours) * 3_600_000,
-  );
-
-  const windowEnd = endDate.toISOString();
-  const windowStart = windowStartDate.toISOString();
-  const baselineStart = baselineStartDate.toISOString();
+  const { windowHours, baselineHours, end, windowStart: windowStartMs, start } = resolveInsightWindow(body, ctx.now);
+  const windowEnd = new Date(end).toISOString();
+  const windowStart = new Date(windowStartMs).toISOString();
+  const baselineStart = new Date(start).toISOString();
   const baselineEnd = windowStart;
   const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
   const serviceId = body.service_id ?? ctx.serviceId ?? "default";
@@ -515,112 +548,208 @@ export async function handleInsights(
     ctx.availableColumns,
   );
   const availableDefs = availability.insights.filter((i) => i.available);
-  const historyHours = ctx.availableHistoryHours ?? baselineHours;
-
-  const urlRows = ctx.urlAggregateRows ?? [];
-  const ipRows = ctx.ipSecurityRows ?? [];
+  const historyHours = ctx.availableHistoryHours ?? 0;
+  const n = (r: Record<string, unknown>, key: string) => Number(r[key] ?? 0);
+  const pct = (value: number, total: number) => total > 0 ? value * 100 / total : 0;
+  const scaled = (count: number) => count * windowHours / baselineHours;
 
   const cards: InsightCard[] = availableDefs.map((d) => {
-    if (historyHours < min_Baseline) {
+    if (ctx.windowTotalRequests === 0) {
+      return { id: d.id, title: d.title, description: d.description, category: d.category,
+        severity: "info", summary: "No matching requests in the analysis window. Not evaluated.", items: [] };
+    }
+    const requiredHistory = Math.min(min_Baseline, baselineHours);
+    if (!CURRENT_WINDOW_INSIGHT_DETECTORS.has(d.id) && historyHours < requiredHistory) {
       return {
         id: d.id,
         title: d.title,
         description: d.description,
         category: d.category,
         severity: "info",
-        summary: `Requires ${baselineHours}h of historical data (only ${Math.max(0.1, Math.round(historyHours * 10) / 10)}h available)`,
+        summary: `Requires at least ${requiredHistory}h of baseline history; ${Math.round(historyHours * 10) / 10}h available. Not evaluated.`,
         items: [],
       };
     }
 
-    if (d.id === "cache_collapse" && urlRows.length > 0) {
-      const items: InsightItem[] = [];
-      for (const r of urlRows) {
-        const wHits = Number(r.w_hits ?? 0);
-        const wMiss = Number(r.w_miss ?? 0);
-        const bHits = Number(r.b_hits ?? 0);
-        const bMiss = Number(r.b_miss ?? 0);
-        const wCacheable = wHits + wMiss;
-        const bCacheable = bHits + bMiss;
-        if (wCacheable >= 20 && bCacheable >= 20) {
-          const wRate = (wHits / wCacheable) * 100;
-          const bRate = (bHits / bCacheable) * 100;
-          if (bRate - wRate >= 20) {
-            const url = String(r.url ?? "(empty)");
-            items.push({
-              label: url,
-              current_val: Math.round(wRate * 10) / 10,
-              baseline_val: Math.round(bRate * 10) / 10,
-              unit: "% hit rate",
-              meta: {
-                window_requests: wCacheable,
-                baseline_requests: bCacheable,
-                filters: { url },
-              },
-              severity: wRate < 20 ? "critical" : "warning",
-              investigate_url: `/dashboard?service=${encodeURIComponent(serviceId)}&start=${encodeURIComponent(windowStart)}&end=${encodeURIComponent(windowEnd)}&filter_url=${encodeURIComponent(url)}`,
-            });
+    const items: InsightItem[] = [];
+    const add = (label: string, current: number, baseline: number, unit: string,
+      meta: Record<string, unknown>, severity: InsightItem["severity"] = "warning") => {
+      items.push({ label, current_val: Math.round(current * 10) / 10,
+        baseline_val: Math.round(baseline * 10) / 10, unit, meta, severity });
+    };
+    const scan = (rows: Record<string, unknown>[] | undefined) => {
+      if (!rows) throw new Error(`Missing local aggregate input for ${d.id}`);
+      return rows;
+    };
+    const latency = (r: Record<string, unknown>, label: string, filters: Record<string, unknown>,
+      minW: number, minB: number, multiplier: number, delta: number) => {
+      const w = n(r, "w_p95"), b = n(r, "b_p95");
+      if (n(r, "w_lat_total") >= minW && n(r, "b_lat_total") >= minB && b > 0 && w >= b * multiplier && w - b >= delta) {
+        add(label, w, b, "ms P95", { window_requests: n(r, "w_lat_total"), baseline_requests: n(r, "b_lat_total"), filters },
+          w >= b * 5 ? "critical" : "warning");
+      }
+    };
+    switch (d.id) {
+      case "error_spikes":
+      case "cache_collapse":
+      case "cacheability_regression":
+      case "latency_regression":
+      case "tail_latency":
+        for (const r of scan(ctx.urlAggregateRows)) {
+          const label = String(r.url ?? "(empty)");
+          const wTotal = n(r, "w_total"), bTotal = n(r, "b_total");
+          const meta = { window_requests: wTotal, baseline_requests: bTotal, filters: { url: r.url } };
+          if (d.id === "error_spikes") {
+            const w = pct(n(r, "w_5xx"), wTotal), b = pct(n(r, "b_5xx"), bTotal);
+            if (wTotal >= 3 && w >= 5 && (bTotal < 10 || w >= b * 2 + 5)) {
+              add(label, w, b, "% 5xx", { ...meta, window_errors: n(r, "w_5xx") }, w >= 20 ? "critical" : "warning");
+            }
+          } else if (d.id === "cache_collapse") {
+            const wCount = n(r, "w_hits") + n(r, "w_miss"), bCount = n(r, "b_hits") + n(r, "b_miss");
+            const w = pct(n(r, "w_hits"), wCount), b = pct(n(r, "b_hits"), bCount);
+            if (wCount >= 5 && bCount >= 20 && b >= 40 && w <= b - 20 && w <= b * 0.6) {
+              add(label, w, b, "% hit rate", { ...meta, window_requests: wCount, baseline_requests: bCount }, w < 20 ? "critical" : "warning");
+            }
+          } else if (d.id === "cacheability_regression") {
+            const w = pct(n(r, "w_pass"), wTotal), b = pct(n(r, "b_pass"), bTotal);
+            if (wTotal >= 10 && bTotal >= 50 && b <= 20 && w >= 50 && w >= b + 30) {
+              add(label, w, b, "% PASS", meta, w >= 90 ? "critical" : "warning");
+            }
+          } else if (d.id === "latency_regression") {
+            latency(r, label, { url: r.url }, 5, 20, 2, 200);
+          } else if (n(r, "w_lat_total") >= 20 && n(r, "w_p50") > 0 && n(r, "w_p99") > n(r, "w_p50") * 5) {
+            add(label, n(r, "w_p99"), n(r, "w_p50"), "ms (P99 vs P50)",
+              { ...meta, ratio: n(r, "w_p99") / n(r, "w_p50") });
           }
         }
-      }
-      if (items.length > 0) {
-        return {
-          id: d.id,
-          title: d.title,
-          description: d.description,
-          category: d.category,
-          severity: items.some((i) => i.severity === "critical")
-            ? "critical"
-            : "warning",
-          summary: `${items.length} anomalies detected`,
-          items,
-        };
-      }
-    }
-
-    if (d.id === "credential_enumeration" && ipRows.length > 0) {
-      const items: InsightItem[] = [];
-      for (const r of ipRows) {
-        const wDenied = Number(r.ce_w_denied ?? 0);
-        const bDenied = Number(r.ce_b_denied ?? 0);
-        if (wDenied >= 20 && wDenied > bDenied * 2) {
-          const ipLabel = maskIps ? "0.0.0.0" : String(r.ip ?? "(unknown)");
-          items.push({
-            label: ipLabel,
-            current_val: wDenied,
-            baseline_val: bDenied,
-            unit: "denied requests",
-            meta: {
-              requests: wDenied,
-              filters: { ip: ipLabel },
-            },
-            severity: wDenied >= 100 ? "critical" : "warning",
-          });
+        break;
+      case "credential_enumeration":
+      case "content_discovery":
+        for (const r of scan(ctx.ipSecurityRows)) {
+          const label = maskIps ? "0.0.0.0" : String(r.ip);
+          if (d.id === "credential_enumeration") {
+            const denied = n(r, "ce_w_denied"), attempts = n(r, "ce_w_attempts");
+            if (denied >= 20 && pct(denied, attempts) >= 50 && denied > scaled(n(r, "ce_b_denied")) * 3 + 5) {
+              add(label, denied, scaled(n(r, "ce_b_denied")), "denied requests",
+                { attempts, denied, fail_rate_pct: pct(denied, attempts), distinct_paths: n(r, "ce_w_paths"), filters: { ip: label } },
+                denied >= 100 ? "critical" : "warning");
+            }
+          } else if (n(r, "cd_w_404") >= 20 && pct(n(r, "cd_w_404"), n(r, "w_total")) >= 70 && n(r, "cd_distinct_404") >= 15) {
+            add(label, n(r, "cd_w_404"), scaled(n(r, "cd_b_404")), "404 requests",
+              { distinct_paths: n(r, "cd_distinct_404"), requests: n(r, "w_total"), filters: { ip: label } });
+          }
         }
+        break;
+      case "city_surges":
+      case "city_error_spikes":
+      case "city_latency_regressions":
+      case "new_city_traffic":
+        for (const r of scan(ctx.cityAggregateRows)) {
+          const label = [r.city, r.region, r.country].filter(Boolean).join(", ");
+          const w = n(r, "w_cnt"), b = n(r, "b_cnt");
+          const filters = Object.fromEntries(["city", "region", "country"].filter((key) => r[key] != null).map((key) => [key, r[key]]));
+          if (d.id === "city_latency_regressions") {
+            latency(r, label, filters, 10, 50, 3, 500);
+          } else if (d.id === "city_error_spikes") {
+            const wRate = pct(n(r, "w_errors_4xx"), w), bRate = pct(n(r, "b_errors_4xx"), b);
+            if (w >= 10 && wRate >= 10 && (b < 50 || wRate >= bRate * 3 + 5)) {
+              add(label, wRate, bRate, "% errors", { window_requests: w, baseline_requests: b, filters });
+            }
+          } else if (d.id === "new_city_traffic" ? w >= 5 && b === 0 : w >= 20 && w > scaled(b) * 3) {
+            add(label, w, scaled(b), "requests", { filters }, d.id === "new_city_traffic" ? "info" : "warning");
+          }
+        }
+        break;
+      case "new_country_traffic":
+      case "ua_monoculture":
+      case "referer_monoculture":
+      case "method_drift":
+      case "proxy_surge": {
+        const key = ({ new_country_traffic: "country", ua_monoculture: "ua", referer_monoculture: "referer", method_drift: "method", proxy_surge: "p_type" } as const)[d.id];
+        const rows = scan(ctx.dimensionAggregateRows).filter((r) => r.dimension === key);
+        const wTotal = rows.reduce((sum, r) => sum + n(r, "w_cnt"), 0);
+        const bTotal = rows.reduce((sum, r) => sum + n(r, "b_cnt"), 0);
+        for (const r of rows) {
+          const label = r[key] == null ? "" : String(r[key]);
+          if (!label || (d.id === "method_drift" && ["GET", "HEAD", "OPTIONS"].includes(label.toUpperCase()))) continue;
+          const w = n(r, "w_cnt"), b = n(r, "b_cnt");
+          const wShare = pct(w, wTotal), bShare = pct(b, bTotal);
+          if (d.id === "new_country_traffic") {
+            if (w >= 3 && b === 0) add(label, w, 0, "requests", { filters: { [key]: label } }, "info");
+          } else if (d.id === "proxy_surge") {
+            const wProxy = pct(rows.filter((r) => r[key] != null && r[key] !== "").reduce((s, r) => s + n(r, "w_cnt"), 0), wTotal);
+            const bProxy = pct(rows.filter((r) => r[key] != null && r[key] !== "").reduce((s, r) => s + n(r, "b_cnt"), 0), bTotal);
+            if (w > 0 && wProxy >= 5 && wProxy >= bProxy * 2 + 5) add(label, wShare, bShare, "% traffic", { filters: { [key]: label } });
+          } else {
+            const method = d.id === "method_drift";
+            const floor = method ? 10 : d.id === "ua_monoculture" ? 25 : 20;
+            if ((!method || w >= 20) && wShare >= floor && (bTotal === 0 || wShare >= bShare * (method ? 2 : 3) + (method ? 5 : 10))) {
+              add(label, wShare, bShare, "% traffic", { window_requests: w, baseline_requests: b, filters: { [key]: label } });
+            }
+          }
+        }
+        break;
       }
-      if (items.length > 0) {
-        return {
-          id: d.id,
-          title: d.title,
-          description: d.description,
-          category: d.category,
-          severity: items.some((i) => i.severity === "critical")
-            ? "critical"
-            : "warning",
-          summary: `${items.length} anomalies detected`,
-          items,
-        };
-      }
+      case "new_asn_traffic":
+      case "asn_concentration":
+      case "asn_hosting_shift":
+        for (const r of scan(ctx.asnAggregateRows)) {
+          if (r.asn == null) continue;
+          const label = `AS${r.asn}`, w = n(r, "w_cnt"), b = n(r, "b_cnt");
+          const meta = { window_requests: w, baseline_requests: b, filters: { asn: r.asn } };
+          if (d.id === "new_asn_traffic") {
+            if (w >= 20 && b === 0) add(label, w, 0, "requests", meta, "info");
+          } else if (d.id === "asn_hosting_shift") {
+            const wProxy = n(r, "w_proxy_total"), bProxy = n(r, "b_proxy_total");
+            const wShare = pct(n(r, "w_hosting"), wProxy), bShare = pct(n(r, "b_hosting"), bProxy);
+            if (wProxy >= 50 && wShare >= 30 && (bProxy === 0 || wShare >= bShare * 3 + 10)) add(label, wShare, bShare, "% hosting", meta);
+          } else {
+            const wShare = pct(w, ctx.windowTotalRequests ?? 0), bShare = pct(b, ctx.baselineTotalRequests ?? 0);
+            if (wShare >= 20 && ((ctx.baselineTotalRequests ?? 0) === 0 || wShare >= bShare * 3 + 10)) add(label, wShare, bShare, "% traffic", meta);
+          }
+        }
+        break;
+      case "pop_latency_regression":
+        for (const r of scan(ctx.geoLatencyRows)) {
+          if (r.pop) latency(r, String(r.pop), { pop: r.pop }, 20, 50, 1.5, 100);
+        }
+        break;
+      case "cache_hit_cliff":
+      case "http3_fallback":
+        for (const r of scan(ctx.scalarAggregateRows)) {
+          const cache = d.id === "cache_hit_cliff";
+          const wTotal = n(r, cache ? "w_cacheable" : "w_tr_total");
+          const bTotal = n(r, cache ? "b_cacheable" : "b_tr_total");
+          const w = pct(n(r, cache ? "w_hits" : "w_quic"), wTotal);
+          const b = pct(n(r, cache ? "b_hits" : "b_quic"), bTotal);
+          if (wTotal >= 100 && bTotal >= (cache ? 200 : 100) && b >= (cache ? 40 : 30) && w <= b - (cache ? 15 : 20)) {
+            add(cache ? "Service-wide cache HIT ratio" : "Service-wide HTTP/3 share", w, b, cache ? "% HIT" : "% QUIC",
+              { window_requests: wTotal, baseline_requests: bTotal, drop_pts: b - w }, b - w >= 30 ? "critical" : "warning");
+          }
+        }
+        break;
+      default:
+        throw new Error(`Cloud detector ${d.id} is advertised without an implementation`);
     }
-
+    items.sort((a, b) => Math.abs(b.current_val - b.baseline_val) - Math.abs(a.current_val - a.baseline_val));
+    const findings = items.slice(0, 20);
+    for (const item of findings) {
+      const filters = item.meta.filters as Record<string, unknown> | undefined;
+      const params = new URLSearchParams({ service: serviceId, start: windowStart, end: windowEnd });
+      for (const [key, value] of Object.entries(filters ?? {})) {
+        if (value != null && !(maskIps && key === "ip")) params.set(`filter_${key}`, String(value));
+      }
+      item.investigate_url = `/dashboard?${params}`;
+    }
     return {
       id: d.id,
       title: d.title,
       description: d.description,
       category: d.category,
-      severity: "clean",
-      summary: `No ${d.title.toLowerCase()} detected`,
-      items: [],
+      severity: findings.some((i) => i.severity === "critical") ? "critical"
+        : findings.some((i) => i.severity === "warning") ? "warning" : findings.length ? "info" : "clean",
+      summary: findings.length ? `${items.length} anomalies detected${items.length > findings.length ? `; showing ${findings.length}` : ""}` : `No ${d.title.toLowerCase()} detected`,
+      items: findings,
     };
   });
 

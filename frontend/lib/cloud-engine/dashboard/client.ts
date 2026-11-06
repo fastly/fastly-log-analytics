@@ -1,6 +1,7 @@
 import { getPageLoadId } from "@/lib/api";
 import { useDebugStore } from "@/stores/filterStore";
 import { BaseWorkerRpcClient } from "../worker-rpc";
+import { beginCloudLoading } from "../loading-progress";
 import { getDuckDBEngine } from "./duckdb";
 import {
   clearDashboardMemo,
@@ -88,7 +89,25 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     }
   };
 
-  run(options: EngineOptions): Promise<DashboardResult> {
+  async run(options: EngineOptions): Promise<DashboardResult> {
+    const loading = beginCloudLoading("files");
+    let success = false;
+    try {
+      const result = await this.runWithProgress({
+        ...options,
+        onProgress: (progress) => {
+          loading.update({ progress });
+          options.onProgress?.(progress);
+        },
+      });
+      success = true;
+      return result;
+    } finally {
+      loading.finish(success);
+    }
+  }
+
+  private runWithProgress(options: EngineOptions): Promise<DashboardResult> {
     if (options.signal?.aborted) {
       return Promise.reject(new DOMException("Aborted", "AbortError"));
     }
@@ -154,7 +173,23 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     });
   }
 
-  executeSql<T = Record<string, unknown>>(
+  async executeSql<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    const loading = beginCloudLoading("files");
+    let success = false;
+    try {
+      const result = await this.executeSqlWithProgress<T>(sql, params, signal);
+      success = true;
+      return result;
+    } finally {
+      loading.finish(success);
+    }
+  }
+
+  private executeSqlWithProgress<T = Record<string, unknown>>(
     sql: string,
     params: readonly unknown[] = [],
     signal?: AbortSignal,

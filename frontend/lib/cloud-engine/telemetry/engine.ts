@@ -1,4 +1,5 @@
 import { isCdnHit } from "../dashboard/cdn-cache";
+import type { RunProgress } from "../dashboard/engine";
 import {
   fetchManifest,
   type FetchJson,
@@ -34,6 +35,7 @@ export type ReadLogsOptions = {
   from: string;
   to: string;
   signal?: AbortSignal;
+  onProgress?: (progress: RunProgress) => void;
 };
 
 type LivePage = {
@@ -179,6 +181,11 @@ export async function readLogs(
       : { from: kindOrOptions.from, to: kindOrOptions.to };
   const signal =
     typeof kindOrOptions === "string" ? optionsArg.signal : kindOrOptions.signal;
+  const onProgress = typeof kindOrOptions === "string" ? undefined : kindOrOptions.onProgress;
+  const progress: RunProgress = {
+    phase: "cache", cached: 0, toFetch: 0, toDecode: 0, done: 0,
+    downloadedBytes: 0, cachedBytes: 0,
+  };
   const fromMs = Date.parse(range.from);
   const toMs = Date.parse(range.to);
   const stats: LogsStats = {
@@ -209,7 +216,8 @@ export async function readLogs(
   stats.listed = manifest.files.length;
 
   const listed = new Set(manifest.files.map((file) => file.key));
-  const evictions = (await source.cachedKeys()).filter((key) => {
+  const cachedKeys = new Set(await source.cachedKeys());
+  const evictions = [...cachedKeys].filter((key) => {
     if (listed.has(key) || !key.startsWith(`processed/ops/${kind}/`))
       return false;
     const parsed = parseKey(key);
@@ -224,7 +232,16 @@ export async function readLogs(
     if (cached) stats.cached++;
     if (isCdnHit(cdn)) stats.cdnHits++;
     stats.read++;
-    return readRows(bytes);
+    if (cached) {
+      progress.cached++;
+      progress.cachedBytes += bytes.byteLength;
+    } else {
+      progress.downloadedBytes += bytes.byteLength;
+    }
+    const rows = await readRows(bytes);
+    progress.done++;
+    onProgress?.({ ...progress });
+    return rows;
   };
 
   const windows = new Map<
@@ -258,6 +275,15 @@ export async function readLogs(
     return inRange.length === parsed.sources || inRange.length === 0;
   });
   stats.ignoredCompact += compacts.length - validCompacts.length;
+  const queueProgress = (files: ManifestFile[]) => {
+    for (const file of files) {
+      if (cachedKeys.has(file.key)) progress.toDecode++;
+      else progress.toFetch++;
+    }
+    progress.phase = "files";
+    onProgress?.({ ...progress });
+  };
+  queueProgress(validCompacts.map(({ file }) => file));
   await mapLimit(
     validCompacts,
     async ({ file, parsed }) => {
@@ -275,6 +301,7 @@ export async function readLogs(
   const rest = [...windows.values()].flat().map(({ file }) => file);
   const toRead = [...plain, ...rest.filter((file) => !covered.has(file.key))];
   stats.skippedCovered = rest.length - (toRead.length - plain.length);
+  queueProgress(toRead);
   await mapLimit(
     toRead,
     async (file) => {
@@ -283,6 +310,8 @@ export async function readLogs(
     signal,
   );
 
+  progress.phase = "aggregate";
+  onProgress?.({ ...progress });
   stats.liveRows = live.rows.length;
   const byId = new Map<string, LogRow>();
   for (const raw of [...live.rows, ...fileRows]) {

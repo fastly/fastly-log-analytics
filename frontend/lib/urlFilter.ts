@@ -2,6 +2,8 @@ import { subHours } from 'date-fns'
 import { useFilterStore } from '@/stores/filterStore'
 import type { FiltersPayload } from '@/types/api'
 
+export { parseFilterToken } from './filterToken'
+
 export function buildServiceHref(path: string, serviceId: string | null | undefined): string {
   return serviceId ? `${path}${path.includes('?') ? '&' : '?'}service=${encodeURIComponent(serviceId)}` : path
 }
@@ -140,17 +142,4 @@ export function normalizeTabKey(tab: string | null | undefined): string {
   if (!tab) return 'all'
   const lower = tab.toLowerCase().trim()
   return lower === 'performance' ? 'edge' : lower === 'routing' ? 'network' : lower
-}
-
-export function parseFilterToken(
-  text: string,
-): { mode: 'include' | 'exclude'; field: string; value: string } | null {
-  const sign = text[0]
-  if (sign !== '+' && sign !== '-') return null
-  const colon = text.indexOf(':')
-  if (colon < 2) return null
-  const field = text.slice(1, colon)
-  const value = text.slice(colon + 1)
-  if (!field || value === '') return null
-  return { mode: sign === '+' ? 'include' : 'exclude', field, value }
 }

@@ -3,16 +3,15 @@ import type { paths, components } from "@/types/api.generated";
 import type { StripIndex, WireParity } from "@/types/api";
 import { useDebugStore, useServiceStore, useSessionRoleStore } from "@/stores/filterStore";
 import { parseExtentMs, showReadOnlyToast, showBusyToast, showToast, isUserActive } from "@/lib/utils";
-import {
-  IS_CLOUD_MODE,
-  isCloudMode,
-  handleCloudAnalyticalRequest,
-} from "@/lib/cloud-engine/adapter";
+import { IS_CLOUD_MODE, isCloudMode } from "@/lib/cloud-engine/mode";
 import { parseVcpuMsHeader } from "@/lib/cloud-engine/dashboard/sources";
 
 export * from "./apiSsrProxy";
 export * from "./apiQueryKeys";
 export * from "./apiLogFields";
+
+let cloudAdapter: Promise<typeof import("@/lib/cloud-engine/adapter")> | undefined;
+const getCloudAdapter = () => cloudAdapter ??= import("@/lib/cloud-engine/adapter");
 
 let pageLoadId: string | null = null;
 const makeUuid = () =>
@@ -98,6 +97,7 @@ export const client = createClient<paths>({
   baseUrl: getApiBase(),
   fetch: async (req) => {
     if (IS_CLOUD_MODE || isCloudMode()) {
+      const { handleCloudAnalyticalRequest } = await getCloudAdapter();
       const intercepted = await handleCloudAnalyticalRequest(req);
       if (intercepted) return intercepted;
     }
@@ -129,7 +129,31 @@ function stampClientContextHeaders(headers: Headers): string | null {
 
 const SESSION_DEAD_403_ERRORS = new Set(["fingerprint_mismatch", "ip_not_whitelisted", "unauthenticated"]);
 
-function redirectToShareLoginIfSessionDead(): void {
+let cloudSessionVerification: Promise<boolean> | null = null;
+
+function isCloudSessionDead(): Promise<boolean> {
+  if (!cloudSessionVerification) {
+    cloudSessionVerification = (async () => {
+      try {
+        const response = await globalThis.fetch(`${getApiBase()}/api/auth/session`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (response.status === 401 || response.status === 403) return true;
+        if (!response.ok) return false;
+        const session = await response.json() as { user?: unknown };
+        return session.user === null;
+      } catch {
+        return false;
+      }
+    })().finally(() => {
+      cloudSessionVerification = null;
+    });
+  }
+  return cloudSessionVerification;
+}
+
+async function redirectToShareLoginIfSessionDead(verifyCloudSession: boolean): Promise<void> {
   if (typeof window === "undefined") return;
   const pathname = window.location.pathname;
   if (
@@ -145,15 +169,16 @@ function redirectToShareLoginIfSessionDead(): void {
   } catch {
     /* store unavailable */
   }
+  if (verifyCloudSession && (IS_CLOUD_MODE || isCloudMode()) && !await isCloudSessionDead()) return;
   const returnTo = `${window.location.pathname}${window.location.search}`;
   window.location.replace(`/share-login?return=${encodeURIComponent(returnTo)}`);
 }
 
-export function handleApiStatusSideEffects(
+export async function handleApiStatusSideEffects(
   status: number,
   bodyOrError: unknown,
   method?: string,
-): { msg: string; isBusy503: boolean; isDead403: boolean; alreadyHandled: boolean } {
+): Promise<{ msg: string; isBusy503: boolean; isDead403: boolean; alreadyHandled: boolean }> {
   let error: unknown = bodyOrError;
   if (typeof bodyOrError === "string") {
     const trimmed = bodyOrError.trim();
@@ -176,7 +201,7 @@ export function handleApiStatusSideEffects(
     (error as { error?: string })?.error;
   const isDead403 =
     status === 403 && typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode);
-  if (status === 401 || isDead403) redirectToShareLoginIfSessionDead();
+  if (status === 401 || isDead403) await redirectToShareLoginIfSessionDead(status === 401);
   if (status === 403 && msg === "read_only") showReadOnlyToast();
   const isBusy503 = status === 503 && (error as { detail?: { busy?: boolean } })?.detail?.busy === true;
   if (isBusy503) showBusyToast();
@@ -192,8 +217,10 @@ async function rawAdminFetch(input: string | URL | Request, init: RequestInit = 
   const headers = new Headers(init.headers ?? {});
   stampClientContextHeaders(headers);
   if (IS_CLOUD_MODE || isCloudMode()) {
+    const { handleCloudAnalyticalRequest } = await getCloudAdapter();
     const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const req = new Request(urlStr.startsWith("http") ? urlStr : `http://localhost${urlStr.startsWith("/") ? "" : "/"}${urlStr}`, {
+    const origin = globalThis.window?.location.origin ?? "http://localhost";
+    const req = new Request(new URL(urlStr, origin), {
       ...init,
       headers,
     });
@@ -207,7 +234,7 @@ export async function adminFetch(input: string | URL | Request, init: RequestIni
   const r = await rawAdminFetch(input, init);
   if (!r.ok) {
     const errorText = typeof r.clone === "function" ? await r.clone().text().catch(() => "") : "";
-    handleApiStatusSideEffects(r.status, errorText, init.method);
+    await handleApiStatusSideEffects(r.status, errorText, init.method);
   }
   return r;
 }
@@ -245,7 +272,7 @@ export async function adminJsonResult<P extends keyof paths, T = JsonOf<P>, M ex
   const r = await rawAdminFetch(url, init);
   if (!r.ok) {
     const errorText = await r.text().catch(() => "");
-    handleApiStatusSideEffects(r.status, errorText, init.method);
+    await handleApiStatusSideEffects(r.status, errorText, init.method);
     return {
       ok: false,
       status: r.status,
@@ -335,7 +362,7 @@ client.use({
     }
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "An unknown error occurred" }));
-      const { msg, isBusy503 } = handleApiStatusSideEffects(response.status, error, request.method);
+      const { msg, isBusy503 } = await handleApiStatusSideEffects(response.status, error, request.method);
       const err = new Error(msg) as Error & { status?: number; response?: { status: number }; busy?: boolean };
       err.status = response.status;
       err.response = { status: response.status };

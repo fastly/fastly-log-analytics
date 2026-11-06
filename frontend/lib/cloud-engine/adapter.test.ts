@@ -5,8 +5,14 @@ import { setPerformanceEngineClient } from "./performance";
 import { setSecurityEngineClient } from "./security";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 
+vi.mock("./range-loader", () => ({ ensureCloudRange: vi.fn().mockResolvedValue(undefined) }));
+
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
   beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) =>
+      Response.json(String(input).includes("/api/services")
+        ? { services: [{ service_id: "svc-1", rum: { enabled: true }, scoring: { enabled: false } }] }
+        : { latest_log_at: "2026-11-06T00:00:00Z" })));
     setOriginSqlExecutor({
       tableName: "requests",
       getColumns: async () => new Set(["ottfb", "ost", "edge", "pop", "oip", "url", "host"]),
@@ -32,6 +38,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     setPerformanceEngineClient(null);
     setSecurityEngineClient(null);
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("dispatches /api/origin/* routes through handleOriginRequest", async () => {
@@ -205,6 +212,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     );
     expect(scoreRes).not.toBeNull();
     expect(scoreRes!.status).toBe(200);
+    expect(await scoreRes!.json()).toMatchObject({ enabled: false, supported: false });
 
     const presetsRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/presets", { method: "GET" }),

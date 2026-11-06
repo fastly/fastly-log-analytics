@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
-import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
 

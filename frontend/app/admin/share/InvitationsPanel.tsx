@@ -13,7 +13,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useAutoFlash, useCopyToClipboard } from "@/hooks/useSSE"
 import { client, extractApiError, unwrapClient } from "@/lib/api"
-import { IS_CLOUD_MODE } from "@/lib/cloud-engine/adapter"
+import { IS_CLOUD_MODE } from "@/lib/cloud-engine/mode"
 import { formatDeterministicUTC } from "@/lib/utils"
 import { CreateInviteDialog } from "./CreateInviteDialog"
 import { SortableHead } from "./SharingControlPanel"

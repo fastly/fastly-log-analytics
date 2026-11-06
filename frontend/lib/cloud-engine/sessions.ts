@@ -47,6 +47,7 @@ export interface SessionSummaryRow {
   session_end: string;
   req_count: number;
   streaming_reqs?: number;
+  is_streaming: boolean;
   edge_sid?: string | null;
   edge_count?: number;
   shield_count?: number;
@@ -116,9 +117,6 @@ export interface SessionTokenPayload {
 }
 
 function toBase64Url(input: string): string {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(input, "utf-8").toString("base64url");
-  }
   const bytes = new TextEncoder().encode(input);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
@@ -126,9 +124,6 @@ function toBase64Url(input: string): string {
 }
 
 function fromBase64Url(token: string): string {
-  if (typeof Buffer !== "undefined") {
-    return Buffer.from(token, "base64url").toString("utf-8");
-  }
   const padded = token.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(padded);
   const bytes = new Uint8Array(binary.length);
@@ -278,12 +273,12 @@ export function buildSessionsCteSql(options: {
     ),
     gaps AS (
       SELECT *,
-        ts - LAG(ts) OVER (PARTITION BY ${partKey} ORDER BY ts) AS gap
+        epoch_ms(ts) - LAG(epoch_ms(ts)) OVER (PARTITION BY ${partKey} ORDER BY ts) AS gap
       FROM base
     ),
     marks AS (
       SELECT *,
-        CASE WHEN gap IS NULL OR gap > INTERVAL 30 MINUTES THEN 1 ELSE 0 END AS is_new
+        CASE WHEN gap IS NULL OR gap > ${SESSIONS_INACTIVITY_GAP_SECONDS * 1000} THEN 1 ELSE 0 END AS is_new
       FROM gaps
     ),
     sessions_raw AS (
@@ -461,8 +456,12 @@ export async function handleSessionsList(
   const sessions: SessionSummaryRow[] = rawRows.map((r) => {
     const rawIp = String(r.ip ?? "");
     const rawJa4 = r.ja4 != null ? String(r.ja4) : null;
-    const sessionStart = String(r.session_start ?? body.start_time);
-    const sessionEnd = String(r.session_end ?? body.end_time);
+    const sessionStart = typeof r.session_start === "number"
+      ? new Date(r.session_start).toISOString()
+      : String(r.session_start ?? body.start_time);
+    const sessionEnd = typeof r.session_end === "number"
+      ? new Date(r.session_end).toISOString()
+      : String(r.session_end ?? body.end_time);
     const reqCount = Number(r.req_count ?? 0);
     const reqs4xx = Number(r.reqs_4xx ?? 0);
     const reqs5xx = Number(r.reqs_5xx ?? 0);
@@ -488,6 +487,7 @@ export async function handleSessionsList(
       session_end: sessionEnd,
       req_count: reqCount,
       streaming_reqs: Number(r.streaming_reqs ?? 0),
+      is_streaming: Number(r.streaming_reqs ?? 0) > 0,
       edge_sid: maskIps
         ? "[redacted]"
         : r.edge_sid != null
@@ -598,8 +598,11 @@ export async function handleSessionsDetail(
 
   const rawRows = ctx.runSql ? await ctx.runSql(sql) : [];
   const data = rawRows.map((r) => {
-    if (!maskIps) return { ...r };
     const copy: Record<string, unknown> = { ...r };
+    if (typeof copy.timestamp === "number") {
+      copy.timestamp = new Date(copy.timestamp).toISOString();
+    }
+    if (!maskIps) return copy;
     if ("ip" in copy) copy.ip = "0.0.0.0";
     if ("edge_sid" in copy && copy.edge_sid != null) copy.edge_sid = "[redacted]";
     if ("cookie_session" in copy && copy.cookie_session != null) {

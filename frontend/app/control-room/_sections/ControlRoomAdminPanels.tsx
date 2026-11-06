@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button'
 import { adminFetch, adminJson, queryKeys } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { useMounted } from '@/hooks/useBootstrap'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import {
   formatBytesTiered,
   formatLocalDateTime,
@@ -58,9 +59,9 @@ function QuarantineItemRow({
           {item.byte_offset !== null && ` · byte ${item.byte_offset}`} · {formatLocalDateTime(item.quarantined_at)}
         </p>
         <p className="break-words text-sm">{item.error_text}</p>
-        <p className="break-all font-mono text-[11px] text-muted-foreground">SHA-256: {item.sha256}</p>
+        {!IS_CLOUD_MODE && <p className="break-all font-mono text-[11px] text-muted-foreground">SHA-256: {item.sha256}</p>}
       </div>
-      <div className="flex shrink-0 gap-2">
+      {!IS_CLOUD_MODE && <div className="flex shrink-0 gap-2">
         <Button variant="outline" size="sm" onClick={onDownload} disabled={working}>
           {working ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
           {working ? 'Working…' : 'Download'}
@@ -69,7 +70,7 @@ function QuarantineItemRow({
           <Trash2 className="h-3 w-3 mr-1" />
           Remove
         </Button>
-      </div>
+      </div>}
     </div>
   )
 }
@@ -206,6 +207,7 @@ export function QuarantineSection() {
         </div>
       </CardHeader>
       <CardContent className="space-y-3 pt-0">
+        {IS_CLOUD_MODE && <p className="text-xs text-muted-foreground">Cloud records quarantine containers. Per-line hashes, evidence downloads and individual line removal are unavailable; Purge all uses the native container purge.</p>}
         {summaryQuery.isPending ? (
           <p className="text-sm text-muted-foreground">Loading quarantine summary…</p>
         ) : (

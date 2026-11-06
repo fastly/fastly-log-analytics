@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COALESCED_SCAN_NAMES,
+  CLOUD_INSIGHT_DETECTORS,
   INSIGHTS_ROLLUP_MIN_COVERAGE,
   INSIGHT_CARDS,
   INSIGHT_DEFINITIONS,
@@ -55,6 +56,14 @@ describe("cloud-engine insights module", () => {
     expect(errorSpikes?.missing_fields).toBeNull();
     expect(botnet?.available).toBe(false);
     expect(botnet?.missing_fields).toEqual(["ja3", "ja4"]);
+    expect(botnet?.reason).toBe("cloud_detector_unsupported");
+    const allFields = INSIGHT_DEFINITIONS.flatMap((d) => d.required_fields);
+    const complete = handleInsightAvailability("svc-1", allFields);
+    expect(complete.insights.filter((d) => d.available).map((d) => d.id).sort())
+      .toEqual([...CLOUD_INSIGHT_DETECTORS].sort());
+    expect(complete.unavailable).toHaveLength(29);
+    expect(complete.unavailable.every((d) => d.reason === "cloud_detector_unsupported")).toBe(true);
+    expect(handleInsightAvailability("svc-1").available).toBe(false);
   });
 
   it("detects cache_collapse and masks IPs in credential_enumeration when maskIps is true", async () => {
@@ -62,6 +71,8 @@ describe("cloud-engine insights module", () => {
       { service_id: "svc-1", window_size_hrs: 24, baseline_hours: 168 },
       {
         role: "analyst-no-pii",
+        availableColumns: new Set(["url", "cache", "ip", "status"]),
+        availableHistoryHours: 168,
         urlAggregateRows: [
           {
             url: "/assets/app.js",
@@ -76,8 +87,11 @@ describe("cloud-engine insights module", () => {
             ip: "198.51.100.77",
             ce_w_denied: 120,
             ce_b_denied: 2,
+            ce_w_attempts: 120,
+            ce_w_paths: 1,
           },
         ],
+        scalarAggregateRows: [{ w_hits: 10, w_cacheable: 100, b_hits: 95, b_cacheable: 100 }],
         windowTotalRequests: 5000,
       },
     );
@@ -93,6 +107,17 @@ describe("cloud-engine insights module", () => {
     const ceCard = env.insights.find((c) => c.id === "credential_enumeration");
     expect(ceCard?.severity).toBe("critical");
     expect(ceCard?.items[0].label).toBe("0.0.0.0");
+    expect(JSON.stringify(env)).not.toContain("198.51.100.77");
+  });
+
+  it("does not claim clean results when history or detector inputs are missing", async () => {
+    const body = { window_size_hrs: 1, baseline_hours: 48 };
+    const context = { availableColumns: new Set(["url", "cache"]) };
+    const result = await handleInsights(body, context);
+    expect(result.insights.map((card) => card.severity)).toEqual(["info", "info", "info"]);
+    expect(result.insights.every((card) => card.summary.includes("Not evaluated"))).toBe(true);
+    await expect(handleInsights(body, { ...context, availableHistoryHours: 48 }))
+      .rejects.toThrow("Missing local aggregate input");
   });
 
   it("shapes /api/insights/cache-collapse-detail and masks recent_misses IPs", async () => {

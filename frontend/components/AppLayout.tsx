@@ -19,8 +19,8 @@ import {
   useEnforceMaskedFilters, useAnalystHeartbeat, useAnalystLogout,
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
-import { prewarmDashboardEngine } from '@/lib/cloud-engine/dashboard/client'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { CloudLoadingProgress } from '@/components/LoadingProgress'
 import packageJson from '../package.json'
 import {
   SrLiveRegion,
@@ -191,7 +191,7 @@ export function AppLayout({
   const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
   React.useEffect(() => {
     if (IS_CLOUD_MODE && needsPlotlyPrewarm && !needsLogin) {
-      prewarmDashboardEngine()
+      void import('@/lib/cloud-engine/dashboard/client').then(({ prewarmDashboardEngine }) => prewarmDashboardEngine())
     }
   }, [needsPlotlyPrewarm, needsLogin])
 
@@ -409,6 +409,7 @@ export function AppLayout({
         </TooltipProvider>
       </div>
 
+      {IS_CLOUD_MODE && <CloudLoadingProgress />}
       <MobileNavDrawer
         open={mobileNavOpen}
         onOpenChange={setMobileNavOpen}

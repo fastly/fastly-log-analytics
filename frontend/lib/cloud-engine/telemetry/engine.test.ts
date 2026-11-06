@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { fnv1a32, readLogs, type OpsSource } from "./engine";
 import type { ManifestFile } from "../dashboard/manifest";
+import type { RunProgress } from "../dashboard/engine";
 
 const DAY_MS = Date.parse("2026-10-29T00:00:00Z");
 const minute = (hour: number, extra = 0) => DAY_MS / 60_000 + hour * 60 + extra;
@@ -82,6 +83,29 @@ const range = {
 const noLive = [{ rows: [], next_cursor: null }];
 
 describe("readLogs", () => {
+  it("reports actual downloaded and cached file work before aggregation", async () => {
+    const fetched = "processed/ops/fos_usage/download.parquet";
+    const cached = "processed/ops/fos_usage/cached.parquet";
+    const downloadedBytes = await parquet([row(1, "download")]);
+    const cachedBytes = await parquet([row(2, "cached")]);
+    const { src } = source({
+      live: noLive,
+      manifest: [{ files: [entry(fetched, 1), entry(cached, 1)], next_cursor: null }],
+      files: {}, cached: [cached],
+    });
+    src.fetchFile = async (key) => ({
+      bytes: key === cached ? cachedBytes : downloadedBytes,
+      cached: key === cached,
+    });
+    const updates: RunProgress[] = [];
+    await readLogs(src, { kind: "fos_usage", ...range, onProgress: (progress) => updates.push(progress) });
+    expect(updates.some((p) => p.phase === "files" && p.done === 1)).toBe(true);
+    expect(updates.at(-1)).toMatchObject({
+      phase: "aggregate", toFetch: 1, toDecode: 1, done: 2, cached: 1,
+      downloadedBytes: downloadedBytes.byteLength, cachedBytes: cachedBytes.byteLength,
+    });
+  });
+
   it("merges paginated live rows and manifest files, dedups on event_id, newest first", async () => {
     const k1 = windowKey(10, minute(10), 2);
     const { src, log } = source({

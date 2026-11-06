@@ -637,6 +637,8 @@ function arrowTableToRows<T = Record<string, unknown>>(
 }
 
 const RUM_VITALS_COLUMNS: Record<string, DuckDBColumnType> = {
+  request_event_id: "VARCHAR",
+  client_id: "VARCHAR",
   metric_name: "VARCHAR",
   metric_value: "DOUBLE",
   rating: "VARCHAR",
@@ -661,6 +663,8 @@ const RUM_VITALS_COLUMNS: Record<string, DuckDBColumnType> = {
 };
 
 const RUM_ERRORS_COLUMNS: Record<string, DuckDBColumnType> = {
+  request_event_id: "VARCHAR",
+  client_id: "VARCHAR",
   message: "VARCHAR",
   error_message: "VARCHAR",
   error_type: "VARCHAR",
@@ -888,13 +892,20 @@ export class DuckDBAnalyticalEngine {
             : `CAST(${sqlIdent(tsCol)} AS BIGINT)`;
 
       const entries = Object.entries(schemaCols);
+      const aliases: Record<string, string> = {
+        request_event_id: "req_id", client_id: "cid", session_id: "cid",
+        rating: "metric_rating", page_url: "pathname", path: "pathname",
+        browser_name: "browser", os_name: "os", device_type: "device",
+        filename: "error_file", lineno: "error_line", colno: "error_col",
+      };
       const selectCols = entries
         .map(([field, targetType]) => {
           const col = sqlIdent(field);
-          if (!typeByCol.has(field)) {
+          const sourceField = typeByCol.has(field) ? field : aliases[field];
+          if (!sourceField || !typeByCol.has(sourceField)) {
             return `NULL::${targetType} AS ${col}`;
           }
-          const cast = `CAST(${col} AS ${targetType})`;
+          const cast = `CAST(${sqlIdent(sourceField)} AS ${targetType})`;
           return targetType === "DOUBLE"
             ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
             : `${cast} AS ${col}`;

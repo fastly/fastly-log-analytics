@@ -1,8 +1,5 @@
 import { z } from "zod";
 import {
-  executeSql,
-  getPresentColumns,
-  getStoreStats,
   runInWorker,
   searchFieldSummariesInWorker,
   searchFieldValuesInWorker,
@@ -14,14 +11,14 @@ import { handleAssetsRequest, type AssetsQueryParams } from "./assets";
 import { handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
 import { parseVcpuMsHeader } from "./dashboard/sources";
-import type { CardField } from "./dashboard/summaries";
+import type { CardField, CustomField } from "./dashboard/summaries";
 import {
-  handleCacheCollapseDetail,
   handleInsightAvailability,
-  handleInsights,
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
+import { queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
+import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead } from "./scoring-reads";
 import { handleNetworkRequest, type NetworkQueryParams } from "./network";
 import { handleOriginRequest } from "./origin";
 import { handlePerformanceRequest } from "./performance";
@@ -32,29 +29,35 @@ import {
   type QueryRequest,
 } from "./query";
 import { handleRumRequest, type RumQueryParams } from "./rum";
+import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
+import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
+import { isNativeCloudRoute } from "./native-routes";
+import { handleSavedViews } from "./saved-views";
+import { cloudServiceStatus } from "./service-bridges";
+import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
+import { cloudAdminWire } from "./admin-wire";
+import { beginCloudLoading, type LoadingStage } from "./loading-progress";
+import { ensureCloudRange } from "./range-loader";
+import { getDuckDBEngine } from "./dashboard/duckdb";
+import type { components } from "@/types/api.generated";
 import { handleSecurityRequest } from "./security";
 import {
-  handleSessionScoringRoute,
   handleSessionsDetail,
   handleSessionsList,
+  openSessionToken,
   type SessionDetailRequest,
   type SessionsListRequest,
 } from "./sessions";
 import {
   deleteLogHistory,
-  getLoggedTraffic,
-  getLogsStatus,
-  getOperationalLogging,
-  getQuarantine,
-  patchOperationalLogging,
   purgeQuarantine,
   reconcileStorage,
   startBackfill,
   sweepRetention,
 } from "./telemetry/admin";
 import { queryOpsLogs } from "./telemetry/client";
-import { OPS_KINDS, type OpsKind } from "./telemetry/kinds";
+import type { OpsKind } from "./telemetry/kinds";
 import { evaluateCapacity } from "./usage/capacity";
 import { estimateMonthlyUsage } from "./usage/estimate";
 import { fetchEstimatePrefill } from "./usage/estimatePrefill";
@@ -62,11 +65,9 @@ import { LIST_RATES } from "./usage/rates";
 import { bucketUsage } from "./usage/series";
 import {
   buildSevenLineCostTable,
-  deriveFosUsageFromCronRuns,
   fetchUsageSettings,
   fetchUsageSummary,
   reconcileSnapshot,
-  type CronRunRow,
 } from "./usage/summary";
 import { handleValueRequest, type ValueQueryParams } from "./value";
 import {
@@ -76,23 +77,9 @@ import {
 } from "@/stores/filterStore";
 
 export { parseVcpuMsHeader };
+export { IS_CLOUD_MODE, isCloudMode, setCloudModeRuntime } from "./mode";
 
 type BucketInterval = "1m" | "5m" | "1h" | "1d";
-
-let _runtimeCloudMode = false;
-
-export const IS_CLOUD_MODE: boolean =
-  process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "cloud" ||
-  process.env.NEXT_PUBLIC_STATIC_EXPORT === "1" ||
-  process.env.NEXT_PUBLIC_RUNTIME_MODE === "cloud";
-
-export function isCloudMode(): boolean {
-  return IS_CLOUD_MODE || _runtimeCloudMode;
-}
-
-export function setCloudModeRuntime(enabled: boolean): void {
-  _runtimeCloudMode = enabled;
-}
 
 export interface CloudQueryTelemetryPayload {
   files_listed?: number;
@@ -241,32 +228,196 @@ function parseFiltersPayload(
   return out;
 }
 
-const SAVED_VIEWS_STORAGE_KEY = "flp-saved-views-v1";
+function unsupportedCloudEndpoint(request: Request): Response {
+  return jsonResponse({
+    detail: { error: "cloud_endpoint_unsupported", method: request.method,
+      path: new URL(request.url).pathname },
+  }, request, undefined, 501);
+}
 
-function readSavedViews(): Array<Record<string, unknown>> {
-  if (typeof localStorage === "undefined") return [];
+function executeSql(sql: string, params: readonly unknown[] = [], signal?: AbortSignal) {
+  return getDuckDBEngine().executeSql<Record<string, unknown>>(sql, params, signal);
+}
+
+function getPresentColumns(_keys?: readonly string[], _signal?: AbortSignal) {
+  return getDuckDBEngine().getPresentColumns(_keys);
+}
+
+async function withLoading<T>(stage: LoadingStage, work: () => Promise<T>): Promise<T> {
+  const loading = beginCloudLoading(stage);
+  let success = false;
   try {
-    const raw = localStorage.getItem(SAVED_VIEWS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+    const result = await work();
+    success = true;
+    return result;
+  } finally {
+    loading.finish(success);
   }
 }
 
-function writeSavedViews(views: Array<Record<string, unknown>>): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(SAVED_VIEWS_STORAGE_KEY, JSON.stringify(views));
-  } catch {
-    /* ignore quota errors */
+async function loadCloudCatalog(request: Request) {
+  const response = await fetch("/api/log-fields/catalog", { signal: request.signal });
+  if (!response.ok) return response;
+  const catalog = await response.json() as components["schemas"]["LogFieldsCatalogResponse"];
+  const serviceId = new URL(request.url).searchParams.get("service_id") ??
+    request.headers.get("x-service-id");
+  if (!serviceId) return cloudLogFieldsCatalog(catalog);
+  const services = await fetch("/api/services", { signal: request.signal });
+  if (!services.ok) return services;
+  const payload = await services.json() as {
+    services?: Array<{ service_id: string; log_fields?: { custom_fields?: Array<Record<string, unknown>> } }>;
+  };
+  const service = payload.services?.find((item) => item.service_id === serviceId);
+  if (!service) return jsonResponse({ detail: { error: "service_not_found" } }, request, undefined, 404);
+  return cloudLogFieldsCatalog(catalog, service.log_fields);
+}
+
+let analyticalQueue = Promise.resolve();
+
+function isLocalScan(path: string, method: string): boolean {
+  if (!["GET", "POST"].includes(method)) return false;
+  const scoring = path.match(/^\/api\/services\/[^/]+\/scoring\/(.+)$/);
+  if (scoring) return method === "GET" && (CLOUD_SCORING_SCAN_ROUTES.has(scoring[1]) || /^sessions\/[^/]+\/events$/.test(scoring[1]));
+  if (path === "/api/insight-availability") return method === "GET";
+  return /^\/api\/(?:origin\/(?:aggregates|summary|timeseries|slow-urls|status-codes|path-breakdown|pop-latency|ip-health|shielding-analysis|drilldown)|performance(?:\/aggregates)?|security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?|threat-intel)|network(?:\/(?:bundle|pop-health)|-health|-quality)|value\/summary|assets\/aggregates|cmcd\/aggregates|sessions(?:\/detail)?|query|insights(?:\/cache-collapse-detail)?|usage\/rum-breakdown|rum\/(?:analytics|live-events|beacon-health))$/.test(path) ||
+    /^\/api\/services\/[^/]+\/rum\/(?:analytics|live-events|beacon-health)$/.test(path);
+}
+
+async function prepareCloudScan(request: Request): Promise<Request> {
+  const url = new URL(request.url);
+  const body = request.method === "POST"
+    ? await request.clone().json() as Record<string, unknown> : {};
+  const params = { ...Object.fromEntries(url.searchParams), ...body };
+  const token = typeof params.session_token === "string" ? openSessionToken(params.session_token) : null;
+  let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
+  if (!end) {
+    const response = await withLoading("range", () =>
+      fetch("/api/log-extents", { signal: request.signal }));
+    if (!response.ok) throw new Error(`Cloud range discovery failed (${response.status})`);
+    const extents = await response.json() as { latest_log_at?: string | null };
+    end = extents.latest_log_at ?? new Date().toISOString();
   }
+  const scoring = /\/scoring\//.test(url.pathname);
+  const historyHours = url.pathname.startsWith("/api/insights")
+    ? Number(params.window_size_hrs ?? 24) + Number(params.baseline_hours ?? 168)
+    : scoring ? Number(params.since_hours ?? (url.pathname.includes("/sessions/") ? Number(params.since_days ?? 30) * 24 : 24)) : 24;
+  const start = String(params.start_time ?? params.start ?? token?.s ??
+    new Date(Date.parse(end) - historyHours * 3_600_000).toISOString());
+  if (!Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end)) ||
+      Date.parse(start) > Date.parse(end) || !token && Date.parse(start) === Date.parse(end)) {
+    throw new Error("Invalid Cloud query time range");
+  }
+  const dataset = params.dataset;
+  const rum = /\/rum\//.test(url.pathname) || url.pathname === "/api/usage/rum-breakdown" ||
+    dataset === "client_vitals" || dataset === "client_errors";
+  const scanStart = url.pathname.startsWith("/api/insights")
+    ? new Date(Math.min(Date.parse(start), Date.parse(end) - historyHours * 3_600_000)).toISOString() : start;
+  const serviceId = url.pathname.match(/^\/api\/services\/([^/]+)\//)?.[1] ??
+    params.service_id ?? request.headers.get("x-service-id") ?? token?.svc ?? undefined;
+  let customFields: CustomField[] = [];
+  if (!rum && serviceId) {
+    const catalogUrl = new URL("/api/log-fields/catalog", request.url);
+    catalogUrl.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
+    const catalog = await loadCloudCatalog(new Request(catalogUrl, request));
+    if (catalog instanceof Response) throw new Error(`Cloud field discovery failed (${catalog.status})`);
+    customFields = (catalog.fields ?? []).filter((field) => field.is_custom).map((field) => ({
+      id: field.id,
+      type: /BOOL/i.test(String(field.sql_type)) ? "boolean"
+        : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(field.sql_type)) ? "number" : "string",
+    }));
+  }
+  const scanEnd = token ? new Date(Date.parse(end) + 1).toISOString() : end;
+  await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
+    serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+  });
+  if (request.method === "POST") {
+    return new Request(request, { body: JSON.stringify({ ...params,
+      start_time: params.start_time ?? start, end_time: params.end_time ?? end,
+      ...(serviceId ? { service_id: decodeURIComponent(String(serviceId)) } : {}),
+      ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
+    }) });
+  }
+  if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
+  if (!url.searchParams.has("end_time")) url.searchParams.set("end_time", end);
+  if (serviceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
+  return new Request(url, request);
 }
 
 export async function handleCloudAnalyticalRequest(
   request: Request,
 ): Promise<Response | null> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  if (/^\/api\/(?:cron-runs|cron-schedule|audit-logs|admin\/(?:usage-log(?:\/export)?|raw-tree|storage-tree|ingested-files|quarantine\/purge))$/.test(path)) {
+    const administrative = await withLoading("listing", () => cloudAdminWire(request));
+    if (administrative) return administrative;
+  }
+  if (request.method === "GET" && path === "/api/admin/log-accounting") return cloudLogAccounting(request);
+  if (request.method === "GET" && ["/api/admin/quarantine", "/api/admin/quarantine/summary"].includes(path)) {
+    return withLoading("listing", () => cloudQuarantine(request));
+  }
+  if (/^\/api\/services\/[^/]+\/scoring\//.test(path) && !isLocalScan(path, request.method)) {
+    return (await cloudScoringRead(request)) ?? unsupportedCloudEndpoint(request);
+  }
+  if (/^\/api\/services\/[^/]+\/(?:rum|cmcd)\/(?:status|versions)$/.test(path)) {
+    const response = await withLoading("session", () => cloudServiceStatus(request));
+    return response ?? unsupportedCloudEndpoint(request);
+  }
+  if (/^\/api\/(?:origin|performance|security|network|value|assets|cmcd|rum)(?:\/|-)/.test(path) &&
+      !isLocalScan(path, request.method) && !isNativeCloudRoute(request.method, path)) {
+    return unsupportedCloudEndpoint(request);
+  }
+  if (/^\/api\/admin\/(?:health-snapshot|metric-history(?:\/batch)?|bot-sources|system-jobs|pop-locations)$/.test(path)) {
+    return unsupportedCloudEndpoint(request);
+  }
+  if (path.startsWith("/api/views")) return (await handleSavedViews(request)) ?? unsupportedCloudEndpoint(request);
+  if (request.method === "GET" && ["/api/log-fields/catalog", "/api/schema"].includes(path)) {
+    const catalog = await withLoading("listing", () => loadCloudCatalog(request));
+    if (catalog instanceof Response) return catalog;
+    return jsonResponse(path === "/api/schema" ? cloudSchema(catalog) : catalog, request);
+  }
+  const stage = path === "/api/bootstrap" || path === "/api/auth/session" || path === "/api/services"
+    ? "session" : path === "/api/log-extents" ? "range" : path === "/api/files" ? "listing" : null;
+  if (stage && path !== "/api/bootstrap" && isNativeCloudRoute(request.method, path)) {
+    return withLoading(stage, () => fetch(request));
+  }
+  if ((request.method !== "GET" && (
+    /^\/api\/services\/[^/]+\/(?:rum|cmcd)\//.test(path) && !isLocalScan(path, request.method) ||
+    /^\/api\/services\/[^/]+\/scoring\//.test(path) &&
+      !/\/(?:analytics|evaluation|threshold-preview|latency-timeseries|score-distribution|top-flagged|compliance-breakdown|audit|curves|health|events)$/.test(path)
+  )) || /^\/api\/services\/[^/]+\/(?:rum|cmcd)\/(?:enable|disable|upgrade|settings)$/.test(path)) {
+    return unsupportedCloudEndpoint(request);
+  }
+
+  const work = async () => {
+    if (isLocalScan(path, request.method)) {
+      const previous = analyticalQueue;
+      let release!: () => void;
+      analyticalQueue = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      const loading = beginCloudLoading("files");
+      let success = false;
+      try {
+        request.signal.throwIfAborted();
+        const prepared = await prepareCloudScan(request);
+        const response = /\/scoring\//.test(path)
+          ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared);
+        success = Boolean(response?.ok);
+        return response ?? unsupportedCloudEndpoint(request);
+      } finally {
+        loading.finish(success);
+        release();
+      }
+    }
+    const response = await dispatchCloudRequest(request);
+    if (response) return response;
+    return !path.startsWith("/api/") || isNativeCloudRoute(request.method, path)
+      ? null : unsupportedCloudEndpoint(request);
+  };
+  return stage ? withLoading(stage, work) : work();
+}
+
+async function dispatchCloudRequest(request: Request): Promise<Response | null> {
   const url = new URL(request.url, "http://localhost");
   const { pathname, searchParams } = url;
   const method = (request.method || "GET").toUpperCase();
@@ -291,7 +442,8 @@ export async function handleCloudAnalyticalRequest(
     const sessionRes = await fetch("/api/auth/session", {
       credentials: "include",
       signal: request.signal,
-    }).catch(() => null);
+    });
+    if (!sessionRes.ok && sessionRes.status !== 401) return sessionRes;
     if (!sessionRes || !sessionRes.ok) {
       return jsonResponse(
         {
@@ -341,7 +493,8 @@ export async function handleCloudAnalyticalRequest(
     const servicesRes = await fetch("/api/services", {
       credentials: "include",
       signal: request.signal,
-    }).catch(() => null);
+    });
+    if (!servicesRes.ok) return servicesRes;
     const servicesJson = servicesRes?.ok
       ? ((await servicesRes.json().catch(() => ({ services: [] }))) as {
           services?: Array<{
@@ -364,21 +517,11 @@ export async function handleCloudAnalyticalRequest(
       cmcd_enabled: Boolean(s.cmcd?.enabled),
       rum_enabled: Boolean(s.rum_enabled),
     }));
-    const services =
-      mappedServices.length > 0
-        ? mappedServices
-        : isRemoteAnalyst
-          ? [
-              {
-                service_id: "default",
-                name: "Default Service",
-                cmcd_enabled: false,
-                rum_enabled: false,
-              },
-            ]
-          : [];
-    const activeServiceId = services[0]?.service_id ?? null;
-    const activeLogFieldIds = rawServices[0]?.log_fields?.selected_fields ?? [];
+    const services = mappedServices;
+    const requestedService = searchParams.get("service_id") ?? request.headers.get("x-service-id");
+    const activeServiceId = services.find((service) => service.service_id === requestedService)?.service_id ??
+      services[0]?.service_id ?? null;
+    const activeLogFieldIds = rawServices.find((service) => service.service_id === activeServiceId)?.log_fields?.selected_fields ?? [];
     return jsonResponse(
       {
         runtime_mode: "cloud",
@@ -403,57 +546,6 @@ export async function handleCloudAnalyticalRequest(
     );
   }
 
-  // High-scale-only admin overview endpoints bridged in Cloud mode
-  if (pathname === "/api/admin/health-snapshot" && method === "GET") {
-    return jsonResponse(
-      {
-        vcpus: 1,
-        load: null,
-        memory: null,
-        data_mount: null,
-        root_disk: null,
-        scheduler_last_tick_age_s: null,
-        recent_cron_failures: [],
-        config_backup: null,
-        in_flight_runs: [],
-      },
-      request,
-    );
-  }
-  if (pathname === "/api/admin/metric-history/batch" && method === "GET") {
-    return jsonResponse({ series: {} }, request);
-  }
-  if (pathname === "/api/admin/log-accounting" && method === "GET") {
-    return jsonResponse(
-      {
-        totals: { gap_pct: 0, total_lines: 0, total_lost_lines: 0 },
-        buckets: [],
-        sustained_loss: null,
-      },
-      request,
-    );
-  }
-  if (pathname === "/api/admin/quarantine/summary" && method === "GET") {
-    return jsonResponse({ total_items: 0, by_category: {} }, request);
-  }
-  if (pathname === "/api/admin/quarantine" && method === "GET") {
-    return jsonResponse({ items: [], total: 0 }, request);
-  }
-  if (pathname === "/api/admin/bot-sources" && method === "GET") {
-    return jsonResponse(
-      {
-        sources: [],
-        rdns: { total: 0, pending: 0, last_enrichment_at: null },
-      },
-      request,
-    );
-  }
-  if (pathname === "/api/admin/system-jobs" && method === "GET") {
-    return jsonResponse({ jobs: [] }, request);
-  }
-  if (pathname === "/api/admin/pop-locations" && method === "GET") {
-    return jsonResponse({ pops: [] }, request);
-  }
   if (pathname === "/api/admin/debug-settings" && method === "GET") {
     const res = await fetch("/api/auth/session", {
       credentials: "include",
@@ -487,8 +579,9 @@ export async function handleCloudAnalyticalRequest(
       credentials: "include",
       body: JSON.stringify(body),
       signal: request.signal,
-    }).catch(() => null);
-    const updated = res?.ok
+    });
+    if (!res.ok) return res;
+    const updated = res.ok
       ? ((await res.json().catch(() => ({}))) as Record<string, unknown>)
       : {};
     return jsonResponse(
@@ -506,15 +599,16 @@ export async function handleCloudAnalyticalRequest(
     const startTime = searchParams.get("start_time");
     const endTime = searchParams.get("end_time");
     if (startTime || endTime) {
-      await startBackfill().catch(() => null);
+      await startBackfill();
     } else {
-      await fetch("/api/cron-runs/trigger", {
+      const triggered = await fetch("/api/cron-runs/trigger", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{}",
         credentials: "include",
         signal: request.signal,
-      }).catch(() => null);
+      });
+      if (!triggered.ok) return triggered;
     }
     return jsonResponse({ run_id: "cloud-tick", status: "started" }, request);
   }
@@ -698,7 +792,7 @@ export async function handleCloudAnalyticalRequest(
         to: new Date(now).toISOString(),
       },
       { signal: request.signal },
-    ).catch(() => ({ rows: [] }));
+    );
     const audit_logs = (res.rows ?? []).map(
       (r: Record<string, unknown>, idx: number) => ({
         id: idx + 1,
@@ -712,50 +806,6 @@ export async function handleCloudAnalyticalRequest(
       }),
     );
     return jsonResponse({ audit_logs }, request);
-  }
-
-  // Saved Views localStorage bridge
-  if (pathname === "/api/views" && method === "GET") {
-    return jsonResponse({ views: readSavedViews() }, request);
-  }
-  if (pathname === "/api/views" && method === "POST") {
-    const body = (await request.clone().json().catch(() => ({}))) as Record<
-      string,
-      unknown
-    >;
-    const views = readSavedViews();
-    const created = {
-      id:
-        typeof crypto?.randomUUID === "function"
-          ? crypto.randomUUID()
-          : `view-${Date.now()}`,
-      created_at: new Date().toISOString(),
-      ...body,
-    };
-    views.push(created);
-    writeSavedViews(views);
-    return jsonResponse(created, request);
-  }
-  if (pathname.startsWith("/api/views/") && (method === "PUT" || method === "DELETE")) {
-    const viewId = decodeURIComponent(pathname.slice("/api/views/".length));
-    const views = readSavedViews();
-    if (method === "DELETE") {
-      writeSavedViews(views.filter((v) => String(v.id) !== viewId));
-      return jsonResponse({ status: "deleted" }, request);
-    }
-    const body = (await request.clone().json().catch(() => ({}))) as Record<
-      string,
-      unknown
-    >;
-    const next = views.map((v) =>
-      String(v.id) === viewId ? { ...v, ...body } : v,
-    );
-    writeSavedViews(next);
-    const updated = next.find((v) => String(v.id) === viewId) ?? {
-      id: viewId,
-      ...body,
-    };
-    return jsonResponse(updated, request);
   }
 
   // Page 4: Main Dashboard (/api/dashboard/bundle, /api/dashboard/aggregates, /api/dashboard/field-values)
@@ -984,14 +1034,22 @@ export async function handleCloudAnalyticalRequest(
   }
 
   // Page 5: Usage & Cost (/api/usage/*)
+  if (pathname === "/api/usage/rum-breakdown" && method === "GET") {
+    const settings = await fetchUsageSettings();
+    return jsonResponse(await cloudRumUsage({
+      start_time: searchParams.get("start_time")!,
+      end_time: searchParams.get("end_time")!,
+      signal: request.signal,
+    }, settings.class_a_rate_per_1k), request);
+  }
   if (pathname.startsWith("/api/usage/")) {
     const now = Date.now();
     const days = Number(searchParams.get("days") ?? 30) || 30;
-    const fromMs = searchParams.get("start_time")
-      ? Date.parse(searchParams.get("start_time")!)
+    const fromMs = searchParams.get("start_time") || searchParams.get("start")
+      ? Date.parse((searchParams.get("start_time") ?? searchParams.get("start"))!)
       : now - days * 86_400_000;
-    const toMs = searchParams.get("end_time")
-      ? Date.parse(searchParams.get("end_time")!)
+    const toMs = searchParams.get("end_time") || searchParams.get("end")
+      ? Date.parse((searchParams.get("end_time") ?? searchParams.get("end"))!)
       : now;
 
     if (pathname === "/api/usage/prefill/rates") {
@@ -1099,18 +1157,6 @@ export async function handleCloudAnalyticalRequest(
         request,
       );
     }
-    if (pathname === "/api/usage/rum-breakdown") {
-      return jsonResponse(
-        {
-          total_events: 0,
-          total_bytes:
-            summary.storage.datasets.find((d) => d.dataset === "pq_rum")
-              ?.bytes ?? 0,
-          data: [],
-        },
-        request,
-      );
-    }
   }
 
   // Page 6 & 7: Operational Logs, Schema & Usage Log
@@ -1118,85 +1164,8 @@ export async function handleCloudAnalyticalRequest(
     const res = await deleteLogHistory("cron_runs");
     return jsonResponse(res, request);
   }
-  if (pathname === "/api/cron-runs" && method === "GET") {
-    const now = Date.now();
-    const res = await queryOpsLogs(
-      "cron_runs",
-      {
-        from: new Date(now - 7 * 86_400_000).toISOString(),
-        to: new Date(now).toISOString(),
-      },
-      { signal: request.signal },
-    );
-    return jsonResponse(
-      {
-        entries: res.rows,
-        total: res.rows.length,
-        status: res.status,
-        stats: res.stats,
-      },
-      request,
-    );
-  }
-  if (pathname === "/api/cron-schedule" && method === "GET") {
-    return jsonResponse(
-      {
-        tasks: [
-          { name: "ingest", interval_s: 120, enabled: true },
-          { name: "rum_ingest", interval_s: 120, enabled: true },
-          { name: "ops_flush", interval_s: 120, enabled: true },
-          { name: "rollup", interval_s: 120, enabled: true },
-          { name: "retention", interval_s: 3600, enabled: true },
-          { name: "reconcile", interval_s: 3600, enabled: true },
-        ],
-      },
-      request,
-    );
-  }
-  if (pathname === "/api/audit-logs" && method === "GET") {
-    const now = Date.now();
-    const res = await queryOpsLogs(
-      "admin_audit",
-      {
-        from: new Date(now - 30 * 86_400_000).toISOString(),
-        to: new Date(now).toISOString(),
-      },
-      { signal: request.signal },
-    );
-    return jsonResponse(
-      { entries: res.rows, total: res.rows.length },
-      request,
-    );
-  }
-  if (pathname === "/api/admin/ingested-files" && method === "GET") {
-    const now = Date.now();
-    const res = await queryOpsLogs(
-      "ingest_files",
-      {
-        from: new Date(now - 7 * 86_400_000).toISOString(),
-        to: new Date(now).toISOString(),
-      },
-      { signal: request.signal },
-    );
-    return jsonResponse({ files: res.rows, total: res.rows.length }, request);
-  }
   if (pathname === "/api/admin/metadata-storage" && method === "GET") {
-    const [status, logging, quarantine, cacheStats] = await Promise.all([
-      getLogsStatus().catch(() => null),
-      getOperationalLogging().catch(() => null),
-      getQuarantine().catch(() => null),
-      getStoreStats().catch(() => null),
-    ]);
-    return jsonResponse(
-      {
-        status,
-        logging,
-        quarantine,
-        browser_cache: cacheStats,
-        kinds: OPS_KINDS,
-      },
-      request,
-    );
+    return jsonResponse({ supported: false, reason: "cloud_postgres_storage_unavailable" }, request);
   }
   if (pathname === "/api/admin/metadata-cleanup" && method === "POST") {
     const body = (await request.clone().json().catch(() => ({}))) as {
@@ -1224,76 +1193,11 @@ export async function handleCloudAnalyticalRequest(
     if (body.kind) {
       return jsonResponse(await deleteLogHistory(body.kind), request);
     }
-    return jsonResponse({ status: "ok" }, request);
+    return jsonResponse({ detail: { error: "unsupported_cleanup_action" } }, request, undefined, 400);
   }
   if (pathname === "/api/admin/metadata-retention" && method === "PATCH") {
-    const body = (await request.clone().json().catch(() => ({}))) as Record<
-      string,
-      boolean
-    >;
-    return jsonResponse(await patchOperationalLogging(body), request);
+    return unsupportedCloudEndpoint(request);
   }
-  if (pathname === "/api/admin/usage-log" && method === "GET") {
-    const now = Date.now();
-    const [fosRes, cronRes, traffic] = await Promise.all([
-      queryOpsLogs(
-        "fos_usage",
-        {
-          from: new Date(now - 7 * 86_400_000).toISOString(),
-          to: new Date(now).toISOString(),
-        },
-        { signal: request.signal },
-      ),
-      queryOpsLogs(
-        "cron_runs",
-        {
-          from: new Date(now - 7 * 86_400_000).toISOString(),
-          to: new Date(now).toISOString(),
-        },
-        { signal: request.signal },
-      ),
-      getLoggedTraffic(request.signal).catch(() => null),
-    ]);
-    const rows =
-      fosRes.rows.length > 0
-        ? fosRes.rows
-        : deriveFosUsageFromCronRuns(cronRes.rows as unknown as CronRunRow[]);
-    return jsonResponse(
-      {
-        entries: rows,
-        total: rows.length,
-        traffic,
-      },
-      request,
-    );
-  }
-  if (pathname === "/api/schema" && method === "GET") {
-    const catRes = await fetch("/api/log-fields/catalog", {
-      signal: request.signal,
-    }).catch(() => null);
-    const catalog = catRes?.ok
-      ? ((await catRes.json().catch(() => ({ fields: [] }))) as {
-          fields?: Array<{
-            name?: string;
-            id?: string;
-            arrow_type?: string;
-            type?: string;
-            group?: string;
-            description?: string;
-          }>;
-        })
-      : { fields: [] };
-    const cols = parquetColumns(
-      (catalog.fields ?? []).map((f) => ({
-        name: f.name ?? f.id ?? "unknown",
-        arrow_type: f.arrow_type ?? f.type ?? "Utf8",
-        group: f.group ?? "core",
-        description: f.description ?? "",
-      })),
-    );
-    return jsonResponse({ columns: cols, sampleStats: null }, request);
-  }
-
   // Page 8: Origin Analytics (/api/origin/*)
   if (pathname.startsWith("/api/origin/")) {
     return handleOriginRequest(request, pathname, url);
@@ -1409,11 +1313,14 @@ export async function handleCloudAnalyticalRequest(
     const serviceId = rumServiceMatch
       ? decodeURIComponent(rumServiceMatch[1])
       : String(params.service_id ?? "default");
-    const data = await handleRumRequest(pathname, {
+    const rumParams = {
       ...params,
       service_id: serviceId,
       signal: request.signal,
-    } as RumQueryParams);
+    } as RumQueryParams;
+    const data = pathname.endsWith("/analytics") ? await cloudRumAnalytics(rumParams)
+      : pathname.endsWith("/live-events") ? await cloudRumLiveEvents(rumParams)
+      : await handleRumRequest(pathname, rumParams);
     return jsonResponse(data, request);
   }
 
@@ -1452,7 +1359,7 @@ export async function handleCloudAnalyticalRequest(
         maskIps,
         role,
         availableColumns: cols && cols.size > 0 ? cols : undefined,
-        runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+        runSql: (sql) => executeSql(sql, [], request.signal),
       },
     );
     return jsonResponse(res.body, request, undefined, res.status);
@@ -1467,34 +1374,7 @@ export async function handleCloudAnalyticalRequest(
         serviceId: String(params.service_id ?? "default"),
         maskIps,
         role,
-        runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
-      },
-    );
-    return jsonResponse(res.body, request, undefined, res.status);
-  }
-
-  const scoringServiceMatch = pathname.match(
-    /^\/api\/services\/([^/]+)\/scoring\/(.+)$/,
-  );
-  if (scoringServiceMatch) {
-    const serviceId = decodeURIComponent(scoringServiceMatch[1]);
-    const subPath = scoringServiceMatch[2];
-    const params = await parseRequestParams();
-    const { maskIps, role } = resolveMaskIpsAndRole(params);
-    const cols = await getPresentColumns(undefined, request.signal).catch(
-      () => undefined,
-    );
-    const res = await handleSessionScoringRoute(
-      method,
-      serviceId,
-      subPath,
-      params,
-      {
-        serviceId,
-        maskIps,
-        role,
-        availableColumns: cols && cols.size > 0 ? cols : undefined,
-        runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+        runSql: (sql) => executeSql(sql, [], request.signal),
       },
     );
     return jsonResponse(res.body, request, undefined, res.status);
@@ -1529,7 +1409,10 @@ export async function handleCloudAnalyticalRequest(
       serviceId: String(params.service_id ?? "default"),
       maskIps,
       role,
-      runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+      allowedTables: ["logs", "requests", "client_vitals", "client_errors"],
+      tableName: params.dataset === "client_vitals" || params.dataset === "client_errors"
+        ? params.dataset : "requests",
+      runSql: (sql) => executeSql(sql, [], request.signal),
     });
     return jsonResponse(res.body, request, undefined, res.status);
   }
@@ -1540,39 +1423,27 @@ export async function handleCloudAnalyticalRequest(
       searchParams.get("service_id") ??
       request.headers.get("x-service-id") ??
       undefined;
-    const cols = await getPresentColumns(undefined, request.signal).catch(
-      () => undefined,
-    );
-    return jsonResponse(
-      handleInsightAvailability(
-        serviceId,
-        cols && cols.size > 0 ? cols : undefined,
-      ),
-      request,
-    );
+    const cols = await getPresentColumns(undefined, request.signal);
+    return jsonResponse(handleInsightAvailability(serviceId, cols), request);
   }
 
   if (pathname === "/api/insights" && (method === "POST" || method === "GET")) {
     const params = await parseRequestParams();
-    const { maskIps, role } = resolveMaskIpsAndRole(params);
-    const cols = await getPresentColumns(undefined, request.signal).catch(
-      () => undefined,
-    );
-    const data = await handleInsights(params as unknown as InsightsRequest, {
-      serviceId: String(params.service_id ?? "default"),
+    const { maskIps } = resolveMaskIpsAndRole(params);
+    const data = await queryCloudInsights(params as unknown as InsightsRequest, {
+      signal: request.signal,
       maskIps,
-      role,
-      availableColumns: cols && cols.size > 0 ? cols : undefined,
+      filters: parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined),
     });
     return jsonResponse(data, request);
   }
 
   if (pathname === "/api/insights/cache-collapse-detail" && method === "POST") {
     const params = await parseRequestParams();
-    const { maskIps, role } = resolveMaskIpsAndRole(params);
-    const data = await handleCacheCollapseDetail(
+    const { maskIps } = resolveMaskIpsAndRole(params);
+    const data = await queryCloudCacheCollapse(
       params as unknown as CacheCollapseDetailRequest,
-      { maskIps, role },
+      { maskIps, signal: request.signal },
     );
     return jsonResponse(data, request);
   }
@@ -1695,11 +1566,19 @@ export async function cloudStreamFetch(
         : input.url;
   const url = new URL(rawUrl, "http://localhost");
   const { pathname } = url;
-  const method = (init?.method ?? "GET").toUpperCase();
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const localRequest = () => input instanceof Request
+    ? new Request(input, init) : new Request(url, { ...init, method });
 
-  // Pass through standard GET SSE streams (e.g. /api/ingest/events), except synthetic cloud-tick stream
   if (method === "GET" && pathname !== "/api/cron-runs/cloud-tick/stream") {
-    return fetch(input, init);
+    if (isNativeCloudRoute(method, pathname)) return fetch(input, init);
+    return (await handleCloudAnalyticalRequest(localRequest())) ??
+      unsupportedCloudEndpoint(localRequest());
+  }
+  if (!isNativeCloudRoute(method, pathname) &&
+      !["/api/cron-runs/cloud-tick/stream", "/api/admin/ingest-logs", "/api/provision/ingest"].includes(pathname)) {
+    return (await handleCloudAnalyticalRequest(localRequest())) ??
+      unsupportedCloudEndpoint(localRequest());
   }
 
   const encoder = new TextEncoder();
@@ -1718,13 +1597,14 @@ export async function cloudStreamFetch(
           pathname === "/api/cron-runs/cloud-tick/stream"
         ) {
           if (pathname === "/api/provision/ingest") {
-            await fetch("/api/cron-runs/trigger", {
+            const triggered = await fetch("/api/cron-runs/trigger", {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: "{}",
               credentials: "include",
               signal,
             });
+            if (!triggered.ok) throw new Error(`Ingest trigger failed (${triggered.status})`);
           }
           emit({ type: "status", status: "complete", message: "Triggered ingest tick" });
           emit({ type: "done", status: "complete" });
@@ -1732,10 +1612,10 @@ export async function cloudStreamFetch(
           return;
         }
 
-        const initRes = await fetch(input, {
-          ...init,
-          credentials: "include",
-        });
+        const initRes = isNativeCloudRoute(method, pathname)
+          ? await fetch(input, { ...init, credentials: "include" })
+          : (await handleCloudAnalyticalRequest(localRequest())) ??
+            unsupportedCloudEndpoint(localRequest());
         if (!initRes.ok) {
           const errJson = (await initRes.json().catch(() => ({}))) as {
             detail?: string;

@@ -53,7 +53,7 @@ export function setActiveServiceCookie(serviceId: string | null) {
 
 export const ACTIVE_WINDOW_MS = 120_000
 const MOUSE_THROTTLE_MS = 1_000
-let lastInteractionAt = typeof window !== 'undefined' ? Date.now() : 0
+let lastInteractionAt = globalThis.window ? Date.now() : 0
 let lastThrottledBump = 0
 let listenersAttached = false
 
@@ -68,24 +68,25 @@ function bumpThrottled() {
 }
 
 function ensureListeners() {
-  if (listenersAttached || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+  const browserWindow = globalThis.window
+  if (listenersAttached || !browserWindow || typeof browserWindow.addEventListener !== 'function') return
   listenersAttached = true
-  window.addEventListener('mousemove', bumpThrottled, { passive: true })
-  window.addEventListener('wheel', bumpThrottled, { passive: true })
-  window.addEventListener('keydown', bump)
-  window.addEventListener('pointerdown', bump, { passive: true })
-  window.addEventListener('touchstart', bump, { passive: true })
+  browserWindow.addEventListener('mousemove', bumpThrottled, { passive: true })
+  browserWindow.addEventListener('wheel', bumpThrottled, { passive: true })
+  browserWindow.addEventListener('keydown', bump)
+  browserWindow.addEventListener('pointerdown', bump, { passive: true })
+  browserWindow.addEventListener('touchstart', bump, { passive: true })
 }
 ensureListeners()
 
 export function msSinceLastInteraction(): number {
-  if (typeof window === 'undefined') return 0
+  if (!globalThis.window) return 0
   ensureListeners()
   return Date.now() - lastInteractionAt
 }
 
 export function isUserActive(windowMs: number = ACTIVE_WINDOW_MS): boolean {
-  if (typeof window === 'undefined') return true
+  if (!globalThis.window) return true
   ensureListeners()
   return Date.now() - lastInteractionAt < windowMs
 }

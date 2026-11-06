@@ -8,7 +8,7 @@ import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import type { components } from '@/types/api.generated'
 
 export const TICK_BACKEND_CALL_CEILING = 32
@@ -106,6 +106,7 @@ export function SystemHealthCard() {
   // — same shape as useSyncStatus / useLastSync.
   const { data: snap, isLoading, isFetching, error } = useQuery({
     queryKey: queryKeys.admin.healthSnapshot(),
+    enabled: !IS_CLOUD_MODE,
     queryFn: async () => {
       return (await unwrapClient(
         client.GET('/api/admin/health-snapshot'),

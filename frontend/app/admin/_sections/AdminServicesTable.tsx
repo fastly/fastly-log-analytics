@@ -6,7 +6,7 @@ import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Pla
 import type { ColumnDef } from '@tanstack/react-table'
 import type { ServiceConfig } from '@/types/api'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
 import { useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'

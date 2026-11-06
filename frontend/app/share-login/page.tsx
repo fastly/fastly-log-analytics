@@ -15,7 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Eye, EyeOff, KeyRound, Loader2, AlertTriangle, Check } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { analystFetch } from '@/hooks/useBootstrap'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import { authenticateWithPasskey, registerPasskey } from '@/lib/cloud-engine/passkeys'
 
 z.config({ jitless: true })

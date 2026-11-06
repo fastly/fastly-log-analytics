@@ -16,6 +16,14 @@ Source: [`frontend/app/admin/usage-log/`](../../../frontend/app/admin/usage-log/
 
 Admin only (`require_admin` on every route; `/api/admin/` is analyst-blocked).
 
+## Cloud
+
+The browser bridge reads native FOS operational records, applies the selected time and operation filters, and computes totals before pagination. CSV export uses the same real rows; purge starts the native history-deletion job. When detailed receipts are absent, measured cron counters provide an explicitly marked estimate using configured rates.
+
+Ingest accounting compares sample-adjusted request counts against processed rows for completed UTC days. Cloud offers daily periods, not hourly precision. Missing measurements produce an unavailable explanation, never a healthy zero-gap result.
+
+Data Management maps native paginated file trees, ingested files and clock history into the existing tables. Processed Parquet downloads use `/api/file`; raw evidence and ZIP-folder downloads are not offered. Its Metadata Storage tab shows native operational retention instead of PostgreSQL sizes or controls. Quarantine exposes real container records and native purge-all, but not unavailable per-line hashes, evidence downloads or numeric-ID removal.
+
 ## Backend
 
 Routes in [`backend/routers/admin/admin_queries.py`](../../../backend/routers/admin/admin_queries.py) (usage log, usage-logging settings and system jobs) and [`backend/routers/admin/log_accounting.py`](../../../backend/routers/admin/log_accounting.py); models in [`backend/models/admin/health_and_sync.py`](../../../backend/models/admin/health_and_sync.py) and [`operations.py`](../../../backend/models/admin/operations.py).

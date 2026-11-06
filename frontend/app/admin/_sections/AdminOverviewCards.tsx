@@ -12,7 +12,7 @@ import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from 
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import { CLOUD_PRUNED_ADMIN_HREFS } from '@/components/AppLayoutChrome'
 
 const ADMIN_PREFETCH_LINKS = [
@@ -121,6 +121,7 @@ function IngestHealthCard() {
     initialData: seed, enabled: !!activeServiceId, retry: false, staleTime: 30_000, refetchInterval: 5 * 60_000, refetchIntervalInBackground: false,
   })
   if (!activeServiceId) return <OverviewCard href="/admin/usage-log" icon={<Database className="h-4 w-4" />} title="Ingest Gap" primary="—" primaryTone="muted" secondary="no service yet" />
+  if ((data as { available?: boolean } | undefined)?.available === false) return <OverviewCard href="/admin/usage-log" icon={<Database className="h-4 w-4" />} title="Ingest Gap" primary="—" primaryTone="muted" secondary="Daily accounting measurements unavailable" />
   const gapPct = data?.totals?.gap_pct ?? 0
   const sustained = data?.sustained_loss
   const tone: CardTone = isError ? 'muted' : sustained ? 'critical' : gapPct >= 0.1 ? 'warning' : gapPct >= 0.02 ? 'attention' : 'default'

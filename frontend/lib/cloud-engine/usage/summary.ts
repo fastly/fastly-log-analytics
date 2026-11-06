@@ -1,7 +1,9 @@
 import { reconcileStorage, adminRequest } from "../telemetry/admin";
-import { readLogs } from "../telemetry/client";
 import type { LogsRange } from "../telemetry/kinds";
 import { DAY_MS, LIST_RATES } from "./rates";
+
+const readLogs: UsageLogReader = async (...args) =>
+  (await import("../telemetry/client")).readLogs(...args);
 
 export type OpClass = "A" | "B" | "CDN_HIT";
 

@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Pencil, Trash2 } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
@@ -39,7 +40,7 @@ export function useScoringLabels(
   const { enabled = true } = opts
   const q = useQuery({
     queryKey: queryKeys.scoringLabels(serviceId),
-    enabled: enabled && !!serviceId,
+    enabled: enabled && !!serviceId && !isCloudMode(),
     queryFn: async ({ signal }) =>
       unwrapClient(
         client.GET('/api/services/{service_id}/scoring/labels', {

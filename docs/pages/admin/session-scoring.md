@@ -16,6 +16,18 @@ Source: [`frontend/app/admin/session-scoring/page.tsx`](../../../frontend/app/ad
 
 Enforcement: L1/L2 scores are always computed and logged. L2 contributes to the enforced combined score only after an operator enables it (`l2-enforce`); enabling fades it in over three days, disabling returns it to observe-only. There is no clock-driven auto-ramp.
 
+### Cloud/static mode
+
+Cloud shows historical scoring recorded in retained request Parquet: ranked scored requests,
+score distributions, health aggregates and per-session event timelines. Cookie compliance,
+L2 statistics and latency are available only when their fields were recorded. Missing scoring
+fields show a not-configured view, not synthetic zero-valued analytics.
+
+Cloud does not provision the scorer or provide its control plane. Labels, matrix history,
+evaluation/curves, threshold previews, enforcement controls and scoring audit history are
+explicitly unavailable. The Cloud page does not mount their queries or mutation controls;
+session-label requests and flag buttons are also disabled on the Sessions pages.
+
 ## Roles
 
 Admin only. The routes use `require_admin`, and `_ANALYST_BLOCKED_SCORING_SUFFIXES` blocks `/config`, `/status`, `/audit`, `/threshold`, `/exclude-regex`, `/enforce-status-code`, `/enforce-threshold`, `/l2-enforce`, `/matrix-versions`, `/restore`, `/retrain`, `/rotate-key`, `/enable`, `/disable`, `/dashboard` and `/evaluation/per-reason` for analysts.

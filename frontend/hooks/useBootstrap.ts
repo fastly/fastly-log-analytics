@@ -17,8 +17,7 @@ import {
   IS_CLOUD_MODE,
   isCloudMode,
   setCloudModeRuntime,
-  setDashboardCacheIdentity,
-} from '@/lib/cloud-engine/adapter'
+} from '@/lib/cloud-engine/mode'
 import { syncOpsCacheForSession } from '@/lib/cloud-engine/telemetry/sources'
 
 export {
@@ -190,10 +189,12 @@ export function useBootstrapSyncEffects(
         userId: data.user?.id ?? null,
         needsLogin: Boolean(data.settings?.needs_login),
       })
-      void setDashboardCacheIdentity(
-        data.user?.id
-          ? `${data.user.id}:${data.user.role ?? 'admin'}`
-          : 'anonymous',
+      void import('@/lib/cloud-engine/dashboard/client').then(({ setDashboardCacheIdentity }) =>
+        setDashboardCacheIdentity(
+          data.user?.id
+            ? `${data.user.id}:${data.user.role ?? 'admin'}`
+            : 'anonymous',
+        ),
       )
     }
     const { setServices, setInitialized } = useServiceStore.getState()
