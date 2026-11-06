@@ -1568,4 +1568,3 @@ export function getDuckDBEngine(): DuckDBAnalyticalEngine {
 
 export const runDuckDbDashboard = getDuckDBEngine;
 export { DuckDBAnalyticalEngine as DashboardDuckDBEngine };
-

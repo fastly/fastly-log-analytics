@@ -358,7 +358,7 @@ def main(file_path: str | None = None) -> None:
                     "--name",
                     args.name,
                     "--package",
-                    "pkg/flp.tar.gz",
+                    str(package) if runtime_rel == "compute/cloud" else "pkg/flp.tar.gz",
                 ],
                 cwd=root / runtime_rel,
                 check=True,

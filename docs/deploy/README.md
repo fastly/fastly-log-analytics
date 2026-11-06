@@ -49,4 +49,3 @@ For zero-origin serverless deployments running entirely on Fastly Compute (`comp
 - [Security & Route Access](../cloud/security-route-access.md) — passkey authentication, front-service header validation, and route-level access control.
 - [Autonomous Cron Jobs](../cloud/crons/README.md) — bounded ingest conversion, compaction, rollup construction, and retention stages.
 - Build & deploy via root `Makefile`: `make cloud-build` and `make cloud-deploy NAME=<install>` (implemented in `compute/cloud/infra/provision.py` and `compute/cloud/tools/release.py`).
-

@@ -85,7 +85,7 @@ def verify_package_provenance(
     contents = package.read_bytes()
     if hashlib.sha256(contents).hexdigest() != digest:
         raise ValueError("Package changed after the recorded build")
-    subdir = tree_subdir or ("compute/cloud" if package.parent.parent.name == "cloud" else "app")
+    subdir = tree_subdir or ("compute/cloud" if package.resolve().parent.parent.name == "cloud" else "app")
     if git_fn(root, "status", "--porcelain", "--untracked-files=all", "--", subdir):
         raise ValueError(f"Runtime has uncommitted inputs; commit {subdir}/ before a release")
     if git_fn(root, "rev-parse", f"{sha}:{subdir}") != git_fn(root, "rev-parse", f"HEAD:{subdir}"):

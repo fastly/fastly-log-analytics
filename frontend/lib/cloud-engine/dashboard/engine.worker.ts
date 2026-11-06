@@ -173,4 +173,3 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     ctx.post({ id: msg.id, type: "searchSummariesResult", result });
   }
 });
-

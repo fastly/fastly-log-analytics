@@ -115,4 +115,3 @@ describe("DuckDB browser assets", () => {
     await engine.reset();
   });
 });
-
