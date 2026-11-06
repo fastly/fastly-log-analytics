@@ -349,8 +349,18 @@ def main(file_path: str | None = None) -> None:
                 raise
             print(json.dumps({"event": "release.verified", **provenance}))
         if args.command == "deploy":
-            subprocess.run(
+            cmd = (
                 [
+                    sys.executable,
+                    "infra/provision.py",
+                    "deploy",
+                    "--name",
+                    args.name,
+                    "--package",
+                    str(package),
+                ]
+                if runtime_rel == "compute/cloud"
+                else [
                     "uv",
                     "run",
                     "infra/provision.py",
@@ -358,8 +368,11 @@ def main(file_path: str | None = None) -> None:
                     "--name",
                     args.name,
                     "--package",
-                    str(package) if runtime_rel == "compute/cloud" else "pkg/flp.tar.gz",
-                ],
+                    "pkg/flp.tar.gz",
+                ]
+            )
+            subprocess.run(
+                cmd,
                 cwd=root / runtime_rel,
                 check=True,
             )
