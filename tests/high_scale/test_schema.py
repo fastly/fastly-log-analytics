@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -558,6 +559,116 @@ def test_decode_normalizes_rum_fields_and_querystring_fallback(
         assert res.events[0][k] == v
 
 
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+@pytest.mark.parametrize(
+    ("encoding", "identity_source"),
+    [
+        ("flat", "fastly_req_id"),
+        ("flat", "req_id"),
+        ("flat", "req"),
+        ("query", "req"),
+        ("url", "req"),
+        ("batch", "req"),
+        ("body", "fastly_req_id"),
+        ("body", "req"),
+        ("body_object", "fastly_req_id"),
+        ("encoded_body", "fastly_req_id"),
+        ("fallback_body", "req"),
+    ],
+)
+def test_rum_receipt_identity_survives_decode_and_fact_projection(
+    domain: str, encoding: str, identity_source: str
+) -> None:
+    from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS
+
+    req_id = "run-20261106-seq-000042/é+final"
+    record: dict[str, Any] = {"timestamp": "2026-11-06T12:00:00Z", "rum_cid": "session-not-request"}
+    params = [("cid", "session-not-request")]
+    if domain == "rum_vitals":
+        fields = {"rum_metric_name": "LCP", "rum_metric_value": "123.5"}
+        body = {"measurements": [{"type": "web-vitals", "values": {"lcp": 123.5, "cls": 0.02}}]}
+    else:
+        fields = {"rum_error_message": "boom", "rum_error_file": "app.js"}
+        body = {"exceptions": [{"value": "boom"}, {"value": "another error"}]}
+    if encoding == "flat":
+        record.update(fields)
+    elif encoding in {"query", "url", "batch", "fallback_body"}:
+        params.extend(fields.items())
+        if encoding == "batch":
+            params.extend(fields.items())
+        if encoding == "fallback_body":
+            record["rum_body"] = "{truncated"
+    else:
+        record["rum_body"] = body if encoding == "body_object" else json.dumps(body)
+        if encoding == "encoded_body":
+            record["rum_body"] = json.dumps(record["rum_body"])
+    if identity_source == "req":
+        params.append(("req", req_id))
+    else:
+        record[identity_source] = req_id
+        params.append(("req", "different-query-identity"))
+        if identity_source == "req_id":
+            record["fastly_req_id"] = "different-logged-identity"
+    record["url" if encoding == "url" else "rum_raw_query"] = "/beacon?" + urlencode(params)
+    payload = gzip.compress(json.dumps(record, separators=(",", ":")).encode())
+    source = _source(domain, "raw/rum/receipt.gz")
+    result = decode_source_object(source, payload, transform_version="normalize.v1")
+    replay = decode_source_object(source, payload, transform_version="normalize.v1")
+    expected_count = 2 if encoding in {"batch", "body", "body_object", "encoded_body"} else 1
+    assert result.quarantined_rows == 0 and result.accepted_rows == expected_count
+    assert [event["req_id"] for event in result.events] == [req_id] * expected_count
+    assert [event["event_id"] for event in result.events] == [event["event_id"] for event in replay.events]
+    assert len({event["event_id"] for event in result.events}) == expected_count
+    assert all(event["client_id"] == "session-not-request" for event in result.events)
+    assert all(json.loads(event["raw_json"]) == record for event in result.events)
+    batch = HighScaleBatch("receipt", "svc", domain, "1", result.events)
+    rows = [
+        dict(zip(_DOMAIN_COLUMNS[domain], row, strict=True))
+        for row in _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+    ]
+    assert [row["req_id"] for row in rows] == [req_id] * expected_count
+    assert all(row["request_event_id"] is None for row in rows)
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+@pytest.mark.parametrize("identity_fields", [{}, {"fastly_req_id": None}, {"req_id": None}, {"req_id": ""}])
+def test_legacy_rum_receipt_identity_stays_empty_in_decode_and_projection(
+    domain: str, identity_fields: dict[str, Any]
+) -> None:
+    from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS
+
+    record = {
+        "timestamp": "2026-11-06T12:00:00Z",
+        "rum_cid": "not-a-receipt",
+        **(
+            {"rum_metric_name": "LCP", "rum_metric_value": 1.0}
+            if domain == "rum_vitals"
+            else {"rum_error_message": "boom"}
+        ),
+        **identity_fields,
+    }
+    result = decode_source_object(
+        _source(domain, "raw/rum/legacy.gz"),
+        gzip.compress(json.dumps(record).encode()),
+        transform_version="normalize.v1",
+    )
+    assert result.accepted_rows == 1 and result.events[0]["req_id"] == ""
+    for event in (
+        result.events[0],
+        {k: v for k, v in result.events[0].items() if k != "req_id"},
+        {**result.events[0], "req_id": None},
+    ):
+        batch = HighScaleBatch("legacy", "svc", domain, "1", (event,))
+        row = dict(
+            zip(
+                _DOMAIN_COLUMNS[domain],
+                _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")[0],
+                strict=True,
+            )
+        )
+        assert row["req_id"] == "" and row["request_event_id"] is None
+
+
 def test_decode_expands_faro_rum_body_matching_canonical_parity() -> None:
     faro_payload = {
         "meta": {
@@ -907,6 +1018,46 @@ def _make_client(seed: str) -> ClickHouseClient:
         ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
         transport=httpx.MockTransport(transport),
     )
+
+
+@_CH_SKIP
+def test_rum_receipt_identity_schema_upgrade_preserves_legacy_rows_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.high_scale.archive import clickhouse_batch
+
+    installed: list[str] = []
+    monkeypatch.setattr(clickhouse_batch, "get_clickhouse_client", lambda: SimpleNamespace(execute=installed.append))
+    clickhouse_batch.install_clickhouse_schema()
+    clickhouse_batch.install_clickhouse_schema()
+    rum_statements = [
+        sql
+        for sql in installed
+        if re.match(r"(?:CREATE TABLE IF NOT EXISTS|ALTER TABLE) rum_(?:vitals|error)_facts\b", sql)
+    ]
+    creates = [sql for sql in rum_statements if sql.startswith("CREATE TABLE")]
+    legacy_schema = [re.sub(r"\s+req_id String,", "", sql) for sql in creates[:2]]
+    legacy_schema = [re.sub(r"\nTTL .*", "", sql) for sql in legacy_schema]
+    seed = ";\n".join(legacy_schema) + ";\n"
+    for table in ("rum_vitals_facts", "rum_error_facts"):
+        seed += f"INSERT INTO {table} (client_id) VALUES ('legacy-session');\n"
+    seed += ";\n".join(rum_statements) + ";\n"
+    for table in ("rum_vitals_facts", "rum_error_facts"):
+        seed += f"INSERT INTO {table} (client_id, req_id) VALUES ('new-session', 'run-seq-42-not-a-uuid');\n"
+    client = _make_client(seed)
+    try:
+        rows = client.execute(
+            "SELECT * FROM (SELECT 'vitals' AS domain, client_id, req_id, request_event_id FROM rum_vitals_facts "
+            "UNION ALL SELECT 'errors', client_id, req_id, request_event_id FROM rum_error_facts "
+            ") ORDER BY domain, client_id"
+        )
+    finally:
+        client.close()
+    assert rows == [
+        {"domain": domain, "client_id": cid, "req_id": req_id, "request_event_id": None}
+        for domain in ("errors", "vitals")
+        for cid, req_id in (("legacy-session", ""), ("new-session", "run-seq-42-not-a-uuid"))
+    ]
 
 
 @pytest.fixture

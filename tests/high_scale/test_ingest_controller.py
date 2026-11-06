@@ -309,21 +309,22 @@ def test_rum_errors_claim_also_publishes_sibling_vitals_from_the_shared_object()
     ownership = OwnershipStore()
     ledger = HighScaleLedger()
     clickhouse = _ClickHouse()
+    archive = ArchivePublication(InMemoryObjectStore())
     ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
     controller = HighScaleIngestController(
         ownership=ownership,
         ledger=ledger,
-        archive=ArchivePublication(InMemoryObjectStore()),
+        archive=archive,
         serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
         worker_id="worker-1",
     )
     payload = gzip.compress(
-        b'{"event_id":"error-1","timestamp":"2026-09-14T20:00:01Z","error_message":"boom"}\n'
-        b'{"event_id":"vital-1","timestamp":"2026-09-14T20:00:00Z","metric_name":"LCP","metric_value":1.25}\n'
-        b'{"event_id":"vital-2","timestamp":"2026-09-14T20:00:02Z","metric_name":"CLS","metric_value":0.1}\n'
+        b'{"event_id":"error-1","timestamp":"2026-09-14T20:00:01Z","error_message":"boom","fastly_req_id":"run-seq-42"}\n'
+        b'{"event_id":"vital-1","timestamp":"2026-09-14T20:00:00Z","metric_name":"LCP","metric_value":1.25,"fastly_req_id":"run-seq-42"}\n'
+        b'{"event_id":"vital-2","timestamp":"2026-09-14T20:00:02Z","metric_name":"CLS","metric_value":0.1,"rum_raw_query":"/beacon?req=run-seq-42"}\n'
     )
 
-    _ingest_one(
+    result = _ingest_one(
         controller,
         service_id="svc",
         domain="rum_errors",
@@ -338,6 +339,9 @@ def test_rum_errors_claim_also_publishes_sibling_vitals_from_the_shared_object()
     assert [row["error_message"] for row in by_domain["rum_errors"].rows] == ["boom"]
     assert sorted(row["metric_name"] for row in by_domain["rum_vitals"].rows) == ["CLS", "LCP"]
     assert len({batch.batch_id for batch in clickhouse.batches}) == 2
+    assert all(row["req_id"] == "run-seq-42" for batch in clickhouse.batches for row in batch.rows)
+    archived = pq.read_table(pa.BufferReader(archive.read_artifact(result.manifest))).to_pylist()
+    assert len(archived) == 3 and all(row["req_id"] == "run-seq-42" for row in archived)
 
 
 @pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])

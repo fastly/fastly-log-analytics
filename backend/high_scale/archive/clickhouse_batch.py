@@ -337,6 +337,7 @@ _DOMAIN_COLUMNS = {
         *_COMMON_FACT_COLUMNS,
         "client_id",
         "request_event_id",
+        "req_id",
         "metric_name",
         "metric_value",
         "metric_rating",
@@ -348,6 +349,7 @@ _DOMAIN_COLUMNS = {
         *_COMMON_FACT_COLUMNS,
         "client_id",
         "request_event_id",
+        "req_id",
         "error_message",
         "error_file",
         "pathname",
@@ -608,6 +610,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
             common = _common_values(batch, row, batch_uuid)
             req_id = row.get("request_event_id")
             req_uuid = None if req_id is None else _event_uuid(req_id, field="request_event_id")
+            receipt_id = "" if row.get("req_id") is None else _required_string(row, "req_id")
             client_id = _required_string(row, "client_id", default="")
             if batch.domain == "rum_vitals":
                 val = row.get("metric_value")
@@ -627,7 +630,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                     _required_string(row, "pathname", default=""),
                     *_rum_environment_values(row, with_error_position=True),
                 )
-            rows.append((*common, client_id, req_uuid, *tail))
+            rows.append((*common, client_id, req_uuid, receipt_id, *tail))
         elif batch.domain == "cmcd":
             request_event_id = row.get("request_event_id")
             if not isinstance(request_event_id, str) or not request_event_id:

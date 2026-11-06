@@ -57,6 +57,8 @@ graph TD
 5. **Decoupled Batch Deletion:** Source deletions are queued and processed asynchronously using a verified manifest cache (`batch_{manifest_id}`), guaranteeing retention cleanup without stalling the ingest tick.
 6. **RUM Dual-Domain Shared Object Handling:** Because `raw/rum/` objects can contain both Web Vitals (`rum_vitals`) and JS Errors (`rum_errors`), the claiming worker decodes both domains from the payload, publishes any sibling-domain rows under `build_batch_id_from_manifest_id(f"{manifest_id}:{sibling}")`, and verifies both before acknowledging the source ([AGENTS.md Trap #48](../AGENTS.md#48-a-shared-rawrum-object-belongs-to-one-domain-but-carries-both)).
 
+RUM receipt identity is preserved as the string `req_id` in normalized events, canonical archives, and both `rum_vitals_facts` and `rum_error_facts`. It retains an explicit `req_id`, otherwise the logged `fastly_req_id` (already extracted from beacon query `req`), with query `req` as a fallback. One beacon can expand into several child rows with the same receipt identity; `req_id` is not a unique row key and does not replace `client_id` or the nullable UUID `request_event_id`. Legacy rows without it remain empty, including archive replay. The existing ClickHouse schema installer adds the column idempotently to both fact tables without backfilling identity; run schema installation before deploying the updated writer.
+
 ---
 
 ## 3. VCL Log Format & Custom Fields

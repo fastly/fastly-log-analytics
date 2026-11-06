@@ -1618,6 +1618,74 @@ def _rum_batch(domain: str, row: dict) -> HighScaleBatch:
     return HighScaleBatch(f"batch-{domain}", "svc", domain, "4", ({**base, **row},))
 
 
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+def test_rum_receipt_identity_repeats_across_child_facts_without_duplicate_retry(domain: str) -> None:
+    fields = {"metric_name": "LCP", "metric_value": 1.5} if domain == "rum_vitals" else {"error_message": "boom"}
+    batch = _rum_batch(domain, {**fields, "req_id": "run-seq-42-not-a-uuid", "client_id": "session-1"})
+    batch = HighScaleBatch(
+        batch.batch_id,
+        batch.service_id,
+        batch.domain,
+        batch.generation,
+        (batch.rows[0], {**batch.rows[0], "event_id": f"{domain}-2"}),
+    )
+    client = FakeHttpClickHouse()
+    adapter = ClickHouseBatchAdapter(client)
+    assert adapter.insert(batch) == adapter.insert(batch)
+    facts = [(columns, rows) for table, columns, rows in client.inserts if table != "high_scale_batch_publications"]
+    assert len(facts) == 1
+    columns, rows = facts[0]
+    projected = [dict(zip(columns, row, strict=True)) for row in rows]
+    assert [row["req_id"] for row in projected] == ["run-seq-42-not-a-uuid"] * 2
+    assert len({row["event_id"] for row in projected}) == 2
+    assert all(row["client_id"] == "session-1" and row["request_event_id"] is None for row in projected)
+
+
+def test_rum_receipt_identity_schema_installer_upgrades_existing_writer_contract(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from backend.high_scale.archive import clickhouse_batch
+
+    class ExistingRumSchemaClient(FakeHttpClickHouse):
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas = {
+                table: set(_DOMAIN_COLUMNS[domain]) - {"req_id"}
+                for domain, table in (("rum_vitals", "rum_vitals_facts"), ("rum_errors", "rum_error_facts"))
+            }
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if sql.startswith("CREATE TABLE IF NOT EXISTS"):
+                return []
+            migration = re.fullmatch(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+) .+", sql)
+            if migration:
+                table, column = migration.groups()
+                self.schemas[table].add(column)
+                return []
+            return super().execute(sql, params)
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            if table in self.schemas and not set(columns) <= self.schemas[table]:
+                raise ValueError(f"unknown columns in existing {table}")
+            super().insert_rows(table, columns, rows)
+
+    client = ExistingRumSchemaClient()
+    monkeypatch.setattr(clickhouse_batch, "get_clickhouse_client", lambda: client)
+    monkeypatch.setattr(clickhouse_batch, "_SCHEMA_FILES", ["rum_schema.sql"])
+    clickhouse_batch.install_clickhouse_schema()
+    clickhouse_batch.install_clickhouse_schema()
+    adapter = ClickHouseBatchAdapter(client)
+    for domain, fields in (
+        ("rum_vitals", {"metric_name": "LCP", "metric_value": 1.5}),
+        ("rum_errors", {"error_message": "boom"}),
+    ):
+        adapter.insert(_rum_batch(domain, {**fields, "req_id": "run-seq-42-not-a-uuid"}))
+    facts = [(columns, rows) for table, columns, rows in client.inserts if table in client.schemas]
+    assert len(facts) == 2
+    assert all(dict(zip(columns, rows[0], strict=True))["req_id"] == "run-seq-42-not-a-uuid" for columns, rows in facts)
+    assert "Failed to install schema" not in caplog.text
+
+
 def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
     batch = _rum_batch(
         "rum_vitals",
@@ -1947,10 +2015,12 @@ _SCHEMAS = {
     "rum_vitals_facts": [
         ("service_id", "LowCardinality(String)"), ("event_timestamp", "DateTime64(3, 'UTC')"),
         ("client_id", "String"), ("request_event_id", "Nullable(UUID)"), ("metric_name", "LowCardinality(String)"),
+        ("req_id", "String"),
     ],
     "rum_error_facts": [
         ("service_id", "LowCardinality(String)"), ("event_timestamp", "DateTime64(3, 'UTC')"),
         ("client_id", "Nullable(String)"), ("error_message", "String"),
+        ("req_id", "String"),
     ],
 }  # fmt: skip
 
@@ -2073,6 +2143,9 @@ def test_the_rum_client_id_is_redacted_in_masked_rum_views_including_nullable_co
     admin = _provision()
     assert "AS `client_id`" in _view_stmt(admin, "svc-a", True, "rum_vitals_facts")
     assert "AS `client_id`" in _view_stmt(admin, "svc-a", True, "rum_error_facts")
+    for table in ("rum_vitals_facts", "rum_error_facts"):
+        view = _view_stmt(admin, "svc-a", True, table)
+        assert "`req_id`" in view and "AS `req_id`" not in view
 
 
 @pytest.mark.security_regression
@@ -2354,7 +2427,7 @@ _COMMON = {
     "service_id", "event_id", "event_timestamp", "ingest_timestamp", "source_object_key", "source_object_version",
     "line_ordinal", "transform_version", "batch_id", "publication_state", "country",
 }  # fmt: skip
-_RUM_SHARED = {"client_id", "request_event_id", "pathname", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb"}  # fmt: skip
+_RUM_SHARED = {"client_id", "request_event_id", "req_id", "pathname", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb"}  # fmt: skip
 _REVIEWED_COLUMNS = {
     "request_facts": _COMMON | {"client_ip", "url", "custom_fields", "cmcd"},
     "rum_vitals_facts": _COMMON | _RUM_SHARED | {"metric_name", "metric_value", "metric_rating"},

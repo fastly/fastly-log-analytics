@@ -217,6 +217,13 @@ def _get_request_key_action(k: str) -> int:
 
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
+    if domain in {"rum_vitals", "rum_errors"}:
+        event["req_id"] = (
+            event.get("req_id")
+            or event.get("fastly_req_id")
+            or _first_qparam(_rum_querystring_params(event), "req")
+            or ""
+        )
     if domain == "request":
         custom_fields = event.setdefault("custom_fields", {})
         cmcd = event.setdefault("cmcd", {})
