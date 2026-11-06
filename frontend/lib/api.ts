@@ -3,6 +3,12 @@ import type { paths, components } from "@/types/api.generated";
 import type { StripIndex, WireParity } from "@/types/api";
 import { useDebugStore, useServiceStore, useSessionRoleStore } from "@/stores/filterStore";
 import { parseExtentMs, showReadOnlyToast, showBusyToast, showToast, isUserActive } from "@/lib/utils";
+import {
+  IS_CLOUD_MODE,
+  isCloudMode,
+  handleCloudAnalyticalRequest,
+} from "@/lib/cloud-engine/adapter";
+import { parseVcpuMsHeader } from "@/lib/cloud-engine/dashboard/sources";
 
 export * from "./apiSsrProxy";
 export * from "./apiQueryKeys";
@@ -88,7 +94,16 @@ export function getApiBase() {
   return process.env.API_PROXY_URL || `http://127.0.0.1:${port}`;
 }
 
-export const client = createClient<paths>({ baseUrl: getApiBase(), fetch: (req) => globalThis.fetch(req) });
+export const client = createClient<paths>({
+  baseUrl: getApiBase(),
+  fetch: async (req) => {
+    if (IS_CLOUD_MODE || isCloudMode()) {
+      const intercepted = await handleCloudAnalyticalRequest(req);
+      if (intercepted) return intercepted;
+    }
+    return globalThis.fetch(req);
+  },
+});
 
 function stampClientContextHeaders(headers: Headers): string | null {
   const currentPageLoadId = getPageLoadId();
@@ -116,9 +131,17 @@ const SESSION_DEAD_403_ERRORS = new Set(["fingerprint_mismatch", "ip_not_whiteli
 
 function redirectToShareLoginIfSessionDead(): void {
   if (typeof window === "undefined") return;
-  if (window.location.pathname.startsWith("/share-login")) return;
+  const pathname = window.location.pathname;
+  if (
+    pathname.startsWith("/share-login") ||
+    pathname.startsWith("/setup") ||
+    pathname.startsWith("/sign-in") ||
+    pathname.startsWith("/invite")
+  ) {
+    return;
+  }
   try {
-    if (!useSessionRoleStore.getState().isRemoteAnalyst) return;
+    if (!useSessionRoleStore.getState().isRemoteAnalyst && !IS_CLOUD_MODE && !isCloudMode()) return;
   } catch {
     /* store unavailable */
   }
@@ -168,6 +191,15 @@ export function handleApiStatusSideEffects(
 async function rawAdminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
   stampClientContextHeaders(headers);
+  if (IS_CLOUD_MODE || isCloudMode()) {
+    const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const req = new Request(urlStr.startsWith("http") ? urlStr : `http://localhost${urlStr.startsWith("/") ? "" : "/"}${urlStr}`, {
+      ...init,
+      headers,
+    });
+    const intercepted = await handleCloudAnalyticalRequest(req);
+    if (intercepted) return intercepted;
+  }
   return fetch(input, { ...init, headers });
 }
 
@@ -265,7 +297,7 @@ client.use({
   async onRequest({ request }) {
     const activeServiceId = stampClientContextHeaders(request.headers);
     request.headers.set("X-User-Active", isUserActive() ? "1" : "0");
-    if (activeServiceId) return request;
+    if (activeServiceId || IS_CLOUD_MODE || isCloudMode()) return request;
     const url = String(request.url);
     if (SERVICELESS_PATH_PREFIXES.some((p) => url.includes(p)) || url.split("?")[0].endsWith("/api/services")) {
       return request;
@@ -275,6 +307,26 @@ client.use({
     throw err;
   },
   async onResponse({ request, response }) {
+    try {
+      const debugState = useDebugStore.getState();
+      if (debugState.apiCallsEnabled) {
+        const parsedUrl = new URL(String(request.url), "http://localhost");
+        const path = `${parsedUrl.pathname}${parsedUrl.search}`;
+        const vcpuMs = parseVcpuMsHeader(response.headers.get("x-flp-vcpu-ms"));
+        debugState.addApiCall({
+          source: "Compute",
+          method: request.method || "GET",
+          path,
+          endpoint: `${request.method || "GET"} ${parsedUrl.pathname}`,
+          status: response.status,
+          duration_ms: 0,
+          vcpu_ms: vcpuMs,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* ignore debug telemetry errors */
+    }
     if (response.status === 503 && String(request.url).includes("/api/admin/clickhouse/status")) {
       const payload = await response.clone().json().catch(() => null);
       if (payload && typeof payload === "object" && "health" in payload) {

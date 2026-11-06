@@ -13,6 +13,13 @@ import { useServiceStore } from '@/stores/filterStore'
 import { useSessionRoleStore } from '@/stores/filterStore'
 import { toService } from '@/types/api'
 import { buildFiltersPayload, type FiltersPayload } from '@/types/api'
+import {
+  IS_CLOUD_MODE,
+  isCloudMode,
+  setCloudModeRuntime,
+  setDashboardCacheIdentity,
+} from '@/lib/cloud-engine/adapter'
+import { syncOpsCacheForSession } from '@/lib/cloud-engine/telemetry/sources'
 
 export {
   useUrlServiceSync,
@@ -149,12 +156,15 @@ export function useBootstrapSyncEffects(
   const isRealQueryResult = typeof query.dataUpdatedAt === 'number'
   const data = query.data as
     | {
+        runtime_mode?: string
+        user?: { id?: string | null; role?: string } | null
         services?: Parameters<typeof toService>[0][]
         active_service_id?: string | null
         pop_geo?: Parameters<ReturnType<typeof usePopGeoStore.getState>['setMap']>[0]
         pops?: Record<string, [number | null, number | null]>
         settings?: {
           is_remote_analyst?: boolean
+          needs_login?: boolean
         }
         debug_state?: {
           query_debug_visibility?: string
@@ -172,6 +182,20 @@ export function useBootstrapSyncEffects(
       return
     }
     _lastSyncedBootstrapData = data
+    if (data.runtime_mode === 'cloud') {
+      setCloudModeRuntime(true)
+    }
+    if (IS_CLOUD_MODE || isCloudMode() || data.runtime_mode === 'cloud') {
+      void syncOpsCacheForSession({
+        userId: data.user?.id ?? null,
+        needsLogin: Boolean(data.settings?.needs_login),
+      })
+      void setDashboardCacheIdentity(
+        data.user?.id
+          ? `${data.user.id}:${data.user.role ?? 'admin'}`
+          : 'anonymous',
+      )
+    }
     const { setServices, setInitialized } = useServiceStore.getState()
     setServices((data.services ?? []).map(toService))
     setInitialized(true)

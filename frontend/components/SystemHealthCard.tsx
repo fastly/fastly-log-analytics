@@ -10,6 +10,31 @@ import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
 import type { components } from '@/types/api.generated'
 
+export const TICK_BACKEND_CALL_CEILING = 32
+export const TICK_VCPU_BUDGET_MS = 1000
+export const DEFAULT_CLOCK_INTERVAL_S = 120
+
+export function summarizeTickHealth(runs: Array<{ started_at?: string; backend_calls?: number; vcpu_ms?: number; status?: string }>, nowMs = Date.now()) {
+  const latest = runs[0]
+  const last_tick_at = latest?.started_at ?? null
+  const clock_interval_s = DEFAULT_CLOCK_INTERVAL_S
+  const maxBackendCalls = runs.reduce((m, r) => Math.max(m, r.backend_calls ?? 0), 0)
+  const maxVcpuMs = runs.reduce((m, r) => Math.max(m, r.vcpu_ms ?? 0), 0)
+  const ageSec = last_tick_at ? Math.max(0, (nowMs - Date.parse(last_tick_at)) / 1000) : null
+  const healthy =
+    ageSec !== null &&
+    ageSec <= clock_interval_s * 3 &&
+    maxBackendCalls <= TICK_BACKEND_CALL_CEILING &&
+    maxVcpuMs <= TICK_VCPU_BUDGET_MS
+  return {
+    tick_health: healthy ? 'healthy' : 'degraded',
+    last_tick_at,
+    clock_interval_s,
+    maxBackendCalls,
+    maxVcpuMs,
+  }
+}
+
 type TrendPoint = components['schemas']['MetricHistoryPoint']
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
 type HealthSnapshot = components['schemas']['HealthSnapshotResponse']

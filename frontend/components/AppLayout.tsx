@@ -19,6 +19,8 @@ import {
   useEnforceMaskedFilters, useAnalystHeartbeat, useAnalystLogout,
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { prewarmDashboardEngine } from '@/lib/cloud-engine/dashboard/client'
 import packageJson from '../package.json'
 import {
   SrLiveRegion,
@@ -139,8 +141,8 @@ export function AppLayout({
 
   const needsLogin = bootstrapSettings?.needs_login === true
   const analystBlocked =
-    (isAnalyst && matchesPrefix(pathname, ['/admin', '/usage', '/alerts', '/high-scale'])) ||
-    ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
+    (isAnalyst && matchesPrefix(pathname, IS_CLOUD_MODE ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
+    (!IS_CLOUD_MODE && (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
   const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin')
 
@@ -172,6 +174,13 @@ export function AppLayout({
     }
   }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId])
 
+  const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
+  React.useEffect(() => {
+    if (IS_CLOUD_MODE && needsPlotlyPrewarm && !needsLogin) {
+      prewarmDashboardEngine()
+    }
+  }, [needsPlotlyPrewarm, needsLogin])
+
   const isLoginPage = pathname.startsWith('/share-login')
   if (isLoginPage || needsLogin) {
     return (
@@ -188,7 +197,6 @@ export function AppLayout({
   }
 
   const needsGeoPreload = matchesPrefix(pathname, ['/dashboard', '/network'])
-  const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
   const needsMapPrewarm = matchesPrefix(pathname, ['/dashboard', '/network', '/security'])
 
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode

@@ -266,6 +266,24 @@ export function UsageStatCards({
           </div>
         ),
       },
+      ...(((storage as Record<string, unknown> | undefined)?.compute_requests as number | undefined ?? 0) > 0
+        ? [
+            {
+              id: 'compute',
+              label: <span>Compute &amp; vCPU:</span>,
+              value: (
+                <div className="flex flex-col items-end">
+                  <strong className="text-foreground">
+                    {formatAbbreviatedCount(((storage as Record<string, unknown>)?.compute_requests as number) ?? 0)} reqs
+                  </strong>
+                  <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
+                    vCPU: {Math.round(((storage as Record<string, unknown>)?.compute_vcpu_ms as number) ?? 0)}ms · KV: {formatAbbreviatedCount(((storage as Record<string, unknown>)?.kv_ops as number) ?? 0)}
+                  </span>
+                </div>
+              ),
+            },
+          ]
+        : []),
     ],
     [
       errorStorage,
@@ -277,6 +295,7 @@ export function UsageStatCards({
       rateBPer10k,
       roughBandwidth,
       rateEgress,
+      storage,
     ],
   )
 

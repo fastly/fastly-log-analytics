@@ -157,6 +157,18 @@ export function UsageChartsGrid({
   const opsDates = useMemo(() => ops?.data.map((d) => d.date) ?? [], [ops?.data])
   const opsClassA = useMemo(() => ops?.data.map((d) => d.class_a) ?? [], [ops?.data])
   const opsClassB = useMemo(() => ops?.data.map((d) => d.class_b) ?? [], [ops?.data])
+  const kvClassA = useMemo(
+    () => ops?.data.map((d) => ((d as Record<string, unknown>).kv_class_a as number | undefined) ?? 0) ?? [],
+    [ops?.data],
+  )
+  const kvClassB = useMemo(
+    () => ops?.data.map((d) => ((d as Record<string, unknown>).kv_class_b as number | undefined) ?? 0) ?? [],
+    [ops?.data],
+  )
+  const hasKvOps = useMemo(
+    () => kvClassA.some((v) => v > 0) || kvClassB.some((v) => v > 0),
+    [kvClassA, kvClassB],
+  )
 
   const opsData = useMemo(
     () => [
@@ -176,8 +188,28 @@ export function UsageChartsGrid({
         marker: { color: accentB },
         hovertemplate: 'Class B: %{y:,}<extra></extra>',
       },
+      ...(hasKvOps
+        ? [
+            {
+              type: 'bar',
+              name: 'KV Class A',
+              x: opsDates,
+              y: kvClassA,
+              marker: { color: CHART_COLORS.warning },
+              hovertemplate: 'KV Class A: %{y:,}<extra></extra>',
+            },
+            {
+              type: 'bar',
+              name: 'KV Class B',
+              x: opsDates,
+              y: kvClassB,
+              marker: { color: '#a855f7' },
+              hovertemplate: 'KV Class B: %{y:,}<extra></extra>',
+            },
+          ]
+        : []),
     ],
-    [opsDates, opsClassA, opsClassB, accent, accentB],
+    [opsDates, opsClassA, opsClassB, kvClassA, kvClassB, hasKvOps, accent, accentB],
   )
   const opsLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const }), [baseLayout])
 

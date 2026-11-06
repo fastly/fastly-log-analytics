@@ -20,6 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useTimezoneStore, useSessionRoleStore, useServiceStore } from '@/stores/filterStore'
 import { useMounted, useUrlServiceSync, useIsAnalyst } from '@/hooks/useBootstrap'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 export function SrLiveRegion({ children }: { children: React.ReactNode }) {
@@ -184,13 +185,14 @@ export const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
   { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
-  { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
+  { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false, shareAnalystVisible: IS_CLOUD_MODE },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
   { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
-  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
+  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: IS_CLOUD_MODE },
 ]
 
 export const SYSTEM_NAVIGATION = [{ name: 'Admin', href: '/admin', icon: Settings }]
+export const IS_CLOUD_RUNTIME = IS_CLOUD_MODE
 
 export function UrlServiceSync() {
   useUrlServiceSync()

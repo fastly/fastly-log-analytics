@@ -315,10 +315,14 @@ impl<'a, S: StateStore> AuthService<'a, S> {
         }) {
             return Ok(false);
         }
-        Ok(state
+        Ok(Self::has_users(&state))
+    }
+
+    pub fn has_users(state: &AuthState) -> bool {
+        state
             .users
             .values()
-            .any(|u| !u.revoked && u.role == Role::Admin))
+            .any(|u| !u.revoked && u.role == Role::Admin)
     }
 
     pub fn accept_setup(

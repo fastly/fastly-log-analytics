@@ -286,3 +286,5 @@ export function calculate(s: CalcState): CalcResults {
 }
 
 export const fmtN = (n: number): string => formatAbbreviatedCount(n, 2)
+export { estimateMonthlyUsage } from '@/lib/cloud-engine/usage/estimate'
+export { evaluateCapacity } from '@/lib/cloud-engine/usage/capacity'

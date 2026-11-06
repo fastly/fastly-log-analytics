@@ -13,6 +13,7 @@ import {
   parseSSEFrames,
   extractSSEFrameData,
 } from './sseStreamAppliers'
+import { IS_CLOUD_MODE, isCloudMode, cloudStreamFetch } from '@/lib/cloud-engine/adapter'
 
 // ── Event Stream Transport & Hooks ───────────────────────────────────────────
 
@@ -40,7 +41,7 @@ export interface RunEventStreamOptions {
 
 export async function runEventStream(opts: RunEventStreamOptions): Promise<void> {
   const { url, method = 'GET', body, headers, cache, signal, onOpen, onFrame, isActive } = opts
-  const fetchFn = opts.fetchImpl ?? fetch
+  const fetchFn = opts.fetchImpl ?? (IS_CLOUD_MODE || isCloudMode() ? cloudStreamFetch : fetch)
   const response = await fetchFn(url, { method, ...(cache ? { cache } : {}), headers, body, signal })
 
   if (isActive && !isActive()) {

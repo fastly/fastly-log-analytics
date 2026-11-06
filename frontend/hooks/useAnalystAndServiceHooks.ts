@@ -220,7 +220,7 @@ export function useAnalystHeartbeat({
 }
 
 /**
- * Self-service logout for remote analysts.
+ * Self-service logout for remote analysts (and Cloud passkey sessions).
  */
 export function useAnalystLogout(): { logout: () => Promise<void>; isLoggingOut: boolean } {
   const [isLoggingOut, setIsLoggingOut] = React.useState(false)
@@ -229,7 +229,20 @@ export function useAnalystLogout(): { logout: () => Promise<void>; isLoggingOut:
     if (isLoggingOut) return
     setIsLoggingOut(true)
     try {
-      await analystFetch('/api/share/logout', { method: 'POST' }, 10_000)
+      const { IS_CLOUD_MODE } = await import('@/lib/cloud-engine/adapter')
+      if (IS_CLOUD_MODE) {
+        const [{ clearDashboardBrowserCaches }, { clearOpsCaches }] = await Promise.all([
+          import('@/lib/cloud-engine/dashboard/sources'),
+          import('@/lib/cloud-engine/telemetry/sources'),
+        ])
+        await Promise.allSettled([
+          analystFetch('/api/auth/logout', { method: 'POST' }, 10_000),
+          clearDashboardBrowserCaches(),
+          clearOpsCaches(),
+        ])
+      } else {
+        await analystFetch('/api/share/logout', { method: 'POST' }, 10_000)
+      }
     } catch {
       // Swallow — redirect anyway.
     } finally {

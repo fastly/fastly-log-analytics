@@ -17,6 +17,10 @@ import {
   makeCronRunsApplier,
 } from './sseStreamAppliers'
 import { useEventStream } from './useEventStream'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/adapter'
+import { observeCatalogCommit } from '@/lib/cloud-engine/dashboard/catalog-manifest'
+import { readIngestEvents } from '@/lib/cloud-engine/telemetry/engine'
+import { browserOpsSource } from '@/lib/cloud-engine/telemetry/sources'
 
 // ── Service & Admin Multiplex Streams ────────────────────────────────────────
 
@@ -64,7 +68,53 @@ type BadgeStreamEvent = Schema<'ShareHeaderBadgeResponse'>
 
 export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
-  return useServiceStream(enabled, '/api/log-extents/stream', (raw) => {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const cursorRef = useRef<number | null>(null)
+  const seenIdsRef = useRef<Set<string>>(new Set())
+  const cloudActive = IS_CLOUD_MODE || isCloudMode()
+
+  useEffect(() => {
+    if (!enabled || !cloudActive) return
+    const controller = new AbortController()
+    let stopped = false
+    const source = browserOpsSource(
+      typeof window !== 'undefined' ? window.location.origin : '',
+    )
+
+    const poll = async () => {
+      while (!stopped && !controller.signal.aborted) {
+        try {
+          const now = Date.now()
+          const result = await readIngestEvents(source, {
+            from: new Date(cursorRef.current ?? now - 300_000).toISOString(),
+            to: new Date(now).toISOString(),
+            seenIds: seenIdsRef.current,
+            lastCursorMs: cursorRef.current ?? 0,
+            signal: controller.signal,
+          })
+          if (result.nextCursorMs > 0) cursorRef.current = result.nextCursorMs
+          if (result.events.length > 0) {
+            observeCatalogCommit(source.fetchJson, {
+              type: 'commit',
+              generation: result.nextCursorMs,
+            })
+            void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+          }
+        } catch {
+          /* ignore transient poll error */
+        }
+        await new Promise((r) => setTimeout(r, 15_000))
+      }
+    }
+
+    void poll()
+    return () => {
+      stopped = true
+      controller.abort()
+    }
+  }, [enabled, cloudActive, activeServiceId, queryClient])
+
+  return useServiceStream(enabled && !cloudActive, '/api/log-extents/stream', (raw) => {
     try {
       const payload = JSON.parse(raw) as BadgeStreamEvent
       queryClient.setQueryData<BootstrapShape | undefined>(queryKeys.bootstrap(), (prev) => {

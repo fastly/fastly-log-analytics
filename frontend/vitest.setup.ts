@@ -136,3 +136,30 @@ afterEach(async () => {
 afterEach(() => {
   cleanup()
 })
+
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+}
+
+if (typeof Blob !== 'undefined' && typeof Blob.prototype.arrayBuffer !== 'function') {
+  Blob.prototype.arrayBuffer = function () {
+    return new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as ArrayBuffer)
+      reader.onerror = () => reject(reader.error)
+      reader.readAsArrayBuffer(this)
+    })
+  }
+}
+
+if (
+  typeof File !== 'undefined' &&
+  typeof Blob !== 'undefined' &&
+  typeof File.prototype.arrayBuffer !== 'function'
+) {
+  File.prototype.arrayBuffer = Blob.prototype.arrayBuffer
+}

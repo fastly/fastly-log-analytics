@@ -5,6 +5,67 @@ import type { FilterPill, FilterMode } from '@/types/api'
 import type { PopGeo } from '@/components/DataTable'
 import { setActiveServiceCookie } from '@/lib/utils'
 
+export type ComparePreset =
+  | 'previous'
+  | '1w'
+  | '4w'
+  | '1y'
+  | 'custom'
+  | 'off'
+  | 'prev_period'
+  | 'prev_day'
+  | 'prev_week'
+
+export interface DashboardBounds {
+  earliest: string | null
+  latest: string
+  anchorMs: number
+}
+
+export function computeCompareRange(
+  startTime: string,
+  endTime: string,
+  preset: ComparePreset,
+): { start: string; end: string } | null {
+  try {
+    const startMs = Date.parse(startTime)
+    const endMs = Date.parse(endTime)
+    if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null
+    const duration = endMs - startMs
+    if (duration <= 0) return null
+
+    let offsetMs: number
+    switch (preset) {
+      case 'previous':
+      case 'prev_period':
+        offsetMs = duration
+        break
+      case 'prev_day':
+        offsetMs = 24 * 60 * 60 * 1000
+        break
+      case '1w':
+      case 'prev_week':
+        offsetMs = 7 * 24 * 60 * 60 * 1000
+        break
+      case '4w':
+        offsetMs = 28 * 24 * 60 * 60 * 1000
+        break
+      case '1y':
+        offsetMs = 365 * 24 * 60 * 60 * 1000
+        break
+      default:
+        return null
+    }
+
+    return {
+      start: new Date(startMs - offsetMs).toISOString(),
+      end: new Date(endMs - offsetMs).toISOString(),
+    }
+  } catch {
+    return null
+  }
+}
+
 interface FilterState {
   startTime: string
   endTime: string
@@ -20,6 +81,13 @@ interface FilterState {
   compareMode: boolean
   compareStartTime: string | null
   compareEndTime: string | null
+  comparePreset: ComparePreset
+  dashboardBounds: DashboardBounds | null
+  dashboardAvailability: Partial<Record<string, boolean>> | null
+  lastFetchVcpuMs: number | null
+  lastFetchEngine: string | null
+  lastFetchCachedFiles: number
+  lastFetchFetchedFiles: number
   setRange: (start: string, end: string) => void
   setRelativeRange: (range: string, start: string, end: string) => void
   addFilter: (column: string, value: string, mode: FilterMode) => void
@@ -27,13 +95,24 @@ interface FilterState {
   toggleFilterMode: (id: string) => void
   toggleCompareMode: () => void
   setCompareRange: (start: string | null, end: string | null) => void
+  setComparePreset: (preset: ComparePreset) => void
+  setDashboardContext: (ctx: {
+    bounds: DashboardBounds | null
+    availability: Partial<Record<string, boolean>> | null
+  }) => void
+  setLastFetchMeta: (meta: {
+    vcpuMs?: number | null
+    engine?: string | null
+    cachedFiles?: number
+    fetchedFiles?: number
+  }) => void
   toggleEdgeOnly: () => void
   clearFilters: () => void
   resetAll: () => void
   resetRange: () => void
 }
 
-export const useFilterStore = create<FilterState>((set) => ({
+export const useFilterStore = create<FilterState>((set, get) => ({
   // Default to last 24h.
   startTime: formatISO(subDays(new Date(), 1)),
   endTime: formatISO(new Date()),
@@ -44,6 +123,13 @@ export const useFilterStore = create<FilterState>((set) => ({
   compareMode: false,
   compareStartTime: null,
   compareEndTime: null,
+  comparePreset: 'previous',
+  dashboardBounds: null,
+  dashboardAvailability: null,
+  lastFetchVcpuMs: null,
+  lastFetchEngine: null,
+  lastFetchCachedFiles: 0,
+  lastFetchFetchedFiles: 0,
 
   // Explicit absolute-range selection (custom datetime, chart zoom, saved
   // view). Clears relativeRange — this range no longer corresponds to a
@@ -91,6 +177,38 @@ export const useFilterStore = create<FilterState>((set) => ({
   }),
 
   setCompareRange: (startTime, endTime) => set({ compareStartTime: startTime, compareEndTime: endTime }),
+
+  setComparePreset: (preset) => {
+    const state = get()
+    if (preset !== 'custom' && preset !== 'off' && state.startTime && state.endTime) {
+      const comp = computeCompareRange(state.startTime, state.endTime, preset)
+      if (comp) {
+        set({
+          comparePreset: preset,
+          compareMode: true,
+          compareStartTime: comp.start,
+          compareEndTime: comp.end,
+        })
+        return
+      }
+    }
+    if (preset === 'off') {
+      set({ comparePreset: preset, compareMode: false, compareStartTime: null, compareEndTime: null })
+      return
+    }
+    set({ comparePreset: preset })
+  },
+
+  setDashboardContext: ({ bounds, availability }) =>
+    set({ dashboardBounds: bounds, dashboardAvailability: availability }),
+
+  setLastFetchMeta: (meta) =>
+    set((state) => ({
+      lastFetchVcpuMs: meta.vcpuMs !== undefined ? meta.vcpuMs : state.lastFetchVcpuMs,
+      lastFetchEngine: meta.engine !== undefined ? meta.engine : state.lastFetchEngine,
+      lastFetchCachedFiles: meta.cachedFiles !== undefined ? meta.cachedFiles : state.lastFetchCachedFiles,
+      lastFetchFetchedFiles: meta.fetchedFiles !== undefined ? meta.fetchedFiles : state.lastFetchFetchedFiles,
+    })),
 
   addFilter: (column, value, mode) => set((state) => {
     // Reject column names matching /_\d+$/. buildFiltersPayload uses
@@ -151,6 +269,7 @@ export const useFilterStore = create<FilterState>((set) => ({
       compareMode: false,
       compareStartTime: null,
       compareEndTime: null,
+      comparePreset: 'previous',
       startTime: formatISO(subDays(now, 1)),
       endTime: formatISO(now),
     })
@@ -178,11 +297,44 @@ export const usePopGeoStore = create<PopGeoState>((set) => ({
 }))
 
 // ── Debug Store ──────────────────────────────────────────────────────────────
+export interface ApiCallEntry {
+  id?: string | number
+  source: string
+  method: string
+  path: string
+  endpoint?: string
+  status: number | string | null
+  duration_ms: number
+  vcpu_ms?: number | null
+  cache?: 'network' | 'cdn' | 'memory' | 'cache-storage' | 'hit' | 'miss' | 'browser' | null
+  details?: string
+  timestamp?: string
+}
+
+export interface QueryTelemetryEntry {
+  id?: string | number
+  engine: string
+  sql: string
+  duration_ms: number
+  vcpu_ms?: number | null
+  rows_scanned?: number
+  bytes_scanned?: number
+  endpoint?: string
+  is_cached?: boolean
+  timestamp?: string
+}
+
 interface DebugState {
   enabled: boolean
   setEnabled: (val: boolean) => void
   apiCallsEnabled: boolean
   setApiCallsEnabled: (val: boolean) => void
+  apiCalls: ApiCallEntry[]
+  addApiCall: (entry: ApiCallEntry) => void
+  clearApiCalls: () => void
+  queries: QueryTelemetryEntry[]
+  addQueries: (entries: QueryTelemetryEntry[]) => void
+  clearQueries: () => void
 }
 
 export const useDebugStore = create<DebugState>()(
@@ -192,9 +344,25 @@ export const useDebugStore = create<DebugState>()(
       setEnabled: (val) => set({ enabled: val }),
       apiCallsEnabled: false,
       setApiCallsEnabled: (val) => set({ apiCallsEnabled: val }),
+      apiCalls: [],
+      addApiCall: (entry) =>
+        set((state) => ({
+          apiCalls: [...state.apiCalls.slice(-249), entry],
+        })),
+      clearApiCalls: () => set({ apiCalls: [] }),
+      queries: [],
+      addQueries: (entries) =>
+        set((state) => ({
+          queries: [...state.queries, ...entries].slice(-250),
+        })),
+      clearQueries: () => set({ queries: [] }),
     }),
     {
       name: 'fastly-debug-settings',
+      partialize: (state) => ({
+        enabled: state.enabled,
+        apiCallsEnabled: state.apiCallsEnabled,
+      }),
       // SSR safety — see serviceStore. Rehydrated post-mount by
       // <StoreHydrator> so the first client render matches the server's
       // `enabled: false` default instead of a persisted `true`.

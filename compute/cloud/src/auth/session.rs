@@ -59,6 +59,7 @@ pub fn setup_cookie(value: &str) -> String {
 }
 
 pub const CDN_COOKIE_TTL: u64 = 900;
+pub const HOST_CDN_COOKIE_NAME: &str = "__Host-flp_cdn";
 
 fn cdn_role(role: Role) -> &'static str {
     match role {

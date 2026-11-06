@@ -1,0 +1,5885 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fastly Log Analytics Goals 1–2",
+    "version": "2.0.0",
+    "description": "Built-in authentication, admin operations and durable single-service provisioning, logging configuration, reconcile and teardown. Tokens are POST-only, write-only credentials."
+  },
+  "paths": {
+    "/api/services": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Installed service visible to authenticated users",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InstalledServices" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/services": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Persisted service configurations",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InstalledServices" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/services/{service_id}": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Configuration and recoverable job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledServiceResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ServiceConfigEdit" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generation checked configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledServiceResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/services": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["token"],
+                "properties": {
+                  "token": { "type": "string", "writeOnly": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token-authorized account services",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["services", "customer_id"],
+                  "properties": {
+                    "customer_id": { "type": "string" },
+                    "services": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProvisionCandidate"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/validate": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProvisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Account, ownership and Object Storage preflight",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["valid", "service"],
+                  "properties": {
+                    "valid": { "type": "boolean" },
+                    "customer_id": { "type": "string" },
+                    "service": {
+                      "$ref": "#/components/schemas/ProvisionCandidate"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/execute": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProvisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable provisioning job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledServiceResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/services/{service_id}/delete-data": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Current or last Delete Data job, or status none",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DeleteDataStatus" }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["confirm_service_id", "generation"],
+                "properties": {
+                  "confirm_service_id": { "type": "string" },
+                  "generation": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Started Delete Data job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["job", "service", "generation"],
+                  "properties": {
+                    "job": { "$ref": "#/components/schemas/DeleteDataStatus" },
+                    "service": {
+                      "$ref": "#/components/schemas/InstalledService"
+                    },
+                    "generation": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/services/{service_id}/delete-data/cancel": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Cancelled Delete Data job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["job"],
+                  "properties": {
+                    "job": { "$ref": "#/components/schemas/DeleteDataStatus" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/services/{service_id}/reconcile": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["generation"],
+                "properties": {
+                  "generation": { "type": "string" },
+                  "dry_run": { "type": "boolean" },
+                  "activate": { "type": "boolean" },
+                  "cmcd": { "$ref": "#/components/schemas/CmcdConfig" },
+                  "rum": { "$ref": "#/components/schemas/RumConfig" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reconcile job",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ControlJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/teardown": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "service_id",
+                  "confirm_service_id",
+                  "token",
+                  "generation"
+                ],
+                "properties": {
+                  "service_id": { "type": "string" },
+                  "confirm_service_id": { "type": "string" },
+                  "token": { "type": "string", "writeOnly": true },
+                  "generation": { "type": "string" },
+                  "remove_logging": { "type": "boolean" },
+                  "remove_snippets": { "type": "boolean" },
+                  "delete_fos_bucket": { "type": "boolean" },
+                  "delete_fos_keys": { "type": "boolean" },
+                  "delete_data": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmed teardown job",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ControlJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/jobs/{job_id}": {
+      "parameters": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Durable progress",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ControlJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/jobs/{job_id}/step": {
+      "parameters": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": false }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Checkpointed next step",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ControlJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/jobs/{job_id}/retry": {
+      "parameters": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": false }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retry failed step without recreating completed resources",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ControlJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/log-fields/catalog": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Pinned v3 field catalog",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FieldCatalog" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/log-fields/catalog": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Catalog readable by authenticated roles",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FieldCatalog" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/rum/versions": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Supported Faro Web SDK versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RumVersionsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rum/versions": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Supported Faro Web SDK versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RumVersionsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/log-fields/config": {
+      "get": {
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted service field configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureFieldsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CaptureFieldsResponse" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generation checked field configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureFieldsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/log-fields/limits": {
+      "get": {
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service-specific field limits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureLimitsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CaptureLimitsResponse" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generation checked field limits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureLimitsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/log-fields/preview": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["log_fields"],
+                "properties": {
+                  "log_fields": {
+                    "$ref": "#/components/schemas/CaptureFields"
+                  },
+                  "cmcd": { "$ref": "#/components/schemas/CmcdConfig" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated format preview, no Fastly changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["format", "format_length", "max_length"],
+                  "properties": {
+                    "format": { "type": "string" },
+                    "format_length": { "type": "integer" },
+                    "max_length": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/log-fields/custom/validate": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["field"],
+                "properties": {
+                  "field": {
+                    "$ref": "#/components/schemas/CaptureCustomField"
+                  },
+                  "existing_names": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Custom VCL field validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["valid", "errors"],
+                  "properties": {
+                    "valid": { "type": "boolean" },
+                    "errors": { "type": "array", "items": { "type": "string" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sync-status": {
+      "get": {
+        "tags": ["admin"],
+        "summary": "Sync Status",
+        "operationId": "sync_status_api_sync_status_get",
+        "parameters": [
+          {
+            "name": "fresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Fresh"
+            }
+          },
+          {
+            "name": "skip_fos",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Skip Fos"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/files": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "List Processed Files",
+        "description": "Paged processed Parquet discovery for [from, to). Request pages pin one committed catalog generation, excluding uncommitted uploads and replaced representations. Summary selection uses a fully covered day bundle, otherwise hour bundles and uncovered late window summaries, with finer windows at partial boundaries. Incremental requests replay bounded raw changes and replace marked summary-day selections; apply all pages atomically. A cursor can continue through an empty page. complete is true only on the last page.",
+        "operationId": "list_files_api_files_get",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "From" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "To" }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "title": "Cursor" }
+          },
+          {
+            "name": "since_generation",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0 },
+            "description": "Request committed changes since this request-catalog generation. Requires previous_from and previous_to. All pages pin one target generation; expired replay, retention or reset requires a full resynchronization."
+          },
+          {
+            "name": "previous_from",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "Start of the previously applied complete catalog range."
+          },
+          {
+            "name": "previous_to",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "End of the previously applied complete catalog range."
+          },
+          {
+            "name": "summaries",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["1"] },
+            "description": "Include committed chart summaries on every page."
+          },
+          {
+            "name": "dataset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "request, rum or ops:{kind}"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["raw", "summary"],
+              "description": "raw (default) lists window Parquet files; summary lists summary files (request dataset only)."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["files", "next_cursor", "complete"],
+                  "properties": {
+                    "files": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProcessedFile"
+                      },
+                      "description": "Full snapshot entries, or entering-range snapshot entries for an incremental response."
+                    },
+                    "summary_files": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ProcessedFile"
+                      },
+                      "description": "Coarsest nonoverlapping committed summaries. In incremental responses these replace the cached summaries for summary_partitions, evaluated against the new whole query range."
+                    },
+                    "base_generation": {
+                      "anyOf": [{ "type": "integer" }, { "type": "string" }],
+                      "description": "Previously applied generation used by an incremental response."
+                    },
+                    "changes": {
+                      "type": "array",
+                      "description": "Ordered committed raw-file changes after base_generation. Stage every page before applying replacements and additions atomically.",
+                      "items": {
+                        "type": "object",
+                        "required": ["generation", "files", "replaces"],
+                        "properties": {
+                          "generation": {
+                            "anyOf": [
+                              { "type": "integer" },
+                              { "type": "string" }
+                            ]
+                          },
+                          "files": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/ProcessedFile"
+                            }
+                          },
+                          "replaces": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                          }
+                        }
+                      }
+                    },
+                    "summary_partitions": {
+                      "type": "array",
+                      "description": "Authoritative UTC-day summary reset ranges. Clear cached summaries for each marked day before installing summary_files; an empty marked day clears its previous summaries. Omitted days remain unchanged.",
+                      "items": {
+                        "type": "object",
+                        "required": ["from", "to"],
+                        "properties": {
+                          "from": { "type": "string", "format": "date-time" },
+                          "to": { "type": "string", "format": "date-time" }
+                        }
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [{ "type": "string" }, { "type": "null" }]
+                    },
+                    "complete": { "type": "boolean" },
+                    "catalog_generation": {
+                      "anyOf": [{ "type": "integer" }, { "type": "string" }],
+                      "description": "Committed request catalog snapshot pinned by every page of this listing."
+                    },
+                    "approximate": {
+                      "type": "object",
+                      "description": "view=summary only: summary format version and which values are approximate (top-K truncation with __other__, HLL distinct counts, capped IP samples).",
+                      "required": [
+                        "summary_version",
+                        "top_k",
+                        "ip_top_k",
+                        "other",
+                        "truncated_flag",
+                        "distinct",
+                        "ip_sample_cap",
+                        "sample_capped_flag"
+                      ],
+                      "properties": {
+                        "summary_version": { "type": "string" },
+                        "top_k": {
+                          "type": "object",
+                          "required": ["window", "hour", "day"],
+                          "properties": {
+                            "window": { "type": "integer" },
+                            "hour": { "type": "integer" },
+                            "day": { "type": "integer" }
+                          }
+                        },
+                        "ip_top_k": { "type": "integer" },
+                        "other": { "type": "string" },
+                        "truncated_flag": { "type": "string" },
+                        "distinct": {
+                          "type": "object",
+                          "required": ["method", "precision"],
+                          "properties": {
+                            "method": { "type": "string" },
+                            "precision": { "type": "integer" }
+                          }
+                        },
+                        "ip_sample_cap": { "type": "integer" },
+                        "sample_capped_flag": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range or cursor",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "409": {
+            "description": "Catalog snapshot or replay expired, or lineage changed. Restart with a full snapshot.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalog unavailable or the observed head is behind the requested generation. Retry without regressing the applied generation.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/file": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Download Processed File",
+        "description": "Parquet bytes of one processed file: a window file, or a summary or summary bundle listed by /api/files?view=summary. The key must be under this service's processed/ prefix.",
+        "operationId": "get_file_api_file_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "title": "Key" }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "A single HTTP byte range for selective Parquet reads."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Parquet file",
+            "content": {
+              "application/vnd.apache.parquet": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "206": {
+            "description": "Requested Parquet byte range",
+            "headers": {
+              "Content-Range": { "schema": { "type": "string" } },
+              "Content-Length": { "schema": { "type": "integer" } },
+              "Accept-Ranges": { "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/vnd.apache.parquet": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "416": { "description": "Requested byte range is not satisfiable" },
+          "400": {
+            "description": "Key outside processed files",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "tags": ["meta"],
+        "summary": "Inspect Processed File",
+        "description": "The same authenticated file access as GET, without a response body. Range: bytes=0- returns 206 and the complete object's Content-Length for DuckDB's size probe.",
+        "operationId": "head_file_api_file_head",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Parquet file metadata",
+            "headers": {
+              "Content-Length": { "schema": { "type": "integer" } }
+            }
+          },
+          "206": {
+            "description": "Ranged Parquet metadata",
+            "headers": {
+              "Content-Length": { "schema": { "type": "integer" } },
+              "Content-Range": { "schema": { "type": "string" } }
+            }
+          },
+          "401": { "description": "Authentication required" },
+          "403": { "description": "Request-data access required" },
+          "404": { "description": "File not found" },
+          "416": { "description": "Requested byte range is not satisfiable" }
+        }
+      }
+    },
+    "/api/ingest/events": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Committed Ingestion Events",
+        "description": "A bounded SSE response carrying a durable committed-data cursor. Reconnect after the retry interval with the last successfully applied cursor. The ready, commit and resync events include cursor, generation and committed_at. No request rows or credentials are streamed.",
+        "operationId": "ingest_events_api_ingest_events_get",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Finite committed-data event stream",
+            "content": {
+              "text/event-stream": { "schema": { "type": "string" } }
+            }
+          },
+          "400": {
+            "description": "Invalid cursor",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "403": {
+            "description": "Request-data access required",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/log-extents": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Log Extents",
+        "description": "Return only the earliest/latest log timestamps for the FilterBar.",
+        "operationId": "log_extents_api_log_extents_get",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogExtentsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup": {
+      "get": {
+        "operationId": "get__api_setup",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup/accept": {
+      "post": {
+        "operationId": "post__api_setup_accept",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupAccepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupAccept"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/session": {
+      "get": {
+        "operationId": "get__api_auth_session",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/register/options": {
+      "post": {
+        "operationId": "post__api_auth_register_options",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Challenge"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistrationRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/register/verify": {
+      "post": {
+        "operationId": "post__api_auth_register_verify",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialVerification"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login/options": {
+      "post": {
+        "operationId": "post__api_auth_login_options",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Challenge"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login/verify": {
+      "post": {
+        "operationId": "post__api_auth_login_verify",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialVerification"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "post__api_auth_logout",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/users": {
+      "get": {
+        "operationId": "get__api_admin_users",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Users"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/users/{user_id}": {
+      "patch": {
+        "operationId": "patch__api_admin_users_user_id",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleChange"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/revoke": {
+      "post": {
+        "operationId": "post__api_admin_users_user_id_revoke",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/admin/users/{user_id}/passkeys/{passkey_id}/revoke": {
+      "post": {
+        "operationId": "post__api_admin_users_user_id_passkeys_passkey_id_revoke",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "passkey_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/admin/invites": {
+      "get": {
+        "operationId": "get__api_admin_invites",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invites"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "post__api_admin_invites",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteCreated"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteCreate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/invites/{invite_id}/revoke": {
+      "post": {
+        "operationId": "post__api_admin_invites_invite_id_revoke",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "invite_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/cron-runs": {
+      "get": {
+        "operationId": "get__api_cron_runs",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronRunsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron-runs/trigger": {
+      "post": {
+        "operationId": "post__api_cron_runs_trigger",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerCronRunResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/audit-logs": {
+      "get": {
+        "operationId": "get__api_admin_audit_logs",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/ingested-files": {
+      "get": {
+        "operationId": "get__api_admin_ingested_files",
+        "summary": "List Ingested Files",
+        "description": "One bounded page (at most 500) of Parquet files in key order, oldest window first. complete is true only on the last page. A raw key can repeat on a later page with a newer state; clients keep the last occurrence.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "files",
+                    "skipped_objects",
+                    "next_cursor",
+                    "complete"
+                  ],
+                  "properties": {
+                    "files": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "key",
+                          "start",
+                          "end",
+                          "size",
+                          "rows",
+                          "last_modified",
+                          "status",
+                          "raw_deleted",
+                          "raw_deleted_at",
+                          "dataset"
+                        ],
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "start": {
+                            "type": "string"
+                          },
+                          "end": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer"
+                          },
+                          "rows": {
+                            "anyOf": [
+                              {
+                                "type": "integer"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "last_modified": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "raw_deleted": {
+                            "type": "boolean"
+                          },
+                          "raw_deleted_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "dataset": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "skipped_objects": {
+                      "type": "integer"
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/raw-tree": {
+      "get": {
+        "operationId": "get__api_admin_raw_tree",
+        "summary": "Raw Log Folder",
+        "description": "One delimiter LIST of a folder under the raw root. prefix is relative to the root and must end with a slash.",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "root",
+                    "prefix",
+                    "nodes",
+                    "next_cursor",
+                    "complete"
+                  ],
+                  "properties": {
+                    "root": {
+                      "type": "string"
+                    },
+                    "prefix": {
+                      "type": "string"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["name", "type"],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": ["directory", "file"]
+                          },
+                          "prefix": {
+                            "type": "string"
+                          },
+                          "key": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer"
+                          },
+                          "mtime": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "rows": {
+                            "anyOf": [
+                              {
+                                "type": "integer"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/storage-tree": {
+      "get": {
+        "operationId": "get__api_admin_storage_tree",
+        "summary": "Parquet Storage Folder",
+        "description": "One delimiter LIST of a folder under the Parquet root. prefix is relative to the root and must end with a slash.",
+        "parameters": [
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["request", "rum", "ops"]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "root",
+                    "prefix",
+                    "nodes",
+                    "next_cursor",
+                    "complete"
+                  ],
+                  "properties": {
+                    "root": {
+                      "type": "string"
+                    },
+                    "prefix": {
+                      "type": "string"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["name", "type"],
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": ["directory", "file"]
+                          },
+                          "prefix": {
+                            "type": "string"
+                          },
+                          "key": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer"
+                          },
+                          "mtime": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "rows": {
+                            "anyOf": [
+                              {
+                                "type": "integer"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/quarantine": {
+      "get": {
+        "operationId": "get__api_admin_quarantine",
+        "summary": "Quarantined Raw Objects",
+        "description": "Failed and quarantined raw objects of committed plans, one page of quarantine records per request. purgeable is false for keys above the ingest watermark.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["items", "next_cursor", "complete"],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "key",
+                          "record",
+                          "status",
+                          "reason",
+                          "size",
+                          "attempts",
+                          "first_seen",
+                          "quarantined_at",
+                          "purgeable"
+                        ],
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "record": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": ["quarantined", "failed"]
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer"
+                          },
+                          "attempts": {
+                            "type": "integer"
+                          },
+                          "first_seen": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "quarantined_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "purgeable": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/quarantine/purge": {
+      "post": {
+        "operationId": "post__api_admin_quarantine_purge",
+        "summary": "Purge Quarantined Raw Objects",
+        "description": "Without confirm, issues a confirm token bound to the caller and target. With one, runs one bounded, audited step; repeat with next_cursor and the returned confirm_token until complete.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["target"],
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "description": "\"all\" or one raw key"
+                  },
+                  "record": {
+                    "type": "string"
+                  },
+                  "confirm": {
+                    "type": "string"
+                  },
+                  "cursor": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Confirm token or one purge step",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": ["confirm_required", "partial", "complete"]
+                    },
+                    "confirm_token": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "expires_at": {
+                      "type": "string"
+                    },
+                    "purged": {
+                      "type": "integer"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "failed": {
+                      "type": "integer"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "complete": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/system-checks": {
+      "get": {
+        "operationId": "get__api_admin_system-checks",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemChecks"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "post__api_admin_system-checks",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemChecks"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/usage-logging": {
+      "get": {
+        "operationId": "get__api_admin_usage_logging",
+        "responses": {
+          "200": {
+            "description": "Saved usage collection preferences and pricing",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UsageLogging" }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patch__api_admin_usage_logging",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UsageLoggingPatch" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Persisted merged settings; does not start collection",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UsageLogging" }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/logs/backfill": {
+      "post": {
+        "operationId": "post__api_admin_logs_backfill",
+        "summary": "Start or restart a bounded deep re-LIST backfill scan of settled raw .gz objects",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from_ts": { "type": "integer", "nullable": true },
+                  "to_ts": { "type": "integer", "nullable": true },
+                  "restart": { "type": "boolean" }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Started backfill job state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["backfill"],
+                  "properties": {
+                    "backfill": { "type": "object" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/usage/logged-traffic": {
+      "get": {
+        "operationId": "get__api_admin_usage_logged_traffic",
+        "summary": "Fastly Stats API requests and edge requests per UTC day for the logged service over the last 3 complete days, with its logging settings",
+        "responses": {
+          "200": {
+            "description": "Daily totals, oldest first; days without stats are absent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["service_id", "from", "to", "days", "logging"],
+                  "properties": {
+                    "service_id": {
+                      "type": "string"
+                    },
+                    "logging": {
+                      "type": "object",
+                      "required": [
+                        "log_period",
+                        "sample_rate",
+                        "edge_only",
+                        "delete_after",
+                        "log_retention_days"
+                      ],
+                      "properties": {
+                        "log_period": {
+                          "type": "integer",
+                          "description": "Seconds between raw files per node"
+                        },
+                        "sample_rate": {
+                          "type": "integer",
+                          "description": "Percent of requests logged"
+                        },
+                        "edge_only": {
+                          "type": "boolean"
+                        },
+                        "delete_after": {
+                          "type": "boolean"
+                        },
+                        "log_retention_days": {
+                          "type": "integer"
+                        },
+                        "ingest_relay": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16,
+                          "description": "Config ingest_relay: shards per relayed worker call; 0 dispatches directly"
+                        }
+                      }
+                    },
+                    "from": {
+                      "type": "integer",
+                      "description": "Unix s, UTC midnight"
+                    },
+                    "to": {
+                      "type": "integer",
+                      "description": "Unix s, today's UTC midnight (exclusive)"
+                    },
+                    "days": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["day"],
+                        "properties": {
+                          "day": {
+                            "type": "integer",
+                            "description": "Unix s, UTC midnight"
+                          },
+                          "requests": {
+                            "type": "number"
+                          },
+                          "edge_requests": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/usage/compute-billing": {
+      "get": {
+        "operationId": "get__api_admin_usage_compute_billing",
+        "summary": "Fastly Stats API billed usage for the app, worker and front services, plus the Secret Store size",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Unix ms"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Unix ms; at most 31 days after from"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hourly-resolution totals per service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["from", "to", "by", "services", "secret_store"],
+                  "properties": {
+                    "from": {
+                      "type": "integer"
+                    },
+                    "to": {
+                      "type": "integer"
+                    },
+                    "by": {
+                      "type": "string"
+                    },
+                    "services": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "role",
+                          "service_id",
+                          "bandwidth",
+                          "kv_store_class_a_operations",
+                          "kv_store_class_b_operations"
+                        ],
+                        "properties": {
+                          "role": {
+                            "type": "string",
+                            "enum": ["app", "worker", "front"]
+                          },
+                          "service_id": {
+                            "type": "string"
+                          },
+                          "compute_requests": {
+                            "type": "number",
+                            "description": "app and worker only"
+                          },
+                          "compute_execution_time_ms": {
+                            "type": "number",
+                            "description": "app and worker only; billed vCPU ms"
+                          },
+                          "compute_request_time_billed_ms": {
+                            "type": "number",
+                            "description": "app and worker only"
+                          },
+                          "bandwidth": {
+                            "type": "number",
+                            "description": "Bytes Fastly bills as delivery bandwidth"
+                          },
+                          "requests": {
+                            "type": "number",
+                            "description": "front only; billed CDN requests"
+                          },
+                          "kv_store_class_a_operations": {
+                            "type": "number"
+                          },
+                          "kv_store_class_b_operations": {
+                            "type": "number"
+                          },
+                          "bandwidth_buckets": {
+                            "type": "array",
+                            "description": "front only; hourly bandwidth",
+                            "items": {
+                              "type": "object",
+                              "required": ["start_time", "bandwidth"],
+                              "properties": {
+                                "start_time": { "type": "integer" },
+                                "bandwidth": { "type": "number" }
+                              }
+                            }
+                          },
+                          "covered_from": {
+                            "type": ["integer", "null"],
+                            "description": "First hourly bucket start (unix s)"
+                          },
+                          "covered_to": {
+                            "type": ["integer", "null"],
+                            "description": "Last hourly bucket end (unix s)"
+                          }
+                        }
+                      }
+                    },
+                    "secret_store": {
+                      "type": "object",
+                      "required": ["store_id", "secrets"],
+                      "properties": {
+                        "store_id": { "type": "string" },
+                        "secrets": {
+                          "type": "integer",
+                          "description": "Secrets in the install's store (first 200)"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/usage/reconcile-storage": {
+      "post": {
+        "operationId": "post__api_admin_usage_reconcile_storage",
+        "summary": "Request a storage reconcile",
+        "responses": {
+          "200": {
+            "description": "started is false when a reconcile is already pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["started"],
+                  "properties": {
+                    "started": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/operational-logging": {
+      "get": {
+        "operationId": "get__api_admin_operational_logging",
+        "summary": "Read operational logging settings",
+        "responses": {
+          "200": {
+            "description": "Settings and defaults",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["settings", "defaults"],
+                  "properties": {
+                    "settings": {
+                      "$ref": "#/components/schemas/OperationalLogSettings"
+                    },
+                    "defaults": {
+                      "$ref": "#/components/schemas/OperationalLogSettings"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patch__api_admin_operational_logging",
+        "summary": "Patch operational logging settings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved settings and changed field names. 409 settings_conflict when another admin saved first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["settings", "changed"],
+                  "properties": {
+                    "settings": {
+                      "$ref": "#/components/schemas/OperationalLogSettings"
+                    },
+                    "changed": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/logs/status": {
+      "get": {
+        "operationId": "get__api_admin_logs_status",
+        "summary": "Operational log job status",
+        "responses": {
+          "200": {
+            "description": "Delete-history job, storage reconcile request and last sweep",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "delete_history",
+                    "storage_reconcile",
+                    "last_sweep"
+                  ],
+                  "properties": {
+                    "delete_history": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/LogHistoryJob"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "storage_reconcile": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "requested_at": {
+                              "type": "integer"
+                            },
+                            "actor": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "last_sweep": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "at": {
+                              "type": "integer"
+                            },
+                            "complete": {
+                              "type": "boolean"
+                            },
+                            "next": {
+                              "type": "integer"
+                            }
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/logs/flush": {
+      "post": {
+        "operationId": "post__api_admin_logs_flush",
+        "summary": "Flush operational logs",
+        "responses": {
+          "200": {
+            "description": "Flush result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "status",
+                    "rows",
+                    "files",
+                    "purged",
+                    "outbox_depth"
+                  ],
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "rows": {
+                      "type": "integer"
+                    },
+                    "files": {
+                      "type": "integer"
+                    },
+                    "purged": {
+                      "type": "integer"
+                    },
+                    "outbox_depth": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/logs/clear-cache": {
+      "post": {
+        "operationId": "post__api_admin_logs_clear_cache",
+        "summary": "Clear unflushed best-effort rows",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "cron_runs",
+                      "cron_ticks",
+                      "ingest_files",
+                      "fos_usage",
+                      "admin_audit",
+                      "api_telemetry",
+                      "platform_errors"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cleared kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["cleared"],
+                  "properties": {
+                    "cleared": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/logs/delete-history": {
+      "post": {
+        "operationId": "post__api_admin_logs_delete_history",
+        "summary": "Delete operational log history",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["kind"],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "cron_runs",
+                      "cron_ticks",
+                      "ingest_files",
+                      "fos_usage",
+                      "admin_audit",
+                      "api_telemetry",
+                      "platform_errors"
+                    ]
+                  },
+                  "older_than_days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3650
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Started job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["job"],
+                  "properties": {
+                    "job": {
+                      "$ref": "#/components/schemas/LogHistoryJob"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/logs/sweep": {
+      "post": {
+        "operationId": "post__api_admin_logs_sweep",
+        "summary": "Run the retention sweep",
+        "responses": {
+          "200": {
+            "description": "Sweep report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "deleted",
+                    "failed",
+                    "bytes",
+                    "more_pending",
+                    "datasets",
+                    "backend_calls"
+                  ],
+                  "properties": {
+                    "deleted": {
+                      "type": "integer"
+                    },
+                    "failed": {
+                      "type": "integer"
+                    },
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "more_pending": {
+                      "type": "boolean"
+                    },
+                    "datasets": {},
+                    "backend_calls": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/logs/{kind}/live": {
+      "get": {
+        "operationId": "get__api_logs_kind_live",
+        "summary": "Unflushed operational log rows",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "cron_runs",
+                "cron_ticks",
+                "ingest_files",
+                "fos_usage",
+                "admin_audit",
+                "api_telemetry",
+                "platform_errors"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest-first page of live rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["rows", "next_cursor"],
+                  "properties": {
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/telemetry/query": {
+      "post": {
+        "operationId": "post__api_telemetry_query",
+        "summary": "Browser query summary beacon",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "files_listed": {
+                    "type": "integer"
+                  },
+                  "files_fetched": {
+                    "type": "integer"
+                  },
+                  "files_cached": {
+                    "type": "integer"
+                  },
+                  "cdn_hits": {
+                    "type": "integer"
+                  },
+                  "rows_scanned": {
+                    "type": "integer"
+                  },
+                  "bytes_scanned": {
+                    "type": "integer"
+                  },
+                  "duration_ms": {
+                    "type": "integer"
+                  },
+                  "surface": {
+                    "type": "string",
+                    "enum": ["dashboard", "explorer"]
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": ["ok", "error", "aborted"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Accepted, rate limited or disabled"
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/versions": {
+      "get": {
+        "operationId": "get__api_admin_versions",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunningVersions"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ProcessedFile": {
+        "type": "object",
+        "required": ["key", "start", "end", "size", "rows"],
+        "properties": {
+          "key": { "type": "string" },
+          "start": { "type": "string" },
+          "end": { "type": "string" },
+          "size": { "type": "integer" },
+          "rows": {
+            "anyOf": [{ "type": "integer" }, { "type": "null" }]
+          },
+          "span": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Compact files only: start of the first and last source window."
+          },
+          "sources": {
+            "type": "integer",
+            "description": "Compact files and summaries: source window count (1 for a window summary)."
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["day", "hour", "window"],
+            "description": "Day bundle, hour bundle or window summary."
+          }
+        }
+      },
+      "ProvisionCandidate": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "customer_id": { "type": "string" }
+        }
+      },
+      "CmcdConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "mode", "version"],
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "mode": {
+            "type": "string",
+            "enum": ["query_string", "headers"],
+            "default": "query_string"
+          },
+          "version": { "type": "integer", "enum": [1, 2], "default": 1 }
+        }
+      },
+      "CaptureCustomField": {
+        "type": "object",
+        "required": ["name", "vcl", "parquet_type", "enabled"],
+        "properties": {
+          "name": { "type": "string" },
+          "vcl": { "type": "string" },
+          "parquet_type": {
+            "type": "string",
+            "enum": [
+              "VARCHAR",
+              "INTEGER",
+              "BIGINT",
+              "DOUBLE",
+              "BOOLEAN",
+              "Utf8",
+              "Int64",
+              "Float64",
+              "Boolean"
+            ]
+          },
+          "enabled": { "type": "boolean" },
+          "created_at": { "type": "string" },
+          "committed": { "type": "boolean" },
+          "system_managed": { "type": "boolean" },
+          "byte_limit": { "type": "integer" },
+          "duckdb_type": { "type": "string" },
+          "vcl_log_expression": { "type": "string" },
+          "value_type": { "type": "string" },
+          "label": { "type": "string" },
+          "show_in_dashboard": { "type": "boolean" }
+        }
+      },
+      "CaptureFields": {
+        "type": "object",
+        "required": [
+          "groups",
+          "custom_fields",
+          "field_overrides",
+          "field_limits"
+        ],
+        "properties": {
+          "preset": { "type": "string" },
+          "groups": { "type": "array", "items": { "type": "string" } },
+          "custom_fields": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CaptureCustomField" }
+          },
+          "field_overrides": {
+            "type": "object",
+            "additionalProperties": { "type": "boolean" }
+          },
+          "field_limits": {
+            "type": "object",
+            "additionalProperties": { "type": "integer" }
+          }
+        }
+      },
+      "CaptureFieldsResponse": {
+        "type": "object",
+        "required": ["service_id", "generation", "log_fields"],
+        "properties": {
+          "service_id": { "type": "string" },
+          "generation": { "type": "string" },
+          "log_fields": { "$ref": "#/components/schemas/CaptureFields" }
+        }
+      },
+      "CaptureLimitsResponse": {
+        "type": "object",
+        "required": ["generation", "field_limits"],
+        "properties": {
+          "service_id": { "type": "string" },
+          "generation": { "type": "string" },
+          "field_limits": {
+            "type": "object",
+            "additionalProperties": { "type": "integer" }
+          }
+        }
+      },
+      "FieldCatalog": {
+        "type": "object",
+        "required": ["fields", "groups"],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "group"],
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "label": { "type": "string" },
+                "group": { "type": ["string", "null"] },
+                "description": { "type": "string" },
+                "vcl": { "type": "string" },
+                "duckdb_type": { "type": "string" },
+                "default_off": { "type": "boolean" },
+                "individually_toggleable": { "type": "boolean" },
+                "has_limit": { "type": "boolean" },
+                "limit": { "type": "integer" },
+                "mandatory": { "type": "boolean" },
+                "required": { "type": "boolean" },
+                "typical_bytes": { "type": "integer" },
+                "note": { "type": ["string", "null"] },
+                "required_by": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "label"],
+              "properties": {
+                "id": { "type": ["string", "null"] },
+                "label": { "type": "string" },
+                "name": { "type": "string" },
+                "description": { "type": "string" },
+                "locked": { "type": "boolean" },
+                "required": { "type": "boolean" },
+                "default": { "type": "boolean" },
+                "requires": { "type": ["string", "null"] },
+                "fields": { "type": "array", "items": { "type": "string" } },
+                "note": { "type": ["string", "null"] },
+                "recommended_with": {
+                  "type": ["array", "null"],
+                  "items": { "type": "string" }
+                },
+                "total_bytes": { "type": "integer" }
+              }
+            }
+          },
+          "insights": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "title"],
+              "properties": {
+                "id": { "type": "string" },
+                "category": { "type": "string" },
+                "title": { "type": "string" },
+                "description": { "type": "string" },
+                "required_fields": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "required_groups": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          },
+          "default_config": { "$ref": "#/components/schemas/CaptureFields" },
+          "presets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["groups"],
+              "properties": {
+                "label": { "type": "string" },
+                "description": { "type": "string" },
+                "groups": { "type": "array", "items": { "type": "string" } },
+                "field_overrides": {
+                  "type": "object",
+                  "additionalProperties": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RumConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "log_period",
+          "faro_version",
+          "custom_condition",
+          "capture_vitals",
+          "capture_performance",
+          "capture_errors",
+          "capture_events"
+        ],
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "log_period": { "type": "integer", "default": 300 },
+          "faro_version": { "type": "string", "default": "2.13.0" },
+          "custom_condition": { "type": "string", "default": "" },
+          "capture_vitals": { "type": "boolean", "default": true },
+          "capture_performance": { "type": "boolean", "default": true },
+          "capture_errors": { "type": "boolean", "default": true },
+          "capture_events": { "type": "boolean", "default": true },
+          "sample_rate": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 1,
+            "description": "Fraction of browser sessions that send vitals, decided once per session."
+          },
+          "error_sample_rate": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 1,
+            "description": "Fraction of browser sessions that send JS errors."
+          }
+        }
+      },
+      "RumVersionsResponse": {
+        "type": "object",
+        "required": ["versions", "default_version"],
+        "properties": {
+          "versions": { "type": "array", "items": { "type": "string" } },
+          "default_version": { "type": "string" }
+        }
+      },
+      "CompactionSetting": {
+        "type": "object",
+        "description": "Size-aware request-log compaction. `off`, or merge closed hours' windows below the target into compact files of about that size.",
+        "required": ["mode", "size_target_mb"],
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["off", "size_target"],
+            "default": "off"
+          },
+          "size_target_mb": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256,
+            "default": 64
+          }
+        }
+      },
+      "ServiceConfigEdit": {
+        "type": "object",
+        "required": ["generation"],
+        "properties": {
+          "generation": { "type": "string" },
+          "cmcd": { "$ref": "#/components/schemas/CmcdConfig" },
+          "rum": { "$ref": "#/components/schemas/RumConfig" },
+          "logging_enabled": { "type": "boolean" },
+          "logging_endpoint_name": { "type": "string" },
+          "log_period": { "type": "integer" },
+          "sample_rate": { "type": "integer" },
+          "edge_only": { "type": "boolean" },
+          "custom_condition": { "type": "string" },
+          "rum_enabled": { "type": "boolean" },
+          "rum_log_period": { "type": "integer" },
+          "faro_version": { "type": "string" },
+          "rum_custom_condition": { "type": "string" },
+          "capture_vitals": { "type": "boolean" },
+          "capture_performance": { "type": "boolean" },
+          "capture_errors": { "type": "boolean" },
+          "capture_events": { "type": "boolean" },
+          "delete_after": { "type": "boolean", "default": true },
+          "log_retention_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650,
+            "default": 30
+          },
+          "rum_retention_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650,
+            "default": 30
+          },
+          "compaction": { "$ref": "#/components/schemas/CompactionSetting" },
+          "log_fields": { "$ref": "#/components/schemas/CaptureFields" }
+        }
+      },
+      "ProvisionInput": {
+        "type": "object",
+        "required": ["token", "service_id"],
+        "properties": {
+          "token": { "type": "string", "writeOnly": true },
+          "service_id": { "type": "string" },
+          "cmcd": { "$ref": "#/components/schemas/CmcdConfig" },
+          "rum": { "$ref": "#/components/schemas/RumConfig" },
+          "service_name": { "type": "string" },
+          "fos_bucket_name": { "type": "string" },
+          "endpoint_name": { "type": "string" },
+          "fos_bucket": { "type": "string" },
+          "fos_region": { "type": "string" },
+          "fos_prefix": { "type": "string" },
+          "logging_enabled": { "type": "boolean" },
+          "logging_endpoint_name": { "type": "string" },
+          "log_period": { "type": "integer" },
+          "sample_rate": { "type": "integer" },
+          "edge_only": { "type": "boolean" },
+          "custom_condition": { "type": "string" },
+          "rum_enabled": { "type": "boolean" },
+          "rum_log_period": { "type": "integer" },
+          "faro_version": { "type": "string" },
+          "rum_custom_condition": { "type": "string" },
+          "capture_vitals": { "type": "boolean" },
+          "capture_performance": { "type": "boolean" },
+          "capture_errors": { "type": "boolean" },
+          "capture_events": { "type": "boolean" },
+          "delete_after": { "type": "boolean", "default": true },
+          "log_retention_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650,
+            "default": 30
+          },
+          "rum_retention_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650,
+            "default": 30
+          },
+          "compaction": { "$ref": "#/components/schemas/CompactionSetting" },
+          "log_fields": { "$ref": "#/components/schemas/CaptureFields" }
+        }
+      },
+      "InstalledService": {
+        "type": "object",
+        "required": [
+          "service_id",
+          "name",
+          "status",
+          "generation",
+          "log_fields",
+          "logging_enabled",
+          "logging_endpoint_name",
+          "log_period",
+          "sample_rate",
+          "edge_only",
+          "custom_condition",
+          "fos_bucket",
+          "fos_region",
+          "fos_prefix",
+          "pending_job_id",
+          "cmcd",
+          "rum",
+          "delete_after",
+          "log_retention_days",
+          "rum_retention_days",
+          "compaction"
+        ],
+        "properties": {
+          "service_id": { "type": "string" },
+          "cmcd": { "$ref": "#/components/schemas/CmcdConfig" },
+          "rum": { "$ref": "#/components/schemas/RumConfig" },
+          "name": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["provisioning", "active", "torn_down"]
+          },
+          "generation": { "type": "string" },
+          "created_at": { "type": "integer" },
+          "updated_at": { "type": "integer" },
+          "config_version": { "type": "integer" },
+          "log_fields": { "$ref": "#/components/schemas/CaptureFields" },
+          "logging_enabled": { "type": "boolean" },
+          "logging_endpoint_name": { "type": "string" },
+          "log_period": { "type": "integer" },
+          "sample_rate": { "type": "integer" },
+          "edge_only": { "type": "boolean" },
+          "custom_condition": { "type": "string" },
+          "rum_enabled": { "type": "boolean" },
+          "rum_log_period": { "type": "integer" },
+          "faro_version": { "type": "string" },
+          "rum_custom_condition": { "type": "string" },
+          "capture_vitals": { "type": "boolean" },
+          "capture_performance": { "type": "boolean" },
+          "capture_errors": { "type": "boolean" },
+          "capture_events": { "type": "boolean" },
+          "delete_after": { "type": "boolean", "default": true },
+          "log_retention_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650,
+            "default": 30
+          },
+          "rum_retention_days": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650,
+            "default": 30
+          },
+          "compaction": { "$ref": "#/components/schemas/CompactionSetting" },
+          "fos_bucket": { "type": "string" },
+          "fos_region": { "type": "string" },
+          "fos_prefix": { "type": "string" },
+          "fos_endpoint": { "type": "string" },
+          "pending_job_id": { "type": ["string", "null"] },
+          "last_activated_version": { "type": ["integer", "null"] },
+          "last_reconcile": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          },
+          "data_reset": { "$ref": "#/components/schemas/DataResetMarker" }
+        }
+      },
+      "DataResetMarker": {
+        "type": "object",
+        "required": ["job_id", "reset_at", "phase", "started_at", "actor"],
+        "properties": {
+          "job_id": { "type": "string" },
+          "reset_at": { "type": "integer" },
+          "phase": { "type": "string", "enum": ["fencing", "cleanup"] },
+          "started_at": { "type": "integer" },
+          "actor": { "type": "string" },
+          "rum_held": { "type": "boolean" }
+        }
+      },
+      "DeleteDataStatus": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "none",
+              "fencing",
+              "resetting",
+              "cleanup",
+              "complete",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "job_id": { "type": "string" },
+          "reset_at": { "type": "integer" },
+          "started_at": { "type": "integer" },
+          "reset_cas_at": { "type": ["integer", "null"] },
+          "retirement_grace_until": { "type": ["integer", "null"] },
+          "reset_manifest": { "type": ["string", "null"] },
+          "resetting_at": { "type": ["integer", "null"] },
+          "purge_pending": { "type": "boolean" },
+          "deleted": {
+            "type": "object",
+            "additionalProperties": { "type": "integer" }
+          },
+          "bytes": { "type": "integer" },
+          "pending": { "type": "integer" },
+          "cursors": {
+            "type": "object",
+            "additionalProperties": { "type": ["string", "null"] }
+          },
+          "raw_recheck_at": { "type": ["integer", "null"] },
+          "steps_done": { "type": "array", "items": { "type": "string" } },
+          "purge_failures": { "type": "integer" },
+          "error": { "type": ["string", "null"] },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["at", "text"],
+              "properties": {
+                "at": { "type": "integer" },
+                "text": { "type": "string" }
+              }
+            }
+          },
+          "updated_at": { "type": "integer" }
+        }
+      },
+      "InstalledServices": {
+        "type": "object",
+        "required": ["services"],
+        "properties": {
+          "services": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/InstalledService" }
+          }
+        }
+      },
+      "InstalledServiceResponse": {
+        "type": "object",
+        "required": ["service", "generation"],
+        "properties": {
+          "service": { "$ref": "#/components/schemas/InstalledService" },
+          "generation": { "type": "string" },
+          "job": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/ControlJob" },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "ControlJobResponse": {
+        "type": "object",
+        "required": ["job"],
+        "properties": { "job": { "$ref": "#/components/schemas/ControlJob" } }
+      },
+      "ControlJob": {
+        "type": "object",
+        "required": [
+          "id",
+          "service_id",
+          "kind",
+          "status",
+          "step",
+          "completed_steps",
+          "error",
+          "draft_version",
+          "changes"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "service_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "running", "failed", "complete"]
+          },
+          "step": { "type": "string" },
+          "completed_steps": { "type": "array", "items": { "type": "string" } },
+          "error": { "type": ["string", "null"] },
+          "draft_version": { "type": ["integer", "null"] },
+          "retry_at": { "type": ["integer", "null"] },
+          "retry_reason": { "type": ["string", "null"] },
+          "retry_attempt": { "type": "integer" },
+          "changes": { "type": "array", "items": {} },
+          "created_at": { "type": "integer" },
+          "updated_at": { "type": "integer" }
+        }
+      },
+      "OperationalLogSettings": {
+        "type": "object",
+        "required": [
+          "flush_max_rows",
+          "flush_max_age_s",
+          "flush_min_interval_s",
+          "browser_query_telemetry",
+          "compaction_enabled",
+          "retention_days_by_kind"
+        ],
+        "properties": {
+          "flush_max_rows": {
+            "type": "integer"
+          },
+          "flush_max_age_s": {
+            "type": "integer"
+          },
+          "flush_min_interval_s": {
+            "type": "integer"
+          },
+          "browser_query_telemetry": {
+            "type": "boolean"
+          },
+          "compaction_enabled": {
+            "type": "boolean"
+          },
+          "retention_days_by_kind": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "LogHistoryJob": {
+        "type": "object",
+        "required": [
+          "kind",
+          "cutoff_ts",
+          "status",
+          "actor",
+          "started_at",
+          "updated_at",
+          "deleted"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "older_than_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cutoff_ts": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["deleting", "purging", "complete"]
+          },
+          "actor": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          },
+          "deleted": {
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": ["detail"],
+        "additionalProperties": false
+      },
+      "Challenge": {
+        "type": "object",
+        "properties": {
+          "challenge_id": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": ["challenge_id", "public_key"],
+        "additionalProperties": false
+      },
+      "ClickHouseQueryObservation": {
+        "properties": {
+          "query_id": {
+            "type": "string",
+            "title": "Query Id"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "page_load_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Load Id"
+          },
+          "service_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Id"
+          },
+          "component": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          },
+          "section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Id"
+          },
+          "parent_section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Section Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fact",
+              "projection",
+              "projected_fact",
+              "mixed",
+              "unknown"
+            ],
+            "title": "Source",
+            "default": "unknown"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["success", "error", "timeout"],
+            "title": "Outcome"
+          },
+          "client_elapsed_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Client Elapsed Ms"
+          },
+          "admission_wait_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admission Wait Ms"
+          },
+          "network_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Network Ms"
+          },
+          "decode_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decode Ms"
+          },
+          "server_elapsed_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Elapsed Ms"
+          },
+          "server_elapsed_source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "statistics.elapsed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Elapsed Source"
+          },
+          "server_cpu_ms": {
+            "type": "null",
+            "title": "Server Cpu Ms"
+          },
+          "timing_kind": {
+            "type": "string",
+            "const": "client_operation_wall",
+            "title": "Timing Kind",
+            "default": "client_operation_wall"
+          }
+        },
+        "type": "object",
+        "required": ["query_id", "outcome", "client_elapsed_ms"],
+        "title": "ClickHouseQueryObservation"
+      },
+      "CredentialVerification": {
+        "type": "object",
+        "properties": {
+          "challenge_id": {
+            "type": "string"
+          },
+          "credential": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": ["challenge_id", "credential"],
+        "additionalProperties": false
+      },
+      "DebugCall": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "time_ms": {
+            "type": "number",
+            "title": "Time Ms"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "caller": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caller"
+          }
+        },
+        "type": "object",
+        "required": ["service", "method", "path", "time_ms"],
+        "title": "DebugCall"
+      },
+      "DebugQuery": {
+        "properties": {
+          "clickhouse": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClickHouseQueryObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sql": {
+            "type": "string",
+            "title": "Sql"
+          },
+          "time_ms": {
+            "type": "number",
+            "title": "Time Ms"
+          },
+          "is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
+          }
+        },
+        "type": "object",
+        "required": ["sql", "time_ms"],
+        "title": "DebugQuery"
+      },
+      "ErrorDetail": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error"
+          },
+          "error_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Id"
+          },
+          "messages": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Messages"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": ["error"],
+        "title": "ErrorDetail",
+        "description": "Inner detail object for the canonical error envelope.\n\nAllows extra fields because a handful of historical 403 sites attach\ncontext (``service``, ``invite_id``, etc.) alongside the canonical\n``error`` code. Locking the shape down would force a coordinated\nrewrite of those handlers without changing observable behavior \u2014 the\nfrontend's ``extractApiError`` already keys on ``detail.error`` and\nignores extras."
+      },
+      "ErrorEnvelope": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "type": "object",
+        "required": ["detail"],
+        "title": "ErrorEnvelope",
+        "description": "Canonical FastAPI HTTPException envelope shape."
+      },
+      "Invite": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "used": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "display_name",
+          "role",
+          "expires_at",
+          "revoked",
+          "used"
+        ],
+        "additionalProperties": false
+      },
+      "InviteCreate": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        },
+        "required": ["display_name", "role"],
+        "additionalProperties": false
+      },
+      "InviteCreated": {
+        "type": "object",
+        "properties": {
+          "invite": {
+            "$ref": "#/components/schemas/Invite"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": ["invite", "token"],
+        "additionalProperties": false
+      },
+      "Invites": {
+        "type": "object",
+        "properties": {
+          "invites": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Invite"
+            }
+          }
+        },
+        "required": ["invites"],
+        "additionalProperties": false
+      },
+      "LogExtentsResponse": {
+        "properties": {
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "_section_timings": {
+            "items": {
+              "$ref": "#/components/schemas/SectionTimingEntry"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "LogExtentsResponse",
+        "description": "Minimal extents projection for the FilterBar's time-range snap.\n\nSibling of ``SyncStatusResponse`` but strips every field that the\nmiddleware blocks ``/api/sync-status`` for an analyst over: no\n``ngwaf_workspace_id``, no ``active_run``, no cron task state, no\nDuckDB size, no storage mode. Just the two timestamps the\nFilterBar needs to snap its range, plus a ``configured`` flag so\nthe frontend can short-circuit when a service has no source."
+      },
+      "MissingKey": {
+        "type": "object",
+        "properties": {
+          "store": {
+            "type": "string",
+            "enum": ["Config", "Secret", "KV"]
+          },
+          "command": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["store", "name", "command"],
+        "additionalProperties": false
+      },
+      "MutationResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": ["ok"],
+        "additionalProperties": false
+      },
+      "Passkey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+      },
+      "RegistrationRequest": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "invite_token": {
+            "type": "string"
+          }
+        },
+        "required": ["display_name"],
+        "additionalProperties": false
+      },
+      "ResponseCacheObservation": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": ["hit", "miss", "bypass", "unknown"],
+            "title": "State"
+          },
+          "ttl_seconds": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl Seconds"
+          },
+          "prewarmer": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prewarmer"
+          },
+          "single_flight": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["leader", "follower"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Single Flight"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": ["self", "subtree"]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "wait_ms": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wait Ms"
+          }
+        },
+        "type": "object",
+        "required": ["state"],
+        "title": "ResponseCacheObservation"
+      },
+      "Role": {
+        "type": "string",
+        "enum": ["admin", "analyst", "analyst-no-pii"]
+      },
+      "RoleChange": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        },
+        "required": ["role"],
+        "additionalProperties": false
+      },
+      "RunningVersion": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "source_sha": {
+            "type": "string"
+          }
+        },
+        "required": ["name", "version", "source_sha"],
+        "additionalProperties": false
+      },
+      "UsageLogging": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "retention_days": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 30
+          },
+          "class_a_rate_per_1k": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.0025
+          },
+          "class_b_rate_per_10k": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.004
+          },
+          "cdn_egress_rate_per_gb": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.12
+          },
+          "storage_rate_per_gb_month": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.02
+          },
+          "min_billed_days": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 30
+          },
+          "compute_request_rate_per_million": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.5
+          },
+          "compute_vcpu_rate_per_million_ms": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.05
+          },
+          "compute_vcpu_free_ms_per_request": {
+            "type": "number",
+            "minimum": 0,
+            "default": 20
+          },
+          "compute_vcpu_excess_rate_per_second": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.00005
+          },
+          "compute_vcpu_rounding_ms": {
+            "type": "number",
+            "minimum": 0,
+            "default": 10
+          },
+          "cdn_request_rate_per_10k": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.01
+          },
+          "kv_class_a_rate_per_million": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 6.5
+          },
+          "kv_class_b_rate_per_million": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 0.55
+          },
+          "secret_rate_per_month": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 5
+          },
+          "query_debug_visibility": {
+            "type": "string",
+            "enum": ["disabled", "admins", "analysts", "both"],
+            "default": "disabled"
+          },
+          "api_call_debug_visibility": {
+            "type": "string",
+            "enum": ["disabled", "admins", "analysts", "both"],
+            "default": "disabled"
+          }
+        },
+        "required": [
+          "enabled",
+          "retention_days",
+          "class_a_rate_per_1k",
+          "class_b_rate_per_10k",
+          "cdn_egress_rate_per_gb",
+          "storage_rate_per_gb_month",
+          "min_billed_days",
+          "compute_request_rate_per_million",
+          "compute_vcpu_rate_per_million_ms",
+          "compute_vcpu_free_ms_per_request",
+          "compute_vcpu_excess_rate_per_second",
+          "compute_vcpu_rounding_ms",
+          "cdn_request_rate_per_10k",
+          "kv_class_a_rate_per_million",
+          "kv_class_b_rate_per_million",
+          "secret_rate_per_month"
+        ],
+        "additionalProperties": false
+      },
+      "UsageLoggingPatch": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "retention_days": { "type": "number", "exclusiveMinimum": 0 },
+          "class_a_rate_per_1k": { "type": "number", "exclusiveMinimum": 0 },
+          "class_b_rate_per_10k": { "type": "number", "exclusiveMinimum": 0 },
+          "cdn_egress_rate_per_gb": { "type": "number", "exclusiveMinimum": 0 },
+          "storage_rate_per_gb_month": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "min_billed_days": { "type": "number", "exclusiveMinimum": 0 },
+          "compute_request_rate_per_million": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "compute_vcpu_rate_per_million_ms": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "compute_vcpu_free_ms_per_request": {
+            "type": "number",
+            "minimum": 0
+          },
+          "compute_vcpu_excess_rate_per_second": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "compute_vcpu_rounding_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cdn_request_rate_per_10k": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "kv_class_a_rate_per_million": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "kv_class_b_rate_per_million": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "secret_rate_per_month": { "type": "number", "exclusiveMinimum": 0 },
+          "query_debug_visibility": {
+            "type": "string",
+            "enum": ["disabled", "admins", "analysts", "both"]
+          },
+          "api_call_debug_visibility": {
+            "type": "string",
+            "enum": ["disabled", "admins", "analysts", "both"]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunningVersions": {
+        "type": "object",
+        "properties": {
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunningVersion"
+            }
+          }
+        },
+        "required": ["versions"],
+        "additionalProperties": false
+      },
+      "SectionTimingEntry": {
+        "properties": {
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          },
+          "section_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "time_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Ms"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "cache": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "SectionTimingEntry",
+        "description": "Per-phase wall-clock timing entry in ``BaseResponse.section_timings``."
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/User"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "compute_service_id": {
+            "type": ["string", "null"]
+          },
+          "compute_service_version": {
+            "type": ["integer", "null"]
+          },
+          "debug_queries": {
+            "type": "boolean"
+          },
+          "debug_api_calls": {
+            "type": "boolean"
+          },
+          "query_debug_visibility": {
+            "type": "string",
+            "enum": ["disabled", "admins", "analysts", "both"]
+          },
+          "api_call_debug_visibility": {
+            "type": "string",
+            "enum": ["disabled", "admins", "analysts", "both"]
+          },
+          "custom_dashboard_cards": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CustomDashboardCard" }
+          }
+        },
+        "required": ["user", "compute_service_id", "compute_service_version"],
+        "additionalProperties": false
+      },
+      "CustomDashboardCard": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "type": { "type": "string", "enum": ["string", "number", "boolean"] }
+        },
+        "required": ["id", "label", "type"],
+        "additionalProperties": false
+      },
+      "SetupAccept": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": ["code"],
+        "additionalProperties": false
+      },
+      "SetupAccepted": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          }
+        },
+        "required": ["accepted"],
+        "additionalProperties": false
+      },
+      "SetupStatus": {
+        "type": "object",
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MissingKey"
+            }
+          }
+        },
+        "required": ["complete", "accepted", "missing"],
+        "additionalProperties": false
+      },
+      "StreamMetrics": {
+        "properties": {
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "total_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Rows"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "StreamMetrics"
+      },
+      "SyncStatusResponse": {
+        "properties": {
+          "earliest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Log At"
+          },
+          "latest_log_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Log At"
+          },
+          "local_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Rows"
+          },
+          "rum": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StreamMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured",
+            "default": true
+          },
+          "busy": {
+            "type": "boolean",
+            "title": "Busy",
+            "default": false
+          },
+          "storage_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Mode"
+          },
+          "latest_ingested_file_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Ingested File At"
+          },
+          "latest_available_file_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Available File At"
+          },
+          "duckdb_size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duckdb Size Bytes"
+          },
+          "duckdb_exists": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duckdb Exists"
+          },
+          "active_run": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Run"
+          },
+          "ngwaf_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Workspace Id"
+          },
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "_section_timings": {
+            "items": {
+              "$ref": "#/components/schemas/SectionTimingEntry"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "last_tick_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Tick At"
+          },
+          "next_tick_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Tick At"
+          },
+          "clock_interval_s": {
+            "type": "integer",
+            "title": "Clock Interval S",
+            "default": 120
+          },
+          "cron_runs": {
+            "items": {
+              "$ref": "#/components/schemas/CronRunEntry"
+            },
+            "type": "array",
+            "title": "Cron Runs"
+          },
+          "audit_logs": {
+            "items": {
+              "$ref": "#/components/schemas/AuditLogEntry"
+            },
+            "type": "array",
+            "title": "Audit Logs"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "SyncStatusResponse"
+      },
+      "CronRunEntry": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "started_at": { "type": "string" },
+          "finished_at": { "type": "string" },
+          "duration_ms": { "type": "integer" },
+          "outcome": {
+            "type": "string",
+            "enum": ["idle", "done", "busy", "error"]
+          },
+          "trigger": { "type": "string", "enum": ["clock", "manual"] },
+          "actor": { "type": "string" },
+          "bucket": { "type": "integer" },
+          "service_id": { "type": ["string", "null"] },
+          "listed_raw_files": { "type": "integer" },
+          "straggler_raw_files": { "type": "integer" },
+          "converted_raw_files": { "type": "integer" },
+          "deleted_raw_files": { "type": "integer" },
+          "rows_written": { "type": "integer" },
+          "bytes_written": { "type": "integer" },
+          "backend_requests_used": { "type": "integer" },
+          "fos_manifest_key": { "type": ["string", "null"] },
+          "error": { "type": ["string", "null"] }
+        },
+        "required": [
+          "id",
+          "started_at",
+          "finished_at",
+          "duration_ms",
+          "outcome",
+          "trigger",
+          "actor",
+          "bucket",
+          "service_id",
+          "listed_raw_files",
+          "converted_raw_files",
+          "deleted_raw_files",
+          "rows_written",
+          "bytes_written",
+          "backend_requests_used",
+          "fos_manifest_key",
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "AuditLogEntry": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "time": { "type": "string" },
+          "timestamp": { "type": "integer" },
+          "category": { "type": "string", "enum": ["auth", "control_plane"] },
+          "actor": { "type": "string" },
+          "action": { "type": "string" },
+          "target": { "type": "string" },
+          "details": { "type": "string" }
+        },
+        "required": [
+          "id",
+          "time",
+          "timestamp",
+          "category",
+          "actor",
+          "action",
+          "target",
+          "details"
+        ],
+        "additionalProperties": false
+      },
+      "CronRunsResponse": {
+        "type": "object",
+        "properties": {
+          "configured": { "type": "boolean" },
+          "service_id": { "type": ["string", "null"] },
+          "last_tick_at": { "type": ["string", "null"] },
+          "next_tick_at": { "type": ["string", "null"] },
+          "clock_interval_s": { "type": "integer" },
+          "last_ingest_at": { "type": ["string", "null"] },
+          "runs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CronRunEntry" }
+          }
+        },
+        "required": [
+          "configured",
+          "service_id",
+          "last_tick_at",
+          "next_tick_at",
+          "clock_interval_s",
+          "runs"
+        ],
+        "additionalProperties": false
+      },
+      "TriggerCronRunResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "configured": { "type": "boolean" },
+          "service_id": { "type": ["string", "null"] },
+          "last_tick_at": { "type": ["string", "null"] },
+          "next_tick_at": { "type": ["string", "null"] },
+          "clock_interval_s": { "type": "integer" },
+          "run": { "$ref": "#/components/schemas/CronRunEntry" },
+          "runs": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CronRunEntry" }
+          }
+        },
+        "required": [
+          "ok",
+          "configured",
+          "service_id",
+          "last_tick_at",
+          "next_tick_at",
+          "clock_interval_s",
+          "run",
+          "runs"
+        ],
+        "additionalProperties": false
+      },
+      "AuditLogsResponse": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AuditLogEntry" }
+          }
+        },
+        "required": ["entries"],
+        "additionalProperties": false
+      },
+      "SystemCheck": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "warn", "fail"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "fix": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": ["id", "name", "status", "message", "fix"],
+        "additionalProperties": false
+      },
+      "SystemChecks": {
+        "type": "object",
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SystemCheck"
+            }
+          },
+          "api_calls": {
+            "type": "integer"
+          },
+          "probe_calls": {
+            "type": "integer"
+          }
+        },
+        "required": ["checks", "api_calls", "probe_calls"],
+        "additionalProperties": false
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "passkeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Passkey"
+            }
+          }
+        },
+        "required": ["id", "display_name", "role"],
+        "additionalProperties": false
+      },
+      "Users": {
+        "type": "object",
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            }
+          }
+        },
+        "required": ["users"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

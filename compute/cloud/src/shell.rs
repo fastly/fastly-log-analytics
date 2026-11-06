@@ -794,7 +794,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             }
             return self.admin_route(&auth, user, request, path, ip, now);
         }
-        if setup_page
+        if matches!(path, "/setup" | "/setup.html" | "/setup.txt")
             && matches!(request.method.as_str(), "GET" | "HEAD")
             && auth.setup_complete()?
         {
@@ -1416,6 +1416,11 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
 
     fn static_response(&self, request: &Request) -> Response {
         let path = request.path.split('?').next().unwrap_or(&request.path);
+        if site::resolve(self.assets, path).is_none() {
+            if let Some(target) = legacy_auth_redirect(&request.path, path) {
+                return Response::redirect(&target);
+            }
+        }
         let (asset, status) = match site::resolve(self.assets, path) {
             Some(asset) => (Some(asset), 200),
             None => (site::resolve(self.assets, "/404.html"), 404),
@@ -1663,7 +1668,31 @@ pub fn is_admin_page_path(path: &str) -> bool {
 }
 
 fn is_setup_page(path: &str) -> bool {
-    matches!(path, "/setup" | "/setup.html" | "/setup.txt")
+    matches!(
+        path,
+        "/setup"
+            | "/setup.html"
+            | "/setup.txt"
+            | "/share-login"
+            | "/share-login.html"
+            | "/share-login.txt"
+    )
+}
+
+fn legacy_auth_redirect(request_path: &str, path: &str) -> Option<String> {
+    let query = request_path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let base = path
+        .strip_suffix(".html")
+        .or_else(|| path.strip_suffix(".txt"))
+        .unwrap_or(path);
+    match base {
+        "/setup" | "/sign-in" | "/invite" => Some(if query.is_empty() {
+            "/share-login".to_owned()
+        } else {
+            format!("/share-login?{query}")
+        }),
+        _ => None,
+    }
 }
 
 fn is_signin_failure(error: &AuthError) -> bool {

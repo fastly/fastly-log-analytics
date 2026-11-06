@@ -15,6 +15,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Eye, EyeOff, KeyRound, Loader2, AlertTriangle, Check } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { analystFetch } from '@/hooks/useBootstrap'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { authenticateWithPasskey, registerPasskey } from '@/lib/cloud-engine/passkeys'
 
 type LoginResponse = components['schemas']['ShareLoginResponse']
 type AuthConfig = components['schemas']['AuthConfigResponse']
@@ -240,11 +242,131 @@ export function ShareLoginForm() {
     }
   })
 
+  const [cloudDisplayName, setCloudDisplayName] = React.useState('')
+  const [cloudSetupCode, setCloudSetupCode] = React.useState('')
+  const [cloudSetupAccepted, setCloudSetupAccepted] = React.useState(false)
+
+  const handleCloudPasskeySignIn = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      await authenticateWithPasskey()
+      window.location.assign(returnTarget ?? '/dashboard')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Passkey authentication failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleCloudSetupAccept = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await fetch('/api/setup/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ code: cloudSetupCode }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body?.detail || 'Invalid setup code')
+      }
+      setCloudSetupAccepted(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Setup code verification failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleCloudPasskeyRegister = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      await registerPasskey(cloudDisplayName || 'Administrator', inviteToken ?? undefined)
+      window.location.assign(returnTarget ?? (inviteToken ? '/dashboard' : '/admin'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Passkey registration failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div
       data-testid="share-login-form-container"
       className="space-y-4 min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
     >
+      {IS_CLOUD_MODE && (
+        <div data-testid="cloud-passkey-auth" className="space-y-3 border-b border-border/60 pb-4">
+          {inviteToken ? (
+            <form onSubmit={handleCloudPasskeyRegister} className="space-y-3">
+              <div className="space-y-1">
+                <Label htmlFor="cloud-invite-name" className="text-xs">Display Name</Label>
+                <Input
+                  id="cloud-invite-name"
+                  value={cloudDisplayName}
+                  onChange={(e) => setCloudDisplayName(e.target.value)}
+                  placeholder="Your name"
+                  required
+                  disabled={busy}
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={busy}>
+                {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Accept Invite &amp; Register Passkey
+              </Button>
+            </form>
+          ) : (
+            <div className="space-y-2">
+              <Button
+                type="button"
+                variant="default"
+                className="w-full"
+                disabled={busy}
+                onClick={() => { void handleCloudPasskeySignIn() }}
+                data-testid="cloud-passkey-signin-button"
+              >
+                {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Sign in with Passkey
+              </Button>
+              {!cloudSetupAccepted ? (
+                <form onSubmit={handleCloudSetupAccept} className="space-y-2 pt-2">
+                  <Input
+                    value={cloudSetupCode}
+                    onChange={(e) => setCloudSetupCode(e.target.value)}
+                    placeholder="Initial setup code (first-time admin)"
+                    disabled={busy}
+                  />
+                  {cloudSetupCode && (
+                    <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy}>
+                      Verify Setup Code
+                    </Button>
+                  )}
+                </form>
+              ) : (
+                <form onSubmit={handleCloudPasskeyRegister} className="space-y-2 pt-2">
+                  <Input
+                    value={cloudDisplayName}
+                    onChange={(e) => setCloudDisplayName(e.target.value)}
+                    placeholder="Admin display name"
+                    required
+                    disabled={busy}
+                  />
+                  <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy}>
+                    Register Admin Passkey
+                  </Button>
+                </form>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {configState === 'loading' && (
         <div
           data-testid="share-login-loading-skeleton"

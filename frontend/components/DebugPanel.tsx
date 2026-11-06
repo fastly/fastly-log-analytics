@@ -11,23 +11,30 @@ import { Badge } from '@/components/ui/badge'
 import { client, extractApiError } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/adapter'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
-type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & { id: string; is_cached?: boolean }
+type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & {
+  id: string
+  is_cached?: boolean
+  vcpu_ms?: number | null
+}
 
 type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   id: string
   caller?: string
   status: string
   details?: string
+  vcpu_ms?: number | null
 }
 
 export function DebugPanel() {
   const { enabled, apiCallsEnabled } = useDebugStore()
+  const cloudActive = IS_CLOUD_MODE || isCloudMode()
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
   const [isCallsOpen, setIsCallsOpen] = React.useState(false)
   const [isSqliteOpen, setIsSqliteOpen] = React.useState(false)
@@ -68,7 +75,7 @@ export function DebugPanel() {
       if (error) throw new Error(extractApiError(error) || 'recent-postgres failed')
       return data as SqliteRecentResponse
     },
-    enabled: enabled && sqliteScope === 'buffer',
+    enabled: enabled && sqliteScope === 'buffer' && !cloudActive,
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
     staleTime: 0,
@@ -271,7 +278,7 @@ export function DebugPanel() {
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
-  const defaultEngine = 'ClickHouse'
+  const defaultEngine = cloudActive ? 'DuckDB' : 'ClickHouse'
   const queryEngines = Array.from(
     new Set(
       queries
@@ -334,6 +341,11 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                           {q.engine}
                         </Badge>
                       )}
+                      {q.vcpu_ms != null && (
+                        <Badge variant="secondary" className="text-[9px] font-mono">
+                          vCPU: {q.vcpu_ms}ms
+                        </Badge>
+                      )}
                       {q.is_cached && <span className="text-blue-500 text-[10px]">(CACHED)</span>}
                     </span>
                     <Badge variant={q.time_ms > 1000 ? "destructive" : q.time_ms > 200 ? "secondary" : "outline"} className="font-mono">
@@ -348,7 +360,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
         </section>
       )}
 
-      {enabled && (
+      {enabled && !cloudActive && (
         <section>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">

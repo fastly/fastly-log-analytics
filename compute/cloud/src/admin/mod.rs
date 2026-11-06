@@ -266,7 +266,7 @@ fn route(
         }
         ("POST", ["api", "admin", "jobs", id, "retry"]) => {
             let _: serde_json::Map<String, Value> = body(request)?;
-            step(context, id, true)
+            retry_job(context, id)
         }
         ("GET", ["api", "admin", "log-fields", "catalog"] | ["api", "log-fields", "catalog"]) => {
             Ok(json!({
@@ -356,6 +356,15 @@ fn services(context: &Context<'_, impl Runtime>) -> Result<Value, Error> {
     }
     Ok(json!({"services":result}))
 }
+pub fn retry_job(context: &Context<'_, impl Runtime>, id: &str) -> Result<Value, Error> {
+    step(context, id, true)
+}
+
+pub fn check_vcl_drift(deployed_vcl_sha: Option<&str>, current_vcl_sha: &str) -> bool {
+    let vcl_drift = deployed_vcl_sha.is_some_and(|sha| sha != current_vcl_sha);
+    vcl_drift
+}
+
 fn own_services(runtime: &impl Runtime) -> Result<Vec<String>, Error> {
     ["flp_service_id", "worker_service_id", "front_service_id"]
         .iter()

@@ -508,6 +508,9 @@ function SyncStatusBadgeInner() {
     )
   }
 
+  const lastTickAt = (snapshot as { last_tick_at?: string | null } | undefined)?.last_tick_at ?? null
+  const clockIntervalS = (snapshot as { clock_interval_s?: number | null } | undefined)?.clock_interval_s ?? null
+
   return (
     <div className="hidden md:flex flex-col gap-0.5 min-w-[409px] mr-2 animate-in fade-in zoom-in-95">
       <div className="flex flex-col gap-0.5">
@@ -516,7 +519,7 @@ function SyncStatusBadgeInner() {
           'REQUEST',
           requestLatestLogAt,
           requestTotal,
-          requestLastSyncAt,
+          requestLastSyncAt ?? lastTickAt,
           lastSync?.status === 'running',
           lastSync?.started_at,
         )}
@@ -526,9 +529,14 @@ function SyncStatusBadgeInner() {
           'RUM',
           rumMetrics?.latest_log_at,
           rumMetrics?.total_rows,
-          rumMetrics?.last_sync_at,
+          rumMetrics?.last_sync_at ?? lastTickAt,
         )}
       </div>
+      {clockIntervalS != null && (
+        <span className="sr-only" data-clock-interval={clockIntervalS}>
+          Autonomous clock interval: {clockIntervalS}s
+        </span>
+      )}
 
       {/* a11y: sr-only live region for screen readers */}
       <span role="status" aria-live="polite" className="sr-only">

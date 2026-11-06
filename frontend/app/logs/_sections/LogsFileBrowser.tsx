@@ -29,7 +29,14 @@ import { Input } from '@/components/ui/input'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { components } from '@/types/api.generated'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { getStoreStats } from '@/lib/cloud-engine/dashboard/client'
+import { clearDashboardBrowserCaches } from '@/lib/cloud-engine/dashboard/sources'
+import { clearOpsCaches } from '@/lib/cloud-engine/telemetry/sources'
+import { parquetColumns, sampleStats } from '@/lib/cloud-engine/schema'
 import type { CronRun } from './useLogsPageState'
+
+export { parquetColumns, sampleStats }
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
 type SchemaColumn = components['schemas']['SchemaResponse']['schema'][number]
@@ -107,13 +114,36 @@ export function SchemaTab({
   schemaData: components['schemas']['SchemaResponse'] | undefined
   isLoadingSchema: boolean
 }) {
+  const [clearingCache, setClearingCache] = useState(false)
+  const handleClearBrowserCache = async () => {
+    setClearingCache(true)
+    try {
+      await Promise.allSettled([clearDashboardBrowserCaches(), clearOpsCaches(), getStoreStats()])
+      showToast('Browser Parquet & operational caches cleared', 'success')
+    } finally {
+      setClearingCache(false)
+    }
+  }
   return (
     <>
       <div className="p-4 border-b flex justify-between items-center">
         <div>
-          <h3 className="text-sm font-medium">ClickHouse Table Schema & Statistics</h3>
+          <h3 className="text-sm font-medium">
+            {IS_CLOUD_MODE ? 'Parquet Schema & Statistics' : 'ClickHouse Table Schema & Statistics'}
+          </h3>
           <p className="text-xs text-muted-foreground mt-1">Based on a fast statistical sample of your logs.</p>
         </div>
+        {IS_CLOUD_MODE && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { void handleClearBrowserCache() }}
+            disabled={clearingCache}
+            data-testid="clear-browser-cache-btn"
+          >
+            Clear Browser Cache
+          </Button>
+        )}
       </div>
       <DataTableReadonly
         columns={SCHEMA_COLUMNS}
@@ -137,27 +167,29 @@ export function IngestionTab({
   isLoadingIngested: boolean
 }) {
   return (
-    <DataTableReadonly
-      columns={ingestedColumns}
-      data={ingestedFiles?.files || []}
-      isLoading={isLoadingIngested}
-      searchKey="file_name"
-      initialSorting={[{ id: 'ingested_at', desc: true }]}
-      renderToolbar={(table) => (
-        <div className="p-4 border-b flex flex-wrap items-center justify-between gap-4">
-          <h3 className="text-sm font-medium">Log Ingestion History</h3>
-          <div className="flex items-center gap-2 ml-auto">
-            <Input
-              placeholder="Filter by filename..."
-              className="max-w-sm h-8"
-              value={(table.getColumn('file_name')?.getFilterValue() as string) ?? ''}
-              onChange={(event) => table.getColumn('file_name')?.setFilterValue(event.target.value)}
-            />
-            <ColumnVisibilityDropdown table={table} compact />
+    <div data-testid="ingested-files">
+      <DataTableReadonly
+        columns={ingestedColumns}
+        data={ingestedFiles?.files || []}
+        isLoading={isLoadingIngested}
+        searchKey="file_name"
+        initialSorting={[{ id: 'ingested_at', desc: true }]}
+        renderToolbar={(table) => (
+          <div className="p-4 border-b flex flex-wrap items-center justify-between gap-4">
+            <h3 className="text-sm font-medium">Log Ingestion History</h3>
+            <div className="flex items-center gap-2 ml-auto">
+              <Input
+                placeholder="Filter by filename..."
+                className="max-w-sm h-8"
+                value={(table.getColumn('file_name')?.getFilterValue() as string) ?? ''}
+                onChange={(event) => table.getColumn('file_name')?.setFilterValue(event.target.value)}
+              />
+              <ColumnVisibilityDropdown table={table} compact />
+            </div>
           </div>
-        </div>
-      )}
-    />
+        )}
+      />
+    </div>
   )
 }
 
