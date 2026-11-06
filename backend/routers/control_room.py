@@ -33,6 +33,7 @@ from backend.models.common import (
     RealtimeSeedResponse,
 )
 from backend.utils.auth import mask_ips_for
+from backend.utils.date_utils import safe_iso
 from backend.utils.router_utils import query_errors
 from backend.utils.sse import sse_response
 
@@ -82,7 +83,7 @@ def recent_high_scale_error_events(client: Any, service_id: str) -> list[dict[st
     return [
         {
             "event_id": str(row["event_id"]),
-            "timestamp": row["timestamp"].isoformat(),
+            "timestamp": safe_iso(row["timestamp"]),
             "status": int(row["status"]),
             "url": str(row.get("url") or ""),
             "pop": str(row.get("pop") or ""),

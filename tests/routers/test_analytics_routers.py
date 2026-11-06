@@ -1039,6 +1039,41 @@ def test_value_summary_populated_buckets(client, test_service_source, monkeypatc
     assert vals == (12, 9, 12) and len(body["network"]["protocol_time_series"]) > 0
 
 
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ("2026-01-01 00:00:00.123", "2026-01-01T00:00:00.123Z"),
+        ("2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00.123Z"),
+        (datetime(2026, 1, 1, tzinfo=UTC), "2026-01-01T00:00:00+00:00"),
+    ],
+)
+def test_control_room_error_events_accept_clickhouse_timestamps(timestamp: str | datetime, expected: str) -> None:
+    from backend.routers.control_room import recent_high_scale_error_events
+
+    ch = MagicMock()
+    ch.execute.return_value = [
+        {
+            "event_id": "fixture-error",
+            "timestamp": timestamp,
+            "status": 503,
+            "url": "/fixture.css",
+            "pop": "DEN",
+            "client_ip": "192.0.2.1",
+        }
+    ]
+
+    assert recent_high_scale_error_events(ch, "fixture-service") == [
+        {
+            "event_id": "fixture-error",
+            "timestamp": expected,
+            "status": 503,
+            "url": "/fixture.css",
+            "pop": "DEN",
+            "client_ip": "192.0.2.1",
+        }
+    ]
+
+
 # ── Page & Endpoint Smoke Tests ──
 _SMOKE_ENDPOINTS = [
     ("POST", "/api/origin/status-codes", {"filters": {}}, ("has_data",)),
