@@ -38,6 +38,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import cloudReadiness from "../../../scripts/lib/cloud_readiness.cjs";
+
+const { CLOUD_READINESS_INIT_SCRIPT, dashboardSnapshot, waitForDashboardResult, waitForCloudReport } = cloudReadiness;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const PLAYWRIGHT_PATH = fs.existsSync(
@@ -255,8 +258,26 @@ export function parseArgs(argv) {
   return args;
 }
 
-const FRESH_TOTAL = '[data-testid="total-requests"][data-fresh="true"]';
 const LAST_FETCH_SELECTOR = '[data-testid="last-fetch"]';
+
+export function compatibleDashboardQuery(query) {
+  const params = new URLSearchParams(query);
+  const tokens = params.getAll("f");
+  if (!tokens.length) return query;
+  const filters = Object.create(null);
+  for (const token of tokens) {
+    const match = /^([+-])([a-zA-Z0-9_.]+):(.+)$/.exec(token);
+    if (!match) throw new Error("Invalid filter token");
+    const [, sign, field, value] = match;
+    const mode = sign === "-" ? "exclude" : "include";
+    let key = field;
+    let suffix = 1;
+    while (filters[key] && filters[key].mode !== mode) key = `${field}_${suffix++}`;
+    (filters[key] ??= { mode, values: [] }).values.push(value);
+  }
+  params.set("filters", JSON.stringify(filters));
+  return `?${params}`;
+}
 
 export function parseFormattedCount(raw) {
   if (!raw) return 0;
@@ -1050,6 +1071,7 @@ async function createInstrumentedContext(browser, storageStatePath) {
     viewport: { width: 1600, height: 1000 },
   });
   await context.addInitScript(WEB_VITALS_INIT_SCRIPT);
+  await context.addInitScript(CLOUD_READINESS_INIT_SCRIPT);
   return context;
 }
 
@@ -1072,6 +1094,8 @@ export async function assertMonitoredService(context, baseUrl, serviceId) {
 }
 
 async function readLastFetchLocator(page) {
+  const cloud = await page.evaluate(() => window.__flaCloudReadiness?.snapshot() ?? null);
+  if (cloud?.observed) return cloud.worker ?? null;
   try {
     const loc = page.locator(LAST_FETCH_SELECTOR).first();
     if ((await loc.count()) === 0) return null;
@@ -1080,6 +1104,20 @@ async function readLastFetchLocator(page) {
   } catch {
     return null;
   }
+}
+
+async function readinessFailure(page) {
+  const readiness = await page.evaluate(dashboardSnapshot).catch(() => null);
+  let route = "/";
+  try { route = new URL(page.url()).pathname; } catch {}
+  return {
+    reason: readiness?.errors ? "query_error" : readiness?.pending ? "query_pending" : "fresh_result_missing",
+    route,
+    missing: readiness?.ready ? 0 : 1,
+    stale: readiness?.observed && !readiness.ready && !readiness.pending && !readiness.errors ? 1 : 0,
+    pending: readiness?.pending ?? 0,
+    errors: readiness?.errors ?? 0,
+  };
 }
 
 export async function runDashboardCase(
@@ -1111,6 +1149,7 @@ export async function runDashboardCase(
     return result;
   } catch (error) {
     const failure = { caseLabel, error: String(error), result };
+    failure.readiness = await readinessFailure(page);
     try {
       failure.document = await page.evaluate(() => ({
         url: location.href,
@@ -1134,7 +1173,7 @@ export async function runDashboardCase(
   }
 }
 
-async function measureDashboardOnce(
+export async function measureDashboardOnce(
   context,
   baseUrl,
   query = "",
@@ -1202,7 +1241,7 @@ async function measureDashboardOnce(
   page.on("response", onResponse);
 
   try {
-    const targetUrl = `${baseUrl}/dashboard${query}`;
+    const targetUrl = `${baseUrl}/dashboard${compatibleDashboardQuery(query)}`;
     if (existingPage && page.url() === targetUrl) {
       await page.reload({
         waitUntil: "domcontentloaded",
@@ -1214,23 +1253,10 @@ async function measureDashboardOnce(
         timeout: 60_000,
       });
     }
-    // A reload paints the persisted result first; wait for the fresh run
-    // or an error state (Retry button) so failed queries do not hang until timeout.
+    // Persisted React Query data is not proof that this navigation queried successfully.
     let freshReady = true;
-    const retryBtn = page.getByRole("button", { name: "Retry", exact: true });
     try {
-      const outcome = await Promise.race([
-        page
-          .locator(FRESH_TOTAL)
-          .waitFor({ state: "visible", timeout: timeoutMs })
-          .then(() => "fresh"),
-        retryBtn
-          .waitFor({ state: "visible", timeout: timeoutMs })
-          .then(() => "error"),
-      ]);
-      if (outcome === "error") {
-        freshReady = false;
-      }
+      await waitForDashboardResult(page, timeoutMs);
     } catch (error) {
       if (!allowTimeout) throw error;
       freshReady = false;
@@ -1243,10 +1269,10 @@ async function measureDashboardOnce(
 
     const totalLoadMs = Date.now() - t0;
     const visibleAtEpochS = Date.now() / 1000;
-    const totalRequestsText = freshReady
-      ? await page.locator(FRESH_TOTAL).textContent()
-      : "";
-    const totalRequests = parseFormattedCount(totalRequestsText);
+    const readiness = await page.evaluate(dashboardSnapshot);
+    freshReady = freshReady && readiness.ready;
+    const totalRequests = freshReady ? readiness.totalRows : 0;
+    const totalRequestsText = freshReady ? String(totalRequests) : "";
     const lastFetch = await readLastFetchLocator(page);
     const uiHealth = await collectUiHealth(page);
     if (!freshReady && uiHealth?.errorBannerTexts?.length) {
@@ -1259,11 +1285,13 @@ async function measureDashboardOnce(
     }
     const navigationTiming = uiHealth?.navigationTiming ?? null;
 
-    const parquetDownloadMs =
+    const workerDownloadsUnobserved = readiness.source === "cloud-query"
+      && (lastFetch?.filesFetched ?? 0) > 0 && firstParquetStartMs === null;
+    const parquetDownloadMs = workerDownloadsUnobserved ? null :
       firstParquetStartMs !== null && lastParquetEndMs >= firstParquetStartMs
         ? lastParquetEndMs - firstParquetStartMs
         : 0;
-    const workerPostDownloadMs =
+    const workerPostDownloadMs = workerDownloadsUnobserved ? null :
       lastParquetEndMs > 0 ? Math.max(0, totalLoadMs - lastParquetEndMs) : 0;
 
     // Give trailing query telemetry beacon and background CacheStorage/OPFS storeQueue writes a moment to flush
@@ -1278,7 +1306,7 @@ async function measureDashboardOnce(
       totalLoadMs,
       navigationTtfbMs: navigationTiming?.ttfbMs ?? null,
       navigationTtlbMs: navigationTiming?.ttlbMs ?? null,
-      parquetFilesFetched: fetchedKeys.size || parquetFilesFetched,
+      parquetFilesFetched: fetchedKeys.size || parquetFilesFetched || lastFetch?.filesFetched || 0,
       parquetHttpRequests: parquetFilesFetched,
       rangeProbeCount,
       rangeReadCount,
@@ -1288,6 +1316,7 @@ async function measureDashboardOnce(
       preParquetBootstrapMs: firstParquetStartMs ?? 0,
       parquetDownloadMs,
       workerPostDownloadMs,
+      parquetNetworkTimingMeasured: !workerDownloadsUnobserved,
       totalRequests,
       totalRequestsText: (totalRequestsText || "").trim(),
       visibleAtEpochS,
@@ -1300,6 +1329,7 @@ async function measureDashboardOnce(
       pageErrors,
       httpErrors,
       freshReady,
+      readiness,
     };
   } finally {
     page.off("console", onConsole);
@@ -1707,7 +1737,7 @@ async function reloadCounting(
   }
 }
 
-async function measureWarmDashboardReload(
+export async function measureWarmDashboardReload(
   context,
   baseUrl,
   query = "",
@@ -1747,7 +1777,7 @@ async function measureWarmDashboardReload(
   try {
     // Measure warm load in the already-primed tab, preserving sessionStorage,
     // CacheStorage, OPFS, and localStorage like a normal user reloading.
-    const targetUrl = `${baseUrl}/dashboard${query}`;
+    const targetUrl = `${baseUrl}/dashboard${compatibleDashboardQuery(query)}`;
     const currentUrl = page.url();
     const isSameDashboardRoute =
       existingPage &&
@@ -1765,16 +1795,13 @@ async function measureWarmDashboardReload(
       });
     }
     // A reload paints the persisted result first; wait for the fresh run.
-    await page.locator(FRESH_TOTAL).waitFor({
-      state: "visible",
-      timeout: 120_000,
-    });
+    const readiness = await waitForDashboardResult(page, 120_000);
     await page
       .getByText("Loading Progress")
       .waitFor({ state: "hidden", timeout: 30_000 })
       .catch(() => {});
     const warmLoadMs = Date.now() - t0;
-    const totalRequestsText = await page.locator(FRESH_TOTAL).textContent();
+    const totalRequestsText = String(readiness.totalRows);
     const visibleAtEpochS = Date.now() / 1000;
     const lastFetch = await readLastFetchLocator(page);
     const uiHealth = await collectUiHealth(page);
@@ -1783,10 +1810,10 @@ async function measureWarmDashboardReload(
     // Verify Cards popover and FieldSearchDialog controls on /dashboard
     const cardsBtn = page.getByRole("button", { name: /^Cards/i });
     await cardsBtn.waitFor({ state: "visible", timeout: 15_000 });
-    const fieldSearchBtn = page.getByRole("button", {
-      name: "Search Client IP",
-    });
-    await fieldSearchBtn.waitFor({ state: "visible", timeout: 15_000 });
+    if (readiness.source === "legacy") {
+      const fieldSearchBtn = page.getByRole("button", { name: "Search Client IP" });
+      await fieldSearchBtn.waitFor({ state: "visible", timeout: 15_000 });
+    }
 
     await page.waitForTimeout(100).catch(() => {});
     const apiWaterfall = apiRecorder.getWaterfall();
@@ -1805,6 +1832,8 @@ async function measureWarmDashboardReload(
       consoleErrors,
       pageErrors,
       httpErrors,
+      freshReady: readiness.ready,
+      readiness,
     };
   } finally {
     page.off("console", onConsole);
@@ -1853,7 +1882,70 @@ async function measureRouteWithTelemetry(page, url, waitFn) {
   }
 }
 
-async function sweepPages(context, baseUrl, existingPage = null) {
+async function sweepUnifiedPages(context, baseUrl, appDir) {
+  const page = await context.newPage();
+  const recorder = attachApiWaterfallRecorder(page);
+  const consoleErrors = [];
+  const pageErrors = [];
+  const httpErrors = [];
+  const pages = {};
+  const routeCoverage = {};
+  const analytical = new Set(cloudReadiness.CLOUD_ANALYTICAL_ROUTES);
+  page.on("console", message => {
+    if (message.type() === "error") consoleErrors.push({ url: page.url(), message: message.text() });
+  });
+  page.on("pageerror", error => pageErrors.push({ url: page.url(), message: String(error) }));
+  page.on("response", response => {
+    if (response.status() >= 400) httpErrors.push({ url: response.url(), status: response.status() });
+  });
+  try {
+    const routes = fs.readdirSync(appDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name !== "share-login"
+        && fs.existsSync(path.join(appDir, entry.name, "page.tsx")))
+      .map(entry => `/${entry.name}`);
+    for (const route of routes) {
+      const queries = analytical.has(route) && FILTER_BAR_ROUTE_PREFIXES.includes(route)
+        ? [buildFilterQueryString("24h"), buildFilterQueryString("24h", "+status:200")]
+        : [analytical.has(route) ? buildFilterQueryString("24h") : ""];
+      for (const query of queries) {
+        const label = `${route}${query.includes("f=") ? " (filtered)" : ""}`;
+        const result = await measureRouteWithTelemetry(page, `${baseUrl}${route}${compatibleDashboardQuery(query)}`, async p => {
+          if (analytical.has(route)) {
+            await waitForCloudReport(p);
+          } else {
+            await p.getByRole("heading").first().waitFor({ state: "visible", timeout: 30_000 });
+          }
+        });
+        if (!result.deployed || result.status < 200 || result.status >= 400) {
+          throw new Error(`Unified route unavailable: ${route}`);
+        }
+        const readiness = await page.evaluate(() => window.__flaCloudReadiness?.snapshot() ?? null);
+        if (analytical.has(route) && !readiness?.ready) throw new Error(`Fresh query incomplete: ${route}`);
+        if (readiness?.pending || readiness?.errors || result.uiHealth?.errorBannerTexts?.length) {
+          throw new Error(`Unified route has pending or failed work: ${route}`);
+        }
+        pages[label] = { ...result, readiness };
+        routeCoverage[route] = { deployed: true, analytical: analytical.has(route) };
+      }
+    }
+    return { pages, routeCoverage, apiWaterfall: recorder.getWaterfall(), consoleErrors, pageErrors, httpErrors };
+  } catch (error) {
+    error.dashboardFailure = {
+      readiness: await readinessFailure(page),
+      pendingRequests: recorder.getPending(),
+    };
+    throw error;
+  } finally {
+    recorder.detach();
+    await page.close();
+  }
+}
+
+export async function sweepPages(context, baseUrl, existingPage = null) {
+  const unifiedFrontend = path.resolve(__dirname, "../../../frontend/app");
+  if (fs.existsSync(path.join(unifiedFrontend, "dashboard/page.tsx"))) {
+    return sweepUnifiedPages(context, baseUrl, unifiedFrontend);
+  }
   const page = existingPage ?? (await context.newPage());
   const shouldClosePage = !existingPage;
   const sweepRecorder = attachApiWaterfallRecorder(page);
@@ -2861,7 +2953,7 @@ export async function main(argv = process.argv) {
       status: "failed",
       failure,
       apiWaterfall: sessionRecorder?.getWaterfall() ?? [],
-      pendingRequests: sessionRecorder?.getPending() ?? [],
+      pendingRequests: failure.pendingRequests ?? sessionRecorder?.getPending() ?? [],
     });
     throw error;
   } finally {

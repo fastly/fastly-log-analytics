@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import cloudReadiness from "../../../scripts/lib/cloud_readiness.cjs";
 
 import {
   attachApiWaterfallRecorder,
@@ -10,6 +11,7 @@ import {
   collectUiHealth,
   WEB_VITALS_INIT_SCRIPT,
   buildFilterQueryString,
+  compatibleDashboardQuery,
   computeBenchmarkDistributions,
   DASHBOARD_PRESETS,
   DEFAULT_BENCHMARK_RANGES,
@@ -20,10 +22,127 @@ import {
   parseLastFetchText,
   PLAYWRIGHT_PATH,
   runDashboardCase,
+  measureDashboardOnce,
+  measureWarmDashboardReload,
   summarizeApiCalls,
   summarizeNumericSeries,
+  sweepPages,
   validateDashboardPresets,
 } from "./browser_verify.mjs";
+
+test("unified page sweep dispatch reaches its browser context", async () => {
+  let opened = false;
+  await assert.rejects(sweepPages({
+    newPage: async () => {
+      opened = true;
+      throw new Error("offline-context-boundary");
+    },
+  }, "https://offline.invalid"), /offline-context-boundary/);
+  assert.equal(opened, true);
+});
+
+test("unified cold and warm dashboards measure actual fresh query rows without legacy DOM selectors", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+    await context.addInitScript(WEB_VITALS_INIT_SCRIPT);
+    let loads = 0;
+    await context.route("https://offline.invalid/**", async route => {
+      loads += 1;
+      const fetched = loads === 1 ? 3 : 0;
+      await route.fulfill({ contentType: "text/html", body: `<!doctype html><body>
+        <h1>Dashboard</h1><button aria-label="Cards 3, toggle visible dashboard cards">Cards</button>
+        <script>
+        const detail = { id: 1, section: 'dashboard.bundle', route: '/dashboard', search: location.search };
+        window.dispatchEvent(new CustomEvent('fla:cloud-query', {detail: {...detail, state: 'pending'}}));
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('fla:cloud-worker', { detail: {
+            route: '/dashboard', search: location.search, filesListed: 3, filesFetched: ${fetched},
+            filesCached: ${3 - fetched}, rowsScanned: 42, clientElapsedMs: 7,
+          }}));
+          document.body.insertAdjacentHTML('beforeend', '<p>42 requests</p>');
+          window.dispatchEvent(new CustomEvent('fla:cloud-query', {
+            detail: {...detail, state: 'success', totalRows: 42},
+          }));
+        }, 10);
+        </script></body>` });
+    });
+    const page = await context.newPage();
+    const cold = await measureDashboardOnce(context, "https://offline.invalid", "?range=1h", 1000, false, page);
+    assert.equal(cold.freshReady, true);
+    assert.equal(cold.totalRequests, 42);
+    assert.equal(cold.lastFetch.filesFetched, 3);
+    assert.equal(cold.parquetFilesFetched, 3);
+    assert.equal(cold.parquetDownloadMs, null);
+    assert.equal(await page.locator('[data-testid="total-requests"]').count(), 0);
+    const warm = await measureWarmDashboardReload(context, "https://offline.invalid", "?range=1h", page);
+    assert.equal(warm.freshReady, true);
+    assert.equal(warm.totalRequests, 42);
+    assert.equal(warm.lastFetch.filesFetched, 0);
+    assert.equal(warm.lastFetch.filesCached, 3);
+    for (const range of ["6h", "24h"]) {
+      const result = await measureDashboardOnce(context, "https://offline.invalid", `?range=${range}`, 1000, false, page);
+      assert.equal(result.freshReady, true);
+      assert.equal(result.totalRequests, 42);
+    }
+    await context.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test("unified stale, pending and errored query results cannot pass acceptance", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+    await context.route("https://offline.invalid/**", async route => {
+      const state = new URL(route.request().url()).searchParams.get("state");
+      await route.fulfill({ contentType: "text/html", body: `<!doctype html><body><h1>Stale cached dashboard</h1>
+      <script>window.dispatchEvent(new CustomEvent('fla:cloud-query', {detail: {
+        id: 1, section: 'dashboard.bundle', route: '/dashboard', totalRows: 999,
+        search: ${JSON.stringify(state === "stale" ? "?range=24h" : "?range=1h")},
+        state: ${JSON.stringify(state === "stale" ? "success" : state)},
+      }}));</script></body>` });
+    });
+    for (const state of ["stale", "pending", "error"]) {
+      const result = await measureDashboardOnce(context, "https://offline.invalid", `?range=1h&state=${state}`, 80, true);
+      assert.equal(result.freshReady, false, state);
+      assert.equal(result.totalRequests, 0, state);
+    }
+    await context.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test("legacy cold dashboards still require their genuine fresh total marker", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+    await context.route("https://offline.invalid/**", async route => {
+      const fresh = new URL(route.request().url()).searchParams.get("fresh") === "yes";
+      await route.fulfill({ contentType: "text/html", body: `<!doctype html><body>
+        <div data-testid="total-requests" data-fresh="${fresh}">2,500</div>
+        <p data-testid="last-fetch">Last fetch: 2 listed, 0 fetched (2 cached, 0 CDN hits), 2,500 rows</p>
+        </body>` });
+    });
+    const stale = await measureDashboardOnce(context, "https://offline.invalid", "?fresh=no", 80, true);
+    assert.equal(stale.freshReady, false);
+    const fresh = await measureDashboardOnce(context, "https://offline.invalid", "?fresh=yes", 1000);
+    assert.equal(fresh.freshReady, true);
+    assert.equal(fresh.totalRequests, 2500);
+    assert.equal(fresh.lastFetch.filesCached, 2);
+    await context.close();
+  } finally {
+    await browser.close();
+  }
+});
 
 test("dashboard failure capture completes before another case can navigate", async () => {
   const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
@@ -335,6 +454,20 @@ test("buildFilterQueryString formats single and multi-filter expressions", () =>
     () => buildFilterQueryString("1h", "status=200"),
     /Invalid filter token/,
   );
+});
+
+test("unified dashboard filters preserve legacy tokens and actually apply current filter payloads", () => {
+  const params = new URLSearchParams(compatibleDashboardQuery(
+    buildFilterQueryString("6h", "+status:200&+method:GET&-status:503"),
+  ));
+  assert.equal(params.get("range"), "6h");
+  assert.deepEqual(params.getAll("f"), ["+status:200", "+method:GET", "-status:503"]);
+  assert.deepEqual(JSON.parse(params.get("filters")), {
+    status: { mode: "include", values: ["200"] },
+    method: { mode: "include", values: ["GET"] },
+    status_1: { mode: "exclude", values: ["503"] },
+  });
+  assert.equal(compatibleDashboardQuery("?range=1h"), "?range=1h");
 });
 
 test("parseLastFetchText extracts listed, fetched, cached, CDN hits, rows, bytes, elapsed, and vCPU", () => {

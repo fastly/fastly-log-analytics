@@ -40,6 +40,7 @@ import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import { ensureCloudRange } from "./range-loader";
+import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, getDuckDBEngine } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
 import { handleSecurityRequest } from "./security";
@@ -121,7 +122,10 @@ export interface CloudQueryTelemetryPayload {
 
 export async function postCloudQueryTelemetry(
   payload: CloudQueryTelemetryPayload,
+  serviceId: string | null = null,
+  origin?: CloudQueryContext,
 ): Promise<void> {
+  publishCloudWorkerTelemetry(payload, serviceId, origin);
   try {
     const debugState = useDebugStore.getState();
     if (debugState.enabled && payload.sql) {
@@ -375,6 +379,16 @@ export async function handleCloudAnalyticalRequest(
   request: Request,
 ): Promise<Response | null> {
   const url = new URL(request.url);
+  const serviceId = url.searchParams.get("service_id") ?? request.headers.get("x-service-id");
+  const origin = captureCloudQueryContext();
+  return measureCloudQuery(`api.${url.pathname}`, () => handleCloudRequest(request, origin), undefined, serviceId);
+}
+
+async function handleCloudRequest(
+  request: Request,
+  origin?: CloudQueryContext,
+): Promise<Response | null> {
+  const url = new URL(request.url);
   const path = url.pathname;
   if (/^\/api\/(?:cron-runs|cron-schedule|audit-logs|admin\/(?:usage-log(?:\/export)?|raw-tree|storage-tree|ingested-files|quarantine\/purge))$/.test(path)) {
     const administrative = await withLoading("listing", () => cloudAdminWire(request));
@@ -438,7 +452,7 @@ export async function handleCloudAnalyticalRequest(
         request.signal.throwIfAborted();
         const prepared = await prepareCloudScan(request);
         const response = /\/scoring\//.test(path)
-          ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared);
+          ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared, origin);
         success = Boolean(response?.ok);
         return response ?? unsupportedCloudEndpoint(request);
       } finally {
@@ -446,7 +460,7 @@ export async function handleCloudAnalyticalRequest(
         release();
       }
     }
-    const response = await dispatchCloudRequest(request);
+    const response = await dispatchCloudRequest(request, origin);
     if (response) return response;
     return !path.startsWith("/api/") || isNativeCloudRoute(request.method, path)
       ? null : unsupportedCloudEndpoint(request);
@@ -454,7 +468,7 @@ export async function handleCloudAnalyticalRequest(
   return stage ? withLoading(stage, work) : work();
 }
 
-async function dispatchCloudRequest(request: Request): Promise<Response | null> {
+async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext): Promise<Response | null> {
   const url = new URL(request.url, "http://localhost");
   const { pathname, searchParams } = url;
   const method = (request.method || "GET").toUpperCase();
@@ -987,7 +1001,7 @@ async function dispatchCloudRequest(request: Request): Promise<Response | null> 
       sql: sqlText,
       engine: engineName,
       endpoint: pathname,
-    });
+    }, searchParams.get("service_id") ?? request.headers.get("x-service-id"), origin);
     const aggregates = {
       data: Object.fromEntries(Object.entries(result.cards).map(([field, card]) =>
         [field, { top: card.top, total: card.total }],

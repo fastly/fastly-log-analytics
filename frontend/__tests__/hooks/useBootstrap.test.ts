@@ -476,6 +476,31 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     mockServiceState.activeServiceId = 'svc-1'
   })
 
+  it('publishes Cloud readiness only after the actual report query passes its validation', async () => {
+    const { setCloudModeRuntime } = await import('@/lib/cloud-engine/mode')
+    setCloudModeRuntime(true)
+    const events: Array<Record<string, unknown>> = []
+    const listener = (event: Event) => events.push((event as CustomEvent).detail)
+    window.addEventListener('fla:cloud-query', listener)
+    try {
+      const { result } = renderHook(() => useAnalyticsReportQuery({
+        namespace: ['dashboard', 'bundle'], serviceId: 'svc-1', filterPayload: {},
+        range: { relativeRange: '1h', isAutoRange: true, startTime: null, endTime: null, anchor: 'now' },
+        queryFn: async () => { throw new Error('stale-view sentinel-private-body') },
+        queryOptions: { retry: false },
+      }), { wrapper: makeQueryWrapper(createTestQueryClient({ queries: { gcTime: 0 } })) })
+      await waitFor(() => expect(result.current.isError).toBe(true))
+      expect(events).toMatchObject([
+        { state: 'pending', section: 'dashboard.bundle', search: 'range=1h' },
+        { state: 'error', totalRows: null },
+      ])
+      expect(JSON.stringify(events)).not.toContain('sentinel')
+    } finally {
+      window.removeEventListener('fla:cloud-query', listener)
+      setCloudModeRuntime(false)
+    }
+  })
+
   it('useInsightsDefaults adapts to extents, falls back when null, preserves user override, and resets on service switch', () => {
     const qc = createTestQueryClient({ queries: { gcTime: 0 } })
     const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()

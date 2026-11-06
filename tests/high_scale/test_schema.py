@@ -576,9 +576,7 @@ def test_decode_normalizes_rum_fields_and_querystring_fallback(
         ("fallback_body", "req"),
     ],
 )
-def test_rum_receipt_identity_survives_decode_and_fact_projection(
-    domain: str, encoding: str, identity_source: str
-) -> None:
+def test_rum_receipt_identity_survives_decode_and_http_insert(domain: str, encoding: str, identity_source: str) -> None:
     from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS
 
     req_id = "run-20261106-seq-000042/é+final"
@@ -628,6 +626,31 @@ def test_rum_receipt_identity_survives_decode_and_fact_projection(
     ]
     assert [row["req_id"] for row in rows] == [req_id] * expected_count
     assert all(row["request_event_id"] is None for row in rows)
+    sent: list[tuple[str, list[list[Any]]]] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.params["query"], [json.loads(line) for line in request.content.splitlines()]))
+        return httpx.Response(200)
+
+    client = ClickHouseClient(
+        ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password=""),
+        transport=httpx.MockTransport(transport),
+    )
+    table = "rum_vitals_facts" if domain == "rum_vitals" else "rum_error_facts"
+    try:
+        client.insert_rows(
+            table,
+            list(_DOMAIN_COLUMNS[domain]),
+            _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001"),
+        )
+    finally:
+        client.close()
+    assert len(sent) == 1
+    sql, wire_rows = sent[0]
+    wire_columns = re.findall(r"`([^`]+)`", sql)[1:]
+    wire_records = [dict(zip(wire_columns, row, strict=True)) for row in wire_rows]
+    assert [row["req_id"] for row in wire_records] == [req_id] * expected_count
+    assert all(row["client_id"] == "session-not-request" and row["request_event_id"] is None for row in wire_records)
 
 
 @pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])

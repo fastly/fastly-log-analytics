@@ -15,6 +15,7 @@ import { adminJsonResult, client, unwrapClient, queryKeys } from "@/lib/api";
 import { INTERVAL_SECONDS, INTERVALS, historyHoursFromExtents, pickInsightsDefault, quantizeAnchor, resolveRangeWire, _resetUrlHydrationFlag, hydrateFilterStoreFromUrl, rangeLabelToHours, type ChartInterval, type RangeWire, type RangeWireArgs } from "@/lib/utils";
 import { useFilterStore } from '@/stores/filterStore'
 import type { Simplify, WithRequired, components } from '@/types/api'
+import { measureCloudQuery } from '@/lib/cloud-engine/readiness'
 
 export { useDebounce, useFilterPayload, useDebouncedFilterPayload }
 export * from './useDashboardCardDefinitions'
@@ -238,7 +239,12 @@ export function useAnalyticsReportQuery<TData>({
   ]
   return useServiceQuery<TData>(
     queryKey,
-    ({ signal }) => queryFn({ rangeBody, rangeToken, signal }),
+    ({ signal }) => measureCloudQuery(
+      namespace.join('.'),
+      () => queryFn({ rangeBody, rangeToken, signal }),
+      { range: rangeToken, filters: filterPayload, start: range.startTime, end: range.endTime },
+      serviceId,
+    ),
     queryOptions,
   )
 }

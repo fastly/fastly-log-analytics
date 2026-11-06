@@ -25,6 +25,7 @@ import { useBootstrap } from '@/hooks/useBootstrap'
 import type { BootstrapResponse, InsightCardData } from '@/types/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { usePathname, useRouter } from 'next/navigation'
 import React, { isValidElement } from 'react'
 
@@ -297,6 +298,24 @@ describe('StoreHydrator', () => {
   it('renders nothing (null)', () => {
     const { container } = render(<StoreHydrator />)
     expect(container.innerHTML).toBe('')
+  })
+
+  it('publishes the actual Cloud service selection and unsubscribes on unmount', () => {
+    setCloudModeRuntime(true)
+    const events: unknown[] = []
+    const listener = (event: Event) => events.push((event as CustomEvent).detail)
+    window.addEventListener('fla:cloud-service', listener)
+    try {
+      const { unmount } = render(<StoreHydrator />)
+      act(() => useServiceStore.setState({ activeServiceId: 'service-a' }))
+      act(() => useServiceStore.setState({ activeServiceId: 'service-b' }))
+      unmount()
+      act(() => useServiceStore.setState({ activeServiceId: 'service-c' }))
+      expect(events).toEqual([{ serviceId: null }, { serviceId: 'service-a' }, { serviceId: 'service-b' }])
+    } finally {
+      window.removeEventListener('fla:cloud-service', listener)
+      setCloudModeRuntime(false)
+    }
   })
 
   it('rehydrates serviceStore from localStorage after mount', async () => {

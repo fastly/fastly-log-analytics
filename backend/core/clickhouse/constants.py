@@ -71,6 +71,7 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "cmcd",
         "client_id",
         "request_event_id",
+        "req_id",
         "metric_name",
         "metric_value",
         "metric_rating",
