@@ -84,6 +84,7 @@ jobs:
           CI: "1"
           PLAYWRIGHT_WORKERS: "2"
           PLAYWRIGHT_RETRIES: "1"
+          PROJECTS: ${{ matrix.browser }}
           PERF_EXHAUSTIVE: "1"
         run: cd frontend && npx playwright test --project=${{ matrix.browser }}
 

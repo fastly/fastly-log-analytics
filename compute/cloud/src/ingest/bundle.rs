@@ -86,7 +86,7 @@ pub fn fingerprint<'a>(names: impl IntoIterator<Item = &'a str>) -> u64 {
     compute_common::crypto::fnv1a64(
         names
             .into_iter()
-            .flat_map(|name| name.bytes().chain([b'\n'])),
+            .flat_map(|name| name.bytes().chain(*b"\n")),
     )
 }
 

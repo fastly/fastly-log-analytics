@@ -252,7 +252,7 @@ function OpsSectionsTable() {
   )
   const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
   return (
-    <Table className='w-full text-xs text-muted-foreground'>
+    <Table scrollFocusable className='w-full text-xs text-muted-foreground'>
       <TableBody>
         {table.getRowModel().rows.map((row) => {
           const item = row.original
@@ -351,9 +351,7 @@ export function Pricing({ s, setZone }: PricingProps) {
 
       <section>
         <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>What generates operations</h3>
-        <div className='overflow-x-auto'>
-          <OpsSectionsTable />
-        </div>
+        <OpsSectionsTable />
       </section>
     </>
   )

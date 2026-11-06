@@ -759,10 +759,8 @@ pub fn logging_service_snippets(state: &Value) -> Result<Value, String> {
 }
 
 fn reject_future_features(state: &Value) -> Result<(), String> {
-    for feature in ["scoring"] {
-        if state[feature]["enabled"] == true || state[format!("{feature}_enabled")] == true {
-            return Err(format!("{feature} is outside Goal 2"));
-        }
+    if state["scoring"]["enabled"] == true || state["scoring_enabled"] == true {
+        return Err("scoring is outside Goal 2".into());
     }
     Ok(())
 }

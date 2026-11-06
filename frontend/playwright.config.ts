@@ -28,6 +28,11 @@ const IS_CLOUD_NATIVE = process.env.FLP_E2E_NATIVE === '1'
 
 export default defineConfig({
   testDir: './e2e',
+  // These contracts require the Rust Cloud runtime + HTTPS proxy, not the
+  // Standard Next.js/FastAPI fixture (including when using an external URL).
+  ...(IS_CLOUD_NATIVE
+    ? { testMatch: '**/cloud/**/*.spec.ts' }
+    : { testIgnore: '**/cloud/**' }),
   timeout: 90_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,

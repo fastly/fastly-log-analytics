@@ -1,8 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { client } from "@/lib/api";
 import { useDebugStore, useServiceStore } from "@/stores/filterStore";
+import { setCloudModeRuntime } from "./mode";
+
+beforeEach(() => {
+  setCloudModeRuntime(true);
+});
 
 afterEach(() => {
+  setCloudModeRuntime(false);
   vi.unstubAllGlobals();
   useDebugStore.setState({ apiCallsEnabled: true, apiCalls: [] });
   useServiceStore.setState({ activeServiceId: "svc-1" });
@@ -24,13 +30,14 @@ describe("API telemetry hook", () => {
         }),
       ),
     );
-    await client.GET("/api/health");
+    // Use a real Compute passthrough route. /api/health is Standard-only.
+    await client.GET("/api/services");
     const calls = useDebugStore.getState().apiCalls;
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       source: "Compute",
       method: "GET",
-      path: "/api/health",
+      path: "/api/services",
       status: 200,
       vcpu_ms: 17,
     });
@@ -48,7 +55,7 @@ describe("API telemetry hook", () => {
         }),
       ),
     );
-    await client.GET("/api/health");
+    await client.GET("/api/services");
     expect(useDebugStore.getState().apiCalls[0]?.vcpu_ms).toBeNull();
   });
 });

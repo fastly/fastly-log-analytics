@@ -46,14 +46,46 @@ scorer-test:
 
 compute-test:
 	@if command -v cargo-nextest > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-nextest" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --manifest-path compute/Cargo.toml --workspace --locked --all-targets --no-fail-fast; \
+		cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --workspace --locked --all-targets --no-fail-fast; \
 	else \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/Cargo.toml --workspace --locked --all-targets; \
+		cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace --locked --all-targets; \
 	fi
 
+# rustup resolves rust-toolchain.toml from cwd, not --manifest-path. Run
+# inside compute so local and CI checks both use the pinned workspace toolchain.
 compute-lint:
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo fmt --manifest-path compute/Cargo.toml --all -- --check
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --manifest-path compute/Cargo.toml --workspace --locked --all-targets --all-features -- -D warnings
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo fmt --all -- --check
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+
+.PHONY: compute-wasm-check cloud-infra-test cloud-browser-test cloud-e2e cloud-ci
+
+compute-wasm-check:
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo check -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp -- -D warnings
+
+cloud-infra-test:
+	PYTHONPATH=. uv run pytest compute/cloud/infra compute/cloud/tools -o addopts="-q --strict-markers"
+	uv run python scripts/check_secret_values.py
+
+cloud-browser-test:
+	cd frontend && STATIC_EXPORT=1 NEXT_PUBLIC_DEPLOYMENT_MODE=cloud npx vitest run lib/cloud-engine/
+
+cloud-e2e:
+	cd frontend && node e2e/cloud/native-servers.mjs --build-only
+	cd frontend && FLP_SKIP_NEXT_BUILD=1 FLP_E2E_NATIVE=1 PROJECTS=chromium PLAYWRIGHT_WORKERS=1 npx playwright test --project=chromium --output=test-results/cloud
+
+# Mirrors the Cloud Compute & Browser Engine job, including dedicated native
+# browser acceptance. Excluding Cloud specs from Standard must not drop coverage.
+cloud-ci:
+	$(MAKE) cloud-sync-catalog
+	git diff --exit-code compute/cloud/src/logging/catalog.json compute/cloud/vcl/capture/templates.json
+	$(MAKE) compute-lint
+	$(MAKE) compute-test
+	$(MAKE) compute-wasm-check
+	$(MAKE) vcl-test
+	$(MAKE) cloud-infra-test
+	$(MAKE) cloud-browser-test
+	$(MAKE) cloud-e2e
 
 compute-audit:
 	@if command -v cargo-audit > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-audit" ]; then \
@@ -345,6 +377,7 @@ ci:
 	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck import-contracts vcl-test scorer-test scorer-audit verify-deps secret-scan osv otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard security-regression openapi-drift deploy-validate stray-file-gate
 	$(MAKE) test-ci
 	$(MAKE) test-frontend-ci
+	$(MAKE) cloud-ci
 	$(MAKE) perf-ci
 	$(MAKE) e2e
 

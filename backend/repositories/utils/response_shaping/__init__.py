@@ -16,13 +16,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence  # noqa: F401
 from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import TYPE_CHECKING, Any
 
-from backend.core.sql_validator import require_safe_ident
-
-
-def _safe_table_name(name: str) -> str:
-    return require_safe_ident(name, "Unsafe SQL table name")
-
-
+from backend.core.fos_client import _safe_table_name
 from backend.repositories.utils.response_shaping import asn as _asn_mod
 from backend.repositories.utils.response_shaping import domains as _domains_mod
 from backend.repositories.utils.response_shaping import time_buckets as _time_buckets_mod
@@ -218,7 +212,7 @@ class SectionTimer:
 
 
 def _safe_table(name: str) -> str:
-    """Validate and return a safe SQL identifier for table names."""
+    """Return the canonical SQL table alias for a service name."""
     return _safe_table_name(name)
 
 

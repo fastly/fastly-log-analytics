@@ -494,6 +494,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
+    # make vcl-test includes backend VCL semantics tests whose shared fixtures
+    # bootstrap metadata, even though the Cloud runtime itself has no database.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: fla_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d fla_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+      TEST_METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -548,18 +569,27 @@ jobs:
         run: |
           make compute-lint
           make compute-test
-          cargo check --manifest-path compute/Cargo.toml -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp
-          cargo clippy --manifest-path compute/Cargo.toml -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp -- -D warnings
+          make compute-wasm-check
           make vcl-test
 
       - name: Cloud Python infra/tools tests & secret value scan
-        run: |
-          PYTHONPATH=. uv run pytest compute/cloud/infra compute/cloud/tools -o addopts="-q --strict-markers"
-          uv run python scripts/check_secret_values.py
+        run: make cloud-infra-test
 
       - name: Cloud browser engine tests & STATIC_EXPORT verification
-        env:
-          STATIC_EXPORT: "1"
-          NEXT_PUBLIC_DEPLOYMENT_MODE: "cloud"
-        run: |
-          cd frontend && npx vitest run lib/cloud-engine/
+        run: make cloud-browser-test
+
+      - name: Install Cloud acceptance browser
+        run: cd frontend && npx playwright install --with-deps chromium
+
+      - name: Cloud native browser acceptance (CSP, engine, runtime)
+        run: make cloud-e2e
+
+      - name: Upload Cloud Playwright diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cloud-playwright-diagnostics
+          path: |
+            frontend/test-results/cloud
+            frontend/playwright-report
+          retention-days: 7

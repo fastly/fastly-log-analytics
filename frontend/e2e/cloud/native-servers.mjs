@@ -22,27 +22,25 @@ const backendPort = Number(process.env.FLP_E2E_NATIVE_BACKEND_PORT || "8787");
 
 import { existsSync } from "node:fs";
 
-const cachedWebOut = resolve(repoRoot, "target/release-cache/web-out");
-const webOut = existsSync(resolve(cachedWebOut, "dashboard.html"))
-  ? cachedWebOut
-  : resolve(frontendRoot, "out");
+const buildOnly = process.argv.includes("--build-only");
+// Acceptance must exercise this checkout, not a possibly stale release export.
+// Callers may explicitly provide a prepared export for focused runtime checks.
+const webOut = process.env.FLP_WEB_OUT
+  ? resolve(process.env.FLP_WEB_OUT)
+  : resolve(repoRoot, "target/cloud-e2e/web-out");
 const assetCacheDir = resolve(repoRoot, "target/release-cache/precompressed");
 
 const buildSteps = [];
 if (
   process.env.FLP_SKIP_NEXT_BUILD !== "1" &&
-  !existsSync(resolve(webOut, "dashboard.html"))
+  (buildOnly || !existsSync(resolve(webOut, "dashboard.html")))
 ) {
   buildSteps.push([
-    "npm",
-    ["run", "build"],
+    "uv",
+    ["run", "python", "-m", "compute.cloud.tools.build_e2e_export"],
     {
-      cwd: frontendRoot,
-      env: {
-        ...process.env,
-        STATIC_EXPORT: "1",
-        NEXT_PUBLIC_DEPLOYMENT_MODE: "cloud",
-      },
+      cwd: repoRoot,
+      env: process.env,
     },
   ]);
 }
@@ -51,6 +49,7 @@ buildSteps.push([
   [
     "build",
     "--quiet",
+    "--locked",
     "--manifest-path",
     computeManifest,
     "--bin",
@@ -59,7 +58,7 @@ buildSteps.push([
     targetDir,
   ],
   {
-    cwd: repoRoot,
+    cwd: resolve(repoRoot, "compute"),
     env: {
       ...process.env,
       FLP_WEB_OUT: webOut,
@@ -74,6 +73,9 @@ for (const [command, args, opts] of buildSteps) {
   if (result.status !== 0)
     throw new Error(`${command} failed (${result.status})`);
 }
+
+// Do the cold Next/Rust build before Playwright's bounded readiness wait.
+if (buildOnly) process.exit(0);
 
 const children = new Set();
 let stopping = false;
