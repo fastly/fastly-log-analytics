@@ -37,7 +37,41 @@ type ControlMessage = {
   reportApiCalls?: boolean;
 };
 
-export type WorkerRequest = RunMessage | SearchMessage | ControlMessage;
+type ExecuteSqlMessage = {
+  id: number;
+  type: "execute_sql";
+  sql: string;
+  params?: readonly unknown[];
+};
+
+type GetPresentColumnsMessage = {
+  id: number;
+  type: "get_present_columns";
+  scopedKeys?: readonly string[];
+};
+
+type SyncRumFilesMessage = {
+  id: number;
+  type: "sync_rum_files";
+  vitalsFiles: readonly {
+    scopedKey?: string;
+    key: string;
+    bytes: ArrayBuffer;
+  }[];
+  errorFiles?: readonly {
+    scopedKey?: string;
+    key: string;
+    bytes: ArrayBuffer;
+  }[];
+};
+
+export type WorkerRequest =
+  | RunMessage
+  | SearchMessage
+  | ControlMessage
+  | ExecuteSqlMessage
+  | GetPresentColumnsMessage
+  | SyncRumFilesMessage;
 
 export type WorkerMessage =
   | { id: number; type: "progress"; progress: RunProgress }
@@ -52,6 +86,16 @@ export type WorkerMessage =
       id: number;
       type: "searchSummariesResult";
       result: { entries: { value: Scalar; count: number }[]; partial: boolean };
+    }
+  | {
+      id: number;
+      type: "sqlResult";
+      result: Record<string, unknown>[];
+    }
+  | {
+      id: number;
+      type: "presentColumnsResult";
+      result: string[];
     }
   | { id: number; type: "error"; message: string };
 
@@ -72,6 +116,29 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     clearManifestCache();
     sharedSource.clearMemoryCache?.();
     await getDuckDBEngine().reset();
+    ctx.post({ id: msg.id, type: "result", result: null });
+    return;
+  }
+  if (msg.type === "execute_sql") {
+    const rows = await getDuckDBEngine().executeSql(
+      msg.sql,
+      msg.params ?? [],
+      ctx.signal,
+    );
+    ctx.post({ id: msg.id, type: "sqlResult", result: rows });
+    return;
+  }
+  if (msg.type === "get_present_columns") {
+    const cols = await getDuckDBEngine().getPresentColumns(msg.scopedKeys);
+    ctx.post({ id: msg.id, type: "presentColumnsResult", result: [...cols] });
+    return;
+  }
+  if (msg.type === "sync_rum_files") {
+    await getDuckDBEngine().syncRumFiles(
+      msg.vitalsFiles,
+      msg.errorFiles ?? [],
+      ctx.signal,
+    );
     ctx.post({ id: msg.id, type: "result", result: null });
     return;
   }
@@ -106,3 +173,4 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     ctx.post({ id: msg.id, type: "searchSummariesResult", result });
   }
 });
+

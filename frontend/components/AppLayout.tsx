@@ -30,6 +30,7 @@ import {
   useShareStatusBanner,
   SERVICE_NAVIGATION,
   SYSTEM_NAVIGATION,
+  CLOUD_PRUNED_NAV_HREFS,
   UrlServiceSync,
   RouteFocus,
   RawQueryModeProbe,
@@ -127,6 +128,7 @@ export function AppLayout({
   const navActiveServiceId = activeServiceId || ssrActiveServiceId || null
 
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
+    if (IS_CLOUD_MODE && CLOUD_PRUNED_NAV_HREFS.has(item.href)) return false
     if (item.requiresCmcd && !hasCmcd) return false
     if (item.requiresRum && !hasRum) return false
     if (isShareAnalyst) return item.shareAnalystVisible ?? item.analystVisible ?? false

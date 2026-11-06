@@ -184,9 +184,17 @@ def prepare_static_export_tree(web: Path) -> None:
         "app/admin/queue",
         "app/admin/queries",
         "app/admin/trends",
-        "app/control-room",
+        "app/control-room/page.tsx",
         "app/alerts",
         "app/share",
+        "components/high-scale",
+        "__tests__",
+        "e2e",
+        "vitest.setup.ts",
+        "vitest.config.ts",
+        "playwright.config.ts",
+        "knip.config.ts",
+        "tsconfig.tsbuildinfo",
     ):
         target = web / rel
         if target.is_dir():

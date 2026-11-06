@@ -194,6 +194,29 @@ export const SERVICE_NAVIGATION: ServiceNavItem[] = [
 export const SYSTEM_NAVIGATION = [{ name: 'Admin', href: '/admin', icon: Settings }]
 export const IS_CLOUD_RUNTIME = IS_CLOUD_MODE
 
+export const CLOUD_PRUNED_NAV_HREFS = new Set<string>([
+  '/high-scale/request-facts',
+  '/control-room',
+  '/alerts',
+])
+
+export const ADMIN_SUBPAGES = [
+  '/admin/share',
+  '/admin/session-scoring',
+  '/admin/queries',
+  '/admin/trends',
+  '/admin/queue',
+  '/admin/rum',
+  '/admin/clickhouse',
+] as const
+
+export const CLOUD_PRUNED_ADMIN_HREFS = new Set<string>([
+  '/admin/clickhouse',
+  '/admin/queue',
+  '/admin/queries',
+  '/admin/trends',
+])
+
 export function UrlServiceSync() {
   useUrlServiceSync()
   return null

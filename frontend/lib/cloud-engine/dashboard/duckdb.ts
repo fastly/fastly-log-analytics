@@ -2,23 +2,23 @@ import { quoteIdent, sqlEscape } from "@/lib/sqlBuilder";
 import type {
   Aggregator,
   FieldAggregate,
+  FileSource,
   MinuteBucket,
   PartialAggregates,
   Scalar,
 } from "./engine";
 import { numericFilterValue, type DashboardFilter } from "./filters";
+import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
 import { CARD_FIELDS, type CustomField } from "./summaries";
-
-const FILTERABLE_FIELDS = new Set(CARD_FIELDS);
 
 // wasm32 caps the heap at 4 GiB; DuckDB's default (~3 GiB) would starve the tab.
 const MEMORY_LIMIT = "256MB";
 const DEFAULT_RESIDENT_BUDGET_BYTES = 512 * 1024 * 1024;
 const MINUTE_MS = 60_000;
 
-type DuckDBColumnType = "BIGINT" | "DOUBLE" | "BOOLEAN" | "VARCHAR";
+export type DuckDBColumnType = "BIGINT" | "DOUBLE" | "BOOLEAN" | "VARCHAR";
 
-const FIELD_DUCKDB_TYPES: Record<string, DuckDBColumnType> = {
+export const FIELD_DUCKDB_TYPES: Record<string, DuckDBColumnType> = {
   resp_bytes: "BIGINT",
   ip: "VARCHAR",
   asn: "BIGINT",
@@ -59,9 +59,142 @@ const FIELD_DUCKDB_TYPES: Record<string, DuckDBColumnType> = {
   tls_ciphers_sha: "VARCHAR",
   io_input_format: "VARCHAR",
   io_output_format: "VARCHAR",
+  // Additional catalog columns required by Pages 8–15 (F18–F26):
+  elapsed: "BIGINT",
+  ttfb: "DOUBLE",
+  ottfb: "DOUBLE",
+  ottlb: "DOUBLE",
+  ost: "BIGINT",
+  oip: "VARCHAR",
+  obytes: "BIGINT",
+  ohbytes: "BIGINT",
+  rid: "VARCHAR",
+  prid: "VARCHAR",
+  req_bytes: "BIGINT",
+  req_header_bytes: "BIGINT",
+  req_body_bytes: "BIGINT",
+  resp_header_bytes: "BIGINT",
+  resp_body_bytes: "BIGINT",
+  tcpi_min_rtt: "BIGINT",
+  tcpi_rtt: "BIGINT",
+  tcpi_rtt_var: "BIGINT",
+  tcpi_delivery_rate: "BIGINT",
+  tcpi_total_retrans: "BIGINT",
+  tcpi_snd_cwnd: "BIGINT",
+  tcp_rtt: "BIGINT",
+  rtt_min: "BIGINT",
+  rtt_var: "BIGINT",
+  retrans: "BIGINT",
+  ploss: "DOUBLE",
+  delivery_rate: "BIGINT",
+  cwnd: "BIGINT",
+  lat: "DOUBLE",
+  lon: "DOUBLE",
+  protocol: "VARCHAR",
+  is_ssl: "BOOLEAN",
+  ipv6: "BOOLEAN",
+  is_shield: "BOOLEAN",
+  h2fp: "VARCHAR",
+  ohfp: "VARCHAR",
+  waf_sig: "VARCHAR",
+  waf_action: "VARCHAR",
+  waf_req_id: "VARCHAR",
+  waf_logged_rules: "VARCHAR",
+  waf_blocked_rules: "VARCHAR",
+  ngwaf_bot_name: "VARCHAR",
+  is_bot: "BOOLEAN",
+  verified_bot: "BOOLEAN",
+  _bot_name: "VARCHAR",
+  content_type: "VARCHAR",
+  resp_header_content_type: "VARCHAR",
+  io_input_bytes: "BIGINT",
+  io_output_bytes: "BIGINT",
+  io_transform: "VARCHAR",
+  ifmt: "VARCHAR",
+  ofmt: "VARCHAR",
+  cmcd_sid: "VARCHAR",
+  cmcd_cid: "VARCHAR",
+  cmcd_br: "BIGINT",
+  cmcd_bl: "BIGINT",
+  cmcd_bs: "BOOLEAN",
+  cmcd_d: "BIGINT",
+  cmcd_dl: "BIGINT",
+  cmcd_mtp: "BIGINT",
+  cmcd_nor: "VARCHAR",
+  cmcd_nrr: "VARCHAR",
+  cmcd_ot: "VARCHAR",
+  cmcd_pr: "DOUBLE",
+  cmcd_rtp: "BIGINT",
+  cmcd_sf: "VARCHAR",
+  cmcd_st: "VARCHAR",
+  cmcd_su: "BOOLEAN",
+  cmcd_tb: "BIGINT",
+  cmcd_v: "BIGINT",
+  edge_sid: "VARCHAR",
+  edge_score: "BIGINT",
+  edge_score_reason: "VARCHAR",
+  cookie_session: "VARCHAR",
+  service_id: "VARCHAR",
+  fastly_req_id: "VARCHAR",
+  // Long-form alias columns for Pages 8–15 compatibility:
+  path: "VARCHAR",
+  query_string: "VARCHAR",
+  cache_status: "VARCHAR",
+  resp_body_size: "BIGINT",
+  req_body_size: "BIGINT",
+  time_elapsed_usec: "BIGINT",
+  time_to_first_byte_ns: "BIGINT",
+  ttfb_ms: "DOUBLE",
+  origin_time_ms: "DOUBLE",
+  origin_Whole_ms: "DOUBLE",
+  origin_ttfb_ms: "DOUBLE",
+  origin_status: "BIGINT",
+  origin_host: "VARCHAR",
+  origin_ip: "VARCHAR",
+  fastly_pop: "VARCHAR",
+  fastly_is_shield: "BOOLEAN",
+  is_edge: "BOOLEAN",
+  geo_country: "VARCHAR",
+  geo_city: "VARCHAR",
+  geo_region: "VARCHAR",
+  client_ip: "VARCHAR",
+  client_asn: "BIGINT",
+  as_name: "VARCHAR",
+  user_agent: "VARCHAR",
+  tls_version: "VARCHAR",
+  tls_cipher: "VARCHAR",
+  ja3_md5: "VARCHAR",
+  h2_fingerprint: "VARCHAR",
+  oh_fingerprint: "VARCHAR",
+  client_rtt_us: "DOUBLE",
+  client_ploss: "DOUBLE",
+  client_cwnd: "BIGINT",
+  client_tcpi_rtt: "DOUBLE",
+  client_tcpi_rttvar: "DOUBLE",
+  client_tcpi_rcv_space: "BIGINT",
+  client_tcpi_snd_mss: "BIGINT",
+  client_tcpi_delta_retrans: "BIGINT",
+  content_encoding: "VARCHAR",
+  asset_type: "VARCHAR",
+  cache_control: "VARCHAR",
+  surrogate_control: "VARCHAR",
+  waf_rule_id: "VARCHAR",
+  waf_message: "VARCHAR",
+  waf_severity: "VARCHAR",
+  ngwaf_signals: "VARCHAR",
+  ngwaf_decision: "VARCHAR",
+  bot_score: "DOUBLE",
+  bot_category: "VARCHAR",
+  bot_verified: "BOOLEAN",
+  ddos_action: "VARCHAR",
 };
 
-const ALL_TABLE_FIELDS = ["resp_bytes", ...CARD_FIELDS] as const;
+const FILTERABLE_FIELDS = new Set<string>([
+  ...CARD_FIELDS,
+  ...Object.keys(FIELD_DUCKDB_TYPES),
+]);
+
+export const ALL_TABLE_FIELDS = Object.keys(FIELD_DUCKDB_TYPES);
 
 const CUSTOM_DUCKDB_TYPES: Record<CustomField["type"], DuckDBColumnType> = {
   string: "VARCHAR",
@@ -83,14 +216,21 @@ export type IngestedFileMeta = {
   maxTs: number;
   /** Custom columns filled at ingest; others read NULL until re-ingested. */
   customColumns?: readonly string[];
+  /** Physical columns present in the ingested Parquet file. */
+  presentColumns?: readonly string[];
 };
 
 type ArrowColumnLike = {
   toJSON(): unknown[];
 };
 
+type ArrowSchemaField = {
+  name: string;
+};
+
 type ArrowTableLike = {
   numRows: number;
+  schema?: { fields?: ArrowSchemaField[] };
   getChild(name: string): ArrowColumnLike | null;
 };
 
@@ -116,9 +256,13 @@ export type ParquetAccess = (
   release?: () => void;
 };
 
-function concatBatches(batches: ArrowTableLike[]): ArrowTableLike {
+function concatBatches(
+  batches: ArrowTableLike[],
+  schema?: { fields?: ArrowSchemaField[] },
+): ArrowTableLike {
   return {
     numRows: batches.reduce((sum, batch) => sum + batch.numRows, 0),
+    schema: schema ?? batches[0]?.schema,
     getChild(name: string) {
       const columns = batches.map((batch) => batch.getChild(name));
       if (columns.length === 0 || columns.some((c) => !c)) return null;
@@ -376,7 +520,10 @@ async function createBrowserBackend(): Promise<DuckDBBackend> {
             }
             batches.push(batch as unknown as ArrowTableLike);
           }
-          return concatBatches(batches);
+          return concatBatches(
+            batches,
+            (reader as { schema?: { fields?: ArrowSchemaField[] } }).schema,
+          );
         } catch (error) {
           signal?.throwIfAborted();
           throw error;
@@ -432,16 +579,120 @@ function firstNumber(table: ArrowTableLike, column: string): number | null {
   return value === null || value === undefined ? null : Number(value);
 }
 
+function interpolateSqlParams(
+  sql: string,
+  params: readonly unknown[] = [],
+): string {
+  if (!params || params.length === 0) return sql;
+  const encodeParam = (val: unknown): string => {
+    if (val === null || val === undefined) return "NULL";
+    if (typeof val === "number") {
+      return Number.isFinite(val) ? String(val) : "NULL";
+    }
+    if (typeof val === "bigint") return String(val);
+    if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
+    if (val instanceof Date) return sqlString(val.toISOString());
+    if (Array.isArray(val)) {
+      return `[${val.map(encodeParam).join(", ")}]`;
+    }
+    return sqlString(String(val));
+  };
+  let positionalIdx = 0;
+  return sql.replace(/\$([0-9]+)|\?/g, (_match, numStr) => {
+    if (numStr !== undefined) {
+      const idx = Number(numStr) - 1;
+      return idx >= 0 && idx < params.length ? encodeParam(params[idx]) : "NULL";
+    }
+    const idx = positionalIdx++;
+    return idx < params.length ? encodeParam(params[idx]) : "NULL";
+  });
+}
+
+function arrowTableToRows<T = Record<string, unknown>>(
+  table: ArrowTableLike,
+): T[] {
+  const numRows = table.numRows;
+  if (numRows === 0) return [];
+  const fieldNames = table.schema?.fields?.map((f) => f.name) ?? [];
+  const columns = new Map<string, unknown[]>();
+  for (const name of fieldNames) {
+    columns.set(name, table.getChild(name)?.toJSON() ?? []);
+  }
+  const rows: T[] = [];
+  for (let r = 0; r < numRows; r++) {
+    const obj: Record<string, unknown> = {};
+    for (const [name, col] of columns) {
+      const raw = col[r];
+      if (typeof raw === "bigint") {
+        obj[name] = Number(raw);
+      } else if (typeof raw === "number" && Number.isNaN(raw)) {
+        obj[name] = null;
+      } else {
+        obj[name] = raw ?? null;
+      }
+    }
+    rows.push(obj as T);
+  }
+  return rows;
+}
+
+const RUM_VITALS_COLUMNS: Record<string, DuckDBColumnType> = {
+  metric_name: "VARCHAR",
+  metric_value: "DOUBLE",
+  rating: "VARCHAR",
+  url: "VARCHAR",
+  page_url: "VARCHAR",
+  path: "VARCHAR",
+  browser_name: "VARCHAR",
+  browser_version: "VARCHAR",
+  os_name: "VARCHAR",
+  os_version: "VARCHAR",
+  device_type: "VARCHAR",
+  connection_type: "VARCHAR",
+  country: "VARCHAR",
+  city: "VARCHAR",
+  asn: "BIGINT",
+  as_name: "VARCHAR",
+  session_id: "VARCHAR",
+  nav_type: "VARCHAR",
+  element: "VARCHAR",
+  attribution: "VARCHAR",
+  service_id: "VARCHAR",
+};
+
+const RUM_ERRORS_COLUMNS: Record<string, DuckDBColumnType> = {
+  message: "VARCHAR",
+  error_message: "VARCHAR",
+  error_type: "VARCHAR",
+  filename: "VARCHAR",
+  source: "VARCHAR",
+  lineno: "BIGINT",
+  colno: "BIGINT",
+  stack: "VARCHAR",
+  url: "VARCHAR",
+  page_url: "VARCHAR",
+  path: "VARCHAR",
+  browser_name: "VARCHAR",
+  os_name: "VARCHAR",
+  device_type: "VARCHAR",
+  country: "VARCHAR",
+  session_id: "VARCHAR",
+  service_id: "VARCHAR",
+};
+
 export class DuckDBAnalyticalEngine {
   private backendPromise: Promise<DuckDBBackend> | null = null;
   /** Insertion order is recency order: the first entry is least recently used. */
   private readonly ingestedFiles = new Map<string, IngestedFileMeta>();
+  private readonly ingestedRumVitals = new Set<string>();
+  private readonly ingestedRumErrors = new Set<string>();
   private readonly inflightIngests = new Map<
     string,
     Promise<IngestedFileMeta>
   >();
   private readonly pins = new Map<string, number>();
   private readonly customTypes = new Map<string, DuckDBColumnType>();
+  private presentColumnsOverride: Set<string> | null = null;
   private readonly residentBudgetBytes: number;
   private nextVirtualFileId = 1;
 
@@ -460,6 +711,210 @@ export class DuckDBAnalyticalEngine {
 
   getFileMeta(scopedKey: string): IngestedFileMeta | undefined {
     return this.ingestedFiles.get(scopedKey);
+  }
+
+  setPresentColumnsOverride(columns: Iterable<string> | null): void {
+    this.presentColumnsOverride = columns ? new Set(columns) : null;
+  }
+
+  async getPresentColumns(
+    scopedKeys?: readonly string[],
+  ): Promise<Set<string>> {
+    if (this.presentColumnsOverride) {
+      return new Set(this.presentColumnsOverride);
+    }
+    const result = new Set<string>();
+    const metas = scopedKeys
+      ? scopedKeys
+          .map((k) => this.ingestedFiles.get(k))
+          .filter((m): m is IngestedFileMeta => Boolean(m))
+      : [...this.ingestedFiles.values()];
+    for (const meta of metas) {
+      for (const col of meta.presentColumns ?? []) {
+        result.add(col);
+      }
+      result.add("timestamp");
+      result.add("ts_ms");
+    }
+    if (result.size > 0 || this.ingestedFiles.size > 0) {
+      return result;
+    }
+    const backend = await this.ensureBackend();
+    const countTable = await backend.query(
+      "SELECT COUNT(*)::BIGINT AS cnt FROM requests",
+    );
+    const totalRows = firstNumber(countTable, "cnt") ?? 0;
+    if (totalRows === 0) {
+      return result;
+    }
+    const exprs = ALL_TABLE_FIELDS.map(
+      (field, idx) => `COUNT(${sqlIdent(field)})::BIGINT AS c_${idx}`,
+    ).join(", ");
+    const nonNullTable = await backend.query(`SELECT ${exprs} FROM requests`);
+    ALL_TABLE_FIELDS.forEach((field, idx) => {
+      if ((firstNumber(nonNullTable, `c_${idx}`) ?? 0) > 0) {
+        result.add(field);
+      }
+    });
+    result.add("timestamp");
+    result.add("ts_ms");
+    return result;
+  }
+
+  async executeSql<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    const backend = await this.ensureBackend();
+    signal?.throwIfAborted();
+    const finalSql = interpolateSqlParams(sql, params);
+    const table = await backend.query(finalSql, signal);
+    return arrowTableToRows<T>(table);
+  }
+
+  async querySql<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    return this.executeSql<T>(sql, params, signal);
+  }
+
+  async syncWindow(
+    files: readonly {
+      scopedKey?: string;
+      key: string;
+      bytes: ArrayBuffer;
+      knownStats?: { rawRows: number; minTs: number; maxTs: number };
+    }[],
+    signal?: AbortSignal,
+  ): Promise<IngestedFileMeta[]> {
+    const metas: IngestedFileMeta[] = [];
+    for (const file of files) {
+      signal?.throwIfAborted();
+      const sk = file.scopedKey ?? file.key;
+      const meta = await this.ingestFile(
+        sk,
+        file.key,
+        file.bytes,
+        file.knownStats,
+        signal,
+      );
+      metas.push(meta);
+    }
+    return metas;
+  }
+
+  async syncRumFiles(
+    vitalsFiles: readonly {
+      scopedKey?: string;
+      key: string;
+      bytes: ArrayBuffer;
+    }[],
+    errorFiles: readonly {
+      scopedKey?: string;
+      key: string;
+      bytes: ArrayBuffer;
+    }[] = [],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const backend = await this.ensureBackend();
+    for (const file of vitalsFiles) {
+      signal?.throwIfAborted();
+      const sk = file.scopedKey ?? file.key;
+      if (this.ingestedRumVitals.has(sk)) continue;
+      await this.ingestRumTableFile(
+        backend,
+        "client_vitals",
+        RUM_VITALS_COLUMNS,
+        sk,
+        file.bytes,
+        signal,
+      );
+      this.ingestedRumVitals.add(sk);
+    }
+    for (const file of errorFiles) {
+      signal?.throwIfAborted();
+      const sk = file.scopedKey ?? file.key;
+      if (this.ingestedRumErrors.has(sk)) continue;
+      await this.ingestRumTableFile(
+        backend,
+        "client_errors",
+        RUM_ERRORS_COLUMNS,
+        sk,
+        file.bytes,
+        signal,
+      );
+      this.ingestedRumErrors.add(sk);
+    }
+  }
+
+  private async ingestRumTableFile(
+    backend: DuckDBBackend,
+    tableName: "client_vitals" | "client_errors",
+    schemaCols: Record<string, DuckDBColumnType>,
+    scopedKey: string,
+    bytes: ArrayBuffer,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const virtualName = `rum_${this.nextVirtualFileId++}.parquet`;
+    await backend.registerFileBuffer(virtualName, new Uint8Array(bytes));
+    try {
+      const schemaTable = await backend.query(
+        `DESCRIBE SELECT * FROM read_parquet(${sqlString(virtualName)})`,
+        signal,
+      );
+      const colNames =
+        (schemaTable.getChild("column_name")?.toJSON() as string[]) ?? [];
+      const colTypes =
+        (schemaTable.getChild("column_type")?.toJSON() as string[]) ?? [];
+      const typeByCol = new Map<string, string>();
+      for (let i = 0; i < colNames.length; i++) {
+        typeByCol.set(colNames[i], (colTypes[i] ?? "").toUpperCase());
+      }
+      const tsCol = typeByCol.has("timestamp")
+        ? "timestamp"
+        : typeByCol.has("ts_ms")
+          ? "ts_ms"
+          : null;
+      const tsType = tsCol ? (typeByCol.get(tsCol) ?? "") : "";
+      const tsExpr = !tsCol
+        ? "0::BIGINT"
+        : tsType.startsWith("TIMESTAMP")
+          ? `epoch_ms(${sqlIdent(tsCol)})::BIGINT`
+          : tsType.includes("CHAR")
+            ? `epoch_ms(TRY_CAST(${sqlIdent(tsCol)} AS TIMESTAMP))::BIGINT`
+            : `CAST(${sqlIdent(tsCol)} AS BIGINT)`;
+
+      const entries = Object.entries(schemaCols);
+      const selectCols = entries
+        .map(([field, targetType]) => {
+          const col = sqlIdent(field);
+          if (!typeByCol.has(field)) {
+            return `NULL::${targetType} AS ${col}`;
+          }
+          const cast = `CAST(${col} AS ${targetType})`;
+          return targetType === "DOUBLE"
+            ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
+            : `${cast} AS ${col}`;
+        })
+        .join(", ");
+      const colList = [
+        "scoped_key",
+        "timestamp",
+        "ts_ms",
+        ...entries.map(([f]) => f),
+      ]
+        .map(sqlIdent)
+        .join(", ");
+      await backend.query(
+        `INSERT INTO ${tableName} (${colList}) SELECT ${sqlString(scopedKey)} AS scoped_key, epoch_ms((${tsExpr})::BIGINT)::TIMESTAMPTZ AS "timestamp", (${tsExpr})::BIGINT AS ts_ms, ${selectCols} FROM read_parquet(${sqlString(virtualName)})`,
+        signal,
+      );
+    } finally {
+      await backend.dropFile(virtualName).catch(() => {});
+    }
   }
 
   async memoryLimit(): Promise<string> {
@@ -513,10 +968,15 @@ export class DuckDBAnalyticalEngine {
 
   async reset(): Promise<void> {
     this.ingestedFiles.clear();
+    this.ingestedRumVitals.clear();
+    this.ingestedRumErrors.clear();
     this.inflightIngests.clear();
+    this.presentColumnsOverride = null;
     if (this.backendPromise) {
       const backend = await this.backendPromise;
       await backend.query("DELETE FROM requests");
+      await backend.query("DELETE FROM client_vitals");
+      await backend.query("DELETE FROM client_errors");
       await backend.query("CHECKPOINT");
     }
   }
@@ -575,7 +1035,22 @@ export class DuckDBAnalyticalEngine {
             `${sqlIdent(field)} ${FIELD_DUCKDB_TYPES[field] ?? "VARCHAR"}`,
         ).join(", ");
         await backend.query(
-          `CREATE TABLE IF NOT EXISTS requests (scoped_key VARCHAR, ts_ms BIGINT, ${colDefs})`,
+          `CREATE TABLE IF NOT EXISTS requests (scoped_key VARCHAR, ts_ms BIGINT, "timestamp" TIMESTAMPTZ, ${colDefs})`,
+        );
+        await backend.query(
+          `CREATE VIEW IF NOT EXISTS logs AS SELECT * FROM requests`,
+        );
+        const vitalsCols = Object.entries(RUM_VITALS_COLUMNS)
+          .map(([f, t]) => `${sqlIdent(f)} ${t}`)
+          .join(", ");
+        await backend.query(
+          `CREATE TABLE IF NOT EXISTS client_vitals (scoped_key VARCHAR, "timestamp" TIMESTAMPTZ, ts_ms BIGINT, ${vitalsCols})`,
+        );
+        const errorsCols = Object.entries(RUM_ERRORS_COLUMNS)
+          .map(([f, t]) => `${sqlIdent(f)} ${t}`)
+          .join(", ");
+        await backend.query(
+          `CREATE TABLE IF NOT EXISTS client_errors (scoped_key VARCHAR, "timestamp" TIMESTAMPTZ, ts_ms BIGINT, ${errorsCols})`,
         );
         return backend;
       })();
@@ -694,16 +1169,22 @@ export class DuckDBAnalyticalEngine {
       for (let i = 0; i < colNames.length; i++) {
         typeByCol.set(colNames[i], (colTypes[i] ?? "").toUpperCase());
       }
-      const tsType = typeByCol.get("timestamp");
-      if (!tsType) {
+      const tsCol = typeByCol.has("timestamp")
+        ? "timestamp"
+        : typeByCol.has("ts_ms")
+          ? "ts_ms"
+          : null;
+      const tsType = tsCol ? typeByCol.get(tsCol) : undefined;
+      if (!tsCol || !tsType) {
         throw new Error(`${key} has no timestamp column`);
       }
 
+      const tsIdent = sqlIdent(tsCol);
       const tsExpr = tsType.startsWith("TIMESTAMP")
-        ? `epoch_ms("timestamp")::BIGINT`
+        ? `epoch_ms(${tsIdent})::BIGINT`
         : tsType.includes("CHAR")
-          ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
-          : `CAST("timestamp" AS BIGINT)`;
+          ? `epoch_ms(TRY_CAST(${tsIdent} AS TIMESTAMP))::BIGINT`
+          : `CAST(${tsIdent} AS BIGINT)`;
 
       let rawRows = knownStats?.rawRows ?? 0;
       let minTs = knownStats?.minTs ?? Infinity;
@@ -747,6 +1228,7 @@ export class DuckDBAnalyticalEngine {
       const columnList = [
         "scoped_key",
         "ts_ms",
+        "timestamp",
         ...ALL_TABLE_FIELDS,
         ...custom.map(([id]) => id),
       ]
@@ -755,7 +1237,7 @@ export class DuckDBAnalyticalEngine {
       // The INSERT is atomic, so cancelling it leaves no partial rows. Once it
       // completes, record the file before any further abort check.
       await backend.query(
-        `INSERT INTO requests (${columnList}) SELECT ${sqlString(insertKey)} AS scoped_key, ${tsExpr} AS ts_ms, ${selectCols} FROM read_parquet(${sqlString(virtualName)})`,
+        `INSERT INTO requests (${columnList}) SELECT ${sqlString(insertKey)} AS scoped_key, (${tsExpr})::BIGINT AS ts_ms, epoch_ms((${tsExpr})::BIGINT)::TIMESTAMPTZ AS "timestamp", ${selectCols} FROM read_parquet(${sqlString(virtualName)})`,
         signal,
       );
       if (replacing) {
@@ -772,11 +1254,13 @@ export class DuckDBAnalyticalEngine {
         key,
         rawRows,
         byteLength,
-        hasBytes: typeByCol.has("resp_bytes"),
-        hasEdge: typeByCol.has("edge"),
+        hasBytes:
+          typeByCol.has("resp_bytes") || typeByCol.has("resp_body_size"),
+        hasEdge: typeByCol.has("edge") || typeByCol.has("is_edge"),
         minTs,
         maxTs,
         customColumns: custom.map(([id]) => id),
+        presentColumns: colNames,
       };
       this.ingestedFiles.set(scopedKey, meta);
       return meta;
@@ -1083,3 +1567,5 @@ export function getDuckDBEngine(): DuckDBAnalyticalEngine {
 }
 
 export const runDuckDbDashboard = getDuckDBEngine;
+export { DuckDBAnalyticalEngine as DashboardDuckDBEngine };
+

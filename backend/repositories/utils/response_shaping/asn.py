@@ -103,11 +103,62 @@ def enrich_asn_rows(
 
 
 def shape_performance_asn_rows(
-    service_name: str,
-    rows: Iterable[Any],
+    service_name: str | Iterable[Any],
+    rows: Iterable[Any] | Mapping[Any, str] | None = None,
+    *,
+    asn_lookup: Mapping[Any, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Shape and ASN-enrich performance ``top_asns`` rows from either tuple or dict rows."""
-    row_list = list(rows)
+    if not isinstance(service_name, str):
+        row_list = list(service_name)
+        lookup: Mapping[Any, str] = (
+            asn_lookup
+            if asn_lookup is not None
+            else (rows if isinstance(rows, Mapping) else {})
+        )
+        if not row_list:
+            return []
+        out_legacy: list[dict[str, Any]] = []
+        for r in row_list:
+            if isinstance(r, Mapping):
+                raw_val = r.get("asn", r.get("value"))
+                asn_int = parse_asn_int(raw_val)
+                requests = int(r["req_count"]) if "req_count" in r else int(r.get("requests", 0) or 0)
+                avg_v = float_or_zero(r["avg_ms"]) if "avg_ms" in r else float_or_zero(r.get("avg"))
+                p50_v = float_or_zero(r["p50_ms"]) if "p50_ms" in r else float_or_zero(r.get("p50"))
+                p95_v = float_or_zero(r["p95_ms"]) if "p95_ms" in r else float_or_zero(r.get("p95"))
+                p99_v = float_or_zero(r["p99_ms"]) if "p99_ms" in r else float_or_zero(r.get("p99"))
+            else:
+                raw_val = r[0]
+                asn_int = parse_asn_int(raw_val)
+                requests, avg_v, p50_v, p95_v, p99_v = (
+                    int(r[1] or 0),
+                    float_or_zero(r[2]),
+                    float_or_zero(r[3]),
+                    float_or_zero(r[4]),
+                    float_or_zero(r[5]),
+                )
+            org_name = (
+                (lookup.get(asn_int) or lookup.get(str(asn_int)) or "")
+                if (lookup and asn_int is not None)
+                else ""
+            )
+            asn_str = f"AS{asn_int}" if asn_int is not None else str(raw_val if raw_val is not None else "")
+            label = f"{org_name} ({asn_int})" if (org_name and asn_int is not None) else asn_str
+            out_legacy.append(
+                {
+                    "asn": asn_str,
+                    "label": label,
+                    "requests": requests,
+                    "avg": avg_v,
+                    "p50": p50_v,
+                    "p95": p95_v,
+                    "p99": p99_v,
+                }
+            )
+        return out_legacy
+
+    row_list = list(rows or ())
     if not row_list:
         return []
     raw_asns = [r["value"] if isinstance(r, Mapping) else r[0] for r in row_list]
@@ -142,17 +193,129 @@ def shape_performance_asn_rows(
 
 
 def finish_security_proxies(
-    source_name: str,
-    stats: Mapping[str, Any],
-    quality_rows: Iterable[Any],
-    raw_isps: Iterable[Mapping[str, Any]],
-    raw_clients: Iterable[Mapping[str, Any]],
-    mask_ips: bool,
+    source_name: str | Iterable[Any] | None = None,
+    stats: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None = None,
+    quality_rows: Iterable[Any] | bool | None = None,
+    raw_isps: Iterable[Mapping[str, Any]] | None = None,
+    raw_clients: Iterable[Mapping[str, Any]] | None = None,
+    mask_ips: bool = False,
+    *,
+    flagged_rows: Iterable[Mapping[str, Any]] | None = None,
+    asn_lookup: Mapping[Any, str] | None = None,
 ) -> dict[str, Any]:
     """Shape the security proxies payload (traffic quality, suspicious ISPs, active clients) across engines."""
-    q_list = list(quality_rows)
-    isp_list = list(raw_isps)
-    client_list = list(raw_clients)
+    if not isinstance(source_name, str) or flagged_rows is not None or raw_isps is None:
+        q_iter: Iterable[Any] = (
+            source_name
+            if (source_name is not None and not isinstance(source_name, str))
+            else (quality_rows if isinstance(quality_rows, Iterable) else ())
+        )
+        f_iter: Iterable[Mapping[str, Any]] = (
+            flagged_rows
+            if flagged_rows is not None
+            else (stats if (stats is not None and not isinstance(stats, Mapping)) else ())
+        )
+        effective_mask = bool(quality_rows) if isinstance(quality_rows, bool) else bool(mask_ips)
+
+        q_list_legacy = list(q_iter)
+        f_list = [dict(r) for r in f_iter if isinstance(r, Mapping)]
+
+        traffic_quality_legacy: list[dict[str, Any]] = []
+        if q_list_legacy:
+            pairs_legacy: list[tuple[Any, int]] = []
+            for item in q_list_legacy:
+                if isinstance(item, Mapping):
+                    row_lbl = item.get("type") or item.get("category") or item.get("label")
+                    pairs_legacy.append((row_lbl, int(item.get("count") or 0)))
+                else:
+                    pairs_legacy.append((item[0], int(item[1] or 0)))
+            total_cnt = sum(cnt for _, cnt in pairs_legacy)
+            if total_cnt > 0:
+                for row_type, row_count in pairs_legacy:
+                    label = str(row_type if row_type is not None else "Unknown")
+                    value = round((float(row_count) / total_cnt) * 100, 1)
+                    traffic_quality_legacy.append({"label": label, "value": value})
+
+        lookup_map = dict(asn_lookup or {})
+        if not lookup_map:
+            asns_needed = [
+                asn_int for r in f_list if (asn_int := parse_asn_int(r.get("asn"))) is not None
+            ]
+            if asns_needed:
+                try:
+                    from backend.core.fos_client import get_asn_names
+
+                    lookup_map = get_asn_names("default", list(set(asns_needed)))
+                except Exception:
+                    lookup_map = {}
+
+        def _legacy_asn_display(asn_int: int | None) -> str:
+            if asn_int is not None:
+                found = lookup_map.get(asn_int) or lookup_map.get(str(asn_int))
+                if found:
+                    return str(found)
+                return f"AS{asn_int}"
+            return "Unknown ISP"
+
+        isp_counts: dict[int | None, int] = {}
+        active_clients_legacy: list[dict[str, Any]] = []
+        dist_mismatch_ips: set[str] = set()
+        proxy_ips: set[str] = set()
+        total_tunnel_reqs = 0
+
+        if effective_mask:
+            from backend.core.share_db import mask_ip
+
+        for row in f_list:
+            raw_ip = str(row.get("ip") or "")
+            if raw_ip:
+                proxy_ips.add(raw_ip)
+            reqs = int(row.get("requests") or row.get("count") or 1)
+            total_tunnel_reqs += reqs
+            asn_int = parse_asn_int(row.get("asn"))
+            isp_counts[asn_int] = isp_counts.get(asn_int, 0) + reqs
+
+            impossible = bool(row.get("impossible_distance") or row.get("impossible_dist"))
+            if not impossible:
+                rtt = float_or_zero(row.get("rtt_min_ms", row.get("rtt_ms")))
+                dist = float_or_zero(row.get("distance_km"))
+                if rtt > 0 and dist > (rtt * 100.0 + 150.0):
+                    impossible = True
+            if impossible and raw_ip:
+                dist_mismatch_ips.add(raw_ip)
+
+            risk_level = str(row.get("risk_level") or ("High" if impossible else "Medium"))
+            client_item = {**row}
+            if effective_mask and client_item.get("ip"):
+                client_item["ip"] = mask_ip(str(client_item["ip"]))
+            client_item["impossible_distance"] = impossible
+            client_item["risk_level"] = risk_level
+            client_item["asn_name"] = _legacy_asn_display(asn_int)
+            client_item.pop("asn", None)
+            active_clients_legacy.append(client_item)
+
+        suspicious_isps_legacy = [
+            {
+                "isp": _legacy_asn_display(asn_val),
+                "asn": asn_val,
+                "count": cnt,
+            }
+            for asn_val, cnt in sorted(isp_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        ]
+
+        return {
+            "active_proxies_count": len(proxy_ips),
+            "tunnel_requests_count": total_tunnel_reqs,
+            "distance_mismatches_count": len(dist_mismatch_ips),
+            "traffic_quality": traffic_quality_legacy,
+            "suspicious_isps": suspicious_isps_legacy,
+            "active_clients": active_clients_legacy[:50],
+        }
+
+    stats_map: Mapping[str, Any] = stats if isinstance(stats, Mapping) else {}
+    q_list = list(quality_rows if isinstance(quality_rows, Iterable) else ())
+    isp_list = list(raw_isps or ())
+    client_list = list(raw_clients or ())
 
     traffic_quality: list[dict[str, Any]] = []
     if q_list:
@@ -203,9 +366,9 @@ def finish_security_proxies(
         active_clients.append(client_item)
 
     return {
-        "active_proxies_count": int(stats.get("active_proxies_count", 0)),
-        "tunnel_requests_count": int(stats.get("total_requests_count", 0)),
-        "distance_mismatches_count": int(stats.get("distance_mismatches_count", 0)),
+        "active_proxies_count": int(stats_map.get("active_proxies_count", 0)),
+        "tunnel_requests_count": int(stats_map.get("total_requests_count", 0)),
+        "distance_mismatches_count": int(stats_map.get("distance_mismatches_count", 0)),
         "traffic_quality": traffic_quality,
         "suspicious_isps": suspicious_isps,
         "active_clients": active_clients,

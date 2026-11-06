@@ -800,3 +800,77 @@ def _city_filters(row: tuple) -> dict:
 
 def _zero_baseline_count_item(label: str, count: int, meta: dict, warn_threshold: int) -> dict:
     return _item(label, count, 0, "requests", meta, "warning" if count >= warn_threshold else "info")
+
+
+# Coalesced single-pass scan template aliases (used by insights repository & Cloud engine parity checks)
+_coalesced_city_aggregates = COALESCED_CITY_AGGREGATES
+_coalesced_url_aggregates = COALESCED_URL_EXTENDED_AGGREGATES
+_coalesced_ip_security_aggregates = COALESCED_IP_EXTENDED_AGGREGATES
+_coalesced_fp_aggregates = COALESCED_FP_AGGREGATES
+_coalesced_dim_aggregates = COALESCED_DIM_AGGREGATES
+_coalesced_geo_latency_aggregates = COALESCED_GEO_LATENCY_AGGREGATES
+_coalesced_asn_aggregates = COALESCED_ASN_AGGREGATES
+_coalesced_scalar_aggregates = COALESCED_SCALAR_EXTENDED_AGGREGATES
+
+COALESCED_SCAN_DETECTORS: dict[str, tuple[str, ...]] = {
+    "_coalesced_city_aggregates": (
+        "city_surges",
+        "city_error_spikes",
+        "city_latency_regressions",
+        "new_city_traffic",
+    ),
+    "_coalesced_url_aggregates": (
+        "error_spikes",
+        "cache_collapse",
+        "cacheability_regression",
+        "latency_regression",
+        "tail_latency",
+        "new_probe_urls",
+        "payload_compression_regression",
+        "image_optimization_opportunities",
+        "cache_ttl_mismatch",
+        "origin_retries",
+    ),
+    "_coalesced_ip_security_aggregates": (
+        "low_and_slow",
+        "credential_enumeration",
+        "content_discovery",
+        "orphaned_deep_crawl",
+        "session_harvesting",
+        "request_size_anomaly",
+        "connection_abuse",
+    ),
+    "_coalesced_fp_aggregates": (
+        "botnet_grouping",
+        "residential_fingerprint_dispersion",
+        "cipher_spread",
+    ),
+    "_coalesced_dim_aggregates": (
+        "new_country_traffic",
+        "proxy_surge",
+        "method_drift",
+        "connection_type_mix",
+        "origin_error_rate",
+        "origin_ip_failure",
+        "referer_monoculture",
+        "ua_monoculture",
+    ),
+    "_coalesced_geo_latency_aggregates": (
+        "pop_latency_regression",
+        "region_latency",
+        "metro_delivery_degradation",
+    ),
+    "_coalesced_asn_aggregates": (
+        "asn_concentration",
+        "new_asn_traffic",
+        "network_asn_health",
+        "asn_hosting_shift",
+    ),
+    "_coalesced_scalar_aggregates": (
+        "http3_fallback",
+        "cache_hit_cliff",
+        "timeout_split",
+        "origin_latency_spike",
+    ),
+}
+

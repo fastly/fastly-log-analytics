@@ -554,6 +554,34 @@ def heap_to_sorted_items(heap: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
     return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
 
 
+def build_insights_envelope(
+    insights: list[dict[str, Any]] | None = None,
+    window_start: str = "",
+    window_end: str = "",
+    baseline_start: str = "",
+    baseline_end: str = "",
+    window_hours: float = 0.0,
+    baseline_hours: float = 0.0,
+    *,
+    computed_at: str = "",
+    window_total_requests: int = 0,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build the standard insights response envelope (accepts positional or keyword window args)."""
+    return {
+        "insights": list(insights) if insights is not None else [],
+        "window_start": window_start,
+        "window_end": window_end,
+        "baseline_start": baseline_start,
+        "baseline_end": baseline_end,
+        "computed_at": computed_at or window_end,
+        "window_hours": window_hours,
+        "baseline_hours": baseline_hours,
+        "window_total_requests": int(window_total_requests),
+        **extra,
+    }
+
+
 __all__ = [
     "AUTH_PATHS",
     "AUTH_REGEX",
@@ -566,6 +594,7 @@ __all__ = [
     "build_error_insight_card",
     "build_insight_card",
     "build_insights_cache_key",
+    "build_insights_envelope",
     "build_insufficient_baseline_card",
     "clamp_insight_window",
     "compute_available_history_hours",

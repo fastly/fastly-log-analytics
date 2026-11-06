@@ -16,7 +16,16 @@ from collections.abc import Callable, Iterable, Mapping, Sequence  # noqa: F401
 from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import TYPE_CHECKING, Any
 
-from backend.core.fos_client import _safe_table_name
+try:
+    from backend.core.fos_client import _safe_table_name
+except Exception:
+    _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    def _safe_table_name(name: str) -> str:
+        if not _SAFE_IDENT_RE.match(name):
+            raise ValueError(f"Unsafe SQL table name: {name!r}")
+        return name
+
 from backend.repositories.utils.response_shaping import asn as _asn_mod
 from backend.repositories.utils.response_shaping import domains as _domains_mod
 from backend.repositories.utils.response_shaping import time_buckets as _time_buckets_mod
@@ -36,6 +45,7 @@ from backend.repositories.utils.response_shaping.asn import (
 from backend.repositories.utils.response_shaping.domains import (
     ORIGIN_SUMMARY_KEYS,
     PERF_SECTION_DEFAULTS,
+    PERF_TTL_BUCKET_EDGES,
     PERF_TTL_BUCKETS,
     PERF_TTL_LAST_BUCKET,
     SECURITY_CONN_REUSE_BUCKETS,
@@ -54,13 +64,16 @@ from backend.repositories.utils.response_shaping.domains import (
     compute_network_global_summary,
     compute_network_health_score,
     compute_share_pct,
+    compute_summary_from_dims,
     deduplicate_metro_leaderboard,
+    empty_assets_aggregates,
     empty_cmcd_aggregates,
     empty_dashboard_aggregates,
     empty_network_quality,
     empty_origin_aggregates,
     empty_origin_summary,
     empty_performance_aggregates,
+    empty_rum_analytics,
     empty_security_aggregates,
     empty_security_proxies,
     empty_sessions_response,
@@ -89,6 +102,7 @@ from backend.repositories.utils.response_shaping.domains import (
     shape_perf_ttl_dist_rows,
     shape_pop_latency_rows,
     shape_protocol_distribution,
+    shape_rum_environments,
     shape_security_bucket_rows,
     shape_security_fingerprint_row,
     shape_security_ngwaf_bot_row,
@@ -226,6 +240,7 @@ __all__ = [
     "INSIGHT_BUCKET_INTERVALS",
     "ORIGIN_SUMMARY_KEYS",
     "PERF_SECTION_DEFAULTS",
+    "PERF_TTL_BUCKET_EDGES",
     "PERF_TTL_BUCKETS",
     "PERF_TTL_LAST_BUCKET",
     "SECURITY_CONN_REUSE_BUCKETS",
@@ -262,13 +277,16 @@ __all__ = [
     "compute_network_global_summary",
     "compute_network_health_score",
     "compute_share_pct",
+    "compute_summary_from_dims",
     "deduplicate_metro_leaderboard",
+    "empty_assets_aggregates",
     "empty_cmcd_aggregates",
     "empty_dashboard_aggregates",
     "empty_network_quality",
     "empty_origin_aggregates",
     "empty_origin_summary",
     "empty_performance_aggregates",
+    "empty_rum_analytics",
     "empty_security_aggregates",
     "empty_security_proxies",
     "empty_sessions_response",
@@ -316,6 +334,7 @@ __all__ = [
     "shape_performance_asn_rows",
     "shape_pop_latency_rows",
     "shape_protocol_distribution",
+    "shape_rum_environments",
     "shape_security_bucket_rows",
     "shape_security_fingerprint_row",
     "shape_security_ngwaf_bot_row",

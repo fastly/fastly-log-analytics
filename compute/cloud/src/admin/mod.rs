@@ -361,8 +361,7 @@ pub fn retry_job(context: &Context<'_, impl Runtime>, id: &str) -> Result<Value,
 }
 
 pub fn check_vcl_drift(deployed_vcl_sha: Option<&str>, current_vcl_sha: &str) -> bool {
-    let vcl_drift = deployed_vcl_sha.is_some_and(|sha| sha != current_vcl_sha);
-    vcl_drift
+    deployed_vcl_sha.is_some_and(|sha| sha != current_vcl_sha)
 }
 
 fn own_services(runtime: &impl Runtime) -> Result<Vec<String>, Error> {

@@ -87,9 +87,11 @@ def chart_interval_seconds(chart_interval: str | None, default: int = 60) -> int
     return CHART_INTERVAL_SECONDS.get(normalize_chart_interval(chart_interval), default)
 
 
-def _coerce_utc_datetime(value: str | datetime | None) -> datetime | None:
+def _coerce_utc_datetime(value: str | int | float | datetime | None) -> datetime | None:
     if value is None:
         return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(float(value), tz=UTC)
     if isinstance(value, datetime):
         return ensure_utc(value)
     return parse_iso_utc(value)
@@ -97,8 +99,8 @@ def _coerce_utc_datetime(value: str | datetime | None) -> datetime | None:
 
 def clamp_bucket_seconds(
     bucket_seconds: int,
-    start_time: str | datetime | None,
-    end_time: str | datetime | None,
+    start_time: str | int | float | datetime | None,
+    end_time: str | int | float | datetime | None,
     *,
     max_buckets: int = 8640,
 ) -> int:
@@ -112,8 +114,8 @@ def clamp_bucket_seconds(
 
 
 def generate_epoch_aligned_buckets(
-    start_time: str | datetime | None,
-    end_time: str | datetime | None,
+    start_time: str | int | float | datetime | None,
+    end_time: str | int | float | datetime | None,
     bucket_seconds: int,
     *,
     fmt: str = "%Y-%m-%dT%H:%M:%S",
@@ -131,39 +133,60 @@ def generate_epoch_aligned_buckets(
 
 
 def pad_timeseries_buckets(
-    start_time: str | datetime | None,
-    end_time: str | datetime | None,
-    bucket_seconds: int,
-    rows_by_bucket: Mapping[str, Mapping[str, Any]],
+    start_time: str | int | float | datetime | Mapping[Any, Mapping[str, Any]] | None,
+    end_time: str | int | float | datetime | None,
+    bucket_seconds: int | str | float | datetime | None,
+    rows_by_bucket: Mapping[Any, Mapping[str, Any]] | int,
     default_vals: Mapping[str, Any],
     *,
     bucket_fmt: str = "%Y-%m-%d %H:%M:%S",
 ) -> list[dict[str, Any]]:
     """Zero-fill missing time-series buckets between ``start_time`` and ``end_time``.
 
-    Accepts ``start_time`` / ``end_time`` as ISO strings, ``datetime`` objects, or ``None``.
-    Falls back to sorted existing buckets when bounds cannot be parsed.
+    Accepts ``start_time`` / ``end_time`` as ISO strings, epoch seconds, ``datetime`` objects, or ``None``,
+    and supports both ``(start_time, end_time, bucket_seconds, rows_by_bucket, default_vals)`` and
+    ``(rows_by_bucket, start_time, end_time, bucket_seconds, default_vals)`` call orders.
     """
-    st = _coerce_utc_datetime(start_time)
-    et = _coerce_utc_datetime(end_time)
-    if st is None or et is None or bucket_seconds <= 0:
-        return sorted([{"bucket": k, **v} for k, v in rows_by_bucket.items()], key=lambda x: x["bucket"])
+    if isinstance(start_time, Mapping):
+        rows_map: Mapping[Any, Mapping[str, Any]] = start_time
+        st_arg = end_time
+        et_arg = bucket_seconds  # type: ignore[assignment]
+        bs_arg = int(rows_by_bucket)  # type: ignore[arg-type]
+    else:
+        rows_map = rows_by_bucket  # type: ignore[assignment]
+        st_arg = start_time
+        et_arg = end_time
+        bs_arg = int(bucket_seconds)  # type: ignore[arg-type]
+
+    st = _coerce_utc_datetime(st_arg)
+    et = _coerce_utc_datetime(et_arg)
+    if st is None or et is None or bs_arg <= 0:
+        return sorted([{"bucket": k, **v} for k, v in rows_map.items()], key=lambda x: str(x["bucket"]))
 
     st_epoch = int(st.timestamp())
-    st_aligned = st_epoch - (st_epoch % bucket_seconds)
+    st_aligned = st_epoch - (st_epoch % bs_arg)
 
     et_epoch = int(et.timestamp())
-    et_aligned = et_epoch - (et_epoch % bucket_seconds)
+    et_aligned = et_epoch - (et_epoch % bs_arg)
     if et_aligned < st_aligned:
         return []
 
     has_callables = any(callable(v) for v in default_vals.values())
     static_defaults = None if has_callables else dict(default_vals)
 
+    aligned_numeric_map: dict[int, Mapping[str, Any]] = {}
+    for k, v in rows_map.items():
+        if isinstance(k, int | float) and not isinstance(k, bool):
+            ik = int(k)
+            aligned_numeric_map[ik] = v
+            aligned_numeric_map[ik - (ik % bs_arg)] = v
+
     padded: list[dict[str, Any]] = []
-    for ts in range(st_aligned, et_aligned + 1, bucket_seconds):
+    for ts in range(st_aligned, et_aligned + 1, bs_arg):
         bucket_str = datetime.fromtimestamp(ts, tz=UTC).strftime(bucket_fmt)
-        existing = rows_by_bucket.get(bucket_str)
+        existing = rows_map.get(bucket_str)
+        if existing is None:
+            existing = aligned_numeric_map.get(ts, rows_map.get(str(ts)))
         if existing is not None:
             padded.append({"bucket": bucket_str, **existing})
         elif static_defaults is not None:

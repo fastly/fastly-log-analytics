@@ -94,9 +94,20 @@ def shape_latency_percentiles(
     return out
 
 
-def is_pop_latency_elevated(p95_ms: float | None, median_p95_ms: float | None) -> bool:
-    """Return True when a POP's P95 latency exceeds 2× the median P95 across POPs."""
-    return p95_ms is not None and median_p95_ms is not None and p95_ms > median_p95_ms * 2
+class _IterRowsDict(dict[str, Any]):
+    """Dictionary whose iteration yields ``self['rows']`` while preserving all dict keys and methods."""
+
+    def __iter__(self) -> Any:
+        return iter(self.get("rows", ()))
+
+
+def is_pop_latency_elevated(
+    p95_ms: float | None,
+    median_p95_ms: float | None,
+    factor: float = 1.5,
+) -> bool:
+    """Return True when a POP's P95 latency exceeds ``factor`` × the median P95 across POPs."""
+    return p95_ms is not None and median_p95_ms is not None and p95_ms > median_p95_ms * factor
 
 
 def shape_pop_latency_rows(
@@ -116,7 +127,7 @@ def shape_pop_latency_rows(
             base["median_p95_ms"] = 0
         base["rows"] = []
         base.update(extra)
-        return base
+        return _IterRowsDict(base)
 
     normalized: list[tuple[Any, Any, Any, Any]] = []
     for r in rows:
@@ -127,22 +138,32 @@ def shape_pop_latency_rows(
 
     valid_p95s = sorted(p95 for _, _, _, p95 in normalized if p95 is not None)
     median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
-    return {
-        "has_data": True,
-        "requires_group_c": False,
-        "median_p95_ms": median_p95,
-        "rows": [
-            {
-                "pop": pop,
-                "requests": reqs,
-                "p50_ms": p50,
-                "p95_ms": p95,
-                "elevated": is_pop_latency_elevated(p95, median_p95),
-            }
-            for pop, reqs, p50, p95 in normalized
-        ],
-        **extra,
-    }
+    return _IterRowsDict(
+        {
+            "has_data": True,
+            "requires_group_c": False,
+            "median_p95_ms": median_p95,
+            "rows": [
+                {
+                    "pop": pop,
+                    "requests": reqs,
+                    "p50_ms": p50,
+                    "p95_ms": p95,
+                    "elevated": is_pop_latency_elevated(p95, median_p95),
+                }
+                for pop, reqs, p50, p95 in normalized
+            ],
+            **extra,
+        }
+    )
+
+
+_WATERFALL_ALIAS_MAP: tuple[tuple[str, str], ...] = (
+    ("edge_processing", "a"),
+    ("origin_wait", "b"),
+    ("origin_download", "c"),
+    ("client_download", "d"),
+)
 
 
 def shape_waterfall_avg(
@@ -150,36 +171,52 @@ def shape_waterfall_avg(
     origin_wait: Any = 0.0,
     origin_download: Any = 0.0,
     client_download: Any = 0.0,
-) -> dict[str, dict[str, float]]:
+) -> dict[str, Any]:
     """Shape the performance waterfall average breakdown from a mapping or 4 positional values."""
     if isinstance(edge_processing, Mapping):
         row = edge_processing
-        return {"avg": {k: float_or_zero(row.get(k)) for k in WATERFALL_KEYS}}
-    return {
-        "avg": {
-            "edge_processing": float_or_zero(edge_processing),
-            "origin_wait": float_or_zero(origin_wait),
-            "origin_download": float_or_zero(origin_download),
-            "client_download": float_or_zero(client_download),
+        shaped = {
+            k: max(0.0, float_or_zero(row.get(k, row.get(alias))))
+            for k, alias in _WATERFALL_ALIAS_MAP
         }
-    }
+    else:
+        shaped = {
+            "edge_processing": max(0.0, float_or_zero(edge_processing)),
+            "origin_wait": max(0.0, float_or_zero(origin_wait)),
+            "origin_download": max(0.0, float_or_zero(origin_download)),
+            "client_download": max(0.0, float_or_zero(client_download)),
+        }
+    return {**shaped, "avg": dict(shaped)}
+
+
+_UNSET = object()
 
 
 def compute_network_health_score(
-    throughput_bps: float | None,
-    rtt_congestion_us: float | None,
-    avg_ploss: float | None,
-    rtt_jitter_us: float | None,
-    error_pct: float | None,
+    throughput_bps: float | int | None,
+    rtt_congestion_us: float | int | None,
+    avg_ploss: float | int | None,
+    rtt_jitter_us: float | int | None,
+    error_pct: float | int | None | object = _UNSET,
 ) -> float:
-    """Compute the composite 0–100 network health score from packet loss, RTT congestion, jitter, and 5xx rate."""
+    """Compute the composite 0–100 network health score (supports both 5-arg and 4-arg signatures)."""
+    if error_pct is _UNSET:
+        rtt_med_us = float(throughput_bps or 0.0)
+        rtt_base_us = float(rtt_congestion_us or 0.0)
+        congestion_us = max(0.0, rtt_med_us - rtt_base_us)
+        loss_pct = max(0.0, float(avg_ploss or 0.0))
+        err_pct = max(0.0, float(rtt_jitter_us or 0.0))
+        c_pen = min(40.0, (congestion_us / 1000.0) * 0.25)
+        l_pen = min(35.0, loss_pct * 3.5)
+        e_pen = min(25.0, err_pct * 2.5)
+        return round(max(0.0, min(100.0, 100.0 - (c_pen + l_pen + e_pen))), 1)
     _ = throughput_bps
-    pkt = min((avg_ploss or 0) / 0.05, 1.0) if avg_ploss is not None else 0
-    cong = min((rtt_congestion_us or 0) / 200_000, 1.0) if rtt_congestion_us is not None else 0
-    jitter = min((rtt_jitter_us or 0) / 100_000, 1.0) if rtt_jitter_us is not None else 0
-    err = min((error_pct or 0) / 10.0, 1.0) if error_pct is not None else 0
+    pkt = min(max(float(avg_ploss or 0.0), 0.0) / 0.05, 1.0) if avg_ploss is not None else 0.0
+    cong = min(max(float(rtt_congestion_us or 0.0), 0.0) / 200_000.0, 1.0) if rtt_congestion_us is not None else 0.0
+    jitter = min(max(float(rtt_jitter_us or 0.0), 0.0) / 100_000.0, 1.0) if rtt_jitter_us is not None else 0.0
+    err = min(max(float(error_pct or 0.0), 0.0) / 10.0, 1.0) if error_pct is not None else 0.0
     weighted = pkt * 0.40 + cong * 0.30 + jitter * 0.20 + err * 0.10
-    return round((1.0 - weighted) * 100, 1)
+    return round(max(0.0, min(100.0, (1.0 - weighted) * 100.0)), 1)
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -282,7 +319,7 @@ def empty_origin_aggregates(*, include_has_data: bool = True, **extra: Any) -> d
         base["has_data"] = False
     base.update(
         {
-            "summary": {},
+            "summary": {**empty_origin_summary(), "total_misses": 0, "total_passes": 0},
             "timeseries": {"has_data": False, "series": []},
             "slow_urls": {"has_data": False, "rows": []},
             "status_codes": {"has_data": False, "rows": []},
@@ -293,6 +330,51 @@ def empty_origin_aggregates(*, include_has_data: bool = True, **extra: Any) -> d
         }
     )
     return base
+
+
+def empty_assets_aggregates(**extra: Any) -> dict[str, Any]:
+    """Return a fresh empty assets & shield aggregates payload."""
+    return {
+        "asset_type_breakdown": [],
+        "cache_performance": [],
+        "compression_performance": [],
+        "large_uncompressed_assets": [],
+        "low_ttl_assets": [],
+        "missing_fields": [],
+        **extra,
+    }
+
+
+def empty_rum_analytics(**extra: Any) -> dict[str, Any]:
+    """Return a fresh empty RUM analytics payload when no beacons exist."""
+    return {
+        "is_mock": False,
+        "no_data": True,
+        "beacon_count": 0,
+        "pageview_count": 0,
+        "interaction_count": 0,
+        "error_count": 0,
+        "message": "Waiting for real-time RUM user events...",
+        "vitals": {
+            "lcp": {"p75": None, "distribution": None},
+            "cls": {"p75": None, "distribution": None},
+            "inp": {"p75": None, "distribution": None},
+            "fid": {"p75": None, "fcp": None, "ttfb": None},
+        },
+        "worst_pages": [],
+        "errors": [],
+        "trends": {
+            "timestamps": [],
+            "lcp": [],
+            "cls": [],
+            "error_rate": [],
+            "pageviews": [],
+            "interactions": [],
+            "errors": [],
+        },
+        "environments": {"browsers": {}, "os": {}, "devices": {}},
+        **extra,
+    }
 
 
 def empty_performance_aggregates(
@@ -604,22 +686,37 @@ def parse_metro_code(metro_raw: Any) -> int | None:
 def deduplicate_metro_leaderboard(
     metro_entries: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Deduplicate metro leaderboard entries by formatted display ``city`` with request-weighted health scores."""
+    """Deduplicate metro leaderboard entries by formatted display ``city``/``metro`` with request-weighted metrics."""
     seen: dict[str, dict[str, Any]] = {}
+    weighted_fields: tuple[tuple[str, int], ...] = (
+        ("health_score", 1),
+        ("rtt_med_us", 1),
+        ("rtt_med_ms", 2),
+        ("avg_ploss", 4),
+        ("avg_ploss_pct", 3),
+        ("error_pct", 2),
+    )
     for entry in metro_entries:
-        key = str(entry["city"])
+        key = str(entry.get("city") or entry.get("metro") or "")
+        new_reqs = int(entry.get("total_reqs", entry.get("reqs", 0)) or 0)
         if key in seen:
             prev = seen[key]
-            prev_reqs = int(prev["total_reqs"])
-            new_reqs = int(entry["total_reqs"])
+            prev_reqs = int(prev.get("total_reqs", prev.get("reqs", 0)) or 0)
             total = prev_reqs + new_reqs
-            if prev.get("health_score") is not None and entry.get("health_score") is not None and total > 0:
-                prev["health_score"] = round(
-                    (prev["health_score"] * prev_reqs + entry["health_score"] * new_reqs) / total, 1
-                )
+            if total > 0:
+                for field_name, ndigits in weighted_fields:
+                    if prev.get(field_name) is not None and entry.get(field_name) is not None:
+                        prev[field_name] = round(
+                            (float(prev[field_name]) * prev_reqs + float(entry[field_name]) * new_reqs) / total,
+                            ndigits,
+                        )
             prev["total_reqs"] = total
+            prev["reqs"] = total
         else:
-            seen[key] = dict(entry)
+            item = dict(entry)
+            item["total_reqs"] = new_reqs
+            item["reqs"] = new_reqs
+            seen[key] = item
     return sorted(seen.values(), key=lambda x: x["total_reqs"], reverse=True)
 
 
@@ -857,7 +954,7 @@ def shape_origin_status_row(status: Any, count: Any, pct: Any) -> dict[str, Any]
     }
 
 
-PERF_TTL_BUCKETS: tuple[tuple[int, str], ...] = (
+PERF_TTL_BUCKET_EDGES: tuple[tuple[int, str], ...] = (
     (0, "0s"),
     (10, "<10s"),
     (30, "<30s"),
@@ -877,6 +974,7 @@ PERF_TTL_BUCKETS: tuple[tuple[int, str], ...] = (
     (7776000, "<90d"),
     (31536000, "<1y"),
 )
+PERF_TTL_BUCKETS: list[str] = ["< 60s", "1m - 1h", "1h - 1d", "> 1d"]
 PERF_TTL_LAST_BUCKET = ">1y"
 
 
@@ -1145,10 +1243,146 @@ def shape_sessions_envelope(
     return res
 
 
+class _IterSummaryDict(dict[str, Any]):
+    """Dictionary whose iteration yields ``(asset_type_breakdown, cache_performance, compression_performance)``."""
+
+    def __iter__(self) -> Any:
+        return iter(
+            (
+                self.get("asset_type_breakdown", []),
+                self.get("cache_performance", []),
+                self.get("compression_performance", []),
+            )
+        )
+
+
+def compute_summary_from_dims(
+    dim_rows: Iterable[Any],
+) -> dict[str, Any]:
+    """Compute ``asset_type_breakdown``, ``cache_performance``, and ``compression_performance`` from dimension rows."""
+    by_type_reqs: dict[str, int] = {}
+    by_type_bytes: dict[str, int] = {}
+    by_type_hit_reqs: dict[str, int] = {}
+    by_type_cache_denom: dict[str, int] = {}
+    by_type_comp_num: dict[str, int] = {}
+    by_type_comp_denom: dict[str, int] = {}
+    by_cache: dict[tuple[str, str], list[int]] = {}
+    by_comp: dict[tuple[str, str], list[int]] = {}
+
+    for row in dim_rows:
+        if isinstance(row, Mapping):
+            asset_type = str(row.get("asset_type") or "API/Dynamic")
+            cache_status = str(row.get("cache_status") or row.get("cache") or "MISS")
+            encoding_norm = str(row.get("content_encoding") or row.get("encoding_norm") or "uncompressed")
+            reqs = int(row.get("requests", row.get("reqs", 0)) or 0)
+            sum_bytes = int(row.get("total_bytes", row.get("bytes", row.get("sum_bytes", 0))) or 0)
+            is_compressed = int(
+                row.get(
+                    "is_compressed",
+                    1 if encoding_norm.lower() in ("br", "gzip", "deflate", "zstd") else 0,
+                )
+            )
+            is_compressible = int(
+                row.get(
+                    "is_compressible",
+                    1
+                    if asset_type in ("JavaScript", "CSS", "JavaScript/CSS", "Documents", "Fonts", "API/Dynamic")
+                    else 0,
+                )
+            )
+        else:
+            asset_type, cache_status, encoding_norm, is_compressed, is_compressible, reqs, sum_bytes = row
+            reqs, sum_bytes = int(reqs or 0), int(sum_bytes or 0)
+
+        by_type_reqs[asset_type] = by_type_reqs.get(asset_type, 0) + reqs
+        by_type_bytes[asset_type] = by_type_bytes.get(asset_type, 0) + sum_bytes
+        if cache_status in ("HIT", "HIT-SYNTHETIC", "HIT-STALE", "HIT-CLUSTER"):
+            by_type_hit_reqs[asset_type] = by_type_hit_reqs.get(asset_type, 0) + reqs
+        if cache_status in ("HIT", "HIT-SYNTHETIC", "HIT-STALE", "HIT-CLUSTER", "MISS", "PASS", "BYPASS"):
+            by_type_cache_denom[asset_type] = by_type_cache_denom.get(asset_type, 0) + reqs
+        if is_compressible == 1:
+            by_type_comp_denom[asset_type] = by_type_comp_denom.get(asset_type, 0) + reqs
+            if is_compressed == 1:
+                by_type_comp_num[asset_type] = by_type_comp_num.get(asset_type, 0) + reqs
+
+        ck = (asset_type, cache_status)
+        if ck not in by_cache:
+            by_cache[ck] = [0, 0]
+        by_cache[ck][0] += reqs
+        by_cache[ck][1] += sum_bytes
+
+        ek = (asset_type, encoding_norm)
+        if ek not in by_comp:
+            by_comp[ek] = [0, 0]
+        by_comp[ek][0] += reqs
+        by_comp[ek][1] += sum_bytes
+
+    asset_type_breakdown = [
+        {
+            "asset_type": at,
+            "requests": by_type_reqs[at],
+            "egress_bytes": by_type_bytes[at],
+            "cache_hit_ratio": (
+                float(by_type_hit_reqs.get(at, 0)) / float(by_type_cache_denom[at])
+                if by_type_cache_denom.get(at, 0) > 0
+                else 0.0
+            ),
+            "compression_rate": (
+                float(by_type_comp_num.get(at, 0)) / float(by_type_comp_denom[at])
+                if by_type_comp_denom.get(at, 0) > 0
+                else 0.0
+            ),
+        }
+        for at in sorted(by_type_reqs.keys(), key=lambda k: (-by_type_reqs[k], k))
+    ]
+    cache_performance = [
+        {"asset_type": at, "cache_status": cs, "requests": vals[0], "bytes": vals[1]}
+        for (at, cs), vals in sorted(by_cache.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
+    ]
+    compression_performance = [
+        {"asset_type": at, "content_encoding": ce, "requests": vals[0], "bytes": vals[1]}
+        for (at, ce), vals in sorted(by_comp.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
+    ]
+    return _IterSummaryDict(
+        {
+            "asset_type_breakdown": asset_type_breakdown,
+            "cache_performance": cache_performance,
+            "compression_performance": compression_performance,
+        }
+    )
+
+
+def shape_rum_environments(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """Shape RUM environment GROUPING SETS rows into ``{"browsers": {...}, "os": {...}, "devices": {...}}``."""
+    browsers: dict[str, int] = {}
+    os_dict: dict[str, int] = {}
+    devices: dict[str, int] = {}
+    for row in rows:
+        cnt = int(row.get("count") or 0)
+        b = row.get("browser")
+        o = row.get("os")
+        d = row.get("device")
+        if b is not None and o is None and d is None:
+            browsers[str(b)] = browsers.get(str(b), 0) + cnt
+        elif o is not None and b is None and d is None:
+            os_dict[str(o)] = os_dict.get(str(o), 0) + cnt
+        elif d is not None and b is None and o is None:
+            devices[str(d)] = devices.get(str(d), 0) + cnt
+        else:
+            if b:
+                browsers[str(b)] = browsers.get(str(b), 0) + cnt
+            if o:
+                os_dict[str(o)] = os_dict.get(str(o), 0) + cnt
+            if d:
+                devices[str(d)] = devices.get(str(d), 0) + cnt
+    return {"browsers": browsers, "os": os_dict, "devices": devices}
+
+
 __all__ = [
     "ORIGIN_SUMMARY_KEYS",
     "PERF_SECTION_DEFAULTS",
     "PERF_TTL_BUCKETS",
+    "PERF_TTL_BUCKET_EDGES",
     "PERF_TTL_LAST_BUCKET",
     "SECURITY_CONN_REUSE_BUCKETS",
     "SECURITY_CONN_REUSE_LAST",
@@ -1170,13 +1404,16 @@ __all__ = [
     "compute_network_global_summary",
     "compute_network_health_score",
     "compute_share_pct",
+    "compute_summary_from_dims",
     "deduplicate_metro_leaderboard",
+    "empty_assets_aggregates",
     "empty_cmcd_aggregates",
     "empty_dashboard_aggregates",
     "empty_network_quality",
     "empty_origin_aggregates",
     "empty_origin_summary",
     "empty_performance_aggregates",
+    "empty_rum_analytics",
     "empty_security_aggregates",
     "empty_security_proxies",
     "empty_sessions_response",
@@ -1205,6 +1442,7 @@ __all__ = [
     "shape_perf_ttl_dist_rows",
     "shape_pop_latency_rows",
     "shape_protocol_distribution",
+    "shape_rum_environments",
     "shape_security_bucket_rows",
     "shape_security_fingerprint_row",
     "shape_security_ngwaf_bot_row",

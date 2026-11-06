@@ -12,6 +12,8 @@ import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from 
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
+import { CLOUD_PRUNED_ADMIN_HREFS } from '@/components/AppLayoutChrome'
 
 const ADMIN_PREFETCH_LINKS = [
   { href: '/admin/share', testId: 'open-share-dialog', label: 'Share Dashboard', icon: UserPlus, key: 'share' },
@@ -28,6 +30,9 @@ export function AdminPrefetchLinks() {
   const mounted = useMounted()
   const storeServiceId = useServiceStore(s => s.activeServiceId)
   const activeServiceId = mounted ? storeServiceId : null
+  const visibleLinks = IS_CLOUD_MODE
+    ? ADMIN_PREFETCH_LINKS.filter(item => !CLOUD_PRUNED_ADMIN_HREFS.has(item.href))
+    : ADMIN_PREFETCH_LINKS
   const handlePrefetch = (key: (typeof ADMIN_PREFETCH_LINKS)[number]['key']) => {
     if (key === 'share') queryClient.prefetchQuery({ queryKey: queryKeys.admin.shareStatus(), queryFn: async ({ signal }) => unwrapClient(client.GET('/api/admin/share/status', { signal })) })
     else if (key === 'scoring' && activeServiceId) { queryClient.prefetchQuery(scoringAnalyticsCompositeOptions(activeServiceId, 24)); queryClient.prefetchQuery(scoringConfigCompositeOptions(activeServiceId)) }
@@ -46,7 +51,7 @@ export function AdminPrefetchLinks() {
   }
   return (
     <>
-      {ADMIN_PREFETCH_LINKS.map(item => (
+      {visibleLinks.map(item => (
         <Link key={item.key} href={activeServiceId ? `${item.href}?service=${activeServiceId}` : item.href} prefetch={false} onMouseEnter={() => handlePrefetch(item.key)} data-testid={'testId' in item ? item.testId : undefined} className={buttonVariants({ variant: 'secondary', size: 'sm' })}>
           <item.icon className="h-4 w-4 mr-1" /> {item.label}
         </Link>
@@ -69,6 +74,13 @@ function useOpsOverviewSeed(): { seed: OpsOverviewSeed; seedServiceId: string | 
 }
 
 export function OperationsOverview() {
+  if (IS_CLOUD_MODE) {
+    return (
+      <div className="grid grid-cols-1 md:grid-cols-1 gap-3 min-h-[108px] [contain-intrinsic-size:auto_108px]" data-testid="admin-operations-overview">
+        <IngestHealthCard />
+      </div>
+    )
+  }
   return (
     <div className="grid grid-cols-1 md:grid-cols-4 gap-3 min-h-[108px] [contain-intrinsic-size:auto_108px]" data-testid="admin-operations-overview">
       <LiveQueriesCard /><IngestHealthCard /><SlowQueriesTeaser /><CeleryStatusCard />

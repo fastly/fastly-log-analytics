@@ -536,16 +536,17 @@ fn catalog_json_exports_enum_decode_maps_and_fos_regions() {
             shield.as_str().unwrap()
         );
     }
-    assert_eq!(logging::rum::shield_for_region("unknown-region"), "iad-va-us");
+    assert_eq!(
+        logging::rum::shield_for_region("unknown-region"),
+        "iad-va-us"
+    );
 }
 
 #[test]
 fn templates_json_exports_rum_and_sigv4_vcl_snippets() {
-    let tpl: Value =
-        serde_json::from_str(include_str!("../vcl/capture/templates.json")).unwrap();
+    let tpl: Value = serde_json::from_str(include_str!("../vcl/capture/templates.json")).unwrap();
     assert_eq!(
-        tpl["M"]["deliver"],
-        tpl["group_capture_deliver"]["M"],
+        tpl["M"]["deliver"], tpl["group_capture_deliver"]["M"],
         "Group M deliver templates must be identical without fake comments"
     );
     let m_deliver = tpl["M"]["deliver"].as_str().unwrap();
@@ -586,9 +587,14 @@ fn rum_ingest_matches_python_golden_vectors() {
     let object_time_s = gv["object_time_s"].as_i64().unwrap();
     let line_bytes = format!("{}\n", serde_json::to_string(&gv["faro_line"]).unwrap());
     let compressed = zstd::stream::encode_all(line_bytes.as_bytes(), 1).unwrap();
-    let converted =
-        rum::convert_object(&compressed, window_s, object_time_s, 1024 * 1024, service_id)
-            .unwrap();
+    let converted = rum::convert_object(
+        &compressed,
+        window_s,
+        object_time_s,
+        1024 * 1024,
+        service_id,
+    )
+    .unwrap();
 
     let expected = gv["expected_extracted"].as_array().unwrap();
     let expected_vitals: Vec<&Value> = expected
@@ -694,7 +700,10 @@ fn rum_validators_match_python_golden_vectors() {
 fn hll_registers_match_python_golden_vectors() {
     use fastly_log_analytics::ingest::summary::{hll_hash, Hll};
 
-    let cases = fixtures()["golden_vectors"]["hll"].as_array().unwrap().clone();
+    let cases = fixtures()["golden_vectors"]["hll"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert!(!cases.is_empty());
     for case in &cases {
         let mut hll = Hll::default();

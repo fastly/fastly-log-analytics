@@ -1,10 +1,10 @@
 [package]
 name = "session-scorer"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 authors = ["drew.michael"]
 description = "Edge session-anomaly scoring service for Fastly Compute"
-license.workspace = true
+license = "Apache-2.0"
 publish = false
 
 [[bin]]

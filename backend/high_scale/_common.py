@@ -383,9 +383,14 @@ def format_iso_utc_or_empty(value: Any) -> str:
     return format_iso_utc(value) or ""
 
 
-def _bucket_case(column: str, buckets: tuple[tuple[int, str], ...], last: str) -> str:
+def _bucket_case(column: str, buckets: Iterable[Any], last: str) -> str:
     """Build a ClickHouse ``multiIf(col <= limit, 'label', ..., 'last')`` expression."""
-    arms = ", ".join(f"{column} <= {limit}, '{label}'" for limit, label in buckets)
+    bucket_list = list(buckets)
+    if bucket_list and isinstance(bucket_list[0], str):
+        from backend.repositories.utils.response_shaping.domains import PERF_TTL_BUCKET_EDGES
+
+        bucket_list = list(PERF_TTL_BUCKET_EDGES)
+    arms = ", ".join(f"{column} <= {limit}, '{label}'" for limit, label in bucket_list)
     return f"multiIf({arms}, '{last}')"
 
 

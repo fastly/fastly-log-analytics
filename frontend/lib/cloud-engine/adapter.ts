@@ -1,14 +1,43 @@
 import {
+  executeSql,
+  getPresentColumns,
   getStoreStats,
   runInWorker,
   searchFieldSummariesInWorker,
   searchFieldValuesInWorker,
   setDashboardCacheIdentity,
 } from "./dashboard/client";
+import { handleAssetsRequest, type AssetsQueryParams } from "./assets";
+import { handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
 import { parseVcpuMsHeader } from "./dashboard/sources";
 import type { CardField } from "./dashboard/summaries";
+import {
+  handleCacheCollapseDetail,
+  handleInsightAvailability,
+  handleInsights,
+  type CacheCollapseDetailRequest,
+  type InsightsRequest,
+} from "./insights";
+import { handleNetworkRequest, type NetworkQueryParams } from "./network";
+import { handleOriginRequest } from "./origin";
+import { handlePerformanceRequest } from "./performance";
+import {
+  executeCloudQuery,
+  getQueryPresets,
+  getQuerySchema,
+  type QueryRequest,
+} from "./query";
+import { handleRumRequest, type RumQueryParams } from "./rum";
 import { parquetColumns, sampleStats } from "./schema";
+import { handleSecurityRequest } from "./security";
+import {
+  handleSessionScoringRoute,
+  handleSessionsDetail,
+  handleSessionsList,
+  type SessionDetailRequest,
+  type SessionsListRequest,
+} from "./sessions";
 import {
   deleteLogHistory,
   getLoggedTraffic,
@@ -36,7 +65,12 @@ import {
   reconcileSnapshot,
   type CronRunRow,
 } from "./usage/summary";
-import { useDebugStore, useFilterStore } from "@/stores/filterStore";
+import { handleValueRequest, type ValueQueryParams } from "./value";
+import {
+  useDebugStore,
+  useFilterStore,
+  useSessionRoleStore,
+} from "@/stores/filterStore";
 
 export { parseVcpuMsHeader };
 
@@ -827,6 +861,289 @@ export async function handleCloudAnalyticalRequest(
       })),
     );
     return jsonResponse({ columns: cols, sampleStats: null }, request);
+  }
+
+  // Page 8: Origin Analytics (/api/origin/*)
+  if (pathname.startsWith("/api/origin/")) {
+    return handleOriginRequest(request, pathname, url);
+  }
+
+  // Page 9: Performance Analytics (/api/performance, /api/performance/aggregates)
+  if (
+    pathname === "/api/performance/aggregates" ||
+    pathname === "/api/performance" ||
+    pathname.startsWith("/api/performance/")
+  ) {
+    return handlePerformanceRequest(request, pathname, url);
+  }
+
+  // Page 10: Security Analytics (/api/security/*)
+  if (pathname.startsWith("/api/security/")) {
+    return handleSecurityRequest(request, pathname, url);
+  }
+
+  const parseRequestParams = async (): Promise<Record<string, unknown>> => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of searchParams.entries()) {
+      out[k] = v;
+    }
+    if (method === "POST" || method === "PUT" || method === "PATCH") {
+      const body = (await request.clone().json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      if (body && typeof body === "object") {
+        Object.assign(out, body);
+      }
+    }
+    const headerSid = request.headers.get("x-service-id");
+    if (headerSid && !out.service_id) {
+      out.service_id = headerSid;
+    }
+    return out;
+  };
+
+  const resolveMaskIpsAndRole = (
+    params: Record<string, unknown>,
+  ): {
+    maskIps: boolean;
+    role: "admin" | "analyst" | "analyst-no-pii";
+  } => {
+    const headerRole = request.headers.get("x-session-role");
+    const isNoPii =
+      Boolean(params.mask_ips) ||
+      request.headers.get("x-mask-ips") === "1" ||
+      headerRole === "analyst-no-pii" ||
+      useSessionRoleStore.getState().isRemoteAnalyst;
+    return {
+      maskIps: isNoPii,
+      role: isNoPii
+        ? "analyst-no-pii"
+        : headerRole === "analyst"
+          ? "analyst"
+          : "admin",
+    };
+  };
+
+  // Page 11: Network Analytics (/api/network/bundle, /api/network-health, /api/network-quality, /api/network/pop-health)
+  if (
+    pathname === "/api/network/bundle" ||
+    pathname === "/api/network-health" ||
+    pathname === "/api/network-quality" ||
+    pathname === "/api/network/pop-health" ||
+    pathname.startsWith("/api/network/")
+  ) {
+    const params = await parseRequestParams();
+    const data = await handleNetworkRequest(pathname, {
+      ...params,
+      signal: request.signal,
+    } as NetworkQueryParams);
+    return jsonResponse(data, request);
+  }
+
+  // Page 12: Fastly Value (/api/value/summary, /api/value/*)
+  if (pathname === "/api/value/summary" || pathname.startsWith("/api/value/")) {
+    const params = await parseRequestParams();
+    const data = await handleValueRequest(pathname, {
+      ...params,
+      signal: request.signal,
+    } as ValueQueryParams);
+    return jsonResponse(data, request);
+  }
+
+  // Page 12: Assets Shield (/api/assets/aggregates, /api/assets/*)
+  if (
+    pathname === "/api/assets/aggregates" ||
+    pathname.startsWith("/api/assets/")
+  ) {
+    const params = await parseRequestParams();
+    const data = await handleAssetsRequest(pathname, {
+      ...params,
+      signal: request.signal,
+    } as AssetsQueryParams);
+    return jsonResponse(data, request);
+  }
+
+  // Page 13: Real User Monitoring (/api/services/{id}/rum/*, /api/rum/analytics, /api/rum/live-events, /api/rum/beacon-health)
+  const rumServiceMatch = pathname.match(
+    /^\/api\/services\/([^/]+)\/rum\/(.+)$/,
+  );
+  if (
+    rumServiceMatch ||
+    pathname === "/api/rum/analytics" ||
+    pathname === "/api/rum/live-events" ||
+    pathname === "/api/rum/beacon-health"
+  ) {
+    const params = await parseRequestParams();
+    const serviceId = rumServiceMatch
+      ? decodeURIComponent(rumServiceMatch[1])
+      : String(params.service_id ?? "default");
+    const data = await handleRumRequest(pathname, {
+      ...params,
+      service_id: serviceId,
+      signal: request.signal,
+    } as RumQueryParams);
+    return jsonResponse(data, request);
+  }
+
+  // Page 14: CMCD Streaming Analytics (/api/cmcd/aggregates, /api/cmcd/*, /api/services/{id}/cmcd/*)
+  const cmcdServiceMatch = pathname.match(
+    /^\/api\/services\/([^/]+)\/cmcd\/(.+)$/,
+  );
+  if (
+    pathname === "/api/cmcd/aggregates" ||
+    pathname.startsWith("/api/cmcd/") ||
+    cmcdServiceMatch
+  ) {
+    const params = await parseRequestParams();
+    const serviceId = cmcdServiceMatch
+      ? decodeURIComponent(cmcdServiceMatch[1])
+      : String(params.service_id ?? "default");
+    const data = await handleCmcdRequest(pathname, {
+      ...params,
+      service_id: serviceId,
+      signal: request.signal,
+    } as CmcdQueryParams);
+    return jsonResponse(data, request);
+  }
+
+  // Page 15: Sessions & Session Scoring (/api/sessions, /api/sessions/detail, /api/services/{id}/scoring/*)
+  if (pathname === "/api/sessions" && method === "POST") {
+    const params = await parseRequestParams();
+    const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const cols = await getPresentColumns(undefined, request.signal).catch(
+      () => undefined,
+    );
+    const res = await handleSessionsList(
+      params as unknown as SessionsListRequest,
+      {
+        serviceId: String(params.service_id ?? "default"),
+        maskIps,
+        role,
+        availableColumns: cols && cols.size > 0 ? cols : undefined,
+        runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+      },
+    );
+    return jsonResponse(res.body, request, undefined, res.status);
+  }
+
+  if (pathname === "/api/sessions/detail" && method === "POST") {
+    const params = await parseRequestParams();
+    const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const res = await handleSessionsDetail(
+      params as unknown as SessionDetailRequest,
+      {
+        serviceId: String(params.service_id ?? "default"),
+        maskIps,
+        role,
+        runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+      },
+    );
+    return jsonResponse(res.body, request, undefined, res.status);
+  }
+
+  const scoringServiceMatch = pathname.match(
+    /^\/api\/services\/([^/]+)\/scoring\/(.+)$/,
+  );
+  if (scoringServiceMatch) {
+    const serviceId = decodeURIComponent(scoringServiceMatch[1]);
+    const subPath = scoringServiceMatch[2];
+    const params = await parseRequestParams();
+    const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const cols = await getPresentColumns(undefined, request.signal).catch(
+      () => undefined,
+    );
+    const res = await handleSessionScoringRoute(
+      method,
+      serviceId,
+      subPath,
+      params,
+      {
+        serviceId,
+        maskIps,
+        role,
+        availableColumns: cols && cols.size > 0 ? cols : undefined,
+        runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+      },
+    );
+    return jsonResponse(res.body, request, undefined, res.status);
+  }
+
+  // Page 15: SQL Query Console (/api/presets, /api/query/schema*, /api/query)
+  if (pathname === "/api/presets" && method === "GET") {
+    const serviceId =
+      searchParams.get("service_id") ??
+      request.headers.get("x-service-id") ??
+      undefined;
+    return jsonResponse(getQueryPresets(serviceId), request);
+  }
+
+  if (
+    (pathname === "/api/query/schema" ||
+      pathname.startsWith("/api/query/schema/")) &&
+    method === "GET"
+  ) {
+    const params = await parseRequestParams();
+    const { maskIps } = resolveMaskIpsAndRole(params);
+    const serviceId = pathname.startsWith("/api/query/schema/")
+      ? decodeURIComponent(pathname.slice("/api/query/schema/".length))
+      : String(params.service_id ?? "logs");
+    return jsonResponse(getQuerySchema(serviceId, maskIps), request);
+  }
+
+  if (pathname === "/api/query" && method === "POST") {
+    const params = await parseRequestParams();
+    const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const res = await executeCloudQuery(params as unknown as QueryRequest, {
+      serviceId: String(params.service_id ?? "default"),
+      maskIps,
+      role,
+      runSql: (sql) => executeSql(sql, [], request.signal).catch(() => []),
+    });
+    return jsonResponse(res.body, request, undefined, res.status);
+  }
+
+  // Page 15: Insights (/api/insight-availability, /api/insights, /api/insights/cache-collapse-detail)
+  if (pathname === "/api/insight-availability" && method === "GET") {
+    const serviceId =
+      searchParams.get("service_id") ??
+      request.headers.get("x-service-id") ??
+      undefined;
+    const cols = await getPresentColumns(undefined, request.signal).catch(
+      () => undefined,
+    );
+    return jsonResponse(
+      handleInsightAvailability(
+        serviceId,
+        cols && cols.size > 0 ? cols : undefined,
+      ),
+      request,
+    );
+  }
+
+  if (pathname === "/api/insights" && (method === "POST" || method === "GET")) {
+    const params = await parseRequestParams();
+    const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const cols = await getPresentColumns(undefined, request.signal).catch(
+      () => undefined,
+    );
+    const data = await handleInsights(params as unknown as InsightsRequest, {
+      serviceId: String(params.service_id ?? "default"),
+      maskIps,
+      role,
+      availableColumns: cols && cols.size > 0 ? cols : undefined,
+    });
+    return jsonResponse(data, request);
+  }
+
+  if (pathname === "/api/insights/cache-collapse-detail" && method === "POST") {
+    const params = await parseRequestParams();
+    const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const data = await handleCacheCollapseDetail(
+      params as unknown as CacheCollapseDetailRequest,
+      { maskIps, role },
+    );
+    return jsonResponse(data, request);
   }
 
   return null;

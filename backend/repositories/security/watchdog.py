@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from backend.repositories.utils.response_shaping import (
@@ -19,13 +20,24 @@ _parse_asn_int = parse_asn_int
 _finish_proxies = finish_security_proxies
 
 
-def classify_ua_counts(rows: list[tuple[str, int]], n: int) -> list[dict]:
-    from backend.utils.bot_sources import build_matcher
+def classify_ua_counts(rows: list[tuple[str, int] | Mapping[str, Any]], n: int) -> list[dict]:
+    from backend.utils.bot_sources import build_matcher, build_well_known_bots_matcher
 
     match_ua = build_matcher()
+    fallback_ua = None
     bot_counts: dict[str, dict] = {}
-    for ua_val, cnt in rows:
-        for entry in match_ua(ua_val):
+    for row in rows:
+        if isinstance(row, Mapping):
+            ua_val = str(row.get("ua") or "")
+            cnt = int(row.get("cnt", row.get("count", 0)) or 0)
+        else:
+            ua_val, cnt = row[0], int(row[1] or 0)
+        matches = match_ua(ua_val)
+        if not matches:
+            if fallback_ua is None:
+                fallback_ua = build_well_known_bots_matcher()
+            matches = fallback_ua(ua_val)
+        for entry in matches:
             bot_id = entry.get("id", "unknown")
             if bot_id not in bot_counts:
                 cats = entry.get("categories", [])
@@ -42,20 +54,37 @@ def classify_ua_counts(rows: list[tuple[str, int]], n: int) -> list[dict]:
 def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
     if not rows:
         return []
-    from backend.utils.bot_sources import build_matcher, classify, enqueue, get_hostnames
+    from backend.utils.bot_sources import (
+        build_matcher,
+        build_well_known_bots_matcher,
+        classify,
+        enqueue,
+        get_hostnames,
+    )
 
     match_ua = build_matcher()
+    fallback_ua = None
     bot_agg: dict[str, dict] = {}
     new_ips: set[str] = set()
     ua_matches: dict[str, list[dict]] = {}
     matched_rows: list[tuple[list[dict], str, int]] = []
     ip_totals: dict[str, int] = {}
-    for ua_val, ip_val, cnt in rows:
+    for row in rows:
+        if isinstance(row, Mapping):
+            ua_val = row.get("ua")
+            ip_val = row.get("ip")
+            cnt = row.get("cnt", row.get("count", 0))
+        else:
+            ua_val, ip_val, cnt = row[0], row[1], row[2]
         if not ua_val or not ip_val:
             continue
         matches = ua_matches.get(ua_val)
         if matches is None:
             matches = list(match_ua(ua_val))
+            if not matches:
+                if fallback_ua is None:
+                    fallback_ua = build_well_known_bots_matcher()
+                matches = list(fallback_ua(ua_val))
             ua_matches[ua_val] = matches
         if not matches:
             continue
@@ -68,7 +97,10 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
         top_ips = [ip for ip, _ in sorted(ip_totals.items(), key=lambda kv: kv[1], reverse=True)[:_RDNS_LOOKUP_LIMIT]]
     else:
         top_ips = list(ip_totals)
-    hostnames = get_hostnames(top_ips)
+    try:
+        hostnames = get_hostnames(top_ips)
+    except Exception:
+        hostnames = {}
     top_ips_set = set(top_ips)
     classify_cache: dict[tuple[str, str], str] = {}
     for matches, ip_val, cnt in matched_rows:
@@ -108,7 +140,10 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
             else:
                 agg["unverified_count"] += cnt
     if new_ips:
-        enqueue(list(new_ips))
+        try:
+            enqueue(list(new_ips))
+        except Exception:
+            pass
     sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
     for b in sorted_bots:
         total = b["request_count"]
@@ -137,7 +172,7 @@ _GENERIC_BOT_RE = re.compile(
 )
 
 
-def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int]]) -> list[dict[str, Any]]:
+def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int] | Mapping[str, Any]]) -> list[dict[str, Any]]:
     from backend.utils.bot_sources import (
         _BOT_TOKEN_SUFFIX_RE,
         build_well_known_bots_matcher,
@@ -158,7 +193,14 @@ def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int]]) -> list
     total_site_bytes = 0
     ref_counts: dict[str, int] = {}
     ua_rows: list[tuple[str, int, int]] = []
-    for kind, key, cnt, r_bytes in rows:
+    for row in rows:
+        if isinstance(row, Mapping):
+            kind = str(row.get("kind") or "")
+            key = str(row.get("key") or "")
+            cnt = row.get("cnt", row.get("count", 0))
+            r_bytes = row.get("resp_bytes", 0)
+        else:
+            kind, key, cnt, r_bytes = row[0], row[1], row[2], row[3]
         cnt_i = int(cnt or 0)
         bytes_i = int(r_bytes or 0)
         if kind == "site":

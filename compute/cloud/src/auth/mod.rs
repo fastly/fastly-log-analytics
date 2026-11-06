@@ -3,7 +3,7 @@ pub mod settings;
 pub mod webauthn;
 pub use session::{
     cdn_cookie_valid, clear_cdn_cookie, cookie_header, issue_cdn_cookie, logout_cookie,
-    setup_cookie,
+    setup_cookie, HOST_CDN_COOKIE_NAME,
 };
 
 use crate::state::{StateError, StateStore};

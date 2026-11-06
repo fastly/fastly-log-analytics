@@ -25,9 +25,12 @@ def column_or_default(actual_cols: Collection[str], col: str, default: str, *, c
     return coalesce(ref, default)
 
 
-def protocol_label_expr(actual_cols: Collection[str]) -> str | None:
+def protocol_label_expr(actual_cols: Collection[str] = ("protocol",)) -> str | None:
     """Clean HTTP protocol label for network distribution, or ``None`` when no protocol column exists."""
-    col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
+    if isinstance(actual_cols, str):
+        col: str | None = actual_cols
+    else:
+        col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
     if col is None:
         if "transport" in actual_cols:
             return f"UPPER({coalesce('CAST(transport AS VARCHAR)', repr('TCP'))})"
@@ -42,7 +45,28 @@ def protocol_label_expr(actual_cols: Collection[str]) -> str | None:
     )
 
 
-def origin_latency_us(actual_cols: Collection[str], *, absent: str | None = "NULL") -> str | None:
+def origin_latency_us(
+    actual_cols: Collection[str] | str,
+    cols_set: Collection[str] | None = None,
+    table_alias: str | None = None,
+    *,
+    absent: str | None = "NULL",
+) -> str | None:
+    if isinstance(actual_cols, str) and cols_set is not None:
+        col_name = actual_cols
+        prefix = f"{table_alias}." if table_alias else ""
+        has_us = col_name in cols_set
+        has_ms = f"{col_name}_ms" in cols_set
+        if has_us and has_ms:
+            return f'COALESCE({prefix}"{col_name}", {prefix}"{col_name}_ms" * 1000.0)'
+        if has_ms:
+            return f'({prefix}"{col_name}_ms" * 1000.0)'
+        if has_us:
+            return f'{prefix}"{col_name}"'
+        if col_name == "ottfb" and "ttfb" in cols_set:
+            return f'({prefix}"ttfb" * 1000000.0)'
+        return absent
+
     has_ottfb, has_ttfb = "ottfb" in actual_cols, "ttfb" in actual_cols
     if has_ottfb and has_ttfb:
         return 'COALESCE("ottfb", "ttfb" * 1000000.0)'

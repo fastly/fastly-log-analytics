@@ -4,4 +4,4 @@ description = "Fastly Log Analytics"
 language = "rust"
 
 [scripts]
-build = "AR_wasm32_wasip1=\"${AR_wasm32_wasip1:-$(command -v llvm-ar || echo $(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-ar)}\" cargo build --locked --release --target wasm32-wasip1 --bin flp && mkdir -p bin && cp \"${CARGO_TARGET_DIR:-../target}/wasm32-wasip1/release/flp.wasm\" bin/main.wasm"
+build = "AR_wasm32_wasip1=\"${AR_wasm32_wasip1:-$(command -v llvm-ar || echo $(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-ar)}\" cargo build --locked --release --target wasm32-wasip1 --bin flp && cp \"${CARGO_TARGET_DIR:-../target}/wasm32-wasip1/release/flp.wasm\" \"${CARGO_TARGET_DIR:-../target}/wasm32-wasip1/release/fastly-logs-parquet-shell.wasm\" && mkdir -p bin && cp \"${CARGO_TARGET_DIR:-../target}/wasm32-wasip1/release/flp.wasm\" bin/main.wasm"

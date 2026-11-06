@@ -1,6 +1,7 @@
 import { getPageLoadId } from "@/lib/api";
 import { useDebugStore } from "@/stores/filterStore";
 import { BaseWorkerRpcClient } from "../worker-rpc";
+import { getDuckDBEngine } from "./duckdb";
 import {
   clearDashboardMemo,
   runDashboard as runInline,
@@ -77,7 +78,9 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     if (
       msg.type === "result" ||
       msg.type === "searchResult" ||
-      msg.type === "searchSummariesResult"
+      msg.type === "searchSummariesResult" ||
+      msg.type === "sqlResult" ||
+      msg.type === "presentColumnsResult"
     ) {
       if (this.finishJob(msg.id)) {
         cb.resolve(msg.result);
@@ -151,6 +154,111 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     });
   }
 
+  executeSql<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    if (signal?.aborted) {
+      return Promise.reject(new DOMException("Aborted", "AbortError"));
+    }
+    const worker = this.getWorker(this.handleMessage);
+    if (!worker) {
+      return getDuckDBEngine().executeSql<T>(sql, params, signal);
+    }
+    const id = this.allocateId();
+    return new Promise<T[]>((resolve, reject) => {
+      this.callbacks.set(id, {
+        resolve: resolve as (val: unknown) => void,
+      });
+      this.registerJob(id, worker, signal, reject, () => {
+        this.callbacks.delete(id);
+      });
+      const req: WorkerRequest = {
+        id,
+        type: "execute_sql",
+        sql,
+        params,
+      };
+      worker.postMessage(req);
+    });
+  }
+
+  querySql<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    return this.executeSql<T>(sql, params, signal);
+  }
+
+  async getPresentColumns(
+    scopedKeys?: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<Set<string>> {
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    const worker = this.getWorker(this.handleMessage);
+    if (!worker) {
+      return getDuckDBEngine().getPresentColumns(scopedKeys);
+    }
+    const id = this.allocateId();
+    const cols = await new Promise<string[]>((resolve, reject) => {
+      this.callbacks.set(id, {
+        resolve: resolve as (val: unknown) => void,
+      });
+      this.registerJob(id, worker, signal, reject, () => {
+        this.callbacks.delete(id);
+      });
+      const req: WorkerRequest = {
+        id,
+        type: "get_present_columns",
+        scopedKeys,
+      };
+      worker.postMessage(req);
+    });
+    return new Set(cols);
+  }
+
+  async syncRumFiles(
+    vitalsFiles: readonly {
+      scopedKey?: string;
+      key: string;
+      bytes: ArrayBuffer;
+    }[],
+    errorFiles: readonly {
+      scopedKey?: string;
+      key: string;
+      bytes: ArrayBuffer;
+    }[] = [],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    const worker = this.getWorker(this.handleMessage);
+    if (!worker) {
+      return getDuckDBEngine().syncRumFiles(vitalsFiles, errorFiles, signal);
+    }
+    const id = this.allocateId();
+    await new Promise<void>((resolve, reject) => {
+      this.callbacks.set(id, {
+        resolve: () => resolve(),
+      });
+      this.registerJob(id, worker, signal, reject, () => {
+        this.callbacks.delete(id);
+      });
+      const req: WorkerRequest = {
+        id,
+        type: "sync_rum_files",
+        vitalsFiles,
+        errorFiles,
+      };
+      worker.postMessage(req);
+    });
+  }
+
   prewarm(): void {
     const worker = this.getWorker(this.handleMessage);
     if (!worker) return;
@@ -161,6 +269,40 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
 
 let rpcClient: DashboardWorkerClient | null = null;
 const getClient = () => (rpcClient ??= new DashboardWorkerClient());
+export { DashboardWorkerClient as DashboardDuckDBClient };
+
+export function executeSql<T = Record<string, unknown>>(
+  sql: string,
+  params: readonly unknown[] = [],
+  signal?: AbortSignal,
+): Promise<T[]> {
+  return getClient().executeSql<T>(sql, params, signal);
+}
+
+export const querySql = executeSql;
+
+export function getPresentColumns(
+  scopedKeys?: readonly string[],
+  signal?: AbortSignal,
+): Promise<Set<string>> {
+  return getClient().getPresentColumns(scopedKeys, signal);
+}
+
+export function syncRumFiles(
+  vitalsFiles: readonly {
+    scopedKey?: string;
+    key: string;
+    bytes: ArrayBuffer;
+  }[],
+  errorFiles: readonly {
+    scopedKey?: string;
+    key: string;
+    bytes: ArrayBuffer;
+  }[] = [],
+  signal?: AbortSignal,
+): Promise<void> {
+  return getClient().syncRumFiles(vitalsFiles, errorFiles, signal);
+}
 
 export function prewarmDashboardEngine(): void {
   getClient().prewarm();
