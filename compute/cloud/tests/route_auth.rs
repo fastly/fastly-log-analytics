@@ -766,6 +766,12 @@ fn services_listing_is_redacted_for_analysts_only() {
         "logging_enabled",
         "created_at",
         "updated_at",
+        "log_fields",
+        "rum_enabled",
+        "rum",
+        "faro_version",
+        "cmcd",
+        "scoring",
     ]
     .into();
     let full = read("admin");
@@ -782,13 +788,33 @@ fn services_listing_is_redacted_for_analysts_only() {
     for session in ["analyst", "no_pii"] {
         let services = read(session);
         assert_eq!(services.len(), full.len());
-        for service in services {
+        for (service, original) in services.iter().zip(&full) {
             for key in service.as_object().unwrap().keys() {
                 assert!(
                     allowed.contains(key.as_str()),
                     "{session} sees {key} in /api/services"
                 );
             }
+            assert_eq!(service["rum_enabled"], original["rum_enabled"]);
+            assert_eq!(service["faro_version"], original["faro_version"]);
+            assert_eq!(
+                service["rum"],
+                json!({
+                    "enabled": original["rum_enabled"],
+                    "faro_version": original["faro_version"],
+                })
+            );
+            for feature in ["cmcd", "scoring"] {
+                assert_eq!(service[feature], json!({"enabled": false}));
+            }
+            assert_eq!(
+                service["log_fields"],
+                json!({
+                    "groups": ["A", "C"],
+                    "field_overrides": {},
+                    "custom_fields": [],
+                })
+            );
         }
     }
 }
