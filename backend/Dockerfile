@@ -55,7 +55,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # commit; compute/scorer/pkg/ is gitignored and a hand-built tarball goes stale
 # or goes missing on any host that only does a git checkout. Local non-Docker
 # dev builds the same artifact with `make scorer-package`.
-# rust:1.90-slim-bookworm (matches compute/scorer/rust-toolchain.toml)
+# rust:1.90-slim-bookworm (rustup installs compute/rust-toolchain.toml 1.96.0)
 FROM rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9 AS scorer-builder
 
 ARG TARGETARCH
@@ -79,15 +79,23 @@ RUN set -eu; \
     tar -xzf /tmp/fastly.tgz -C /usr/local/bin fastly; \
     rm /tmp/fastly.tgz
 
-WORKDIR /src/compute/scorer
-COPY compute/scorer/rust-toolchain.toml compute/scorer/Cargo.toml compute/scorer/Cargo.lock compute/scorer/fastly.toml ./
-COPY compute/scorer/src ./src
-COPY compute/scorer/fixtures ./fixtures
+WORKDIR /src/compute
+COPY compute/rust-toolchain.toml ./rust-toolchain.toml
+RUN rustup target add wasm32-wasip1
 
+COPY compute/Cargo.toml compute/Cargo.lock ./
+COPY compute/cloud/Cargo.toml ./cloud/Cargo.toml
+RUN mkdir -p cloud/src && touch cloud/src/lib.rs && printf 'fn main() {}\n' > cloud/src/main.rs && printf 'fn main() {}\n' > cloud/src/test_server.rs
+COPY compute/common ./common
+COPY compute/scorer/Cargo.toml compute/scorer/fastly.toml ./scorer/
+COPY compute/scorer/src ./scorer/src
+COPY compute/scorer/fixtures ./scorer/fixtures
+
+WORKDIR /src/compute/scorer
 # Cache mounts keep the cargo registry and incremental target dir across
 # builds; the final tarball is copied out of the mount before it ends.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/compute/scorer/target \
+    --mount=type=cache,target=/src/compute/target \
     fastly compute build --auto-yes \
     && cp pkg/session-scorer.tar.gz /session-scorer.tar.gz
 
