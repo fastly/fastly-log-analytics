@@ -1,9 +1,9 @@
 app = "flp"
 install = "flp-g2-live-20261029"
-checkout = "."
+checkout = "../.."
 base_url = "https://flp-g2-live-20261029.global.ssl.fastly.net"
 destination = "dmichael-log-streaming-stead.global.ssl.fastly.net"
-estimator = "frontend/lib/cloud-engine/usage/estimate.ts"
+estimator = "../../frontend/lib/cloud-engine/usage/estimate.ts"
 total_selector = '[data-testid="total-requests"]'
 scenarios_file = "~/Projects/fastly-distributed-load-tester/scenarios/fastly-log-analytics.toml"
 

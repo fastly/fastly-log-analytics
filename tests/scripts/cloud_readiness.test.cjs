@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const { CLOUD_READINESS_INIT_SCRIPT, waitForDashboardResult } = require('../../scripts/lib/cloud_readiness.cjs');
+const { CLOUD_READINESS_INIT_SCRIPT, waitForDashboardResult, waitForCloudReport } = require('../../scripts/lib/cloud_readiness.cjs');
 
 function documentState(search = '?range=1h') {
   const listeners = {};
@@ -89,12 +89,94 @@ test('non-dashboard routes need their own successful analytical response, not bo
   assert.equal(doc.state().ready, true);
 });
 
-test('legacy dashboards still require their genuine fresh total marker', async () => {
-  let waited = false;
-  const page = {
-    waitForFunction: async () => { waited = true; },
-    evaluate: async () => ({ source: 'legacy', ready: true, totalRows: 42 }),
+function cspPage(snapshots, legacy = false) {
+  let index = 0;
+  return {
+    waitForFunction: async () => {
+      throw new EvalError('Content Security Policy blocks unsafe-eval');
+    },
+    evaluate: async callback => {
+      const state = snapshots[Math.min(index++, snapshots.length - 1)];
+      const marker = '[data-testid="total-requests"][data-fresh="true"]';
+      const document = {
+        querySelector: selector => selector === marker && state.ready
+          ? { textContent: String(state.totalRows) } : null,
+      };
+      const window = legacy ? {} : { __flaCloudReadiness: { snapshot: () => state } };
+      const result = vm.runInNewContext(`(${callback.toString()})()`, { window, document }, {
+        contextCodeGeneration: { strings: false, wasm: false },
+      });
+      return result == null ? result : JSON.parse(JSON.stringify(result));
+    },
   };
-  assert.equal((await waitForDashboardResult(page, 25)).totalRows, 42);
-  assert.equal(waited, true);
+}
+
+for (const [name, wait] of [['dashboard', waitForDashboardResult], ['report', waitForCloudReport]]) {
+  test(`CSP-safe ${name} readiness waits for real completion and accepts zero rows`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const page = cspPage([
+      { observed: true, ready: false, pending: 1, totalRows: null },
+      { observed: true, ready: true, pending: 0, totalRows: 0 },
+    ]);
+    const result = wait(page, 200);
+    await new Promise(setImmediate);
+    t.mock.timers.tick(100);
+    const snapshot = await result;
+    assert.equal(snapshot.ready, true);
+    assert.equal(snapshot.totalRows, 0);
+    assert.equal(snapshot.pending, 0);
+  });
+
+  test(`CSP-safe ${name} readiness times out without inventing success`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const page = cspPage([{ observed: true, ready: false, errors: 1, totalRows: 42 }]);
+    const rejected = assert.rejects(wait(page, 40), /[Tt]imed out.*40/);
+    await new Promise(setImmediate);
+    t.mock.timers.tick(40);
+    await rejected;
+  });
+
+  test(`CSP-safe ${name} readiness rejects completion arriving after its deadline`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const page = cspPage([{ observed: true, ready: true, totalRows: 42 }]);
+    const evaluate = page.evaluate;
+    page.evaluate = async callback => {
+      await new Promise(resolve => setTimeout(resolve, 41));
+      return evaluate(callback);
+    };
+    const rejected = assert.rejects(wait(page, 40), /[Tt]imed out.*40/);
+    t.mock.timers.tick(41);
+    await rejected;
+  });
+
+  test(`CSP-safe ${name} readiness bounds an unresponsive browser evaluation`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    let finish;
+    let outcome;
+    const page = { evaluate: () => new Promise(resolve => { finish = resolve; }) };
+    const result = wait(page, 40).then(
+      () => { outcome = 'ready'; },
+      error => { outcome = error.message; },
+    );
+    await new Promise(setImmediate);
+    t.mock.timers.tick(40);
+    await new Promise(setImmediate);
+    try {
+      assert.match(outcome ?? 'still waiting', /[Tt]imed out.*40/);
+    } finally {
+      finish({ observed: true, ready: true, totalRows: 42 });
+      await result;
+    }
+  });
+}
+
+test('legacy dashboards still wait for their genuine fresh total marker under CSP', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const page = cspPage([{ ready: false, totalRows: 42 }, { ready: true, totalRows: 42 }], true);
+  const result = waitForDashboardResult(page, 200);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(100);
+  const snapshot = await result;
+  assert.equal(snapshot.source, 'legacy');
+  assert.equal(snapshot.totalRows, 42);
 });

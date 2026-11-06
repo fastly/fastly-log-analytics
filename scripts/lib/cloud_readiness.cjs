@@ -74,14 +74,37 @@ function dashboardSnapshot() {
     pending: 0, errors: 0, complete: total ? 1 : 0 };
 }
 
+async function waitForSnapshot(page, snapshot, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const timeoutError = new Error(`Timed out after ${timeoutMs}ms waiting for current analytical results`);
+  for (;;) {
+    let remaining = deadline - Date.now();
+    if (remaining <= 0) throw timeoutError;
+    let timer;
+    let result;
+    try {
+      result = await Promise.race([
+        page.evaluate(snapshot),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(timeoutError), remaining);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    remaining = deadline - Date.now();
+    if (result?.ready && remaining >= 0) return result;
+    if (remaining <= 0) throw timeoutError;
+    await new Promise(resolve => setTimeout(resolve, Math.min(100, remaining)));
+  }
+}
+
 async function waitForDashboardResult(page, timeoutMs = 120_000) {
-  await page.waitForFunction(`(${dashboardSnapshot.toString()})().ready`, null, { timeout: timeoutMs });
-  return page.evaluate(dashboardSnapshot);
+  return waitForSnapshot(page, dashboardSnapshot, timeoutMs);
 }
 
 async function waitForCloudReport(page, timeoutMs = 120_000) {
-  await page.waitForFunction(() => window.__flaCloudReadiness?.snapshot().ready, null, { timeout: timeoutMs });
-  return page.evaluate(() => window.__flaCloudReadiness.snapshot());
+  return waitForSnapshot(page, () => window.__flaCloudReadiness?.snapshot(), timeoutMs);
 }
 
 const CLOUD_ANALYTICAL_ROUTES = Object.freeze(['/dashboard', '/origin', '/security', '/performance',
