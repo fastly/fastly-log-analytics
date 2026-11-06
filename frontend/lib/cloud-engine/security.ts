@@ -1173,6 +1173,12 @@ async function parseSecurityRequest(req: Request, url: URL): Promise<SecurityAgg
           : 300,
     filters: (body.filters as FilterSpec | undefined) ?? null,
     sections: Array.isArray(body.sections) ? (body.sections as SecuritySectionName[]) : null,
+    mask_ips: Boolean(
+      body.mask_ips ||
+        url.searchParams.get("mask_ips") === "1" ||
+        req.headers.get("x-mask-ips") === "1" ||
+        req.headers.get("x-session-role") === "analyst-no-pii",
+    ),
   };
 }
 

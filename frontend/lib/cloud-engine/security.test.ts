@@ -216,6 +216,15 @@ describe("security cloud-engine module (F20)", () => {
     const bundleJson = await bundleRes!.json();
     expect(bundleJson.tls_fingerprints?.[0]?.fingerprint).toBe("sha-1");
     expect(bundleJson.active_proxies_count).toBe(1);
+    expect(bundleJson.active_clients?.[0]?.ip).toBe("198.51.100.77");
+
+    const maskedBundleRes = await handleSecurityRequest(
+      new Request("https://example.test/api/security/bundle?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z", {
+        headers: { "x-session-role": "analyst-no-pii" },
+      }),
+    );
+    const maskedBundleJson = await maskedBundleRes!.json();
+    expect(maskedBundleJson.active_clients?.[0]?.ip).toBe("198.51.100.xxx");
 
     const tiRes = await handleSecurityRequest(
       new Request("https://example.test/api/security/threat-intel?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z"),

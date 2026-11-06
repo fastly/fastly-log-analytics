@@ -112,9 +112,7 @@ def shape_performance_asn_rows(
     if not isinstance(service_name, str):
         row_list = list(service_name)
         lookup: Mapping[Any, str] = (
-            asn_lookup
-            if asn_lookup is not None
-            else (rows if isinstance(rows, Mapping) else {})
+            asn_lookup if asn_lookup is not None else (rows if isinstance(rows, Mapping) else {})
         )
         if not row_list:
             return []
@@ -139,9 +137,7 @@ def shape_performance_asn_rows(
                     float_or_zero(r[5]),
                 )
             org_name = (
-                (lookup.get(asn_int) or lookup.get(str(asn_int)) or "")
-                if (lookup and asn_int is not None)
-                else ""
+                (lookup.get(asn_int) or lookup.get(str(asn_int)) or "") if (lookup and asn_int is not None) else ""
             )
             asn_str = f"AS{asn_int}" if asn_int is not None else str(raw_val if raw_val is not None else "")
             label = f"{org_name} ({asn_int})" if (org_name and asn_int is not None) else asn_str
@@ -218,7 +214,7 @@ def finish_security_proxies(
         effective_mask = bool(quality_rows) if isinstance(quality_rows, bool) else bool(mask_ips)
 
         q_list_legacy = list(q_iter)
-        f_list = [dict(r) for r in f_iter if isinstance(r, Mapping)]
+        f_list: list[Mapping[str, Any]] = [dict(r) for r in f_iter if isinstance(r, Mapping)]
 
         traffic_quality_legacy: list[dict[str, Any]] = []
         if q_list_legacy:
@@ -238,9 +234,7 @@ def finish_security_proxies(
 
         lookup_map = dict(asn_lookup or {})
         if not lookup_map:
-            asns_needed = [
-                asn_int for r in f_list if (asn_int := parse_asn_int(r.get("asn"))) is not None
-            ]
+            asns_needed = [asn_int for r in f_list if (asn_int := parse_asn_int(r.get("asn"))) is not None]
             if asns_needed:
                 try:
                     from backend.core.fos_client import get_asn_names

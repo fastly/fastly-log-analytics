@@ -873,4 +873,3 @@ COALESCED_SCAN_DETECTORS: dict[str, tuple[str, ...]] = {
         "origin_latency_spike",
     ),
 }
-

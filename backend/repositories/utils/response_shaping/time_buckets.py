@@ -88,9 +88,9 @@ def chart_interval_seconds(chart_interval: str | None, default: int = 60) -> int
 
 
 def _coerce_utc_datetime(value: str | int | float | datetime | None) -> datetime | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, (int, float)):
         return datetime.fromtimestamp(float(value), tz=UTC)
     if isinstance(value, datetime):
         return ensure_utc(value)

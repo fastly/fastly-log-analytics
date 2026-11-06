@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from backend.repositories.utils.response_shaping import (
@@ -20,7 +20,7 @@ _parse_asn_int = parse_asn_int
 _finish_proxies = finish_security_proxies
 
 
-def classify_ua_counts(rows: list[tuple[str, int] | Mapping[str, Any]], n: int) -> list[dict]:
+def classify_ua_counts(rows: Sequence[tuple[str, int] | Mapping[str, Any]], n: int) -> list[dict]:
     from backend.utils.bot_sources import build_matcher, build_well_known_bots_matcher
 
     match_ua = build_matcher()
@@ -172,7 +172,9 @@ _GENERIC_BOT_RE = re.compile(
 )
 
 
-def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int] | Mapping[str, Any]]) -> list[dict[str, Any]]:
+def summarize_bot_efficiency_rows(
+    rows: Sequence[tuple[str, str, int, int] | Mapping[str, Any]],
+) -> list[dict[str, Any]]:
     from backend.utils.bot_sources import (
         _BOT_TOKEN_SUFFIX_RE,
         build_well_known_bots_matcher,

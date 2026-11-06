@@ -175,21 +175,18 @@ def shape_waterfall_avg(
     """Shape the performance waterfall average breakdown from a mapping or 4 positional values."""
     if isinstance(edge_processing, Mapping):
         row = edge_processing
-        shaped = {
-            k: max(0.0, float_or_zero(row.get(k, row.get(alias))))
-            for k, alias in _WATERFALL_ALIAS_MAP
-        }
-    else:
-        shaped = {
-            "edge_processing": max(0.0, float_or_zero(edge_processing)),
-            "origin_wait": max(0.0, float_or_zero(origin_wait)),
-            "origin_download": max(0.0, float_or_zero(origin_download)),
-            "client_download": max(0.0, float_or_zero(client_download)),
-        }
-    return {**shaped, "avg": dict(shaped)}
+        shaped = {k: max(0.0, float_or_zero(row.get(k, row.get(alias)))) for k, alias in _WATERFALL_ALIAS_MAP}
+        return {**shaped, "avg": dict(shaped)}
+    shaped = {
+        "edge_processing": max(0.0, float_or_zero(edge_processing)),
+        "origin_wait": max(0.0, float_or_zero(origin_wait)),
+        "origin_download": max(0.0, float_or_zero(origin_download)),
+        "client_download": max(0.0, float_or_zero(client_download)),
+    }
+    return {"avg": shaped}
 
 
-_UNSET = object()
+_UNSET: Any = object()
 
 
 def compute_network_health_score(
@@ -197,7 +194,7 @@ def compute_network_health_score(
     rtt_congestion_us: float | int | None,
     avg_ploss: float | int | None,
     rtt_jitter_us: float | int | None,
-    error_pct: float | int | None | object = _UNSET,
+    error_pct: float | int | None = _UNSET,
 ) -> float:
     """Compute the composite 0–100 network health score (supports both 5-arg and 4-arg signatures)."""
     if error_pct is _UNSET:
@@ -711,11 +708,13 @@ def deduplicate_metro_leaderboard(
                             ndigits,
                         )
             prev["total_reqs"] = total
-            prev["reqs"] = total
+            if "reqs" in entry or "reqs" in prev:
+                prev["reqs"] = total
         else:
             item = dict(entry)
             item["total_reqs"] = new_reqs
-            item["reqs"] = new_reqs
+            if "reqs" in entry:
+                item["reqs"] = new_reqs
             seen[key] = item
     return sorted(seen.values(), key=lambda x: x["total_reqs"], reverse=True)
 

@@ -16,15 +16,12 @@ from collections.abc import Callable, Iterable, Mapping, Sequence  # noqa: F401
 from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import TYPE_CHECKING, Any
 
-try:
-    from backend.core.fos_client import _safe_table_name
-except Exception:
-    _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from backend.core.sql_validator import require_safe_ident
 
-    def _safe_table_name(name: str) -> str:
-        if not _SAFE_IDENT_RE.match(name):
-            raise ValueError(f"Unsafe SQL table name: {name!r}")
-        return name
+
+def _safe_table_name(name: str) -> str:
+    return require_safe_ident(name, "Unsafe SQL table name")
+
 
 from backend.repositories.utils.response_shaping import asn as _asn_mod
 from backend.repositories.utils.response_shaping import domains as _domains_mod
