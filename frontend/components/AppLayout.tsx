@@ -31,6 +31,7 @@ import {
   SERVICE_NAVIGATION,
   SYSTEM_NAVIGATION,
   CLOUD_PRUNED_NAV_HREFS,
+  CLOUD_PRUNED_ADMIN_HREFS,
   UrlServiceSync,
   RouteFocus,
   RawQueryModeProbe,
@@ -173,8 +174,19 @@ export function AppLayout({
     }
     if (needsWizard) {
       React.startTransition(() => router.replace('/admin'))
+      return
     }
-  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId])
+    if (IS_CLOUD_MODE) {
+      if (CLOUD_PRUNED_ADMIN_HREFS.has(pathname)) {
+        React.startTransition(() => router.replace('/admin'))
+        return
+      }
+      if (CLOUD_PRUNED_NAV_HREFS.has(pathname)) {
+        const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
+        React.startTransition(() => router.replace(target))
+      }
+    }
+  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId, pathname])
 
   const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
   React.useEffect(() => {

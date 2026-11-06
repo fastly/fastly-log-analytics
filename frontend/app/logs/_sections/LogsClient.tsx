@@ -15,6 +15,7 @@ import { ingestedFilesColumns } from '@/components/DataTable'
 import Loading from '../loading'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
 import { MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
 import { useLogsPageState, type CronRun, type CatalogMaps } from './useLogsPageState'
 import {
   CRON_EXPLANATIONS,
@@ -55,7 +56,7 @@ const LOG_TABS = [
   { value: 'storage', label: 'Archive Storage', icon: Archive },
   { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
   { value: 'raw', label: 'Available Logs', icon: FileCode },
-  { value: 'schema', label: 'ClickHouse Schema', icon: FileCode },
+  { value: 'schema', label: IS_CLOUD_MODE ? 'Parquet Schema' : 'ClickHouse Schema', icon: FileCode },
 ] as const
 
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {

@@ -455,13 +455,263 @@ export async function handleCloudAnalyticalRequest(
     return jsonResponse({ pops: [] }, request);
   }
   if (pathname === "/api/admin/debug-settings" && method === "GET") {
+    const res = await fetch("/api/auth/session", {
+      credentials: "include",
+      signal: request.signal,
+    }).catch(() => null);
+    const session = res?.ok
+      ? ((await res.json().catch(() => null)) as Record<string, unknown> | null)
+      : null;
     return jsonResponse(
       {
-        query_debug_visibility: "disabled",
-        api_call_debug_visibility: "disabled",
+        query_debug_visibility:
+          typeof session?.query_debug_visibility === "string"
+            ? session.query_debug_visibility
+            : "disabled",
+        api_call_debug_visibility:
+          typeof session?.api_call_debug_visibility === "string"
+            ? session.api_call_debug_visibility
+            : "disabled",
       },
       request,
     );
+  }
+  if (pathname === "/api/admin/debug-settings" && method === "PATCH") {
+    const body = (await request.clone().json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    const res = await fetch("/api/admin/usage-logging", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body),
+      signal: request.signal,
+    }).catch(() => null);
+    const updated = res?.ok
+      ? ((await res.json().catch(() => ({}))) as Record<string, unknown>)
+      : {};
+    return jsonResponse(
+      {
+        query_debug_visibility:
+          (body.query_debug_visibility as string | undefined) ?? "disabled",
+        api_call_debug_visibility:
+          (body.api_call_debug_visibility as string | undefined) ?? "disabled",
+        ...updated,
+      },
+      request,
+    );
+  }
+  if (pathname === "/api/admin/ingest-logs" && method === "POST") {
+    const startTime = searchParams.get("start_time");
+    const endTime = searchParams.get("end_time");
+    if (startTime || endTime) {
+      await startBackfill().catch(() => null);
+    } else {
+      await fetch("/api/cron-runs/trigger", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+        credentials: "include",
+        signal: request.signal,
+      }).catch(() => null);
+    }
+    return jsonResponse({ run_id: "cloud-tick", status: "started" }, request);
+  }
+  if (pathname === "/api/admin/share/banner" && method === "GET") {
+    return jsonResponse({ sharing_active: false, public_url: null }, request);
+  }
+  if (pathname === "/api/admin/share/oauth-providers" && method === "GET") {
+    return jsonResponse({ providers: [] }, request);
+  }
+  if (
+    (pathname === "/api/admin/share/status" ||
+      pathname === "/api/admin/share/live") &&
+    method === "GET"
+  ) {
+    const [invitesRes, usersRes, servicesRes] = await Promise.all([
+      fetch("/api/admin/invites", {
+        credentials: "include",
+        signal: request.signal,
+      }).catch(() => null),
+      fetch("/api/admin/users", {
+        credentials: "include",
+        signal: request.signal,
+      }).catch(() => null),
+      fetch("/api/services", {
+        credentials: "include",
+        signal: request.signal,
+      }).catch(() => null),
+    ]);
+    const invitesJson = invitesRes?.ok
+      ? ((await invitesRes.json().catch(() => ({ invites: [] }))) as {
+          invites?: Array<{
+            id: string;
+            display_name?: string;
+            role?: string;
+            created_at?: number | string;
+            expires_at?: number | string;
+            accepted_at?: number | string | null;
+            revoked?: boolean;
+          }>;
+        })
+      : { invites: [] };
+    const usersJson = usersRes?.ok
+      ? ((await usersRes.json().catch(() => ({ users: [] }))) as {
+          users?: Array<{
+            id: string;
+            display_name?: string;
+            role?: string;
+            created_at?: number | string;
+            revoked?: boolean;
+            passkeys?: Array<{ id: string; created_at?: number | string }>;
+          }>;
+        })
+      : { users: [] };
+    const servicesJson = servicesRes?.ok
+      ? ((await servicesRes.json().catch(() => ({ services: [] }))) as {
+          services?: Array<{ service_id: string; name?: string; service_name?: string }>;
+        })
+      : { services: [] };
+    const svcList = (servicesJson.services ?? []).map((s) => ({
+      service_id: s.service_id,
+      name: s.name || s.service_name || s.service_id,
+    }));
+    const allServiceIds = svcList.map((s) => s.service_id);
+    const toIso = (v: number | string | null | undefined): string | null => {
+      if (v == null) return null;
+      if (typeof v === "number") {
+        return new Date(v > 1e12 ? v : v * 1000).toISOString();
+      }
+      return String(v);
+    };
+    const invites = (invitesJson.invites ?? [])
+      .filter((i) => !i.revoked)
+      .map((i) => ({
+        id: i.id,
+        name: i.display_name || i.id,
+        email: i.role || "analyst",
+        auth_method: "passkey",
+        created_at: toIso(i.created_at) ?? new Date().toISOString(),
+        expires_at: toIso(i.expires_at),
+        last_login_at: toIso(i.accepted_at),
+        service_ids: allServiceIds,
+        pii_policy: { mask_ips: i.role === "analyst-no-pii" },
+        allow_concurrent_sessions: true,
+      }));
+    const sessions = (usersJson.users ?? [])
+      .filter((u) => !u.revoked)
+      .map((u) => ({
+        session_id: u.id,
+        invite_id: u.id,
+        name: u.display_name || u.id,
+        email: u.role || "analyst",
+        auth_method: `Passkey (${u.passkeys?.length ?? 0})`,
+        ip_address: u.role || "user",
+        last_active_time: toIso(u.created_at) ?? new Date().toISOString(),
+      }));
+    const originUrl =
+      typeof window !== "undefined" ? window.location.origin : null;
+    return jsonResponse(
+      {
+        sharing_active: true,
+        public_url: originUrl,
+        active_session_count: sessions.length,
+        max_concurrent_sessions: 100,
+        invites,
+        sessions,
+        services: svcList,
+        rate_limits: { lockouts: [], failures: [] },
+      },
+      request,
+    );
+  }
+  if (pathname === "/api/admin/share/invites" && method === "POST") {
+    const body = (await request.clone().json().catch(() => ({}))) as {
+      name?: string;
+      role?: string;
+      pii_policy?: { mask_ips?: boolean };
+    };
+    const role =
+      body.role === "admin" ||
+      body.role === "analyst" ||
+      body.role === "analyst-no-pii"
+        ? body.role
+        : body.pii_policy?.mask_ips
+          ? "analyst-no-pii"
+          : "analyst";
+    const res = await fetch("/api/admin/invites", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        display_name: body.name || "Analyst",
+        role,
+      }),
+      signal: request.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    return jsonResponse(data, request, undefined, res.status);
+  }
+  const revokeInviteMatch = pathname.match(
+    /^\/api\/admin\/share\/invites\/([^/]+)$/,
+  );
+  if (revokeInviteMatch && method === "DELETE") {
+    const inviteId = decodeURIComponent(revokeInviteMatch[1]);
+    const res = await fetch(
+      `/api/admin/invites/${encodeURIComponent(inviteId)}/revoke`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: "{}",
+        signal: request.signal,
+      },
+    );
+    const data = await res.json().catch(() => ({ ok: res.ok }));
+    return jsonResponse(data, request, undefined, res.status);
+  }
+  const bootSessionMatch = pathname.match(
+    /^\/api\/admin\/share\/sessions\/([^/]+)\/boot$/,
+  );
+  if (bootSessionMatch && method === "POST") {
+    const userId = decodeURIComponent(bootSessionMatch[1]);
+    const res = await fetch(
+      `/api/admin/users/${encodeURIComponent(userId)}/revoke`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: "{}",
+        signal: request.signal,
+      },
+    );
+    const data = await res.json().catch(() => ({ ok: res.ok }));
+    return jsonResponse(data, request, undefined, res.status);
+  }
+  if (pathname === "/api/admin/share/audit-logs" && method === "GET") {
+    const now = Date.now();
+    const res = await queryOpsLogs(
+      "admin_audit",
+      {
+        from: new Date(now - 30 * 86_400_000).toISOString(),
+        to: new Date(now).toISOString(),
+      },
+      { signal: request.signal },
+    ).catch(() => ({ rows: [] }));
+    const audit_logs = (res.rows ?? []).map(
+      (r: Record<string, unknown>, idx: number) => ({
+        id: idx + 1,
+        timestamp: String(
+          r.timestamp ?? r.created_at ?? new Date().toISOString(),
+        ),
+        event_type: String(r.action ?? r.event_type ?? "ADMIN_ACTION"),
+        email: String(r.actor ?? r.user_id ?? "admin"),
+        ip_address: String(r.ip ?? r.target ?? "-"),
+        details: String(r.target ?? r.details ?? ""),
+      }),
+    );
+    return jsonResponse({ audit_logs }, request);
   }
 
   // Saved Views localStorage bridge
@@ -1447,8 +1697,8 @@ export async function cloudStreamFetch(
   const { pathname } = url;
   const method = (init?.method ?? "GET").toUpperCase();
 
-  // Pass through standard GET SSE streams (e.g. /api/ingest/events)
-  if (method === "GET") {
+  // Pass through standard GET SSE streams (e.g. /api/ingest/events), except synthetic cloud-tick stream
+  if (method === "GET" && pathname !== "/api/cron-runs/cloud-tick/stream") {
     return fetch(input, init);
   }
 
@@ -1463,14 +1713,19 @@ export async function cloudStreamFetch(
         );
       };
       try {
-        if (pathname === "/api/provision/ingest") {
-          await fetch("/api/cron-runs/trigger", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-            credentials: "include",
-            signal,
-          });
+        if (
+          pathname === "/api/provision/ingest" ||
+          pathname === "/api/cron-runs/cloud-tick/stream"
+        ) {
+          if (pathname === "/api/provision/ingest") {
+            await fetch("/api/cron-runs/trigger", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: "{}",
+              credentials: "include",
+              signal,
+            });
+          }
           emit({ type: "status", status: "complete", message: "Triggered ingest tick" });
           emit({ type: "done", status: "complete" });
           controller.close();

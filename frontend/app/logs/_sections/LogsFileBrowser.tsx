@@ -57,7 +57,7 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
   },
   {
     id: 'type',
-    header: 'ClickHouse Type',
+    header: IS_CLOUD_MODE ? 'Parquet / Arrow Type' : 'ClickHouse Type',
     accessorFn: (c) => c.type,
     size: 160,
     cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,

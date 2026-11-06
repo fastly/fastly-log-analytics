@@ -147,12 +147,24 @@ export function ShareLoginForm() {
   }, [claimQuery.data, getValues, setValue])
 
   const providers = config?.providers ?? []
-  // Fail-open: on a config fetch failure, offer the passcode form.
+  // Fail-open: on a config fetch failure, offer the passcode form (never on Cloud Compute, which uses passkeys only).
   const passcodeEnabled = configState === 'failed' ? true : (config?.passcode_enabled ?? true)
-  const showProviders = configState === 'loaded' && providers.length > 0
-  const showPasscode = configState === 'failed' || (configState === 'loaded' && passcodeEnabled)
-  const showLockout = configState === 'loaded' && !passcodeEnabled && providers.length === 0
+  const showProviders = !IS_CLOUD_MODE && configState === 'loaded' && providers.length > 0
+  const showPasscode = !IS_CLOUD_MODE && (configState === 'failed' || (configState === 'loaded' && passcodeEnabled))
+  const showLockout = !IS_CLOUD_MODE && configState === 'loaded' && !passcodeEnabled && providers.length === 0
   const showDivider = showProviders && showPasscode
+
+  const cloudSetupQuery = useQuery<{ complete?: boolean; accepted?: boolean }>({
+    queryKey: ['cloud-setup-status'],
+    enabled: IS_CLOUD_MODE && !inviteToken,
+    retry: false,
+    queryFn: async () => {
+      const res = await fetch('/api/setup', { credentials: 'include' })
+      if (!res.ok) return { complete: false, accepted: false }
+      return (await res.json()) as { complete?: boolean; accepted?: boolean }
+    },
+  })
+  const cloudSetupComplete = cloudSetupQuery.data?.complete === true
 
   // Countdown for rate-limit lockouts.
   React.useEffect(() => {
@@ -309,7 +321,7 @@ export function ShareLoginForm() {
       className="space-y-4 min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
     >
       {IS_CLOUD_MODE && (
-        <div data-testid="cloud-passkey-auth" className="space-y-3 border-b border-border/60 pb-4">
+        <div data-testid="cloud-passkey-auth" className="space-y-3">
           {inviteToken ? (
             <form onSubmit={handleCloudPasskeyRegister} className="space-y-3">
               <div className="space-y-1">
@@ -341,31 +353,33 @@ export function ShareLoginForm() {
                 {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                 Sign in with Passkey
               </Button>
-              {!cloudSetupAccepted ? (
-                <form onSubmit={handleCloudSetupAccept} className="space-y-2 pt-2">
-                  <Input
-                    value={cloudSetupCode}
-                    onChange={(e) => setCloudSetupCode(e.target.value)}
-                    placeholder="Initial setup code (first-time admin)"
-                    disabled={busy}
-                  />
-                  <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy || !cloudSetupCode.trim()}>
-                    Verify Setup Code
-                  </Button>
-                </form>
-              ) : (
-                <form onSubmit={handleCloudPasskeyRegister} className="space-y-2 pt-2">
-                  <Input
-                    value={cloudDisplayName}
-                    onChange={(e) => setCloudDisplayName(e.target.value)}
-                    placeholder="Admin display name"
-                    required
-                    disabled={busy}
-                  />
-                  <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy}>
-                    Register Admin Passkey
-                  </Button>
-                </form>
+              {!cloudSetupComplete && (
+                !(cloudSetupAccepted || cloudSetupQuery.data?.accepted) ? (
+                  <form onSubmit={handleCloudSetupAccept} className="space-y-2 pt-2 border-t border-border/60">
+                    <Input
+                      value={cloudSetupCode}
+                      onChange={(e) => setCloudSetupCode(e.target.value)}
+                      placeholder="Initial setup code (first-time admin)"
+                      disabled={busy}
+                    />
+                    <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy || !cloudSetupCode.trim()}>
+                      Verify Setup Code
+                    </Button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleCloudPasskeyRegister} className="space-y-2 pt-2 border-t border-border/60">
+                    <Input
+                      value={cloudDisplayName}
+                      onChange={(e) => setCloudDisplayName(e.target.value)}
+                      placeholder="Admin display name"
+                      required
+                      disabled={busy}
+                    />
+                    <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy}>
+                      Register Admin Passkey
+                    </Button>
+                  </form>
+                )
               )}
             </div>
           )}
@@ -673,7 +687,7 @@ export default function ShareLoginPage() {
           this page would otherwise have zero headings. Sr-only <h1> gives
           screen-reader heading nav a landing spot without affecting the
           visual design. */}
-      <h1 className="sr-only">Analyst sign-in</h1>
+      <h1 className="sr-only">{IS_CLOUD_MODE ? 'Sign in' : 'Analyst sign-in'}</h1>
       <Card
         data-testid="share-login-card"
         className="w-full max-w-md self-start min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
@@ -681,12 +695,12 @@ export default function ShareLoginPage() {
         <CardHeader className="space-y-2">
           <CardTitle className="flex items-center gap-2 text-xl">
             <KeyRound className="h-5 w-5" />
-            Analyst sign-in
+            {IS_CLOUD_MODE ? 'Sign in' : 'Analyst sign-in'}
           </CardTitle>
           <p className="text-sm text-muted-foreground">
-            Access to this dashboard is invite-only. Enter the email address the
-            invite was sent to, and the passcode from the invitation message. If
-            you don&apos;t have an invite, ask the dashboard owner to send you one.
+            {IS_CLOUD_MODE
+              ? 'Authenticate with your registered passkey to access Fastly Log Analytics. Access is invite-only — new users need a one-time invitation link from an administrator.'
+              : "Access to this dashboard is invite-only. Enter the email address the invite was sent to, and the passcode from the invitation message. If you don't have an invite, ask the dashboard owner to send you one."}
           </p>
         </CardHeader>
         <CardContent

@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { client, extractApiError, unwrapClient } from "@/lib/api"
+import { IS_CLOUD_MODE } from "@/lib/cloud-engine/adapter"
 import { cn, panelDialogContent, panelDialogHeaderSolid } from "@/lib/utils"
 import type { ShareStatus } from "./types"
 
@@ -80,6 +81,9 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
   const [error, setError] = React.useState('')
   const [authMode, setAuthModeState] = React.useState<'passcode' | 'oauth'>('passcode')
   const [oauthProvider, setOauthProviderState] = React.useState('')
+  const [cloudRole, setCloudRole] = React.useState<'analyst' | 'analyst-no-pii' | 'admin'>('analyst')
+  const [createdCloudInviteUrl, setCreatedCloudInviteUrl] = React.useState<string | null>(null)
+  const [copiedCloudLink, setCopiedCloudLink] = React.useState(false)
 
   const setName = (v: string) => { setNameState(v); form.setValue('name', v) }
   const setEmail = (v: string) => { setEmailState(v); form.setValue('email', v) }
@@ -126,6 +130,25 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
     setError('')
     setCreating(true)
     try {
+      if (IS_CLOUD_MODE) {
+        const res = await fetch('/api/admin/invites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ display_name: name, role: cloudRole }),
+        })
+        const data = (await res.json().catch(() => ({}))) as { token?: string; detail?: string; error?: string }
+        if (!res.ok) {
+          throw new Error(data.detail || data.error || `Invite creation failed (${res.status})`)
+        }
+        await onCreated()
+        if (data.token && typeof window !== 'undefined') {
+          setCreatedCloudInviteUrl(`${window.location.origin}/share-login?token=${encodeURIComponent(data.token)}`)
+          return
+        }
+        onOpenChange(false)
+        return
+      }
       await unwrapClient(
         client.POST('/api/admin/share/invites', {
           body: {
@@ -151,9 +174,10 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
     }
   }
 
-  const canSubmit =
-    !creating && !!name && !!email && serviceIds.length > 0 &&
-    (authMode === 'passcode' ? !!passcode : !!oauthProvider)
+  const canSubmit = IS_CLOUD_MODE
+    ? !creating && !!name.trim()
+    : !creating && !!name && !!email && serviceIds.length > 0 &&
+      (authMode === 'passcode' ? !!passcode : !!oauthProvider)
   const providerLabel = providers.find((p) => p.id === oauthProvider)?.display_name ?? ''
 
   return (
@@ -169,6 +193,47 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
         <div className="flex-1 overflow-y-auto min-h-0 px-6 py-4 space-y-3">
           {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
 
+          {IS_CLOUD_MODE ? (
+            createdCloudInviteUrl ? (
+              <div className="space-y-3" data-testid="cloud-invite-link-result">
+                <p className="text-xs text-muted-foreground">
+                  Share this one-time passkey registration link with <strong>{name}</strong>. The token is only shown once.
+                </p>
+                <div className="flex items-center gap-2">
+                  <Input readOnly value={createdCloudInviteUrl} className="font-mono text-xs" />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(createdCloudInviteUrl)
+                      setCopiedCloudLink(true)
+                    }}
+                  >
+                    {copiedCloudLink ? 'Copied' : 'Copy Link'}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <Label htmlFor="invite-name" className="text-xs">Display Name</Label>
+                  <Input id="invite-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Jane Doe" />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="cloud-invite-role" className="text-xs">Role</Label>
+                  <Select value={cloudRole} onValueChange={(v) => v && setCloudRole(v as 'analyst' | 'analyst-no-pii' | 'admin')}>
+                    <SelectTrigger id="cloud-invite-role"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="analyst">Analyst (read-only dashboard access)</SelectItem>
+                      <SelectItem value="analyst-no-pii">Analyst — No PII (client IPs masked)</SelectItem>
+                      <SelectItem value="admin">Administrator (full control plane access)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="invite-name" className="text-xs">Name</Label>
@@ -331,14 +396,21 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
               Note: Analysts are required to review and agree to the Terms of Access upon their first login before dashboard access is granted.
             </div>
           </div>
+          )}
         </div>
 
         <DialogFooter className="px-6 py-3 border-t bg-muted/10 shrink-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={creating}>Cancel</Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit}>
-            {creating && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-            Create invite
-          </Button>
+          {createdCloudInviteUrl ? (
+            <Button onClick={() => onOpenChange(false)}>Done</Button>
+          ) : (
+            <>
+              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={creating}>Cancel</Button>
+              <Button onClick={handleSubmit} disabled={!canSubmit}>
+                {creating && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                Create invite
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -6,6 +6,7 @@ import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Pla
 import type { ColumnDef } from '@tanstack/react-table'
 import type { ServiceConfig } from '@/types/api'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
 import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
 import { useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'
@@ -69,18 +70,24 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
         const rows = row.original.log_row_count || 0
         return (
           <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-medium text-foreground">ClickHouse</span>
-            <span className="text-[10px] text-muted-foreground tabular-nums">{formatCount(rows)} rows</span>
+            <span className="text-xs font-medium text-foreground">{IS_CLOUD_MODE ? 'FOS Parquet' : 'ClickHouse'}</span>
+            {!IS_CLOUD_MODE && <span className="text-[10px] text-muted-foreground tabular-nums">{formatCount(rows)} rows</span>}
           </div>
         )
       },
     },
     {
-      id: 'status', accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0), header: 'Cron Sync', size: 140,
+      id: 'status', accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0), header: IS_CLOUD_MODE ? 'Edge Clock' : 'Cron Sync', size: 140,
       cell: ({ row: { original: service } }) => (
         <div className="flex items-center gap-2">
-          {service.cron_sync?.enabled ? <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge> : <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>}
-          <Button variant="ghost" size="icon" aria-label="Cron sync settings" className="h-6 w-6 hover:bg-muted cursor-pointer" onClick={() => setCronService(service)} title="Cron Sync Settings"><Settings className="h-3 w-3 text-muted-foreground" /></Button>
+          {IS_CLOUD_MODE ? (
+            <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">2m Tick</Badge>
+          ) : (
+            <>
+              {service.cron_sync?.enabled ? <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge> : <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>}
+              <Button variant="ghost" size="icon" aria-label="Cron sync settings" className="h-6 w-6 hover:bg-muted cursor-pointer" onClick={() => setCronService(service)} title="Cron Sync Settings"><Settings className="h-3 w-3 text-muted-foreground" /></Button>
+            </>
+          )}
         </div>
       ),
     },
@@ -96,8 +103,8 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
                 {isActive && <DropdownMenuItem disabled><Play className="mr-2 h-4 w-4" /> Active Service</DropdownMenuItem>}
                 <DropdownMenuItem onClick={() => setSettingsService(service)}><Settings2 className="mr-2 h-4 w-4" /> Log Settings</DropdownMenuItem>
                 {openRum && <DropdownMenuItem onClick={() => openRum(service)}><Eye className="mr-2 h-4 w-4" /> RUM Configuration</DropdownMenuItem>}
-                <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>
+                {!IS_CLOUD_MODE && <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>}
+                {!IS_CLOUD_MODE && <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setDeleteDataService(service)}><Eraser className="mr-2 h-4 w-4" /> Delete Data</DropdownMenuItem>
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setTeardownService(service)}><Trash2 className="mr-2 h-4 w-4" /> Teardown Service</DropdownMenuItem>
@@ -304,7 +311,9 @@ export function ServicesTable() {
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-semibold tracking-tight">Service Management</h2>
-            <Button size="sm" onClick={() => setWizardOpen(true)}><Plus className="h-4 w-4 mr-1" /> Add Service</Button>
+            {(!IS_CLOUD_MODE || (services?.services?.length ?? 0) === 0) && (
+              <Button size="sm" onClick={() => setWizardOpen(true)}><Plus className="h-4 w-4 mr-1" /> Add Service</Button>
+            )}
           </div>
           <Button size="sm" variant="outline" data-testid="admin-overview-refresh-btn" onClick={handleRefreshAll} disabled={isFetching}>Refresh Status</Button>
         </div>

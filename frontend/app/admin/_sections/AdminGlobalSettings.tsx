@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { AlertCircle, CheckCircle2, DollarSign, Loader2, MapPin, Pencil, RefreshCw, Save } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
 import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialogHeaderMuted } from '@/lib/utils'
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
 import { useDerivedState } from '@/hooks/useSSE'
@@ -117,7 +118,7 @@ export function DiagnosticsPanel() {
   const debugBackendOn = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn ? 'Backend debug responses are disabled — set DEBUG_RESPONSES=true in the server env (or .env file) and restart to see data here.' : undefined
   const panels = [
-    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: 'Bottom-of-screen panel with ClickHouse SQL queries and execution times.', value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
+    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: IS_CLOUD_MODE ? 'Bottom-of-screen panel with DuckDB-Wasm SQL queries and execution times.' : 'Bottom-of-screen panel with ClickHouse SQL queries and execution times.', value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
     { id: 'diag-api-panel-label', title: 'API call panel', desc: 'Bottom-of-screen panel with all Fastly API calls and FOS operations per request.', value: settings?.api_call_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ api_call_debug_visibility: val }) },
   ]
   return (
@@ -268,20 +269,22 @@ export function GlobalSettings() {
                 <Switch aria-labelledby="gs-usage-log-label" checked={usageLoggingEnabled} onCheckedChange={(enabled) => toggleMutation.mutate(enabled)} disabled={toggleMutation.isPending} />
               </div>
             </div>
-            <div className="flex flex-col p-3 border rounded-lg gap-3">
-              <div className="min-w-0 space-y-0.5">
-                <Label className="text-sm font-medium">POP location data</Label>
-                <p className="text-xs text-muted-foreground">Fastly PoP coordinates used by the Impossible Distance insight for geo/RTT spoofing detection.</p>
+            {!IS_CLOUD_MODE && (
+              <div className="flex flex-col p-3 border rounded-lg gap-3">
+                <div className="min-w-0 space-y-0.5">
+                  <Label className="text-sm font-medium">POP location data</Label>
+                  <p className="text-xs text-muted-foreground">Fastly PoP coordinates used by the Impossible Distance insight for geo/RTT spoofing detection.</p>
+                </div>
+                <div className="flex items-center justify-end mt-auto">
+                  <Button variant="outline" size="sm" onClick={() => setPopLocationsOpen(true)}><MapPin className="h-3.5 w-3.5 mr-1.5" /> Update POP Info</Button>
+                </div>
               </div>
-              <div className="flex items-center justify-end mt-auto">
-                <Button variant="outline" size="sm" onClick={() => setPopLocationsOpen(true)}><MapPin className="h-3.5 w-3.5 mr-1.5" /> Update POP Info</Button>
-              </div>
-            </div>
+            )}
           </div>
-          <BotSourcesPanel />
+          {!IS_CLOUD_MODE && <BotSourcesPanel />}
         </div>
       </AnalyticsCard>
-      <PopLocationsModal open={popLocationsOpen} onOpenChange={setPopLocationsOpen} />
+      {!IS_CLOUD_MODE && <PopLocationsModal open={popLocationsOpen} onOpenChange={setPopLocationsOpen} />}
     </>
   )
 }

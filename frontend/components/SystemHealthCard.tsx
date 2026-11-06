@@ -8,6 +8,7 @@ import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
 import type { components } from '@/types/api.generated'
 
 export const TICK_BACKEND_CALL_CEILING = 32
@@ -121,6 +122,7 @@ export function SystemHealthCard() {
   // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch('1h'),
+    enabled: !IS_CLOUD_MODE,
     queryFn: async () => {
       return (await unwrapClient(
         client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } }),
@@ -131,6 +133,81 @@ export function SystemHealthCard() {
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
   })
+
+  const { data: cloudSync, dataUpdatedAt: cloudSyncUpdatedAt } = useQuery({
+    queryKey: ['cloud-system-health-sync'],
+    enabled: IS_CLOUD_MODE,
+    queryFn: async () => {
+      const res = await fetch('/api/sync-status', { credentials: 'include' })
+      if (!res.ok) return null
+      return (await res.json()) as {
+        configured?: boolean
+        last_tick_at?: string | null
+        next_tick_at?: string | null
+        clock_interval_s?: number
+        cron_runs?: Array<{ started_at?: string; backend_calls?: number; vcpu_ms?: number; status?: string }>
+      }
+    },
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  })
+
+  if (IS_CLOUD_MODE) {
+    const runs = cloudSync?.cron_runs ?? []
+    const tick = summarizeTickHealth(runs)
+    const lastTickAt = cloudSync?.last_tick_at ?? tick.last_tick_at
+    const tickAgeSec =
+      lastTickAt && cloudSyncUpdatedAt > 0
+        ? Math.max(0, Math.round((cloudSyncUpdatedAt - Date.parse(lastTickAt)) / 1000))
+        : null
+    const healthy = tick.tick_health === 'healthy'
+    return (
+      <AnalyticsCard
+        title="Compute & Edge Clock Health"
+        description="Serverless Fastly Compute ingestion clock, resource ceilings, and browser query engine status."
+      >
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <Stat
+            label="Edge Clock (/_tick)"
+            value={runs.length === 0 && !lastTickAt ? 'WAITING' : healthy ? 'HEALTHY' : 'DEGRADED'}
+            sub={`Cadence: ${cloudSync?.clock_interval_s ?? DEFAULT_CLOCK_INTERVAL_S}s IAD shield probe`}
+            tone={runs.length === 0 && !lastTickAt ? 'unknown' : healthy ? 'default' : 'warn'}
+          />
+          <Stat
+            label="Last Ingest Tick"
+            value={tickAgeSec == null ? '–' : `${formatElapsed(tickAgeSec, ELAPSED_AGE_COMPACT)} ago`}
+            sub={lastTickAt ?? 'awaiting first tick'}
+            tone={tickAgeSec == null ? 'unknown' : tickAgeSec > DEFAULT_CLOCK_INTERVAL_S * 3 ? 'warn' : 'default'}
+          />
+          <Stat
+            label="Peak Tick vCPU"
+            value={`${tick.maxVcpuMs} ms`}
+            sub={`Budget ceiling: ${TICK_VCPU_BUDGET_MS} ms / execution`}
+            tone={tick.maxVcpuMs > TICK_VCPU_BUDGET_MS ? 'crit' : tick.maxVcpuMs > 800 ? 'warn' : 'default'}
+          />
+          <Stat
+            label="Peak Backend Calls"
+            value={`${tick.maxBackendCalls} / ${TICK_BACKEND_CALL_CEILING}`}
+            sub="Subrequests per tick execution"
+            tone={tick.maxBackendCalls > TICK_BACKEND_CALL_CEILING ? 'crit' : tick.maxBackendCalls > 28 ? 'warn' : 'default'}
+          />
+          <Stat
+            label="Query Engine"
+            value="DuckDB-Wasm"
+            sub="In-browser Parquet + Rollup execution"
+            tone="default"
+          />
+          <Stat
+            label="Object Storage"
+            value="FOS Parquet"
+            sub="Fastly Object Storage + VCL CDN cache"
+            tone="default"
+          />
+        </div>
+      </AnalyticsCard>
+    )
+  }
 
   if (!mounted || !snap) {
     return (

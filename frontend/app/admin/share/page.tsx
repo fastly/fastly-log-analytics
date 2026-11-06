@@ -14,6 +14,7 @@ import { DeployRemoteFrontendDialog, TeardownRemoteFrontendDialog } from "@/comp
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { client, extractApiError, queryKeys, unwrapClient } from "@/lib/api"
+import { IS_CLOUD_MODE } from "@/lib/cloud-engine/adapter"
 import { cn } from "@/lib/utils"
 import Loading from "./loading"
 import { InvitationsPanel } from "./InvitationsPanel"
@@ -83,18 +84,24 @@ function ShareDashboardPageContent() {
   return (
     <div className="space-y-6" data-testid="admin-share-root">
       <PageHeader
-        title="Remote Dashboard Sharing"
-        description="Start the share tunnel, manage analyst invitations, monitor live sessions, and review the audit trail."
+        title={IS_CLOUD_MODE ? "Users & Passkey Invitations" : "Remote Dashboard Sharing"}
+        description={
+          IS_CLOUD_MODE
+            ? "Create one-time passkey invitation links for admins or analysts, manage registered users, and review the admin audit trail."
+            : "Start the share tunnel, manage analyst invitations, monitor live sessions, and review the audit trail."
+        }
         icon={ShieldAlert}
       >
-        {activeService && activeService.remote_frontend_deployed ? (
-          <TeardownRemoteFrontendDialog
-            serviceId={activeService.service_id}
-            domainName={activeService.sharing_domain || ''}
-            onSuccess={refresh}
-          />
-        ) : (
-          <DeployRemoteFrontendDialog />
+        {!IS_CLOUD_MODE && (
+          activeService && activeService.remote_frontend_deployed ? (
+            <TeardownRemoteFrontendDialog
+              serviceId={activeService.service_id}
+              domainName={activeService.sharing_domain || ''}
+              onSuccess={refresh}
+            />
+          ) : (
+            <DeployRemoteFrontendDialog />
+          )
         )}
         <Button variant="outline" size="sm" onClick={refresh} disabled={isRefreshing} data-testid="admin-share-refresh-btn">
           <RefreshCw className={cn('h-4 w-4 mr-1', isRefreshing && 'animate-spin')} />
@@ -103,18 +110,20 @@ function ShareDashboardPageContent() {
         <BackToAdminLink />
       </PageHeader>
 
-      <Alert className="border-amber-300 bg-amber-50 text-amber-900 [&>svg]:text-amber-900">
-        <AlertTriangle className="h-4 w-4" />
-        <AlertDescription>
-          <span className="font-semibold">Secure your server before sharing.</span>{' '}
-          Remote sharing exposes this dashboard to invited analysts over the public internet.
-          Before enabling the tunnel, confirm the host has an up-to-date OS, firewall rules
-          restricting inbound access to the share port, and (recommended) only allows the
-          tunnel through a reverse proxy you control. Each invited analyst gets read-only
-          access scoped to the services you grant — but the underlying server is yours to
-          harden.
-        </AlertDescription>
-      </Alert>
+      {!IS_CLOUD_MODE && (
+        <Alert className="border-amber-300 bg-amber-50 text-amber-900 [&>svg]:text-amber-900">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>
+            <span className="font-semibold">Secure your server before sharing.</span>{' '}
+            Remote sharing exposes this dashboard to invited analysts over the public internet.
+            Before enabling the tunnel, confirm the host has an up-to-date OS, firewall rules
+            restricting inbound access to the share port, and (recommended) only allows the
+            tunnel through a reverse proxy you control. Each invited analyst gets read-only
+            access scoped to the services you grant — but the underlying server is yours to
+            harden.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {statusErrorMsg && (
         <Alert variant="destructive" data-testid="admin-share-status-error">
@@ -127,26 +136,28 @@ function ShareDashboardPageContent() {
         </Alert>
       )}
 
-      <div
-        className={cn(
-          'min-h-[220px] [contain-intrinsic-size:auto_220px] [content-visibility:auto] transition-opacity',
-          isRefreshing && 'opacity-40 pointer-events-none',
-        )}
-        data-testid="admin-share-control-reservation"
-      >
-        {statusForPanels === null && !statusErrorMsg ? (
-          <div className="space-y-3" aria-busy="true">
-            <Skeleton className="h-[220px] w-full rounded-xl" />
-          </div>
-        ) : (
-          <SharingControlPanel status={statusForPanels} onRefresh={refresh} onError={setActionError} />
-        )}
-      </div>
+      {!IS_CLOUD_MODE && (
+        <div
+          className={cn(
+            'min-h-[220px] [contain-intrinsic-size:auto_220px] [content-visibility:auto] transition-opacity',
+            isRefreshing && 'opacity-40 pointer-events-none',
+          )}
+          data-testid="admin-share-control-reservation"
+        >
+          {statusForPanels === null && !statusErrorMsg ? (
+            <div className="space-y-3" aria-busy="true">
+              <Skeleton className="h-[220px] w-full rounded-xl" />
+            </div>
+          ) : (
+            <SharingControlPanel status={statusForPanels} onRefresh={refresh} onError={setActionError} />
+          )}
+        </div>
+      )}
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full" data-testid="admin-share-tabs">
         <TabsList>
           <TabsTrigger value="invites" data-testid="admin-share-tab-invites">Invitations</TabsTrigger>
-          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">Sessions</TabsTrigger>
+          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">{IS_CLOUD_MODE ? "Users & Passkeys" : "Sessions"}</TabsTrigger>
           <TabsTrigger value="audit" data-testid="admin-share-tab-audit">Audit</TabsTrigger>
         </TabsList>
 
