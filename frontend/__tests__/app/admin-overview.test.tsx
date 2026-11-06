@@ -9,6 +9,9 @@ import {
 } from '../helpers/page-smoke'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import React from 'react'
+import { renderToString } from 'react-dom/server'
+import { hydrateRoot } from 'react-dom/client'
+import { QueryClientProvider } from '@tanstack/react-query'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import { useServiceStore } from '@/stores/filterStore'
 
@@ -201,13 +204,13 @@ import { ClickHouseAdminClient, ClickHouseStatusNotice } from '@/app/admin/click
 import { OperationsOverview, AdminTrendsClient, ServicesTable } from '@/app/admin/_sections/OperationsOverview'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 import TrendsLoading from '@/app/admin/trends/loading'
-import { getApiBase } from '@/lib/api'
+import { getApiBase, queryKeys } from '@/lib/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
-import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
+import { AuditLogPanel, useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
 import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
-import { LabelsTab, AuditLogTab, MatrixVersionsCard, useScorerTimeseries } from '@/components/SessionScoring/ScoringAdminPanels'
+import { LabelsTab, AuditLogTab, MatrixVersionsCard, ThresholdSlider, useScorerTimeseries } from '@/components/SessionScoring/ScoringAdminPanels'
 
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -548,6 +551,39 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
 })
 
 describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
+  it('hydrates before the service store and status cache are safe to consume', async () => {
+    mockSearchParamsString = ''
+    useServiceStore.setState({ activeServiceId: null, services: [] })
+    const queryClient = createTestQueryClient()
+    const tree = (
+      <QueryClientProvider client={queryClient}>
+        <ClickHouseAdminClient initialServiceId="svc-test" />
+      </QueryClientProvider>
+    )
+    const container = document.createElement('div')
+    container.innerHTML = renderToString(tree)
+    document.body.appendChild(container)
+    useServiceStore.setState({ activeServiceId: 'svc-test', services: [{ id: 'svc-test', name: 'Test' }] })
+    queryClient.setQueryData(queryKeys.admin.clickhouseStatus('svc-test'), {
+      service_id: 'svc-test', enabled: false, health: 'disabled',
+    })
+    const onRecoverableError = vi.fn()
+    let root: ReturnType<typeof hydrateRoot> | undefined
+    try {
+      await act(async () => {
+        root = hydrateRoot(container, tree, { onRecoverableError })
+      })
+      expect(onRecoverableError).not.toHaveBeenCalled()
+      expect(container.querySelector('[data-testid="admin-clickhouse-service-badge"]')).toHaveTextContent('svc-test')
+      expect(container.querySelector('[data-testid="admin-clickhouse-health-badge"]')).toHaveTextContent('disabled')
+    } finally {
+      act(() => root?.unmount())
+      container.remove()
+      queryClient.clear()
+      mockSearchParamsString = 'service=svc-test'
+    }
+  })
+
   beforeEach(() => {
     notFoundMock.mockClear()
     vi.unstubAllEnvs()
@@ -759,6 +795,41 @@ describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsC
     useServiceStore.setState({ activeServiceId: SVC, isInitialized: true })
   })
 
+  it('waits for scoring configuration before requesting enforcement and reacts to configuration changes', async () => {
+    const hits: string[] = []
+    let releaseStatus!: (value: { enabled: boolean }) => void
+    const status = new Promise<{ enabled: boolean }>((resolve) => { releaseStatus = resolve })
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/status`, async () => HttpResponse.json(await status)),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/threshold-preview`, () => HttpResponse.json({
+        flagged: { total: 0, good: 0, bad: 0, unlabeled: 0 },
+        passed: { good: 0, bad: 0, unlabeled: 0 }, total_scored_sessions: 0,
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/threshold`, () => HttpResponse.json({ threshold: null })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/enforce-status-code`, () => HttpResponse.json({ effective: 429 })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/health`, () => HttpResponse.json({})),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/enforce-threshold`, () => {
+        hits.push('threshold')
+        return HttpResponse.json({ threshold: null })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/l2-enforce`, () => {
+        hits.push('l2')
+        return HttpResponse.json({ detail: { error: 'enforcement read failed' } }, { status: 500 })
+      }),
+    )
+    const { queryClient } = renderWithQuery(
+      <><ThresholdSlider serviceId={SVC} /><L2EnforcementCard serviceId={SVC} /></>,
+    )
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) })
+    expect(hits).toEqual([])
+    await act(async () => { releaseStatus({ enabled: false }) })
+    expect(await screen.findByText(/Enable session scoring for this service to manage L2 enforcement/)).toBeInTheDocument()
+    expect(hits).toEqual([])
+    act(() => { queryClient.setQueryData(['scoring-status', SVC], { enabled: true }) })
+    await waitFor(() => expect(hits).toEqual(expect.arrayContaining(['threshold', 'l2'])))
+    expect(await screen.findByText(/enforcement read failed/)).toBeInTheDocument()
+  })
+
   it('StatusPanel gates on preflight_pragmas_ready without leaking internal pragma names, then opens SSEModal when ready', async () => {
     let statusCalls = 0
     let readyState = false
@@ -880,6 +951,7 @@ describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsC
     })
 
     server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/status`, () => HttpResponse.json({ enabled: true })),
       http.get(`${API_BASE}/api/services/:service_id/scoring/health`, () =>
         HttpResponse.json({ matrix_staleness: { l2_high_pct: 8.5, l2_evaluated: 1000 } }),
       ),
@@ -1133,6 +1205,89 @@ function buildMockShareStatus(overrides: Record<string, unknown> = {}) {
 
 describe('admin/share page', () => {
   beforeEach(() => { mockSearchParamsString = '' })
+
+  test('filters by native audit actions and retains the selection when no events match', async () => {
+    const requestedEvents: Array<string | null> = []
+    server.use(http.get(`${API_BASE}/api/admin/share/audit-logs`, ({ request }) => {
+      const event = new URL(request.url).searchParams.get('event_type')
+      requestedEvents.push(event)
+      return HttpResponse.json({ audit_logs: event ? [] : ['login', 'logout', 'login'].map((event_type, id) => ({
+        id, timestamp: '2026-06-01T10:00:00Z', event_type,
+        email: `fixture-user-${id}@example.test`, ip_address: '127.0.0.1', details: '',
+      })) })
+    }))
+    const status = buildMockShareStatus({ audit_logs: undefined }) as unknown as ShareStatus
+    const user = userEvent.setup()
+    renderWithQuery(<AuditLogPanel status={status} onError={vi.fn()} />)
+    await screen.findByText('fixture-user-0@example.test')
+    const eventSelect = screen.getByRole('combobox')
+    eventSelect.focus()
+    await user.keyboard('{ArrowDown}')
+    expect(await screen.findByRole('option', { name: 'LOGIN_SUCCESS' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'logout' })).toBeInTheDocument()
+    expect(screen.getAllByRole('option', { name: 'login' })).toHaveLength(1)
+    await user.click(screen.getByRole('option', { name: 'login' }))
+    await user.click(screen.getByTestId('admin-share-audit-apply-btn'))
+    await screen.findByText('No audit events yet.')
+    expect(requestedEvents).toEqual([null, 'login'])
+    expect(eventSelect).toHaveTextContent('login')
+    eventSelect.focus()
+    await user.keyboard('{ArrowDown}')
+    expect(await screen.findByRole('option', { name: 'login' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('loads recent audit events when Cloud status does not embed them', async () => {
+    let calls = 0
+    server.use(http.get(`${API_BASE}/api/admin/share/audit-logs`, () => {
+      calls += 1
+      return HttpResponse.json({ audit_logs: [{
+        id: 1, timestamp: '2026-06-01T10:00:00Z', event_type: 'login',
+        email: 'admin@example.com', ip_address: '127.0.0.1', details: 'fixture-target',
+      }] })
+    }))
+    const status = buildMockShareStatus({ audit_logs: undefined }) as unknown as ShareStatus
+    const onError = vi.fn()
+    renderWithQuery(<AuditLogPanel status={status} onError={onError} />)
+    expect(await screen.findByText('admin@example.com')).toBeInTheDocument()
+    expect(screen.getByText('fixture-target')).toBeInTheDocument()
+    expect(calls).toBe(1)
+    expect(onError).not.toHaveBeenCalledWith(expect.stringMatching(/error|failed/i))
+  })
+
+  test.each(['omitted', 'populated'])('audit table remains stable with %s recent audit rows', async (mode) => {
+    server.use(http.get(`${API_BASE}/api/admin/share/audit-logs`, () => HttpResponse.json({ audit_logs: [] })))
+    let commits = 0
+    const onRender = () => {
+      commits += 1
+      if (commits > 12) throw new Error('Audit render loop exceeded the test safety bound')
+    }
+    const auditLogs = mode === 'omitted' ? undefined : Array.from({ length: 250 }, (_, index) => ({
+      id: index,
+      timestamp: '2026-06-01T10:00:00Z',
+      event_type: 'login_success',
+      email: `admin-${index}@example.com`,
+      ip_address: '127.0.0.1',
+      details: '',
+    }))
+    const status = buildMockShareStatus({ audit_logs: auditLogs }) as unknown as ShareStatus
+    const tree = () => (
+      <React.Profiler id="share-audit" onRender={onRender}>
+        <AuditLogPanel status={{ ...status }} onError={vi.fn()} />
+      </React.Profiler>
+    )
+    const { rerender } = renderWithQuery(tree())
+    await act(async () => {})
+    rerender(tree())
+    fireEvent.change(screen.getByLabelText('Email contains'), { target: { value: 'admin' } })
+    await act(async () => {})
+    if (mode === 'omitted') {
+      expect(screen.getByText('No audit events yet.')).toBeInTheDocument()
+    } else {
+      expect(screen.getAllByText('login_success')).toHaveLength(250)
+      expect(screen.getByText('admin-249@example.com')).toBeInTheDocument()
+    }
+    expect(commits).toBeLessThan(12)
+  })
 
   test('renders zero-CLS reservations, SharingControlPanel, InvitationsPanel, and manual Refresh', async () => {
     let statusCalls = 0

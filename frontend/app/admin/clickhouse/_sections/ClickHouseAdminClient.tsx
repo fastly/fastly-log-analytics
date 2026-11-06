@@ -15,6 +15,8 @@ import {
 
 import { client, queryKeys, unwrapClient } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
+import { useMounted } from '@/hooks/useBootstrap'
+import { ClickHousePanelFallback } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ClickHouseReplayControlPanel } from './ClickHouseReplayControlPanel'
@@ -59,6 +61,7 @@ async function fetchClickHouseStatus(
 }
 
 export function ClickHouseAdminClient({ initialServiceId }: ClickHouseAdminClientProps) {
+  const mounted = useMounted()
   const searchParams = useSearchParams()
   const [nuqsService] = useQueryState('service', parseAsString)
   const urlServiceId =
@@ -79,7 +82,7 @@ export function ClickHouseAdminClient({ initialServiceId }: ClickHouseAdminClien
   const statusQuery = useQuery({
     queryKey: queryKeys.admin.clickhouseStatus(resolvedServiceId || null),
     queryFn: ({ signal }) => fetchClickHouseStatus(resolvedServiceId, signal),
-    enabled: Boolean(resolvedServiceId),
+    enabled: mounted && Boolean(resolvedServiceId),
     placeholderData: keepPreviousData,
     staleTime: 15_000,
     retry: false,
@@ -155,6 +158,8 @@ export function ClickHouseAdminClient({ initialServiceId }: ClickHouseAdminClien
       setReferenceValue(activeGen.generation)
     }
   }
+
+  if (!mounted) return <ClickHousePanelFallback />
 
   return (
     <div className="space-y-6">

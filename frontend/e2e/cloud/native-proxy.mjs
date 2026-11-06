@@ -77,6 +77,9 @@ createServer(credentials, (incoming, outgoing) => {
       response.pipe(outgoing);
     },
   );
+  outgoing.on("close", () => {
+    if (!outgoing.writableFinished) upstream.destroy();
+  });
   upstream.on("error", (error) => {
     if (outgoing.headersSent) {
       outgoing.destroy(error);

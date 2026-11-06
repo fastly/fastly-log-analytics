@@ -18,13 +18,13 @@ export async function cloudServiceStatus(request: Request): Promise<Response | n
     if (match[2] !== "rum") return null;
     const versions = await fetch("/api/rum/versions", { signal: request.signal });
     if (!versions.ok) return versions;
-    const available = await versions.json() as { versions: string[]; default_version: string };
+    const available = await versions.json() as { versions: string[]; default: string };
     const current = service.rum?.faro_version ?? service.faro_version ?? null;
     return Response.json({
       available: available.versions,
       current,
-      latest: available.default_version,
-      update_available: current !== null && current !== available.default_version,
+      latest: available.default,
+      update_available: current !== null && current !== available.default,
     });
   }
   const config = service[match[2] as "rum" | "cmcd"];

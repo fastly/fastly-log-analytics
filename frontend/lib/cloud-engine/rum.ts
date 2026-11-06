@@ -1,7 +1,9 @@
 import {
   getDuckDBEngine,
+  compileFiltersToSql,
   type DuckDBAnalyticalEngine,
 } from "./dashboard/duckdb";
+import type { FiltersPayload } from "@/types/api";
 
 export const CWV_THRESHOLDS = {
   LCP: { good: 2500, poor: 4000 },
@@ -22,6 +24,7 @@ export interface RumQueryParams {
   page_url?: string;
   since?: string | number;
   limit?: number;
+  filters?: FiltersPayload | string;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   signal?: AbortSignal;
 }
@@ -186,6 +189,10 @@ export function buildRumWhere(params: RumQueryParams): string {
     const escaped = String(params.page_url).replaceAll("'", "''");
     clauses.push(`COALESCE(page_url, url, path) = '${escaped}'`);
   }
+  const filters: FiltersPayload = typeof params.filters === "string" ? JSON.parse(params.filters) : params.filters ?? {};
+  clauses.push(compileFiltersToSql(Object.entries(filters).flatMap(([field, spec]) =>
+    spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
+  )));
   return clauses.join(" AND ");
 }
 

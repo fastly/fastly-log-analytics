@@ -64,11 +64,13 @@ export async function cloudRumAnalytics(params: RumQueryParams) {
   const seconds = (value: unknown) => value == null ? null : Number(value) / 1000;
   const vitals = (name: "LCP" | "CLS" | "INP") => {
     const metric = data.metrics[name];
-    const good = Math.round(metric.count * metric.good_pct / 100);
-    const poor = Math.round(metric.count * metric.poor_pct / 100);
     return {
       p75: metric.count ? name === "LCP" ? seconds(metric.p75) : metric.p75 : null,
-      distribution: { good, needs_improvement: Math.max(0, metric.count - good - poor), poor },
+      distribution: {
+        good: metric.good_pct,
+        needs_improvement: metric.needs_improvement_pct,
+        poor: metric.poor_pct,
+      },
     };
   };
   return {

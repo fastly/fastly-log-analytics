@@ -7,6 +7,7 @@
  */
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
+import { compileFiltersToSql } from "./dashboard/duckdb";
 
 export const SESSIONS_INACTIVITY_GAP_SECONDS = 1800; // 30 * 60 seconds (INTERVAL 30 MINUTES)
 export const SESSIONS_MAX_WINDOW_DAYS = 7;
@@ -174,6 +175,7 @@ export function buildSessionsCteSql(options: {
   sortDir?: "asc" | "desc";
   limit?: number;
   offset?: number;
+  filters?: SessionsListRequest["filters"];
 }): string {
   const tableName = requireSafeIdent(options.tableName ?? "requests", "tableName");
   const cols =
@@ -247,13 +249,19 @@ export function buildSessionsCteSql(options: {
   const whereClause =
     postFilters.length > 0 ? `WHERE ${postFilters.join(" AND ")}` : "";
 
-  const startEsc = escapeSqlLiteral(options.startTime);
-  const endEsc = escapeSqlLiteral(options.endTime);
+  const timestampSql = cols.has("ts_ms")
+    ? 'EPOCH_MS(CAST("ts_ms" AS BIGINT))'
+    : 'EPOCH_MS(EPOCH_MS("timestamp"))';
+  const filterSql = compileFiltersToSql(Object.entries(options.filters ?? {}).flatMap(([field, spec]) =>
+    (Array.isArray(spec) ? spec : spec.values ?? []).map((value) => ({
+      field, value, mode: !Array.isArray(spec) && spec.mode === "exclude" ? "exclude" as const : "include" as const,
+    })),
+  ));
 
   return `
     WITH base AS (
       SELECT
-        "timestamp" AS ts,
+        ${timestampSql} AS ts,
         "ip",
         ${ja4Select},
         ${cols.has("cmcd_sid") ? `"cmcd_sid"` : `NULL AS "cmcd_sid"`},
@@ -268,8 +276,9 @@ export function buildSessionsCteSql(options: {
         ${cols.has("url") ? `"url"` : `NULL AS "url"`}
       FROM ${tableName}
       WHERE "ip" IS NOT NULL AND "ip" != ''
-        AND "timestamp" >= CAST('${startEsc}' AS TIMESTAMPTZ)
-        AND "timestamp" <= CAST('${endEsc}' AS TIMESTAMPTZ)
+        AND ${timestampSql} >= EPOCH_MS(CAST(${Date.parse(options.startTime)} AS BIGINT))
+        AND ${timestampSql} <= EPOCH_MS(CAST(${Date.parse(options.endTime)} AS BIGINT))
+        AND (${filterSql})
     ),
     gaps AS (
       SELECT *,
@@ -450,6 +459,7 @@ export async function handleSessionsList(
     sortDir: body.sort_dir,
     limit,
     offset,
+    filters: body.filters,
   });
 
   const rawRows = ctx.runSql ? await ctx.runSql(sql) : [];
@@ -586,13 +596,16 @@ export async function handleSessionsDetail(
     targetJa4 != null && targetJa4 !== ""
       ? ` AND "ja4" = '${escapeSqlLiteral(targetJa4)}'`
       : "";
+  const timestampSql = ctx.availableColumns?.has("ts_ms")
+    ? 'EPOCH_MS(CAST("ts_ms" AS BIGINT))'
+    : 'EPOCH_MS(EPOCH_MS("timestamp"))';
   const sql = `
     SELECT *
     FROM ${tableName}
     WHERE "ip" = '${escapeSqlLiteral(targetIp)}'
-      AND "timestamp" >= CAST('${escapeSqlLiteral(startTime)}' AS TIMESTAMPTZ)
-      AND "timestamp" <= CAST('${escapeSqlLiteral(endTime)}' AS TIMESTAMPTZ)${ja4Clause}
-    ORDER BY "timestamp" ASC
+      AND ${timestampSql} >= EPOCH_MS(CAST(${Date.parse(startTime)} AS BIGINT))
+      AND ${timestampSql} <= EPOCH_MS(CAST(${Date.parse(endTime)} AS BIGINT))${ja4Clause}
+    ORDER BY ${timestampSql} ASC
     LIMIT 500
   `;
 

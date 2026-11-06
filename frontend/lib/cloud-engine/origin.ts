@@ -431,9 +431,7 @@ export function buildOriginTimeseriesSql(
     percentile === "p50"
       ? `MEDIAN(${latExpr})`
       : `APPROX_QUANTILE(${latExpr}, ${pctVal})`;
-  const tsExpr = actualCols.has("timestamp")
-    ? '"timestamp"'
-    : `epoch_ms("ts_ms")`;
+  const tsExpr = 'EPOCH_MS(CAST("ts_ms" AS BIGINT))';
   const edgeCol = splitByLeg ? `, "edge"` : "";
 
   return `
@@ -906,8 +904,8 @@ function createDefaultOriginExecutor(): OriginSqlExecutor {
     tableName: "requests",
     async query(sql: string, signal?: AbortSignal): Promise<OriginSqlRow[]> {
       const engine = getDuckDBEngine() as unknown as {
-        querySql?: (sql: string, signal?: AbortSignal) => Promise<OriginSqlRow[]>;
-        executeSql?: (sql: string, signal?: AbortSignal) => Promise<OriginSqlRow[]>;
+        querySql?: (sql: string, params: readonly unknown[], signal?: AbortSignal) => Promise<OriginSqlRow[]>;
+        executeSql?: (sql: string, params: readonly unknown[], signal?: AbortSignal) => Promise<OriginSqlRow[]>;
         ensureBackend?: () => Promise<{
           query: (
             sql: string,
@@ -920,10 +918,10 @@ function createDefaultOriginExecutor(): OriginSqlExecutor {
         }>;
       };
       if (typeof engine.querySql === "function") {
-        return engine.querySql(sql, signal);
+        return engine.querySql(sql, [], signal);
       }
       if (typeof engine.executeSql === "function") {
-        return engine.executeSql(sql, signal);
+        return engine.executeSql(sql, [], signal);
       }
       if (typeof engine.ensureBackend === "function") {
         const backend = await engine.ensureBackend();

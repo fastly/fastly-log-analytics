@@ -320,6 +320,48 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     )
   }
 
+  describe('RUM query failures', () => {
+    it('replaces failed analytics skeletons with a retry that recovers the report', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      mockRumEndpoints()
+      let failed = true
+      server.use(http.get('/api/services/:service_id/rum/analytics', () =>
+        failed ? HttpResponse.json({ error: 'unavailable' }, { status: 503 }) : HttpResponse.json(analytics()),
+      ))
+      renderClient()
+
+      expect(await screen.findByText('RUM analytics unavailable')).toBeInTheDocument()
+      failed = false
+      await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+      expect(screen.queryByText('RUM analytics unavailable')).not.toBeInTheDocument()
+    })
+
+    it('does not disguise failed live events as an empty activity table', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      mockRumEndpoints()
+      let failed = true
+      server.use(http.get('/api/services/:service_id/rum/live-events', () =>
+        failed ? HttpResponse.json({ error: 'unavailable' }, { status: 503 }) : HttpResponse.json([]),
+      ))
+      renderClient()
+
+      expect(await screen.findByText('Live activity unavailable')).toBeInTheDocument()
+      expect(screen.getByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+      failed = false
+      await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      await waitFor(() => expect(screen.queryByText('Live activity unavailable')).not.toBeInTheDocument())
+    })
+  })
+
   describe('RumClient — Faro version card placement', () => {
     it('admin: renders the Faro version card alongside the vitals dashboard when RUM is enabled', async () => {
       useServiceStore.setState({

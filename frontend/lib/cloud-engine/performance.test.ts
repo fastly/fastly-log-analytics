@@ -1,4 +1,6 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getDuckDBEngine } from "./dashboard/duckdb";
 import {
   buildPerfScatterSql,
   buildPerfTopAsnsSql,
@@ -22,6 +24,35 @@ import {
 describe("performance cloud-engine module (F19)", () => {
   beforeEach(() => {
     setPerformanceEngineClient(null);
+  });
+
+  it("returns populated short-field results using the page's table and chart contract", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", elapsed, ttfb, cache, url, asn, ttl)
+        SELECT 'performance-test', 1700000000000, epoch_ms(1700000000000),
+          100000, 0.02, 'HIT', '/a', 15169, 300 FROM range(12)
+      `);
+      const response = await handlePerformanceRequest(
+        new Request("https://example.test/api/performance/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+          }),
+        }),
+      );
+      const data = await response!.json();
+      expect(data.top_urls[0]).toMatchObject({
+        url: "/a", requests: 12, avg: 100, p50: 100, p95: 100, p99: 100,
+      });
+      expect(data.top_asns[0]).toMatchObject({ requests: 12, avg: 100 });
+      expect(data.waterfall.avg).toMatchObject({ edge_processing: 20, client_download: 80 });
+      expect(data.scatter[0]).toEqual({ origin: 20, edge: 80, cache: "HIT" });
+    } finally {
+      await engine.reset();
+    }
   });
 
   it("expands section union pairs (top_urls+top_asns and waterfall+scatter)", () => {
@@ -82,11 +113,11 @@ describe("performance cloud-engine module (F19)", () => {
     ]);
     expect(urls[0]).toEqual({
       url: "/checkout",
-      req_count: 42,
-      avg_ms: 12.35,
-      p50_ms: 10.1,
-      p95_ms: 40.56,
-      p99_ms: 88.91,
+      requests: 42,
+      avg: 12.35,
+      p50: 10.1,
+      p95: 40.56,
+      p99: 88.91,
     });
 
     const asns = shapePerformanceAsnRows([
@@ -125,7 +156,7 @@ describe("performance cloud-engine module (F19)", () => {
     });
 
     const scatter = shapePerfScatterRows([{ origin_ms: 12.345, edge_ms: 4.567, cache: "MISS" }]);
-    expect(scatter).toEqual([{ origin_ms: 12.35, edge_ms: 4.57, cache: "MISS" }]);
+    expect(scatter).toEqual([{ origin: 12.35, edge: 4.57, cache: "MISS" }]);
   });
 
   it("uses perf_top_urls, perf_top_asns, and perf_ttl_dist rollups when unfiltered and dispatches /api/performance/aggregates", async () => {
@@ -166,7 +197,7 @@ describe("performance cloud-engine module (F19)", () => {
     expect(agg.top_urls?.[0]?.url).toBe("/fast");
     expect(agg.top_asns?.[0]?.asn).toBe("13335");
     expect(agg.ttl_dist?.[0]?.bucket).toBe("1m - 1h");
-    expect(agg.waterfall?.origin_wait).toBe(10);
+    expect(agg.waterfall?.avg?.origin_wait).toBe(10);
 
     const req = new Request("https://example.test/api/performance/aggregates", {
       method: "POST",

@@ -95,21 +95,21 @@ export interface PerformanceRequest {
 
 export interface PerfTopUrlItem {
   url: string;
-  req_count: number;
-  avg_ms: number;
-  p50_ms: number;
-  p95_ms: number;
-  p99_ms: number;
+  requests: number;
+  avg: number;
+  p50: number;
+  p95: number;
+  p99: number;
 }
 
 export interface PerfTopAsnItem {
   asn: string;
   label: string;
-  req_count: number;
-  avg_ms: number;
-  p50_ms: number;
-  p95_ms: number;
-  p99_ms: number;
+  requests: number;
+  avg: number;
+  p50: number;
+  p95: number;
+  p99: number;
 }
 
 export interface PerfTtlDistItem {
@@ -125,8 +125,8 @@ export interface PerfWaterfallAvg {
 }
 
 export interface PerfScatterItem {
-  origin_ms: number;
-  edge_ms: number;
+  origin: number;
+  edge: number;
   cache: string;
 }
 
@@ -134,7 +134,7 @@ export interface PerformanceAggregatesResponse {
   top_urls?: PerfTopUrlItem[];
   top_asns?: PerfTopAsnItem[];
   ttl_dist?: PerfTtlDistItem[];
-  waterfall?: PerfWaterfallAvg;
+  waterfall?: { avg: PerfWaterfallAvg | null };
   scatter?: PerfScatterItem[];
   _approx?: boolean;
 }
@@ -441,11 +441,11 @@ export function shapePerfTopUrlRow(row: Record<string, unknown>): PerfTopUrlItem
   const url = String(row.url ?? row.value ?? "");
   return {
     url,
-    req_count: Math.trunc(toNum(row.req_count ?? row.requests)),
-    avg_ms: roundTo(toNum(row.avg_ms), 2),
-    p50_ms: roundTo(toNum(row.p50_ms), 2),
-    p95_ms: roundTo(toNum(row.p95_ms), 2),
-    p99_ms: roundTo(toNum(row.p99_ms), 2),
+    requests: Math.trunc(toNum(row.req_count ?? row.requests)),
+    avg: roundTo(toNum(row.avg_ms ?? row.avg), 2),
+    p50: roundTo(toNum(row.p50_ms ?? row.p50), 2),
+    p95: roundTo(toNum(row.p95_ms ?? row.p95), 2),
+    p99: roundTo(toNum(row.p99_ms ?? row.p99), 2),
   };
 }
 
@@ -461,11 +461,11 @@ export function shapePerformanceAsnRows(rows: Record<string, unknown>[]): PerfTo
     return {
       asn: asnStr,
       label: existingLabel ?? formatAsnLabel(asnStr),
-      req_count: Math.trunc(toNum(row.req_count ?? row.requests)),
-      avg_ms: roundTo(toNum(row.avg_ms), 2),
-      p50_ms: roundTo(toNum(row.p50_ms), 2),
-      p95_ms: roundTo(toNum(row.p95_ms), 2),
-      p99_ms: roundTo(toNum(row.p99_ms), 2),
+      requests: Math.trunc(toNum(row.req_count ?? row.requests)),
+      avg: roundTo(toNum(row.avg_ms ?? row.avg), 2),
+      p50: roundTo(toNum(row.p50_ms ?? row.p50), 2),
+      p95: roundTo(toNum(row.p95_ms ?? row.p95), 2),
+      p99: roundTo(toNum(row.p99_ms ?? row.p99), 2),
     };
   });
 }
@@ -496,8 +496,8 @@ export function shapeWaterfallAvg(row: Record<string, unknown> | null | undefine
 
 export function shapePerfScatterRows(rows: Record<string, unknown>[]): PerfScatterItem[] {
   return rows.slice(0, SCATTER_SAMPLE_SIZE).map((row) => ({
-    origin_ms: roundTo(toNum(row.origin_ms), 2),
-    edge_ms: roundTo(toNum(row.edge_ms), 2),
+    origin: roundTo(toNum(row.origin_ms ?? row.origin), 2),
+    edge: roundTo(toNum(row.edge_ms ?? row.edge), 2),
     cache: String(row.cache ?? ""),
   }));
 }
@@ -577,7 +577,10 @@ export async function executePerformanceAggregates(
       (async () => {
         const { sql, params } = buildPerfWaterfallSql(req, availableColumns);
         const rows = await client.query(sql, params);
-        response.waterfall = shapeWaterfallAvg(rows[0] ?? null);
+        const row = rows[0];
+        response.waterfall = {
+          avg: row && row.component_count !== 0 ? shapeWaterfallAvg(row) : null,
+        };
       })(),
     );
   }

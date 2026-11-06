@@ -4,6 +4,9 @@ import { setOriginSqlExecutor } from "./origin";
 import { setPerformanceEngineClient } from "./performance";
 import { setSecurityEngineClient } from "./security";
 import { getDuckDBEngine } from "./dashboard/duckdb";
+import * as usage from "./usage/summary";
+import { fixtureUsageInput } from "./usage/fixtures";
+import * as ops from "./telemetry/client";
 
 vi.mock("./range-loader", () => ({ ensureCloudRange: vi.fn().mockResolvedValue(undefined) }));
 
@@ -39,6 +42,110 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     setSecurityEngineClient(null);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("preserves historical usage bounds and requested hourly buckets", async () => {
+    const from = Date.parse("2026-10-30T12:00:00Z");
+    const to = from + 2 * 3_600_000;
+    const input = {
+      ...fixtureUsageInput,
+      now: to,
+      rows: {
+        fos_usage: [0, 1].map((hour) => ({
+          ...fixtureUsageInput.rows.fos_usage[0],
+          timestamp: from + hour * 3_600_000 + 1000,
+          op_count: 1,
+        })),
+        api_telemetry: [],
+        cron_runs: [],
+        cron_ticks: [],
+      },
+    };
+    const summary = usage.summarizeUsage(input);
+    const fetchSummary = vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...summary, input, summary, lines: [], totalUsd: 0,
+    });
+    const params = new URLSearchParams({
+      start: new Date(from).toISOString(),
+      end: new Date(to).toISOString(),
+      by: "hour",
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/operations?${params}`),
+    );
+
+    expect(fetchSummary).toHaveBeenCalledWith(
+      expect.objectContaining({ from, to }),
+    );
+    expect(await response!.json()).toMatchObject({
+      total_class_a: 2,
+      data: expect.arrayContaining([
+        expect.objectContaining({ date: "2026-10-30T12:00:00.000Z", class_a: 1 }),
+        expect.objectContaining({ date: "2026-10-30T13:00:00.000Z", class_a: 1 }),
+      ]),
+    });
+  });
+
+  it("returns filtered Cloud share audit rows with parseable timestamps and requested limits", async () => {
+    const since = Date.parse("2026-01-01T00:00:00Z");
+    const until = since + 1500;
+    const rows = [
+      { timestamp: since + 2000, event_id: "later", actor: "admin@example.test", action: "logout", target: "later" },
+      { timestamp: since + 1200, event_id: "selected", actor: "admin@example.test", action: "login", target: "selected" },
+      { timestamp: since + 1000, event_id: "older", actor: "admin@example.test", action: "login", target: "older" },
+      { timestamp: since + 500, event_id: "other", actor: "other@example.test", action: "login", target: "other" },
+      ...Array.from({ length: 250 }, (_, index) => ({
+        timestamp: since + 250 - index,
+        event_id: `extra-${index}`, actor: "other@example.test",
+        action: "logout", target: `extra-${index}`,
+      })),
+    ];
+    const queryLogs = vi.spyOn(ops, "queryOpsLogs").mockResolvedValue({
+      kind: "admin_audit", from: "", to: "", rows, oldestLiveMs: null, status: null,
+      stats: {
+        listed: 0, read: 0, cached: 0, cdnHits: 0, skippedCovered: 0,
+        ignoredCompact: 0, evicted: 0, liveRows: rows.length,
+      },
+    });
+    const params = new URLSearchParams({
+      since: new Date(since).toISOString(),
+      until: new Date(until).toISOString(),
+      event_type: "login", email: "admin", limit: "1",
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/admin/share/audit-logs?${params}`),
+    );
+
+    expect(await response!.json()).toMatchObject({
+      audit_logs: [{
+        timestamp: "2026-01-01T00:00:01.200Z",
+        event_type: "login", email: "admin@example.test", details: "selected",
+      }],
+    });
+    expect(queryLogs).toHaveBeenCalledWith(
+      "admin_audit",
+      { from: new Date(since).toISOString(), to: new Date(until + 1).toISOString() },
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+    const defaultResponse = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/admin/share/audit-logs?since=${new Date(since).toISOString()}&until=${new Date(until).toISOString()}`),
+    );
+    expect((await defaultResponse!.json()).audit_logs).toHaveLength(200);
+  });
+
+  it.each([
+    ["limit=0", 422],
+    ["limit=2001", 422],
+    ["since=not-a-date", 400],
+  ])("rejects invalid Audit query %s before reading logs", async (query, status) => {
+    const queryLogs = vi.spyOn(ops, "queryOpsLogs");
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/admin/share/audit-logs?${query}`),
+    );
+    expect(response!.status).toBe(status);
+    expect(queryLogs).not.toHaveBeenCalled();
   });
 
   it("dispatches /api/origin/* routes through handleOriginRequest", async () => {

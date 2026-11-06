@@ -6,6 +6,7 @@ import { NATIVE_ROUTES, isNativeCloudRoute } from "./native-routes";
 import { ensureCloudRange } from "./range-loader";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { sealSessionToken } from "./sessions";
+import { cloudServiceStatus } from "./service-bridges";
 
 vi.mock("./range-loader", () => ({ ensureCloudRange: vi.fn().mockResolvedValue(undefined) }));
 
@@ -25,6 +26,27 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); });
 
 describe("Cloud endpoint bridges", () => {
+  it("uses the native RUM default version without claiming an up-to-date SDK needs updating", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/services"
+        ? Response.json({ services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.13.0" } }] })
+        : Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    expect(await (await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.json()).toEqual({
+      available: ["2.13.0", "2.10.0"], current: "2.13.0", latest: "2.13.0", update_available: false,
+    });
+    fetcher.mockImplementation(async (input: RequestInfo | URL) =>
+      String(input) === "/api/services"
+        ? Response.json({ services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.10.0" } }] })
+        : Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" }),
+    );
+    expect(await (await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.json())
+      .toMatchObject({ current: "2.10.0", latest: "2.13.0", update_available: true });
+    fetcher.mockImplementation(async () => Response.json({ error: "unauthorized" }, { status: 401 }));
+    expect((await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.status).toBe(401);
+  });
+
   it("preserves native auth and rejects unsupported stream requests without network leakage", async () => {
     const fetcher = vi.fn(async () => Response.json({ user: { id: "fixture-user" } }));
     vi.stubGlobal("fetch", fetcher);

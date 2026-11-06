@@ -214,9 +214,10 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     setAppliedFilters(initialEmailFilter ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' } : null)
   }
 
+  const loadRecentAudit = status !== null && status.audit_logs == null
   const auditQuery = useQuery({
     queryKey: ['share-audit-logs', appliedFilters],
-    enabled: appliedFilters !== null,
+    enabled: appliedFilters !== null || loadRecentAudit,
     retry: false,
     queryFn: async () => {
       onError('')
@@ -254,9 +255,20 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     if (onClearInitialFilter) onClearInitialFilter()
   }
 
-  const filteredLogs = appliedFilters !== null ? (auditQuery.data ?? null) : null
+  const filteredLogs = appliedFilters !== null || loadRecentAudit ? (auditQuery.data ?? null) : null
   const loading = auditQuery.isFetching
-  const rows = filteredLogs ?? status?.audit_logs ?? []
+  const rows = React.useMemo(
+    () => filteredLogs ?? status?.audit_logs ?? [],
+    [filteredLogs, status?.audit_logs],
+  )
+  const eventTypeOptions = React.useMemo(
+    () => [...new Set([
+      ...EVENT_TYPE_FILTER_OPTIONS,
+      ...rows.map((row) => row.event_type).filter((event): event is string => typeof event === 'string' && event.length > 0),
+      filters.event_type,
+    ])],
+    [rows, filters.event_type],
+  )
 
   const auditAccessors = React.useMemo<SortAccessors<AuditLog>>(
     () => ({
@@ -295,7 +307,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             <Select value={filters.event_type} onValueChange={(v) => setFilters((f) => ({ ...f, event_type: v ?? 'ALL' }))}>
               <SelectTrigger id="audit-event-type"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {EVENT_TYPE_FILTER_OPTIONS.map((opt) => (
+                {eventTypeOptions.map((opt) => (
                   <SelectItem key={opt} value={opt}>{opt}</SelectItem>
                 ))}
               </SelectContent>
@@ -324,7 +336,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       </section>
       <section className="rounded-lg border bg-card p-4 max-h-[480px] overflow-y-auto">
         <h4 className="text-sm font-semibold mb-2">
-          {filteredLogs ? 'Filtered audit events' : 'Recent audit events'}
+          {appliedFilters !== null ? 'Filtered audit events' : 'Recent audit events'}
         </h4>
         <Table className="font-mono text-[11px]">
           <TableHeader>

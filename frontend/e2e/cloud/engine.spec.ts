@@ -1,5 +1,136 @@
 import { expect, test, type Route } from "@playwright/test";
+import { get as httpsGet } from "node:https";
+import { PACKAGE_VERSION } from "@duckdb/duckdb-wasm";
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { parquetFixture } from "../../lib/cloud-engine/dashboard/test-fixtures";
+
+test("native Cloud runtime recovers after an abandoned Wasm download", async ({
+  baseURL,
+  request,
+}) => {
+  if (!baseURL) throw new Error("Native Cloud base URL is required");
+  await new Promise<void>((resolve, reject) => {
+    const download = httpsGet(
+      new URL(`/duckdb/${PACKAGE_VERSION}/duckdb-eh.wasm`, baseURL),
+      {
+        rejectUnauthorized: false,
+        headers: { "accept-encoding": "gzip" },
+      },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`Wasm download returned ${response.statusCode}`));
+          return;
+        }
+        response.once("data", () => {
+          download.destroy();
+          resolve();
+        });
+        response.on("error", reject);
+      },
+    );
+    download.on("error", reject);
+  });
+  expect((await request.get("/healthz", { timeout: 5000 })).status()).toBe(200);
+});
+
+test("Cloud origin buckets use UTC without timezone extensions", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  const unexpected: string[] = [];
+  const extensions: number[] = [];
+  const from = "2026-01-01T00:00:00Z";
+  const to = "2026-01-01T01:00:00Z";
+  const bytes = Buffer.from(
+    parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: [new Date(from)] },
+        { name: "cache", type: "STRING", data: ["MISS"] },
+        { name: "url", type: "STRING", data: ["/fixture-origin.css"] },
+        { name: "ttfb", type: "DOUBLE", data: [0.02] },
+        { name: "status", type: "INT32", data: [200] },
+      ],
+    }),
+  );
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("response", (response) => {
+    if (new URL(response.url()).pathname.endsWith("/icu.duckdb_extension.wasm")) {
+      extensions.push(response.status());
+    }
+  });
+  await page.context().route("**/api/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    switch (path) {
+      case "/api/auth/session":
+        return route.fulfill({
+          json: { user: { id: "fixture-user", role: "admin" } },
+        });
+      case "/api/services":
+        return route.fulfill({
+          json: {
+            services: [{ service_id: "fixtureService", name: "Fixture Service" }],
+          },
+        });
+      case "/api/log-fields/catalog":
+        return route.fulfill({ json: { fields: [], groups: [] } });
+      case "/api/log-extents":
+        return route.fulfill({
+          json: {
+            earliest_log_at: from,
+            latest_log_at: to,
+          },
+        });
+      case "/api/files":
+        return route.fulfill({
+          json: {
+            files: [
+              {
+                key: "pq/origin-buckets.parquet",
+                start: from,
+                end: to,
+                rows: 1,
+                size: bytes.length,
+              },
+            ],
+            summary_files: [],
+            complete: true,
+            next_cursor: null,
+          },
+        });
+      case "/api/file":
+        return serveParquetRange(route, bytes);
+      case "/api/telemetry/query":
+        return route.fulfill({ json: { ok: true } });
+      case "/api/admin/usage-logging":
+        return route.fulfill({ json: { enabled: false } });
+      case "/api/cron-runs":
+        return route.fulfill({ json: { configured: true, runs: [] } });
+      default:
+        unexpected.push(`${route.request().method()} ${path}`);
+        return route.fulfill({
+          status: 404,
+          json: { detail: "No timezone test fixture" },
+        });
+    }
+  });
+  const params = new URLSearchParams({
+    service: "fixtureService",
+    start_time: from,
+    end_time: to,
+  });
+  await page.goto(`/origin?${params}`, { waitUntil: "domcontentloaded" });
+  const row = page.getByRole("row").filter({ hasText: "/fixture-origin.css" });
+  await expect(row).toContainText("20", {
+    timeout: 30_000,
+  });
+  expect(extensions).toEqual([]);
+  expect(errors).toEqual([]);
+  expect(unexpected).toEqual([]);
+});
 
 const NOW = "2026-11-03T11:00:20Z";
 const BASE = Date.parse("2026-11-03T10:30:00Z");

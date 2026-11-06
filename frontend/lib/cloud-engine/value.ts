@@ -1,313 +1,343 @@
+import { sqlEscape } from "@/lib/sqlBuilder";
+import type { components } from "@/types/api";
 import {
-  getDuckDBEngine,
-  type DuckDBAnalyticalEngine,
+  compileFiltersToSql, getDuckDBEngine, type DuckDBAnalyticalEngine, type DuckDBColumnType,
 } from "./dashboard/duckdb";
+import type { DashboardFilter } from "./dashboard/filters";
 
-export const IO_LARGE_IMAGE_THRESHOLD_BYTES = 51200; // 50 * 1024
+export const IO_LARGE_IMAGE_THRESHOLD_BYTES = 51200;
+
+type ValueSection = NonNullable<components["schemas"]["ValueSummaryRequest"]["sections"]>[number];
+type ValueSections = {
+  [Section in ValueSection]: NonNullable<components["schemas"]["ValueSummaryResponse"][Section]>;
+};
+type ValueSummary = Partial<ValueSections>;
+type ValuePoint = components["schemas"]["ValueTimeSeriesPoint"];
 
 export interface ValueQueryParams {
   start_time?: string | number;
   end_time?: string | number;
   service_id?: string;
+  filters?: Record<string, { mode?: string; values?: string[] }>;
+  custom_filters?: Record<string, { mode?: string; values?: string[] }>;
+  sections?: readonly ValueSection[] | null;
+  chart_interval?: string;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   signal?: AbortSignal;
 }
 
-function roundTo(val: number, decimals: number): number {
+function roundTo(val: number, decimals = 2): number {
   const factor = 10 ** decimals;
   return Math.round(val * factor) / factor;
 }
 
-export function emptyValueSummary() {
+function nullableNumber(value: unknown): number | null {
+  return value == null ? null : roundTo(Number(value));
+}
+
+export function emptyValueSummary(): ValueSections {
   return {
     overview: {
-      total_requests: 0,
-      total_bytes: 0,
-      unique_countries: 0,
-      unique_pops: 0,
-      unique_asns: 0,
-      error_rate_pct: 0,
-      availability_pct: 100,
+      total_requests: 0, total_bandwidth_bytes: null, origin_offload_pct: null,
+      threats_blocked: null, cache_acceleration_factor: null, edge_hit_requests: 0, origin_requests: 0,
     },
     caching: {
-      total_requests: 0,
-      cache_hits: 0,
-      cache_misses: 0,
-      cache_passes: 0,
-      hit_ratio_pct: 0,
-      origin_offload_pct: 0,
-      bandwidth_saved_bytes: 0,
-      hit_ttfb_p50_ms: 0,
-      miss_ttfb_p50_ms: 0,
-      cache_acceleration_factor: 1.0,
-      cache_accel_factor: 1.0,
-      shield_requests: 0,
-      shield_hit_ratio_pct: 0,
+      total_requests: 0, hit_requests: 0, miss_requests: 0, pass_requests: 0, synth_requests: 0,
+      origin_offload_pct: null, bandwidth_saved_bytes: null, shield_effectiveness_pct: null,
+      offload_time_series: [], cache_state_time_series: [],
     },
     security: {
-      tls_13_requests: 0,
-      tls_13_pct: 0,
-      waf_evaluated_requests: 0,
-      waf_blocked_requests: 0,
-      ddos_mitigated_requests: 0,
+      total_requests: 0, waf_blocked: null, waf_logged: null, waf_passed: null,
+      threat_time_series: [], top_waf_signals: [],
     },
-    bots: {
-      bot_requests: 0,
-      bot_share_pct: 0,
-      verified_bot_requests: 0,
-      suspected_bot_requests: 0,
-      bot_cache_hit_ratio_pct: 0,
-      origin_requests_saved_from_bots: 0,
-    },
+    bots: { total_requests: 0, bot_requests: null, verified_bots: null, top_bots: [] },
     performance: {
-      ttfb_p50_ms: 0,
-      ttfb_p95_ms: 0,
-      ttfb_p99_ms: 0,
-      http3_requests: 0,
-      http3_pct: 0,
-      http2_requests: 0,
-      http2_pct: 0,
-      compressed_requests: 0,
-      compression_ratio_pct: 0,
+      total_requests: 0, cache_accel_factor: null, avg_hit_latency_ms: null,
+      avg_miss_latency_ms: null, p99_latency_ms: null, latency_time_series: [],
     },
     network: {
-      unique_pops: 0,
-      unique_countries: 0,
-      unique_asns: 0,
-      avg_rtt_ms: 0,
-      median_rtt_ms: 0,
-      avg_ploss_pct: 0,
+      total_requests: 0, http3_pct: null, h2_pct: null, tls_pct: null, ipv6_pct: null,
+      protocol_time_series: [],
     },
     io: {
-      total_images: 0,
-      modern_format_images: 0,
-      modern_format_pct: 0,
-      legacy_format_images: 0,
-      io_transformed_images: 0,
-      unoptimized_large_images: 0,
-      estimated_savings_bytes: 0,
+      total_requests: 0, io_transforms: null, io_bandwidth_bytes: null,
+      io_shield_bandwidth_bytes: null, io_pct_of_traffic: null, io_estimated_cost_usd: null,
+      modern_format_pct: null, image_request_count: null, image_bandwidth_bytes: null,
+      io_actual_bandwidth_saved_bytes: null, io_actual_compression_ratio: null,
+      estimated_savings_bytes: null, io_time_series: [], io_bandwidth_time_series: [],
+      io_compression_time_series: [], format_distribution: [], optimization_opportunities: [],
+      io_format_conversion_pairs: [],
     },
   };
 }
 
 function parseEpochMs(val: string | number | undefined): number | null {
   if (val === undefined || val === null || val === "") return null;
-  if (typeof val === "number") {
-    return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);
-  }
   const num = Number(val);
-  if (Number.isFinite(num)) {
-    return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
-  }
-  const parsed = Date.parse(val);
+  if (Number.isFinite(num)) return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
+  const parsed = Date.parse(String(val));
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function buildWhereClause(params: ValueQueryParams): string {
-  const clauses: string[] = ["1=1"];
+function buildWhereClause(params: ValueQueryParams, types: Map<string, DuckDBColumnType>): string {
+  const clauses = ["TRUE"];
   const startMs = parseEpochMs(params.start_time);
   const endMs = parseEpochMs(params.end_time);
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
   if (endMs !== null) clauses.push(`ts_ms <= ${endMs}`);
   if (params.service_id) {
-    const escaped = String(params.service_id).replaceAll("'", "''");
-    clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
+    clauses.push(`(service_id = '${sqlEscape(params.service_id)}' OR service_id IS NULL)`);
   }
+  const filters: DashboardFilter[] = [];
+  for (const source of [params.filters, params.custom_filters]) {
+    for (const [key, spec] of Object.entries(source ?? {})) {
+      for (const value of spec?.values ?? []) {
+        filters.push({
+          field: key.replace(/_\d+$/, ""), value: String(value),
+          mode: spec.mode === "exclude" ? "exclude" : "include",
+        });
+      }
+    }
+  }
+  if (filters.length) clauses.push(`(${compileFiltersToSql(filters, false, [], types)})`);
   return clauses.join(" AND ");
 }
 
-export async function queryValueSummary(params: ValueQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
-  const where = buildWhereClause(params);
-
-  const rows = await engine.executeSql<Record<string, unknown>>(
-    `WITH normalized AS (
-      SELECT
-        status,
-        UPPER(COALESCE(cache_status, cache, '')) AS c_status,
-        COALESCE(resp_body_size, resp_bytes, 0)::BIGINT AS body_bytes,
-        COALESCE(ttfb_ms, time_to_first_byte_ns / 1000000.0, time_elapsed_usec / 1000.0) AS ttfb,
-        COALESCE(geo_country, country) AS country_code,
-        COALESCE(fastly_pop, pop) AS pop_code,
-        COALESCE(client_asn, asn) AS asn_val,
-        COALESCE(tls_version, tls) AS tls_ver,
-        UPPER(COALESCE(protocol, '')) AS proto,
-        LOWER(COALESCE(content_type, '')) AS c_type,
-        LOWER(COALESCE(content_encoding, '')) AS c_enc,
-        LOWER(COALESCE(url, path, '')) AS req_url,
-        COALESCE( fastly_is_shield, is_shield, FALSE ) AS shield_flag,
-        waf_action,
-        ngwaf_decision,
-        bot_category,
-        bot_verified,
-        COALESCE(client_rtt_us, client_tcpi_rtt) AS rtt_us,
-        client_ploss
-      FROM requests
-      WHERE ${where}
-    )
-    SELECT
-      COUNT(*)::BIGINT AS total_requests,
-      COALESCE(SUM(body_bytes), 0)::BIGINT AS total_bytes,
-      COUNT(DISTINCT country_code)::BIGINT AS unique_countries,
-      COUNT(DISTINCT pop_code)::BIGINT AS unique_pops,
-      COUNT(DISTINCT asn_val)::BIGINT AS unique_asns,
-      (COUNT(*) FILTER (WHERE status >= 500 AND status < 600))::BIGINT AS s5xx,
-      (COUNT(*) FILTER (WHERE starts_with(c_status, 'HIT')))::BIGINT AS cache_hits,
-      (COUNT(*) FILTER (WHERE starts_with(c_status, 'MISS')))::BIGINT AS cache_misses,
-      (COUNT(*) FILTER (WHERE starts_with(c_status, 'PASS')))::BIGINT AS cache_passes,
-      COALESCE(SUM(body_bytes) FILTER (WHERE starts_with(c_status, 'HIT')), 0)::BIGINT AS bandwidth_saved_bytes,
-      QUANTILE_CONT(ttfb, 0.5) FILTER (WHERE starts_with(c_status, 'HIT'))::DOUBLE AS hit_ttfb_p50_ms,
-      QUANTILE_CONT(ttfb, 0.5) FILTER (WHERE starts_with(c_status, 'MISS'))::DOUBLE AS miss_ttfb_p50_ms,
-      (COUNT(*) FILTER (WHERE shield_flag IS TRUE))::BIGINT AS shield_requests,
-      (COUNT(*) FILTER (WHERE shield_flag IS TRUE AND starts_with(c_status, 'HIT')))::BIGINT AS shield_hits,
-      (COUNT(*) FILTER (WHERE tls_ver ILIKE '%1.3%'))::BIGINT AS tls_13_requests,
-      (COUNT(*) FILTER (WHERE waf_action IS NOT NULL OR ngwaf_decision IS NOT NULL))::BIGINT AS waf_evaluated,
-      (COUNT(*) FILTER (WHERE UPPER(COALESCE(waf_action, ngwaf_decision, '')) IN ('BLOCK', 'BLOCKED', 'DENY')))::BIGINT AS waf_blocked,
-      (COUNT(*) FILTER (WHERE bot_category IS NOT NULL AND bot_category != ''))::BIGINT AS bot_requests,
-      (COUNT(*) FILTER (WHERE bot_verified IS TRUE))::BIGINT AS verified_bot_requests,
-      (COUNT(*) FILTER (WHERE bot_category IS NOT NULL AND bot_category != '' AND starts_with(c_status, 'HIT')))::BIGINT AS bot_cache_hits,
-      QUANTILE_CONT(ttfb, 0.5)::DOUBLE AS ttfb_p50_ms,
-      QUANTILE_CONT(ttfb, 0.95)::DOUBLE AS ttfb_p95_ms,
-      QUANTILE_CONT(ttfb, 0.99)::DOUBLE AS ttfb_p99_ms,
-      (COUNT(*) FILTER (WHERE proto LIKE 'HTTP/3%' OR proto = 'H3'))::BIGINT AS http3_requests,
-      (COUNT(*) FILTER (WHERE proto LIKE 'HTTP/2%' OR proto = 'H2'))::BIGINT AS http2_requests,
-      (COUNT(*) FILTER (WHERE c_enc IN ('br', 'gzip', 'zstd', 'deflate')))::BIGINT AS compressed_requests,
-      AVG(rtt_us)::DOUBLE AS avg_rtt_us,
-      QUANTILE_CONT(rtt_us, 0.5)::DOUBLE AS med_rtt_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
-      (COUNT(*) FILTER (WHERE starts_with(c_type, 'image/')))::BIGINT AS total_images,
-      (COUNT(*) FILTER (WHERE c_type LIKE 'image/webp%' OR c_type LIKE 'image/avif%' OR req_url LIKE '%ifmt=webp%' OR req_url LIKE '%ifmt=avif%' OR req_url LIKE '%format=webp%' OR req_url LIKE '%format=avif%'))::BIGINT AS modern_format_images,
-      (COUNT(*) FILTER (WHERE c_type LIKE 'image/jpeg%' OR c_type LIKE 'image/jpg%' OR c_type LIKE 'image/png%' OR c_type LIKE 'image/gif%'))::BIGINT AS legacy_format_images,
-      (COUNT(*) FILTER (WHERE req_url LIKE '%ifmt=%' OR req_url LIKE '%io_transform%' OR req_url LIKE '%width=%' OR req_url LIKE '%quality=%' OR req_url LIKE '%auto=webp%'))::BIGINT AS io_transformed_images,
-      (COUNT(*) FILTER (WHERE (c_type LIKE 'image/jpeg%' OR c_type LIKE 'image/jpg%' OR c_type LIKE 'image/png%' OR c_type LIKE 'image/gif%') AND body_bytes > 51200))::BIGINT AS unoptimized_large_images,
-      COALESCE(SUM(body_bytes) FILTER (WHERE (c_type LIKE 'image/jpeg%' OR c_type LIKE 'image/jpg%' OR c_type LIKE 'image/png%' OR c_type LIKE 'image/gif%') AND body_bytes > 51200), 0)::BIGINT AS unoptimized_large_image_bytes
-    FROM normalized`,
-    [],
-    params.signal,
-  );
-
-  const r = rows[0];
-  const totalRequests = Number(r?.total_requests ?? 0);
-  if (totalRequests === 0) {
-    return emptyValueSummary();
-  }
-
-  const totalBytes = Number(r.total_bytes ?? 0);
-  const s5xx = Number(r.s5xx ?? 0);
-  const errorRatePct = roundTo((s5xx * 100) / totalRequests, 2);
-  const availabilityPct = roundTo(Math.max(0, 100 - errorRatePct), 2);
-
-  const cacheHits = Number(r.cache_hits ?? 0);
-  const cacheMisses = Number(r.cache_misses ?? 0);
-  const cachePasses = Number(r.cache_passes ?? 0);
-  const cacheDenom = cacheHits + cacheMisses + cachePasses;
-  const originOffloadPct =
-    cacheDenom > 0
-      ? roundTo((cacheHits * 100) / cacheDenom, 2)
-      : roundTo((cacheHits * 100) / totalRequests, 2);
-  const hitTtfb = Number(r.hit_ttfb_p50_ms ?? 0);
-  const missTtfb = Number(r.miss_ttfb_p50_ms ?? 0);
-  const cacheAccelFactor =
-    hitTtfb > 0 && missTtfb > 0 ? roundTo(missTtfb / hitTtfb, 2) : 1.0;
-  const shieldReqs = Number(r.shield_requests ?? 0);
-  const shieldHits = Number(r.shield_hits ?? 0);
-
-  const tls13Reqs = Number(r.tls_13_requests ?? 0);
-  const botReqs = Number(r.bot_requests ?? 0);
-  const verifiedBotReqs = Number(r.verified_bot_requests ?? 0);
-  const botCacheHits = Number(r.bot_cache_hits ?? 0);
-
-  const http3Reqs = Number(r.http3_requests ?? 0);
-  const http2Reqs = Number(r.http2_requests ?? 0);
-  const compressedReqs = Number(r.compressed_requests ?? 0);
-
-  const totalImages = Number(r.total_images ?? 0);
-  const modernImages = Number(r.modern_format_images ?? 0);
-  const legacyImages = Number(r.legacy_format_images ?? 0);
-  const ioTransformedImages = Number(r.io_transformed_images ?? 0);
-  const unoptimizedLargeImages = Number(r.unoptimized_large_images ?? 0);
-  const unoptimizedLargeBytes = Number(r.unoptimized_large_image_bytes ?? 0);
-
-  return {
-    overview: {
-      total_requests: totalRequests,
-      total_bytes: totalBytes,
-      unique_countries: Number(r.unique_countries ?? 0),
-      unique_pops: Number(r.unique_pops ?? 0),
-      unique_asns: Number(r.unique_asns ?? 0),
-      error_rate_pct: errorRatePct,
-      availability_pct: availabilityPct,
-    },
-    caching: {
-      total_requests: totalRequests,
-      cache_hits: cacheHits,
-      cache_misses: cacheMisses,
-      cache_passes: cachePasses,
-      hit_ratio_pct: originOffloadPct,
-      origin_offload_pct: originOffloadPct,
-      bandwidth_saved_bytes: Number(r.bandwidth_saved_bytes ?? 0),
-      hit_ttfb_p50_ms: roundTo(hitTtfb, 2),
-      miss_ttfb_p50_ms: roundTo(missTtfb, 2),
-      cache_acceleration_factor: cacheAccelFactor,
-      cache_accel_factor: cacheAccelFactor,
-      shield_requests: shieldReqs,
-      shield_hit_ratio_pct:
-        shieldReqs > 0 ? roundTo((shieldHits * 100) / shieldReqs, 2) : 0,
-    },
-    security: {
-      tls_13_requests: tls13Reqs,
-      tls_13_pct: roundTo((tls13Reqs * 100) / totalRequests, 2),
-      waf_evaluated_requests: Number(r.waf_evaluated ?? 0),
-      waf_blocked_requests: Number(r.waf_blocked ?? 0),
-      ddos_mitigated_requests: Number(r.waf_blocked ?? 0),
-    },
-    bots: {
-      bot_requests: botReqs,
-      bot_share_pct: roundTo((botReqs * 100) / totalRequests, 2),
-      verified_bot_requests: verifiedBotReqs,
-      suspected_bot_requests: Math.max(0, botReqs - verifiedBotReqs),
-      bot_cache_hit_ratio_pct:
-        botReqs > 0 ? roundTo((botCacheHits * 100) / botReqs, 2) : 0,
-      origin_requests_saved_from_bots: botCacheHits,
-    },
-    performance: {
-      ttfb_p50_ms: roundTo(Number(r.ttfb_p50_ms ?? 0), 2),
-      ttfb_p95_ms: roundTo(Number(r.ttfb_p95_ms ?? 0), 2),
-      ttfb_p99_ms: roundTo(Number(r.ttfb_p99_ms ?? 0), 2),
-      http3_requests: http3Reqs,
-      http3_pct: roundTo((http3Reqs * 100) / totalRequests, 2),
-      http2_requests: http2Reqs,
-      http2_pct: roundTo((http2Reqs * 100) / totalRequests, 2),
-      compressed_requests: compressedReqs,
-      compression_ratio_pct: roundTo((compressedReqs * 100) / totalRequests, 2),
-    },
-    network: {
-      unique_pops: Number(r.unique_pops ?? 0),
-      unique_countries: Number(r.unique_countries ?? 0),
-      unique_asns: Number(r.unique_asns ?? 0),
-      avg_rtt_ms: roundTo(Number(r.avg_rtt_us ?? 0) / 1000, 2),
-      median_rtt_ms: roundTo(Number(r.med_rtt_us ?? 0) / 1000, 2),
-      avg_ploss_pct: roundTo(Number(r.avg_ploss ?? 0) * 100, 2),
-    },
-    io: {
-      total_images: totalImages,
-      modern_format_images: modernImages,
-      modern_format_pct:
-        totalImages > 0 ? roundTo((modernImages * 100) / totalImages, 2) : 0,
-      legacy_format_images: legacyImages,
-      io_transformed_images: ioTransformedImages,
-      unoptimized_large_images: unoptimizedLargeImages,
-      estimated_savings_bytes: Math.round(unoptimizedLargeBytes * 0.4),
-    },
-  };
+function selectSections(summary: ValueSummary, sections?: readonly ValueSection[] | null): ValueSummary {
+  if (!sections?.length) return summary;
+  return Object.fromEntries(sections.map((section) => [section, summary[section]]));
 }
 
-export async function handleValueRequest(
-  path: string,
-  params: ValueQueryParams = {},
-) {
-  if (path.includes("/api/value/summary")) {
-    return queryValueSummary(params);
+const CHART_INTERVAL_SECONDS: Record<string, number> = {
+  "1 second": 1, "1 minute": 60, "5 minutes": 300, "1 hour": 3600, "1 day": 86400,
+};
+
+export async function queryValueSummary(params: ValueQueryParams = {}): Promise<ValueSummary> {
+  const engine = params.engine ?? getDuckDBEngine();
+  const types = new Map<string, DuckDBColumnType>();
+  if (Object.keys(params.filters ?? {}).length || Object.keys(params.custom_filters ?? {}).length) {
+    const schema = await engine.executeSql<{ column_name: string; column_type: string }>(
+      "DESCRIBE requests", [], params.signal,
+    );
+    for (const column of schema) {
+      if (["VARCHAR", "BIGINT", "DOUBLE", "BOOLEAN"].includes(column.column_type)) {
+        types.set(column.column_name, column.column_type as DuckDBColumnType);
+      }
+    }
   }
+  const normalized = `WITH normalized AS (
+    SELECT EPOCH_MS(CAST(ts_ms AS BIGINT)) AS "timestamp", url,
+      UPPER(COALESCE(NULLIF(cache_status, ''), cache, '')) AS cache_state,
+      COALESCE(resp_body_size, resp_body_bytes, resp_bytes) AS body_bytes,
+      COALESCE(time_elapsed_usec, elapsed) / 1000.0 AS latency_ms,
+      UPPER(COALESCE(NULLIF(protocol, ''), proto, '')) AS protocol_name,
+      COALESCE(is_ssl, CASE WHEN COALESCE(tls_version, tls) IS NOT NULL
+        THEN NULLIF(COALESCE(tls_version, tls), '') IS NOT NULL END) AS encrypted,
+      COALESCE(is_ipv6, ipv6) AS ipv6_flag,
+      COALESCE(fastly_is_shield, is_shield, NOT edge) AS shield_flag,
+      LOWER(COALESCE(NULLIF(content_type, ''), resp_header_content_type, '')) AS content_type,
+      COALESCE(NULLIF(waf_action, ''), NULLIF(ngwaf_decision, '')) AS waf_decision,
+      NULLIF(waf_sig, '') AS waf_signals,
+      COALESCE(bot_verified, verified_bot) AS bot_verified,
+      COALESCE(NULLIF(_bot_name, ''), NULLIF(ngwaf_bot_name, ''), NULLIF(bot_category, '')) AS bot_name,
+      is_bot,
+      NULLIF(COALESCE(NULLIF(io_output_format, ''), ofmt), '') AS output_format,
+      NULLIF(COALESCE(NULLIF(io_input_format, ''), ifmt), '') AS input_format,
+      io_input_bytes, io_output_bytes
+    FROM requests WHERE ${buildWhereClause(params, types)}
+  )`;
+  const query = (sql: string) =>
+    engine.executeSql<Record<string, unknown>>(`${normalized} ${sql}`, [], params.signal);
+  const count = (row: Record<string, unknown>, key: string) => Number(row[key] ?? 0);
+  const rows = await query(`SELECT
+    COUNT(*) AS total,
+    COUNT(NULLIF(cache_state, '')) AS cache_samples,
+    COUNT(body_bytes) AS byte_samples,
+    SUM(body_bytes) AS total_bytes,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'HIT')) AS hits,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'MISS')) AS misses,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'PASS')) AS passes,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'SYNTH')) AS synths,
+    SUM(body_bytes) FILTER (WHERE starts_with(cache_state, 'HIT')) AS saved_bytes,
+    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'HIT')) AS avg_hit,
+    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'MISS')) AS avg_miss,
+    QUANTILE_CONT(latency_ms, 0.99) AS p99,
+    COUNT(*) FILTER (WHERE shield_flag) AS shield_requests,
+    COUNT(*) FILTER (WHERE shield_flag AND starts_with(cache_state, 'HIT')) AS shield_hits,
+    COUNT(waf_decision) AS waf_samples,
+    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')) AS blocked,
+    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('LOG', 'LOGGED')) AS logged,
+    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')) AS passed,
+    COUNT(*) FILTER (WHERE bot_name IS NOT NULL OR is_bot OR bot_verified) AS bots,
+    COUNT(*) FILTER (WHERE bot_verified) AS verified,
+    COUNT(bot_verified) AS verified_samples,
+    COUNT(bot_name) + COUNT(is_bot) + COUNT(bot_verified) AS bot_samples,
+    COUNT(NULLIF(protocol_name, '')) AS protocol_samples,
+    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3,
+    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2,
+    COUNT(*) FILTER (WHERE encrypted) AS tls_count,
+    COUNT(encrypted) AS tls_samples,
+    COUNT(ipv6_flag) AS ipv6_samples,
+    COUNT(*) FILTER (WHERE ipv6_flag) AS ipv6_count,
+    COUNT(*) FILTER (WHERE starts_with(content_type, 'image/')) AS images,
+    SUM(body_bytes) FILTER (WHERE starts_with(content_type, 'image/')) AS image_bytes,
+    COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count,
+    SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes,
+    SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL AND shield_flag) AS io_shield_bytes,
+    SUM(io_input_bytes) FILTER (WHERE io_output_bytes IS NOT NULL) AS input_bytes,
+    SUM(io_output_bytes) FILTER (WHERE io_input_bytes IS NOT NULL) AS output_bytes,
+    SUM(io_input_bytes - io_output_bytes) AS actual_saved
+    FROM normalized`);
+  const r = rows[0] ?? {};
+  const total = count(r, "total");
+  const result = emptyValueSummary();
+  if (!total) return selectSections(result, params.sections);
+  const hits = count(r, "hits");
+  const hasCache = count(r, "cache_samples") > 0;
+  const offload = hasCache ? roundTo(hits * 100 / total) : null;
+  const avgHit = nullableNumber(r.avg_hit);
+  const avgMiss = nullableNumber(r.avg_miss);
+  const acceleration = avgHit !== null && avgHit > 0 && avgMiss !== null
+    ? roundTo(avgMiss / avgHit) : null;
+  const hasWaf = count(r, "waf_samples") > 0;
+  result.overview = {
+    total_requests: total, total_bandwidth_bytes: nullableNumber(r.total_bytes),
+    origin_offload_pct: offload, cache_acceleration_factor: acceleration,
+    threats_blocked: hasWaf ? count(r, "blocked") : null,
+    edge_hit_requests: hasCache ? hits : null,
+    origin_requests: hasCache ? count(r, "misses") + count(r, "passes") : null,
+  };
+  result.caching = {
+    total_requests: total, hit_requests: hasCache ? hits : null,
+    miss_requests: hasCache ? count(r, "misses") : null,
+    pass_requests: hasCache ? count(r, "passes") : null,
+    synth_requests: hasCache ? count(r, "synths") : null,
+    origin_offload_pct: offload,
+    bandwidth_saved_bytes: count(r, "byte_samples") ? count(r, "saved_bytes") : null,
+    shield_effectiveness_pct: count(r, "shield_requests")
+      ? roundTo(count(r, "shield_hits") * 100 / count(r, "shield_requests")) : null,
+    offload_time_series: [], cache_state_time_series: [],
+  };
+  result.performance = {
+    total_requests: total, avg_hit_latency_ms: avgHit, avg_miss_latency_ms: avgMiss,
+    p99_latency_ms: nullableNumber(r.p99), cache_accel_factor: acceleration, latency_time_series: [],
+  };
+  result.security = {
+    total_requests: total, waf_blocked: hasWaf ? count(r, "blocked") : null,
+    waf_logged: hasWaf ? count(r, "logged") : null, waf_passed: hasWaf ? count(r, "passed") : null,
+    threat_time_series: [], top_waf_signals: [],
+  };
+  result.bots = {
+    total_requests: total, bot_requests: count(r, "bot_samples") ? count(r, "bots") : null,
+    verified_bots: count(r, "verified_samples") ? count(r, "verified") : null, top_bots: [],
+  };
+  result.network = {
+    total_requests: total,
+    http3_pct: count(r, "protocol_samples") ? roundTo(count(r, "h3") * 100 / total) : null,
+    h2_pct: count(r, "protocol_samples") ? roundTo(count(r, "h2") * 100 / total) : null,
+    tls_pct: count(r, "tls_samples") ? roundTo(count(r, "tls_count") * 100 / total) : null,
+    ipv6_pct: count(r, "ipv6_samples") ? roundTo(count(r, "ipv6_count") * 100 / total) : null,
+    protocol_time_series: [],
+  };
+  result.io = {
+    ...result.io, total_requests: total, image_request_count: count(r, "images"),
+    image_bandwidth_bytes: nullableNumber(r.image_bytes),
+    io_transforms: count(r, "io_count") || null, io_bandwidth_bytes: nullableNumber(r.io_bytes),
+    io_shield_bandwidth_bytes: nullableNumber(r.io_shield_bytes),
+    io_pct_of_traffic: count(r, "io_count") ? roundTo(count(r, "io_count") * 100 / total) : null,
+    io_actual_bandwidth_saved_bytes: nullableNumber(r.actual_saved),
+    io_actual_compression_ratio: Number(r.output_bytes) > 0 && r.input_bytes != null
+      ? roundTo(Number(r.input_bytes) / Number(r.output_bytes)) : null,
+  };
+
+  const interval = CHART_INTERVAL_SECONDS[params.chart_interval ?? "1 day"] ?? 86400;
+  const buckets = await query(`SELECT
+    time_bucket(INTERVAL '${interval} seconds', "timestamp") AS bucket,
+    COUNT(*) AS total,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'HIT')) AS hits,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'MISS')) AS misses,
+    COUNT(*) FILTER (WHERE starts_with(cache_state, 'PASS')) AS passes,
+    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'HIT')) AS avg_hit,
+    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'MISS')) AS avg_miss,
+    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3,
+    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2,
+    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/1.1%' OR protocol_name = '1.1') AS h11,
+    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')) AS blocked,
+    COUNT(*) FILTER (WHERE UPPER(waf_decision) IN ('LOG', 'LOGGED')) AS logged,
+    COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count,
+    SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes,
+    SUM(io_input_bytes - io_output_bytes) AS actual_saved
+    FROM normalized GROUP BY bucket ORDER BY bucket`);
+  for (const b of buckets) {
+    const raw = b.bucket;
+    const time = new Date(raw instanceof Date ? raw : typeof raw === "number" ? raw : String(raw)).toISOString();
+    const point = (value: number, category?: string): ValuePoint => ({ time, value, ...(category ? { category } : {}) });
+    const bucketTotal = count(b, "total");
+    if (count(r, "cache_samples")) {
+      result.caching.offload_time_series!.push(point(roundTo(count(b, "hits") * 100 / bucketTotal)));
+      for (const [key, category] of [["hits", "HIT"], ["misses", "MISS"], ["passes", "PASS"]] as const) {
+        result.caching.cache_state_time_series!.push(point(count(b, key), category));
+      }
+      const other = bucketTotal - count(b, "hits") - count(b, "misses") - count(b, "passes");
+      if (other) result.caching.cache_state_time_series!.push(point(other, "OTHER"));
+    }
+    if (b.avg_hit != null) result.performance.latency_time_series!.push(point(Number(b.avg_hit), "hit"));
+    if (b.avg_miss != null) result.performance.latency_time_series!.push(point(Number(b.avg_miss), "miss"));
+    if (count(r, "protocol_samples")) {
+      for (const [key, category] of [["h3", "HTTP/3"], ["h2", "HTTP/2"], ["h11", "HTTP/1.1"]] as const) {
+        if (count(b, key)) result.network.protocol_time_series!.push(point(count(b, key), category));
+      }
+      const other = bucketTotal - count(b, "h3") - count(b, "h2") - count(b, "h11");
+      if (other) result.network.protocol_time_series!.push(point(other, "Other"));
+    }
+    if (hasWaf) {
+      result.security.threat_time_series!.push(point(count(b, "blocked"), "blocked"), point(count(b, "logged"), "logged"));
+    }
+    if (count(r, "io_count")) result.io.io_time_series!.push(point(count(b, "io_count")));
+    if (b.io_bytes != null) result.io.io_bandwidth_time_series!.push(point(Number(b.io_bytes)));
+    if (b.actual_saved != null) result.io.io_compression_time_series!.push(point(Number(b.actual_saved)));
+  }
+
+  const want = (section: ValueSection) => !params.sections?.length || params.sections.includes(section);
+  if (want("bots")) {
+    result.bots.top_bots = (await query(`SELECT bot_name, COUNT(*) AS count FROM normalized
+      WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count DESC LIMIT 20`))
+      .map((row) => ({ name: String(row.bot_name), count: count(row, "count") }));
+  }
+  if (want("security")) {
+    result.security.top_waf_signals = (await query(`SELECT signal, COUNT(*) AS count
+      FROM (SELECT UNNEST(string_split(waf_signals, ',')) AS signal FROM normalized)
+      WHERE signal IS NOT NULL AND signal != '' GROUP BY signal ORDER BY count DESC LIMIT 20`))
+      .map((row) => ({ signal: String(row.signal), count: count(row, "count") }));
+  }
+  if (want("io")) {
+    const formats = await query(`SELECT COALESCE(output_format, NULLIF(split_part(content_type, '/', 2), '')) AS format,
+      COUNT(*) AS count FROM normalized WHERE output_format IS NOT NULL OR starts_with(content_type, 'image/')
+      GROUP BY 1 ORDER BY count DESC`);
+    const formatTotal = formats.reduce((sum, row) => sum + count(row, "count"), 0);
+    result.io.format_distribution = formats.map((row) => ({
+      format: String(row.format), count: count(row, "count"), pct: roundTo(count(row, "count") * 100 / formatTotal),
+    }));
+    result.io.modern_format_pct = formatTotal ? roundTo(formats
+      .filter((row) => ["webp", "avif", "jpegxl", "jxl"].includes(String(row.format).toLowerCase()))
+      .reduce((sum, row) => sum + count(row, "count"), 0) * 100 / formatTotal) : null;
+    result.io.optimization_opportunities = (await query(`SELECT url, COUNT(*) AS request_count,
+      SUM(body_bytes) AS total_bytes, AVG(body_bytes) / 1024.0 AS avg_kb FROM normalized
+      WHERE content_type IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif')
+        AND output_format IS NULL AND body_bytes > ${IO_LARGE_IMAGE_THRESHOLD_BYTES}
+      GROUP BY url ORDER BY total_bytes DESC LIMIT 20`))
+      .map((row) => ({ url: String(row.url ?? ""), request_count: count(row, "request_count"),
+        total_bytes: count(row, "total_bytes"), avg_kb: nullableNumber(row.avg_kb) }));
+    result.io.io_format_conversion_pairs = (await query(`SELECT input_format, output_format,
+      COUNT(*) AS count, AVG(io_input_bytes / NULLIF(io_output_bytes, 0)) AS avg_ratio FROM normalized
+      WHERE input_format IS NOT NULL AND output_format IS NOT NULL
+      GROUP BY input_format, output_format ORDER BY count DESC LIMIT 20`))
+      .map((row) => ({ input_format: String(row.input_format), output_format: String(row.output_format),
+        count: count(row, "count"), avg_ratio: nullableNumber(row.avg_ratio) }));
+  }
+  return selectSections(result, params.sections);
+}
+
+export async function handleValueRequest(_path: string, params: ValueQueryParams = {}): Promise<ValueSummary> {
   return queryValueSummary(params);
 }

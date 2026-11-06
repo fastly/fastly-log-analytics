@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BookOpen, Radio } from 'lucide-react'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import { DashboardSkeleton, ReportLayout } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
@@ -93,7 +94,7 @@ export function RumClient({
   const timezone = useTimezone()
   const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId)
 
-  const { data: analytics, isLoading } = useAnalyticsReportQuery<RumAnalytics | null>({
+  const { data: analytics, isLoading, isError, refetch } = useAnalyticsReportQuery<RumAnalytics | null>({
     namespace: ['rum-analytics'],
     serviceId,
     filterPayload,
@@ -114,7 +115,7 @@ export function RumClient({
     queryOptions: { enabled: !!serviceId && status?.enabled !== false, refetchInterval: false },
   })
 
-  const { data: liveEvents, isLoading: isLiveEventsLoading } = useQuery({
+  const { data: liveEvents, isLoading: isLiveEventsLoading, isError: isLiveEventsError, refetch: refetchLiveEvents } = useQuery({
     queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
     queryFn: async () => {
       if (!serviceId) return []
@@ -136,6 +137,13 @@ export function RumClient({
 
   if (isStatusLoading) return <DashboardSkeleton />
   if (!status?.enabled) return <RumStatusPanel />
+  if (isError) return (
+    <CardErrorState
+      title="RUM analytics unavailable"
+      message="Could not load analytics for this time window."
+      onRetry={() => void refetch()}
+    />
+  )
   if (isLoading || !analytics) return <DashboardSkeleton />
 
   if (analytics.no_data) {
@@ -167,11 +175,15 @@ export function RumClient({
         timezone={timezone}
       />
 
-      <RumLiveActivitySection
+      {isLiveEventsError ? <CardErrorState
+        title="Live activity unavailable"
+        message="Could not load RUM live events for this time window."
+        onRetry={() => void refetchLiveEvents()}
+      /> : <RumLiveActivitySection
         liveEvents={liveEvents}
         isLiveEventsLoading={isLiveEventsLoading}
         timezone={timezone}
-      />
+      />}
     </div>
   )
 }

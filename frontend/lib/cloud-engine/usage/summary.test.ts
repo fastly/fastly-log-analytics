@@ -328,6 +328,27 @@ describe("fetchUsageInput", () => {
     });
   });
 
+  it("reads historical bounds instead of shifting them to the current day", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(FIXTURE_NOW + 7 * 86_400_000);
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    respond(fixtureUsageInput.settings);
+    const row = { ...fixtureUsageInput.rows.fos_usage[0], timestamp: FIXTURE_NOW - 1000 };
+    const read = reader({ fos_usage: [row] });
+    const bounds = { from: FIXTURE_NOW - 3_600_000, to: FIXTURE_NOW };
+
+    const input = await fetchUsageInput(1, identity, read, undefined, bounds);
+
+    expect(read.mock.calls[0][1]).toEqual({
+      from: new Date(bounds.from).toISOString(),
+      to: new Date(bounds.to).toISOString(),
+    });
+    expect(input.rows.fos_usage).toEqual([row]);
+    expect(input.now).toBe(bounds.to);
+  });
+
   it("defaults null columns and drops rows outside the window", async () => {
     respond(fixtureUsageInput.settings);
     const now = Date.now();

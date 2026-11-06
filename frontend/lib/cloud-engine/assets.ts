@@ -1,7 +1,9 @@
 import {
   getDuckDBEngine,
+  compileFiltersToSql,
   type DuckDBAnalyticalEngine,
 } from "./dashboard/duckdb";
+import type { FiltersPayload } from "@/types/api";
 
 export const LARGE_UNCOMPRESSED_THRESHOLD_BYTES = 10240; // 10 KB
 export const LOW_TTL_THRESHOLD_SECONDS = 3600; // 1 hour
@@ -16,7 +18,7 @@ export interface AssetsQueryParams {
   start_time?: string | number;
   end_time?: string | number;
   service_id?: string;
-  filters?: readonly AssetFilterClause[];
+  filters?: readonly AssetFilterClause[] | FiltersPayload;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   signal?: AbortSignal;
 }
@@ -90,15 +92,15 @@ export function computeSummaryFromDims(
 
   const byAsset = new Map<
     string,
-    { requests: number; bytes: number; hits: number; ttfbSum: number }
+    { requests: number; bytes: number; hits: number; compressed: number; ttfbSum: number }
   >();
   const byCache = new Map<
     string,
-    { requests: number; bytes: number; ttfbSum: number }
+    { asset_type: string; cache_status: string; requests: number; bytes: number; ttfbSum: number }
   >();
   const byCompression = new Map<
     string,
-    { requests: number; bytes: number; ttfbSum: number }
+    { asset_type: string; content_encoding: string; requests: number; bytes: number; ttfbSum: number }
   >();
 
   for (const raw of dimRows) {
@@ -144,15 +146,20 @@ export function computeSummaryFromDims(
       requests: 0,
       bytes: 0,
       hits: 0,
+      compressed: 0,
       ttfbSum: 0,
     };
     aBucket.requests += reqs;
     aBucket.bytes += bytesVal;
     if (isHit) aBucket.hits += reqs;
+    if (["gzip", "br", "zstd", "deflate"].includes(encoding)) aBucket.compressed += reqs;
     aBucket.ttfbSum += sumTtfb;
     byAsset.set(assetType, aBucket);
 
-    const cBucket = byCache.get(cacheStatus) ?? {
+    const cacheKey = JSON.stringify([assetType, cacheStatus]);
+    const cBucket = byCache.get(cacheKey) ?? {
+      asset_type: assetType,
+      cache_status: cacheStatus,
       requests: 0,
       bytes: 0,
       ttfbSum: 0,
@@ -160,9 +167,12 @@ export function computeSummaryFromDims(
     cBucket.requests += reqs;
     cBucket.bytes += bytesVal;
     cBucket.ttfbSum += sumTtfb;
-    byCache.set(cacheStatus, cBucket);
+    byCache.set(cacheKey, cBucket);
 
-    const encBucket = byCompression.get(encoding) ?? {
+    const encodingKey = JSON.stringify([assetType, encoding]);
+    const encBucket = byCompression.get(encodingKey) ?? {
+      asset_type: assetType,
+      content_encoding: encoding,
       requests: 0,
       bytes: 0,
       ttfbSum: 0,
@@ -170,7 +180,7 @@ export function computeSummaryFromDims(
     encBucket.requests += reqs;
     encBucket.bytes += bytesVal;
     encBucket.ttfbSum += sumTtfb;
-    byCompression.set(encoding, encBucket);
+    byCompression.set(encodingKey, encBucket);
   }
 
   const hitRatioPct =
@@ -186,6 +196,9 @@ export function computeSummaryFromDims(
       asset_type,
       requests: b.requests,
       total_bytes: b.bytes,
+      egress_bytes: b.bytes,
+      cache_hit_ratio: b.requests > 0 ? b.hits / b.requests : 0,
+      compression_rate: b.requests > 0 ? b.compressed / b.requests : 0,
       bytes: b.bytes,
       pct_requests:
         totalRequests > 0 ? roundTo((b.requests * 100) / totalRequests, 2) : 0,
@@ -197,8 +210,9 @@ export function computeSummaryFromDims(
 
   const cache_performance = [...byCache.entries()]
     .sort((a, b) => b[1].requests - a[1].requests)
-    .map(([cache_status, b]) => ({
-      cache_status,
+    .map(([, b]) => ({
+      asset_type: b.asset_type,
+      cache_status: b.cache_status,
       requests: b.requests,
       total_bytes: b.bytes,
       bytes: b.bytes,
@@ -210,8 +224,9 @@ export function computeSummaryFromDims(
 
   const compression_performance = [...byCompression.entries()]
     .sort((a, b) => b[1].requests - a[1].requests)
-    .map(([content_encoding, b]) => ({
-      content_encoding,
+    .map(([, b]) => ({
+      asset_type: b.asset_type,
+      content_encoding: b.content_encoding,
       requests: b.requests,
       total_bytes: b.bytes,
       bytes: b.bytes,
@@ -272,7 +287,12 @@ function buildAssetsWhere(params: AssetsQueryParams): string {
     const escaped = String(params.service_id).replaceAll("'", "''");
     clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
   }
-  for (const f of params.filters ?? []) {
+  if (params.filters && !Array.isArray(params.filters)) {
+    clauses.push(compileFiltersToSql(Object.entries(params.filters as FiltersPayload).flatMap(([field, spec]) =>
+      spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
+    )));
+  }
+  for (const f of Array.isArray(params.filters) ? params.filters : []) {
     if (!ALLOWED_FILTER_COLS.has(f.column)) continue;
     const escapedVal = String(f.value ?? "").replaceAll("'", "''");
     const colExpr =
@@ -311,9 +331,9 @@ const DERIVED_ASSET_CTE = `
         END
       ) AS derived_asset_type,
       UPPER(COALESCE(cache_status, cache, 'OTHER')) AS norm_cache_status,
-      LOWER(COALESCE(NULLIF(content_encoding, ''), 'none')) AS norm_encoding,
+      LOWER(COALESCE(NULLIF(content_encoding, ''), NULLIF(resp_header_content_encoding, ''), 'unknown')) AS norm_encoding,
       COALESCE(resp_body_size, resp_bytes, 0)::BIGINT AS body_bytes,
-      COALESCE(ttfb_ms, time_to_first_byte_ns / 1000000.0, time_elapsed_usec / 1000.0, 0.0)::DOUBLE AS norm_ttfb_ms,
+      COALESCE(ttfb_ms, ttfb * 1000.0, time_to_first_byte_ns / 1000000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0, 0.0)::DOUBLE AS norm_ttfb_ms,
       COALESCE(origin_Whole_ms, origin_time_ms, 0.0)::DOUBLE AS norm_origin_ms,
       COALESCE(url, path, '/') AS norm_url
     FROM requests
@@ -357,6 +377,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       norm_encoding AS content_encoding,
       COUNT(*)::BIGINT AS requests,
       AVG(body_bytes)::DOUBLE AS avg_size_bytes,
+      MIN(status)::INTEGER AS status,
       SUM(body_bytes)::BIGINT AS total_bytes
     FROM enriched
     WHERE ${where}
@@ -378,11 +399,11 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       derived_asset_type AS asset_type,
       norm_cache_status AS cache_status,
       COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(ttl, 0))::DOUBLE AS avg_ttl_seconds,
+      AVG(ttl)::DOUBLE AS avg_ttl_seconds,
       (COUNT(*) FILTER (WHERE starts_with(norm_cache_status, 'HIT')) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS hit_ratio_pct
     FROM enriched
     WHERE ${where}
-      AND COALESCE(ttl, 0) < 3600
+      AND ttl < 3600
       AND NOT starts_with(norm_cache_status, 'HIT')
     GROUP BY 1, 2, 3
     ORDER BY requests DESC
@@ -391,7 +412,12 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     params.signal,
   );
 
+  const present = await engine.getPresentColumns();
   return {
+    missing_fields: [
+      ...(!present.has("ttl") ? ["ttl"] : []),
+      ...(!present.has("content_encoding") && !present.has("resp_header_content_encoding") ? ["resp_header_content_encoding"] : []),
+    ],
     summary: {
       total_requests: computed.total_requests,
       total_bytes: computed.total_bytes,
@@ -409,6 +435,8 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       content_encoding: String(r.content_encoding ?? "none"),
       requests: Number(r.requests ?? 0),
       avg_size_bytes: roundTo(Number(r.avg_size_bytes ?? 0), 1),
+      avg_bytes: roundTo(Number(r.avg_size_bytes ?? 0), 1),
+      status: Number(r.status ?? 0),
       total_bytes: Number(r.total_bytes ?? 0),
     })),
     low_ttl_assets: lowTtlRows.map((r) => ({
@@ -417,6 +445,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       cache_status: String(r.cache_status ?? "MISS"),
       requests: Number(r.requests ?? 0),
       avg_ttl_seconds: roundTo(Number(r.avg_ttl_seconds ?? 0), 1),
+      avg_ttl: roundTo(Number(r.avg_ttl_seconds ?? 0), 1),
       hit_ratio_pct: roundTo(Number(r.hit_ratio_pct ?? 0), 2),
     })),
   };

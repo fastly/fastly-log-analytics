@@ -268,6 +268,7 @@ export function setSecurityEngineClient(client: SecurityEngineClient | null): vo
 export async function getSecurityEngineClient(): Promise<SecurityEngineClient> {
   if (customSecurityClient) return customSecurityClient;
   const engine = getDuckDBEngine() as unknown as {
+    getPresentColumns: () => Promise<ReadonlySet<string>>;
     querySql?: (sql: string) => Promise<Record<string, unknown>[]>;
     executeSql?: (sql: string) => Promise<Record<string, unknown>[]>;
     queryRollup?: (
@@ -277,33 +278,7 @@ export async function getSecurityEngineClient(): Promise<SecurityEngineClient> {
   };
   return {
     async getAvailableColumns(): Promise<ReadonlySet<string>> {
-      if (typeof engine.querySql === "function") {
-        const rows = await engine.querySql("DESCRIBE SELECT * FROM requests").catch(() => []);
-        return new Set(rows.map((r) => String(r.column_name ?? "")).filter(Boolean));
-      }
-      return new Set([
-        "timestamp",
-        "ip",
-        "tls_ciphers_sha",
-        "req_header_bytes",
-        "conn_requests",
-        "is_ipv6",
-        "p_type",
-        "waf_sig",
-        "ua",
-        "referer",
-        "resp_bytes",
-        "rtt_min",
-        "tcp_rtt",
-        "lat",
-        "lon",
-        "pop",
-        "asn",
-        "country",
-        "city",
-        "ja3",
-        "ja4",
-      ]);
+      return engine.getPresentColumns();
     },
     tryRollup: engine.queryRollup ? (name, opts) => engine.queryRollup!(name, opts) : undefined,
     async query(sql: string): Promise<Record<string, unknown>[]> {
@@ -328,6 +303,12 @@ function toNum(v: unknown, fallback = 0): number {
 function roundTo(v: number, digits = 2): number {
   const factor = 10 ** digits;
   return Math.round(v * factor) / factor;
+}
+
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") return new Date(value).toISOString();
+  return String(value ?? "");
 }
 
 export function maskIpValue(ip: string, maskIps = false): string {
@@ -445,12 +426,21 @@ export function buildConnReuseBucketCaseSql(colExpr = "c"): string {
   END`;
 }
 
+function securityIpExpr(availableColumns?: ReadonlySet<string>): string {
+  if (availableColumns?.has("client_ip")) {
+    return availableColumns.has("ip")
+      ? "COALESCE(NULLIF(CAST(client_ip AS VARCHAR), ''), ip)"
+      : "client_ip";
+  }
+  return "ip";
+}
+
 export function buildSecurityTlsFingerprintsSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
   const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
-  const ipCol = availableColumns?.has("client_ip") ? "client_ip" : "ip";
+  const ipCol = securityIpExpr(availableColumns);
   const sql = `
     SELECT
       CAST(tls_ciphers_sha AS VARCHAR) AS fingerprint,
@@ -510,7 +500,7 @@ export function buildSecurityTopIpsHeaderSql(
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
   const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
-  const ipCol = availableColumns?.has("client_ip") ? "client_ip" : "ip";
+  const ipCol = securityIpExpr(availableColumns);
   const sql = `
     SELECT
       CAST(${ipCol} AS VARCHAR) AS ip,
@@ -520,7 +510,7 @@ export function buildSecurityTopIpsHeaderSql(
       AND ${ipCol} IS NOT NULL
       AND CAST(${ipCol} AS VARCHAR) != ''
       AND TRY_CAST(req_header_bytes AS BIGINT) IS NOT NULL
-    GROUP BY ip
+    GROUP BY 1
     ORDER BY max_header DESC
     LIMIT 10
   `.trim();
@@ -560,7 +550,7 @@ export function buildSecurityIpv6AdoptionSql(
     : "FALSE";
   const sql = `
     SELECT
-      date_trunc('hour', TRY_CAST(timestamp AS TIMESTAMPTZ)) AS bucket_ts,
+      date_trunc('hour', EPOCH_MS(CAST(ts_ms AS BIGINT))) AS bucket_ts,
       COUNT(*) FILTER (WHERE ${ipv6Expr}) * 100.0 / NULLIF(COUNT(*), 0) AS pct
     FROM logs
     WHERE (${whereSql})
@@ -598,7 +588,7 @@ export function buildSecurityVerifiedBotsTsSql(
   const bucketSeconds = Math.max(60, Math.trunc(toNum(req.bucket_seconds, 300)));
   const sql = `
     SELECT
-      time_bucket(INTERVAL '${bucketSeconds} seconds', TRY_CAST(timestamp AS TIMESTAMPTZ)) AS bucket_ts,
+      time_bucket(INTERVAL '${bucketSeconds} seconds', EPOCH_MS(CAST(ts_ms AS BIGINT))) AS bucket_ts,
       REPLACE(CAST(waf_sig AS VARCHAR), 'VERIFIED-BOT.', '') AS bot_type,
       COUNT(*) AS count
     FROM logs
@@ -616,9 +606,11 @@ export function buildSecurityProxiesSql(
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
   const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
-  const ipCol = availableColumns?.has("client_ip") ? "client_ip" : "ip";
-  const rttMinCol = availableColumns?.has("rtt_min") ? "rtt_min" : "tcpi_min_rtt";
-  const tcpRttCol = availableColumns?.has("tcp_rtt") ? "tcp_rtt" : "tcpi_rtt";
+  const ipCol = securityIpExpr(availableColumns);
+  const rttMinCol = availableColumns?.has("rtt_min")
+    ? "COALESCE(rtt_min, tcpi_min_rtt)" : "tcpi_min_rtt";
+  const tcpRttCol = availableColumns?.has("tcp_rtt")
+    ? "COALESCE(tcp_rtt, tcpi_rtt)" : "tcpi_rtt";
   const sql = `
     SELECT
       CAST(${ipCol} AS VARCHAR) AS ip,
@@ -1060,7 +1052,7 @@ export async function executeSecurityAggregates(
         const { sql, params } = buildSecurityIpv6AdoptionSql(req, availableColumns);
         const rows = await client.query(sql, params);
         response.ipv6_adoption = rows.map((r) => ({
-          time: String(r.bucket_ts ?? r.time ?? ""),
+          time: toIsoTimestamp(r.bucket_ts ?? r.time),
           pct: roundTo(toNum(r.pct), 2),
         }));
       })(),
@@ -1086,7 +1078,7 @@ export async function executeSecurityAggregates(
         const { sql, params } = buildSecurityVerifiedBotsTsSql(req, availableColumns);
         const rows = await client.query(sql, params);
         response.verified_bots_ts = rows.map((r) => ({
-          time: String(r.bucket_ts ?? r.time ?? ""),
+          time: toIsoTimestamp(r.bucket_ts ?? r.time),
           bot_type: String(r.bot_type ?? ""),
           count: Math.trunc(toNum(r.count)),
         }));
@@ -1104,9 +1096,9 @@ export async function executeSecurityAggregates(
     tasks.push(
       (async () => {
         const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
-        const ipCol = availableColumns?.has("client_ip") ? "client_ip" : "ip";
+        const ipCol = securityIpExpr(availableColumns);
         const rows = await client.query(
-          `SELECT CAST(ua AS VARCHAR) AS ua, CAST(${ipCol} AS VARCHAR) AS ip, COUNT(*) AS cnt FROM logs WHERE (${whereSql}) AND ua IS NOT NULL GROUP BY ua, ip LIMIT 5000`,
+          `SELECT CAST(ua AS VARCHAR) AS ua, CAST(${ipCol} AS VARCHAR) AS ip, COUNT(*) AS cnt FROM logs WHERE (${whereSql}) AND ua IS NOT NULL GROUP BY 1, 2 LIMIT 5000`,
           params,
         );
         response.wellknown_bots = summarizeWellKnownBotRows(rows);

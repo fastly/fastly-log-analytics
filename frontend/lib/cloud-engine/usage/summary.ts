@@ -1142,9 +1142,10 @@ export async function fetchUsageInput(
   identity: { user: string; role: string },
   read: UsageLogReader = readLogs,
   signal?: AbortSignal,
+  bounds?: { from: number; to: number },
 ): Promise<UsageInput> {
-  const now = Date.now();
-  const from = now - days * DAY_MS;
+  const now = bounds?.to ?? Date.now();
+  const from = bounds?.from ?? now - days * DAY_MS;
   const range = {
     from: new Date(from).toISOString(),
     to: new Date(now).toISOString(),
@@ -1667,6 +1668,7 @@ export async function fetchUsageSummary(options: {
     { user: "default", role: "admin" },
     readLogs,
     options.signal,
+    { from: fromMs, to: toMs },
   );
   const summary = summarizeUsage(input);
   const incurred = incurredCost({

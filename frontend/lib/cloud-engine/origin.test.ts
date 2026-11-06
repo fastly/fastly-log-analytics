@@ -1,4 +1,6 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getDuckDBEngine } from "./dashboard/duckdb";
 import {
   buildOriginDrilldownSql,
   buildOriginIpHealthSql,
@@ -35,6 +37,33 @@ describe("origin cloud-engine module (F18)", () => {
     setOriginSqlExecutor(null);
   });
 
+  it("preserves query-string URL filters with the default executor and request signal", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ttfb, url)
+        VALUES ('origin-test', 1700000000000, epoch_ms(1700000000000), 'MISS', 0.02, '/a?b=1')
+      `);
+      const response = await handleOriginRequest(
+        new Request("https://example.test/api/origin/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["summary", "slow_urls"],
+            filters: { url: { mode: "include", values: ["/a?b=1"] } },
+          }),
+        }),
+      );
+      const data = await response!.json();
+      expect(data.summary.has_data).toBe(true);
+      expect(data.summary.ottfb_p50_ms).toBe(20);
+      expect(data.slow_urls.rows[0].url).toBe("/a?b=1");
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("resolves originLatencyUsExpr across ottfb and ttfb combinations", () => {
     expect(originLatencyUsExpr(new Set(["ottfb", "ttfb"]))).toBe(
       'COALESCE("ottfb", "ttfb" * 1000000.0)',
@@ -42,6 +71,29 @@ describe("origin cloud-engine module (F18)", () => {
     expect(originLatencyUsExpr(new Set(["ottfb"]))).toBe('"ottfb"');
     expect(originLatencyUsExpr(new Set(["ttfb"]))).toBe('"ttfb" * 1000000.0');
     expect(originLatencyUsExpr(new Set(), null)).toBeNull();
+  });
+
+  it.each([true, false])("buckets epoch milliseconds as core UTC TIMESTAMP with timestamp column present=%s", async (hasTimestamp) => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ttfb)
+        VALUES ('origin-utc', 1700000000000, epoch_ms(1700000000000), 'MISS', 0.02)
+      `);
+      const cols = new Set(["ts_ms", "ttfb"]);
+      if (hasTimestamp) cols.add("timestamp");
+      const sql = buildOriginTimeseriesSql("requests", "TRUE", cols, {
+        bucketMinutes: 5, percentile: "p50",
+      });
+      const rows = await engine.executeSql(`
+        SELECT typeof(ts) AS bucket_type, epoch_ms(ts) AS bucket_ms, value FROM (${sql})
+      `);
+      expect(rows).toEqual([{
+        bucket_type: "TIMESTAMP", bucket_ms: Date.parse("2023-11-14T22:10:00Z"), value: 20,
+      }]);
+    } finally {
+      await engine.reset();
+    }
   });
 
   it("builds SQL for summary, timeseries, slow_urls, status_codes, path_breakdown, pop_latency, ip_health, shielding, and drilldown", () => {

@@ -10,8 +10,9 @@ z.config({ jitless: true });
 import { handleAssetsRequest, type AssetsQueryParams } from "./assets";
 import { handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
+import type { MinuteBucket } from "./dashboard/engine";
 import { parseVcpuMsHeader } from "./dashboard/sources";
-import type { CardField, CustomField } from "./dashboard/summaries";
+import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
 import {
   handleInsightAvailability,
   type CacheCollapseDetailRequest,
@@ -39,7 +40,7 @@ import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import { ensureCloudRange } from "./range-loader";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { compileFiltersToSql, getDuckDBEngine } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
 import { handleSecurityRequest } from "./security";
 import {
@@ -79,7 +80,26 @@ import {
 export { parseVcpuMsHeader };
 export { IS_CLOUD_MODE, isCloudMode, setCloudModeRuntime } from "./mode";
 
-type BucketInterval = "1m" | "5m" | "1h" | "1d";
+type BucketInterval = "1s" | "1m" | "5m" | "1h" | "1d";
+
+const DASHBOARD_PATH = /^\/api\/(?:dashboard\/(?:bundle|aggregates)|aggregates|timeseries)$/;
+const ROLLUP_CHART_METRICS = new Map([
+  ["requests", "COUNT(*)"],
+  ["5xx", "COUNT(*) FILTER (WHERE status >= 500 AND status < 600)"],
+  ["4xx", "COUNT(*) FILTER (WHERE status >= 400 AND status < 500)"],
+  ["hit_rate", "ROUND(100.0 * COUNT(*) FILTER (WHERE cache ILIKE 'HIT%') / NULLIF(COUNT(*), 0), 2)"],
+  ["bandwidth", "SUM(COALESCE(resp_bytes, 0))"],
+  ["error_rate", "100.0 * COUNT(*) FILTER (WHERE status >= 400 AND status < 600) / NULLIF(COUNT(*), 0)"],
+]);
+const RAW_CHART_METRICS = new Map([
+  ["p50_latency", "QUANTILE_CONT(elapsed, 0.5) / 1000.0"],
+  ["p95_latency", "QUANTILE_CONT(elapsed, 0.95) / 1000.0"],
+  ["p99_latency", "QUANTILE_CONT(elapsed, 0.99) / 1000.0"],
+  ["ttfb", "QUANTILE_CONT(COALESCE(ottfb / 1000.0, ttfb * 1000.0), 0.95)"],
+  ["ttfb_ms", "MEDIAN(ttfb) * 1000.0"],
+  ["req_size", "MEDIAN(CASE WHEN req_bytes IS NULL AND req_header_bytes IS NULL THEN NULL ELSE COALESCE(req_bytes, 0) + COALESCE(req_header_bytes, 0) END)"],
+  ["throughput", "SUM(CASE WHEN cache ILIKE 'HIT%' THEN COALESCE(resp_bytes, 0) ELSE 0 END)"],
+]);
 
 export interface CloudQueryTelemetryPayload {
   files_listed?: number;
@@ -195,7 +215,15 @@ function toBucketInterval(
   fromMs: number,
   toMs: number,
 ): BucketInterval {
-  if (raw === "1m" || raw === "5m" || raw === "1h" || raw === "1d") {
+  const aliases: Record<string, BucketInterval> = {
+    "1 second": "1s",
+    "1 minute": "1m",
+    "5 minutes": "5m",
+    "1 hour": "1h",
+    "1 day": "1d",
+  };
+  if (raw && aliases[raw]) return aliases[raw];
+  if (raw === "1s" || raw === "1m" || raw === "5m" || raw === "1h" || raw === "1d") {
     return raw;
   }
   const spanHours = (toMs - fromMs) / 3_600_000;
@@ -390,7 +418,16 @@ export async function handleCloudAnalyticalRequest(
   }
 
   const work = async () => {
-    if (isLocalScan(path, request.method)) {
+    let localScan = isLocalScan(path, request.method);
+    if (request.method === "POST" && DASHBOARD_PATH.test(path)) {
+      const body = await request.clone().json() as {
+        chart_metric?: string; metric?: string; chart_interval?: string; interval?: string;
+      };
+      const chartInterval = body.chart_interval ?? body.interval;
+      localScan ||= RAW_CHART_METRICS.has(body.chart_metric ?? body.metric ?? "requests") ||
+        chartInterval === "1 second" || chartInterval === "1s";
+    }
+    if (localScan) {
       const previous = analyticalQueue;
       let release!: () => void;
       analyticalQueue = new Promise<void>((resolve) => { release = resolve; });
@@ -784,27 +821,46 @@ async function dispatchCloudRequest(request: Request): Promise<Response | null> 
     return jsonResponse(data, request, undefined, res.status);
   }
   if (pathname === "/api/admin/share/audit-logs" && method === "GET") {
-    const now = Date.now();
+    const until = url.searchParams.get("until");
+    const since = url.searchParams.get("since");
+    const to = until ? Date.parse(until) : Date.now();
+    const from = since ? Date.parse(since) : to - 30 * 86_400_000;
+    const limit = Number(url.searchParams.get("limit") ?? 200);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 2000) {
+      return jsonResponse(
+        { detail: { error: "invalid_audit_limit" } }, request, undefined, 422,
+      );
+    }
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+      return jsonResponse(
+        { detail: { error: "invalid_time_range" } }, request, undefined, 400,
+      );
+    }
+    const eventType = url.searchParams.get("event_type");
+    const email = url.searchParams.get("email");
     const res = await queryOpsLogs(
       "admin_audit",
       {
-        from: new Date(now - 30 * 86_400_000).toISOString(),
-        to: new Date(now).toISOString(),
+        from: new Date(from).toISOString(),
+        to: new Date(to + 1).toISOString(),
       },
       { signal: request.signal },
     );
-    const audit_logs = (res.rows ?? []).map(
-      (r: Record<string, unknown>, idx: number) => ({
+    const audit_logs = res.rows
+      .filter((r) => r.timestamp >= from && r.timestamp <= to)
+      .map((r, idx) => ({
         id: idx + 1,
-        timestamp: String(
-          r.timestamp ?? r.created_at ?? new Date().toISOString(),
-        ),
+        timestamp: new Date(r.timestamp).toISOString(),
         event_type: String(r.action ?? r.event_type ?? "ADMIN_ACTION"),
         email: String(r.actor ?? r.user_id ?? "admin"),
         ip_address: String(r.ip ?? r.target ?? "-"),
         details: String(r.target ?? r.details ?? ""),
-      }),
-    );
+      }))
+      .filter((r) =>
+        (!eventType || r.event_type === eventType) &&
+        (!email || r.email.includes(email)),
+      )
+      .slice(0, limit);
     return jsonResponse({ audit_logs }, request);
   }
 
@@ -823,6 +879,8 @@ async function dispatchCloudRequest(request: Request): Promise<Response | null> 
       end_time?: string;
       interval?: string;
       metric?: string;
+      chart_interval?: string;
+      chart_metric?: string;
       filters?: Record<string, { mode?: string; values?: string[] }>;
       custom_filters?: Record<string, { mode?: string; values?: string[] }>;
       fields?: string[];
@@ -830,58 +888,24 @@ async function dispatchCloudRequest(request: Request): Promise<Response | null> 
     const now = Date.now();
     const fromMs = body.start_time ? Date.parse(body.start_time) : now - 86_400_000;
     const toMs = body.end_time ? Date.parse(body.end_time) : now;
-    const interval = toBucketInterval(body.interval, fromMs, toMs);
+    const interval = toBucketInterval(body.chart_interval ?? body.interval, fromMs, toMs);
+    const metric = body.chart_metric ?? body.metric ?? "requests";
+    if (!ROLLUP_CHART_METRICS.has(metric) && !RAW_CHART_METRICS.has(metric)) {
+      return jsonResponse({ detail: { error: "unsupported_chart_metric" } }, request, undefined, 400);
+    }
     const filters = parseFiltersPayload(body.filters, body.custom_filters);
 
     const result = await runInWorker(
       {
         from: new Date(fromMs).toISOString(),
         to: new Date(toMs).toISOString(),
-        interval,
-        metric: body.metric ?? "requests",
         filters,
-        customFields: body.fields,
+        customFields: customCards((body.fields ?? []).map((id) => ({
+          id, label: id, type: "string" as const,
+        }))),
       },
       request.signal,
     );
-
-    const durationMs = Math.max(
-      1,
-      Math.round(
-        (typeof performance !== "undefined" ? performance.now() : Date.now()) -
-          startedAt,
-      ),
-    );
-    const engineName = result.stats.fetched > 0 ? "DuckDB-Wasm" : "Rollups";
-    const vcpuMs: number | null = null;
-
-    useFilterStore.getState().setLastFetchMeta({
-      vcpuMs,
-      engine: engineName,
-      cachedFiles: result.stats.cached,
-      fetchedFiles: result.stats.fetched,
-    });
-
-    const sqlText =
-      result.stats.fetched > 0
-        ? `SELECT time_bucket('${interval}', timestamp), ... FROM read_parquet(${result.stats.fetched} window files)`
-        : `ROLLUP_FAST_PATH(${result.stats.cached} summary files)`;
-
-    void postCloudQueryTelemetry({
-      files_listed: result.stats.listed,
-      files_fetched: result.stats.fetched,
-      files_cached: result.stats.cached,
-      cdn_hits: result.stats.cdnHits,
-      vcpu_ms: vcpuMs,
-      bytes_scanned: result.stats.bytes,
-      rows_scanned: result.totalRequests,
-      duration_ms: durationMs,
-      surface: "dashboard",
-      outcome: "ok",
-      sql: sqlText,
-      engine: engineName,
-      endpoint: pathname,
-    });
 
     const totalReqs = result.totalRequests;
     let totalBytes = 0;
@@ -897,24 +921,102 @@ async function dispatchCloudRequest(request: Request): Promise<Response | null> 
       totalCacheRows += b.cacheRows;
     }
 
+    const bucketMs = { "1s": 1000, "1m": 60_000, "5m": 300_000, "1h": 3_600_000, "1d": 86_400_000 }[interval];
+    const series = new Map<number, MinuteBucket>();
+    for (const point of result.buckets) {
+      const time = Math.floor(point.t / bucketMs) * bucketMs;
+      const bucket = series.get(time);
+      if (!bucket) {
+        series.set(time, { ...point, t: time });
+      } else {
+        bucket.requests += point.requests;
+        bucket.bytes += point.bytes;
+        bucket.s4xx += point.s4xx;
+        bucket.s5xx += point.s5xx;
+        bucket.hits += point.hits;
+        bucket.cacheRows += point.cacheRows;
+      }
+    }
+
+    const rawMetric = RAW_CHART_METRICS.get(metric) ??
+      (interval === "1s" ? ROLLUP_CHART_METRICS.get(metric) : undefined);
+    const columns = rawMetric && filters.length > 0
+      ? await executeSql("DESCRIBE requests", [], request.signal) : [];
+    const filterTypes = new Map(columns.map((column) => [
+      String(column.column_name),
+      /BOOL/i.test(String(column.column_type)) ? "BOOLEAN" as const
+        : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(column.column_type)) ? "DOUBLE" as const
+          : "VARCHAR" as const,
+    ] as const));
+    const whereClause = compileFiltersToSql(filters, false, [], filterTypes);
+    const rawSql = `
+      SELECT FLOOR(ts_ms / ${bucketMs}) * ${bucketMs} AS bucket_ms,
+        ${rawMetric}${metric === "throughput" ? ` / ${bucketMs / 1000}` : ""} AS value
+      FROM requests
+      WHERE ts_ms >= ? AND ts_ms <= ? AND (${whereClause})
+      GROUP BY 1 ORDER BY 1
+    `;
+    const rawSeries = rawMetric
+      ? await executeSql(rawSql, [fromMs, toMs], request.signal) : null;
+    const durationMs = Math.max(1, Math.round(
+      (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+    ));
+    const engineName = rawMetric || result.stats.fetched > 0 ? "DuckDB-Wasm" : "Rollups";
+    const vcpuMs: number | null = null;
+    const sqlText = rawMetric ? rawSql : result.stats.fetched > 0
+      ? `SELECT time_bucket('${interval}', timestamp), ... FROM read_parquet(${result.stats.fetched} window files)`
+      : `ROLLUP_FAST_PATH(${result.stats.cached} summary files)`;
+
+    useFilterStore.getState().setLastFetchMeta({
+      vcpuMs,
+      engine: engineName,
+      cachedFiles: result.stats.cached,
+      fetchedFiles: result.stats.fetched,
+    });
+    void postCloudQueryTelemetry({
+      files_listed: result.stats.listed,
+      files_fetched: result.stats.fetched,
+      files_cached: result.stats.cached,
+      cdn_hits: result.stats.cdnHits,
+      vcpu_ms: vcpuMs,
+      bytes_scanned: result.stats.bytes,
+      rows_scanned: result.totalRequests,
+      duration_ms: durationMs,
+      surface: "dashboard",
+      outcome: "ok",
+      sql: sqlText,
+      engine: engineName,
+      endpoint: pathname,
+    });
     const aggregates = {
-      interval,
-      metric: body.metric ?? "requests",
-      time_series: result.buckets.map((pt) => ({
-        time: new Date(pt.t).toISOString(),
-        value:
-          body.metric === "bandwidth"
-            ? pt.bytes
-            : body.metric === "error_rate"
-              ? pt.requests > 0
-                ? ((pt.s4xx + pt.s5xx) / pt.requests) * 100
-                : 0
-              : pt.requests,
+      data: Object.fromEntries(Object.entries(result.cards).map(([field, card]) =>
+        [field, { top: card.top, total: card.total }],
+      )),
+      map_data: (result.cards.country?.all ?? result.cards.country?.top ?? [])
+        .map((row) => ({ country: String(row.value), count: row.count })),
+      total_rows: totalReqs,
+      total_rows_total: result.stats.rows,
+      where_clause: whereClause,
+      interval: { "1s": "1 second", "1m": "1 minute", "5m": "5 minutes", "1h": "1 hour", "1d": "1 day" }[interval],
+      metric,
+      time_series: rawSeries ? rawSeries.filter((row) => row.value !== null).map((row) => ({
+        time: new Date(Number(row.bucket_ms)).toISOString(),
+        value: Number(row.value),
         category: null,
-      })),
+      })) : [...series.values()].sort((a, b) => a.t - b.t).map((pt) => {
+        let value = pt.requests;
+        if (metric === "bandwidth") value = pt.bytes;
+        else if (metric === "5xx") value = pt.s5xx;
+        else if (metric === "4xx") value = pt.s4xx;
+        else if (metric === "hit_rate") value = pt.requests > 0
+          ? Math.round(pt.hits / pt.requests * 10_000) / 100 : 0;
+        else if (metric === "error_rate") value = pt.requests > 0
+          ? ((pt.s4xx + pt.s5xx) / pt.requests) * 100 : 0;
+        return { time: new Date(pt.t).toISOString(), value, category: null };
+      }),
     };
 
-    if (pathname === "/api/dashboard/aggregates" || pathname === "/api/timeseries") {
+    if (pathname !== "/api/dashboard/bundle") {
       return jsonResponse(aggregates, request, {
         sql: sqlText,
         duration_ms: durationMs,
@@ -1071,10 +1173,13 @@ async function dispatchCloudRequest(request: Request): Promise<Response | null> 
       signal: request.signal,
     });
     const { input, summary } = usageRes;
+    const requestedBucket = searchParams.get("by");
     const points = bucketUsage(input.rows, {
       from: fromMs,
       to: toMs,
-      by: days <= 2 ? "hour" : "day",
+      by: requestedBucket === "hour" || requestedBucket === "day"
+        ? requestedBucket
+        : toMs - fromMs <= 2 * 86_400_000 ? "hour" : "day",
     });
     const costLines = buildSevenLineCostTable({
       hours: days * 24,

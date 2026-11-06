@@ -1,4 +1,6 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { DuckDBAnalyticalEngine } from "./dashboard/duckdb";
 import {
   SESSIONS_INACTIVITY_GAP_SECONDS,
   SESSIONS_MAX_WINDOW_DAYS,
@@ -13,6 +15,85 @@ import {
 } from "./sessions";
 
 describe("cloud-engine sessions & session scoring module", () => {
+  it("sessionizes plain UTC timestamps without timezone extensions and preserves offset bounds", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql("SET autoinstall_known_extensions = false");
+      await engine.executeSql("SET autoload_known_extensions = false");
+      await engine.executeSql(`CREATE TABLE core_sessions (
+        timestamp TIMESTAMP, ts_ms BIGINT, ip VARCHAR, country VARCHAR
+      )`);
+      await engine.executeSql(`INSERT INTO core_sessions VALUES
+        ('2026-11-04 12:00:00.123', 1793793600123, '192.0.2.1', 'US'),
+        ('2026-11-04 12:30:00.123', 1793795400123, '192.0.2.1', 'US'),
+        ('2026-11-04 13:00:00.124', 1793797200124, '192.0.2.1', 'US'),
+        ('2026-11-04 12:00:00.123', 1793793600123, '192.0.2.2', 'CA')`);
+      const result = await handleSessionsList({
+        start_time: "2026-11-04T04:00:00.123-08:00",
+        end_time: "2026-11-04T05:00:00.124-08:00",
+        filters: { country: { mode: "include", values: ["US"] } },
+      }, {
+        tableName: "core_sessions",
+        availableColumns: new Set(["timestamp", "ts_ms", "ip", "country"]),
+        runSql: (sql) => {
+          expect(sql).not.toMatch(/TIMESTAMPTZ|TO_TIMESTAMP|AT TIME ZONE/i);
+          return engine.executeSql(sql);
+        },
+      });
+      expect(result.body).toMatchObject({
+        sessions: [
+          { ip: "192.0.2.1", req_count: 2 },
+          { ip: "192.0.2.1", req_count: 1 },
+        ],
+      });
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("reads plain UTC session detail without timezone extensions and keeps millisecond bounds inclusive", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql("SET autoinstall_known_extensions = false");
+      await engine.executeSql("SET autoload_known_extensions = false");
+      await engine.executeSql("CREATE TABLE core_sessions (timestamp TIMESTAMP, ip VARCHAR, url VARCHAR)");
+      await engine.executeSql(`INSERT INTO core_sessions VALUES
+        ('2026-11-04 12:00:00.122', '192.0.2.1', '/before'),
+        ('2026-11-04 12:00:00.123', '192.0.2.1', '/included'),
+        ('2026-11-04 12:00:00.124', '192.0.2.1', '/after')`);
+      const result = await handleSessionsDetail({
+        ip: "192.0.2.1",
+        start_time: "2026-11-04T04:00:00.123-08:00",
+        end_time: "2026-11-04T04:00:00.123-08:00",
+      }, {
+        tableName: "core_sessions",
+        runSql: (sql) => {
+          expect(sql).not.toMatch(/TIMESTAMPTZ|TO_TIMESTAMP|AT TIME ZONE/i);
+          return engine.executeSql(sql);
+        },
+      });
+      expect(result.body).toMatchObject({ data: [{ url: "/included" }] });
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("applies list filters before sessionization", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests (scoped_key, timestamp, ip, country)
+        VALUES ('native', '2026-11-04T12:00:00Z'::TIMESTAMPTZ, '192.0.2.1', 'US'),
+          ('native', '2026-11-04T12:00:00Z'::TIMESTAMPTZ, '192.0.2.2', 'CA')`);
+      const result = await handleSessionsList({
+        start_time: "2026-11-04T00:00:00Z", end_time: "2026-11-05T00:00:00Z",
+        filters: { country: { mode: "include", values: ["CA"] } },
+      }, { runSql: (sql) => engine.executeSql(sql) });
+      expect(result.body).toMatchObject({ sessions: [{ ip: "192.0.2.2", country: "CA" }] });
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("exports 30-minute inactivity gap (1800s) and 7-day window cap", () => {
     expect(SESSIONS_INACTIVITY_GAP_SECONDS).toBe(1800);
     expect(SESSIONS_MAX_WINDOW_DAYS).toBe(7);

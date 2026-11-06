@@ -1,7 +1,10 @@
 import {
   getDuckDBEngine,
+  compileFiltersToSql,
   type DuckDBAnalyticalEngine,
 } from "./dashboard/duckdb";
+import type { FiltersPayload } from "@/types/api";
+import { buildOriginShieldingAnalysisSql, enrichShieldingRouteWithPopDistance } from "./origin";
 
 export const TCP_FIELDS = [
   "client_rtt_us",
@@ -28,7 +31,7 @@ export interface MetroRow {
   country?: string | null;
   reqs?: number;
   total_reqs?: number;
-  health_score?: number;
+  health_score?: number | null;
   rtt_med_us?: number;
   rtt_med_ms?: number;
   avg_ploss?: number;
@@ -44,6 +47,12 @@ export interface NetworkQueryParams {
   filter_country?: string;
   filter_asn?: string | number;
   filter_pop?: string;
+  filters?: FiltersPayload;
+  bucket_seconds?: number;
+  top_n?: number;
+  map_asn?: string;
+  region_country?: string;
+  sections?: readonly string[];
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   signal?: AbortSignal;
 }
@@ -196,13 +205,22 @@ export function normalizeProtocolBucket(raw: unknown): string {
 
 export function emptyNetworkHealth(missingTcpFields: string[] = []) {
   return {
+    available: true,
+    has_data: false,
+    leaderboard: [] as Record<string, unknown>[],
+    buckets: [] as string[],
+    heatmap: [] as Record<string, unknown>[],
+    cities: [] as { name: string; lat: number | null; lon: number | null }[],
+    map_buckets: [] as Record<string, unknown>[],
+    has_metro: false,
     summary: {
       total_requests: 0,
       avg_rtt_ms: 0,
       median_rtt_ms: 0,
       p95_rtt_ms: 0,
       avg_ploss_pct: 0,
-      health_score: 100,
+      health_score: null as number | null,
+      global_health_score: null as number | null,
     },
     timeseries: [] as Record<string, unknown>[],
     by_country: [] as Record<string, unknown>[],
@@ -215,6 +233,7 @@ export function emptyNetworkHealth(missingTcpFields: string[] = []) {
 
 export function emptyNetworkQuality(missingTcpFields: string[] = []) {
   return {
+    available: false,
     summary: {
       total_requests: 0,
       avg_throughput_mbps: 0,
@@ -238,6 +257,7 @@ export function emptyNetworkQuality(missingTcpFields: string[] = []) {
 
 export function emptyPopHealth() {
   return {
+    data: [] as Record<string, unknown>[],
     pops: [] as Record<string, unknown>[],
     by_pop: [] as Record<string, unknown>[],
     elevated_count: 0,
@@ -295,7 +315,98 @@ function buildWhereClause(params: NetworkQueryParams): string {
     const escaped = String(params.filter_pop).replaceAll("'", "''");
     clauses.push(`COALESCE(fastly_pop, pop) = '${escaped}'`);
   }
+  clauses.push(compileFiltersToSql(Object.entries(params.filters ?? {}).flatMap(([field, spec]) =>
+    spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
+  )));
   return clauses.join(" AND ");
+}
+
+async function queryNetworkBuckets(
+  params: NetworkQueryParams,
+  where: string,
+  engine: Pick<DuckDBAnalyticalEngine, "executeSql">,
+) {
+  const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300))) * 1000;
+  const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
+  const bucket = `(floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT`;
+  const metrics = `COUNT(*)::BIGINT AS reqs,
+    QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5) AS rtt_med_us,
+    QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1) AS baseline,
+    AVG(COALESCE(client_ploss, ploss)) AS avg_ploss,
+    COUNT(*) FILTER (WHERE status >= 500) * 100.0 / COUNT(*) AS error_pct`;
+  const asnRows = await engine.executeSql<Record<string, unknown>>(`SELECT ${bucket} AS bucket_ms,
+    COALESCE(client_asn, asn, 0) AS asn, ${metrics} FROM requests WHERE ${where} GROUP BY 1, 2 ORDER BY 1`, [], params.signal);
+  const mapAsn = params.map_asn && params.map_asn !== "all" ? Number(params.map_asn) : null;
+  const cityRows = await engine.executeSql<Record<string, unknown>>(`SELECT ${bucket} AS bucket_ms,
+    COALESCE(geo_city, city) AS city, COALESCE(geo_country, country) AS country,
+    AVG(lat) AS lat, AVG(lon) AS lon, ${metrics}
+    FROM requests WHERE ${where} AND COALESCE(geo_city, city) IS NOT NULL
+    ${mapAsn !== null && Number.isFinite(mapAsn) ? `AND COALESCE(client_asn, asn, 0) = ${Math.floor(mapAsn)}` : ""}
+    GROUP BY 1, 2, 3 ORDER BY 1, reqs DESC`, [], params.signal);
+  const buckets = [...new Set([...asnRows, ...cityRows].map((row) => new Date(Number(row.bucket_ms)).toISOString()))].sort();
+  const bucketIndexes = new Map(buckets.map((value, index) => [value, index]));
+  const cell = (row: Record<string, unknown>) => ({
+    reqs: Number(row.reqs),
+    rtt_med_us: row.rtt_med_us == null ? null : Number(row.rtt_med_us),
+    avg_ploss: row.avg_ploss == null ? null : Number(row.avg_ploss),
+    error_pct: Number(row.error_pct),
+    health_score: row.rtt_med_us == null ? null : computeNetworkHealthScore(
+      Number(row.rtt_med_us), Math.max(1, Number(row.baseline)), Number(row.avg_ploss ?? 0), Number(row.error_pct),
+    ),
+  });
+  const byAsn = new Map<number, { asn: number; label: string; total_reqs: number; buckets: Record<string, unknown>[] }>();
+  for (const row of asnRows) {
+    const asn = Number(row.asn);
+    const entry = byAsn.get(asn) ?? { asn, label: `AS${asn}`, total_reqs: 0, buckets: [] };
+    const bucket = new Date(Number(row.bucket_ms)).toISOString();
+    entry.total_reqs += Number(row.reqs);
+    entry.buckets.push({ ...cell(row), bucket, bucket_idx: bucketIndexes.get(bucket) });
+    byAsn.set(asn, entry);
+  }
+
+  const cities: { name: string; lat: number | null; lon: number | null }[] = [];
+  const cityIndexes = new Map<string, number>();
+  const mapBuckets = new Map<string, { bucket: string; bucket_idx: number; cities: Record<string, unknown>[] }>();
+  for (const row of cityRows) {
+    const key = JSON.stringify([row.country, row.city]);
+    if (!cityIndexes.has(key)) {
+      cityIndexes.set(key, cities.length);
+      cities.push({ name: String(row.city), lat: row.lat == null ? null : Number(row.lat), lon: row.lon == null ? null : Number(row.lon) });
+    }
+    const bucket = new Date(Number(row.bucket_ms)).toISOString();
+    const entry = mapBuckets.get(bucket) ?? { bucket, bucket_idx: bucketIndexes.get(bucket)!, cities: [] };
+    entry.cities.push({ ...cell(row), city_idx: cityIndexes.get(key), country: row.country });
+    mapBuckets.set(bucket, entry);
+  }
+  return {
+    buckets, cities, map_buckets: [...mapBuckets.values()],
+    heatmap: [...byAsn.values()].sort((a, b) => b.total_reqs - a.total_reqs).slice(0, topN),
+  };
+}
+
+async function queryNetworkShielding(
+  params: NetworkQueryParams,
+  where: string,
+  engine: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">,
+) {
+  const present = await engine.getPresentColumns();
+  const missing = ["edge", "rid", "prid", "pop"].filter((field) => !present.has(field));
+  if (!present.has("ottfb") && !present.has("ttfb")) missing.push("ttfb");
+  if (missing.length) {
+    return { has_data: false, requires_fields: missing, rows: [], total_routes: 0, truncated: false };
+  }
+  const timeWhere = buildWhereClause({
+    start_time: params.start_time, end_time: params.end_time, service_id: params.service_id,
+  });
+  const rows = await engine.executeSql<Record<string, unknown>>(
+    buildOriginShieldingAnalysisSql("requests", where, timeWhere, params.top_n ?? 30),
+    [], params.signal,
+  );
+  const shaped = rows.map((row) => enrichShieldingRouteWithPopDistance(row));
+  const total = Number(rows[0]?.total_routes ?? 0);
+  return {
+    has_data: shaped.length > 0, rows: shaped, total_routes: total, truncated: total > shaped.length,
+  };
 }
 
 async function detectMissingTcpFields(
@@ -305,7 +416,15 @@ async function detectMissingTcpFields(
   if (present.size === 0) {
     return [...TCP_FIELDS];
   }
-  return TCP_FIELDS.filter((f) => !present.has(f));
+  const aliases: Record<string, string[]> = {
+    client_rtt_us: ["tcp_rtt", "tcpi_rtt"],
+    client_tcpi_rtt: ["tcp_rtt", "tcpi_rtt"],
+    client_ploss: ["ploss"],
+    client_cwnd: ["cwnd", "tcpi_snd_cwnd"],
+    client_tcpi_rttvar: ["rtt_var", "tcpi_rtt_var"],
+    client_tcpi_delta_retrans: ["retrans", "tcpi_total_retrans"],
+  };
+  return TCP_FIELDS.filter((f) => ![f, ...(aliases[f] ?? [])].some((field) => present.has(field)));
 }
 
 export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
@@ -324,11 +443,11 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   }>(
     `SELECT
       COUNT(*)::BIGINT AS total_requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt))::DOUBLE AS avg_rtt_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.5)::DOUBLE AS med_rtt_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.95)::DOUBLE AS p95_rtt_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.1)::DOUBLE AS p10_rtt_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
+      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS med_rtt_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.95)::DOUBLE AS p95_rtt_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS p10_rtt_us,
+      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
       (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
     FROM requests
     WHERE ${where}`,
@@ -346,7 +465,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const baseRttUs = Math.max(1, Number(s.p10_rtt_us ?? medRttUs ?? 1));
   const avgPloss = Number(s.avg_ploss ?? 0);
   const errorPct = Number(s.error_pct ?? 0);
-  const healthScore = computeNetworkHealthScore(
+  const healthScore = s.med_rtt_us == null ? null : computeNetworkHealthScore(
     medRttUs,
     baseRttUs,
     avgPloss,
@@ -358,9 +477,9 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       COALESCE(geo_country, country, 'Unknown') AS country,
       COUNT(*)::BIGINT AS reqs,
       COUNT(*)::BIGINT AS total_reqs,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
+      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
       (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
     FROM requests
     WHERE ${where}
@@ -385,7 +504,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       avg_ploss: roundTo(ploss, 4),
       avg_ploss_pct: roundTo(ploss <= 1 ? ploss * 100 : ploss, 2),
       error_pct: roundTo(errPct, 2),
-      health_score: computeNetworkHealthScore(
+      health_score: row.rtt_med_us == null ? null : computeNetworkHealthScore(
         rttMedUs,
         rttBaseUs,
         ploss,
@@ -399,9 +518,9 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       COALESCE(client_asn, asn, 0)::BIGINT AS asn,
       COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name,
       COUNT(*)::BIGINT AS reqs,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
+      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
       (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
     FROM requests
     WHERE ${where}
@@ -425,7 +544,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       rtt_med_ms: roundTo(rttMedUs / 1000, 2),
       avg_ploss: roundTo(ploss, 4),
       error_pct: roundTo(errPct, 2),
-      health_score: computeNetworkHealthScore(
+      health_score: row.rtt_med_us == null ? null : computeNetworkHealthScore(
         rttMedUs,
         rttBaseUs,
         ploss,
@@ -439,9 +558,9 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       COALESCE(geo_city, city, 'Unknown') AS city,
       COALESCE(geo_country, country, 'Unknown') AS country,
       COUNT(*)::BIGINT AS reqs,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
+      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
       (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
     FROM requests
     WHERE ${where}
@@ -464,6 +583,8 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     return {
       city: String(row.city ?? "Unknown"),
       country: String(row.country ?? "Unknown"),
+      raw_city: String(row.city ?? "Unknown"),
+      region: "",
       reqs,
       total_reqs: reqs,
       rtt_med_us: roundTo(rttMedUs, 1),
@@ -471,7 +592,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
       avg_ploss: roundTo(ploss, 4),
       avg_ploss_pct: roundTo(ploss <= 1 ? ploss * 100 : ploss, 2),
       error_pct: roundTo(errPct, 2),
-      health_score: computeNetworkHealthScore(
+      health_score: row.rtt_med_us == null ? null : computeNetworkHealthScore(
         rttMedUs,
         rttBaseUs,
         ploss,
@@ -482,10 +603,32 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
 
   const metro_leaderboard = deduplicateMetroLeaderboard(scoredMetros);
   const popHealth = await queryPopHealth(params);
+  const bucketData = await queryNetworkBuckets(params, where, engine);
+  const shielding = !params.sections || params.sections.includes("shielding_analysis")
+    ? await queryNetworkShielding(params, where, engine) : undefined;
+  const worstAsn = by_asn.filter((row) => row.health_score != null)
+    .sort((a, b) => a.health_score! - b.health_score!)[0];
+  const worstCountry = by_country.filter((row) => row.health_score != null)
+    .sort((a, b) => a.health_score! - b.health_score!)[0];
 
   return {
+    available: true,
+    has_data: true,
+    ...bucketData,
+    shielding_analysis: shielding,
+    has_metro: metro_leaderboard.length > 0,
+    leaderboard: by_asn.slice(0, Math.max(1, Math.min(100, params.top_n ?? 30))).map((row) => ({
+      ...row, label: row.as_name, total_reqs: row.reqs,
+      health_score_now: row.health_score,
+      health_score_1h_ago: null,
+      health_score_1w_ago: null,
+    })),
     summary: {
       total_requests: totalRequests,
+      total_reqs: totalRequests,
+      global_health_score: healthScore,
+      worst_asn: worstAsn ? { label: worstAsn.as_name, score: worstAsn.health_score } : null,
+      worst_country: worstCountry ? { label: worstCountry.country, score: worstCountry.health_score } : null,
       avg_rtt_ms: roundTo(Number(s.avg_rtt_us ?? 0) / 1000, 2),
       median_rtt_ms: roundTo(medRttUs / 1000, 2),
       p95_rtt_ms: roundTo(Number(s.p95_rtt_us ?? 0) / 1000, 2),
@@ -517,10 +660,10 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     `SELECT
       COUNT(*)::BIGINT AS total_requests,
       AVG(client_cwnd)::DOUBLE AS avg_cwnd,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt))::DOUBLE AS avg_rtt_us,
-      AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
+      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
+      AVG(COALESCE(client_tcpi_rttvar, rtt_var, tcpi_rtt_var))::DOUBLE AS avg_rttvar_us,
       (COUNT(*) FILTER (WHERE COALESCE(client_tcpi_delta_retrans, 0) > 0) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS retrans_rate_pct,
-      AVG(CASE WHEN COALESCE(time_elapsed_usec, ttfb_ms * 1000) > 0 THEN (COALESCE(resp_body_size, resp_bytes, 0) * 8.0) / (COALESCE(time_elapsed_usec, ttfb_ms * 1000) / 1000.0) ELSE NULL END)::DOUBLE AS avg_throughput_mbps
+      AVG(CASE WHEN COALESCE(time_elapsed_usec, elapsed) > 0 THEN (COALESCE(resp_body_size, resp_bytes, 0) * 8.0) / COALESCE(time_elapsed_usec, elapsed) ELSE NULL END)::DOUBLE AS avg_throughput_mbps
     FROM requests
     WHERE ${where}`,
     [],
@@ -536,7 +679,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     `SELECT
       COALESCE(geo_country, country, 'Unknown') AS region,
       COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt))::DOUBLE AS avg_rtt_us,
+      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
       AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
       AVG(client_ploss)::DOUBLE AS avg_ploss,
       AVG(client_cwnd)::DOUBLE AS avg_cwnd
@@ -563,7 +706,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
       COALESCE(client_asn, asn, 0)::BIGINT AS asn,
       COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name,
       COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt))::DOUBLE AS avg_rtt_us,
+      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
       AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
       AVG(client_ploss)::DOUBLE AS avg_ploss,
       AVG(client_cwnd)::DOUBLE AS avg_cwnd
@@ -586,14 +729,12 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     avg_cwnd: roundTo(Number(r.avg_cwnd ?? 0), 1),
   }));
 
-  const scatter = by_asn.slice(0, 50).map((r) => ({
-    asn: r.asn,
-    as_name: r.as_name,
-    requests: r.requests,
-    rtt_ms: r.avg_rtt_ms,
-    ploss_pct: r.avg_ploss_pct,
-    cwnd: r.avg_cwnd,
-  }));
+  const scatter = await engine.executeSql<Record<string, unknown>>(`SELECT
+    COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) / 1000.0 AS rtt_ms,
+    COALESCE(ttfb_ms, ttfb * 1000.0) AS ttfb_ms,
+    COALESCE(cache_status, cache) AS cache FROM requests
+    WHERE ${where} AND COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) IS NOT NULL
+      AND COALESCE(ttfb_ms, ttfb * 1000.0) IS NOT NULL LIMIT 2000`, [], params.signal);
 
   const protoRows = await engine.executeSql<{
     proto: string | null;
@@ -601,9 +742,9 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     avg_rtt_us: number | null;
   }>(
     `SELECT
-      COALESCE(protocol, 'Other') AS proto,
+      COALESCE(protocol, proto, 'Other') AS proto,
       COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt))::DOUBLE AS avg_rtt_us
+      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us
     FROM requests
     WHERE ${where}
     GROUP BY 1`,
@@ -644,7 +785,25 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   });
 
   const s = summaryRows[0];
+  const bar = (value: string, label: string, row: { avg_rtt_ms: number; requests: number }) => ({
+    value, label, rtt_ms: row.avg_rtt_ms, reqs: row.requests,
+  });
+  const byPopRows = await engine.executeSql<Record<string, unknown>>(`SELECT
+    COALESCE(fastly_pop, pop) AS pop,
+    AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt)) / 1000.0 AS rtt_ms,
+    COUNT(*) AS reqs FROM requests WHERE ${where} GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
+  const regionCountry = String(params.region_country ?? "US").replaceAll("'", "''");
+  const regionRows = await engine.executeSql<Record<string, unknown>>(`SELECT
+    COALESCE(geo_region, region, 'Unknown') AS value,
+    AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt)) / 1000.0 AS rtt_ms,
+    COUNT(*) AS reqs FROM requests WHERE ${where}
+      AND COALESCE(geo_country, country) = '${regionCountry}' GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
   return {
+    available: s.avg_rtt_us != null,
+    by_country: by_region.map((row) => bar(row.region, row.region, row)),
+    by_pop: byPopRows.map((row) => ({ ...row, value: String(row.pop ?? "Unknown"), label: String(row.pop ?? "Unknown") })),
+    countries: by_region.map((row) => row.region),
+    region_country: params.region_country ?? "US",
     summary: {
       total_requests: totalRequests,
       avg_throughput_mbps: roundTo(Number(s.avg_throughput_mbps ?? 0), 2),
@@ -654,8 +813,8 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
       retrans_rate_pct: roundTo(Number(s.retrans_rate_pct ?? 0), 2),
     },
     scatter,
-    by_region,
-    by_asn,
+    by_region: regionRows.map((row) => ({ ...row, label: String(row.value) })),
+    by_asn: by_asn.map((row) => ({ ...row, ...bar(String(row.asn), row.as_name, row) })),
     protocol_distribution,
     missing_tcp_fields: missingTcpFields,
   };
@@ -669,9 +828,13 @@ export async function queryPopHealth(params: NetworkQueryParams = {}) {
     `SELECT
       COALESCE(fastly_pop, pop, 'Unknown') AS pop,
       COUNT(*)::BIGINT AS requests,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, ttfb_ms * 1000), 0.5)::DOUBLE AS p50_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, ttfb_ms * 1000), 0.95)::DOUBLE AS p95_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, ttfb_ms * 1000), 0.1)::DOUBLE AS baseline_p50_us,
+      COUNT(*) FILTER (WHERE status >= 500) AS errors,
+      COUNT(*) FILTER (WHERE starts_with(UPPER(COALESCE(cache_status, cache)), 'HIT')) * 100.0 / COUNT(*) AS cache_hit_rate,
+      SUM(COALESCE(resp_body_size, resp_bytes, 0)) AS bandwidth_bytes,
+      QUANTILE_CONT(COALESCE(ttfb_ms, ttfb * 1000.0), 0.95) AS p95_ttfb_ms,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS p50_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.95)::DOUBLE AS p95_us,
+      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS baseline_p50_us,
       AVG(client_ploss)::DOUBLE AS avg_ploss,
       (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
     FROM requests
@@ -697,6 +860,12 @@ export async function queryPopHealth(params: NetworkQueryParams = {}) {
     return {
       pop: String(r.pop ?? "Unknown"),
       requests: Number(r.requests ?? 0),
+      errors: Number(r.errors ?? 0),
+      error_rate: Number(r.error_pct ?? 0),
+      bandwidth_bytes: Number(r.bandwidth_bytes ?? 0),
+      cache_hit_rate: Number(r.cache_hit_rate ?? 0),
+      p50_rtt_us: r.p50_us == null ? null : Number(r.p50_us),
+      p95_ttfb_ms: r.p95_ttfb_ms == null ? null : Number(r.p95_ttfb_ms),
       p50_ms: roundTo(p50Ms, 2),
       p95_ms: roundTo(p95Ms, 2),
       baseline_p50_ms: roundTo(baselineMs, 2),
@@ -707,6 +876,7 @@ export async function queryPopHealth(params: NetworkQueryParams = {}) {
   });
 
   return {
+    data: pops,
     pops,
     by_pop: pops,
     elevated_count: elevatedCount,
@@ -714,13 +884,47 @@ export async function queryPopHealth(params: NetworkQueryParams = {}) {
   };
 }
 
+async function queryNetworkTransport(params: NetworkQueryParams) {
+  const engine = params.engine ?? getDuckDBEngine();
+  const where = buildWhereClause(params);
+  const rows = await engine.executeSql<Record<string, unknown>>(`SELECT
+    COUNT(*) AS total_requests,
+    SUM(COALESCE(resp_body_size, resp_bytes, 0)) AS bandwidth_bytes,
+    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.5) / 1000.0 AS tcp_rtt_p50_ms,
+    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.9) / 1000.0 AS tcp_rtt_p90_ms,
+    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.95) / 1000.0 AS tcp_rtt_p95_ms,
+    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.99) / 1000.0 AS tcp_rtt_p99_ms,
+    AVG(COALESCE(client_ploss, ploss)) * 100.0 AS packet_loss_pct,
+    AVG(COALESCE(delivery_rate, tcpi_delivery_rate)) * 8.0 / 1000000.0 AS delivery_rate_mbps
+    FROM requests WHERE ${where}`, [], params.signal);
+  const row = rows[0] ?? {};
+  const protocols = await engine.executeSql<Record<string, unknown>>(`SELECT
+    COALESCE(proto, protocol, 'Unknown') AS protocol, COUNT(*) AS requests
+    FROM requests WHERE ${where} GROUP BY 1 ORDER BY requests DESC`, [], params.signal);
+  const total = Number(row.total_requests ?? 0);
+  return {
+    ...row,
+    has_transport_data: total > 0,
+    missing_fields: row.tcp_rtt_p50_ms == null ? ["tcp_rtt"] : [],
+    protocol_distribution: protocols.map((entry) => ({
+      protocol: String(entry.protocol), requests: Number(entry.requests),
+      share_pct: total ? Number(entry.requests) * 100 / total : 0,
+    })),
+  };
+}
+
 export async function queryNetworkBundle(params: NetworkQueryParams = {}) {
-  const [network_health, network_quality, pop_health] = await Promise.all([
+  const [network_health, network_quality, pop_health, transport] = await Promise.all([
     queryNetworkHealth(params),
     queryNetworkQuality(params),
     queryPopHealth(params),
+    queryNetworkTransport(params),
   ]);
   return {
+    available: true,
+    health: network_health,
+    quality: network_quality,
+    transport,
     network_health,
     network_quality,
     pop_health,

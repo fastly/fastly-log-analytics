@@ -1,15 +1,73 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { DuckDBAnalyticalEngine } from "./dashboard/duckdb";
+import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/duckdb";
+import { cloudRumAnalytics } from "./rum-wire";
 import {
   classifyCwvRating,
   emptyRumAnalytics,
   handleRumRequest,
   queryRumAnalytics,
+  queryRumLiveEvents,
   shapeRumEnvironments,
 } from "./rum";
 
 describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
+  it("returns CWV wire distributions as percentages for two LCP beacons", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value)
+        VALUES ('rum', 1700000000000, 'LCP', 2000),
+          ('rum', 1700000001000, 'LCP', 4000)`);
+      const data = await cloudRumAnalytics({});
+      expect(data.beacon_count).toBe(2);
+      expect(data.vitals.lcp).toEqual({
+        p75: 3.5,
+        distribution: { good: 50, needs_improvement: 50, poor: 0 },
+      });
+      expect(data.vitals.cls).toEqual({
+        p75: null,
+        distribution: { good: 0, needs_improvement: 0, poor: 0 },
+      });
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("keeps CWV wire distributions zero and percentiles null with no beacons", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      const data = await cloudRumAnalytics({});
+      expect(data.no_data).toBe(true);
+      expect(data.beacon_count).toBe(0);
+      for (const name of ["lcp", "cls", "inp"] as const) {
+        expect(data.vitals[name]).toEqual({
+          p75: null,
+          distribution: { good: 0, needs_improvement: 0, poor: 0 },
+        });
+      }
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("applies JSON page filters to analytics and live events", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value, country, page_url)
+        VALUES ('rum', 1700000000000, 'LCP', 2000, 'US', '/home'),
+          ('rum', 1700000001000, 'LCP', 4000, 'CA', '/other')`);
+      const params = {
+        engine, filters: JSON.stringify({ country: { mode: "include", values: ["US"] } }),
+      };
+      expect((await queryRumAnalytics(params)).metrics.LCP.count).toBe(1);
+      expect((await queryRumLiveEvents(params)).events).toHaveLength(1);
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("returns emptyRumAnalytics with no_data: true when tables are empty", async () => {
     const engine = new DuckDBAnalyticalEngine();
     const res = await queryRumAnalytics({ engine });

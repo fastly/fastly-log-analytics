@@ -1,4 +1,9 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { useTimeseriesToTraces } from "@/lib/chartUtils";
+import { getDuckDBEngine } from "./dashboard/duckdb";
 import {
   ACTIVE_CLIENTS_LIMIT,
   buildConnReuseBucketCaseSql,
@@ -23,11 +28,55 @@ import {
   shapeSecurityThreatIntelRows,
   summarizeWellKnownBotRows,
   well_known_bots,
+  type SecurityAggregatesResponse,
 } from "./security";
 
 describe("security cloud-engine module (F20)", () => {
   beforeEach(() => {
     setSecurityEngineClient(null);
+  });
+
+  it("executes mandatory page sections against populated short fields without alias collisions", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", ip, ua, req_header_bytes, tls_ciphers_sha,
+          tcpi_min_rtt, tcpi_rtt, lat, lon, pop, asn, country, city
+        ) VALUES (
+          'security-test', 1700000000000, epoch_ms(1700000000000),
+          '192.0.2.1', 'Googlebot/2.1', 512, 'fingerprint',
+          5000, 20000, -33.8688, 151.2093, 'SJC', 15169, 'AU', 'Sydney'
+        )
+      `);
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", client_ip, ua, req_header_bytes, tls_ciphers_sha
+        ) VALUES (
+          'security-test', 1700000000000, epoch_ms(1700000000000),
+          '192.0.2.2', 'Googlebot/2.1', 256, 'fingerprint'
+        )
+      `);
+      const response = await handleSecurityRequest(
+        new Request("https://example.test/api/security/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["top_ips_header", "tls_fingerprints", "wellknown_bots", "proxies"],
+          }),
+        }),
+      );
+      const data = await response!.json();
+      expect(data.top_ips_header).toEqual([
+        { ip: "192.0.2.1", max_header: 512 }, { ip: "192.0.2.2", max_header: 256 },
+      ]);
+      expect(data.tls_fingerprints[0]).toMatchObject({ ip_count: 2, request_count: 2 });
+      expect(data.wellknown_bots[0]).toMatchObject({ requests: 2, unique_ips: 2 });
+      expect(data.active_clients[0]).toMatchObject({ ip: "192.0.2.1", risk_level: "High" });
+    } finally {
+      await engine.reset();
+    }
   });
 
   it("expands security sections including tls_fingerprints->fingerprint_coverage and ngwaf union", () => {
@@ -40,6 +89,74 @@ describe("security cloud-engine module (F20)", () => {
     expect(s2.has("ngwaf_verified_bots_ts")).toBe(true);
 
     expect(expandSecuritySections().size).toBe(14);
+  });
+
+  it("uses core UTC TIMESTAMP for hourly IPv6 and interval bot buckets", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", is_ipv6, waf_sig)
+        VALUES ('security-utc', 1700000000000, epoch_ms(1700000000000), TRUE, 'VERIFIED-BOT.search')
+      `);
+      const req = {
+        start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", bucket_seconds: 120,
+      };
+      const cols = new Set(["ts_ms", "timestamp", "is_ipv6", "waf_sig"]);
+      for (const [built, expectedTime, metric, expectedValue] of [
+        [buildSecurityIpv6AdoptionSql(req, cols), "2023-11-14T22:00:00Z", "pct", 100],
+        [buildSecurityVerifiedBotsTsSql(req, cols), "2023-11-14T22:12:00Z", "count", 1],
+      ] as const) {
+        const rows = await engine.executeSql(`
+          WITH logs AS (SELECT * FROM requests)
+          SELECT typeof(bucket_ts) AS bucket_type, epoch_ms(bucket_ts) AS bucket_ms,
+            ${metric} AS value FROM (${built.sql})
+        `, built.params);
+        expect(rows).toEqual([{
+          bucket_type: "TIMESTAMP", bucket_ms: Date.parse(expectedTime), value: expectedValue,
+        }]);
+      }
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("renders real IPv4-only DuckDB buckets through the Security chart consumer with valid UTC time and zero percent", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      const timestamp = Date.parse("2026-01-01T00:00:00Z");
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", is_ipv6, waf_sig)
+        SELECT 'security-wire', ${timestamp}, epoch_ms(${timestamp}), FALSE, 'VERIFIED-BOT.search'
+        FROM range(12)
+      `);
+      const response = await handleSecurityRequest(
+        new Request("https://example.test/api/security/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2026-01-01T00:00:00Z", end_time: "2026-01-02T00:00:00Z",
+            sections: ["ipv6_adoption", "verified_bots_ts"],
+          }),
+        }),
+      );
+      const data = await response!.json() as SecurityAggregatesResponse;
+      function Ipv6ChartConsumer() {
+        const [trace] = useTimeseriesToTraces(
+          data.ipv6_adoption,
+          [{ key: "pct", name: "IPv6 %", color: "#8b5cf6", fill: "tozeroy" }],
+          "UTC",
+        );
+        return createElement("output", null, `${trace.x?.[0]} ${trace.y?.[0]}`);
+      }
+      expect(renderToStaticMarkup(createElement(Ipv6ChartConsumer))).toBe(
+        "<output>2026-01-01 00:00:00 0</output>",
+      );
+      expect(data.ipv6_adoption).toEqual([{ time: "2026-01-01T00:00:00.000Z", pct: 0 }]);
+      expect(data.verified_bots_ts).toEqual([{
+        time: "2026-01-01T00:00:00.000Z", bot_type: "search", count: 12,
+      }]);
+    } finally {
+      await engine.reset();
+    }
   });
 
   it("builds SQL for fingerprints, header size buckets (0-256B..>32KB), connection reuse, ipv6, proxies, and threat-intel", () => {
