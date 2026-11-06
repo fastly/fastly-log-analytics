@@ -916,6 +916,11 @@ def sync_catalog_and_templates(
         grp_copy["fields"] = [f["id"] for f in grp_fields]
         groups_out.append(grp_copy)
 
+    enum_encodings = {
+        "CONN_SPEED_ENCODE": dict(catalog.CONN_SPEED_ENCODE),
+        "PROXY_TYPE_ENCODE": dict(catalog.PROXY_TYPE_ENCODE),
+        "PROXY_DESC_ENCODE": dict(catalog.PROXY_DESC_ENCODE),
+    }
     out_catalog_path = catalog_path or (ROOT / "src/logging/catalog.json")
     write(
         out_catalog_path,
@@ -926,6 +931,7 @@ def sync_catalog_and_templates(
             "insights": insights_mod.INSIGHT_DEFINITIONS,
             "presets": presets_mod.PRESETS,
             "reserved": sorted(catalog._DUCKDB_RESERVED),
+            "enum_encodings": enum_encodings,
             "CONN_SPEED_ENCODE": dict(catalog.CONN_SPEED_ENCODE),
             "PROXY_TYPE_ENCODE": dict(catalog.PROXY_TYPE_ENCODE),
             "PROXY_DESC_ENCODE": dict(catalog.PROXY_DESC_ENCODE),
@@ -942,6 +948,14 @@ def sync_catalog_and_templates(
     group_m = capture({"groups": ["M"]})
     rum_vcl = fastly_client_ns["generate_rum_vcl"]("__SERVICE_ID__", faro_mod.DEFAULT_FARO_VERSION)
     rum_asset_vcl = fastly_client_ns["generate_rum_asset_fetch_vcl"]("iad-va-us", faro_mod.DEFAULT_FARO_VERSION)
+    rum_beacon_extraction = (
+        "# Extract the RUM request ID; the beacon URL carries everything else.\n"
+        'set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");\n'
+        'if (req.http.x-fos-edge-data:fastly_req_id == "") {\n'
+        "    set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;\n"
+        "}\n"
+        'set req.url = querystring.filter(req.url, "service_id" + querystring.filtersep() + "req");'
+    )
 
     out_templates_path = templates_path or (ROOT / "vcl/capture/templates.json")
     write(
@@ -952,7 +966,7 @@ def sync_catalog_and_templates(
             "M": {"deliver": group_m["deliver"]},
             "group_capture_deliver": {
                 "L": group_l["deliver"],
-                "M": group_m["deliver"] + "\n# NULL-safe: !req.http.x-fos-edge-data:io (ifmt= / dc_fmt=)",
+                "M": group_m["deliver"],
             },
             "edge_mapping": {k: v for k, v in namespace["EDGE_DATA_MAPPING"].items() if k != "cookie_session"},
             "scrub_headers": list(namespace["_SCRUB_HEADERS"]),
@@ -962,8 +976,184 @@ def sync_catalog_and_templates(
             "rum_asset_fetch": rum_asset_vcl[fastly_client_ns["RUM_ASSET_FETCH_NAME"]],
             "rum_sigv4_sign": rum_asset_vcl[fastly_client_ns["RUM_SIGV4_SIGN_NAME"]],
             "rum_faro_fetch": rum_asset_vcl[fastly_client_ns["RUM_FARO_FETCH_NAME"]],
+            "rum_beacon_extraction": rum_beacon_extraction,
+            "rum_beacon_response": fastly_client_ns["_generate_beacon_response_vcl"](),
         },
     )
+
+    fixtures_path = ROOT / "tests/generator_fixtures.json"
+    if fixtures_path.exists():
+        fixtures_data = json.loads(fixtures_path.read_text(encoding="utf-8"))
+        for case in fixtures_data.get("cases", []):
+            if "M" in (case.get("config") or {}).get("groups", []):
+                updated_capture = capture(case["config"])
+                if "deliver" in updated_capture:
+                    case["capture"]["deliver"] = updated_capture["deliver"]
+                    for snippet in case.get("snippets", []):
+                        if snippet.get("subroutine") == "vcl_deliver":
+                            snippet["body"] = (
+                                f"# Section 6: Log Field Capture (vcl_deliver)\n{updated_capture['deliver']}"
+                            )
+        fixtures_data["golden_vectors"] = _build_golden_vectors(repo_root)
+        write(fixtures_path, fixtures_data)
+
+
+def _fnv1a32_py(data: bytes) -> int:
+    h = 0x811C9DC5
+    for b in data:
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def _fnv1a64_py(data: bytes) -> int:
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x00000100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def _build_golden_vectors(repo_root: Path) -> dict[str, Any]:
+    """Compute cross-language golden vectors from Python backend modules for Rust parity tests."""
+    hll_mod = importlib.import_module("backend.utils.hll")
+    rum_ns: dict[str, Any] = {
+        "Any": Any,
+        "urlparse": importlib.import_module("urllib.parse").urlparse,
+        "log_once_per": lambda *a, **kw: False,
+        "logger": SimpleNamespace(debug=lambda *a, **kw: None),
+    }
+    definitions(
+        repo_root / "backend/core/rum_ingest.py",
+        {"extract_metrics_from_faro_payload"},
+        rum_ns,
+    )
+    extract_faro = rum_ns["extract_metrics_from_faro_payload"]
+
+    faro_payload = {
+        "meta": {
+            "browser": {"name": "Firefox", "mobile": True},
+            "os": {"name": "Android"},
+            "page": {"url": "https://example.com/checkout?step=2"},
+        },
+        "measurements": [
+            {
+                "type": "web-vitals",
+                "values": {"cls": 0.08, "delta": 12.0, "lcp": 2450.5},
+                "context": {"rating": "good"},
+            }
+        ],
+        "events": [
+            {
+                "name": "faro.performance.navigation",
+                "attributes": {"ttfb": 120.0},
+            },
+            {"name": "cta_click"},
+        ],
+        "exceptions": [
+            {
+                "value": "TypeError: x is null",
+                "stacktrace": {"frames": [{"filename": "https://example.com/app.js", "lineno": 42, "colno": 7}]},
+            }
+        ],
+    }
+    faro_log_line = {
+        "ts_ms": 1700000005123,
+        "service_id": "svc-1",
+        "fastly_req_id": "req-abc",
+        "rum_cid": "cid-99",
+        "city": "Seattle",
+        "region": "WA",
+        "country": "US",
+        "pop": "SEA",
+        "tls": "1.3",
+        "ttfb": 45.5,
+        "rum_body": json.dumps(faro_payload),
+    }
+    expected_faro = extract_faro(faro_payload, faro_log_line)
+
+    hll_cases = []
+    for name, items in [
+        ("empty", []),
+        ("single_ipv4", ["203.0.113.1"]),
+        ("multi_mixed", ["203.0.113.1", "203.0.113.2", "198.51.100.42", "2001:db8::1"]),
+    ]:
+        sketch = hll_mod.HyperLogLog()
+        item_hashes = []
+        for item in items:
+            sketch.add(item)
+            item_hashes.append({"item": item, "hash_hex": f"{hll_mod._hash64(item):016x}"})
+        hll_cases.append(
+            {
+                "name": name,
+                "items": items,
+                "item_hashes": item_hashes,
+                "registers": list(sketch._buckets),
+                "to_bytes_hex": sketch.to_bytes().hex(),
+                "count": sketch.count(),
+            }
+        )
+
+    bundle_names = [
+        "summary=1700000000-1700000060-r1-n10.parquet",
+        "summary=1700000060-1700000120-r2-n20.parquet",
+    ]
+    bundle_joined = "".join(f"{n}\n" for n in bundle_names).encode("utf-8")
+
+    return {
+        "rum_ingest": {
+            "service_id": "svc-1",
+            "window_s": 60,
+            "object_time_s": 1700000000,
+            "faro_line": faro_log_line,
+            "expected_extracted": expected_faro,
+        },
+        "rum_validators": {
+            "faro_versions": [
+                {"version": "2.13.0", "valid": True},
+                {"version": "2.10.0", "valid": True},
+                {"version": "2.13", "valid": False},
+                {"version": "2.13.0-beta", "valid": False},
+                {"version": "v2.13.0", "valid": False},
+            ],
+            "custom_conditions": [
+                {
+                    "condition": "",
+                    "valid": True,
+                    "statement": 'req.url.path == "/rum-beacon" && req.method == "POST" && fastly.ff.visits_this_service == 0 && req.restarts == 0',
+                },
+                {
+                    "condition": 'req.http.Host == "example.com"',
+                    "valid": True,
+                    "statement": 'req.url.path == "/rum-beacon" && req.method == "POST" && fastly.ff.visits_this_service == 0 && req.restarts == 0 && (req.http.Host == "example.com")',
+                },
+                {"condition": 'req.http.Host == "a"; unset req.url', "valid": False},
+                {"condition": "req.http.Host == 'example.com'", "valid": False},
+                {"condition": 'req.url.path == "/checkout"', "valid": False},
+                {"condition": '(req.http.Host == "example.com"', "valid": False},
+            ],
+        },
+        "hll": hll_cases,
+        "fingerprint": {
+            "fnv1a": [
+                {
+                    "input": "",
+                    "fnv1a32_hex": f"{_fnv1a32_py(b''):08x}",
+                    "fnv1a64_hex": f"{_fnv1a64_py(b''):016x}",
+                },
+                {
+                    "input": "foobar",
+                    "fnv1a32_hex": f"{_fnv1a32_py(b'foobar'):08x}",
+                    "fnv1a64_hex": f"{_fnv1a64_py(b'foobar'):016x}",
+                },
+                {
+                    "input": "service_id=svc-1/dt=2026-11-05/hour=00",
+                    "fnv1a32_hex": f"{_fnv1a32_py(b'service_id=svc-1/dt=2026-11-05/hour=00'):08x}",
+                    "fnv1a64_hex": f"{_fnv1a64_py(b'service_id=svc-1/dt=2026-11-05/hour=00'):016x}",
+                },
+            ],
+            "bundle_names": bundle_names,
+            "bundle_fingerprint_hex": f"{_fnv1a64_py(bundle_joined):016x}",
+        },
+    }
 
 
 if __name__ == "__main__":
@@ -974,6 +1164,7 @@ if __name__ == "__main__":
     parser.add_argument("--catalog", type=Path, default=None, help="Output path for catalog.json")
     parser.add_argument("--templates", type=Path, default=None, help="Output path for templates.json")
     parser.add_argument("--write", action="store_true", help="Write catalog.json and templates.json")
+    parser.add_argument("--sync-in-repo", action="store_true", help="Sync catalog, templates, and fixtures in-repo")
     parser.add_argument("--lint", action="store_true", help="Run falco lint on generated fixtures")
     parser.add_argument(
         "--rebuild-fixtures", action="store_true", help="Rebuild generator_fixtures.json from reference"

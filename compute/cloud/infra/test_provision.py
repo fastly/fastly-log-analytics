@@ -11,10 +11,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import urllib.error
 import uuid
 from pathlib import Path
 
+import httpx
 import provision
 import pytest
 
@@ -246,13 +246,11 @@ def test_erl_detection_distinguishes_unavailable_from_unknown() -> None:
 
 
 def test_api_errors_never_echo_response_bodies_or_tokens(monkeypatch, caplog) -> None:
-    def denied(request, *, timeout):
-        from io import BytesIO
+    def denied(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("Fastly-Key") == "sensitive-deploy-token"
+        return httpx.Response(400, content=b"sensitive-deploy-token")
 
-        assert request.get_header("Fastly-key") == "sensitive-deploy-token"
-        raise urllib.error.HTTPError(request.full_url, 400, "bad", {}, BytesIO(b"sensitive-deploy-token"))
-
-    monkeypatch.setattr(provision.urllib.request, "urlopen", denied)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(denied))
     api = provision.FastlyAPI("sensitive-deploy-token")
     with pytest.raises(provision.APIError) as failure:
         api.request("POST", "/service", {"name": "test"}, form=True)
@@ -265,28 +263,18 @@ def test_api_errors_never_echo_response_bodies_or_tokens(monkeypatch, caplog) ->
 
 
 def test_secret_api_uses_base64_json_without_a_subprocess(monkeypatch) -> None:
-    captured = []
+    captured: list[httpx.Request] = []
 
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read(self):
-            return b'{"name":"front_key"}'
-
-    def accepted(request, *, timeout):
+    def accepted(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return Response()
+        return httpx.Response(200, content=b'{"name":"front_key"}')
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", accepted)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(accepted))
     provision.put_secret(provision.FastlyAPI("deploy-token"), "store-id", "front_key", "abc")
     request = captured[0]
     assert request.method == "PUT"
-    assert request.full_url.endswith("/resources/stores/secret/store-id/secrets")
-    assert json.loads(request.data) == {
+    assert str(request.url).endswith("/resources/stores/secret/store-id/secrets")
+    assert json.loads(request.content) == {
         "name": "front_key",
         "secret": base64.b64encode(b"abc").decode(),
     }
@@ -467,43 +455,25 @@ def test_failed_admin_reset_does_not_print_a_code(monkeypatch, capsys) -> None:
 
 @pytest.fixture
 def reset_http(monkeypatch):
-    state = {"calls": [], "fail_method": None}
+    state: dict[str, object] = {"calls": [], "fail_method": None}
     monkeypatch.setenv("FASTLY_API_TOKEN", "synthetic-token-never-real")
     monkeypatch.setattr(provision.secrets, "token_urlsafe", lambda size: "synthetic-setup-code")
 
-    class Response:
-        status = 200
-
-        def __init__(self, value):
-            self.value = value
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read(self):
-            return json.dumps(self.value).encode()
-
-    def respond(request, *, timeout):
-        state["calls"].append(request)
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls = state["calls"]
+        assert isinstance(calls, list)
+        calls.append(request)
         if request.method == state["fail_method"]:
-            raise urllib.error.HTTPError(
-                request.full_url,
-                403,
-                "Forbidden",
-                {},
-                io.BytesIO(b"synthetic-token-never-real"),
-            )
+            return httpx.Response(403, content=b"synthetic-token-never-real")
         if request.method == "GET":
-            assert request.full_url == ("https://api.fastly.com/resources/stores/secret")
-            return Response([{"id": "test-store", "name": "flp_secrets"}])
+            assert str(request.url) == ("https://api.fastly.com/resources/stores/secret")
+            return httpx.Response(200, json=[{"id": "test-store", "name": "flp_secrets"}])
         assert request.method == "PUT"
-        assert request.full_url.endswith("/secret/test-store/secrets")
-        return Response({})
+        assert str(request.url).endswith("/secret/test-store/secrets")
+        return httpx.Response(200, json={})
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", respond)
+    state["respond"] = respond
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(respond))
     return state
 
 
@@ -513,10 +483,10 @@ def test_setup_code_guidance_does_not_claim_edge_readiness_or_extend_expiry(
 ) -> None:
     clock = [1_800_000_000]
     monkeypatch.setattr(provision.time, "time", lambda: clock[0])
-    respond = provision.urllib.request.urlopen
+    respond = reset_http["respond"]
 
-    def delayed_write(request, *, timeout):
-        response = respond(request, timeout=timeout)
+    def delayed_write(request: httpx.Request) -> httpx.Response:
+        response = respond(request)
         if request.method == "PUT":
             clock[0] += 75
         return response
@@ -524,7 +494,7 @@ def test_setup_code_guidance_does_not_claim_edge_readiness_or_extend_expiry(
     def unexpected_sleep(seconds):
         pytest.fail("Code rotation must not sleep or poll for readiness")
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", delayed_write)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(delayed_write))
     monkeypatch.setattr(provision.time, "sleep", unexpected_sleep)
     assert provision.main([command, "--apply"]) == 0
     output = capsys.readouterr()
@@ -536,7 +506,7 @@ def test_setup_code_guidance_does_not_claim_edge_readiness_or_extend_expiry(
     assert output.out.count("synthetic-setup-code") == 1
     assert output.err == ""
     assert [request.method for request in reset_http["calls"]] == ["GET", "PUT"]
-    payload = json.loads(reset_http["calls"][1].data)
+    payload = json.loads(reset_http["calls"][1].content)
     stored = json.loads(base64.b64decode(payload["secret"]))
     assert stored["expires_at"] == 1_800_000_900
 
@@ -1071,24 +1041,12 @@ def package(monkeypatch):
 
     monkeypatch.setattr(provision, "_git", git, raising=False)
 
-    class FrontResponse:
-        status = 200
+    def public_front(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://front.example/version"
+        assert request.headers.get("Fastly-Key") is None
+        return httpx.Response(200, json={"build_sha": sha})
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read(self, size=-1):
-            return json.dumps({"build_sha": sha}).encode()
-
-    def public_front(request, *, timeout):
-        assert request.full_url == "https://front.example/version"
-        assert request.get_header("Fastly-key") is None
-        return FrontResponse()
-
-    monkeypatch.setattr(provision.urllib.request, "urlopen", public_front)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(public_front))
     try:
         yield path
     finally:
@@ -1277,59 +1235,37 @@ def test_remote_package_mismatch_stops_before_activation(package, inventory_path
 
 
 def test_package_upload_uses_multipart_binary_without_token_arguments(package, monkeypatch) -> None:
-    captured = []
+    captured: list[httpx.Request] = []
 
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read(self):
-            return b'{"metadata":{"files_hash":"synthetic-files-hash"}}'
-
-    def accepted(request, *, timeout):
+    def accepted(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return Response()
+        return httpx.Response(200, content=b'{"metadata":{"files_hash":"synthetic-files-hash"}}')
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", accepted)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(accepted))
     api = provision.FastlyAPI("deploy-token")
     api.upload_package("compute-id", 3, package)
     request = captured[0]
     assert request.method == "PUT"
-    assert request.full_url.endswith("/service/compute-id/version/3/package")
-    assert request.get_header("Expect") == "100-continue"
-    assert request.get_header("Content-type").startswith("multipart/form-data; boundary=")
-    assert package.read_bytes() in request.data
-    assert b"deploy-token" not in request.data
-    assert b'name="package"; filename="flp.tar.gz"' in request.data
+    assert str(request.url).endswith("/service/compute-id/version/3/package")
+    assert request.headers.get("Expect") == "100-continue"
+    assert request.headers.get("Content-Type", "").startswith("multipart/form-data; boundary=")
+    assert package.read_bytes() in request.content
+    assert b"deploy-token" not in request.content
+    assert b'name="package"; filename="flp.tar.gz"' in request.content
 
 
 def test_deploy_waits_for_matching_front_sha_before_purging(package, inventory_path, monkeypatch) -> None:
-    probe_calls = []
+    probe_calls: list[str] = []
     clock = [0.0]
     monkeypatch.setattr(provision.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(provision.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return None
-
-        def read(self, size=-1):
-            return json.dumps({"build_sha": ("b" if len(probe_calls) == 2 else "a") * 40}).encode()
-
-    def propagating(request, *, timeout):
-        probe_calls.append(request.full_url)
-        assert request.get_header("Fastly-key") is None
+    def propagating(request: httpx.Request) -> httpx.Response:
+        probe_calls.append(str(request.url))
+        assert request.headers.get("Fastly-Key") is None
         if len(probe_calls) == 1:
-            raise urllib.error.HTTPError(request.full_url, 503, "not propagated", {}, None)
-        return Response()
+            return httpx.Response(503, text="not propagated")
+        return httpx.Response(200, json={"build_sha": ("b" if len(probe_calls) == 2 else "a") * 40})
 
     class GuardedPurge(SyntheticDeployAPI):
         def request(self, method, path, payload=None, *, form=False):
@@ -1337,7 +1273,7 @@ def test_deploy_waits_for_matching_front_sha_before_purging(package, inventory_p
                 assert len(probe_calls) == 3, "Purge raced first-activation propagation"
             return super().request(method, path, payload, form=form)
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", propagating)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(propagating))
     _deploy_inventory(inventory_path)
     result = provision.deploy(GuardedPurge(), inventory_path, package, "team-a")
     assert result["html_purged"] is True
@@ -1349,10 +1285,10 @@ def test_front_readiness_timeout_does_not_purge_or_hide_activated_state(package,
     monkeypatch.setattr(provision.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(provision.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
-    def unavailable(request, *, timeout):
-        raise urllib.error.HTTPError(request.full_url, 503, "not propagated", {}, None)
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="not propagated")
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", unavailable)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(unavailable))
     _deploy_inventory(inventory_path)
     api = SyntheticDeployAPI()
     with pytest.raises(provision.APIError, match="readiness timed out"):
@@ -1381,16 +1317,23 @@ def test_purge_only_never_uploads_or_activates_services(package, inventory_path)
 
 
 def test_readiness_forbidden_fails_without_retrying_or_purging(package, inventory_path, monkeypatch) -> None:
-    def forbidden(request, *, timeout):
-        raise urllib.error.HTTPError(request.full_url, 403, "forbidden", {}, None)
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="forbidden")
 
     def unexpected_sleep(delay):
         pytest.fail("A permanent front authorization error must not be retried")
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", forbidden)
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(forbidden))
     monkeypatch.setattr(provision.time, "sleep", unexpected_sleep)
     _deploy_inventory(inventory_path)
     api = SyntheticDeployAPI()
     with pytest.raises(provision.APIError, match="readiness returned 403"):
         provision.deploy(api, inventory_path, package, "team-a")
     assert not any("/purge/" in path for _, path, *_ in api.calls)
+
+
+def test_render_terraform_delegates_to_shared_terraform_gen() -> None:
+    files = provision.render_terraform({"install_name": "team-a", "fos_region": "us-east-1"})
+    assert "cloud_compute.tf.json" in files
+    assert "team-a" in files["cloud_compute.tf.json"]
+    assert "fastly_service_vcl" in files["cloud_compute.tf.json"]

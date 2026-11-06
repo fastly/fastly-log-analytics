@@ -55,7 +55,9 @@ def snapshot_sources(root: Path, sha: str, destination: Path) -> None:
     target = _runtime_dir(root)
     archive_paths = [target]
     if target == "compute/cloud":
-        archive_paths = ["compute", "frontend", "rust-toolchain.toml"]
+        archive_paths = ["compute", "frontend"]
+        if (root / "backend/static").is_dir():
+            archive_paths = [*archive_paths, "backend/static"]
     data = subprocess.check_output(["git", "-C", str(root), "archive", sha, *archive_paths])
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         archive.extractall(destination, filter="data")
@@ -173,7 +175,19 @@ def save_web_caches(web: Path, cache_dir: Path, npm_ready: bool) -> None:
 
 def prepare_static_export_tree(web: Path) -> None:
     """Prune server-only routes/middleware in the temporary frontend worktree for STATIC_EXPORT=1."""
-    for rel in ("app/api", "app/js", "proxy.ts"):
+    for rel in (
+        "app/api",
+        "app/js",
+        "proxy.ts",
+        "app/high-scale",
+        "app/admin/clickhouse",
+        "app/admin/queue",
+        "app/admin/queries",
+        "app/admin/trends",
+        "app/control-room",
+        "app/alerts",
+        "app/share",
+    ):
         target = web / rel
         if target.is_dir():
             shutil.rmtree(target)
@@ -292,7 +306,7 @@ def _resolve_root_from_file(file_path: str) -> Path:
     return resolved.parents[1]
 
 
-def main() -> None:
+def main(file_path: str | None = None) -> None:
     from backend.provision.wasm_deploy import verify_package_provenance
 
     parser = argparse.ArgumentParser()
@@ -300,7 +314,7 @@ def main() -> None:
     parser.add_argument("--name", default="flp")
     parser.add_argument("--crate", choices=["cloud", "scorer"], default="cloud")
     args = parser.parse_args()
-    root = _resolve_root_from_file(__file__)
+    root = _resolve_root_from_file(file_path or __file__)
     runtime_rel = _runtime_dir(root)
     with Path("/tmp/flp-deploy.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

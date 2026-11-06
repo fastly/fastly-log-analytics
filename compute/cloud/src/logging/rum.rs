@@ -18,12 +18,12 @@ pub const TRACKER_OBJECT_KEY: &str = "rum/rum-tracker.js";
 const FARO_BUNDLES: &[(&str, &[u8], &str)] = &[
     (
         "2.13.0",
-        include_bytes!("faro-web-sdk-v2.13.0.iife.js"),
+        include_bytes!("../../../../backend/static/faro-web-sdk-v2.13.0.iife.js"),
         "85741c45fd1fd4875c5f25a95a7940e1171ea11e308a83d88fd5f3a5dcab8c1c",
     ),
     (
         "2.10.0",
-        include_bytes!("faro-web-sdk-v2.10.0.iife.js"),
+        include_bytes!("../../../../backend/static/faro-web-sdk-v2.10.0.iife.js"),
         "cd02768dda8e6dc88b558bc288e1ec2ec416f6ec8f7cce04782d52e70c478b69",
     ),
 ];
@@ -87,18 +87,9 @@ impl Default for Config {
 }
 
 pub fn shield_for_region(region: &str) -> &'static str {
-    match region {
-        "us-east-1" => "iad-va-us",
-        "us-west" => "bfi-wa-us",
-        "us-central-1" => "chi-il-us",
-        "eu-central-1" => "frankfurt-de",
-        "eu-south-1" => "mxp-milan-it",
-        "eu-west-1" => "mxp-paris-fr",
-        "uk-east-1" => "london-uk",
-        "jp-central-1" => "nrt-tokyo-jp",
-        "au-east-1" => "sydney-au",
-        _ => "iad-va-us",
-    }
+    crate::catalog::data()["fos_regions"][region]
+        .as_str()
+        .unwrap_or("iad-va-us")
 }
 
 fn legacy_faro_version() -> String {
@@ -331,20 +322,15 @@ pub fn generate_compact_rum_log_format() -> Result<String, String> {
 }
 
 pub fn beacon_field_extraction_vcl() -> &'static str {
-    "# Extract the RUM request ID; the beacon URL carries everything else.
-set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, \"req\");
-if (req.http.x-fos-edge-data:fastly_req_id == \"\") {
-    set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;
-}
-set req.url = querystring.filter(req.url, \"service_id\" + querystring.filtersep() + \"req\");"
+    super::templates()["rum_beacon_extraction"]
+        .as_str()
+        .expect("rum_beacon_extraction template must exist in templates.json")
 }
 
 pub fn beacon_response_vcl() -> &'static str {
-    "# Mark beacon to skip S3 logging (already logged separately to metadata DB)
-set req.http.x-skip-rum-logging = \"1\";
-
-# Synthetic 204 response (no origin round-trip needed)
-error 611 \"No Content\";"
+    super::templates()["rum_beacon_response"]
+        .as_str()
+        .expect("rum_beacon_response template must exist in templates.json")
 }
 
 pub fn asset_fetch_vcl(shield_pop: &str, faro_version: Option<&str>) -> Result<String, String> {
@@ -363,9 +349,18 @@ pub fn asset_fetch_vcl(shield_pop: &str, faro_version: Option<&str>) -> Result<S
         }
     };
 
-    Ok(format!(
-        "# Fetch RUM tracker JS from FOS with SigV4 signing\nif ({path_condition} && req.method == \"GET\") {{\n    # Backend points to FOS endpoint (shared with logging)\n    set req.backend = {backend_str};\n    # Flag for SigV4 signing in miss/pass (req.backend.name not available there)\n    set req.http.X-FOS-Request = \"1\";\n    return(lookup);\n}}"
-    ))
+    let base_tpl = super::templates()["rum_asset_fetch"]
+        .as_str()
+        .expect("rum_asset_fetch template must exist in templates.json");
+    Ok(base_tpl
+        .replace(
+            "(req.url.path == \"/js/rum.js\" || req.url.path == \"/js/faro-sdk.js\")",
+            &path_condition,
+        )
+        .replace(
+            "fastly.try_select_shield(ssl_shield_iad_va_us, F_fos_origin)",
+            &backend_str,
+        ))
 }
 
 pub fn sigv4_sign_vcl(faro_version: Option<&str>) -> Result<String, String> {
@@ -379,94 +374,13 @@ pub fn sigv4_sign_vcl(faro_version: Option<&str>) -> Result<String, String> {
         }
     };
 
-    Ok(format!(
-        "# FOS SigV4 signing
-if (req.http.X-FOS-Request == \"1\" && !req.backend.is_shield) {{
-    declare local var.fosAccessKey STRING;
-    declare local var.fosSecretKey STRING;
-    declare local var.fosBucket STRING;
-    declare local var.fosRegion STRING;
-    declare local var.fosHost STRING;
-    declare local var.canonicalHeaders STRING;
-    declare local var.signedHeaders STRING;
-    declare local var.canonicalRequest STRING;
-    declare local var.canonicalQuery STRING;
-    declare local var.stringToSign STRING;
-    declare local var.dateStamp STRING;
-    declare local var.signature STRING;
-    declare local var.scope STRING;
-
-    set var.fosAccessKey = table.lookup(fos_credentials, \"access_key\", \"missing\");
-    set var.fosSecretKey = table.lookup(fos_credentials, \"secret_key\", \"missing\");
-    set var.fosBucket = table.lookup(fos_credentials, \"bucket\", \"missing\");
-    set var.fosRegion = table.lookup(fos_credentials, \"region\", \"missing\");
-    set var.fosHost = var.fosRegion \".object.fastlystorage.app\";
-
-    set bereq.http.x-amz-content-sha256 = digest.hash_sha256(\"\");
-    set bereq.http.x-amz-date = strftime({{\"%Y%m%dT%H%M00Z\"}}, now);
-    set bereq.http.host = var.fosHost;
-
-    # If the user-facing path is /js/rum.js, point to the actual FOS object path
-    if (bereq.url.path == \"/js/rum.js\") {{
-        set bereq.url = \"/rum/rum-tracker.js\";
-    }}{faro_rewrite}
-
-    # Prepend bucket if not already present
-    if (regsub(bereq.url.path, \"^/([^/]+)/.*$\", \"\\1\") != var.fosBucket) {{
-        set bereq.url = \"/\" var.fosBucket bereq.url;
-    }}
-
-    # Remove auth params and sort query string
-    set bereq.url = querystring.filter(bereq.url, \"key\");
-    set var.canonicalQuery = querystring.sort(bereq.url.qs);
-
-    # Normalize path for signing
-    set bereq.url = regsuball(urlencode(urldecode(bereq.url.path)), {{\"%2F\"}}, \"/\") + if(bereq.url.qs != \"\", \"?\" + bereq.url.qs, \"\");
-
-    set var.dateStamp = strftime({{\"%Y%m%d\"}}, now);
-
-    set var.canonicalHeaders = \"\"
-        \"host:\" bereq.http.host LF
-        \"x-amz-content-sha256:\" bereq.http.x-amz-content-sha256 LF
-        \"x-amz-date:\" bereq.http.x-amz-date LF
-    ;
-    set var.signedHeaders = \"host;x-amz-content-sha256;x-amz-date\";
-    set var.canonicalRequest = \"\"
-        req.method LF
-        bereq.url.path LF
-        var.canonicalQuery LF
-        var.canonicalHeaders LF
-        var.signedHeaders LF
-        digest.hash_sha256(\"\")
-    ;
-
-    set var.scope = var.dateStamp \"/\" var.fosRegion \"/s3/aws4_request\";
-
-    set var.stringToSign = \"\"
-        \"AWS4-HMAC-SHA256\" LF
-        bereq.http.x-amz-date LF
-        var.scope LF
-        regsub(digest.hash_sha256(var.canonicalRequest),\"^0x\", \"\")
-    ;
-
-    set var.signature = digest.awsv4_hmac(
-        var.fosSecretKey,
-        var.dateStamp,
-        var.fosRegion,
-        \"s3\",
-        var.stringToSign
+    let base_tpl = super::templates()["rum_sigv4_sign"]
+        .as_str()
+        .expect("rum_sigv4_sign template must exist in templates.json");
+    let default_faro_block = format!(
+        "\n\n    # If the user-facing path is /js/faro-sdk.js, point to the pinned Faro Web SDK object in FOS\n    if (bereq.url.path == \"/js/faro-sdk.js\") {{\n        set bereq.url = \"/rum/faro-web-sdk-v{DEFAULT_FARO_VERSION}.iife.js\";\n    }}"
     );
-
-    set bereq.http.Authorization = \"AWS4-HMAC-SHA256 \"
-        \"Credential=\" var.fosAccessKey \"/\" var.scope \", \"
-        \"SignedHeaders=\" var.signedHeaders \", \"
-        \"Signature=\" + regsub(var.signature,\"^0x\", \"\")
-    ;
-    unset bereq.http.Accept;
-    unset bereq.http.Accept-Language;
-    unset bereq.http.User-Agent;
-}}"
-    ))
+    Ok(base_tpl.replace(&default_faro_block, &faro_rewrite))
 }
 
 pub fn fetch_caching_vcl(faro_version: Option<&str>) -> Result<String, String> {
@@ -488,26 +402,20 @@ if (req.url.path == \"/js/rum.js\") {
 
     if let Some(ver) = faro_version.filter(|v| !v.is_empty()) {
         validate_faro_version(ver)?;
-        body.push_str(
-            "\n\n# Cache the self-hosted Faro Web SDK bundle at the edge; only a short\n# browser TTL, since this stable path serves mutable (per-upgrade) content.\nif (req.url.path == \"/js/faro-sdk.js\" && req.http.X-FOS-Request == \"1\") {\n    if (beresp.status == 200) {\n        set beresp.ttl = 604800s;\n        set beresp.cacheable = true;\n        set beresp.http.Surrogate-Key = \"rum-faro-sdk rum-js\";\n        set beresp.http.Surrogate-Control = \"max-age=604800\";\n        set beresp.http.Cache-Control = \"public, max-age=300\";\n    } else {\n        set beresp.ttl = 0s;\n        set beresp.cacheable = false;\n    }\n}",
-        );
+        let faro_fetch = super::templates()["rum_faro_fetch"]
+            .as_str()
+            .expect("rum_faro_fetch template must exist in templates.json");
+        body.push_str("\n\n");
+        body.push_str(faro_fetch);
     }
 
     Ok(body)
 }
 
 pub fn error_beacon_vcl() -> &'static str {
-    "# vcl_error handler for RUM beacon synthetic 204 response
-if (obj.status == 611) {
-    set obj.status = 204;
-    set obj.response = \"No Content\";
-    set obj.http.Cache-Control = \"no-cache, no-store, must-revalidate\";
-    set obj.http.Access-Control-Allow-Origin = \"*\";
-    set obj.http.Access-Control-Allow-Methods = \"POST, OPTIONS\";
-    set obj.http.Access-Control-Allow-Headers = \"Content-Type\";
-    synthetic \"\";
-    return (deliver);
-}"
+    super::templates()["rum_error"]
+        .as_str()
+        .expect("rum_error template must exist in templates.json")
 }
 
 /// The browser tracker. Faro collects; this wrapper drops Faro's own sends and batches every

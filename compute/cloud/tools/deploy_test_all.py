@@ -47,6 +47,18 @@ from typing import Any
 
 import httpx
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts.lib.deploy_report import (  # noqa: E402
+    load_prior_deploy_reports,
+    rotate_and_prune_deploy_dirs,
+    summarize_numeric_series,
+    validate_dashboard_presets,
+)
+from scripts.lib.environments import parse_env_file  # noqa: E402
+
 DEFAULT_INSTALL_NAME = "flp-g2-live-20261029"
 DEFAULT_TEST_SERVICE_ID = "xa20dYfOsL4MhjIo66mVhh"
 DEFAULT_TEST_DOMAIN = "https://dmichael-log-streaming-stead.global.ssl.fastly.net"
@@ -71,17 +83,6 @@ STAGE_VCPU_BUDGET_MS: dict[str, float] = {
 }
 
 # Presets and filters matching fastly-log-analytics (never "10m")
-DASHBOARD_PRESETS: tuple[str, ...] = ("1h", "3h", "6h", "12h", "24h")
-EXTENDED_PRESETS: tuple[str, ...] = (
-    "1h",
-    "3h",
-    "6h",
-    "12h",
-    "24h",
-    "3d",
-    "7d",
-    "30d",
-)
 DEFAULT_BENCHMARK_RANGES: tuple[str, ...] = ("24h", "1h", "6h")
 DEFAULT_BENCHMARK_FILTERS: tuple[str, ...] = (
     "",
@@ -92,94 +93,6 @@ DEFAULT_BENCHMARK_FILTERS: tuple[str, ...] = (
 )
 
 MINUTE_PREFIX_RE = re.compile(r"year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})/minute=(\d{2})/")
-
-
-def validate_dashboard_presets(
-    ranges: list[str] | tuple[str, ...],
-    *,
-    allow_extended: bool = False,
-) -> tuple[str, ...]:
-    """Validate range presets against fastly-log-analytics presets, rejecting '10m'."""
-    allowed = set(EXTENDED_PRESETS if allow_extended else DASHBOARD_PRESETS)
-    cleaned: list[str] = []
-    for item in ranges:
-        token = str(item or "").strip()
-        if not token:
-            continue
-        if token == "10m":
-            raise ValueError(
-                f"Invalid preset '10m': 10m is never a preset in fastly-log-analytics. "
-                f"Allowed presets: {', '.join(EXTENDED_PRESETS if allow_extended else DASHBOARD_PRESETS)}"
-            )
-        if token not in allowed:
-            raise ValueError(
-                f"Unsupported range preset '{token}'. Allowed presets: "
-                f"{', '.join(EXTENDED_PRESETS if allow_extended else DASHBOARD_PRESETS)}"
-            )
-        cleaned.append(token)
-    return tuple(cleaned)
-
-
-def summarize_numeric_series(
-    values: list[int | float | None] | tuple[int | float | None, ...],
-) -> dict[str, int | float | None]:
-    """Compute count, min, p50, p95, max, mean, sum for any numeric sequence."""
-    nums = sorted(
-        float(v) for v in values if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
-    )
-    if not nums:
-        return {
-            "count": 0,
-            "min": None,
-            "p50": None,
-            "p95": None,
-            "max": None,
-            "mean": None,
-            "sum": 0.0,
-        }
-
-    def _pct(p: float) -> float:
-        if len(nums) == 1:
-            return round(nums[0], 2)
-        rank = (p / 100.0) * (len(nums) - 1)
-        lo = int(rank)
-        hi = min(len(nums) - 1, lo + 1)
-        weight = rank - lo
-        return round(nums[lo] * (1.0 - weight) + nums[hi] * weight, 2)
-
-    total = sum(nums)
-    return {
-        "count": len(nums),
-        "min": round(nums[0], 2),
-        "p50": _pct(50.0),
-        "p95": _pct(95.0),
-        "max": round(nums[-1], 2),
-        "mean": round(total / len(nums), 2),
-        "sum": round(total, 2),
-    }
-
-
-def parse_env_file(env_path: Path) -> dict[str, str]:
-    """Parse a dotenv file without printing or exposing secret values."""
-    result: dict[str, str] = {}
-    if not env_path.is_file():
-        return result
-    for raw_line in env_path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        key, sep, val = line.partition("=")
-        if not sep:
-            continue
-        key = key.strip()
-        val = val.strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-            val = val[1:-1]
-        if key:
-            result[key] = val
-    return result
 
 
 def parse_minute_prefix_epoch(prefix: str) -> int | None:
@@ -467,7 +380,7 @@ def load_session_cookie(browser_state_path: Path) -> str:
 
 def ensure_browser_auth(root: Path, base_url: str, state_dir: Path, service_id: str) -> str:
     """Ensure browser-state.json has a valid session (renewing via passkey if needed)."""
-    script = root / "app/tools/browser_verify.mjs"
+    script = root / "compute/cloud/tools/browser_verify.mjs"
     subprocess.run(
         [
             "node",
@@ -1478,7 +1391,7 @@ def step_6_browser_verify(
     """Step 6: Load /dashboard and all hosted pages in Playwright and measure load & lag."""
     validated_ranges = validate_dashboard_presets(ranges)
     out_path = work_dir / "browser_verify.json"
-    script = root / "app/tools/browser_verify.mjs"
+    script = root / "compute/cloud/tools/browser_verify.mjs"
     print(
         f"[Step 6] Running Playwright browser verification against {base_url} "
         f"(expecting >= {expect_min_requests:,} requests on /dashboard, "
@@ -1529,9 +1442,6 @@ def step_6_browser_verify(
             traffic_report["lag"]["send_to_parquet_lag_s"] = measured
 
     return browser_report
-
-
-DEPLOY_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$")
 
 
 def summarize_deploy_entry(report: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -1594,31 +1504,12 @@ def load_prior_deploys(
     limit: int = 5,
 ) -> list[dict[str, Any]]:
     """Load summaries and recommendations from up to `limit` prior deploy folders."""
-    if not deploys_root.is_dir():
-        return []
-    candidates = sorted(
-        (
-            d
-            for d in deploys_root.iterdir()
-            if d.is_dir() and not d.is_symlink() and DEPLOY_TIMESTAMP_RE.match(d.name) and d.name != current_run_id
-        ),
-        key=lambda p: p.name,
-        reverse=True,
+    return load_prior_deploy_reports(
+        deploys_root,
+        current_run_id,
+        summarize_deploy_entry,
+        limit=limit,
     )
-    priors: list[dict[str, Any]] = []
-    for folder in candidates:
-        report_file = folder / "relics" / "report.json"
-        if not report_file.is_file():
-            continue
-        try:
-            data = json.loads(report_file.read_text())
-            priors.append(summarize_deploy_entry(data, folder.name))
-        except (OSError, ValueError, KeyError) as exc:
-            print(f"[warn] Skipping unreadable prior report {report_file}: {exc}")
-            continue
-        if len(priors) >= limit:
-            break
-    return priors
 
 
 def generate_recommendations(
@@ -2374,25 +2265,11 @@ def finalize_deploy_report(
     html_text = render_html_report(report, log_text)
     (run_dir / "index.html").write_text(html_text)
 
-    # Update reports/deploys/current symlink -> run_ts
-    current_link = deploys_root / "current"
-    if current_link.is_symlink() or current_link.exists():
-        current_link.unlink()
-    current_link.symlink_to(run_ts)
+    rotate_and_prune_deploy_dirs(deploys_root, run_ts, keep_prior=keep_prior)
 
     # Write reports/deploys/index.html with <base href="current/"> injected after <head>
     root_html = html_text.replace("<head>", '<head><base href="current/">', 1)
     (deploys_root / "index.html").write_text(root_html)
-
-    # Retain current + keep_prior timestamped folders (e.g. 1 + 5 = 6 total folders)
-    ts_dirs = sorted(
-        (d for d in deploys_root.iterdir() if d.is_dir() and not d.is_symlink() and DEPLOY_TIMESTAMP_RE.match(d.name)),
-        key=lambda p: p.name,
-        reverse=True,
-    )
-    max_total = max(1, keep_prior + 1)
-    for stale_dir in ts_dirs[max_total:]:
-        shutil.rmtree(stale_dir, ignore_errors=True)
 
     return run_dir
 
@@ -2597,7 +2474,7 @@ def main() -> int:
     )
     filters = tuple(x.strip() for x in args.filters.split(",") if x.strip())
 
-    root = Path(__file__).resolve().parents[2]
+    root = _REPO_ROOT
     state_dir = Path.home() / ".flp-state" / args.name
     inv_path = state_dir / "inventory.json"
     if not inv_path.is_file():

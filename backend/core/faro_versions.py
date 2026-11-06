@@ -26,7 +26,7 @@ FARO_BUNDLE_SHA256: dict[str, str] = {
     "2.13.0": "85741c45fd1fd4875c5f25a95a7940e1171ea11e308a83d88fd5f3a5dcab8c1c",
     "2.10.0": "cd02768dda8e6dc88b558bc288e1ec2ec416f6ec8f7cce04782d52e70c478b69",
 }
-VENDORED_FARO_DIR = Path(__file__).resolve().parents[2] / "compute" / "cloud" / "src" / "logging"
+VENDORED_FARO_DIR = Path(__file__).resolve().parents[1] / "static"
 
 
 def read_vendored_faro_bundle(version: str = DEFAULT_FARO_VERSION) -> bytes:

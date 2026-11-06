@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from collections.abc import Callable
@@ -10,6 +11,83 @@ from pathlib import Path
 from typing import Any
 
 DEPLOY_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$")
+
+DASHBOARD_PRESETS: tuple[str, ...] = ("1h", "3h", "6h", "12h", "24h")
+EXTENDED_PRESETS: tuple[str, ...] = (
+    "1h",
+    "3h",
+    "6h",
+    "12h",
+    "24h",
+    "3d",
+    "7d",
+    "30d",
+)
+
+
+def validate_dashboard_presets(
+    ranges: list[str] | tuple[str, ...],
+    *,
+    allow_extended: bool = False,
+) -> tuple[str, ...]:
+    """Validate range presets against fastly-log-analytics presets, rejecting '10m'."""
+    allowed = set(EXTENDED_PRESETS if allow_extended else DASHBOARD_PRESETS)
+    cleaned: list[str] = []
+    for item in ranges:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        if token == "10m":
+            raise ValueError(
+                f"Invalid preset '10m': 10m is never a preset in fastly-log-analytics. "
+                f"Allowed presets: {', '.join(EXTENDED_PRESETS if allow_extended else DASHBOARD_PRESETS)}"
+            )
+        if token not in allowed:
+            raise ValueError(
+                f"Unsupported range preset '{token}'. Allowed presets: "
+                f"{', '.join(EXTENDED_PRESETS if allow_extended else DASHBOARD_PRESETS)}"
+            )
+        cleaned.append(token)
+    return tuple(cleaned)
+
+
+def summarize_numeric_series(
+    values: list[int | float | None] | tuple[int | float | None, ...],
+) -> dict[str, int | float | None]:
+    """Compute count, min, p50, p95, max, mean, sum for any numeric sequence."""
+    nums = sorted(
+        float(v) for v in values if isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+    )
+    if not nums:
+        return {
+            "count": 0,
+            "min": None,
+            "p50": None,
+            "p95": None,
+            "max": None,
+            "mean": None,
+            "sum": 0.0,
+        }
+
+    def _pct(p: float) -> float:
+        if len(nums) == 1:
+            return round(nums[0], 2)
+        rank = (p / 100.0) * (len(nums) - 1)
+        lo = int(rank)
+        hi = min(len(nums) - 1, lo + 1)
+        weight = rank - lo
+        return round(nums[lo] * (1.0 - weight) + nums[hi] * weight, 2)
+
+    total = sum(nums)
+    return {
+        "count": len(nums),
+        "min": round(nums[0], 2),
+        "p50": _pct(50.0),
+        "p95": _pct(95.0),
+        "max": round(nums[-1], 2),
+        "mean": round(total / len(nums), 2),
+        "sum": round(total, 2),
+    }
 
 
 def rotate_and_prune_deploy_dirs(

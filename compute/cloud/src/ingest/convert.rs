@@ -820,6 +820,51 @@ pub fn convert_object_capped(
     )
 }
 
+struct EnumDecodeMaps {
+    c_speed: BTreeMap<&'static str, &'static str>,
+    p_type: BTreeMap<&'static str, &'static str>,
+    p_desc: BTreeMap<&'static str, &'static str>,
+}
+
+fn enum_decode_maps() -> &'static EnumDecodeMaps {
+    static MAPS: OnceLock<EnumDecodeMaps> = OnceLock::new();
+    MAPS.get_or_init(|| {
+        let invert = |table_name: &str| -> BTreeMap<&'static str, &'static str> {
+            let data = crate::catalog::data();
+            let obj = data["enum_encodings"][table_name]
+                .as_object()
+                .or_else(|| data[table_name].as_object());
+            obj.into_iter()
+                .flatten()
+                .filter_map(|(full_str, code_val)| Some((code_val.as_str()?, full_str.as_str())))
+                .collect()
+        };
+        EnumDecodeMaps {
+            c_speed: invert("CONN_SPEED_ENCODE"),
+            p_type: invert("PROXY_TYPE_ENCODE"),
+            p_desc: invert("PROXY_DESC_ENCODE"),
+        }
+    })
+}
+
+/// Looks up a 1-character VCL enum code (`CONN_SPEED_ENCODE`, `PROXY_TYPE_ENCODE`,
+/// `PROXY_DESC_ENCODE`) in `catalog.json` and returns its `'static` canonical string.
+pub fn lookup_enum_decode(field_id: &str, value: &str) -> Option<&'static str> {
+    let maps = enum_decode_maps();
+    match field_id {
+        "c_speed" => maps.c_speed.get(value).copied(),
+        "p_type" => maps.p_type.get(value).copied(),
+        "p_desc" => maps.p_desc.get(value).copied(),
+        _ => None,
+    }
+}
+
+/// Decodes a 1-character VCL enum code (`CONN_SPEED_ENCODE`, `PROXY_TYPE_ENCODE`,
+/// `PROXY_DESC_ENCODE`) back to its canonical string when present in `catalog.json`.
+pub fn decode_enum_value<'a>(field_id: &str, value: &'a str) -> &'a str {
+    lookup_enum_decode(field_id, value).unwrap_or(value)
+}
+
 /// Like [`convert_object_capped`] for the lines starting in `segment`; `max_decompressed` caps
 /// their bytes, and `decompressed` reports them.
 pub fn convert_object_range(
@@ -833,6 +878,9 @@ pub fn convert_object_range(
 ) -> Result<ObjectRows, ConvertError> {
     let timestamp_index = schema.index.get("timestamp").copied();
     let ts_ms_index = schema.index.get("ts_ms").copied();
+    let c_speed_index = schema.index.get("c_speed").copied();
+    let p_type_index = schema.index.get("p_type").copied();
+    let p_desc_index = schema.index.get("p_desc").copied();
     let mut windows: BTreeMap<i64, WindowBuilders> = BTreeMap::new();
     let mut bad_lines = 0u64;
     let mut lines_read = 0u64;
@@ -856,6 +904,21 @@ pub fn convert_object_range(
             bad_lines += 1;
             bad_sample.get_or_insert_with(|| sample_of(trimmed));
             return;
+        }
+        for (field_id, idx_opt) in [
+            ("c_speed", c_speed_index),
+            ("p_type", p_type_index),
+            ("p_desc", p_desc_index),
+        ] {
+            if let Some(idx) = idx_opt {
+                let decoded_opt = match &slots[idx] {
+                    Some(Raw::Str(s)) => lookup_enum_decode(field_id, s),
+                    _ => None,
+                };
+                if let Some(decoded) = decoded_opt {
+                    slots[idx] = Some(Raw::Str(Cow::Borrowed(decoded)));
+                }
+            }
         }
         if trimmed.first() == Some(&b'[') {
             if let (Some(ts_idx), Some(ms_idx)) = (timestamp_index, ts_ms_index) {

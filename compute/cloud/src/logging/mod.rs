@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 pub mod cmcd;
 pub mod rum;
 
-fn templates() -> &'static Value {
+pub(crate) fn templates() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("../../vcl/capture/templates.json"))

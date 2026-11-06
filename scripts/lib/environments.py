@@ -44,6 +44,29 @@ PERSISTED_DEPLOY_ENV_KEYS: frozenset[str] = frozenset(
 )
 
 
+def parse_env_file(env_path: Path) -> dict[str, str]:
+    """Parse a dotenv file without printing or exposing secret values."""
+    result: dict[str, str] = {}
+    if not env_path.is_file():
+        return result
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            result[key] = val
+    return result
+
+
 def load_dotenv(path: str | Path | None = None) -> None:
     """Load the repo-root ``.env`` into ``os.environ`` without clobbering it."""
     if path is None and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules):
@@ -395,6 +418,7 @@ __all__ = [
     "load_dotenv",
     "load_persisted_deploy_env",
     "main",
+    "parse_env_file",
     "parse_forward",
     "parse_iso_utc",
     "percentile",

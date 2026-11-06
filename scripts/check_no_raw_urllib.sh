@@ -24,7 +24,7 @@ ALLOWLIST=(
 )
 
 PATTERN='urllib\.request|urllib\.error|\burlopen\('
-offenders=$(git grep -lE "$PATTERN" -- 'backend/**/*.py' ':(exclude)backend/**/test_*.py' 2>/dev/null || true)
+offenders=$(git grep -lE "$PATTERN" -- 'backend/**/*.py' 'compute/cloud/' ':(exclude)backend/**/test_*.py' 2>/dev/null || true)
 
 check_allowlist_offenders \
   "$offenders" \

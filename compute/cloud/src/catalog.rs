@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 pub const LOG_LINE_MAX_BYTES: i64 = 16_384;
 pub const LOG_FORMAT_MAX_BYTES: usize = 12_288;
 
-pub(crate) fn data() -> &'static Value {
+pub fn data() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
     DATA.get_or_init(|| {
         serde_json::from_str(include_str!("logging/catalog.json"))

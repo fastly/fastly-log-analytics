@@ -38,7 +38,7 @@ scorer-package:
 # cross-language parity, session-expiry boundaries, wire-format round-trips).
 scorer-test:
 	@if command -v cargo > /dev/null || [ -x "$$HOME/.cargo/bin/cargo" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/Cargo.toml -p fastly-bot-scorer --locked; \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path compute/Cargo.toml -p session-scorer --locked; \
 	else \
 		echo "⚠️  Skipping scorer-test: cargo not on PATH."; \
 		echo "    Install: https://rustup.rs   (rust-toolchain.toml pins the version)"; \

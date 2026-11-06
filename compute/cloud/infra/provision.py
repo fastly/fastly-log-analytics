@@ -12,7 +12,6 @@ import base64
 import datetime
 import getpass
 import hashlib
-import io
 import ipaddress
 import json
 import logging
@@ -23,13 +22,12 @@ import subprocess
 import sys
 import tarfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 _FILE_RESOLVED = Path(__file__).resolve()
 REPO_ROOT = (
@@ -40,36 +38,17 @@ REPO_ROOT = (
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-try:
-    from backend.core.fastly.client import SHIELD_MAP, region_endpoint
-    from backend.provision import fos_setup as _fos_setup
-    from backend.provision import stores as _stores
-    from backend.provision import wasm_deploy as _wasm_deploy
-    from backend.utils import terraform_gen as _terraform_gen
-    from scripts.lib import environments as _environments
-    from scripts.lib import readiness as _readiness
+from backend.core.fastly.client import API_BASE, SHIELD_MAP, region_endpoint  # noqa: E402
+from backend.core.retry import retry_call  # noqa: E402
+from backend.provision import cli as _cli  # noqa: E402
+from backend.provision import fos_setup as _fos_setup  # noqa: E402
+from backend.provision import stores as _stores  # noqa: E402
+from backend.provision import wasm_deploy as _wasm_deploy  # noqa: E402
+from backend.utils import terraform_gen as _terraform_gen  # noqa: E402
+from scripts.lib import environments as _environments  # noqa: E402
+from scripts.lib import readiness as _readiness  # noqa: E402
 
-    FOS_REGIONS = tuple(SHIELD_MAP.keys())
-except Exception:
-    SHIELD_MAP = {}
-    region_endpoint = None  # type: ignore[assignment]
-    _fos_setup = None  # type: ignore[assignment]
-    _stores = None  # type: ignore[assignment]
-    _wasm_deploy = None  # type: ignore[assignment]
-    _terraform_gen = None  # type: ignore[assignment]
-    _environments = None  # type: ignore[assignment]
-    _readiness = None  # type: ignore[assignment]
-    FOS_REGIONS = (
-        "us-east-1",
-        "us-west",
-        "us-central-1",
-        "eu-central-1",
-        "eu-south-1",
-        "eu-west-1",
-        "uk-east-1",
-        "jp-central-1",
-        "au-east-1",
-    )
+FOS_REGIONS = tuple(SHIELD_MAP.keys())
 
 VCL = _FILE_RESOLVED.parents[1] / "vcl" / "front"
 LOG = logging.getLogger("flp.bootstrap")
@@ -80,16 +59,38 @@ DICTIONARIES = {
     "credentials": ("flp_fos_credentials", True),
 }
 
+HTTP_TRANSPORT: httpx.BaseTransport | None = None
+
+
+def _http_client(*, timeout: float, transport: httpx.BaseTransport | None = None) -> httpx.Client:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    active_transport = transport if transport is not None else HTTP_TRANSPORT
+    return httpx.Client(
+        timeout=timeout,
+        transport=active_transport,
+        follow_redirects=False,
+        trust_env=False,
+    )
+
 
 class APIError(RuntimeError):
     """An API failure with no server body or credential material."""
 
 
 class FastlyAPI:
-    def __init__(self, token: str) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        attempts: int = 1,
+    ) -> None:
         if not token:
             raise ValueError("A Fastly API token is required")
         self._token = token
+        self._transport = transport
+        self._attempts = max(1, attempts)
         self._run_id = uuid.uuid4().hex[:12]
 
     def request(self, method: str, path: str, payload: Any = None, *, form: bool = False) -> Any:
@@ -98,7 +99,7 @@ class FastlyAPI:
         data = None
         headers = {"Fastly-Key": self._token, "Accept": "application/json"}
         if payload is not None:
-            data = urllib.parse.urlencode(payload).encode() if form else json.dumps(payload).encode()
+            data = str(httpx.QueryParams(payload)).encode() if form else json.dumps(payload).encode()
             headers["Content-Type"] = "application/x-www-form-urlencoded" if form else "application/json"
         return self._send(method, path, data, headers)
 
@@ -127,19 +128,29 @@ class FastlyAPI:
 
     def _send(self, method: str, path: str, data: bytes | None, headers: dict[str, str]) -> Any:
         started = time.monotonic()
-        status = None
+        status: int | None = None
         received = 0
-        request = urllib.request.Request("https://api.fastly.com" + path, data=data, headers=headers, method=method)
+        url = API_BASE + path
+
+        def _do_request() -> httpx.Response:
+            with _http_client(timeout=90.0, transport=self._transport) as client:
+                return client.request(method, url, content=data, headers=headers)
+
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                status = getattr(response, "status", 200)
-                body = response.read()
-                received = len(body)
-                return json.loads(body) if body else None
-        except urllib.error.HTTPError as error:
-            status = error.code
-            raise APIError(f"Fastly {method} {path.split('?')[0]} returned {error.code}") from None
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            response = retry_call(
+                _do_request,
+                retry_on=lambda exc: isinstance(exc, (httpx.TransportError, TimeoutError)),
+                attempts=self._attempts,
+            )
+            status = response.status_code
+            body = response.content
+            received = len(body)
+            if status >= 400:
+                raise APIError(f"Fastly {method} {path.split('?')[0]} returned {status}")
+            return json.loads(body) if body else None
+        except APIError:
+            raise
+        except (httpx.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
             raise APIError(f"Fastly {method} {path.split('?')[0]} failed") from None
         finally:
             LOG.log(
@@ -195,7 +206,7 @@ def backend(name: str, host: str, *, shield: bool = False) -> dict[str, str]:
         "between_bytes_timeout": "60000",
     }
     if shield:
-        fields["shield"] = "iad-va-us"
+        fields["shield"] = SHIELD_MAP["us-east-1"]
     return fields
 
 
@@ -261,6 +272,7 @@ def resource_plan(
         "compute": domain(compute_host or f"{name}.edgecompute.app"),
         "worker": domain(worker_host or f"{name}-worker.edgecompute.app"),
     }
+    raw_prefix = _cli.ANALYTICS_LOG_LAYOUT.split("year=")[0]
     return {
         "install_name": name,
         "services": {
@@ -285,7 +297,7 @@ def resource_plan(
                 *[
                     backend(
                         "fos_" + region.replace("-", "_"),
-                        f"{region}.object.fastlystorage.app",
+                        region_endpoint(region),
                     )
                     for region in FOS_REGIONS
                 ],
@@ -297,7 +309,7 @@ def resource_plan(
                 *[
                     backend(
                         "fos_" + region.replace("-", "_"),
-                        f"{region}.object.fastlystorage.app",
+                        region_endpoint(region),
                     )
                     for region in FOS_REGIONS
                 ],
@@ -323,7 +335,7 @@ def resource_plan(
         "flush_healthcheck": clock_healthcheck("flp_flush", hosts["front"], "/_flush"),
         "dictionaries": {key: {"name": value[0], "write_only": value[1]} for key, value in DICTIONARIES.items()},
         "config_defaults": {
-            "raw_prefix": "raw/request/",
+            "raw_prefix": raw_prefix,
             "out_prefix": "parquet/request/",
             "window_s": "120",
             "grace_s": "180",
@@ -349,7 +361,7 @@ def prepare_storage_backends(api: Any, base: str, front_host: str) -> None:
         *[
             backend(
                 "fos_" + region.replace("-", "_"),
-                f"{region}.object.fastlystorage.app",
+                region_endpoint(region),
             )
             for region in FOS_REGIONS
         ],
@@ -426,8 +438,14 @@ def lint_front(rate_limiting: bool, *, source: str | None = None) -> None:
     path = VCL / "tests" / f".lint-{uuid.uuid4()}.vcl"
     try:
         path.write_text(
-            'table flp_front_auth {\n  "front_key": "test-not-live",\n}\n'
-            "table flp_fos_buckets {}\ntable flp_fos_credentials {}\n" + load_vcl(rate_limiting, source=source)
+            _cli.VclBuilder.join_lines(
+                (
+                    'table flp_front_auth {\n  "front_key": "test-not-live",\n}',
+                    "table flp_fos_buckets {}",
+                    "table flp_fos_credentials {}",
+                    load_vcl(rate_limiting, source=source),
+                )
+            )
         )
         subprocess.run(["falco", "lint", str(path)], check=True, capture_output=True)
     finally:
@@ -460,11 +478,39 @@ def account_has_rate_limiting(api: Any, *service_ids: str) -> bool | None:
 
 
 def put_secret(api: Any, store_id: str, name: str, value: str) -> None:
+    secret_endpoint = _stores.STORE_ENDPOINTS["secret"]
     api.request(
         "PUT",
-        f"/resources/stores/secret/{store_id}/secrets",
+        f"{secret_endpoint}/{store_id}/secrets",
         {"name": name, "secret": base64.b64encode(value.encode()).decode()},
     )
+
+
+def ensure_fos_bucket(
+    name: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    status_cb: Any = None,
+    *,
+    service_id: str | None = None,
+) -> bool:
+    return _fos_setup.ensure_fos_bucket(
+        name,
+        region,
+        access_key,
+        secret_key,
+        status_cb=status_cb,
+        service_id=service_id,
+    )
+
+
+def render_terraform(
+    cfg: dict[str, Any],
+    fos_access_key: str = "replace-with-fos-access-key",
+    fos_secret_key: str = "replace-with-fos-secret-key",
+) -> dict[str, str]:
+    return _terraform_gen.generate_cloud_terraform(cfg, fos_access_key, fos_secret_key)
 
 
 def admin_reset(api: Any, store_id: str) -> str:
@@ -535,36 +581,21 @@ def prepare_front(
     return inventory
 
 
-def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True, check=True)
-    return result.stdout.strip()
+_git = _wasm_deploy._git
 
 
 def verify_provenance(root: Path, package: Path) -> dict[str, str]:
-    provenance = json.loads((package.parent / "provenance.json").read_text())
-    sha = provenance.get("build_sha", "")
-    digest = provenance.get("package_sha256", "")
-    if not re.fullmatch(r"[a-f0-9]{40}", sha) or not re.fullmatch(r"[a-f0-9]{64}", digest):
-        raise ValueError("Invalid frozen build provenance")
-    contents = package.read_bytes()
-    if hashlib.sha256(contents).hexdigest() != digest:
-        raise ValueError("Package changed after the recorded build")
-    subdir = "compute/cloud" if package.parent.parent.name == "cloud" else "app"
-    if _git(root, "status", "--porcelain", "--untracked-files=all", "--", subdir):
-        raise ValueError(f"Runtime has uncommitted inputs; commit {subdir}/ before a release")
-    if _git(root, "rev-parse", f"{sha}:{subdir}") != _git(root, "rev-parse", f"HEAD:{subdir}"):
-        raise ValueError("Runtime source changed after the build")
-    with tarfile.open(fileobj=io.BytesIO(contents), mode="r:gz") as archive:
-        members = [member for member in archive.getmembers() if member.isfile() and member.name.endswith(".wasm")]
-        if len(members) != 1:
-            raise ValueError("Package must contain exactly one Wasm binary")
-        stream = archive.extractfile(members[0])
-        if stream is None or sha.encode() not in stream.read():
-            raise ValueError("Package Wasm does not contain its frozen built SHA")
-    return {"build_sha": sha, "package_sha256": digest}
+    return _wasm_deploy.verify_package_provenance(root, package, git_fn=_git)
 
 
-def wait_for_front(host: str, build_sha: str, *, timeout_s: float = 180, interval_s: float = 3) -> None:
+def wait_for_front(
+    host: str,
+    build_sha: str,
+    *,
+    timeout_s: float = 180,
+    interval_s: float = 3,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
     domain(host)
     if timeout_s <= 0 or interval_s <= 0:
         raise ValueError("Readiness timeout and interval must be positive")
@@ -572,21 +603,30 @@ def wait_for_front(host: str, build_sha: str, *, timeout_s: float = 180, interva
     deadline = started + timeout_s
     attempts = 0
     last_status = None
+    expected_sha = _readiness.normalize_version(build_sha)
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         attempts += 1
-        request = urllib.request.Request(
-            f"https://{host}/version",
-            headers={"Accept": "application/json", "Cache-Control": "no-cache"},
-            method="GET",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=min(10, remaining)) as response:
-                last_status = response.status
-                data = json.loads(response.read(16384))
-                if last_status == 200 and isinstance(data, dict) and data.get("build_sha") == build_sha:
+            with _http_client(timeout=min(10.0, remaining), transport=transport) as client:
+                response = client.get(
+                    f"https://{host}/version",
+                    headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+                )
+            last_status = response.status_code
+            if last_status >= 400:
+                if last_status not in {404, 500, 502, 503, 504}:
+                    raise APIError(f"Front readiness returned {last_status}; HTML remains unpurged")
+            else:
+                data = json.loads(response.content[:16384])
+                if (
+                    last_status == 200
+                    and isinstance(data, dict)
+                    and isinstance(data.get("build_sha"), str)
+                    and _readiness.normalize_version(data["build_sha"]) == expected_sha
+                ):
                     LOG.info(
                         json.dumps(
                             {
@@ -598,14 +638,13 @@ def wait_for_front(host: str, build_sha: str, *, timeout_s: float = 180, interva
                         )
                     )
                     return
-        except urllib.error.HTTPError as error:
-            last_status = error.code
-            if error.code not in {404, 500, 502, 503, 504}:
-                raise APIError(f"Front readiness returned {error.code}; HTML remains unpurged") from None
+        except APIError:
+            raise
         except (
-            urllib.error.URLError,
+            httpx.HTTPError,
             TimeoutError,
             ConnectionError,
+            OSError,
             UnicodeError,
             json.JSONDecodeError,
         ):
@@ -772,7 +811,7 @@ def _all_resources(api: Any, path: str) -> list[dict[str, Any]]:
     cursor = None
     seen = set()
     while True:
-        suffix = "?cursor=" + urllib.parse.quote(cursor, safe="") if cursor else ""
+        suffix = f"?{httpx.QueryParams({'cursor': cursor})}" if cursor else ""
         result = api.request("GET", path + suffix)
         if isinstance(result, list):
             items.extend(result)
@@ -814,7 +853,7 @@ def bootstrap(
         if existing["name"] in plan["services"].values():
             raise ValueError("A named install service already exists; refusing adoption")
     for kind, name in plan["stores"].items():
-        if any(resource["name"] == name for resource in _all_resources(api, f"/resources/stores/{kind}")):
+        if any(resource["name"] == name for resource in _all_resources(api, _stores.STORE_ENDPOINTS[kind])):
             raise ValueError("A named install store already exists; refusing adoption")
 
     inventory: dict[str, Any] = {
@@ -849,7 +888,7 @@ def bootstrap(
         )
 
     for kind, name in plan["stores"].items():
-        created = api.request("POST", f"/resources/stores/{kind}", {"name": name})
+        created = api.request("POST", _stores.STORE_ENDPOINTS[kind], {"name": name})
         inventory["stores"][kind] = {"id": created["id"], "name": name}
         _save(inventory_path, inventory)
 
@@ -935,7 +974,7 @@ def bootstrap(
     for key, value in config.items():
         api.request(
             "PUT",
-            f"/resources/stores/config/{inventory['stores']['config']['id']}/item/{key}",
+            f"{_stores.STORE_ENDPOINTS['config']}/{inventory['stores']['config']['id']}/item/{key}",
             {"item_value": value},
             form=True,
         )
@@ -954,6 +993,7 @@ def bootstrap(
 
 
 def _credential(env_name: str, prompt: str) -> str:
+    _environments.load_dotenv()
     value = os.environ.get(env_name) or getpass.getpass(prompt)
     if not value:
         raise ValueError(f"{env_name} is required")
@@ -1092,7 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
             name = resource_plan(args.name)["stores"]["secret"]
             matching = [
                 store
-                for store in _all_resources(api, "/resources/stores/secret")
+                for store in _all_resources(api, _stores.STORE_ENDPOINTS["secret"])
                 if store["name"] == name and not store.get("deleted_at")
             ]
             if len(matching) != 1:

@@ -7,8 +7,6 @@ import datetime
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -122,14 +120,9 @@ def fetch_contract(path: str, *, projection: str = "", identifiers: dict[str, st
         raise ValueError("Expected a relative Fastly API path")
     token = _token()
     headers = {"Fastly-Key": token, "Accept": "application/json"}
-    request = urllib.request.Request("https://api.fastly.com" + path, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            status = response.status
-            body = json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        status = error.code
-        body = json.loads(error.read())
+    response = httpx.get("https://api.fastly.com" + path, headers=headers, timeout=30.0)
+    status = response.status_code
+    body = response.json()
     if projection == "token":
         saved = {field: body[field] for field in ("scope", "expires_at", "services") if field in body}
         saved = _redact(saved, identifiers=identifiers)
@@ -275,7 +268,7 @@ def record_install(inventory_path: Path, output: Path) -> list[str]:
     return filenames
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--service-id")
@@ -290,3 +283,7 @@ if __name__ == "__main__":
         record_install(arguments.inventory, arguments.output)
     else:
         record(arguments.service_id, arguments.output)
+
+
+if __name__ == "__main__":
+    main()

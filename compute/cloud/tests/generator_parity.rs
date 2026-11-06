@@ -508,3 +508,239 @@ fn rum_generator_parity_covers_shared_and_rum_only_vcl_endpoints_and_tracker_js(
         assert!(body.get("gzip_level").is_none());
     }
 }
+
+#[test]
+fn catalog_json_exports_enum_decode_maps_and_fos_regions() {
+    use fastly_log_analytics::ingest::convert;
+
+    let data = catalog::data();
+    assert!(data.get("golden_vectors").is_none());
+    let encodings = data["enum_encodings"].as_object().unwrap();
+    for (table, field_id) in [
+        ("CONN_SPEED_ENCODE", "c_speed"),
+        ("PROXY_TYPE_ENCODE", "p_type"),
+        ("PROXY_DESC_ENCODE", "p_desc"),
+    ] {
+        let map = encodings[table].as_object().unwrap();
+        assert!(!map.is_empty());
+        for (full_val, code_val) in map {
+            let code = code_val.as_str().unwrap();
+            assert_eq!(convert::decode_enum_value(field_id, code), full_val);
+        }
+    }
+    let regions = data["fos_regions"].as_object().unwrap();
+    assert!(!regions.is_empty());
+    for (region, shield) in regions {
+        assert_eq!(
+            logging::rum::shield_for_region(region),
+            shield.as_str().unwrap()
+        );
+    }
+    assert_eq!(logging::rum::shield_for_region("unknown-region"), "iad-va-us");
+}
+
+#[test]
+fn templates_json_exports_rum_and_sigv4_vcl_snippets() {
+    let tpl: Value =
+        serde_json::from_str(include_str!("../vcl/capture/templates.json")).unwrap();
+    assert_eq!(
+        tpl["M"]["deliver"],
+        tpl["group_capture_deliver"]["M"],
+        "Group M deliver templates must be identical without fake comments"
+    );
+    let m_deliver = tpl["M"]["deliver"].as_str().unwrap();
+    assert!(m_deliver.contains("!req.http.x-fos-edge-data:io"));
+    assert!(m_deliver.contains("dc_fmt=([a-z0-9]+)"));
+    assert!(m_deliver.contains("Fastly-Io-Info"));
+    assert_eq!(
+        logging::rum::beacon_field_extraction_vcl(),
+        tpl["rum_beacon_extraction"].as_str().unwrap()
+    );
+    assert_eq!(
+        logging::rum::beacon_response_vcl(),
+        tpl["rum_beacon_response"].as_str().unwrap()
+    );
+    assert_eq!(
+        logging::rum::error_beacon_vcl(),
+        tpl["rum_error"].as_str().unwrap()
+    );
+    assert_eq!(
+        logging::rum::asset_fetch_vcl("iad-va-us", Some("2.13.0")).unwrap(),
+        tpl["rum_asset_fetch"].as_str().unwrap()
+    );
+    assert_eq!(
+        logging::rum::sigv4_sign_vcl(Some("2.13.0")).unwrap(),
+        tpl["rum_sigv4_sign"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn rum_ingest_matches_python_golden_vectors() {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{Float64Type, Int32Type};
+    use fastly_log_analytics::ingest::rum;
+
+    let gv = &fixtures()["golden_vectors"]["rum_ingest"];
+    let service_id = gv["service_id"].as_str().unwrap();
+    let window_s = gv["window_s"].as_i64().unwrap();
+    let object_time_s = gv["object_time_s"].as_i64().unwrap();
+    let line_bytes = format!("{}\n", serde_json::to_string(&gv["faro_line"]).unwrap());
+    let compressed = zstd::stream::encode_all(line_bytes.as_bytes(), 1).unwrap();
+    let converted =
+        rum::convert_object(&compressed, window_s, object_time_s, 1024 * 1024, service_id)
+            .unwrap();
+
+    let expected = gv["expected_extracted"].as_array().unwrap();
+    let expected_vitals: Vec<&Value> = expected
+        .iter()
+        .filter(|m| m["metric_name"] != "exception")
+        .collect();
+    let expected_errors: Vec<&Value> = expected
+        .iter()
+        .filter(|m| m["metric_name"] == "exception")
+        .collect();
+
+    let vitals_batch = converted.windows.values().next().unwrap();
+    assert_eq!(vitals_batch.num_rows(), expected_vitals.len());
+    let names = vitals_batch
+        .column_by_name("metric_name")
+        .unwrap()
+        .as_string::<i32>();
+    let values = vitals_batch
+        .column_by_name("metric_value")
+        .unwrap()
+        .as_primitive::<Float64Type>();
+    let ratings = vitals_batch
+        .column_by_name("metric_rating")
+        .unwrap()
+        .as_string::<i32>();
+    let pathnames = vitals_batch
+        .column_by_name("pathname")
+        .unwrap()
+        .as_string::<i32>();
+    let browsers = vitals_batch
+        .column_by_name("browser")
+        .unwrap()
+        .as_string::<i32>();
+    let devices = vitals_batch
+        .column_by_name("device")
+        .unwrap()
+        .as_string::<i32>();
+    for (idx, exp) in expected_vitals.iter().enumerate() {
+        assert_eq!(names.value(idx), exp["metric_name"].as_str().unwrap());
+        assert_eq!(values.value(idx), exp["metric_value"].as_f64().unwrap());
+        assert_eq!(ratings.value(idx), exp["metric_rating"].as_str().unwrap());
+        assert_eq!(pathnames.value(idx), exp["pathname"].as_str().unwrap());
+        assert_eq!(browsers.value(idx), exp["browser"].as_str().unwrap());
+        assert_eq!(devices.value(idx), exp["device"].as_str().unwrap());
+    }
+
+    let errors_batch = converted.errors.values().next().unwrap();
+    assert_eq!(errors_batch.num_rows(), expected_errors.len());
+    let err_msgs = errors_batch
+        .column_by_name("error_message")
+        .unwrap()
+        .as_string::<i32>();
+    let err_files = errors_batch
+        .column_by_name("error_file")
+        .unwrap()
+        .as_string::<i32>();
+    let err_lines = errors_batch
+        .column_by_name("error_line")
+        .unwrap()
+        .as_primitive::<Int32Type>();
+    let err_cols = errors_batch
+        .column_by_name("error_col")
+        .unwrap()
+        .as_primitive::<Int32Type>();
+    for (idx, exp) in expected_errors.iter().enumerate() {
+        assert_eq!(err_msgs.value(idx), exp["error_message"].as_str().unwrap());
+        assert_eq!(err_files.value(idx), exp["error_file"].as_str().unwrap());
+        assert_eq!(
+            i64::from(err_lines.value(idx)),
+            exp["error_line"].as_i64().unwrap()
+        );
+        assert_eq!(
+            i64::from(err_cols.value(idx)),
+            exp["error_col"].as_i64().unwrap()
+        );
+    }
+}
+
+#[test]
+fn rum_validators_match_python_golden_vectors() {
+    let gv = &fixtures()["golden_vectors"]["rum_validators"];
+    for entry in gv["faro_versions"].as_array().unwrap() {
+        let ver = entry["version"].as_str().unwrap();
+        let valid = entry["valid"].as_bool().unwrap();
+        assert_eq!(
+            logging::rum::validate_faro_version(ver).is_ok(),
+            valid,
+            "faro_version={ver}"
+        );
+    }
+    for entry in gv["custom_conditions"].as_array().unwrap() {
+        let cond = entry["condition"].as_str().unwrap();
+        let valid = entry["valid"].as_bool().unwrap();
+        let res = logging::rum::build_rum_log_condition(cond);
+        assert_eq!(res.is_ok(), valid, "condition={cond}");
+        if valid {
+            assert_eq!(res.unwrap(), entry["statement"].as_str().unwrap());
+        }
+    }
+}
+
+#[test]
+fn hll_registers_match_python_golden_vectors() {
+    use fastly_log_analytics::ingest::summary::{hll_hash, Hll};
+
+    let cases = fixtures()["golden_vectors"]["hll"].as_array().unwrap().clone();
+    assert!(!cases.is_empty());
+    for case in &cases {
+        let mut hll = Hll::default();
+        for item_entry in case["item_hashes"].as_array().unwrap() {
+            let item = item_entry["item"].as_str().unwrap();
+            let expected_hash =
+                u64::from_str_radix(item_entry["hash_hex"].as_str().unwrap(), 16).unwrap();
+            let actual_hash = hll_hash(item);
+            assert_eq!(actual_hash, expected_hash, "item={item}");
+            hll.add_hash(actual_hash);
+        }
+        assert_eq!(
+            hex::encode(hll.to_bytes()),
+            case["to_bytes_hex"].as_str().unwrap(),
+            "case={}",
+            case["name"]
+        );
+        assert_eq!(
+            hll.count(),
+            case["count"].as_u64().unwrap(),
+            "case={}",
+            case["name"]
+        );
+    }
+}
+
+#[test]
+fn fingerprint_matches_python_golden_vectors() {
+    use compute_common::crypto::{fnv1a32, fnv1a64};
+    use fastly_log_analytics::ingest::bundle::fingerprint;
+
+    let gv = &fixtures()["golden_vectors"]["fingerprint"];
+    for entry in gv["fnv1a"].as_array().unwrap() {
+        let input = entry["input"].as_str().unwrap();
+        let expected32 = u32::from_str_radix(entry["fnv1a32_hex"].as_str().unwrap(), 16).unwrap();
+        let expected64 = u64::from_str_radix(entry["fnv1a64_hex"].as_str().unwrap(), 16).unwrap();
+        assert_eq!(fnv1a32(input.bytes()), expected32, "input={input}");
+        assert_eq!(fnv1a64(input.bytes()), expected64, "input={input}");
+    }
+    let bundle_names: Vec<&str> = gv["bundle_names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let expected_fp =
+        u64::from_str_radix(gv["bundle_fingerprint_hex"].as_str().unwrap(), 16).unwrap();
+    assert_eq!(fingerprint(bundle_names), expected_fp);
+}

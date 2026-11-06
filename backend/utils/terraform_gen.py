@@ -5,16 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from backend.config import is_rum_enabled  # noqa: E402
-from backend.core.fastly.client import load_vcl  # noqa: E402
-from backend.provision.declarative.reconciler import (  # noqa: E402
-    FeatureState,
-    desired_backends,
-    desired_logging_endpoints,
-    logging_service_snippets,
-)
-from backend.provision.fastly_api import _CDN_SNIPPETS  # noqa: E402
-
 
 def _terraform_template_escape(value: object) -> str:
     """Escape ``${`` / ``%{`` inside a string so Terraform treats them as literal characters."""
@@ -25,6 +15,10 @@ def _terraform_template_escape(value: object) -> str:
 def _dump(obj: dict) -> str:
     """Canonical .tf.json serialisation: 2-space indent, keys sorted, trailing newline."""
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
+
+
+from backend.config import is_rum_enabled  # noqa: E402
+from backend.core.fastly.client import load_vcl  # noqa: E402
 
 
 def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
@@ -329,3 +323,12 @@ provider "aws" {{
 def generate_cloud_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
     """Generate Terraform .tf.json including Cloud flp-front + flp/flp-worker resources."""
     return generate_terraform({**cfg, "deployment_mode": "cloud"}, fos_access_key, fos_secret_key)
+
+
+from backend.provision.declarative.reconciler import (  # noqa: E402
+    FeatureState,
+    desired_backends,
+    desired_logging_endpoints,
+    logging_service_snippets,
+)
+from backend.provision.fastly_api import _CDN_SNIPPETS  # noqa: E402
