@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 import { adminGatewayContextOptions } from '../../scripts/lib/admin_gateway_client.cjs'
 import type { DebugQuery } from '../types/api'
+export { virtualAuthenticator, installPasskeyAuthenticator } from './cloud/authenticator'
 
 declare global {
   interface Window {

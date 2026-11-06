@@ -1,6 +1,6 @@
 # Unify `fastly-logs-parquet` into `fastly-log-analytics` — Architecture & Migration Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 ## Goal Description
 
@@ -101,12 +101,12 @@ flowchart TD
 
 ### Phase 1: Foundation, Unified Compute Workspace & Headless Browser Engine Move (Maximizing `fla` Reuse)
 
-- [ ] **Task 1.1 — Migrate Institutional Knowledge (`.trail/learnings/` & Cloud Docs)**
+- [x] **Task 1.1 — Migrate Institutional Knowledge (`.trail/learnings/` & Cloud Docs)**
   - Add `!.trail/learnings/` and `!.trail/learnings/**` after `.trail/` in [`fastly-log-analytics/.gitignore`](file:///Users/drew.michael/Projects/fastly-log-analytics/.gitignore#L31) so `.trail/learnings/` is tracked in git while `.trail/cache/` stays ignored.
   - Copy the 22 session learnings from `fastly-logs-parquet/.trail/learnings/` (including `2026-11-05-old-load-harness-moved-to-the-drew.md`) into `fastly-log-analytics/.trail/learnings/` and copy `fastly-logs-parquet/docs/{crons,specs,recommendation.md,cost-methodology.md,security-route-access.md}` into `fastly-log-analytics/docs/cloud/`.
   - Run `trail build` in `fastly-log-analytics`.
 
-- [ ] **Task 1.2 — Create Unified `compute/` Cargo Workspace (`cloud`, `scorer`, `common`), Move `app/` → `compute/cloud/` & Generalize `fla` Provisioning/Release/Verification Modules**
+- [x] **Task 1.2 — Create Unified `compute/` Cargo Workspace (`cloud`, `scorer`, `common`), Move `app/` → `compute/cloud/` & Generalize `fla` Provisioning/Release/Verification Modules**
   - **Unified Rust Compute Workspace (`compute/Cargo.toml`) & Shared `compute/common` Crate**:
     - Create `compute/Cargo.toml` with `members = ["cloud", "scorer", "common"]`, hoisting [`rust-toolchain.toml`](file:///Users/drew.michael/Projects/fastly-logs-parquet/rust-toolchain.toml) (`1.96.0`, `targets = ["wasm32-wasip1"]`) to `compute/rust-toolchain.toml` and [`app/.cargo/audit.toml`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/.cargo/audit.toml) to `compute/.cargo/audit.toml`.
     - Unify `[workspace.dependencies]` across `cloud` and `scorer` (`fastly = "=0.13.2"`, `base64 = "0.23.1"`, `hex = "0.4"`, `getrandom = "0.2"`, `serde`, `serde_json`, `sha2`, `hmac`, `subtle = "2.6.1"`, `cookie = "0.18.1"`, `url`), and unify `[profile.dev]`/`[profile.test]` (`debug = "line-tables-only"`, `[profile.dev.package."*"] debug = false` to prevent 70 GB `target/` bloat) and `[profile.release]` (`opt-level = "s"`, `lto = true`, `codegen-units = 1`, `strip = "symbols"`, `panic = "abort"`).
@@ -135,7 +135,7 @@ flowchart TD
     - Generalize `app/tools/release.py` → `scripts/release_compute.py` exporting `git(root, *args)`, `check_clean_app_tree(root)`, and `app_tree_sha(root, rev="HEAD")` (reused across `provision.py`, `deploy_test_all.py`, and tests; plus shared `write_synthetic_package` & `init_test_git_repo` in test helpers) to build both `compute/cloud` and `compute/scorer` from frozen `git archive` snapshots with `provenance.json`, move `app/tools/scan.py` → `scripts/check_secret_values.py`, extract `deploy_test_all.py` 5-run report rotation into `scripts/lib/deploy_report.py`, and merge `browser_verify.mjs` Web Vitals + 200/206 Parquet waterfall recorder into [`scripts/lib/section_measurements.cjs`](file:///Users/drew.michael/Projects/fastly-log-analytics/scripts/lib/section_measurements.cjs) & [`scripts/verify_dashboard.js`](file:///Users/drew.michael/Projects/fastly-log-analytics/scripts/verify_dashboard.js).
   - Rewrite all hardcoded repo-root and `app/` path references inside `compute/cloud/` (`build.rs`, `tests/csp.rs`, `tests/summary.rs`, `Makefile`, `infra/provision.py`, `scripts/release_compute.py`, `tools/deploy_test_all.py`).
 
-- [ ] **Task 1.3 — Single-Source Catalog Bugfixes, Enum Decode Tables, `FOS_REGIONS` / `SHIELD_MAP`, RUM/SigV4 VCL Snippets, Vendored Faro Bundles & Cross-Language Golden Fixtures (`generator_fixtures.py`)**
+- [x] **Task 1.3 — Single-Source Catalog Bugfixes, Enum Decode Tables, `FOS_REGIONS` / `SHIELD_MAP`, RUM/SigV4 VCL Snippets, Vendored Faro Bundles & Cross-Language Golden Fixtures (`generator_fixtures.py`)**
   - Fold `flp`'s 3 live-probed catalog/VCL bugfixes directly into [`backend/core/catalog.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/core/catalog.py) and [`backend/provision/fastly_api.py`](file:///Users/drew.michael/Projects/fastly-log-analytics/backend/provision/fastly_api.py) (and account for `compression_codec = "zstd"` in `S3LoggingSpec`):
     1. Core `ts_ms` (`%{time.start.msec}V`, `BIGINT`) right after `timestamp`.
     2. Group J WAF fields (`waf`, `waf_resp`, `waf_sig`, `waf_ms`, `waf_req_id`) reading `vcl_log`-only `waf.inspection.*` variables and `group_j_waf_deliver` `waf_resp` fallback (`resp.status` on block, `"200"` on allow).
@@ -149,7 +149,7 @@ flowchart TD
     - HyperLogLog `HLL_VERSION=1, HLL_P=8` (`backend/utils/hll.py` ↔ `compute/cloud/src/ingest/summary.rs` ↔ `frontend/lib/cloud-engine/dashboard/hll.ts`) and FNV-1a 64 `fingerprint(names)` (`compute/cloud/src/ingest/bundle.rs` ↔ `frontend/lib/cloud-engine/dashboard/summaries.ts:45–56`).
   - Run `cargo test --manifest-path compute/Cargo.toml --test generator_parity --locked` to verify byte-for-byte parity.
 
-- [ ] **Task 1.4 — Move Headless Browser Modules into `frontend/lib/cloud-engine/`, Delete 12 Duplicate Library/Type Modules + `stores/filterStore.ts` + All 14 `app/web/hooks/` Files & Deduplicate Internal `cloud-engine/` Helpers**
+- [x] **Task 1.4 — Move Headless Browser Modules into `frontend/lib/cloud-engine/`, Delete 12 Duplicate Library/Type Modules + `stores/filterStore.ts` + All 14 `app/web/hooks/` Files & Deduplicate Internal `cloud-engine/` Helpers**
   - Add dependencies to [`frontend/package.json`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/package.json):
     - `dependencies`: `@duckdb/duckdb-wasm` (`1.33.1-dev57.0`), `hyparquet` (`^1.25.2`), `hyparquet-compressors` (`^1.1.4`), `@simplewebauthn/browser` (`^14.0.0`).
     - `devDependencies`: `hyparquet-writer` (`^0.18.0`).
@@ -178,7 +178,7 @@ flowchart TD
       - Move only the 6-line `syncOpsCacheForSession(user, signedOut)` into `cloud-engine/telemetry/sources.ts` (called from `useBootstrapSyncEffects` in [`frontend/hooks/useBootstrap.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/hooks/useBootstrap.ts)), the pure `opsLogRange` window helper into `cloud-engine/telemetry/client.ts`, and the pure `readIngestEvents` SSE batch parser into `cloud-engine/dashboard/catalog-manifest.ts` (reusing `parseSSEFrames` from [`sseStreamAppliers.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/hooks/sseStreamAppliers.ts) and called from [`useAdminStream.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/hooks/useAdminStream.ts) when `IS_CLOUD_MODE` is true).
   - Update [`frontend/knip.config.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/knip.config.ts) to register `'lib/cloud-engine/**/*.worker.ts'`, `'lib/cloud-engine/**/*.test.{ts,tsx}'`, and `'lib/cloud-engine/tools/**/*.ts'` in `entry` and `'@duckdb/duckdb-wasm'` in `ignoreDependencies`.
 
-- [ ] **Task 1.5 — Wire the Data-Layer Seam, Universal `runEventStream` SSE-to-Job Bridge, Unified `useDebugStore` Bridge & Telemetry Beacon (`adapter.ts`, `api.ts`, `useEventStream.ts`)**
+- [x] **Task 1.5 — Wire the Data-Layer Seam, Universal `runEventStream` SSE-to-Job Bridge, Unified `useDebugStore` Bridge & Telemetry Beacon (`adapter.ts`, `api.ts`, `useEventStream.ts`)**
   - Create `frontend/lib/cloud-engine/adapter.ts` exporting:
     - `IS_CLOUD_MODE` (`process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === "cloud"`)
     - `handleCloudAnalyticalRequest(req: Request): Promise<Response | null>` (intercepts analytical & Parquet-backed routes, executes DuckDB-Wasm / summary / usage / telemetry queries, records `DebugQuery` / `DebugApiCall` entries with `vcpu_ms`, `source`, `sub_calls`, `fos_gets`, `cdn_hits`, `cache_hits` directly into `fla`'s `useDebugStore` for [`DebugPanel.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/components/DebugPanel.tsx), and returns OpenAPI-compliant `Response` payloads)
@@ -186,7 +186,7 @@ flowchart TD
     - `postCloudQueryTelemetry(payload)` (posts client-side DuckDB-Wasm query timing and folded file-read counters `x-flp-fold-telemetry` to `POST /api/telemetry/query`)
   - Hook `handleCloudAnalyticalRequest` into `client` and `rawAdminFetch` inside [`frontend/lib/api.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/lib/api.ts#L91), and hook `cloudStreamFetch` as the default `fetchImpl` in [`frontend/hooks/useEventStream.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/hooks/useEventStream.ts#L103) when `IS_CLOUD_MODE` is true.
 
-- [ ] **Task 1.6 — Next.js 16 `STATIC_EXPORT=1` Fixes, `ServerFooter.tsx` Cloud Version Display, MapLibre `.mjs`/`.geojson` Support, `shell.rs` + `route_auth.rs`, `vcl/front/main.vcl` & `csp.rs` ↔ `proxy.ts` Parity (`release.py`)**
+- [x] **Task 1.6 — Next.js 16 `STATIC_EXPORT=1` Fixes, `ServerFooter.tsx` Cloud Version Display, MapLibre `.mjs`/`.geojson` Support, `shell.rs` + `route_auth.rs`, `vcl/front/main.vcl` & `csp.rs` ↔ `proxy.ts` Parity (`release.py`)**
   - **Next.js 16 `STATIC_EXPORT=1` (`output: 'export'`) fixes in `fastly-log-analytics/frontend/`**:
     - [`frontend/next.config.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/next.config.ts): add `...(isStaticExport ? { generateBuildId: async () => 'flp-static-build', images: { unoptimized: true } } : {})`.
     - [`frontend/app/layout.tsx`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/app/layout.tsx#L59-L65): guard `await cookies()` and `await headers()` when `process.env.STATIC_EXPORT === "1"`.
@@ -326,7 +326,7 @@ flowchart TD
 
 ### Phase 3: Root CI Ratchet Compatibility, Native E2E Harness, Shared `fdlt` Load Harness & Docs
 
-- [ ] **Task 3.1 — Root CI Ratchets, Pytest/Ruff/Deptry/Mypy Config, Pre-Commit, `check_osv.py`, Secret Scan & Workflow (`Makefile`, `pyproject.toml`, `.gitignore`, `.gitleaks.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`)**
+- [x] **Task 3.1 — Root CI Ratchets, Pytest/Ruff/Deptry/Mypy Config, Pre-Commit, `check_osv.py`, Secret Scan & Workflow (`Makefile`, `pyproject.toml`, `.gitignore`, `.gitleaks.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`)**
   - **[`pyproject.toml`](file:///Users/drew.michael/Projects/fastly-log-analytics/pyproject.toml)**:
     - Keep `compute/cloud/{infra,tools}` out of root `pytest`'s `testpaths = ["tests"]` so `tests/conftest.py`'s `autouse` `isolate_metadata_db` PostgreSQL fixture is not triggered; run Cloud Python tests via `uv run pytest compute/cloud/infra compute/cloud/tools -o testpaths="compute/cloud/infra compute/cloud/tools"` inside `make cloud-test`.
     - Add `"compute/cloud/infra/**" = ["T201"]` and `"compute/cloud/tools/**" = ["T201"]` to `[tool.ruff.lint.per-file-ignores]`, format `compute/cloud/{infra,tools}` with `uv run ruff format` (120-char line length), and add `"compute/cloud/.*"` to `[tool.deptry] extend_exclude` and `"compute/cloud/"` to `[tool.mypy] exclude`.
@@ -339,12 +339,12 @@ flowchart TD
     - Preserve `unexport VIRTUAL_ENV`, port `trim-target` (`TARGET_MAX_GB ?= 20` on `compute/target/`), and unify workspace targets (`compute-test`, `compute-lint`, `compute-audit`, `vcl-test`, `secret-scan` chaining `gitleaks` + `scripts/check_secret_values.py`, `scorer-package` + `cloud-build` via `scripts/release_compute.py`) alongside `admin-reset`, `cloud-sync-catalog`, `cloud-test`, `cloud-soak`, `cloud-lint`, `cloud-audit`, `cloud-build`, `cloud-deploy`, `cloud-deploy-check`, and `cloud-loadtest-campaign` (passing `AR_wasm32_wasip1="$(shell rustc +1.96.0 --print sysroot)/lib/rustlib/$(shell rustc +1.96.0 -vV | sed -n 's/host: //p')/bin/llvm-ar"` when building `compute/cloud` for `wasm32-wasip1` so `zstd-sys` compiles cleanly on macOS & Linux).
     - Add a `cloud-ci` job in `.github/workflows/ci.yml`.
 
-- [ ] **Task 3.2 — Reuse `fla`'s `frontend/e2e/` Suite Against Native Simulation Server (`test_server.rs`), Retire 8 Mock Parity Specs + `serve.mjs` + `csp.mjs`, & Wire Shared `fdlt` Load Harness**
+- [x] **Task 3.2 — Reuse `fla`'s `frontend/e2e/` Suite Against Native Simulation Server (`test_server.rs`), Retire 8 Mock Parity Specs + `serve.mjs` + `csp.mjs`, & Wire Shared `fdlt` Load Harness**
   - Preserve [`compute/cloud/src/test_server.rs`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/src/test_server.rs) (`cargo run --manifest-path compute/Cargo.toml -p fastly-logs-parquet-shell --bin shell-test-server`), add the 12-line `/__test/csp-reports` sink (`serve.mjs:133–144`) to `test_server.rs` / `native-proxy.mjs`, move [`app/web/e2e/{native-servers.mjs,native-proxy.mjs,authenticator.ts,csp-teardown.ts,runtime.spec.ts,csp.spec.ts,goal2-native.ts}`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/e2e) into `frontend/e2e/cloud/` (updating `../Cargo.toml` → `../../compute/Cargo.toml` in `native-servers.mjs` and folding `public-pages-parity.spec.ts:299–338`'s missing-store check into `runtime.spec.ts:24–69`), and re-export `installPasskeyAuthenticator` (`authenticator.ts`) from [`frontend/e2e/helpers.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/e2e/helpers.ts) (also shared with `verify_dashboard.js`).
   - **Retire all 8 mock-DOM parity specs + `serve.mjs` (`L1–533`) + `csp.mjs` (`L1–79`)** (`admin-parity.spec.ts`, `shell-parity.spec.ts`, `public-pages-parity.spec.ts`, `usage-cost-parity.spec.ts`, `operational-logging.spec.ts`, `loading-cls.spec.ts`, `goal1.spec.ts`, `goal2-parity.spec.ts`, `serve.mjs`, `csp.mjs`); consolidate the browser-engine E2E tests from `catalog-parity.spec.ts:59–271` & `dashboard-parity.spec.ts:163–917` (OPFS large-footer caching, 206 range coalescing, ETag change detection, catalog delta `since_generation`, multi-tab OPFS sharing) into a single cloud engine E2E spec importing `parquetFixture` from `test-fixtures.ts` and a shared `serveParquetRange` 206 handler; and run `fla`'s own [`frontend/e2e/pages/{dashboard,core-analytics-pages,admin-overview}.spec.ts`](file:///Users/drew.michael/Projects/fastly-log-analytics/frontend/e2e/pages/dashboard.spec.ts) + `frontend/e2e/cloud/{runtime,csp}.spec.ts` against `shell-test-server` with virtual WebAuthn passkeys at $0 Fastly cost.
   - Run `uv run pytest compute/cloud/infra compute/cloud/tools -o testpaths="compute/cloud/infra compute/cloud/tools" -q` to verify all provisioning, release caching (`scripts/release_compute.py`), and `deploy_test_all.py` (`scripts/lib/deploy_report.py`) tests pass.
 
-- [ ] **Task 3.3 — Documentation & Architecture Guides (`README.md`, `AGENTS.md`, `docs/deploy/`)**
+- [x] **Task 3.3 — Documentation & Architecture Guides (`README.md`, `AGENTS.md`, `docs/deploy/`)**
   - Update [`README.md`](file:///Users/drew.michael/Projects/fastly-log-analytics/README.md) "Architecture & Throughput Sizing" table to include **Cloud Serverless Mode (Fastly Compute + FOS + Browser DuckDB-Wasm)** alongside Single-Host Docker Compose and Multi-Pod Kubernetes.
   - Update [`AGENTS.md`](file:///Users/drew.michael/Projects/fastly-log-analytics/AGENTS.md) with the `compute/cloud/` and `frontend/lib/cloud-engine/` package map and Compute resource-limit rules (128 MB heap, 32 backend calls, 32 dictionary lookups, 1000 ms vCPU).
 
@@ -357,7 +357,7 @@ flowchart TD
 1. **In-Repo Catalog & VCL Byte-for-Byte Parity Gate**:
    ```bash
    make cloud-sync-catalog
-   cargo test --manifest-path compute/cloud/Cargo.toml --test generator_parity --locked
+   cargo test --manifest-path compute/Cargo.toml -p fastly-logs-parquet-shell --test generator_parity --locked
    ```
 2. **Cloud Rust Compute Native & Simulation Suite + Python Infra Suite**:
    ```bash

@@ -64,6 +64,9 @@ compute-audit:
 
 NAME ?= flp
 VERBOSE ?= 0
+TARGET_MAX_GB ?= 20
+AR_wasm32_wasip1 ?= $(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 --print sysroot 2>/dev/null)/lib/rustlib/$(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 -vV 2>/dev/null | sed -n 's/^host: //p')/bin/llvm-ar
+export AR_wasm32_wasip1
 
 cloud-sync-catalog:
 	PYTHONPATH=. uv run python compute/cloud/tools/generator_fixtures.py --write
@@ -96,7 +99,7 @@ admin-reset:
 	@$(MAKE) --no-print-directory -C compute/cloud admin-reset NAME="$(NAME)" VERBOSE="$(VERBOSE)"
 
 trim-target:
-	$(MAKE) -C compute/cloud trim-target
+	$(MAKE) -C compute/cloud trim-target TARGET_MAX_GB="$(TARGET_MAX_GB)"
 
 
 # ── Backend ───────────────────────────────────────────────────────────────────
@@ -177,6 +180,7 @@ osv:
 # Skips cleanly with a loud warning if the binary isn't on PATH. Production
 # CI installs it via curl in .github/workflows/ci.yml (same pattern as falco).
 secret-scan:
+	uv run python scripts/check_secret_values.py
 	@if command -v gitleaks > /dev/null; then \
 		gitleaks detect --no-banner --redact --config .gitleaks.toml --exit-code 1; \
 	else \

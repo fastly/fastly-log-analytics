@@ -40,10 +40,14 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PLAYWRIGHT_PATH = path.resolve(
-  __dirname,
-  "../web/node_modules/playwright/index.mjs",
-);
+export const PLAYWRIGHT_PATH = fs.existsSync(
+  path.resolve(__dirname, "../web/node_modules/playwright/index.mjs"),
+)
+  ? path.resolve(__dirname, "../web/node_modules/playwright/index.mjs")
+  : path.resolve(
+      __dirname,
+      "../../../frontend/node_modules/playwright/index.mjs",
+    );
 
 /**
  * Built-in presets matching app/web/lib/dashboard/range.ts (PRESETS)

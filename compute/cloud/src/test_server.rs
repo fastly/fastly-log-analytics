@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     io::Read,
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,6 +19,8 @@ struct NativeRuntime {
     config: BTreeMap<String, String>,
     secrets: BTreeMap<String, String>,
     admin: fastly_log_analytics::admin::fixture::FixtureAdapter,
+    csp_reports: Mutex<Vec<Value>>,
+    extension_requests: Mutex<Vec<String>>,
 }
 
 impl NativeRuntime {
@@ -65,8 +68,12 @@ impl NativeRuntime {
         getrandom::getrandom(&mut random).map_err(|_| "native random unavailable")?;
         secrets.insert("session_key".into(), auth::encode(&random));
         if let Ok(name) = std::env::var("FLP_TEST_MISSING") {
-            config.remove(&name);
-            secrets.remove(&name);
+            let trimmed = name
+                .strip_prefix("secret:")
+                .or_else(|| name.strip_prefix("config:"))
+                .unwrap_or(&name);
+            config.remove(trimmed);
+            secrets.remove(trimmed);
         }
         if let Ok(dev) = std::env::var("FLP_DEV_TELEMETRY") {
             config.insert("dev_telemetry".into(), dev);
@@ -75,6 +82,8 @@ impl NativeRuntime {
             config,
             secrets,
             admin: fastly_log_analytics::admin::fixture::FixtureAdapter::new(),
+            csp_reports: Mutex::new(Vec::new()),
+            extension_requests: Mutex::new(Vec::new()),
         })
     }
 }
@@ -180,8 +189,80 @@ fn read_request(request: &mut tiny_http::Request) -> Result<Request, Box<dyn std
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn handle_test_endpoint(
+    runtime: &mut NativeRuntime,
+    state: &mut MemoryStore,
+    request: &Request,
+) -> Option<Response> {
+    let path = request.path_only();
+    if path.ends_with(".duckdb_extension.wasm") {
+        if let Ok(mut paths) = runtime.extension_requests.lock() {
+            paths.push(path.to_owned());
+        }
+    }
+    match (request.method.as_str(), path) {
+        ("POST", "/__test/csp-reports") => {
+            let payload = serde_json::from_slice::<Value>(&request.body)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if let Ok(mut reports) = runtime.csp_reports.lock() {
+                reports.push(payload);
+            }
+            Some(Response::new(204, Vec::new()).private())
+        }
+        ("DELETE", "/__test/csp-reports") => {
+            if let Ok(mut reports) = runtime.csp_reports.lock() {
+                reports.clear();
+            }
+            Some(Response::json(200, &serde_json::json!({ "reports": [] })))
+        }
+        ("GET", "/__test/csp-reports") => {
+            let reports = runtime
+                .csp_reports
+                .lock()
+                .map(|r| r.clone())
+                .unwrap_or_default();
+            Some(Response::json(
+                200,
+                &serde_json::json!({ "reports": reports }),
+            ))
+        }
+        ("DELETE", "/__test/extension-requests") => {
+            if let Ok(mut paths) = runtime.extension_requests.lock() {
+                paths.clear();
+            }
+            Some(Response::json(200, &serde_json::json!({ "paths": [] })))
+        }
+        ("GET", "/__test/extension-requests") => {
+            let paths = runtime
+                .extension_requests
+                .lock()
+                .map(|p| p.clone())
+                .unwrap_or_default();
+            Some(Response::json(200, &serde_json::json!({ "paths": paths })))
+        }
+        ("POST", "/__test/reset") => {
+            if let Ok(mut reports) = runtime.csp_reports.lock() {
+                reports.clear();
+            }
+            if let Ok(mut paths) = runtime.extension_requests.lock() {
+                paths.clear();
+            }
+            runtime.admin = fastly_log_analytics::admin::fixture::FixtureAdapter::new();
+            *state = MemoryStore::default();
+            Some(Response::json(200, &serde_json::json!({ "ok": true })))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn to_response(response: Response) -> tiny_http::ResponseBox {
-    let response = response.secured();
+    let mut response = response.secured();
+    if let Some(csp) = response.headers.get_mut("content-security-policy") {
+        if !csp.contains("report-uri /__test/csp-reports") {
+            csp.push_str("; report-uri /__test/csp-reports");
+        }
+    }
     let mut headers = Vec::with_capacity(response.headers.len());
     for (name, value) in response.headers {
         if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
@@ -201,8 +282,8 @@ fn to_response(response: Response) -> tiny_http::ResponseBox {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = NativeRuntime::new()?;
-    let state = MemoryStore::default();
+    let mut runtime = NativeRuntime::new()?;
+    let mut state = MemoryStore::default();
     let address = std::env::var("FLP_TEST_LISTEN").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let server =
         tiny_http::Server::http(&address).map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -210,9 +291,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for mut incoming in server.incoming_requests() {
         let response = match read_request(&mut incoming) {
             Ok(request) => {
-                let response =
-                    Shell::new(&runtime, &state, fastly_log_analytics::ASSETS).handle(&request);
-                fastly_log_analytics::shell::resolve_upstream(&runtime, response)
+                if let Some(response) = handle_test_endpoint(&mut runtime, &mut state, &request) {
+                    response
+                } else {
+                    let response =
+                        Shell::new(&runtime, &state, fastly_log_analytics::ASSETS).handle(&request);
+                    fastly_log_analytics::shell::resolve_upstream(&runtime, response)
+                }
             }
             Err(error) => {
                 eprintln!("Native request rejected: {error}");

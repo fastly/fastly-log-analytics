@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   executeSql,
   getPresentColumns,
@@ -7,6 +8,8 @@ import {
   searchFieldValuesInWorker,
   setDashboardCacheIdentity,
 } from "./dashboard/client";
+
+z.config({ jitless: true });
 import { handleAssetsRequest, type AssetsQueryParams } from "./assets";
 import { handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
@@ -281,6 +284,184 @@ export async function handleCloudAnalyticalRequest(
   // Silence high-scale-only browser beacons when running on Cloud Compute
   if (pathname === "/api/web-vitals" || pathname === "/api/ux-events") {
     return new Response(null, { status: 204 });
+  }
+
+  // Synthesize /api/bootstrap from Cloud Compute's /api/auth/session and /api/services
+  if (pathname === "/api/bootstrap" && method === "GET") {
+    const sessionRes = await fetch("/api/auth/session", {
+      credentials: "include",
+      signal: request.signal,
+    }).catch(() => null);
+    if (!sessionRes || !sessionRes.ok) {
+      return jsonResponse(
+        {
+          runtime_mode: "cloud",
+          user: null,
+          services: [],
+          active_service_id: null,
+          settings: {
+            needs_login: true,
+            is_remote_analyst: false,
+            initializing: false,
+          },
+          debug_state: {
+            query_debug_visibility: "disabled",
+            api_call_debug_visibility: "disabled",
+          },
+        },
+        request,
+      );
+    }
+    const sessionData = (await sessionRes.json().catch(() => ({}))) as {
+      user?: { id?: string; display_name?: string; role?: string } | null;
+      query_debug_visibility?: string;
+      api_call_debug_visibility?: string;
+    };
+    const user = sessionData.user ?? null;
+    if (!user) {
+      return jsonResponse(
+        {
+          runtime_mode: "cloud",
+          user: null,
+          services: [],
+          active_service_id: null,
+          settings: {
+            needs_login: true,
+            is_remote_analyst: false,
+            initializing: false,
+          },
+          debug_state: {
+            query_debug_visibility: "disabled",
+            api_call_debug_visibility: "disabled",
+          },
+        },
+        request,
+      );
+    }
+    const servicesRes = await fetch("/api/services", {
+      credentials: "include",
+      signal: request.signal,
+    }).catch(() => null);
+    const servicesJson = servicesRes?.ok
+      ? ((await servicesRes.json().catch(() => ({ services: [] }))) as {
+          services?: Array<{
+            service_id: string;
+            service_name?: string;
+            name?: string;
+            rum_enabled?: boolean;
+            cmcd?: { enabled?: boolean };
+            log_fields?: { selected_fields?: string[] };
+          }>;
+        })
+      : { services: [] };
+    const rawServices = servicesJson.services ?? [];
+    const isRemoteAnalyst =
+      user.role === "analyst" || user.role === "analyst-no-pii";
+    const mappedServices = rawServices.map((s) => ({
+      ...s,
+      service_id: s.service_id,
+      name: s.name || s.service_name || s.service_id,
+      cmcd_enabled: Boolean(s.cmcd?.enabled),
+      rum_enabled: Boolean(s.rum_enabled),
+    }));
+    const services =
+      mappedServices.length > 0
+        ? mappedServices
+        : isRemoteAnalyst
+          ? [
+              {
+                service_id: "default",
+                name: "Default Service",
+                cmcd_enabled: false,
+                rum_enabled: false,
+              },
+            ]
+          : [];
+    const activeServiceId = services[0]?.service_id ?? null;
+    const activeLogFieldIds = rawServices[0]?.log_fields?.selected_fields ?? [];
+    return jsonResponse(
+      {
+        runtime_mode: "cloud",
+        user,
+        services,
+        active_service_id: activeServiceId,
+        active_log_field_ids: activeLogFieldIds,
+        settings: {
+          needs_login: false,
+          is_remote_analyst: isRemoteAnalyst,
+          mask_ips: user.role === "analyst-no-pii",
+          initializing: false,
+        },
+        debug_state: {
+          query_debug_visibility:
+            sessionData.query_debug_visibility ?? "disabled",
+          api_call_debug_visibility:
+            sessionData.api_call_debug_visibility ?? "disabled",
+        },
+      },
+      request,
+    );
+  }
+
+  // High-scale-only admin overview endpoints bridged in Cloud mode
+  if (pathname === "/api/admin/health-snapshot" && method === "GET") {
+    return jsonResponse(
+      {
+        vcpus: 1,
+        load: null,
+        memory: null,
+        data_mount: null,
+        root_disk: null,
+        scheduler_last_tick_age_s: null,
+        recent_cron_failures: [],
+        config_backup: null,
+        in_flight_runs: [],
+      },
+      request,
+    );
+  }
+  if (pathname === "/api/admin/metric-history/batch" && method === "GET") {
+    return jsonResponse({ series: {} }, request);
+  }
+  if (pathname === "/api/admin/log-accounting" && method === "GET") {
+    return jsonResponse(
+      {
+        totals: { gap_pct: 0, total_lines: 0, total_lost_lines: 0 },
+        buckets: [],
+        sustained_loss: null,
+      },
+      request,
+    );
+  }
+  if (pathname === "/api/admin/quarantine/summary" && method === "GET") {
+    return jsonResponse({ total_items: 0, by_category: {} }, request);
+  }
+  if (pathname === "/api/admin/quarantine" && method === "GET") {
+    return jsonResponse({ items: [], total: 0 }, request);
+  }
+  if (pathname === "/api/admin/bot-sources" && method === "GET") {
+    return jsonResponse(
+      {
+        sources: [],
+        rdns: { total: 0, pending: 0, last_enrichment_at: null },
+      },
+      request,
+    );
+  }
+  if (pathname === "/api/admin/system-jobs" && method === "GET") {
+    return jsonResponse({ jobs: [] }, request);
+  }
+  if (pathname === "/api/admin/pop-locations" && method === "GET") {
+    return jsonResponse({ pops: [] }, request);
+  }
+  if (pathname === "/api/admin/debug-settings" && method === "GET") {
+    return jsonResponse(
+      {
+        query_debug_visibility: "disabled",
+        api_call_debug_visibility: "disabled",
+      },
+      request,
+    );
   }
 
   // Saved Views localStorage bridge

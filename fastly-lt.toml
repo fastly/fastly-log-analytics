@@ -13,7 +13,7 @@ app = "yjFRqPBrgp7jt8BcXzq8hk"
 worker = "sEG8eK9doIBv2oDEbOpdJd"
 front = "386rW1xfyBWZaSoVqxHRoi"
 
-# Same token as the Elevation high-scale service (ZEZ4mcAjoSFDTg7tpkDKV2), same account as the monitored service.
+# Same token as the high-scale service, same account as the monitored service.
 [fastly_token]
 env = "FASTLY_API_KEY"
 env_file = "~/Projects/fastly-log-analytics/.env"

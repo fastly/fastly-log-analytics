@@ -39,3 +39,14 @@ Each runbook covers the same seven sections so a reader switching platforms can 
 - Non-Fastly object storage (GCS, S3, ADLS). Storage stays on Fastly Object Storage.
 - Multi-region deploy. Single-region.
 - Nomad / other orchestrators. The VM guides here use single-host docker compose; Kubernetes deployments are covered by the Helm charts under `deploy/chart/`.
+
+## Cloud Serverless (Fastly Compute + Fastly Object Storage)
+
+For zero-origin serverless deployments running entirely on Fastly Compute (`compute/cloud/`), Fastly VCL, Fastly Object Storage (FOS), and the Browser DuckDB-Wasm engine (`frontend/lib/cloud-engine/`):
+
+- [Architecture & Recommendation](../cloud/recommendation.md) — pipeline design ("Option F"), VCL `/_tick` clock, and Compute coordinator/worker fan-out.
+- [Cost Methodology](../cloud/cost-methodology.md) — Fastly Compute, VCL, and FOS pricing formulas and rollup economics.
+- [Security & Route Access](../cloud/security-route-access.md) — passkey authentication, front-service header validation, and route-level access control.
+- [Autonomous Cron Jobs](../cloud/crons/README.md) — bounded ingest conversion, compaction, rollup construction, and retention stages.
+- Build & deploy via root `Makefile`: `make cloud-build` and `make cloud-deploy NAME=<install>` (implemented in `compute/cloud/infra/provision.py` and `compute/cloud/tools/release.py`).
+

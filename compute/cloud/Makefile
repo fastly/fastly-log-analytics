@@ -5,8 +5,10 @@ VERBOSE ?= 0
 CARGO_BUILD_JOBS ?= 8
 export CARGO_BUILD_JOBS
 TARGET_MAX_GB ?= 20
+AR_wasm32_wasip1 ?= $(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 --print sysroot 2>/dev/null)/lib/rustlib/$(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 -vV 2>/dev/null | sed -n 's/^host: //p')/bin/llvm-ar
+export AR_wasm32_wasip1
 LT_REPO ?= $(HOME)/Projects/fastly-log-analytics-load-testing
-LT_CONFIG := $(CURDIR)/../../fastly-lt.toml
+LT_CONFIG := $(CURDIR)/fastly-lt.toml
 REPO_ROOT := $(abspath $(CURDIR)/../..)
 
 # Cargo never deletes superseded test binaries. Past the cap, drop this crate's

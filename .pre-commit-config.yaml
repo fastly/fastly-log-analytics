@@ -111,4 +111,4 @@ repos:
         stages: [pre-push]
         language: system
         pass_filenames: false
-        entry: bash -c 'if command -v cargo >/dev/null || [ -x "$HOME/.cargo/bin/cargo" ]; then PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path compute/Cargo.toml -p fastly-bot-scorer --locked; else echo "skipping scorer-test - cargo not on PATH (CI enforces it)"; fi'
+        entry: bash -c 'if command -v cargo >/dev/null || [ -x "$HOME/.cargo/bin/cargo" ]; then PATH="$HOME/.cargo/bin:$PATH" cargo test --manifest-path compute/Cargo.toml -p session-scorer --locked; else echo "skipping scorer-test - cargo not on PATH (CI enforces it)"; fi'

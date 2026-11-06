@@ -565,28 +565,61 @@ def step_1_deploy(
     cmd_env.update(env_vars)
     cmd_env["FLP_INVENTORY"] = str(inv_path)
     cmd_env["FASTLY_DISABLE_VERSION_CHECK"] = "1"
-    cmd_env.setdefault("CARGO_TARGET_DIR", str(root / "app/target"))
+    is_unified = (root / "compute/cloud").is_dir() and not (root / "app").is_dir()
+    cloud_rel = "compute/cloud" if is_unified else "app"
+    target_rel = "compute/target" if is_unified else "app/target"
+    cmd_env.setdefault("CARGO_TARGET_DIR", str(root / target_rel))
 
-    # The release packages the app/ tree at a commit, so an identical tree
+    # The release packages the cloud/app tree at a commit, so an identical tree
     # would rebuild the same package and only churn service versions.
     skip_reason = "--skip-deploy" if skip_deploy else None
     deployed_sha = inv_build_sha(json.loads(inv_path.read_text()))
     if not skip_deploy and deployed_sha:
-        try:
-            deployed_tree = subprocess.check_output(
-                ["git", "-C", str(root), "rev-parse", f"{deployed_sha}:app"],
-                text=True,
-                stderr=subprocess.DEVNULL,
+        if is_unified:
+            try:
+                deployed_tree = (
+                    subprocess.check_output(
+                        ["git", "-C", str(root), "rev-parse", f"{deployed_sha}:compute/cloud"],
+                        text=True,
+                        stderr=subprocess.DEVNULL,
+                    ).strip(),
+                    subprocess.check_output(
+                        ["git", "-C", str(root), "rev-parse", f"{deployed_sha}:frontend"],
+                        text=True,
+                        stderr=subprocess.DEVNULL,
+                    ).strip(),
+                )
+            except subprocess.CalledProcessError:
+                deployed_tree = None
+            head_tree = (
+                subprocess.check_output(
+                    ["git", "-C", str(root), "rev-parse", f"{head_sha}:compute/cloud"], text=True
+                ).strip(),
+                subprocess.check_output(
+                    ["git", "-C", str(root), "rev-parse", f"{head_sha}:frontend"], text=True
+                ).strip(),
+            )
+            if deployed_tree == head_tree:
+                skip_deploy = True
+                skip_reason = f"compute/cloud/ and frontend/ unchanged since deployed {deployed_sha[:7]}"
+        else:
+            try:
+                deployed_tree = subprocess.check_output(
+                    ["git", "-C", str(root), "rev-parse", f"{deployed_sha}:app"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except subprocess.CalledProcessError:
+                deployed_tree = None
+            head_tree = subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", f"{head_sha}:app"], text=True
             ).strip()
-        except subprocess.CalledProcessError:
-            deployed_tree = None
-        head_tree = subprocess.check_output(["git", "-C", str(root), "rev-parse", f"{head_sha}:app"], text=True).strip()
-        if deployed_tree == head_tree:
-            skip_deploy = True
-            skip_reason = f"app/ unchanged since deployed {deployed_sha[:7]}"
+            if deployed_tree == head_tree:
+                skip_deploy = True
+                skip_reason = f"app/ unchanged since deployed {deployed_sha[:7]}"
 
     if not skip_deploy:
-        build_root = root / ".worktrees/release" if (root / ".worktrees/release/app").is_dir() else root
+        build_root = root / ".worktrees/release" if (root / ".worktrees/release" / cloud_rel).is_dir() else root
         if build_root != root:
             subprocess.run(
                 ["git", "-C", str(build_root), "checkout", "--detach", head_sha],
@@ -594,18 +627,18 @@ def step_1_deploy(
             )
         print(f"[Step 1] Building & deploying HEAD ({head_sha[:7]}) to {install_name}...")
         subprocess.run(
-            ["make", "-C", str(build_root / "app"), "build"],
+            ["make", "-C", str(build_root / cloud_rel), "build"],
             env=cmd_env,
             check=True,
         )
         if build_root != root:
-            (root / "app/pkg").mkdir(parents=True, exist_ok=True)
+            (root / cloud_rel / "pkg").mkdir(parents=True, exist_ok=True)
             for name in ("flp.tar.gz", "provenance.json"):
-                src = build_root / "app/pkg" / name
+                src = build_root / cloud_rel / "pkg" / name
                 if src.is_file():
-                    shutil.copyfile(src, root / "app/pkg" / name)
+                    shutil.copyfile(src, root / cloud_rel / "pkg" / name)
         subprocess.run(
-            ["make", "-C", str(build_root / "app"), "deploy", f"NAME={install_name}"],
+            ["make", "-C", str(build_root / cloud_rel), "deploy", f"NAME={install_name}"],
             env=cmd_env,
             check=True,
         )
@@ -2535,9 +2568,14 @@ def main() -> int:
             s4: dict[str, Any] | None = None
             expect_min_requests = 0
             if not args.no_traffic:
+                lt_config = (
+                    (root / "compute/cloud/fastly-lt.toml")
+                    if (root / "compute/cloud/fastly-lt.toml").is_file()
+                    else (root / "fastly-lt.toml")
+                )
                 s4 = step_4_deploy_check(
                     work_dir,
-                    config=root / "fastly-lt.toml",
+                    config=lt_config,
                     lt_repo=args.lt_repo.expanduser(),
                 )
                 expect_min_requests = int(s4["expect_min_requests"])

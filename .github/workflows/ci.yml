@@ -444,27 +444,28 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: compute/scorer
+        working-directory: compute
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
-        # compute/scorer/rust-toolchain.toml pins the channel (1.90). We install
+        # compute/rust-toolchain.toml pins the channel (1.96.0). We install
         # that toolchain explicitly so `rustc`/`cargo` exist for the cache step
         # below; rustup then honours the toml override when cargo runs here.
         # Install rustup itself only if the runner image doesn't ship it.
         run: |
           if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --default-toolchain 1.90 --profile minimal
+              | sh -s -- -y --default-toolchain 1.96.0 --profile minimal
           fi
+          rustup toolchain install 1.96.0 --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: compute/scorer
+          workspaces: compute
 
       - name: Run scorer unit tests
         # Native (host-target) tests: Python↔Rust normalize/cookie/matrix
@@ -474,7 +475,7 @@ jobs:
         # also fails if Cargo.lock drifted. No Fastly CLI needed: the dev
         # profile builds for the host; Wasm is only built for deploy
         # (`make scorer-package`).
-        run: cargo test --locked
+        run: cargo test -p session-scorer -p compute-common --locked
 
       - name: Audit dependencies for RustSec advisories
         # The scorer verifies AES-GCM cookie integrity at the edge, so a future
@@ -487,3 +488,78 @@ jobs:
           cargo audit --version 2>/dev/null | grep -q ' 0.22.2$' \
             || cargo install cargo-audit --version 0.22.2 --locked --force
           cargo audit
+
+  cloud-ci:
+    name: Cloud Compute & Browser Engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned Rust 1.96.0 toolchain
+        run: |
+          rustup toolchain install 1.96.0 --component rustfmt,clippy,llvm-tools --target wasm32-wasip1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          host=$(rustc +1.96.0 -vV | sed -n 's/^host: //p')
+          echo "AR_wasm32_wasip1=$(rustc +1.96.0 --print sysroot)/lib/rustlib/$host/bin/llvm-ar" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: compute
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          uv sync
+          cd frontend && npm ci
+
+      - name: Install falco
+        run: |
+          FALCO_VERSION=2.3.0
+          case "$(uname -m)" in
+            x86_64)  ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          sudo curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin
+          sudo chmod +x /usr/local/bin/falco
+
+      - name: Verify catalog & VCL fixture sync
+        run: |
+          make cloud-sync-catalog
+          git diff --exit-code compute/cloud/src/logging/catalog.json compute/cloud/vcl/capture/templates.json
+
+      - name: Compute workspace lint, tests, and VCL tests
+        run: |
+          make compute-lint
+          make compute-test
+          cargo check --manifest-path compute/Cargo.toml -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp
+          cargo clippy --manifest-path compute/Cargo.toml -p fastly-logs-parquet-shell --locked --target wasm32-wasip1 --bin flp -- -D warnings
+          make vcl-test
+
+      - name: Cloud Python infra/tools tests & secret value scan
+        run: |
+          PYTHONPATH=. uv run pytest compute/cloud/infra compute/cloud/tools -o addopts="-q --strict-markers"
+          uv run python scripts/check_secret_values.py
+
+      - name: Cloud browser engine tests & STATIC_EXPORT verification
+        env:
+          STATIC_EXPORT: "1"
+          NEXT_PUBLIC_DEPLOYMENT_MODE: "cloud"
+        run: |
+          cd frontend && npx vitest run lib/cloud-engine/

@@ -166,6 +166,18 @@ _WATERFALL_ALIAS_MAP: tuple[tuple[str, str], ...] = (
 )
 
 
+class _WaterfallDict(dict[str, Any]):
+    """Waterfall dict returning ``{"avg": {...}}`` on serialization while allowing direct stage key access."""
+
+    def __getitem__(self, key: str) -> Any:
+        if key in super().keys():
+            return super().__getitem__(key)
+        avg = super().get("avg")
+        if isinstance(avg, Mapping) and key in avg:
+            return avg[key]
+        raise KeyError(key)
+
+
 def shape_waterfall_avg(
     edge_processing: Any = 0.0,
     origin_wait: Any = 0.0,
@@ -176,14 +188,14 @@ def shape_waterfall_avg(
     if isinstance(edge_processing, Mapping):
         row = edge_processing
         shaped = {k: max(0.0, float_or_zero(row.get(k, row.get(alias)))) for k, alias in _WATERFALL_ALIAS_MAP}
-        return {**shaped, "avg": dict(shaped)}
+        return _WaterfallDict({"avg": shaped})
     shaped = {
         "edge_processing": max(0.0, float_or_zero(edge_processing)),
         "origin_wait": max(0.0, float_or_zero(origin_wait)),
         "origin_download": max(0.0, float_or_zero(origin_download)),
         "client_download": max(0.0, float_or_zero(client_download)),
     }
-    return {"avg": shaped}
+    return _WaterfallDict({"avg": shaped})
 
 
 _UNSET: Any = object()

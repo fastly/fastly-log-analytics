@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   attachApiWaterfallRecorder,
@@ -17,6 +18,7 @@ import {
   FILTER_BAR_ROUTE_PREFIXES,
   parseArgs,
   parseLastFetchText,
+  PLAYWRIGHT_PATH,
   runDashboardCase,
   summarizeApiCalls,
   summarizeNumericSeries,
@@ -24,7 +26,7 @@ import {
 } from "./browser_verify.mjs";
 
 test("dashboard failure capture completes before another case can navigate", async () => {
-  const { chromium } = await import("../web/node_modules/playwright/index.mjs");
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
@@ -102,7 +104,7 @@ test("optional route coverage probes cloud files and unlinked origin/security", 
 });
 
 test("CLS is unmeasured without instrumentation and document-scoped when initialized", async () => {
-  const { chromium } = await import("../web/node_modules/playwright/index.mjs");
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext();

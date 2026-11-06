@@ -366,8 +366,8 @@ ignore = [
 # CLI tools and one-off scripts legitimately print to stdout.
 "scripts/*" = ["T201"]
 "backend/provision/cli.py" = ["T201"]
-"compute/cloud/infra/*" = ["T201"]
-"compute/cloud/tools/*" = ["T201"]
+"compute/cloud/infra/**" = ["T201"]
+"compute/cloud/tools/**" = ["T201"]
 # Tests can print benchmark timings, debug dumps, etc. — not production code.
 "tests/*" = ["T201"]
 

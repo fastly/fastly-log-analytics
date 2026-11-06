@@ -24,6 +24,7 @@ export const E2E_FRONTEND_PORT = FRONTEND_PORT
 
 const isCI = !!process.env.CI
 const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL?.trim()
+const IS_CLOUD_NATIVE = process.env.FLP_E2E_NATIVE === '1'
 
 export default defineConfig({
   testDir: './e2e',
@@ -35,11 +36,20 @@ export default defineConfig({
   // or doubling suite time. The E2E workflow sets workers=1 because every
   // browser worker shares one contract backend instance.
   retries: process.env.PLAYWRIGHT_RETRIES ? parseInt(process.env.PLAYWRIGHT_RETRIES, 10) : 0,
-  workers: process.env.PLAYWRIGHT_WORKERS ? parseInt(process.env.PLAYWRIGHT_WORKERS, 10) : 2,
+  workers: process.env.PLAYWRIGHT_WORKERS
+    ? parseInt(process.env.PLAYWRIGHT_WORKERS, 10)
+    : IS_CLOUD_NATIVE
+      ? 1
+      : 2,
   reporter: isCI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {
-    baseURL: externalBaseURL || `http://127.0.0.1:${FRONTEND_PORT}`,
+    baseURL:
+      externalBaseURL ||
+      (IS_CLOUD_NATIVE ? 'https://localhost:8443' : `http://127.0.0.1:${FRONTEND_PORT}`),
     ignoreHTTPSErrors: true,
+    ...(IS_CLOUD_NATIVE
+      ? { launchOptions: { args: ['--allow-insecure-localhost'] } }
+      : {}),
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -52,30 +62,44 @@ export default defineConfig({
   // the same lock dir).
   webServer: externalBaseURL
     ? undefined
-    : {
-        command: `npm run build && npx next start -H 127.0.0.1 -p ${FRONTEND_PORT}`,
-        env: {
-          NEXT_DIST_DIR: '.next-e2e',
-          // NEXT_PUBLIC_API_URL pins the openapi-fetch base to the
-          // frontend's OWN origin so client-side API calls go through
-          // Next.js's `/api/*` rewrite proxy → backend instead of the
-          // admin-SSH-tunnel branch in `lib/api.getApiBase()` (which
-          // would hit the backend directly on 18004 and trip CORS
-          // preflight from the 13004 origin — every page that depends
-          // on /api/services then renders empty).
-          NEXT_PUBLIC_API_URL: `http://127.0.0.1:${FRONTEND_PORT}`,
-          // The Next.js rewrite proxy for /api/* (next.config.ts) reads
-          // API_PROXY_URL; redirect it at the mocked backend too so
-          // SSR / route-handler calls go through the mock layer.
-          API_PROXY_URL: `http://127.0.0.1:${BACKEND_PORT}`,
+    : IS_CLOUD_NATIVE
+      ? {
+          command: 'node e2e/cloud/native-servers.mjs',
+          url: 'https://localhost:8443/share-login',
+          ignoreHTTPSErrors: true,
+          reuseExistingServer: !isCI,
+          timeout: 240_000,
+          cwd: join(__dirname),
+        }
+      : {
+          command: `npm run build && npx next start -H 127.0.0.1 -p ${FRONTEND_PORT}`,
+          env: {
+            NEXT_DIST_DIR: '.next-e2e',
+            // NEXT_PUBLIC_API_URL pins the openapi-fetch base to the
+            // frontend's OWN origin so client-side API calls go through
+            // Next.js's `/api/*` rewrite proxy → backend instead of the
+            // admin-SSH-tunnel branch in `lib/api.getApiBase()` (which
+            // would hit the backend directly on 18004 and trip CORS
+            // preflight from the 13004 origin — every page that depends
+            // on /api/services then renders empty).
+            NEXT_PUBLIC_API_URL: `http://127.0.0.1:${FRONTEND_PORT}`,
+            // The Next.js rewrite proxy for /api/* (next.config.ts) reads
+            // API_PROXY_URL; redirect it at the mocked backend too so
+            // SSR / route-handler calls go through the mock layer.
+            API_PROXY_URL: `http://127.0.0.1:${BACKEND_PORT}`,
+          },
+          url: `http://127.0.0.1:${FRONTEND_PORT}`,
+          reuseExistingServer: !isCI,
+          timeout: 180_000,
+          cwd: join(__dirname),
         },
-        url: `http://127.0.0.1:${FRONTEND_PORT}`,
-        reuseExistingServer: !isCI,
-        timeout: 180_000,
-        cwd: join(__dirname),
-      },
-  globalSetup: externalBaseURL ? undefined : require.resolve('./e2e/global-setup'),
-  globalTeardown: externalBaseURL ? undefined : require.resolve('./e2e/global-teardown'),
+  globalSetup:
+    externalBaseURL || IS_CLOUD_NATIVE ? undefined : require.resolve('./e2e/global-setup'),
+  globalTeardown: externalBaseURL
+    ? undefined
+    : IS_CLOUD_NATIVE
+      ? require.resolve('./e2e/cloud/csp-teardown')
+      : require.resolve('./e2e/global-teardown'),
 
   projects:
     process.env.PROJECTS === 'all'

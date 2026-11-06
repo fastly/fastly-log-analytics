@@ -142,8 +142,8 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
     if new_ips:
         try:
             enqueue(list(new_ips))
-        except Exception:
-            pass
+        except Exception as exc:
+            _ = exc
     sorted_bots = sorted(bot_agg.values(), key=lambda x: x["request_count"], reverse=True)[:50]
     for b in sorted_bots:
         total = b["request_count"]

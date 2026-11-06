@@ -166,8 +166,9 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
     }
   }, [enabled, activeServiceId, channelsParam, queryClient])
 
+  const cloudActive = IS_CLOUD_MODE || isCloudMode()
   return adminStreamHooks.useServiceStream(
-    enabled && bootstrapSettled && channelsParam.length > 0,
+    enabled && !cloudActive && bootstrapSettled && channelsParam.length > 0,
     `/api/admin/events/stream?channels=${channelsParam}`,
     (raw) => {
       let env: { channel?: string; data?: unknown }

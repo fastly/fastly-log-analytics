@@ -146,7 +146,7 @@ export function AppLayout({
     (isAnalyst && matchesPrefix(pathname, IS_CLOUD_MODE ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
     (!IS_CLOUD_MODE && (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
-  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin')
+  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login')
 
   const redirectAnnouncement = isLoading
     ? ''

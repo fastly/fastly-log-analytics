@@ -18,6 +18,8 @@ import { analystFetch } from '@/hooks/useBootstrap'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/adapter'
 import { authenticateWithPasskey, registerPasskey } from '@/lib/cloud-engine/passkeys'
 
+z.config({ jitless: true })
+
 type LoginResponse = components['schemas']['ShareLoginResponse']
 type AuthConfig = components['schemas']['AuthConfigResponse']
 type ClaimResponse = components['schemas']['ShareClaimResponse']
@@ -94,6 +96,7 @@ export function ShareLoginForm() {
   // 'loading' → render contextual zero-CLS skeleton; 'failed' → fail OPEN to the passcode form.
   const authConfigQuery = useQuery<AuthConfig>({
     queryKey: ['share-auth-config'],
+    enabled: !IS_CLOUD_MODE,
     retry: false,
     queryFn: async () => {
       const res = await analystFetch('/api/share/auth-config')
@@ -105,7 +108,7 @@ export function ShareLoginForm() {
   // Validate optional ?token= or ?invite= query parameter via /api/share/claim/{token}
   const claimQuery = useQuery<{ expired: boolean; data: ClaimResponse | null }>({
     queryKey: ['share-invite-claim', inviteToken],
-    enabled: Boolean(inviteToken),
+    enabled: !IS_CLOUD_MODE && Boolean(inviteToken),
     retry: false,
     queryFn: async () => {
       const res = await analystFetch(`/api/share/claim/${encodeURIComponent(inviteToken!)}`, {
@@ -119,12 +122,16 @@ export function ShareLoginForm() {
       return { expired: false, data }
     },
   })
-  const isInitialLoading = authConfigQuery.isLoading || (Boolean(inviteToken) && claimQuery.isLoading)
-  const configState: 'loading' | 'loaded' | 'failed' = isInitialLoading
-    ? 'loading'
-    : authConfigQuery.isError
-      ? 'failed'
-      : 'loaded'
+  const isInitialLoading =
+    !IS_CLOUD_MODE &&
+    (authConfigQuery.isLoading || (Boolean(inviteToken) && claimQuery.isLoading))
+  const configState: 'loading' | 'loaded' | 'failed' = IS_CLOUD_MODE
+    ? 'failed'
+    : isInitialLoading
+      ? 'loading'
+      : authConfigQuery.isError
+        ? 'failed'
+        : 'loaded'
   const claimedInvite = claimQuery.data?.data ?? null
   const error = loginError !== undefined
     ? loginError
@@ -157,7 +164,7 @@ export function ShareLoginForm() {
   // Auto-focus the email field once the passcode form is actually shown so
   // keyboard users land on the first input.
   React.useEffect(() => {
-    if (showPasscode) emailInputRef.current?.focus()
+    if (showPasscode && !IS_CLOUD_MODE) emailInputRef.current?.focus()
   }, [showPasscode])
 
   // Move focus to the error alert when one appears so SR users hear it
@@ -342,11 +349,9 @@ export function ShareLoginForm() {
                     placeholder="Initial setup code (first-time admin)"
                     disabled={busy}
                   />
-                  {cloudSetupCode && (
-                    <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy}>
-                      Verify Setup Code
-                    </Button>
-                  )}
+                  <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy || !cloudSetupCode.trim()}>
+                    Verify Setup Code
+                  </Button>
                 </form>
               ) : (
                 <form onSubmit={handleCloudPasskeyRegister} className="space-y-2 pt-2">

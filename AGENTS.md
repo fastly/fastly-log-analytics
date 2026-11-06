@@ -67,6 +67,17 @@ Large modules are split into packages whose `__init__.py` re-exports the histori
 | [`backend/models/`](backend/models/) | Pydantic schemas: `analytics/`, `common/`, `admin/` |
 | [`backend/provision/`](backend/provision/) | `orchestrator.py`, `fastly_api.py`, `fos_setup.py`, `cli.py`, `cmcd_fields.py`, `rum_assets.py`, `rum_orchestrator.py`, `declarative/` (reconciler), `session_scoring/` |
 | [`backend/utils/`](backend/utils/) | `telemetry/` (structlog config, Prometheus metrics, log flusher, proxy, system stats), `bot_sources/`, `tunnel/`, `remote_access.py`, `router_utils.py`, `error_utils.py`, `sse.py`, `date_utils.py`, `bounded_cache.py`, `time_window.py`, `hll.py`, `pii_masking.py`, `countries.py`, `pop_utils.py` |
+| [`compute/common/`](compute/common/) | Shared Rust crate (SigV4 signer, constant-time HMAC/SHA-256, FNV-1a, cookie parser, WASI clock/CSPRNG, Fastly store wrappers with KV retry backoff) compiled for `wasm32-wasip1` and native targets |
+| [`compute/cloud/`](compute/cloud/) | Cloud Serverless Fastly Compute app (`flp` + `flp-worker`), VCL templates (`vcl/`), and provisioning/deploy CLI (`infra/`, `tools/`) |
+| [`compute/scorer/`](compute/scorer/) | Fastly Compute `session-scorer` edge service |
+| [`frontend/lib/cloud-engine/`](frontend/lib/cloud-engine/) | Browser DuckDB-Wasm query engine, OPFS Parquet cache, rollup reader, and `/api/*` Cloud fetch adapter |
+
+### Cloud Serverless Mode (`compute/cloud/` & `frontend/lib/cloud-engine/`)
+
+- **Runtime:** Fastly Compute (`compute/cloud/`, Rust `wasm32-wasip1`), paired with a Next.js static export (`STATIC_EXPORT=1 NEXT_PUBLIC_DEPLOYMENT_MODE=cloud` via `frontend/lib/cloud-engine/`) and the front VCL service (`flp-front`).
+- **Tenancy:** One named Cloud install monitors one Fastly service in its own account. Compute is per-request; never assume shared in-process state survives across requests.
+- **Compute Resource Limits:** Stay strictly within Fastly Compute resource limits per execution: **128 MB** heap (`128`), **60s** runtime, **32** backend requests (`32`), **32** dictionary lookups, and **1000 ms** vCPU ceiling (`1000`, keeping coordinator/worker ticks under an 800 ms budget and summary bundles under 700 ms). Bound every tick job by calls, bytes, rows, and wall time, and make it resumable.
+- **Backends & Build Hygiene:** Backends use domain names, matching `override_host`/SNI/cert hostname, and `prefer_ipv6=false`. Compute fan-out uses a peer service (`flp-worker`), never its own domain. Trim `compute/target/` past **20 GB** (`TARGET_MAX_GB=20`) via `make trim-target`.
 
 Request-scoped context: [`backend/core/request_context.py`](backend/core/request_context.py) bundles `service_id`, `source`, `high_scale`, `telemetry`, `analyst_session`, and the opaque AES-GCM session-detail token helpers (`seal_session_token`, `open_session_token`). It folds `require_service_access` into construction, so no path builds a context without enforcing tenancy.
 
