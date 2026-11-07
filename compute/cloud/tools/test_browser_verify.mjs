@@ -208,7 +208,9 @@ test("nested data routes await delayed namespaced results, reject delayed errors
           const detail = {id:1,section:${JSON.stringify(section)},route:location.pathname,search:location.search,totalRows:42};
           window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,state:'pending'}}));
           const complete = () => window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,
-            state:${JSON.stringify(scenario === "error" && pathname === "/admin/session-scoring" ? "error" : "success")}
+            state:${JSON.stringify(scenario === "error" && pathname === "/admin/session-scoring" ? "error" : "success")},
+            error:${JSON.stringify(scenario === "error" && pathname === "/admin/session-scoring"
+              ? "Cloud query needs 877 files, over the 256-file budget; /api/file?key=k&token=sentinel-secret-value" : null)}
           }}));
           ${scenario === "timeout" && pathname === "/admin/session-scoring" ? ""
             : delayMs ? `setTimeout(complete,${delayMs});` : "complete();"}`;
@@ -237,6 +239,10 @@ test("nested data routes await delayed namespaced results, reject delayed errors
               assert.equal(readiness.pending, 1);
             } else {
               assert.match(error.message, /query failed/i);
+              assert.match(error.message, /\/admin\/session-scoring/);
+              assert.match(error.message, /api\.\/api\/services\/fixture-service\/scoring\/analytics/);
+              assert.match(error.message, /877 files, over the 256-file budget/);
+              assert.doesNotMatch(error.message, /sentinel-secret-value/);
               assert.equal(readiness.errors, 1);
               assert.equal(readiness.pending, 0);
             }

@@ -1025,6 +1025,21 @@ pub const RUM_SORT_COLUMNS: [&str; 9] = [
 /// RUM schemas), in the batches' schema. The sort is stable over the batches' order, so the same
 /// batches always give the same bytes.
 pub fn write_parquet(batches: &[&RecordBatch]) -> Result<Vec<u8>, String> {
+    write_sorted(
+        batches,
+        vec![KeyValue::new(
+            "flp_schema".into(),
+            SCHEMA_VERSION.to_string(),
+        )],
+    )
+}
+
+/// [`write_parquet`] with the caller's key-value metadata, so rows merged from window files keep
+/// the schema version those files were written with.
+pub(crate) fn write_sorted(
+    batches: &[&RecordBatch],
+    metadata: Vec<KeyValue>,
+) -> Result<Vec<u8>, String> {
     let schema = batches.first().map_or_else(schema, |b| b.schema());
     let cols: &[&str] =
         if schema.index_of("metric_name").is_ok() || schema.index_of("error_message").is_ok() {
@@ -1048,10 +1063,7 @@ pub fn write_parquet(batches: &[&RecordBatch]) -> Result<Vec<u8>, String> {
     write_with(
         schema,
         &sorted.iter().collect::<Vec<_>>(),
-        vec![KeyValue::new(
-            "flp_schema".into(),
-            SCHEMA_VERSION.to_string(),
-        )],
+        metadata,
         Some(sorting),
     )
 }

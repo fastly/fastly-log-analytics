@@ -2036,14 +2036,14 @@ async function sweepUnifiedPages(context, baseUrl, appDir, queryTimeoutMs) {
         const url = streamDetail && streamDetailUrl ? streamDetailUrl : `${baseUrl}${route}${compatibleDashboardQuery(query)}`;
         const result = await measureRouteWithTelemetry(page, url, async p => {
           if (needsFreshQuery) {
-            await waitForCloudReport(p, queryTimeoutMs);
+            await waitForCloudReport(p, queryTimeoutMs, label);
             if (streamDetail) await p.getByTestId("stream-detail-client").waitFor({ state: "visible", timeout: 30_000 });
           } else if (streamDetail) {
             await p.getByTestId("stream-detail-parameter-required").waitFor({ state: "visible", timeout: 30_000 });
           } else {
             await p.getByRole("heading").first().waitFor({ state: "visible", timeout: 30_000 });
           }
-          if (!needsFreshQuery) await waitForCloudIdle(p, queryTimeoutMs);
+          if (!needsFreshQuery) await waitForCloudIdle(p, queryTimeoutMs, label);
         });
         if (!result.deployed || result.status < 200 || result.status >= 400) {
           throw new Error(`Unified route unavailable: ${route}`);

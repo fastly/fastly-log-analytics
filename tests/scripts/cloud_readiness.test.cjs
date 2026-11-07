@@ -130,6 +130,22 @@ function cspPage(snapshots, legacy = false) {
   };
 }
 
+for (const [name, wait] of [['dashboard', waitForDashboardResult], ['report', waitForCloudReport]]) {
+  test(`${name} query failures name the route and the redacted query error`, async () => {
+    const document = documentState('?range=24h');
+    document.emit({ state: 'pending', section: 'api./api/origin/aggregates' });
+    document.emit({ state: 'error', section: 'api./api/origin/aggregates', status: 413,
+      error: 'HTTP 413: query exceeds the browser scan budget; /api/file?token=sentinel-query-token Bearer sentinel-bearer' });
+    const page = { ...cspPage([document.state()]), url: () => 'https://app.example/dashboard?session=sentinel-url-session' };
+    await assert.rejects(wait(page, 1000), error => {
+      assert.match(error.message, /query failed on \/dashboard \(api\.\/api\/origin\/aggregates: HTTP 413: query exceeds the browser scan budget/);
+      assert.doesNotMatch(error.message, /sentinel/);
+      return true;
+    });
+    await assert.rejects(wait(page, 1000, 'Origin (24h)'), /query failed on Origin \(24h\)/);
+  });
+}
+
 test('configuration-only readiness does not require an invented analytical query', async () => {
   const snapshot = await waitForCloudIdle(cspPage([
     { observed: false, ready: false, pending: 0, errors: 0, complete: 0 },

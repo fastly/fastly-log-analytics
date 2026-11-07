@@ -19,6 +19,7 @@ use super::{
 };
 use crate::{shell::Runtime, telemetry::compact};
 use bytes::Bytes;
+use parquet::file::metadata::ParquetMetaData;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,6 +41,12 @@ pub const VCPU_STOP_MS: u64 = 40;
 pub const MAX_EXECUTION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EXECUTION_ROWS: u64 = 100_000;
 pub const HEAP_STOP_MIB: u32 = 96;
+/// Window files of at most this many rows are decoded and rewritten together. Copied as they
+/// are, each keeps its own row group, and those groups' footer entries fill a compact's
+/// footer limit long before its byte target.
+pub const MERGE_SOURCE_ROWS: u64 = 2048;
+/// Rows rewritten into one row group, which bounds the encode work a pass adds.
+pub const MERGE_GROUP_ROWS: u64 = 4096;
 /// Calls held back for the watermark bump (with one retry) and the state write.
 const COMMIT_RESERVE: u32 = 10;
 /// Calls that persist a pass's progress after its last source read: the checkpoint PUT, the
@@ -523,6 +530,82 @@ fn file_hour(key: &str) -> Option<i64> {
         None => i64::try_from(compact::parse_compact_name(key)?.a).ok()?,
     };
     Some(start - start.rem_euclid(3600))
+}
+
+/// Appends merged window files as one sorted row group, or each as it is when they are a lone
+/// single group or don't rewrite to the same schema, row count and at most their bytes. An
+/// error carries how many of them were appended before it.
+fn append_merged(
+    writer: &mut checkpoint::Writer,
+    merge: &[(Bytes, ParquetMetaData)],
+) -> Result<(), (usize, String)> {
+    let single = merge.len() == 1 && merge[0].1.num_row_groups() <= 1;
+    if let Some((bytes, metadata)) = (!single).then(|| rewrite(merge)).flatten() {
+        if writer.accepts(&metadata) {
+            return writer.append(&bytes, &metadata).map_err(|error| (0, error));
+        }
+    }
+    for (appended, (bytes, metadata)) in merge.iter().enumerate() {
+        writer
+            .append(bytes, metadata)
+            .map_err(|error| (appended, error))?;
+    }
+    Ok(())
+}
+
+fn rewrite(merge: &[(Bytes, ParquetMetaData)]) -> Option<(Bytes, ParquetMetaData)> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let mut batches = Vec::new();
+    for (bytes, _) in merge {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes.clone())
+            .ok()?
+            .build()
+            .ok()?;
+        for batch in reader {
+            batches.push(batch.ok()?);
+        }
+    }
+    // The window writer's sort handles only the types window files are written with.
+    let supported = |field: &arrow_schema::FieldRef| {
+        use arrow_schema::{DataType, TimeUnit};
+        matches!(
+            field.data_type(),
+            DataType::Utf8
+                | DataType::Int64
+                | DataType::Int32
+                | DataType::Float64
+                | DataType::Boolean
+                | DataType::Timestamp(TimeUnit::Millisecond, _)
+        )
+    };
+    if !batches.first()?.schema().fields().iter().all(supported) {
+        return None;
+    }
+    let metadata = merge[0]
+        .1
+        .file_metadata()
+        .key_value_metadata()
+        .map(|kv| {
+            kv.iter()
+                .filter(|kv| kv.key != parquet::arrow::ARROW_SCHEMA_META_KEY)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let bytes = Bytes::from(
+        super::convert::write_sorted(&batches.iter().collect::<Vec<_>>(), metadata).ok()?,
+    );
+    let rows: u64 = merge
+        .iter()
+        .map(|(_, m)| m.file_metadata().num_rows() as u64)
+        .sum();
+    let input: usize = merge.iter().map(|(b, _)| b.len()).sum();
+    let reader = SerializedFileReader::new(bytes.clone()).ok()?;
+    let metadata = reader.metadata().clone();
+    (metadata.file_metadata().num_rows() as u64 == rows
+        && metadata.num_row_groups() == 1
+        && bytes.len() <= input)
+        .then_some((bytes, metadata))
 }
 
 /// The footer share of a group's input: a compact carries one row group per merged input.
@@ -1110,15 +1193,33 @@ impl<R: Runtime> Run<'_, '_, R> {
         let initial_next = job.next;
         let initial_parts = job.etags.len();
         let initial_copy = job.copying.clone();
-        while job.next < job.sources.len() {
-            if let Some(writer) = writer.as_mut() {
+        let mut merge: Vec<(Bytes, ParquetMetaData)> = Vec::new();
+        let mut merge_rows = 0u64;
+        while job.next + merge.len() < job.sources.len() {
+            if let (true, Some(writer)) = (merge.is_empty(), writer.as_mut()) {
                 self.upload_parts(&mut job, writer)?;
                 if writer.buffer.len() >= PART_BYTES {
                     break;
                 }
             }
-            let source = job.sources[job.next].clone();
-            if source.size > MAX_SOURCE_BYTES || source.rows > MAX_EXECUTION_ROWS {
+            let source = job.sources[job.next + merge.len()].clone();
+            let large = source.size > MAX_SOURCE_BYTES || source.rows > MAX_EXECUTION_ROWS;
+            let mergeable = source.rows <= MERGE_SOURCE_ROWS;
+            if !merge.is_empty()
+                && (large || !mergeable || merge_rows + source.rows > MERGE_GROUP_ROWS)
+            {
+                let w = writer.as_mut().ok_or("compact_writer_missing")?;
+                if let Err((appended, error)) = append_merged(w, &merge) {
+                    job.next += appended;
+                    let key = job.sources[job.next].key.clone();
+                    self.reject_input(job, &key, error);
+                    return Ok(());
+                }
+                job.next += std::mem::take(&mut merge).len();
+                merge_rows = 0;
+                continue;
+            }
+            if large {
                 if !self.affordable(9) || !self.within_limits() {
                     break;
                 }
@@ -1174,6 +1275,17 @@ impl<R: Runtime> Run<'_, '_, R> {
                 return Ok(());
             }
             let w = writer.get_or_insert_with(|| checkpoint::Writer::new(reader.metadata()));
+            if mergeable {
+                if !w.accepts(reader.metadata()) {
+                    self.reject_input(job, &source.key, "compact_schema_mismatch".into());
+                    return Ok(());
+                }
+                bytes_read += source.size;
+                rows_read += source.rows;
+                merge_rows += source.rows;
+                merge.push((bytes, reader.metadata().clone()));
+                continue;
+            }
             if let Err(error) = w.append(&bytes, reader.metadata()) {
                 self.reject_input(job, &source.key, error);
                 return Ok(());
@@ -1182,6 +1294,16 @@ impl<R: Runtime> Run<'_, '_, R> {
             rows_read += source.rows;
             self.upload_parts(&mut job, w)?;
             job.next += 1;
+        }
+        if !merge.is_empty() {
+            let w = writer.as_mut().ok_or("compact_writer_missing")?;
+            if let Err((appended, error)) = append_merged(w, &merge) {
+                job.next += appended;
+                let key = job.sources[job.next].key.clone();
+                self.reject_input(job, &key, error);
+                return Ok(());
+            }
+            job.next += merge.len();
         }
         let Some(mut writer) = writer else {
             self.report.more_pending = true;

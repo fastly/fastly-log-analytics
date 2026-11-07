@@ -30,6 +30,15 @@ function rowCount(data: unknown): number | null {
   return typeof rows === "number" && Number.isSafeInteger(rows) && rows >= 0 ? rows : null;
 }
 
+// Error messages and response bodies can carry SQL, keys or tokens, so only the status or error class is reported.
+function failureReason(failure: unknown): string {
+  if (failure instanceof Response) {
+    return failure.status === 413 ? "HTTP 413: query exceeds the browser scan budget" : `HTTP ${failure.status}`;
+  }
+  const name = failure instanceof Error ? failure.name : "";
+  return /^[A-Za-z]\w{0,63}$/.test(name) ? name : "Error";
+}
+
 export async function measureCloudQuery<T>(
   section: string,
   query: () => Promise<T>,
@@ -55,12 +64,12 @@ export async function measureCloudQuery<T>(
     const failed = data instanceof Response && !data.ok;
     globalThis.dispatchEvent(new CustomEvent("fla:cloud-query", {
       detail: { ...detail, state: failed ? "error" : "success", totalRows: rowCount(data),
-        status: data instanceof Response ? data.status : null },
+        status: data instanceof Response ? data.status : null, ...(failed ? { error: failureReason(data) } : {}) },
     }));
     return data;
   } catch (error) {
     globalThis.dispatchEvent(new CustomEvent("fla:cloud-query", {
-      detail: { ...detail, state: "error", totalRows: null },
+      detail: { ...detail, state: "error", totalRows: null, error: failureReason(error) },
     }));
     throw error;
   }

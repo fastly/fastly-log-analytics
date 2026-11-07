@@ -11009,6 +11009,38 @@ mod request_compaction {
     }
 
     #[test]
+    fn small_sources_merge_into_shared_row_groups_without_losing_rows() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 24);
+        let report = finish(&fake, TARGET);
+        assert_eq!(report.sources, 24);
+        let outputs = compacts(&fake);
+        assert_eq!(outputs.len(), 1);
+        let bytes = fake.bucket.borrow()[&outputs[0]].clone();
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(&bytes)).unwrap();
+        let metadata = reader.metadata().clone();
+        assert_eq!(metadata.file_metadata().num_rows(), 48);
+        // One row group per source would cap an hour's compact at the footer limit long
+        // before its byte target; merged groups keep a load hour to one or two files.
+        assert!(
+            metadata.num_row_groups() < 6,
+            "{} row groups",
+            metadata.num_row_groups()
+        );
+        for group in metadata.row_groups() {
+            assert!(!group.sorting_columns().unwrap_or(&Vec::new()).is_empty());
+        }
+        let mut values = column(&bytes, "ip");
+        values.sort();
+        let mut expected: Vec<String> = (0..24)
+            .flat_map(|i| [format!("a{i}"), format!("b{i}")])
+            .collect();
+        expected.sort();
+        assert_eq!(values, expected);
+    }
+
+    #[test]
     fn floor_key_survives_compaction_and_catalog_retirement() {
         let fake = Fake::new(NOW);
         seed(&fake, 2);
@@ -11974,20 +12006,20 @@ mod request_compaction {
                 break;
             }
         }
-        let made = compacts(&fake);
-        assert_eq!(made.len(), 3);
-        for key in &made {
-            assert_eq!(
-                fastly_log_analytics::telemetry::compact::parse_compact_name(key)
-                    .unwrap()
-                    .sources,
-                2
-            );
-        }
+        // Merged windows rewrite smaller than their sources, so compacts can merge again;
+        // every active compact still stays within the target.
         let query = format!("from={}&to={}", iso_url(HOUR), iso_url(HOUR + 3600));
         let active = catalog_keys(&fake, &query).1;
-        assert_eq!(active.len(), 4);
         assert!(active.contains(&big));
+        let made: Vec<&String> = active.iter().filter(|k| k.contains("/compact=")).collect();
+        assert_eq!(active.len(), made.len() + 1);
+        assert!((1..6).contains(&made.len()), "{made:?}");
+        let mut ips = Vec::new();
+        for key in made {
+            assert!(fake.bucket.borrow()[key].len() as u64 <= 2 * size + 1);
+            ips.extend(column(&fake.bucket.borrow()[key], "ip"));
+        }
+        assert_eq!(ips.len(), 12);
     }
 
     #[test]
@@ -12189,8 +12221,15 @@ mod request_compaction {
             names
                 .iter()
                 .map(|name| arrow_schema::Field::new(name, arrow_schema::DataType::Utf8, false))
+                .chain([arrow_schema::Field::new(
+                    "blob",
+                    arrow_schema::DataType::Binary,
+                    false,
+                )])
                 .collect::<Vec<_>>(),
         ));
+        // A binary column is outside the window writer's types, so these one-row files are
+        // copied as they are and each keeps its own footer entry.
         let columns = names
             .iter()
             .map(|name| {
@@ -12199,6 +12238,7 @@ mod request_compaction {
                     "x".repeat(96)
                 )])) as arrow_array::ArrayRef
             })
+            .chain([Arc::new(BinaryArray::from_iter_values([b"x"])) as arrow_array::ArrayRef])
             .collect::<Vec<_>>();
         let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
         let mut writer = parquet::arrow::ArrowWriter::try_new(Vec::new(), schema, None).unwrap();

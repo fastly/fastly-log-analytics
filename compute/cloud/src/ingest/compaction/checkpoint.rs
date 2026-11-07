@@ -81,12 +81,16 @@ impl Writer {
         Ok(())
     }
 
-    pub fn append(&mut self, bytes: &[u8], source: &ParquetMetaData) -> Result<(), String> {
+    /// Whether `source` has this output's schema and key-value metadata.
+    pub fn accepts(&self, source: &ParquetMetaData) -> bool {
         let expected = self.metadata.file_metadata();
         let incoming = source.file_metadata();
-        if expected.schema() != incoming.schema()
-            || expected.key_value_metadata() != incoming.key_value_metadata()
-        {
+        expected.schema() == incoming.schema()
+            && expected.key_value_metadata() == incoming.key_value_metadata()
+    }
+
+    pub fn append(&mut self, bytes: &[u8], source: &ParquetMetaData) -> Result<(), String> {
+        if !self.accepts(source) {
             return Err("compact_schema_mismatch".into());
         }
         if self.metadata.num_row_groups() + source.num_row_groups() > MAX_ROW_GROUPS {

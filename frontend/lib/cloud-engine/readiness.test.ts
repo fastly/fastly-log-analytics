@@ -55,7 +55,7 @@ it("does not turn stale-view exceptions or canceled queries into successful read
   try {
     const error = new Error("sentinel-private-query-token");
     await expect(measureCloudQuery("dashboard.bundle", async () => { throw error; })).rejects.toBe(error);
-    expect(events).toMatchObject([{ state: "pending" }, { state: "error", totalRows: null }]);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", totalRows: null, error: "Error" }]);
     expect(JSON.stringify(events)).not.toContain(error.message);
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
@@ -70,7 +70,23 @@ it("reports failed local API responses as errors without exposing response bodie
   try {
     const response = Response.json({ secret: "sentinel-private-response" }, { status: 503 });
     expect(await measureCloudQuery("api./api/origin/aggregates", async () => response)).toBe(response);
-    expect(events).toMatchObject([{ state: "pending" }, { state: "error", status: 503 }]);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", status: 503, error: "HTTP 503" }]);
+    expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("names an over-budget scan without exposing its response body", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const response = Response.json({ detail: "sentinel-private-detail" }, { status: 413 });
+    await measureCloudQuery("api./api/origin/aggregates", async () => response);
+    expect(events).toMatchObject([{ state: "pending" },
+      { state: "error", status: 413, error: "HTTP 413: query exceeds the browser scan budget" }]);
     expect(JSON.stringify(events)).not.toContain("sentinel");
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
