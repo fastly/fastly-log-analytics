@@ -972,6 +972,21 @@ class PostgresControlPlane:
             ).fetchall()
         return [(str(r[0]), int(r[1]), int(r[2])) for r in rows]
 
+    def source_storage_window(self, service_id: str, start: datetime, end: datetime) -> dict[str, int]:
+        """Source objects discovered in the inclusive window: count, bytes, and the RUM share of those bytes.
+
+        Every discovered object was written to FOS, so each one counts whatever its processing state.
+        """
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT count(*), coalesce(sum(size_bytes), 0), "
+                "coalesce(sum(size_bytes) FILTER (WHERE domain = ANY(%s)), 0) FROM high_scale_source_objects "
+                "WHERE service_id=%s AND discovered_at >= %s AND discovered_at <= %s",
+                (sorted(RUM_SOURCE_DOMAINS), service_id, start, end),
+            ).fetchone()
+        return {"files": int(row[0]), "bytes": int(row[1]), "rum_bytes": int(row[2])}
+
     def mark_archive_expired(self, manifest_id: str) -> None:
         _require_text(manifest_id, "manifest_id")
         with self.transaction() as connection:

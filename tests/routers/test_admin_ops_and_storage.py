@@ -1390,6 +1390,56 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
         _STORAGE_INSPECTION_CACHE.pop(("svc-archive-usage", "b", ""), None)
 
 
+def test_current_storage_reads_high_scale_source_and_rum_bytes_from_the_source_ledger(client):
+    """High-scale ingest never writes ``ingested_files``; billed source and RUM bytes come from its ledger."""
+    from backend.routers.usage import _STORAGE_INSPECTION_CACHE
+
+    svc = "test_current_storage_hs_svc"
+    src = {"name": svc, "service_id": svc, "bucket": "b", "prefix": ""}
+    _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+    app.dependency_overrides[get_source] = lambda: src
+    legacy = AssertionError("legacy ledger read")
+    try:
+        with (
+            patch("backend.routers.usage.get_high_scale_service_registry", return_value=_hs_registry(svc, object())),
+            patch("backend.core.metadata.get_storage_stats_window", side_effect=legacy),
+            patch("backend.core.metadata.ingest_log.get_rum_storage_stats_window", side_effect=legacy),
+            patch("backend.config.get_status", return_value={"storage_bytes": 10_000, "storage_files": 5}),
+            patch("backend.config.load_config", return_value={}),
+            patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=0),
+            patch(
+                "backend.high_scale.postgres_control.PostgresControlPlane.archive_storage_summary",
+                return_value={"live_bytes": 0, "live_objects": 0, "expired_30d_bytes": 0},
+            ),
+            patch("backend.routers.usage._get_fos_client") as mock_fos_client,
+            patch(
+                "backend.high_scale.postgres_control.PostgresControlPlane.source_storage_window",
+                create=True,
+                return_value={"files": 7, "bytes": 5_000, "rum_bytes": 1_200},
+            ) as mock_window,
+        ):
+            r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
+            _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+            mock_window.side_effect = RuntimeError("control plane unavailable")
+            r_err = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["total_files"], body["total_bytes"], body["rum_bytes"], body["regular_log_bytes"]) == (
+        7,
+        5_000,
+        1_200,
+        3_800,
+    )
+    mock_fos_client.assert_not_called()
+    sid, start, end = mock_window.call_args_list[0].args
+    assert sid == svc and end - start == timedelta(days=30), "the FOS 30-day minimum billing window"
+    assert r_err.status_code >= 400, "a failed ledger read must surface, not render as zero bytes"
+
+
 def test_prefill_rates_skips_metadata_averages_and_current_storage_reads_rum_bytes_from_metadata(client):
     from backend.routers.usage import (
         _PREFILL_META_CACHE,

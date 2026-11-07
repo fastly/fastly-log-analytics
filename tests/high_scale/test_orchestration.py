@@ -3756,6 +3756,33 @@ def test_source_activity_buckets_processed_rows_and_bytes_by_discovery_time_in_t
             )
 
 
+def test_source_storage_window_counts_every_discovered_object_and_splits_rum_bytes() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-source-storage"
+    start, end = datetime(2026, 10, 8, 22, 0, tzinfo=UTC), datetime(2026, 11, 7, 22, 0, tzinfo=UTC)
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            ("raw/request/a", "request", "source_deleted", 1000, 10, start),
+            ("raw/request/b", "request", "discovered", 200, 0, datetime(2026, 11, 1, tzinfo=UTC)),
+            ("raw/rum/c", "rum_vitals", "source_deleted", 30, 3, datetime(2026, 11, 2, tzinfo=UTC)),
+            ("raw/rum/d", "rum_errors", "source_missing", 4, 0, end),
+            ("raw/request/before", "request", "source_deleted", 9999, 1, start - timedelta(milliseconds=1)),
+            ("raw/rum/after", "rum_vitals", "source_deleted", 9999, 1, end + timedelta(milliseconds=1)),
+        ],
+    )
+    try:
+        assert control.source_storage_window(sid, start, end) == {"files": 4, "bytes": 1234, "rum_bytes": 34}
+        assert control.source_storage_window("svc-with-no-sources", start, end) == {
+            "files": 0, "bytes": 0, "rum_bytes": 0
+        }  # fmt: skip
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
 def test_clickhouse_adapter_chunks_large_inserts_and_cleans_up_on_mid_chunk_failure(monkeypatch) -> None:
     monkeypatch.setenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "2")
     base_row = _request_batch().rows[0]

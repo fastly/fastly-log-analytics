@@ -375,6 +375,22 @@ def _get_storage_stats(src: dict[str, Any], start_str: str, end_str: str) -> dic
         return repo_fn(None, src, start_str, end_str)
     from backend.core import metadata as metadata_db
 
+    service_id = str(src.get("name") or src.get("service_id") or "")
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        # High-scale ingest records each source object in its Postgres ledger; it never writes ``ingested_files``.
+        from backend.high_scale.postgres_control import PostgresControlPlane
+        from backend.utils.date_utils import parse_window_str_to_dt
+
+        window = PostgresControlPlane().source_storage_window(
+            service_id, parse_window_str_to_dt(start_str), parse_window_str_to_dt(end_str)
+        )
+        return {
+            "total_files": window["files"],
+            "total_bytes": window["bytes"],
+            "rum_bytes": window["rum_bytes"],
+            "_debug_queries": [],
+            "_debug_calls": [],
+        }
     total_files, total_bytes = metadata_db.get_storage_stats_window(src["name"], start_str, end_str)
     return {
         "total_files": total_files,
@@ -471,8 +487,8 @@ def usage_current_storage(
                 logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
 
             rum_bytes = 0
-            rum_from_meta = False
-            if storage_info_success:
+            rum_from_meta = "rum_bytes" in stats
+            if storage_info_success and not rum_from_meta:
                 try:
                     from backend.core.metadata.ingest_log import get_rum_storage_stats_window
 
@@ -520,6 +536,8 @@ def usage_current_storage(
         except Exception:
             logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
 
+        if "rum_bytes" in stats:
+            rum_bytes = int(stats["rum_bytes"])
         regular_log_bytes = total_bytes - rum_bytes
 
         if delete_after:
