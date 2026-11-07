@@ -12,7 +12,7 @@
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Every 240 seconds (`seconds=240`, `jitter=15`).
-- **Timing Rationale:** Strictly runs inside the 300s cache TTL window (`240s < 300s`) so default insight queries never encounter a cold cache miss.
+- **Timing Rationale:** Strictly runs inside the 300s cache TTL window (`240s < 300s`) so default insight queries never encounter a cold cache miss. On High-Scale a prewarm joins any evaluation already running for the same shape instead of starting a second scan, and page requests between refreshes are served the last result while it refreshes (see [Insights](../../pages/insights.md#backend)).
 - **Configurable Overrides:**
   - `provisioning.cron_insights_prewarmer.enabled` (default: `true`).
   - `provisioning.cron_insights_prewarmer.interval_seconds` (default: `240`).

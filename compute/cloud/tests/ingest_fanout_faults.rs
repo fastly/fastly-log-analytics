@@ -746,6 +746,7 @@ fn store<'a>(fake: &'a Fake, service: &'a Service) -> ingest::storage::Store<'a,
         access_key: AK.into(),
         secret_key: SK.into(),
         started: Instant::now(),
+        vcpu_start: 0,
     }
 }
 

@@ -375,6 +375,8 @@ class InsightCardBase[MetaT: WireSafeModel](BaseModel):
     summary: str
     items: list[InsightItem[MetaT]]
     category: str | None = None
+    # True on the "Evaluating…" cards of a pending high-scale response; those are not results.
+    placeholder: bool | None = None
 
 
 class ErrorSpikesInsightCard(InsightCardBase[ErrorSpikesMeta]):
@@ -651,6 +653,11 @@ class InsightsResponse(BaseResponse):
     computed_at: str
     window_hours: float
     baseline_hours: float
+    # High-scale only: ``pending`` cards are placeholders while the first evaluation runs; ``refreshing``
+    # marks a previous result served while a newer one is computed; ``refresh_error`` is why the last refresh failed.
+    pending: bool = False
+    refreshing: bool = False
+    refresh_error: str | None = None
 
 
 class InsightAvailability(BaseModel):

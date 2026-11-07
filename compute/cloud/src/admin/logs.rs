@@ -112,6 +112,7 @@ impl Installed {
             access_key: self.access_key.clone(),
             secret_key: self.secret_key.clone(),
             started,
+            vcpu_start: 0,
         }
     }
 }
@@ -501,6 +502,7 @@ fn logged_traffic(runtime: &impl Runtime) -> Outcome {
                 access_key,
                 secret_key,
                 started: Instant::now(),
+                vcpu_start: 0,
             });
             let sample = service.sample_rate.clamp(1, 100) as f64 / 100.0;
             if let Some(days) = traffic["days"].as_array_mut() {
@@ -733,6 +735,7 @@ pub(super) fn maintenance_stage(
         access_key: tick.access_key.to_owned(),
         secret_key: tick.secret_key.to_owned(),
         started: tick.started,
+        vcpu_start: 0,
     };
     let start = start % MAINT_STAGES.len();
     let mut outcome = MaintOutcome {

@@ -280,14 +280,53 @@ async function withLoading<T>(stage: LoadingStage, work: () => Promise<T>): Prom
   }
 }
 
+// Every Cloud scan needs the extents, catalog and services lookups, and a page
+// load runs many scans. Share one answer for a short window; writes clear it.
+const METADATA_TTL_MS = 15_000;
+type MetadataSnapshot = { status: number; contentType: string | null; body: string };
+const metadataCache = new Map<string, { at: number; value: Promise<MetadataSnapshot> }>();
+
+export function resetCloudMetadataCache(): void {
+  metadataCache.clear();
+}
+
+async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Response> {
+  signal.throwIfAborted();
+  let entry = metadataCache.get(path);
+  if (!entry || Date.now() - entry.at > METADATA_TTL_MS) {
+    const value = fetch(path).then(async (response) => ({
+      status: response.status, contentType: response.headers.get("content-type"), body: await response.text(),
+    }));
+    const created = { at: Date.now(), value };
+    entry = created;
+    metadataCache.set(path, created);
+    const evict = () => { if (metadataCache.get(path) === created) metadataCache.delete(path); };
+    value.then((snapshot) => { if (snapshot.status < 200 || snapshot.status > 299) evict(); }, evict);
+  }
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const snapshot = await Promise.race([entry.value, aborted]);
+    return new Response(snapshot.body, {
+      status: snapshot.status,
+      headers: snapshot.contentType ? { "content-type": snapshot.contentType } : undefined,
+    });
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function loadCloudCatalog(request: Request) {
-  const response = await fetch("/api/log-fields/catalog", { signal: request.signal });
+  const response = await fetchCloudMetadata("/api/log-fields/catalog", request.signal);
   if (!response.ok) return response;
   const catalog = await response.json() as components["schemas"]["LogFieldsCatalogResponse"];
   const serviceId = new URL(request.url).searchParams.get("service_id") ??
     request.headers.get("x-service-id");
   if (!serviceId) return cloudLogFieldsCatalog(catalog);
-  const services = await fetch("/api/services", { signal: request.signal });
+  const services = await fetchCloudMetadata("/api/services", request.signal);
   if (!services.ok) return services;
   const payload = await services.json() as {
     services?: Array<{ service_id: string; log_fields?: { custom_fields?: Array<Record<string, unknown>> } }>;
@@ -323,7 +362,7 @@ async function prepareCloudScan(request: Request): Promise<Request> {
   let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
   if (!end) {
     const response = await withLoading("range", () =>
-      fetch("/api/log-extents", { signal: request.signal }));
+      fetchCloudMetadata("/api/log-extents", request.signal));
     if (!response.ok) throw new Error(`Cloud range discovery failed (${response.status})`);
     const extents = await response.json() as { latest_log_at?: string | null };
     generation.assertCurrent();
@@ -401,6 +440,7 @@ async function handleCloudRequest(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
+  if (!["GET", "HEAD"].includes(request.method) && !isLocalScan(path, request.method)) resetCloudMetadataCache();
   if (request.method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
     return cloudRumMutation(request, (jobId, signal) => {
       const encoder = new TextEncoder();

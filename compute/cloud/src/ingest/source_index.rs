@@ -180,6 +180,7 @@ pub(crate) fn handle_authorized_worker<R: Runtime>(
             access_key,
             secret_key,
             started,
+            vcpu_start: 0,
         };
         prepare(
             &store,

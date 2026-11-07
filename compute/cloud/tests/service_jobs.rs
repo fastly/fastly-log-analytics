@@ -4519,6 +4519,7 @@ fn fence_try(platform: &Platform) -> Option<Result<(), String>> {
         access_key,
         secret_key,
         started: std::time::Instant::now(),
+        vcpu_start: 0,
     };
     let result = admin::reset::advance(&store);
     assert!(CALLS.with(Cell::get) <= 32);

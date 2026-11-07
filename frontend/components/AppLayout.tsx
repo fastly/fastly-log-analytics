@@ -15,7 +15,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ServiceSwitcher, SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useDebugStore, useServiceStore } from '@/stores/filterStore'
 import {
-  useBootstrap, useBootstrapSyncEffects, useIsAnalyst,
+  cloudCacheIdentity, useBootstrap, useBootstrapSyncEffects, useIsAnalyst,
   useEnforceMaskedFilters, useAnalystHeartbeat, useAnalystLogout,
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
@@ -189,11 +189,16 @@ export function AppLayout({
   }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId, pathname])
 
   const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
+  const cloudIdentity = isSuccess && bootstrapData ? cloudCacheIdentity(bootstrapData) : null
   React.useEffect(() => {
-    if (IS_CLOUD_MODE && needsPlotlyPrewarm && !needsLogin) {
-      void import('@/lib/cloud-engine/dashboard/client').then(({ prewarmDashboardEngine }) => prewarmDashboardEngine())
-    }
-  }, [needsPlotlyPrewarm, needsLogin])
+    if (!IS_CLOUD_MODE || !needsPlotlyPrewarm || needsLogin || cloudIdentity === null) return
+    // Setting a new session identity terminates the engine worker, so a worker
+    // prewarmed before it would be killed mid-download.
+    void import('@/lib/cloud-engine/dashboard/client').then(async ({ setDashboardCacheIdentity, prewarmDashboardEngine }) => {
+      await setDashboardCacheIdentity(cloudIdentity)
+      prewarmDashboardEngine()
+    })
+  }, [needsPlotlyPrewarm, needsLogin, cloudIdentity])
 
   const isLoginPage = pathname.startsWith('/share-login')
   if (isLoginPage || needsLogin) {

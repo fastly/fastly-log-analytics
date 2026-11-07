@@ -803,7 +803,7 @@ pub fn prepare_reserving<R: Runtime>(
 
 pub fn admitted<R: Runtime>(store: &Store<'_, R>) -> bool {
     store.within_wall()
-        && store.runtime.vcpu_ms() < 35
+        && store.vcpu_ms() < 35
         && store.runtime.heap_mib().is_none_or(|heap| heap < 96)
 }
 

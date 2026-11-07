@@ -615,6 +615,7 @@ pub fn coordinate_reporting<R: Runtime>(
         access_key: access_key.into(),
         secret_key: secret_key.into(),
         started,
+        vcpu_start: 0,
     };
     if let Some(usage) = runtime.usage_agg() {
         usage.set_caller("cron:ingest");

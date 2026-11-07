@@ -103,6 +103,7 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
         access_key,
         secret_key,
         started,
+        vcpu_start: 0,
     };
     match request_compact(&store, &cdn_key, target, 1) {
         Ok(report) => response(serde_json::json!({"status":"ok","report":report})),
@@ -246,6 +247,16 @@ pub fn request_compact<R: Runtime>(
         })
         .transpose()?
         .unwrap_or_default();
+    // [`VCPU_STOP_MS`] bounds the pass's own work. Live workers have spent 45-60 ms on startup
+    // and these state reads by now, so counting from the execution start admits nothing.
+    let store = &Store {
+        runtime,
+        service: store.service,
+        access_key: store.access_key.clone(),
+        secret_key: store.secret_key.clone(),
+        started: store.started,
+        vcpu_start: runtime.vcpu_ms(),
+    };
     let mut run = Run {
         store,
         cdn_key,
@@ -261,10 +272,12 @@ pub fn request_compact<R: Runtime>(
     };
     if run.state.lease_until > now {
         run.report.more_pending = true;
+        run.report.stopped = Some("lease_held".into());
         return Ok(run.report);
     }
-    if !run.affordable(4) || !run.within_limits() {
+    if let Some(stop) = run.limit_stop(4) {
         run.report.more_pending = true;
+        run.report.stopped = Some(stop.into());
         return Ok(run.report);
     }
     run.state.lease_until = now.saturating_add(70);
@@ -296,6 +309,8 @@ pub fn request_compact<R: Runtime>(
         run.resume_job(&mut pending)?;
     } else if !in_flight {
         pending = run.scan()?;
+    } else {
+        run.report.stopped = Some("plan_in_flight".into());
     }
     if run.bump {
         let committed = match commit_watermark(store, watermark, &mut pending, tail + 2) {
@@ -602,21 +617,42 @@ impl<R: Runtime> Run<'_, '_, R> {
     }
 
     fn within_limits(&self) -> bool {
-        self.store.within_wall()
-            && self.store.runtime.vcpu_ms() < VCPU_STOP_MS
-            && self
-                .store
-                .runtime
-                .heap_mib()
-                .is_none_or(|heap| heap < HEAP_STOP_MIB)
+        self.exceeded().is_none()
+    }
+
+    fn exceeded(&self) -> Option<&'static str> {
+        if !self.store.within_wall() {
+            Some("wall_limit")
+        } else if self.store.vcpu_ms() >= VCPU_STOP_MS {
+            Some("vcpu_limit")
+        } else if self
+            .store
+            .runtime
+            .heap_mib()
+            .is_some_and(|heap| heap >= HEAP_STOP_MIB)
+        {
+            Some("heap_limit")
+        } else {
+            None
+        }
+    }
+
+    /// Why the pass can't start more work needing `calls`, if it can't.
+    fn limit_stop(&self, calls: u32) -> Option<&'static str> {
+        if self.affordable(calls) {
+            self.exceeded()
+        } else {
+            Some("call_budget")
+        }
     }
 
     /// Only the pinned committed catalog may supply compaction inputs.
     fn scan(&mut self) -> Result<Vec<Queued>, String> {
         let mut pending = Vec::new();
         loop {
-            if !self.affordable(4) || !self.within_limits() {
+            if let Some(stop) = self.limit_stop(4) {
                 self.report.more_pending = true;
+                self.report.stopped.get_or_insert_with(|| stop.into());
                 break;
             }
             if self.state.catalog_objects.is_empty() {

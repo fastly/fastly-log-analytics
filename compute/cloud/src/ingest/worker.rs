@@ -367,6 +367,7 @@ pub fn handle_worker_ingest<R: Runtime>(runtime: &R, request: &http::Request) ->
         access_key: access,
         secret_key: secret,
         started,
+        vcpu_start: 0,
     };
     let stop = WORKER_STOP
         .min(Duration::from_millis(shard.stop_ms))

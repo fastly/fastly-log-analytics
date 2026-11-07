@@ -107,6 +107,7 @@ pub fn test_store<'a, R: Runtime>(runtime: &'a R, service: &'a Service) -> Store
         access_key: "AKIAIOSFODNN7EXAMPLE".into(),
         secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
         started: Instant::now(),
+        vcpu_start: 0,
     }
 }
 

@@ -326,6 +326,7 @@ fn run_with_cpu(fake: &Fake, svc: &Service, initial_cpu: u64) -> bundle::BundleR
         access_key: "ak".into(),
         secret_key: "sk".into(),
         started: Instant::now(),
+        vcpu_start: 0,
     };
     let report = bundle::summary_bundle(&store, "ck", RESERVE).unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);

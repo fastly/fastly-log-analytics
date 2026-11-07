@@ -240,6 +240,7 @@ fn a_sweep_that_lists_and_deletes_in_one_execution_survives_a_lagging_read_of_it
         access_key: "ak".into(),
         secret_key: "sk".into(),
         started: Instant::now(),
+        vcpu_start: 0,
     };
     let cutoff = BASE as i64 - 4 * 86_400; // 2027-01-11T08:00Z
     fake.new_execution();
@@ -336,6 +337,7 @@ fn cleanup_is_bounded_and_resumes_across_executions() {
         access_key: "ak".into(),
         secret_key: "sk".into(),
         started: Instant::now(),
+        vcpu_start: 0,
     };
     let (mut lost, mut vcpu_bound, mut job) = (0, false, Value::Null);
     for execution in 0..100 {
@@ -401,6 +403,7 @@ fn a_retention_sweep_after_an_earlier_stage_stops_at_the_execution_vcpu_bound() 
         access_key: "ak".into(),
         secret_key: "sk".into(),
         started: Instant::now(),
+        vcpu_start: 0,
     };
     fake.new_execution();
     // A Delete Data step earlier in the same execution already spent this much.

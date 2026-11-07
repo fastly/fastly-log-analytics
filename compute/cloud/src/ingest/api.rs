@@ -92,6 +92,7 @@ pub fn open<'a, R: Runtime>(
         access_key,
         secret_key,
         started,
+        vcpu_start: 0,
     })
 }
 
@@ -1288,6 +1289,7 @@ pub fn ingested_files<R: Runtime>(
         access_key: String::new(),
         secret_key: String::new(),
         started,
+        vcpu_start: 0,
     };
     let (mut rows, mut skipped) = (Vec::new(), 0u64);
     let relist = days_to_relist(&page.objects, token.is_some());

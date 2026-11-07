@@ -2645,6 +2645,7 @@ fn dispatch(
                 access_key: ak.clone(),
                 secret_key: sk.clone(),
                 started,
+                vcpu_start: 0,
             };
             let mut stage = StageRow::new(TICK_STAGES[2], runtime.now());
             let span = VcpuSpan::start(runtime);

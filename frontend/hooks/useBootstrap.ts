@@ -145,6 +145,12 @@ let _lastReconciledBootstrapState: {
   activeServiceId: string | null
 } | null = null
 
+// Cloud bootstrap payloads carry the signed-in user, which the shared response type omits.
+export function cloudCacheIdentity(bootstrap: unknown): string {
+  const user = (bootstrap as { user?: { id?: string | null; role?: string | null } | null } | null | undefined)?.user
+  return user?.id ? `${user.id}:${user.role ?? 'admin'}` : 'anonymous'
+}
+
 export function useBootstrapSyncEffects(
   query: { data: unknown; isStale?: boolean; dataUpdatedAt?: number },
   activeServiceId?: string | null,
@@ -190,11 +196,7 @@ export function useBootstrapSyncEffects(
         needsLogin: Boolean(data.settings?.needs_login),
       })
       void import('@/lib/cloud-engine/dashboard/client').then(({ setDashboardCacheIdentity }) =>
-        setDashboardCacheIdentity(
-          data.user?.id
-            ? `${data.user.id}:${data.user.role ?? 'admin'}`
-            : 'anonymous',
-        ),
+        setDashboardCacheIdentity(cloudCacheIdentity(data)),
       )
     }
     const { setServices, setInitialized } = useServiceStore.getState()

@@ -145,6 +145,8 @@ pub struct Store<'a, R: Runtime> {
     pub access_key: String,
     pub secret_key: String,
     pub started: Instant,
+    /// Execution vCPU already spent when this store's work began; vCPU admission counts from here.
+    pub vcpu_start: u64,
 }
 
 /// Loops stop starting new work past this elapsed time, well inside the 60s trial runtime.
@@ -210,7 +212,12 @@ impl<R: Runtime> Store<'_, R> {
     pub fn can_afford(&self, calls: u32, reserve: u32, vcpu_stop_ms: u64) -> bool {
         self.within_wall()
             && self.runtime.admin_remaining_calls() >= calls + reserve
-            && self.runtime.vcpu_ms() < vcpu_stop_ms
+            && self.vcpu_ms() < vcpu_stop_ms
+    }
+
+    /// vCPU spent since [`Self::vcpu_start`].
+    pub fn vcpu_ms(&self) -> u64 {
+        self.runtime.vcpu_ms().saturating_sub(self.vcpu_start)
     }
 
     fn fos(

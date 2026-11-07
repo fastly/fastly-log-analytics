@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import sqlite3
+from collections.abc import Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from threading import Event, Lock, current_thread
@@ -2255,12 +2256,59 @@ def test_insights_detector_telemetry_survives_async_and_worker_boundaries(fails:
     assert current_clickhouse_scope()["section_id"] is None
 
 
-def test_partial_insights_results_are_cached_briefly_with_card_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+class _GatedInsightsClient(_InsightsClient):
+    """Detector reads (and optionally the metadata reads) wait for ``gate`` so a scan can be held in flight."""
+
+    def __init__(self, *args: Any, gate_meta: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.gate = Event()
+        self.gate.set()
+        self._gate_meta = gate_meta
+
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+        meta = "insight:history" in sql or "insight:fields" in sql
+        if self._gate_meta or not meta:
+            assert self.gate.wait(10)
+        return super().execute(sql, params)
+
+    def scans(self) -> int:
+        return sum("insight:history" in sql for sql, _ in self.calls)
+
+
+def _drain_insights_refreshes() -> None:
+    from backend.high_scale.insights import evaluator
+
+    for job in list(evaluator._INSIGHTS_JOBS.values()):
+        job.future.exception(timeout=10)
+
+
+def _insights_body(response) -> dict[str, Any]:
+    return json.loads(response.model_dump_json(by_alias=True))
+
+
+@pytest.fixture
+def _insights_clock(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
     import time
 
     real_monotonic = time.monotonic
     skew = [0.0]
     monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + skew[0])
+    from backend.high_scale.insights import evaluator
+
+    for cache in (
+        evaluator._INSIGHTS_CACHE,
+        evaluator._INSIGHTS_TELEMETRY_CACHE,
+        evaluator._INSIGHTS_PARTIAL_CACHE,
+        evaluator._INSIGHTS_LAST_RESULT,
+        evaluator._INSIGHTS_REFRESH_FAILURES,
+    ):
+        cache.clear()
+    yield skew
+    _drain_insights_refreshes()
+
+
+def test_partial_insights_results_keep_card_errors_and_refresh_in_background(_insights_clock: list[float]) -> None:
+    skew = _insights_clock
     spike = {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]}
     client = _InsightsClient(spike, fail={"latency_regression"})
     service = HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
@@ -2282,16 +2330,229 @@ def test_partial_insights_results_are_cached_briefly_with_card_errors(monkeypatc
     forced = insights_endpoint(service, req, None, None, force_refresh=True)
     assert not forced.is_cached and len(client.calls) == 2 * computed_calls
 
+    # Past the partial-result freshness, the error cards are still served at once while one refresh runs.
     skew[0] += 61.0
     client._fail = set()
     expired = insights_endpoint(service, req, None, None)
-    assert not expired.is_cached and len(client.calls) == 3 * computed_calls
-    assert _insight_cards(expired)["latency_regression"]["severity"] == "clean"
+    body = _insights_body(expired)
+    assert (
+        expired.is_cached
+        and body["refreshing"] is True
+        and body["computed_at"] == _insights_body(forced)["computed_at"]
+    )
+    assert _insight_cards(expired)["latency_regression"]["severity"] == "error"
+    _drain_insights_refreshes()
+    assert len(client.calls) == 3 * computed_calls
 
     skew[0] += 200.0
     clean = insights_endpoint(service, req, None, None)
     assert clean.is_cached and len(client.calls) == 3 * computed_calls
     assert _insight_cards(clean)["latency_regression"]["severity"] == "clean"
+    assert _insights_body(clean)["refreshing"] is False
+
+
+def test_stale_insights_are_served_immediately_while_a_single_refresh_runs(_insights_clock: list[float]) -> None:
+    skew = _insights_clock
+    spike = {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]}
+    client = _GatedInsightsClient(spike)
+    service = HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+
+    first = _insights_body(insights_endpoint(service, req, None, None))
+    assert first["pending"] is False and first["refreshing"] is False and client.scans() == 1
+
+    skew[0] += 301.0
+    client.gate.clear()
+    started = monotonic()
+    stale = [insights_endpoint(service, req, None, None) for _ in range(3)]
+    assert monotonic() - started < 2.0
+    for response in stale:
+        body = _insights_body(response)
+        assert response.is_cached and body["refreshing"] is True and body["pending"] is False
+        assert body["computed_at"] == first["computed_at"] and body["insights"] == first["insights"]
+
+    client.gate.set()
+    _drain_insights_refreshes()
+    assert client.scans() == 2
+    refreshed = insights_endpoint(service, req, None, None)
+    body = _insights_body(refreshed)
+    assert refreshed.is_cached and body["refreshing"] is False and client.scans() == 2
+    assert body["computed_at"] > first["computed_at"]
+    assert _insight_cards(refreshed)["error_spikes"]["severity"] == "critical"
+
+
+def test_cold_insights_answer_with_pending_cards_instead_of_holding_the_request(
+    _insights_clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.high_scale.insights import evaluator
+
+    monkeypatch.setattr(evaluator, "_COLD_WAIT_SECONDS", 0.05)
+    spike = {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]}
+    client = _GatedInsightsClient(spike)
+    client.gate.clear()
+    service = HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+
+    started = monotonic()
+    pending = [insights_endpoint(service, req, None, None) for _ in range(2)]
+    assert monotonic() - started < 2.0 and client.scans() == 1
+    for response in pending:
+        body = _insights_body(response)
+        cards = _insight_cards(response)
+        assert body["pending"] is True and body["computed_at"] == "" and not response.is_cached
+        assert set(cards) == EVERY_CARD
+        assert all(
+            card["severity"] == "info" and card["summary"].startswith("Evaluating") and card["placeholder"] is True
+            for card in cards.values()
+        )
+
+    client.gate.set()
+    _drain_insights_refreshes()
+    done = insights_endpoint(service, req, None, None)
+    body = _insights_body(done)
+    assert done.is_cached and body["pending"] is False and body["computed_at"]
+    assert _insight_cards(done)["error_spikes"]["severity"] == "critical" and client.scans() == 1
+    assert not any(card.get("placeholder") for card in _insight_cards(done).values())
+
+
+def test_background_insights_failures_stay_visible(
+    _insights_clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.high_scale.insights import evaluator
+
+    skew = _insights_clock
+    monkeypatch.setattr(evaluator, "_COLD_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(evaluator, "_META_WAIT_SECONDS", 0.05)
+    client = _GatedInsightsClient(gate_meta=True)
+    service = HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+
+    # A scan that fails after the request stopped waiting is raised to the next request, not hidden behind pending.
+    client.gate.clear()
+    client._fail = {"history"}
+    assert _insights_body(insights_endpoint(service, req, None, None))["pending"] is True
+    client.gate.set()
+    _drain_insights_refreshes()
+    with pytest.raises(RuntimeError, match="unavailable"):
+        insights_endpoint(service, req, None, None)
+
+    client._fail = set()
+    monkeypatch.setattr(evaluator, "_COLD_WAIT_SECONDS", 5.0)
+    good = _insights_body(insights_endpoint(service, req, None, None))
+    assert good["pending"] is False and good["refresh_error"] is None
+
+    # A failing refresh keeps serving the last result and says the refresh failed.
+    skew[0] += 301.0
+    client._fail = {"history"}
+    insights_endpoint(service, req, None, None)
+    _drain_insights_refreshes()
+    stale = _insights_body(insights_endpoint(service, req, None, None))
+    assert stale["computed_at"] == good["computed_at"] and stale["insights"] == good["insights"]
+    assert stale["refresh_error"] == "RuntimeError"
+
+
+def _hs_service(client: _InsightsClient) -> HighScaleService:
+    return HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
+
+
+def test_queued_cold_insights_answer_pending_and_start_their_wait_when_the_scan_begins(
+    _insights_clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from backend.high_scale.insights import evaluator
+
+    monkeypatch.setattr(evaluator, "_COLD_POOL", ThreadPoolExecutor(max_workers=1))
+    monkeypatch.setattr(evaluator, "_COLD_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(evaluator, "_META_WAIT_SECONDS", 0.05)
+    busy = _GatedInsightsClient(gate_meta=True)
+    busy.gate.clear()
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+    blocker = insights_endpoint(_hs_service(busy), req, None, None)
+    assert _insights_body(blocker)["pending"] is True and blocker.insights == []
+
+    # Queued behind the busy scan: every poll answers "pending" at once instead of raising.
+    client = _InsightsClient()
+    for _ in range(3):
+        started = monotonic()
+        body = _insights_body(insights_endpoint(_hs_service(client), req, None, None))
+        assert monotonic() - started < 2.0
+        assert body["pending"] is True and body["insights"] == [] and body["computed_at"] == ""
+        assert body["window_hours"] == 24 and body["baseline_hours"] == 168
+    assert client.calls == []
+
+    busy.gate.set()
+    _drain_insights_refreshes()
+    done = insights_endpoint(_hs_service(client), req, None, None)
+    assert done.is_cached and set(_insight_cards(done)) == EVERY_CARD
+
+
+def test_cold_insights_are_not_starved_by_prewarms_or_stale_refreshes(
+    _insights_clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from backend.high_scale.insights import evaluator
+
+    monkeypatch.setattr(evaluator, "_REFRESH_POOL", ThreadPoolExecutor(max_workers=1))
+    busy = _GatedInsightsClient(gate_meta=True)
+    busy.gate.clear()
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+    forced: dict[str, Any] = {}
+
+    def prewarm(name: str, client: _InsightsClient) -> None:
+        forced[name] = insights_endpoint(_hs_service(client), req, None, None, force_refresh=True)
+
+    threads = [threading.Thread(target=prewarm, args=("busy", busy))]
+    threads[0].start()
+    while not evaluator._INSIGHTS_JOBS:
+        sleep(0.01)
+    queued = _InsightsClient()
+    threads.append(threading.Thread(target=prewarm, args=("queued", queued)))
+    threads[1].start()
+    while len(evaluator._INSIGHTS_JOBS) < 2:
+        sleep(0.01)
+
+    # A page request for a shape nobody has evaluated runs on its own pool, even when its shape's
+    # prewarm is queued behind another prewarm.
+    for client in (_InsightsClient(), queued):
+        response = insights_endpoint(_hs_service(client), req, None, None)
+        assert _insights_body(response)["pending"] is False and set(_insight_cards(response)) == EVERY_CARD
+    assert sum("insight:history" in sql for sql, _ in queued.calls) == 1
+
+    busy.gate.set()
+    for thread in threads:
+        thread.join(10)
+    assert set(_insight_cards(forced["queued"])) == EVERY_CARD
+    assert sum("insight:history" in sql for sql, _ in queued.calls) == 1
+
+
+def test_insights_failures_are_retried_after_a_forced_refresh_or_once_old(
+    _insights_clock: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.high_scale.insights import evaluator
+
+    skew = _insights_clock
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+    client = _InsightsClient(fail={"history"})
+    service = _hs_service(client)
+    with pytest.raises(RuntimeError):
+        insights_endpoint(service, req, None, None, force_refresh=True)
+    client._fail = set()
+    assert _insights_body(insights_endpoint(service, req, None, None))["pending"] is False
+
+    other = _GatedInsightsClient(fail={"history"}, gate_meta=True)
+    other.gate.clear()
+    monkeypatch.setattr(evaluator, "_COLD_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(evaluator, "_META_WAIT_SECONDS", 0.0)
+    assert _insights_body(insights_endpoint(_hs_service(other), req, None, None))["pending"] is True
+    other.gate.set()
+    _drain_insights_refreshes()
+    other._fail = set()
+    skew[0] += 61.0
+    monkeypatch.setattr(evaluator, "_COLD_WAIT_SECONDS", 5.0)
+    assert _insights_body(insights_endpoint(_hs_service(other), req, None, None))["pending"] is False
 
 
 def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3767,6 +3767,7 @@ fn catalog_prefetch_accounts_for_allocated_held_response_capacity() {
         access_key: String::new(),
         secret_key: String::new(),
         started: Instant::now(),
+        vcpu_start: 0,
     };
     let mut prefetched = ingest::catalog::Prefetched::new();
     let mut held = Vec::with_capacity(1 << 20);
@@ -4891,6 +4892,7 @@ fn store<'a>(fake: &'a Fake, service: &'a Service) -> ingest::storage::Store<'a,
         access_key: "ak".into(),
         secret_key: "sk".into(),
         started: Instant::now(),
+        vcpu_start: 0,
     }
 }
 
@@ -11063,7 +11065,7 @@ mod request_compaction {
         let before = fake.bucket.borrow().clone();
         let report = run(&fake, TARGET);
         assert!(report.more_pending);
-        assert_eq!(report.stopped, None);
+        assert_eq!(report.stopped.as_deref(), Some("lease_held"));
         assert_eq!(fake.kv.borrow()[compaction::STATE_KEY], (2, active));
         assert_eq!(*fake.bucket.borrow(), before);
     }
@@ -11168,7 +11170,29 @@ mod request_compaction {
         let report = run(&fake, TARGET);
         assert_eq!(report.compacts, 0);
         assert!(report.more_pending);
+        assert_eq!(report.stopped.as_deref(), Some("vcpu_limit"));
         assert!(compacts(&fake).is_empty());
+    }
+
+    #[test]
+    fn compaction_cpu_budget_excludes_vcpu_spent_before_the_pass() {
+        // Live workers reach the pass with 45-60 ms of execution vCPU already spent.
+        let fake = Fake::new(NOW);
+        seed(&fake, 2);
+        fake.vcpu_step.set(0);
+        let mut report = Report::default();
+        for _ in 0..16 {
+            fake.new_request();
+            fake.vcpu.set(60);
+            report =
+                compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 0).unwrap();
+            if report.compacts > 0 || !report.more_pending {
+                break;
+            }
+        }
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.compacts, 1, "stopped: {:?}", report.stopped);
+        assert_eq!(compacts(&fake).len(), 1);
     }
 
     #[test]

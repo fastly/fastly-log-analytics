@@ -575,6 +575,27 @@ describe("summary readers", () => {
     });
   });
 
+  it("lists summaries when an unrequested raw catalog page carries an empty summary_files", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const hours = pick("hour", (e) => !e.early);
+    // The catalog's raw pages always serialize `summary_files: []`.
+    const source = fixtureSource(
+      [{ ...page(RAW), summary_files: [] } as ReturnType<typeof page>],
+      BUFFERS,
+      { json: [], files: [] },
+      [page(hours)],
+    );
+    const result = await runDashboard(source, { from, to });
+    expect(source.log.summary).toHaveLength(1);
+    expect(result.stats).toMatchObject({
+      summaryListing: "listed",
+      summaryFiles: 2,
+    });
+    const listed = await run(from, to, RAW, hours);
+    expect(source.log.files.toSorted()).toEqual(listed.files.toSorted());
+  });
+
   it("classifies summaries against filters and edgeOnly while respecting truncated fields", async () => {
     const dayKey = pick("day")[0].key;
     const h08Key = pick("hour", (e) => e.start < HOUR_09 && !e.early)[0].key;

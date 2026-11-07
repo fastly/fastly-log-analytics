@@ -47506,6 +47506,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -47606,6 +47617,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -47718,6 +47740,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -49063,6 +49096,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -49440,6 +49484,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -49585,6 +49640,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -49741,6 +49807,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -49851,6 +49928,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -50304,6 +50392,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -50416,6 +50515,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -50523,6 +50633,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -50630,6 +50751,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -52466,6 +52598,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -52576,6 +52719,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -52695,6 +52849,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -52963,6 +53128,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -53065,6 +53241,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -54612,6 +54799,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -55622,6 +55820,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -57282,6 +57491,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -57677,6 +57897,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -57789,6 +58020,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -63209,6 +63451,27 @@
           "baseline_hours": {
             "type": "number",
             "title": "Baseline Hours"
+          },
+          "pending": {
+            "type": "boolean",
+            "title": "Pending",
+            "default": false
+          },
+          "refreshing": {
+            "type": "boolean",
+            "title": "Refreshing",
+            "default": false
+          },
+          "refresh_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Error"
           }
         },
         "type": "object",
@@ -63775,6 +64038,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -65218,6 +65492,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -65558,6 +65843,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -65701,6 +65997,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -65824,6 +66131,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -67297,6 +67615,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -67397,6 +67726,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -67480,6 +67820,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -67563,6 +67914,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -68540,6 +68902,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -68623,6 +68996,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -68929,6 +69313,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -69478,6 +69873,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -70655,6 +71061,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -71080,6 +71497,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -71834,6 +72262,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -73520,6 +73959,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -74635,6 +75085,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -74745,6 +75206,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -74863,6 +75335,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -75008,6 +75491,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -75153,6 +75647,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -75290,6 +75795,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -81989,6 +82505,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -83606,6 +84133,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -84081,6 +84619,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -84639,6 +85188,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -84903,6 +85463,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -85651,6 +86222,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",
@@ -87196,6 +87778,17 @@
               }
             ],
             "title": "Category"
+          },
+          "placeholder": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder"
           }
         },
         "type": "object",

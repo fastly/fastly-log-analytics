@@ -122,7 +122,8 @@ async function listPages(
       );
     }
     for (const file of body.files) files.set(file.key, file);
-    if (Array.isArray(body.summary_files)) {
+    // Catalog pages always carry `summary_files`, empty unless requested.
+    if (includeSummaries && Array.isArray(body.summary_files)) {
       summariesIncluded = true;
       for (const file of body.summary_files) summaryFiles.set(file.key, file);
     }

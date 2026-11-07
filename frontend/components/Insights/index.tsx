@@ -23,13 +23,14 @@ import { useDateFormat } from '@/hooks/useSSE'
 import { client, queryKeys, unwrapClient } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
+  categoryToSection,
   groupInsightsBySection,
   historyHoursFromExtents,
   normalizeTabKey,
   SECTION_LOADING_MESSAGES,
 } from '@/lib/utils'
 import { useSessionRoleStore } from '@/stores/filterStore'
-import type { FiltersPayload } from '@/types/api'
+import type { FiltersPayload, InsightCardData } from '@/types/api'
 import { InsightCard } from './InsightCard'
 import { InsightCardSkeleton } from './shared'
 import { InsightTabs, InsightsHeaderControls } from './InsightTabsAndControls'
@@ -46,6 +47,14 @@ export { getSecurityContent } from './InsightHelpModal/sections/security'
 // Without this lift, React Query treats every ReportLayout re-render
 // as a fresh mount and re-fires the /api/insights + /api/insight-
 // availability requests — the local-dev duplicate-fetch pattern.
+// High-Scale answers before a slow evaluation finishes: `pending` (first run, placeholder
+// cards) or `refreshing` (previous result while a newer one runs). Cloud omits both.
+const INSIGHTS_POLL_MS = 5000
+type InsightsStatus = { pending?: boolean; refreshing?: boolean } | undefined
+const isEvaluating = (data: InsightsStatus) => data?.pending === true || data?.refreshing === true
+const isPendingPlaceholder = (insight: InsightCardData) =>
+  'placeholder' in insight && insight.placeholder === true
+
 interface InsightsBodyProps {
   activeServiceId: string | null | undefined
   windowHours: string
@@ -57,6 +66,7 @@ interface InsightsBodyProps {
   full: (iso: string) => string
   abbr: () => string
   prefetchMonthBaseline?: boolean
+  scanReady?: boolean
 }
 
 function InsightsBody({
@@ -70,6 +80,7 @@ function InsightsBody({
   full,
   abbr,
   prefetchMonthBaseline = false,
+  scanReady = true,
 }: InsightsBodyProps) {
   // Which section tab is active. Controlled here (not inside InsightTabs) so the
   // selection survives the loading→loaded swap between the two InsightTabs
@@ -77,7 +88,7 @@ function InsightsBody({
   const [activeTab, setActiveTab] = useQueryState('tab', parseAsString.withDefault(normalizeTabKey(initialTab)))
   const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
 
-  const { data, isLoading, error, isSuccess, isFetching } = useQuery({
+  const { data, isLoading: scanLoading, error, isSuccess, isFetching } = useQuery({
     queryKey: hasActiveFilters
       ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
       : ['insights', activeServiceId, windowHours, baselineHours],
@@ -92,15 +103,17 @@ function InsightsBody({
         },
       }))
     },
-    enabled: !!activeServiceId,
-    staleTime: 60000,
+    enabled: !!activeServiceId && scanReady,
+    staleTime: (query) => (isEvaluating(query.state.data) ? 0 : 60000),
+    refetchInterval: (query) => (isEvaluating(query.state.data) ? INSIGHTS_POLL_MS : false),
     placeholderData: keepPreviousData,
   })
+  const isLoading = scanLoading || (!!activeServiceId && !scanReady && !data && !error)
 
   // The 24h/720h month comparison is a full-retention scan; start it only after the
   // selected scan has finished so the two never compete for the same backend.
   const queryClient = useQueryClient()
-  const primarySettled = isSuccess && !isFetching
+  const primarySettled = isSuccess && !isFetching && !isEvaluating(data)
   const monthPrefetchedFor = React.useRef<string | null>(null)
   React.useEffect(() => {
     if (!activeServiceId || !prefetchMonthBaseline || !primarySettled) return
@@ -139,11 +152,17 @@ function InsightsBody({
     staleTime: 5 * 60 * 1000,
   })
 
+  const isPending = data?.pending === true
   const allInsights = data?.insights
+  const pendingInsights = useMemo(
+    () => (allInsights ?? []).filter((insight) => isPendingPlaceholder(insight)),
+    [allInsights],
+  )
   const filteredInsights = useMemo(() => {
     if (!allInsights) return []
-    if (statusFilter === 'all') return allInsights
-    return allInsights.filter((insight) => insight.severity === statusFilter)
+    const findings = allInsights.filter((insight) => !isPendingPlaceholder(insight))
+    if (statusFilter === 'all') return findings
+    return findings.filter((insight) => insight.severity === statusFilter)
   }, [allInsights, statusFilter])
 
   // Skeleton cards rendered while /api/insights is in flight come from the
@@ -192,6 +211,26 @@ function InsightsBody({
         </Alert>
       )}
 
+      {data && (isEvaluating(data) || data.refresh_error) && (
+        <div className="flex flex-col gap-2">
+          {isEvaluating(data) && (
+            <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
+              {data.pending || !data.computed_at
+                ? <span>Evaluating detectors in the background…</span>
+                : <span>Refreshing (computed {relative(data.computed_at)})</span>}
+            </div>
+          )}
+          {data.refresh_error && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Last refresh failed</AlertTitle>
+              <AlertDescription>{data.refresh_error}</AlertDescription>
+            </Alert>
+          )}
+        </div>
+      )}
+
       {isLoading ? (
         groupedSkeletons.length > 0 ? (
           <InsightTabs
@@ -234,14 +273,14 @@ function InsightsBody({
           groups={groupedInsights}
           activeTab={activeTab}
           onTabChange={setActiveTab}
-          isLoading={false}
+          isLoading={isPending}
           emptyMessage={isCloudMode() ? ({ section }) => {
             const supported = availableInsights.some((entry) => section.key === 'all' || entry.category === section.key)
             return supported && statusFilter !== 'all'
               ? { title: 'No insights match this status', description: 'Change the status filter to see the evaluated detectors.' }
               : { title: 'No detectors available in this category', description: 'No analysis was performed here. Check the Cloud algorithm and log-field availability below.' }
           } : undefined}
-          renderCards={({ cards }) => (
+          renderCards={({ cards, section }) => (
             <div
               className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
               data-testid="insights-grid"
@@ -254,6 +293,16 @@ function InsightsBody({
                   baselineHours={baselineHours}
                 />
               ))}
+              {pendingInsights
+                .filter((insight) => section.key === 'all' || categoryToSection(insight.category).key === section.key)
+                .map((insight) => (
+                  <InsightCardSkeleton
+                    key={insight.id}
+                    title={insight.title}
+                    description={insight.description}
+                    loadingMessage={insight.summary}
+                  />
+                ))}
             </div>
           )}
         />
@@ -354,7 +403,7 @@ export function InsightsClient({
   const { relative, full, abbr } = useDateFormat()
 
   const queryClient = useQueryClient()
-  const { data: extentsData } = useQuery({
+  const { data: extentsData, isPending: extentsPending } = useQuery({
     queryKey: queryKeys.logExtents(activeServiceId),
     queryFn: async () => {
       return unwrapClient(client.GET('/api/log-extents'))
@@ -372,6 +421,11 @@ export function InsightsClient({
   // both selects without firing the intermediate query.
   const appliedWindowHours = useDebounce(windowHours, 400)
   const appliedBaselineHours = useDebounce(baselineHours, 400)
+  // Until the history-adapted defaults resolve (and the debounce catches up to
+  // them), the applied pair is the static 24h/7d fallback; scanning it would
+  // start a full-baseline scan that is cancelled moments later.
+  const defaultsResolved = (selectedWindow != null && selectedBaseline != null) || !extentsPending
+  const scanReady = defaultsResolved && appliedWindowHours === windowHours && appliedBaselineHours === baselineHours
 
   const handleRescan = async () => {
     if (!activeServiceId || isRescanning) return
@@ -447,6 +501,7 @@ export function InsightsClient({
             full={full}
             abbr={abbr}
             prefetchMonthBaseline={prefetchMonthBaseline}
+            scanReady={scanReady}
           />
         </>
       )}

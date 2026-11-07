@@ -5445,6 +5445,8 @@ export interface components {
             items: components["schemas"]["InsightItem_AsnConcentrationMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** AsnConcentrationMeta */
         AsnConcentrationMeta: {
@@ -5478,6 +5480,8 @@ export interface components {
             items: components["schemas"]["InsightItem_AsnHostingShiftMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** AsnHostingShiftMeta */
         AsnHostingShiftMeta: {
@@ -5513,6 +5517,8 @@ export interface components {
             items: components["schemas"]["InsightItem_AsnMetroPerformanceMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** AsnMetroPerformanceMeta */
         AsnMetroPerformanceMeta: {
@@ -6001,6 +6007,8 @@ export interface components {
             items: components["schemas"]["InsightItem_BotnetGroupingMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** BotnetGroupingMeta */
         BotnetGroupingMeta: {
@@ -6168,6 +6176,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CacheCollapseMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CacheCollapseMeta */
         CacheCollapseMeta: {
@@ -6216,6 +6226,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CacheHitCliffMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CacheHitCliffMeta */
         CacheHitCliffMeta: {
@@ -6271,6 +6283,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CacheTtlMismatchMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CacheTtlMismatchMeta */
         CacheTtlMismatchMeta: {
@@ -6308,6 +6322,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CacheabilityRegressionMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CacheabilityRegressionMeta */
         CacheabilityRegressionMeta: {
@@ -6463,6 +6479,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CipherSpreadMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CipherSpreadMeta */
         CipherSpreadMeta: {
@@ -6498,6 +6516,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CityErrorSpikesMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CityErrorSpikesMeta */
         CityErrorSpikesMeta: {
@@ -6531,6 +6551,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CityLatencyRegressionsMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CityLatencyRegressionsMeta */
         CityLatencyRegressionsMeta: {
@@ -6564,6 +6586,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CitySurgesMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CitySurgesMeta */
         CitySurgesMeta: {
@@ -7197,6 +7221,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ConnectionAbuseMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ConnectionAbuseMeta */
         ConnectionAbuseMeta: {
@@ -7234,6 +7260,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ConnectionTypeMixMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ConnectionTypeMixMeta */
         ConnectionTypeMixMeta: {
@@ -7269,6 +7297,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ContentDiscoveryMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ContentDiscoveryMeta */
         ContentDiscoveryMeta: {
@@ -7370,6 +7400,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CrawlerDisparityMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CrawlerDisparityMeta */
         CrawlerDisparityMeta: {
@@ -7423,6 +7455,8 @@ export interface components {
             items: components["schemas"]["InsightItem_CredentialEnumerationMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** CredentialEnumerationMeta */
         CredentialEnumerationMeta: {
@@ -8040,6 +8074,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ErrorSpikesMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ErrorSpikesMeta */
         ErrorSpikesMeta: {
@@ -8417,6 +8453,8 @@ export interface components {
             items: components["schemas"]["InsightItem_HighScale5xxMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** HighScale5xxMeta */
         HighScale5xxMeta: {
@@ -8972,6 +9010,8 @@ export interface components {
             items: components["schemas"]["InsightItem_Http3FallbackMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** Http3FallbackMeta */
         Http3FallbackMeta: {
@@ -9099,6 +9139,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ImageOptimizationOpportunitiesMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ImageOptimizationOpportunitiesMeta */
         ImageOptimizationOpportunitiesMeta: {
@@ -9134,6 +9176,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ImpossibleDistanceMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ImpossibleDistanceMeta */
         ImpossibleDistanceMeta: {
@@ -10788,6 +10832,18 @@ export interface components {
             window_hours: number;
             /** Baseline Hours */
             baseline_hours: number;
+            /**
+             * Pending
+             * @default false
+             */
+            pending: boolean;
+            /**
+             * Refreshing
+             * @default false
+             */
+            refreshing: boolean;
+            /** Refresh Error */
+            refresh_error?: string | null;
         };
         /**
          * InviteMutationAck
@@ -10959,6 +11015,8 @@ export interface components {
             items: components["schemas"]["InsightItem_LatencyRegressionMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** LatencyRegressionMeta */
         LatencyRegressionMeta: {
@@ -11399,6 +11457,8 @@ export interface components {
             items: components["schemas"]["InsightItem_LowAndSlowMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** LowAndSlowMeta */
         LowAndSlowMeta: {
@@ -11514,6 +11574,8 @@ export interface components {
             items: components["schemas"]["InsightItem_MethodDriftMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** MethodDriftMeta */
         MethodDriftMeta: {
@@ -11570,6 +11632,8 @@ export interface components {
             items: components["schemas"]["InsightItem_MetroDeliveryDegradationMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** MetroDeliveryDegradationMeta */
         MetroDeliveryDegradationMeta: {
@@ -11623,6 +11687,8 @@ export interface components {
             items: components["schemas"]["InsightItem_NetworkAsnHealthMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** NetworkAsnHealthMeta */
         NetworkAsnHealthMeta: {
@@ -12147,6 +12213,8 @@ export interface components {
             items: components["schemas"]["InsightItem_NewAsnTrafficMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** NewAsnTrafficMeta */
         NewAsnTrafficMeta: {
@@ -12180,6 +12248,8 @@ export interface components {
             items: components["schemas"]["InsightItem_NewCityTrafficMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** NewCityTrafficMeta */
         NewCityTrafficMeta: {
@@ -12209,6 +12279,8 @@ export interface components {
             items: components["schemas"]["InsightItem_NewCountryTrafficMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** NewCountryTrafficMeta */
         NewCountryTrafficMeta: {
@@ -12238,6 +12310,8 @@ export interface components {
             items: components["schemas"]["InsightItem_NewProbeUrlsMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** NewProbeUrlsMeta */
         NewProbeUrlsMeta: {
@@ -12623,6 +12697,8 @@ export interface components {
             items: components["schemas"]["InsightItem_OriginErrorRateMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** OriginErrorRateMeta */
         OriginErrorRateMeta: {
@@ -12652,6 +12728,8 @@ export interface components {
             items: components["schemas"]["InsightItem_OriginIpFailureMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** OriginIpFailureMeta */
         OriginIpFailureMeta: {
@@ -12774,6 +12852,8 @@ export interface components {
             items: components["schemas"]["InsightItem_OriginLatencySpikeMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** OriginLatencySpikeMeta */
         OriginLatencySpikeMeta: {
@@ -13004,6 +13084,8 @@ export interface components {
             items: components["schemas"]["InsightItem_OriginRetriesMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** OriginRetriesMeta */
         OriginRetriesMeta: {
@@ -13472,6 +13554,8 @@ export interface components {
             items: components["schemas"]["InsightItem_OrphanedDeepCrawlMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** OrphanedDeepCrawlMeta */
         OrphanedDeepCrawlMeta: {
@@ -13596,6 +13680,8 @@ export interface components {
             items: components["schemas"]["InsightItem_PayloadCompressionRegressionMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** PayloadCompressionRegressionMeta */
         PayloadCompressionRegressionMeta: {
@@ -13855,6 +13941,8 @@ export interface components {
             items: components["schemas"]["InsightItem_PopLatencyRegressionMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** PopLatencyRegressionMeta */
         PopLatencyRegressionMeta: {
@@ -14469,6 +14557,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ProxySurgeMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ProxySurgeMeta */
         ProxySurgeMeta: {
@@ -14879,6 +14969,8 @@ export interface components {
             items: components["schemas"]["InsightItem_RefererMonocultureMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** RefererMonocultureMeta */
         RefererMonocultureMeta: {
@@ -14922,6 +15014,8 @@ export interface components {
             items: components["schemas"]["InsightItem_RegionLatencyMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** RegionLatencyMeta */
         RegionLatencyMeta: {
@@ -14957,6 +15051,8 @@ export interface components {
             items: components["schemas"]["InsightItem_RepeatedPatternsFpMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** RepeatedPatternsFpMeta */
         RepeatedPatternsFpMeta: {
@@ -15008,6 +15104,8 @@ export interface components {
             items: components["schemas"]["InsightItem_RepeatedPatternsMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** RepeatedPatternsMeta */
         RepeatedPatternsMeta: {
@@ -15059,6 +15157,8 @@ export interface components {
             items: components["schemas"]["InsightItem_RequestSizeAnomalyMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** RequestSizeAnomalyMeta */
         RequestSizeAnomalyMeta: {
@@ -15123,6 +15223,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ResidentialFingerprintDispersionMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ResidentialFingerprintDispersionMeta */
         ResidentialFingerprintDispersionMeta: {
@@ -17105,6 +17207,8 @@ export interface components {
             items: components["schemas"]["InsightItem_SessionHarvestingMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** SessionHarvestingMeta */
         SessionHarvestingMeta: {
@@ -17688,6 +17792,8 @@ export interface components {
             items: components["schemas"]["InsightItem_ShieldPathDegradationMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** ShieldPathDegradationMeta */
         ShieldPathDegradationMeta: {
@@ -17841,6 +17947,8 @@ export interface components {
             items: components["schemas"]["InsightItem_StaleBrowserVersionMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** StaleBrowserVersionMeta */
         StaleBrowserVersionMeta: {
@@ -18030,6 +18138,8 @@ export interface components {
             items: components["schemas"]["InsightItem_TailLatencyMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** TailLatencyMeta */
         TailLatencyMeta: {
@@ -18124,6 +18234,8 @@ export interface components {
             items: components["schemas"]["InsightItem_TimeoutSplitMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** TimeoutSplitMeta */
         TimeoutSplitMeta: {
@@ -18393,6 +18505,8 @@ export interface components {
             items: components["schemas"]["InsightItem_UaMonocultureMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** UaMonocultureMeta */
         UaMonocultureMeta: {
@@ -18925,6 +19039,8 @@ export interface components {
             items: components["schemas"]["InsightItem_WafSignalSpikesMeta_"][];
             /** Category */
             category?: string | null;
+            /** Placeholder */
+            placeholder?: boolean | null;
         };
         /** WafSignalSpikesMeta */
         WafSignalSpikesMeta: {
