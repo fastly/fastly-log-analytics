@@ -168,7 +168,7 @@ describe("origin cloud-engine module (F18)", () => {
     const summarySql = buildOriginSummarySql("requests", "TRUE", cols);
     expect(summarySql).toContain("starts_with(\"cache\", 'MISS')");
     expect(summarySql).toContain("starts_with(\"cache\", 'PASS')");
-    expect(summarySql).toContain("APPROX_QUANTILE");
+    expect(summarySql).toContain("QUANTILE_CONT");
 
     const tsSql = buildOriginTimeseriesSql("requests", "TRUE", cols, {
       metric: "ttfb",
@@ -310,6 +310,62 @@ describe("origin cloud-engine module (F18)", () => {
     expect(route.anomaly_eligible).toBe(true);
     expect(route.anomaly_static).toBe(true);
   });
+
+  it("ranks many distinct URLs, origin IPs and hosts with exact percentiles inside DuckDB's memory", async () => {
+    const getBuiltin = (process as unknown as { getBuiltinModule: (id: string) => unknown }).getBuiltinModule;
+    const req = (getBuiltin("module") as { createRequire: (url: string) => (id: string) => unknown })
+      .createRequire(import.meta.url);
+    const path = getBuiltin("path") as { resolve: (...p: string[]) => string; join: (...p: string[]) => string };
+    const duckdb = req("@duckdb/duckdb-wasm/dist/duckdb-node-blocking") as {
+      createDuckDB(bundles: unknown, logger: unknown, runtime: unknown): Promise<{
+        instantiate(): Promise<void>; reset(): void | Promise<void>; mod: { HEAPU8: Uint8Array };
+        connect(): { query(sql: string): { toArray(): Record<string, unknown>[] }; close(): void };
+      }>;
+      VoidLogger: new () => unknown;
+      NODE_RUNTIME: unknown;
+    };
+    const dist = path.resolve(process.cwd(), "node_modules/@duckdb/duckdb-wasm/dist");
+    const db = await duckdb.createDuckDB({ eh: {
+      mainModule: path.join(dist, "duckdb-eh.wasm"), mainWorker: path.join(dist, "duckdb-node-eh.worker.cjs"),
+    } }, new duckdb.VoidLogger(), duckdb.NODE_RUNTIME);
+    await db.instantiate();
+    const conn = db.connect();
+    try {
+      conn.query("SET memory_limit = '256MB'");
+      // 20k URLs, origin IPs and hosts, six misses each: key k takes (k·37 mod 1000) + j²·500 ms for j = 0..5.
+      conn.query(`CREATE TABLE requests AS SELECT 1700000000000 + i AS ts_ms, epoch_ms(1700000000000 + i)::TIMESTAMPTZ AS "timestamp",
+        '/u/' || (i % 20000)::VARCHAR AS url, '10.' || (i % 20000)::VARCHAR AS oip, 'h' || (i % 20000)::VARCHAR || '.example' AS host,
+        ((i % 20000) * 37 % 1000 + (i // 20000) * (i // 20000) * 500)::DOUBLE * 1000 AS ottfb, 0.01::DOUBLE AS ttfb,
+        ((i % 20000) * 37 % 1000 + 2000)::DOUBLE * 1000 AS ottlb, 3000000::BIGINT AS elapsed, 'MISS' AS cache,
+        200::BIGINT AS ost, 1000::BIGINT AS obytes, i % 2 = 0 AS edge, 'POP' || (i % 50)::VARCHAR AS pop
+        FROM range(120000) rows(i)`);
+      const heap = db.mod.HEAPU8.byteLength;
+      const query = async (sql: string) => conn.query(sql).toArray().map((row) => Object.fromEntries(
+        Object.entries({ ...row }).map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value])));
+      const read = {
+        assertCurrent: () => undefined, getCustomColumnTypes: () => new Map(), executeSql: query,
+      } as unknown as Parameters<typeof handleOriginRequest>[3];
+      const post = async (route: string, body: Record<string, unknown>) => (await handleOriginRequest(
+        new Request(`http://localhost/api/origin/${route}`, { method: "POST", body: JSON.stringify({
+          start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", ...body,
+        }) }), undefined, undefined, read))!.json();
+      const data = await post("aggregates", {
+        sections: ["summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"],
+        slow_urls_min_requests: 5, ip_health_limit: 20, timeseries_percentile: "p99",
+      });
+      const hosts = await post("drilldown", { dimension: "host", limit: 20 });
+      // Approximate per-group digests took ~1 GB of WASM heap here, outside DuckDB's memory limit.
+      expect(db.mod.HEAPU8.byteLength - heap).toBeLessThan(64 * 1024 * 1024);
+      expect(data.slow_urls.rows).toHaveLength(20);
+      expect(data.slow_urls.rows[0]).toMatchObject({ requests: 6, p50_ms: 4249, p95_ms: 12374, p99_ms: 13274 });
+      expect(data.ip_health.rows).toHaveLength(20);
+      expect(hosts.rows).toHaveLength(20);
+      expect(data.summary).toMatchObject({ has_data: true, ottfb_p50_ms: 3749.5, ottfb_p75_ms: 8499.25, ottfb_p95_ms: 13199.05, ottfb_p99_ms: 13439.01 });
+    } finally {
+      conn.close();
+      await db.reset();
+    }
+  }, 60_000);
 
   it("dispatches /api/origin/* routes via handleOriginRequest", async () => {
     const mockExecutor: OriginSqlExecutor = {

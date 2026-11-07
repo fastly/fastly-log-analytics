@@ -353,8 +353,8 @@ export function buildOriginSummarySql(
   const totalPasses = hasCache
     ? `COUNT(*) FILTER (WHERE starts_with("cache", 'PASS'))`
     : "0";
-  const ottlbP50 = hasOttlb ? `MEDIAN("ottlb") / 1000.0` : "NULL";
-  const ottlbP95 = hasOttlb ? `APPROX_QUANTILE("ottlb", 0.95) / 1000.0` : "NULL";
+  const ottlbP50 = hasOttlb ? `QUANTILE_CONT("ottlb", [0.5, 0.95])[1] / 1000.0` : "NULL";
+  const ottlbP95 = hasOttlb ? `QUANTILE_CONT("ottlb", [0.5, 0.95])[2] / 1000.0` : "NULL";
   const cdnOvh =
     hasElapsed && hasOttlb ? `MEDIAN("elapsed" - "ottlb") / 1000.0` : "NULL";
   const ost5xx = hasOst
@@ -367,10 +367,10 @@ export function buildOriginSummarySql(
       COUNT(*) AS requests,
       ${totalMisses} AS total_misses,
       ${totalPasses} AS total_passes,
-      MEDIAN(${latVal}) / 1000.0 AS ottfb_p50_ms,
-      APPROX_QUANTILE(${latVal}, 0.75) / 1000.0 AS ottfb_p75_ms,
-      APPROX_QUANTILE(${latVal}, 0.95) / 1000.0 AS ottfb_p95_ms,
-      APPROX_QUANTILE(${latVal}, 0.99) / 1000.0 AS ottfb_p99_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.75, 0.95, 0.99])[1] / 1000.0 AS ottfb_p50_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.75, 0.95, 0.99])[2] / 1000.0 AS ottfb_p75_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.75, 0.95, 0.99])[3] / 1000.0 AS ottfb_p95_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.75, 0.95, 0.99])[4] / 1000.0 AS ottfb_p99_ms,
       ${ottlbP50} AS ottlb_p50_ms,
       ${ottlbP95} AS ottlb_p95_ms,
       ${cdnOvh} AS cdn_overhead_p50_ms,
@@ -431,7 +431,7 @@ export function buildOriginTimeseriesSql(
   const aggExpr =
     percentile === "p50"
       ? `MEDIAN(${latExpr})`
-      : `APPROX_QUANTILE(${latExpr}, ${pctVal})`;
+      : `QUANTILE_CONT(${latExpr}, ${pctVal})`;
   const tsExpr = 'EPOCH_MS(CAST("ts_ms" AS BIGINT))';
   const edgeCol = splitByLeg ? `, "edge"` : "";
 
@@ -476,6 +476,9 @@ export function shapeOriginTimeseriesRows(
   return { has_data: series.length > 0, series };
 }
 
+// Exact percentiles hold each group's values (8 bytes a row); APPROX_QUANTILE's per-group digest took ~50 KB
+// of WASM heap outside DuckDB's memory limit, so a day of distinct URLs or origin IPs exhausted the page.
+// Identical QUANTILE_CONT calls in one SELECT share a single aggregate state.
 export function buildOriginSlowUrlsSql(
   table: string,
   where: string,
@@ -503,9 +506,9 @@ export function buildOriginSlowUrlsSql(
     SELECT
       b."url" AS url,
       COUNT(*) AS requests,
-      MEDIAN(b._lat_val) / 1000.0 AS p50_ms,
-      APPROX_QUANTILE(b._lat_val, 0.95) / 1000.0 AS p95_ms,
-      APPROX_QUANTILE(b._lat_val, 0.99) / 1000.0 AS p99_ms
+      QUANTILE_CONT(b._lat_val, [0.5, 0.95, 0.99])[1] / 1000.0 AS p50_ms,
+      QUANTILE_CONT(b._lat_val, [0.5, 0.95, 0.99])[2] / 1000.0 AS p95_ms,
+      QUANTILE_CONT(b._lat_val, [0.5, 0.95, 0.99])[3] / 1000.0 AS p99_ms
     FROM base b
     SEMI JOIN qualified q USING ("url")
     GROUP BY b."url"
@@ -587,8 +590,8 @@ export function buildOriginPathBreakdownSql(
     SELECT
       "edge",
       COUNT(*) AS requests,
-      MEDIAN(${latVal}) / 1000.0 AS p50_ms,
-      APPROX_QUANTILE(${latVal}, 0.95) / 1000.0 AS p95_ms
+      QUANTILE_CONT(${latVal}, [0.5, 0.95])[1] / 1000.0 AS p50_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.95])[2] / 1000.0 AS p95_ms
     FROM ${table}
     WHERE ${where} AND (${latVal} IS NOT NULL)
     GROUP BY "edge"
@@ -628,8 +631,8 @@ export function buildOriginPopLatencySql(
     SELECT
       "pop",
       COUNT(*) AS requests,
-      MEDIAN(${latVal}) / 1000.0 AS p50_ms,
-      APPROX_QUANTILE(${latVal}, 0.95) / 1000.0 AS p95_ms
+      QUANTILE_CONT(${latVal}, [0.5, 0.95])[1] / 1000.0 AS p50_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.95])[2] / 1000.0 AS p95_ms
     FROM ${table}
     WHERE ${where} AND (${latVal} IS NOT NULL) AND "pop" IS NOT NULL AND "pop" != ''
     GROUP BY "pop"
@@ -690,8 +693,8 @@ export function buildOriginIpHealthSql(
     SELECT
       "oip",
       COUNT(*) AS requests,
-      MEDIAN(${latVal}) / 1000.0 AS p50_ms,
-      APPROX_QUANTILE(${latVal}, 0.95) / 1000.0 AS p95_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.95])[1] / 1000.0 AS p50_ms,
+      QUANTILE_CONT(${latVal}, [0.5, 0.95])[2] / 1000.0 AS p95_ms,
       ROUND(COUNT(*) FILTER (WHERE "ost" >= 500) * 100.0 / NULLIF(COUNT(*), 0), 1) AS error_pct
     FROM ${table}
     WHERE ${where} AND "oip" IS NOT NULL AND "oip" != '' AND "oip" != '-' AND "ost" IS NOT NULL
@@ -859,9 +862,9 @@ export function buildOriginDrilldownSql(
     SELECT
       COALESCE(CAST(${qCol} AS VARCHAR), 'unknown') AS dim_key,
       COUNT(*) AS requests,
-      ROUND(MEDIAN(${latVal}) / 1000.0, 2) AS p50_ms,
-      ROUND(APPROX_QUANTILE(${latVal}, 0.95) / 1000.0, 2) AS p95_ms,
-      ROUND(APPROX_QUANTILE(${latVal}, 0.99) / 1000.0, 2) AS p99_ms,
+      ROUND(QUANTILE_CONT(${latVal}, [0.5, 0.95, 0.99])[1] / 1000.0, 2) AS p50_ms,
+      ROUND(QUANTILE_CONT(${latVal}, [0.5, 0.95, 0.99])[2] / 1000.0, 2) AS p95_ms,
+      ROUND(QUANTILE_CONT(${latVal}, [0.5, 0.95, 0.99])[3] / 1000.0, 2) AS p99_ms,
       ROUND(COUNT(*) FILTER (WHERE ${errorExpr}) * 100.0 / NULLIF(COUNT(*), 0), 2) AS error_rate,
       ${bytesExpr} AS bytes
     FROM ${table}
