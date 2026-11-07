@@ -48,6 +48,25 @@ describe('InsightsClient first load', () => {
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(bodies.map((b) => [b.window_size_hrs, b.baseline_hours])).toEqual([[24, 24]])
   })
+
+  it('marks only the month-baseline prefetch so Cloud gives it its own smaller budget', async () => {
+    const calls: Array<{ baseline: number; prefetch: string | null }> = []
+    server.use(
+      http.get(`${getApiBase()}/api/log-extents`, () => HttpResponse.json({
+        earliest_log_at: new Date(Date.now() - 800 * 3600_000).toISOString(), latest_log_at: new Date().toISOString(), count: 10,
+      })),
+      http.post(`${getApiBase()}/api/insights`, async ({ request }) => {
+        const body = (await request.json()) as { baseline_hours: number }
+        calls.push({ baseline: body.baseline_hours, prefetch: request.headers.get('x-flp-cloud-prefetch') })
+        return HttpResponse.json({ insights: [], next_cursor: null })
+      }),
+    )
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+    await waitFor(() => expect(calls.some((call) => call.baseline === 720)).toBe(true), { timeout: 6000 })
+    expect(calls.filter((call) => call.baseline === 720).every((call) => call.prefetch === '1')).toBe(true)
+    expect(calls.filter((call) => call.baseline !== 720).map((call) => call.prefetch)).toEqual([null])
+  }, 10_000)
 })
 
 function envelope(overrides: Record<string, unknown>) {

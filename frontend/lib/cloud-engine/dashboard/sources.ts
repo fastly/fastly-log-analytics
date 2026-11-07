@@ -392,6 +392,7 @@ export function emitDebugSubCalls(
 }
 
 export type BrowserFileSource = FileSource & {
+  fetchRange: NonNullable<FileSource["fetchRange"]>;
   /**
    * The same caches with different telemetry, so concurrent requests in one
    * worker each report their own page load and calls.
@@ -869,6 +870,66 @@ export function browserSource(
           ]),
       },
     ),
+    async fetchRange(file, start, end, signal) {
+      if (!(Number.isSafeInteger(start) && Number.isSafeInteger(end) &&
+          start >= 0 && end > start && (file.size <= 0 || end <= file.size)))
+        throw new Error(`Range ${start}-${end} is outside ${file.key}`);
+      const path = fileDisplayPath(file.key);
+      const headers = buildRequestHeaders(options, {
+        Range: `bytes=${start}-${end - 1}`,
+        ...(limits.foldFileTelemetry ? { "X-FLP-Fold-Telemetry": "1" } : {}),
+      });
+      const begin = performance.now();
+      const response = await fetch(`${baseUrl}${fileRequestPath(file.key)}`, {
+        credentials: "same-origin",
+        cache: "no-store",
+        signal,
+        ...(headers ? { headers } : {}),
+      });
+      try {
+        const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
+          response.headers.get("content-range") ?? "",
+        );
+        if (
+          response.status !== 206 ||
+          !range ||
+          Number(range[1]) !== start ||
+          Number(range[2]) !== end - 1 ||
+          (file.size > 0 && Number(range[3]) !== file.size)
+        )
+          throw new Error(
+            `Range read of ${file.key} failed (${response.status}): the exact 206 Content-Range is required`,
+          );
+        if (file.etag && response.headers.get("etag") !== file.etag)
+          throw new Error(`Immutable file identity changed: ${file.key}`);
+        const bytes = await response.arrayBuffer();
+        if (bytes.byteLength !== end - start)
+          throw new Error(`Range read of ${file.key} returned ${bytes.byteLength} bytes, not ${end - start}`);
+        const cdn = response.headers.get("x-flp-cdn-cache");
+        const cdnHit = isCdnHit(cdn);
+        const vcpuMs = parseVcpuMsHeader(response.headers);
+        const directCdn = cdn !== null && vcpuMs === null;
+        if (limits.foldFileTelemetry && !directCdn) {
+          folded.requests += 1;
+          if (vcpuMs !== null) folded.vcpuMs += vcpuMs;
+        }
+        options?.onApiCall?.({
+          source: cdnHit ? "CDN Cache" : directCdn ? "FOS S3" : "Compute API",
+          method: "GET",
+          path,
+          status: 206,
+          duration_ms: Math.max(0, Math.round(performance.now() - begin)),
+          vcpu_ms: vcpuMs,
+          bytes: bytes.byteLength,
+          cache: cdnHit ? "cdn" : "miss",
+          endpoint: "GET /api/file",
+          page_load_id: options?.getPageLoadId?.(),
+        });
+        return bytes;
+      } finally {
+        if (!response.bodyUsed) await response.body?.cancel();
+      }
+    },
     async fetchFile(key, signal, mode) {
       const transfer = Boolean(mode?.transfer);
       const reqPath = fileRequestPath(key);

@@ -124,6 +124,8 @@ function InsightsBody({
         queryFn: async ({ signal }) => {
           return unwrapClient(client.POST('/api/insights', {
             signal,
+            // Cloud loads a speculative prefetch only within its own smaller budget.
+            headers: { 'x-flp-cloud-prefetch': '1' },
             body: {
               window_size_hrs: 24,
               baseline_hours: 720,

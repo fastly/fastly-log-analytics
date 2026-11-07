@@ -18,7 +18,7 @@ import {
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
-import { queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
+import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead } from "./scoring-reads";
 import { handleNetworkRequest, type NetworkQueryParams } from "./network";
 import { handleOriginRequest } from "./origin";
@@ -337,6 +337,8 @@ async function loadCloudCatalog(request: Request) {
 }
 
 let analyticalQueue = Promise.resolve();
+/** Needed-column bytes a speculative Insights prefetch may load. */
+const PREFETCH_PROJECTION_BYTES = 32 * 1024 * 1024;
 
 function isLocalScan(path: string, method: string): boolean {
   if (!["GET", "POST"].includes(method)) return false;
@@ -402,8 +404,16 @@ async function prepareCloudScan(request: Request): Promise<Request> {
   }
   // Detail and arbitrary SQL may explicitly include their upper endpoint.
   const scanEnd = token || url.pathname === "/api/query" ? new Date(Date.parse(end) + 1).toISOString() : end;
+  const insights = url.pathname === "/api/insights" || url.pathname === "/api/insight-availability" ||
+    url.pathname === "/api/insights/cache-collapse-detail";
+  const filters = url.pathname === "/api/insights"
+    ? parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined) : [];
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+    ...insights ? { projection: {
+      columns: insightScanColumns(filters),
+      ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
+    } } : {},
   });
   try {
     generation.assertCurrent();

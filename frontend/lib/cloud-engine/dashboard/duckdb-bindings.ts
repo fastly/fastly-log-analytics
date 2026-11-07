@@ -387,7 +387,8 @@ export class ParquetBindingStore {
       ingestFile: async (scopedKey, key, bytes, stats, signal, kind = "request", options) => {
         this.check(generation, signal);
         const meta = await this.register(tableFor(kind), scopedKey, key, bytes, stats, signal,
-          kind === "request" ? required : [], generation, hold, options?.deferView ? deferred : undefined);
+          kind === "request" ? required : [], generation, hold, options?.deferView ? deferred : undefined,
+          options?.presentColumns);
         this.check(generation, signal);
         return meta;
       },
@@ -486,6 +487,7 @@ export class ParquetBindingStore {
     generation: number,
     hold?: (binding: Binding) => void,
     deferred?: Set<Binding>,
+    presentColumns?: readonly string[],
   ): Promise<IngestedFileMeta> {
     return this.operation(generation, async () => {
       const backend = await this.ensureBackend(generation);
@@ -562,11 +564,15 @@ export class ParquetBindingStore {
           known = { rawRows: number("raw_rows", 0), minTs: number("min_ts", Infinity), maxTs: number("max_ts", -Infinity) };
         }
         const custom = new Map([...this.customTypes, ...required]);
+        // A column-projected file reports its source file's columns.
+        const present = presentColumns ? [...presentColumns] : names;
+        if (names.some((name) => !present.includes(name)))
+          throw new Error("Cloud projected Parquet has columns its source file lacks");
         const meta: IngestedFileMeta = {
           scopedKey, key, ...known, byteLength: bytes.byteLength,
-          hasBytes: typeMap.has("resp_bytes") || typeMap.has("resp_body_size"),
-          hasEdge: typeMap.has("edge") || typeMap.has("is_edge"),
-          customColumns: [...custom.keys()], presentColumns: names,
+          hasBytes: present.includes("resp_bytes") || present.includes("resp_body_size"),
+          hasEdge: present.includes("edge") || present.includes("is_edge"),
+          customColumns: [...custom.keys()], presentColumns: present,
         };
         const binding: Binding = { name, table, types: typeMap, ts, meta, pins: 0, retired: false, dropped: false };
         if (!deferred) {

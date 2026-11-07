@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ensureCloudRange } from "./range-loader";
+import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 import { clearManifestCache, fetchManifest, filesOverlapping, type ManifestFile } from "./dashboard/manifest";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { cloudLoadingStore } from "./loading-progress";
@@ -11,7 +11,7 @@ import { executePerformanceAggregates } from "./performance";
 import { handleCloudAnalyticalRequest } from "./adapter";
 import * as sqlBuilder from "../sqlBuilder";
 
-const source = vi.hoisted(() => ({ fetchJson: vi.fn(), fetchFile: vi.fn() }));
+const source = vi.hoisted(() => ({ fetchJson: vi.fn(), fetchFile: vi.fn(), fetchRange: vi.fn() }));
 vi.mock("./dashboard/sources", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/sources")>(),
   browserSource: () => source,
@@ -32,6 +32,7 @@ beforeEach(async () => {
   await getDuckDBEngine().reset();
   vi.mocked(fetchManifest).mockClear();
   source.fetchFile.mockClear();
+  source.fetchRange.mockReset();
   cloudLoadingStore.reset();
   vi.mocked(fetchManifest).mockResolvedValue({ files: [file], complete: true });
 });
@@ -68,6 +69,95 @@ async function analyticalPost(path: string, body: Record<string, unknown>) {
 }
 
 describe("Cloud first-page analytical range loading", () => {
+  const wideFile = (index: number, rows = 1600) => {
+    let seed = index + 1;
+    const noise = () => Array.from({ length: 300 }, () => {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      return String.fromCharCode(33 + (seed >>> 0) % 90);
+    }).join("");
+    return parquetWriteBuffer({ codec: "SNAPPY", rowGroupSize: 400, columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rows }, (_, i) => new Date(Date.parse(from) + index * 1000 + i)) },
+      { name: "ua", type: "STRING", data: Array.from({ length: rows }, noise) },
+      { name: "status", type: "INT32", data: Array.from({ length: rows }, (_, i) => i % 7 ? 200 : 503) },
+      { name: "cache", type: "STRING", data: Array.from({ length: rows }, (_, i) => i % 3 ? "HIT" : "MISS") },
+      { name: "referer", type: "STRING", data: Array.from({ length: rows }, noise) },
+    ] });
+  };
+  const projectedFiles = (count: number) => {
+    const entries = Array.from({ length: count }, (_, i) => {
+      const bytes = wideFile(i);
+      return { ...file, key: `processed/request/w${i}.parquet`, size: bytes.byteLength, bytes };
+    });
+    vi.mocked(fetchManifest).mockResolvedValue({ files: entries.map(({ bytes: _bytes, ...entry }) => entry), complete: true });
+    let inFlight = 0;
+    const ranges = { count: 0, bytes: 0, peak: 0 };
+    source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number) => {
+      inFlight++;
+      ranges.peak = Math.max(ranges.peak, inFlight);
+      ranges.count++;
+      ranges.bytes += end - start;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight--;
+      return entries.find((candidate) => candidate.key === entry.key)!.bytes.slice(start, end);
+    });
+    return { entries, ranges, fullBytes: entries.reduce((total, entry) => total + entry.size, 0) };
+  };
+  const projection = (maxBytes: number) => ({ projection: { columns: ["timestamp", "status", "cache"], maxBytes } });
+
+  it("loads only the needed column chunks, budgeted on their bytes, with exact results", async () => {
+    const { ranges, fullBytes } = projectedFiles(4);
+    const read = await ensureCloudRange(from, to, signal, ["request"], projection(fullBytes / 4));
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    expect(ranges.peak).toBeGreaterThan(1);
+    expect(ranges.peak).toBeLessThanOrEqual(6);
+    expect(ranges.bytes).toBeLessThan(fullBytes / 2);
+    expect(await read.executeSql(
+      "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors, count(*) FILTER (WHERE cache = 'HIT') AS hits FROM requests",
+    )).toEqual([{ n: 6400, errors: 4 * 229, hits: 4 * 1066 }]);
+    expect([...await read.getPresentColumns()]).toEqual(expect.arrayContaining(["ua", "referer", "status"]));
+    read.release?.();
+  });
+
+  it("rejects a projection over its byte budget after reading only footers, keeping resident files", async () => {
+    source.fetchFile.mockResolvedValue({ cached: true, bytes: parquetFixture([
+      { timestamp: Date.parse(from), status: 201, cache: "HIT", resp_bytes: 1 },
+    ]) });
+    (await ensureCloudRange(from, to, signal)).release?.();
+    const engine = getDuckDBEngine();
+    const resident = [...(await engine.getPresentColumns())];
+    const { ranges, entries } = projectedFiles(3);
+    await expect(ensureCloudRange(from, to, signal, ["request"], projection(4096)))
+      .rejects.toBeInstanceOf(CloudBudgetError);
+    expect(ranges.count).toBe(entries.length);
+    expect([...await engine.getPresentColumns()]).toEqual(resident);
+  });
+
+  it("keeps the file-count limit for projected ranges", async () => {
+    projectedFiles(1);
+    vi.mocked(fetchManifest).mockResolvedValue({ complete: true,
+      files: Array.from({ length: 257 }, (_, i) => ({ ...file, key: `processed/request/x${i}.parquet` })) });
+    await expect(ensureCloudRange(from, to, signal, ["request"], projection(1 << 30)))
+      .rejects.toBeInstanceOf(CloudBudgetError);
+    expect(source.fetchRange).not.toHaveBeenCalled();
+  });
+
+  it("aborts in-flight range reads when the request is cancelled", async () => {
+    projectedFiles(4);
+    const controller = new AbortController();
+    const seen: AbortSignal[] = [];
+    source.fetchRange.mockImplementation((_entry: ManifestFile, _start: number, _end: number, rangeSignal: AbortSignal) => {
+      seen.push(rangeSignal);
+      if (seen.length === 3) controller.abort(new Error("page left"));
+      return new Promise((_resolve, reject) => {
+        rangeSignal.addEventListener("abort", () => reject(rangeSignal.reason), { once: true });
+      });
+    });
+    await expect(ensureCloudRange(from, to, controller.signal, ["request"], projection(1 << 30)))
+      .rejects.toThrow(/page left/);
+    expect(seen.length).toBeLessThanOrEqual(6);
+    expect(seen.every((rangeSignal) => rangeSignal.aborted)).toBe(true);
+  });
+
   it("downloads a cold range with bounded concurrency and publishes its view once", async () => {
     const files = Array.from({ length: 24 }, (_, i) => ({ ...file, key: `processed/request/f${i}.parquet` }));
     vi.mocked(fetchManifest).mockResolvedValue({ files, complete: true });

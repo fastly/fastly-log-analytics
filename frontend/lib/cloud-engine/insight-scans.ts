@@ -21,6 +21,17 @@ import { escapeSqlLiteral } from "./sql-validator";
 
 export { CLOUD_INSIGHT_DETECTORS } from "./insights";
 
+/** Every request column the Insights and cache-collapse scans read. */
+export const INSIGHT_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "url", "status", "cache", "elapsed", "resp_bytes", "ip", "city", "region",
+  "country", "p_type", "method", "referer", "ua", "pop", "server_region", "metro", "asn", "transport",
+] as const;
+
+/** The columns a column-projected Insights load needs, including filtered fields. */
+export function insightScanColumns(filters: readonly DashboardFilter[]): string[] {
+  return [...new Set([...INSIGHT_SCAN_COLUMNS, ...filters.map((filter) => filter.field)])];
+}
+
 export async function queryCloudInsights(
   body: InsightsRequest,
   options: { signal: AbortSignal; maskIps: boolean; filters: DashboardFilter[]; engine?: DuckDBReadContext },

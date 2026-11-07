@@ -1,8 +1,13 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDuckDBEngine } from "./dashboard/test-fixtures";
-import { CLOUD_INSIGHT_DETECTORS, queryCloudCacheCollapse, queryCloudInsights } from "./insight-scans";
+import { ALL_TABLE_FIELDS, createNodeBackend, FIELD_DUCKDB_TYPES, type DuckDBReadContext } from "./dashboard/duckdb";
+import {
+  CLOUD_INSIGHT_DETECTORS, insightScanColumns, queryCloudCacheCollapse, queryCloudInsights,
+} from "./insight-scans";
 import { handleInsightAvailability, INSIGHT_DEFINITIONS } from "./insights";
+
+const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
 
 const engine = getDuckDBEngine();
 const end = "2026-01-03T00:00:00.000Z";
@@ -131,6 +136,37 @@ describe("local Parquet insight scans", () => {
     expect(result.window_hours).toBe(0.25);
     expect(result.window_start).toBe(new Date(endMs - 15 * 60_000).toISOString());
     expect(result.insights.find((card) => card.id === "cache_collapse")?.severity).toBe("critical");
+  });
+
+  it("reads only the columns a projected Insights load fetches", async () => {
+    const filters = [{ field: "host", value: "example.com", mode: "include" as const }];
+    const columns = insightScanColumns(filters);
+    expect(columns).toContain("host");
+    expect(insightScanColumns([])).not.toContain("host");
+    const backend = await createNodeBackend();
+    try {
+      // Only the projected columns exist, so any other column reference fails to bind.
+      const physical = columns.filter((column) => column !== "timestamp" && column !== "ts_ms");
+      await backend.query(`CREATE TABLE requests AS SELECT ts_ms, epoch_ms(ts_ms)::TIMESTAMPTZ AS "timestamp",
+        ${physical.map((column) => `NULL::${FIELD_DUCKDB_TYPES[column]} AS "${column}"`).join(", ")}
+        FROM (VALUES (${endMs - 1800_000}::BIGINT), (${endMs - 40 * 3_600_000}::BIGINT)) rows(ts_ms)`);
+      await backend.query(`UPDATE requests SET host = 'example.com', url = '/a', status = 200, cache = 'MISS'`);
+      const sqls: string[] = [];
+      const read = {
+        executeSql: async (sql: string) => {
+          sqls.push(sql);
+          return tableRows(await backend.query(sql)).map((row) => Object.fromEntries(Object.entries({ ...row })
+            .map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value])));
+        },
+        getPresentColumns: async () => new Set(ALL_TABLE_FIELDS),
+        getCustomColumnTypes: () => new Map(),
+      } as unknown as DuckDBReadContext;
+      await queryCloudInsights(body, { ...options, filters, engine: read });
+      await queryCloudCacheCollapse({ ...body, url: "/a" }, { signal, maskIps: false, engine: read });
+      expect(sqls.length).toBeGreaterThan(8);
+    } finally {
+      await backend.dispose();
+    }
   });
 
   it("rejects malformed ranges and surfaces failed local scans", async () => {

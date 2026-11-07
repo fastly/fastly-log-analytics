@@ -8,6 +8,7 @@ import * as usage from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
 import { CloudBudgetError, ensureCloudRange } from "./range-loader";
+import { insightScanColumns } from "./insight-scans";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -224,6 +225,30 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     );
     expect(res?.status).toBe(413);
     expect(await res?.json()).toEqual({ detail: message });
+  });
+
+  it("loads Insights scans as column projections, with a smaller own budget for prefetches", async () => {
+    const options = async (path: string, init: RequestInit = {}) => {
+      vi.mocked(ensureCloudRange).mockClear();
+      const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, init));
+      expect(res).not.toBeNull();
+      return vi.mocked(ensureCloudRange).mock.calls[0]?.[4];
+    };
+    const post = (body: Record<string, unknown>, headers: Record<string, string> = {}) => ({
+      method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
+    });
+    const insights = await options("/api/insights", post({
+      window_size_hrs: 24, baseline_hours: 168, filters: { host_1: { mode: "include", values: ["example.com"] } },
+    }));
+    expect(insights?.projection?.columns).toEqual(expect.arrayContaining(["url", "status", "transport", "host"]));
+    expect(insights?.projection?.maxBytes).toBeUndefined();
+    expect((await options("/api/insight-availability"))?.projection?.columns)
+      .toEqual(insightScanColumns([]));
+    expect((await options("/api/insights/cache-collapse-detail", post({ url: "/a", window_size_hrs: 24, baseline_hours: 168 })))
+      ?.projection?.columns).toEqual(insightScanColumns([]));
+    expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))
+      ?.projection?.maxBytes).toBe(32 * 1024 * 1024);
+    expect((await options("/api/performance/aggregates", post({ sections: ["waterfall"] })))?.projection).toBeUndefined();
   });
 
   it("dispatches /api/security/* routes including /proxies/export through handleSecurityRequest", async () => {

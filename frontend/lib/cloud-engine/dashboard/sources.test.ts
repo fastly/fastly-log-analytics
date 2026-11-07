@@ -49,6 +49,38 @@ describe("browserSource", () => {
     expect(file).toMatchObject({ cached: false, cdn: "HIT" });
   });
 
+  it("reads one exact byte range of an immutable file", async () => {
+    const body = new Uint8Array([7, 8, 9]);
+    const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => new Response(body, {
+      status: 206,
+      headers: { "content-range": "bytes 10-12/100", etag: "\"e1\"", "x-flp-cdn-cache": "HIT" },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    const calls: unknown[] = [];
+    const source = browserSource("", { serviceId: "svc", onApiCall: (call) => calls.push(call) });
+    const file = { key: "flp/processed/request/year=2026/a.parquet", start: "", end: "", size: 100, rows: 1, etag: "\"e1\"" };
+    expect(new Uint8Array(await source.fetchRange(file, 10, 13))).toEqual(body);
+    const [url, init] = fetcher.mock.calls[0];
+    expect(url).toBe("/fos/flp/processed/request/year=2026/a.parquet");
+    expect(new Headers(init!.headers).get("range")).toBe("bytes=10-12");
+    expect(new Headers(init!.headers).get("x-service-id")).toBe("svc");
+    expect(calls).toEqual([expect.objectContaining({ status: 206, bytes: 3, cache: "cdn" })]);
+
+    for (const [status, range, etag, bytes] of [
+      [200, "bytes 10-12/100", "\"e1\"", 3],
+      [206, "bytes 10-12/101", "\"e1\"", 3],
+      [206, "bytes 0-2/100", "\"e1\"", 3],
+      [206, "bytes 10-12/100", "\"e2\"", 3],
+      [206, "bytes 10-12/100", "\"e1\"", 2],
+    ] as const) {
+      fetcher.mockResolvedValueOnce(new Response(new Uint8Array(bytes), {
+        status, headers: { "content-range": range, etag },
+      }));
+      await expect(source.fetchRange(file, 10, 13)).rejects.toThrow(/a\.parquet/);
+    }
+    await expect(source.fetchRange(file, 10, 101)).rejects.toThrow(/outside/);
+  });
+
   it("reports whether a file can be served without the network", async () => {
     const store = new Map<string, Response>([
       ["/api/file?key=on-disk", new Response(new Uint8Array([2]))],

@@ -587,7 +587,8 @@ export type DuckDBLease = {
     knownStats?: { rawRows: number; minTs: number; maxTs: number },
     signal?: AbortSignal,
     kind?: "request" | "vitals" | "errors",
-    options?: { deferView?: boolean },
+    /** `presentColumns`: the source file's columns, for a column-projected file. */
+    options?: { deferView?: boolean; presentColumns?: readonly string[] },
   ): Promise<IngestedFileMeta>;
   /**
    * Rebuilds the views once over every held file. Call after ingesting with

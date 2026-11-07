@@ -151,6 +151,13 @@ export type FileSource = {
     signal?: AbortSignal,
     mode?: { transfer?: boolean; identity?: string },
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
+  /** Bytes `[start, end)` of an immutable file, uncached. */
+  fetchRange?: (
+    file: ManifestFile,
+    start: number,
+    end: number,
+    signal?: AbortSignal,
+  ) => Promise<ArrayBuffer>;
   /** Whether `fetchFile` can serve the bytes without a network request. */
   hasFile?: (key: string) => Promise<boolean>;
   /** `variant` names the custom fields the rollup also counts (`customFieldsKey`). */
