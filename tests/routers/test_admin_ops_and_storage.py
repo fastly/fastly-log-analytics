@@ -1326,13 +1326,18 @@ def test_prefill_rum_beacons_per_day_averages_high_scale_beacons_over_the_rum_re
             result, _ = _compute_prefill_rates({"name": svc})
             _PREFILL_META_CACHE.clear()
             beacon_client.fail = True
-            with pytest.raises(RuntimeError, match="clickhouse unavailable"):
-                _compute_prefill_rates({"name": svc})
+            unavailable, _ = _compute_prefill_rates({"name": svc})
+            beacon_client.fail = False
+            recovered, _ = _compute_prefill_rates({"name": svc})
     finally:
         _PREFILL_META_CACHE.clear()
 
     assert result["rum_beacons_per_day"] == 75
-    (params,) = calls
+    # A failed read leaves the estimate unknown rather than zero, keeps the other fields, and is not cached.
+    assert unavailable["rum_beacons_per_day"] is None
+    assert unavailable["rum_retention_days"] == 7
+    assert recovered["rum_beacons_per_day"] == 75
+    params = calls[0]
     assert params["service_id"] == svc
     assert params["end"] - params["start"] == timedelta(days=7)
 
@@ -1364,12 +1369,17 @@ def test_prefill_nodes_per_flush_averages_recent_high_scale_request_flushes():
             result, _ = _compute_prefill_rates({"name": svc})
             _PREFILL_META_CACHE.clear()
             per_flush.side_effect = RuntimeError("postgres unavailable")
-            with pytest.raises(RuntimeError, match="postgres unavailable"):
-                _compute_prefill_rates({"name": svc})
+            unavailable, _ = _compute_prefill_rates({"name": svc})
+            per_flush.side_effect = None
+            recovered, _ = _compute_prefill_rates({"name": svc})
     finally:
         _PREFILL_META_CACHE.clear()
 
     assert result["avg_nodes_per_flush"] == 3
+    # A failed read leaves the estimate unknown, keeps the other fields, and is not cached.
+    assert unavailable.get("avg_nodes_per_flush") is None
+    assert unavailable["rum_beacons_per_day"] == 0
+    assert recovered["avg_nodes_per_flush"] == 3
     assert per_flush.call_args_list[0].args == (svc,)
     assert per_flush.call_args_list[0].kwargs == {}
 

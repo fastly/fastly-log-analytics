@@ -179,15 +179,23 @@ def _compute_prefill_rates(
             from backend.core import metadata as metadata_db
 
             avg_nodes = None
+            # Prefill values are estimates: a failed high-scale read leaves that one field unknown (None, never 0)
+            # and is not cached, so the calculator keeps its own default for it and the next visit retries.
+            hs_read_failed = False
             hs_service = get_high_scale_service_registry().resolve(svc_name) if svc_name else None
             if hs_service is not None:
                 # High-scale source objects live in the Postgres ledger; it never writes ``ingested_files``.
                 from backend.high_scale.postgres_control import PostgresControlPlane
 
-                avg = PostgresControlPlane().request_files_per_flush(svc_name)
-                if avg:
-                    avg_nodes = round(avg)
-                    result["avg_nodes_per_flush"] = avg_nodes
+                try:
+                    avg = PostgresControlPlane().request_files_per_flush(svc_name)
+                except Exception:
+                    logger.warning("prefill: high-scale nodes per flush unavailable for %s", svc_name, exc_info=True)
+                    hs_read_failed = True
+                else:
+                    if avg:
+                        avg_nodes = round(avg)
+                        result["avg_nodes_per_flush"] = avg_nodes
             else:
                 try:
                     avg = metadata_db.get_node_count_avg(source["name"])
@@ -204,9 +212,17 @@ def _compute_prefill_rates(
 
                 rum_end = datetime.now(UTC)
                 rum_start = rum_end - timedelta(days=int(result["rum_retention_days"]))
-                per_day = rum_beacons_by_date(hs_service, rum_start.isoformat(), rum_end.isoformat())
-                rum_beacons = round(sum(per_day.values()) / len(per_day)) if per_day else 0
-                result["rum_beacons_per_day"] = rum_beacons
+                try:
+                    per_day = rum_beacons_by_date(hs_service, rum_start.isoformat(), rum_end.isoformat())
+                except Exception:
+                    logger.warning(
+                        "prefill: high-scale RUM beacons per day unavailable for %s", svc_name, exc_info=True
+                    )
+                    hs_read_failed = True
+                    result["rum_beacons_per_day"] = None
+                else:
+                    rum_beacons = round(sum(per_day.values()) / len(per_day)) if per_day else 0
+                    result["rum_beacons_per_day"] = rum_beacons
             else:
                 try:
                     val = metadata_db.get_rum_beacons_avg_per_day(source["name"])
@@ -215,7 +231,7 @@ def _compute_prefill_rates(
                 except Exception as e:
                     logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
 
-            if svc_name:
+            if svc_name and not hs_read_failed:
                 _PREFILL_META_CACHE[svc_name] = (avg_nodes, rum_beacons)
 
     return result, prov
