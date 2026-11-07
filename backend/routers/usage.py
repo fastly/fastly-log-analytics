@@ -380,6 +380,23 @@ def _get_log_activity(src: dict[str, Any], start_str: str, end_str: str, by: str
     from backend.core import metadata as metadata_db
 
     service_id = str(src.get("name") or src.get("service_id") or "")
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        # High-scale ingest records each source object in its Postgres ledger; it never writes ``ingested_files``.
+        from backend.high_scale.postgres_control import PostgresControlPlane
+        from backend.utils.date_utils import parse_window_str_to_dt
+
+        buckets = PostgresControlPlane().source_activity(
+            service_id, parse_window_str_to_dt(start_str), parse_window_str_to_dt(end_str), by
+        )
+        points = [{"time": t, "row_count": rows, "bytes": size} for t, rows, size in buckets]
+        return {
+            "data": points,
+            "total_rows": sum(p["row_count"] for p in points),
+            "total_bytes": sum(p["bytes"] for p in points),
+            "granularity": by,
+            "_debug_queries": [],
+            "_debug_calls": [],
+        }
     out = metadata_db.get_log_activity(service_id, start_str, end_str, by)
     return {**out, "_debug_queries": [], "_debug_calls": []}
 

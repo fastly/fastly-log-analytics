@@ -3713,6 +3713,49 @@ def test_archive_storage_summary_separates_live_recently_expired_and_old_expired
             connection.execute("DELETE FROM high_scale_archive_manifests WHERE service_id = %s", (sid,))
 
 
+def _insert_source_objects(control: PostgresControlPlane, sid: str, objects: list[tuple]) -> None:
+    """Insert ``(object_key, domain, status, size_bytes, accepted_rows, discovered_at)`` ledger rows."""
+    with control.transaction() as connection:
+        for key, domain, status, size, rows, discovered_at in objects:
+            connection.execute(
+                "INSERT INTO high_scale_source_objects (object_id, service_id, domain, object_key, checksum, "
+                "size_bytes, status, accepted_rows, discovered_at) VALUES (%s, %s, %s, %s, 'c', %s, %s, %s, %s)",
+                (f"{sid}:{key}", sid, domain, key, size, status, rows, discovered_at),
+            )
+
+
+def test_source_activity_buckets_processed_rows_and_bytes_by_discovery_time_in_the_inclusive_window() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-source-activity"
+    start, end = datetime(2026, 11, 7, 10, 0, tzinfo=UTC), datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            ("raw/request/a", "request", "source_deleted", 100, 10, start),
+            ("raw/rum/b", "rum_vitals", "acknowledged", 20, 2, datetime(2026, 11, 7, 10, 59, 59, tzinfo=UTC)),
+            ("raw/request/c", "request", "appended", 300, 30, end),
+            ("raw/request/in-flight", "request", "claimed", 999, 99, datetime(2026, 11, 7, 11, 0, tzinfo=UTC)),
+            ("raw/request/before", "request", "source_deleted", 999, 99, start - timedelta(milliseconds=1)),
+            ("raw/request/after", "request", "source_deleted", 999, 99, end + timedelta(milliseconds=1)),
+        ],
+    )
+    _insert_source_objects(control, "svc-other", [("raw/request/x", "request", "source_deleted", 999, 99, start)])
+    try:
+        assert control.source_activity(sid, start, end, "hour") == [
+            ("2026-11-07T10:00", 12, 120),
+            ("2026-11-07T12:00", 30, 300),
+        ]
+        assert control.source_activity(sid, start, end, "day") == [("2026-11-07", 42, 420)]
+        assert control.source_activity(sid, start, end, "minute")[1] == ("2026-11-07T10:59", 2, 20)
+    finally:
+        with control.transaction() as connection:
+            connection.execute(
+                "DELETE FROM high_scale_source_objects WHERE service_id = ANY(%s)", ([sid, "svc-other"],)
+            )
+
+
 def test_clickhouse_adapter_chunks_large_inserts_and_cleans_up_on_mid_chunk_failure(monkeypatch) -> None:
     monkeypatch.setenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "2")
     base_row = _request_batch().rows[0]

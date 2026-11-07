@@ -26,6 +26,14 @@ from backend.high_scale.ingest_controller import INITIAL_SOURCE_CURSOR, RUM_SOUR
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
 
+# Bucket labels match the legacy ``ingested_files`` log-activity shape the usage page joins with Fastly stats.
+_ACTIVITY_BUCKET_FORMATS = {
+    "second": 'YYYY-MM-DD"T"HH24:MI:SS',
+    "minute": 'YYYY-MM-DD"T"HH24:MI',
+    "hour": 'YYYY-MM-DD"T"HH24:"00"',
+    "day": "YYYY-MM-DD",
+}
+
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS high_scale_ownership (
     service_id TEXT PRIMARY KEY, owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
@@ -945,6 +953,24 @@ class PostgresControlPlane:
                 (service_id,),
             ).fetchone()
         return {"live_bytes": int(row[0]), "live_objects": int(row[1]) * 3, "expired_30d_bytes": int(row[2])}
+
+    def source_activity(self, service_id: str, start: datetime, end: datetime, by: str) -> list[tuple[str, int, int]]:
+        """``(bucket, accepted_rows, size_bytes)`` of processed source objects by UTC discovery time.
+
+        The window is inclusive at both ends. Objects still ``discovered`` or ``claimed`` are not processed yet.
+        """
+        _require_text(service_id, "service_id")
+        if by not in _ACTIVITY_BUCKET_FORMATS:
+            raise ValueError(f"unsupported activity bucket: {by}")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT to_char(date_trunc(%s, discovered_at AT TIME ZONE 'UTC'), %s) AS bucket, "
+                "coalesce(sum(accepted_rows), 0), coalesce(sum(size_bytes), 0) FROM high_scale_source_objects "
+                "WHERE service_id=%s AND status NOT IN ('discovered', 'claimed') "
+                "AND discovered_at >= %s AND discovered_at <= %s GROUP BY bucket ORDER BY bucket",
+                (by, _ACTIVITY_BUCKET_FORMATS[by], service_id, start, end),
+            ).fetchall()
+        return [(str(r[0]), int(r[1]), int(r[2])) for r in rows]
 
     def mark_archive_expired(self, manifest_id: str) -> None:
         _require_text(manifest_id, "manifest_id")

@@ -1243,6 +1243,51 @@ def test_usage_rum_breakdown_counts_high_scale_beacons_in_the_exact_window(clien
     )
 
 
+def _hs_registry(svc: str, client: object):
+    from backend.high_scale.archive import ServingWatermark
+    from backend.high_scale.ingest_controller import HighScaleService, HighScaleServiceRegistry
+
+    watermark = ServingWatermark(svc, "request", 0, None, None, None, None, None, True)
+    return HighScaleServiceRegistry({svc: HighScaleService(svc, client, b"test-secret", watermark)})
+
+
+def test_usage_log_activity_reads_the_high_scale_source_ledger_in_the_exact_window(client):
+    """High-scale ingest never writes ``ingested_files``; processed rows come from its source-object ledger."""
+    svc = "test_usage_log_activity_hs_svc"
+    app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc}
+    params = {"start": "2026-11-07T10:00:00Z", "end": "2026-11-07T12:00:00Z", "by": "hour"}
+    try:
+        with (
+            patch("backend.routers.usage.get_high_scale_service_registry", return_value=_hs_registry(svc, object())),
+            patch("backend.core.metadata.get_log_activity", side_effect=AssertionError("legacy ledger read")),
+            patch(
+                "backend.high_scale.postgres_control.PostgresControlPlane.source_activity",
+                create=True,
+                return_value=[("2026-11-07T10:00", 12, 120), ("2026-11-07T12:00", 30, 300)],
+            ) as mock_activity,
+        ):
+            r = client.get("/api/usage/log-activity", params=params)
+            mock_activity.side_effect = RuntimeError("control plane unavailable")
+            r_err = client.get("/api/usage/log-activity", params={**params, "by": "day"})
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [{k: p[k] for k in ("time", "row_count", "bytes")} for p in body["data"]] == [
+        {"time": "2026-11-07T10:00", "row_count": 12, "bytes": 120},
+        {"time": "2026-11-07T12:00", "row_count": 30, "bytes": 300},
+    ]
+    assert (body["total_rows"], body["total_bytes"], body["granularity"]) == (42, 420, "hour")
+    assert mock_activity.call_args_list[0].args == (
+        svc,
+        datetime(2026, 11, 7, 10, tzinfo=UTC),
+        datetime(2026, 11, 7, 12, tzinfo=UTC),
+        "hour",
+    )
+    assert r_err.status_code >= 400, "a failed ledger read must surface, not render as an empty chart"
+
+
 def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monkeypatch):
     from backend.routers.usage import _compute_prefill_rates
 
