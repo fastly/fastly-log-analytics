@@ -1202,6 +1202,47 @@ def test_usage_prefill_operations_and_rum_breakdown(client, tmp_path, monkeypatc
         app.dependency_overrides.pop(get_source, None)
 
 
+def test_usage_rum_breakdown_counts_high_scale_beacons_in_the_exact_window(client):
+    """High-scale ingest never writes ``ingested_files``; the card must read the ClickHouse RUM facts."""
+    from backend.high_scale.archive import ServingWatermark
+    from backend.high_scale.ingest_controller import HighScaleService, HighScaleServiceRegistry
+
+    svc = "test_usage_rum_breakdown_hs_svc"
+    calls: list[tuple[str, dict]] = []
+
+    class BeaconClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            calls.append((sql, params or {}))
+            return [{"date": "2026-11-07", "beacons": 3900}] if "rum_beacons_by_date" in sql else []
+
+    watermark = ServingWatermark(svc, "request", 0, None, None, None, None, None, True)
+    registry = HighScaleServiceRegistry({svc: HighScaleService(svc, BeaconClient(), b"test-secret", watermark)})
+    app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc}
+    try:
+        with (
+            patch("backend.routers.usage.get_high_scale_service_registry", return_value=registry),
+            patch("backend.config.load_usage_logging_config", return_value={"class_a_rate_per_1k": 0.01}),
+        ):
+            r = client.get(
+                "/api/usage/rum-breakdown", params={"start": "2026-11-07T21:40:00Z", "end": "2026-11-07T22:40:00Z"}
+            )
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"] == [
+        {"date": "2026-11-07", "beacon_count": 3900, "estimated_class_a_ops": 3900, "estimated_cost_usd": 0.039}
+    ]
+    assert body["total_beacons"] == 3900
+    ((_sql, params),) = calls
+    assert params["service_id"] == svc
+    assert (params["start"], params["end"]) == (
+        datetime(2026, 11, 7, 21, 40, tzinfo=UTC),
+        datetime(2026, 11, 7, 22, 40, tzinfo=UTC),
+    )
+
+
 def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monkeypatch):
     from backend.routers.usage import _compute_prefill_rates
 

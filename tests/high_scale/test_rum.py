@@ -45,7 +45,7 @@ from backend.high_scale.ingest_controller import (
     SourceObjectPage,
 )
 from backend.high_scale.postgres_control import PostgresControlPlane
-from backend.high_scale.rum import parse_rum_filters, rum_analytics, rum_live_events
+from backend.high_scale.rum import parse_rum_filters, rum_analytics, rum_beacons_by_date, rum_live_events
 from backend.routers import rum as rum_router
 from tests.conftest import override_request_context
 
@@ -588,6 +588,7 @@ def run_analytics() -> Iterator[Callable[..., dict[str, Any]]]:
         end: str | None = "2026-09-01T02:00:00Z",
         filters: dict[str, Any] | None = None,
         live: bool = False,
+        beacons_by_date: bool = False,
     ) -> Any:
         raw_rum = Path("backend/high_scale/sql/rum_schema.sql").read_text()
         schema = re.sub(r"\nTTL [^;]*;", ";", re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", raw_rum))
@@ -654,11 +655,34 @@ def run_analytics() -> Iterator[Callable[..., dict[str, Any]]]:
         ch_client = ClickHouseClient(cfg, transport=httpx.MockTransport(transport))
         clients.append(ch_client)
         svc = service_for(ch_client)
+        if beacons_by_date:
+            return rum_beacons_by_date(svc, start, end)
         return rum_live_events(svc, start, end, 50, filters) if live else rum_analytics(svc, start, end, filters)
 
     yield run
     for c in clients:
         c.close()
+
+
+@_skip_unless_real_ch
+def test_real_sql_beacons_by_date_count_distinct_visible_beacons_per_utc_day(run_analytics) -> None:
+    shared_id = str(uuid4())
+    day1, day2 = "2026-09-01T23:59:59Z", "2026-09-02T00:00:01Z"
+    result = run_analytics(
+        [
+            _ch_vital(day1, "LCP", 1000, request_id=shared_id),
+            _ch_vital(day1, "CLS", 0.1, request_id=shared_id),
+            _ch_vital(day2, "LCP", 2000, client_id="second"),
+            _ch_vital(day2, "LCP", 2000, state="pending", client_id="hidden"),
+            _ch_vital(day2, "LCP", 2000, service_id="TestOther", client_id="other"),
+            _ch_vital("2026-09-02T00:00:03Z", "LCP", 2000, client_id="after-end"),
+        ],
+        [_ch_error(day1, request_id=shared_id), _ch_error(day2, client_id="third")],
+        start="2026-09-01T12:00:00Z",
+        end="2026-09-02T00:00:02Z",
+        beacons_by_date=True,
+    )
+    assert result == {"2026-09-01": 1, "2026-09-02": 2}
 
 
 @_skip_unless_real_ch

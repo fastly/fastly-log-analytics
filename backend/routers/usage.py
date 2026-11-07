@@ -796,19 +796,33 @@ def usage_rum_breakdown(
     global_rates = svcconfig.load_usage_logging_config()
     class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.005))
 
-    try:
-        start_date = start_str.split("T")[0]
-        end_date = end_str.split("T")[0]
-        rum_cache_key = (service_id, start_date, end_date)
-        cached_beacons = _RUM_BREAKDOWN_CACHE.get(rum_cache_key)
-        if cached_beacons is not None:
-            beacons_by_date: dict[str, int] = dict(cached_beacons)
+    beacons_by_date: dict[str, int]
+    hs_service = get_high_scale_service_registry().resolve(service_id)
+    if hs_service is not None:
+        # High-scale ingest records RUM in ClickHouse facts only; it never writes ``ingested_files``.
+        from backend.high_scale.rum import rum_beacons_by_date
+
+        hs_cache_key = ("high_scale", service_id, start_str, end_str)
+        cached_hs = _RUM_BREAKDOWN_CACHE.get(hs_cache_key)
+        if cached_hs is not None:
+            beacons_by_date = dict(cached_hs)
         else:
-            beacons_by_date = metadata_db.get_rum_beacons_by_date(service_id, start_date, end_date)
-            if beacons_by_date:
-                _RUM_BREAKDOWN_CACHE[rum_cache_key] = dict(beacons_by_date)
-    except Exception:
-        beacons_by_date = {}
+            beacons_by_date = rum_beacons_by_date(hs_service, start_str, end_str)
+            _RUM_BREAKDOWN_CACHE[hs_cache_key] = dict(beacons_by_date)
+    else:
+        try:
+            start_date = start_str.split("T")[0]
+            end_date = end_str.split("T")[0]
+            rum_cache_key = (service_id, start_date, end_date)
+            cached_beacons = _RUM_BREAKDOWN_CACHE.get(rum_cache_key)
+            if cached_beacons is not None:
+                beacons_by_date = dict(cached_beacons)
+            else:
+                beacons_by_date = metadata_db.get_rum_beacons_by_date(service_id, start_date, end_date)
+                if beacons_by_date:
+                    _RUM_BREAKDOWN_CACHE[rum_cache_key] = dict(beacons_by_date)
+        except Exception:
+            beacons_by_date = {}
 
     data: list[RumBreakdownPoint] = []
     total_beacons = 0
