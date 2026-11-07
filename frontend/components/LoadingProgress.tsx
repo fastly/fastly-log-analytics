@@ -72,7 +72,10 @@ export function LoadingProgress({
                 </div>
               </>
             )}
-            <p>{formatBytes(progress.downloadedBytes)} downloaded · {formatBytes(progress.cachedBytes)} from cache</p>
+            <p>
+              {formatBytes(progress.downloadedBytes)} downloaded · {formatBytes(progress.cachedBytes)} from cache
+              {progress.rangedFiles ? ` · ${formatCount(progress.rangedFiles)} files read in ranges (bytes not counted)` : null}
+            </p>
           </div>
         )}
         {refreshing && <p className="text-xs text-muted-foreground">Your previous results stay visible while this finishes.</p>}

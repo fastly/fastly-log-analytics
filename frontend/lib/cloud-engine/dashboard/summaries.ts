@@ -177,11 +177,11 @@ export const CUSTOM_TINT: CardTint = {
   dot: "bg-slate-400",
 };
 
-const SYSTEM_PREFIXES = ["cmcd_", "edge_", "rum_"];
+const SYSTEM_PREFIXES = ["cmcd_", "edge_", "rum_", "lt_"];
 
 /**
- * v3 useDashboardCardDefinitions: system-managed CMCD, edge and RUM fields
- * and the request id never get a card, nor do duplicates of a built-in card.
+ * v3 useDashboardCardDefinitions: system-managed CMCD, edge, RUM and load-test
+ * fields and the request id never get a card, nor do duplicates of a built-in card.
  */
 export function customCards(cards: readonly CustomCard[] | undefined) {
   const builtIn = new Set<string>(CARD_FIELDS);

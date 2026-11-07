@@ -119,36 +119,36 @@ pub fn schema() -> SchemaRef {
 pub struct CustomColumn {
     pub name: String,
     pub kind: Kind,
+    /// Logged, but of a type no column takes: the decoder consumes its array slot and nothing
+    /// more, so the fields after it stay aligned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slot_only: bool,
 }
 
 /// The request table's columns for one service: every catalog column, then each custom field
 /// that is committed or enabled (master plan 8B-R). A disabled committed field stays a null
-/// column, so the schema never shrinks once a field is locked.
+/// column, so the schema never shrinks once a field is locked. A logged field of an unsupported
+/// type is a [`CustomColumn::slot_only`] entry.
 pub fn custom_columns(log_fields: &Value) -> Vec<CustomColumn> {
-    let catalog: Vec<&str> = columns().iter().map(|c| c.id).collect();
-    let mut custom: Vec<CustomColumn> = log_fields["custom_fields"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|f| f["committed"] == true || f["enabled"] != false)
+    let mut custom: Vec<CustomColumn> = crate::catalog::logged_custom_fields(log_fields)
+        .iter()
         .filter_map(|field| {
             let name = field["name"].as_str()?;
             let valid = !name.is_empty()
                 && name
                     .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
-                && !catalog.contains(&name);
-            let normalized = crate::catalog::normalize_custom_field(field);
-            let kind = match normalized["duckdb_type"].as_str()? {
-                "VARCHAR" => Kind::Utf8,
-                "BIGINT" | "INTEGER" => Kind::Int64,
-                "DOUBLE" | "FLOAT" => Kind::Float64,
-                "BOOLEAN" => Kind::Bool,
-                _ => return None,
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
+            let kind = match field["duckdb_type"].as_str() {
+                Some("VARCHAR") => Some(Kind::Utf8),
+                Some("BIGINT" | "INTEGER") => Some(Kind::Int64),
+                Some("DOUBLE" | "FLOAT") => Some(Kind::Float64),
+                Some("BOOLEAN") => Some(Kind::Bool),
+                _ => None,
             };
             valid.then(|| CustomColumn {
                 name: name.to_owned(),
-                kind,
+                kind: kind.unwrap_or(Kind::Utf8),
+                slot_only: kind.is_none(),
             })
         })
         .collect();
@@ -162,6 +162,9 @@ pub struct RequestSchema {
     index: FastMap<String, usize>,
     /// `index` inverted: the field name at each column, if any.
     names: Vec<Option<String>>,
+    /// The column of each positional-array slot, in the compact log format's order: logged
+    /// catalog fields, then custom columns. `None` is a slot with no column.
+    wire: Vec<Option<usize>>,
     arrow: SchemaRef,
     custom: Vec<CustomColumn>,
     hash: String,
@@ -194,11 +197,23 @@ impl RequestSchema {
             .map(|f| f.as_ref().clone())
             .collect();
         custom.retain(|c| !index.contains_key(&c.name));
-        for column in &custom {
+        for column in custom.iter().filter(|c| !c.slot_only) {
             index.insert(column.name.clone(), kinds.len());
             kinds.push(column.kind);
             fields.push(Field::new(&column.name, data_type(column.kind), true));
         }
+        let mut wire: Vec<Option<usize>> = crate::catalog::data()["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|field| crate::catalog::logged_vcl(field).is_some())
+            .map(|field| field["id"].as_str().and_then(|id| index.get(id).copied()))
+            .collect();
+        wire.extend(
+            custom
+                .iter()
+                .map(|c| (!c.slot_only).then(|| index[c.name.as_str()])),
+        );
         let hash = {
             use sha2::{Digest, Sha256};
             let mut digest = Sha256::new();
@@ -209,8 +224,10 @@ impl RequestSchema {
                 digest.update(format!("{}:{:?};", column.id, column.kind));
             }
             for column in &custom {
-                digest.update(format!("custom:{}:{:?};", column.name, column.kind));
+                let slot = if column.slot_only { ":slot" } else { "" };
+                digest.update(format!("custom:{}:{:?}{slot};", column.name, column.kind));
             }
+            digest.update(format!("wire:{wire:?};"));
             hex::encode(&digest.finalize()[..8])
         };
         let mut names = vec![None; kinds.len()];
@@ -221,6 +238,7 @@ impl RequestSchema {
             kinds,
             names,
             index,
+            wire,
             arrow: Arc::new(Schema::new(fields)),
             custom,
             hash,
@@ -483,13 +501,20 @@ impl<'de> Visitor<'de> for RowSeed<'_, 'de> {
         Ok(())
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        let mut i = 0;
-        while i < self.slots.len() {
-            let Some(value) = seq.next_element()? else {
-                return Ok(());
-            };
-            self.slots[i] = Some(value);
-            i += 1;
+        for &column in &self.schema.wire {
+            match column {
+                Some(i) => {
+                    let Some(value) = seq.next_element()? else {
+                        return Ok(());
+                    };
+                    self.slots[i] = Some(value);
+                }
+                None => {
+                    if seq.next_element::<IgnoredAny>()?.is_none() {
+                        return Ok(());
+                    }
+                }
+            }
         }
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(())

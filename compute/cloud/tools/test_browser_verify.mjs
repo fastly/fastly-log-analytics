@@ -1226,3 +1226,141 @@ for (const [label, holdMs] of [
     );
   });
 }
+
+async function withPasskeySignInServer(options, run) {
+  const http = await import("node:http");
+  const crypto = await import("node:crypto");
+  const fsp = await import("node:fs/promises");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const hits = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    hits.push(url.pathname);
+    const html = (body) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(`<!doctype html><meta charset="utf-8"><body>${body}</body>`);
+    };
+    if (url.pathname === "/api/auth/session") {
+      const signedIn = /(?:^|;\s*)flp_session=fixture-session(?:;|$)/.test(
+        req.headers.cookie ?? "",
+      );
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(
+        JSON.stringify({
+          user: signedIn ? { id: "u1", name: "Fixture", role: "admin" } : null,
+        }),
+      );
+    }
+    if (url.pathname === "/api/auth/passkey/finish" && req.method === "POST") {
+      // Mirrors the real flow: the session cookie lands only after the
+      // passkey ceremony, well after the click.
+      return setTimeout(() => {
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "set-cookie": "flp_session=fixture-session; Path=/; HttpOnly; SameSite=Lax",
+        });
+        res.end("{}");
+      }, 750);
+    }
+    if (url.pathname === options.redirectFrom) {
+      res.writeHead(302, { location: "/share-login" });
+      return res.end();
+    }
+    if (url.pathname === options.signInPath) {
+      return html(`<button type="button" ${options.buttonAttrs}>${options.buttonLabel}</button><script>
+document.querySelector("button").addEventListener("click", async () => {
+  await fetch("/api/auth/passkey/finish", { method: "POST" });
+  window.location.assign("/dashboard");
+});
+</script>`);
+    }
+    if (url.pathname === "/dashboard") return html("<p>Dashboard</p>");
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => server.listen(0, "localhost", resolve));
+  const baseUrl = `http://localhost:${server.address().port}`;
+  const dir = await fsp.mkdtemp(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), ".passkey-"),
+  );
+  const { privateKey } = crypto.generateKeyPairSync("ec", {
+    namedCurve: "P-256",
+  });
+  await fsp.writeFile(
+    path.join(dir, "passkeys.json"),
+    JSON.stringify({
+      credentials: [
+        {
+          credentialId: crypto.randomBytes(16).toString("base64"),
+          isResidentCredential: true,
+          rpId: "localhost",
+          privateKey: privateKey
+            .export({ format: "der", type: "pkcs8" })
+            .toString("base64"),
+          userHandle: Buffer.from("u1").toString("base64"),
+          signCount: 0,
+        },
+      ],
+    }),
+  );
+  try {
+    return await run({ baseUrl, dir, hits });
+  } finally {
+    server.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+}
+
+const ensureAuthArgv = (baseUrl, dir) => [
+  "node",
+  "browser_verify.mjs",
+  "--mode",
+  "ensure-auth",
+  "--base-url",
+  baseUrl,
+  "--state-dir",
+  dir,
+];
+
+for (const [label, options] of [
+  [
+    "follows the /sign-in redirect to /share-login and waits for the session cookie",
+    {
+      redirectFrom: "/sign-in",
+      signInPath: "/share-login",
+      buttonLabel: "Sign in with Passkey",
+      buttonAttrs: 'data-testid="cloud-passkey-signin-button"',
+    },
+  ],
+  [
+    "still signs in on the legacy /sign-in page",
+    {
+      redirectFrom: null,
+      signInPath: "/sign-in",
+      buttonLabel: "Sign in with a passkey",
+      buttonAttrs: "",
+    },
+  ],
+]) {
+  test(`ensure-auth ${label}`, async () => {
+    const { main } = await import("./browser_verify.mjs");
+    const fsp = await import("node:fs/promises");
+    const path = await import("node:path");
+    await withPasskeySignInServer(options, async ({ baseUrl, dir, hits }) => {
+      const auth = await main(ensureAuthArgv(baseUrl, dir));
+      assert.equal(auth.ok, true);
+      assert.equal(auth.renewed, true);
+      assert.equal(auth.user.id, "u1");
+      assert.ok(hits.includes(options.signInPath));
+      assert.ok(hits.includes("/dashboard"));
+      const state = JSON.parse(
+        await fsp.readFile(path.join(dir, "browser-state.json"), "utf8"),
+      );
+      assert.deepEqual(
+        state.cookies.map((c) => [c.name, c.value]),
+        [["flp_session", "fixture-session"]],
+      );
+    });
+  });
+}

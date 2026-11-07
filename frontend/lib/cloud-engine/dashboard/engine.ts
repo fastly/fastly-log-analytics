@@ -71,6 +71,10 @@ export type FetchStats = {
   elapsedMs: number;
   /** Selective HTTP/OPFS scan rows and bytes are not measured; counters are partial. */
   selectiveIOUnmeasured?: boolean;
+  /** Set when the run could use summaries: where their listing came from, or why it was not used. */
+  summaryListing?: "inline" | "listed" | "incomplete" | "failed";
+  /** Summary files planned in place of raw windows. */
+  summaryFiles?: number;
 };
 
 export type DashboardResult = {
@@ -181,6 +185,8 @@ export type RunProgress = {
   downloadedBytes: number;
   /** File bytes answered from the browser cache, cached rollups or memory. */
   cachedBytes: number;
+  /** Files DuckDB read with HTTP range requests; their bytes are in neither total. */
+  rangedFiles?: number;
 };
 
 export type EngineOptions = {
@@ -1122,6 +1128,7 @@ async function collectAggregator(
   }
   let files: ManifestFile[] = filesOverlapping(manifest.files, fromMs, toMs);
   let summaryUses: SummaryUse[] = [];
+  let summaryListing: FetchStats["summaryListing"];
   const canUseSummaries =
     topK !== null &&
     fields.length === cardFields.length &&
@@ -1150,8 +1157,19 @@ async function collectAggregator(
       ).catch((error: unknown) => {
         // Summaries only save work; without them every window reads raw.
         if (signal?.aborted) throw error;
+        console.warn("flp: summary listing failed; reading raw Parquet", error);
         return null;
       }));
+    summaryListing = !listing
+      ? "failed"
+      : !listing.complete
+        ? "incomplete"
+        : inlineSummaries
+          ? "inline"
+          : "listed";
+    if (listing && !listing.complete) {
+      console.warn("flp: summary listing incomplete; reading raw Parquet");
+    }
     if (listing?.complete) {
       for (const file of listing.files) {
         setScopeEntry(summaryListings, scope, file.key, file);
@@ -1347,6 +1365,9 @@ async function collectAggregator(
     rows: keptRows.rows,
     bytes: keptRows.bytes,
     elapsedMs: 0,
+    ...(summaryListing
+      ? { summaryListing, summaryFiles: summaryUses.length }
+      : {}),
   };
   const progress: RunProgress = {
     phase: "cache",
@@ -1699,8 +1720,13 @@ async function collectAggregator(
             "The selective query exceeds the browser aggregate budget; choose a shorter range or add a filter.",
           );
         }
-        if (access.cached && !downloaded) stats.cached++;
-        else stats.fetched++;
+        if (access.cached && !downloaded) {
+          stats.cached++;
+          progress.cachedBytes += file.size;
+        } else {
+          stats.fetched++;
+          if (!downloaded) progress.rangedFiles = (progress.rangedFiles ?? 0) + 1;
+        }
       } finally {
         if (!released) access.release?.();
       }

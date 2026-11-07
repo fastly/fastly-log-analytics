@@ -2196,8 +2196,9 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
             "impossible_distance",
         }
         lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
-        if insight_id != "botnet_grouping":
-            assert f"event_timestamp >= {lower}" in sql, insight_id
+        # One raw-column-bounded fact scan per detection keeps partition and primary-key pruning available.
+        assert sql.count("FROM request_facts") == 1, insight_id
+        assert f"event_timestamp >= {lower}" in sql, insight_id
         assert (
             params["service_id"] == "svc" and params["baseline_start"] < params["window_start"] < params["window_end"]
         )
@@ -2252,6 +2253,45 @@ def test_insights_detector_telemetry_survives_async_and_worker_boundaries(fails:
     assert _insight_cards(response)["error_spikes"]["severity"] == ("error" if fails else "clean")
     assert secret not in json.dumps(logs, default=str)
     assert current_clickhouse_scope()["section_id"] is None
+
+
+def test_partial_insights_results_are_cached_briefly_with_card_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    real_monotonic = time.monotonic
+    skew = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + skew[0])
+    spike = {"error_spikes": [{"url": "/x", "w_rate": 0.9, "b_rate": 0.0, "w_errors": 9, "w_total": 10, "b_total": 99}]}
+    client = _InsightsClient(spike, fail={"latency_regression"})
+    service = HighScaleService(service_id="svc", client=client, cursor_secret=b"s", request_watermark=None)
+    req = InsightsRequest(window_size_hrs=24, baseline_hours=168)
+
+    first = insights_endpoint(service, req, None, None)
+    assert not first.is_cached and _insight_cards(first)["latency_regression"]["severity"] == "error"
+    computed_calls = len(client.calls)
+    client._fail = set()
+
+    retry = insights_endpoint(service, req, None, None)
+    retry_cards = _insight_cards(retry)
+    assert retry.is_cached and len(client.calls) == computed_calls
+    assert retry_cards["latency_regression"]["severity"] == "error"
+    assert retry_cards["latency_regression"]["summary"] == "Query failed: RuntimeError"
+    assert retry_cards["error_spikes"]["severity"] == "critical"
+
+    client._fail = {"latency_regression"}
+    forced = insights_endpoint(service, req, None, None, force_refresh=True)
+    assert not forced.is_cached and len(client.calls) == 2 * computed_calls
+
+    skew[0] += 61.0
+    client._fail = set()
+    expired = insights_endpoint(service, req, None, None)
+    assert not expired.is_cached and len(client.calls) == 3 * computed_calls
+    assert _insight_cards(expired)["latency_regression"]["severity"] == "clean"
+
+    skew[0] += 200.0
+    clean = insights_endpoint(service, req, None, None)
+    assert clean.is_cached and len(client.calls) == 3 * computed_calls
+    assert _insight_cards(clean)["latency_regression"]["severity"] == "clean"
 
 
 def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pytest.MonkeyPatch) -> None:

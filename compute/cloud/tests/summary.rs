@@ -515,6 +515,7 @@ fn custom_batch(rows: &[Value], custom: &[(&str, convert::Kind)]) -> RecordBatch
             .map(|(name, kind)| convert::CustomColumn {
                 name: (*name).into(),
                 kind: *kind,
+                slot_only: false,
             })
             .collect(),
     );
@@ -540,6 +541,8 @@ fn custom_columns_are_summarized_but_system_columns_are_not() {
         ("rum_lcp", Kind::Float64),
         ("edge_x", Kind::Utf8),
         ("fastly_req_id", Kind::Utf8),
+        ("lt_run_id", Kind::Utf8),
+        ("lt_request_id", Kind::Utf8),
     ];
     let rows: Vec<Value> = (0..6i64)
         .map(|i| {
@@ -547,7 +550,8 @@ fn custom_columns_are_summarized_but_system_columns_are_not() {
             json!({"timestamp": iso(BASE * 1000 + i), "ip": format!("10.0.0.{i}"),
                 "tenant": tenant, "score": i % 2,
                 "ratio": 0.5, "flag": i % 2 == 0, "cmcd_br": 3000, "rum_lcp": 1.5,
-                "edge_x": "e", "fastly_req_id": format!("r{i}")})
+                "edge_x": "e", "fastly_req_id": format!("r{i}"),
+                "lt_run_id": "run-7", "lt_request_id": format!("q{i}")})
         })
         .collect();
     let b = custom_batch(&rows, &custom);
@@ -569,7 +573,15 @@ fn custom_columns_are_summarized_but_system_columns_are_not() {
         totals["empty"], 0,
         "an all-null custom column still gets a total"
     );
-    for system in ["cmcd_br", "rum_lcp", "edge_x", "fastly_req_id", "ts_ms"] {
+    for system in [
+        "cmcd_br",
+        "rum_lcp",
+        "edge_x",
+        "fastly_req_id",
+        "lt_run_id",
+        "lt_request_id",
+        "ts_ms",
+    ] {
         assert!(!totals.contains_key(system), "{system} is not a card");
     }
     let values = |field: &str| -> BTreeMap<String, i64> {

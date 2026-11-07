@@ -48,6 +48,12 @@ describe("LoadingProgress", () => {
     expect(screen.queryByRole("region")).not.toBeInTheDocument();
   });
 
+  it("says when range reads are not included in the byte totals", () => {
+    render(<LoadingProgress stage="files" progress={{ phase: "files", cached: 0, toFetch: 502, toDecode: 0, done: 109, downloadedBytes: 0, cachedBytes: 0, rangedFiles: 109 }} />);
+    expect(screen.getByText("109 of 502 files")).toBeInTheDocument();
+    expect(screen.getByText("0 B downloaded · 0 B from cache · 109 files read in ranges (bytes not counted)")).toBeInTheDocument();
+  });
+
   it("keeps zero-file cache checks indeterminate", () => {
     render(<LoadingProgress stage="files" progress={{ phase: "cache", cached: 0, toFetch: 0, toDecode: 0, done: 0, downloadedBytes: 0, cachedBytes: 0 }} />);
     expect(screen.getByText("Checking cached data")).toBeInTheDocument();

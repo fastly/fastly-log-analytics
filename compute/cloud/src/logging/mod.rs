@@ -61,7 +61,7 @@ pub fn generate_log_format(config: &Value) -> Result<String, String> {
     let mut parts = Vec::new();
     for field in catalog::data()["fields"].as_array().into_iter().flatten() {
         let id = text(field, "id", "");
-        let Some(mut vcl) = field["vcl"].as_str().map(str::to_owned) else {
+        let Some(mut vcl) = catalog::logged_vcl(field).map(str::to_owned) else {
             continue;
         };
         if !enabled.contains(id) {
@@ -151,8 +151,9 @@ pub fn generate_log_format(config: &Value) -> Result<String, String> {
     Ok(format)
 }
 
-/// Generates a compact positional JSON array `[v0, v1, ...]` format matching the catalog + custom
-/// column order of [`crate::ingest::convert::RequestSchema`]. Disabled catalog or committed custom
+/// Generates a compact positional JSON array `[v0, v1, ...]` format: one slot per logged catalog
+/// field ([`catalog::logged_vcl`]), then the custom columns, in the order
+/// [`crate::ingest::convert::RequestSchema`] decodes. Disabled catalog or committed custom
 /// fields emit `null`, and `timestamp` (slot 0) emits `null` when `ts_ms` is enabled so
 /// `convert_object_capped` populates `timestamp` directly from `ts_ms` without logging a redundant
 /// 28-byte ISO string.
@@ -162,17 +163,7 @@ pub fn generate_compact_log_format(config: &Value) -> Result<String, String> {
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let catalog_ids: Vec<&str> = fields.iter().map(|f| text(f, "id", "")).collect();
-    let mut custom: Vec<Value> = config["custom_fields"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|f| f["committed"] == true || f["enabled"] != false)
-        .filter(|f| !catalog_ids.contains(&text(f, "name", "")))
-        .map(catalog::normalize_custom_field)
-        .collect();
-    custom.sort_by(|a, b| text(a, "name", "").cmp(text(b, "name", "")));
-    custom.dedup_by(|a, b| text(a, "name", "") == text(b, "name", ""));
+    let custom = catalog::logged_custom_fields(config);
     let mut budget = catalog::LOG_LINE_MAX_BYTES - (2 + (fields.len() + custom.len()) as i64 * 2);
     for field in fields {
         let id = text(field, "id", "");
@@ -184,7 +175,7 @@ pub fn generate_compact_log_format(config: &Value) -> Result<String, String> {
     let mut parts = Vec::with_capacity(fields.len() + custom.len());
     for field in fields {
         let id = text(field, "id", "");
-        let Some(mut vcl) = field["vcl"].as_str().map(str::to_owned) else {
+        let Some(mut vcl) = catalog::logged_vcl(field).map(str::to_owned) else {
             continue;
         };
         if !enabled.contains(id) || (id == "timestamp" && has_ts_ms) {

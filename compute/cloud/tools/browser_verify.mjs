@@ -6,7 +6,8 @@
  *   --mode ensure-auth
  *     Checks if browser-state.json has a valid session against /api/auth/session.
  *     If expired or missing, uses CDP WebAuthn Virtual Authenticator + passkeys.json
- *     to sign in at /sign-in and saves the refreshed browser-state.json.
+ *     to sign in at /sign-in (redirected to /share-login) and saves the refreshed
+ *     browser-state.json once the flp_session cookie is set.
  *
  *   --mode verify
  *     1. Ensures authentication is valid and --service-id matches the sole configured service.
@@ -967,6 +968,28 @@ async function checkSessionCookie(baseUrl, storageStatePath) {
   }
 }
 
+const SESSION_COOKIE = "flp_session";
+const SIGN_IN_PATH_RE = /^\/(sign-in|share-login)(\.html|\.txt)?\/?$/;
+
+async function waitForPasskeySession(context, page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let hasCookie = false;
+  let pathname = "";
+  for (;;) {
+    pathname = new URL(page.url()).pathname;
+    hasCookie = (await context.cookies(page.url())).some(
+      (c) => c.name === SESSION_COOKIE && c.value,
+    );
+    if (hasCookie && !SIGN_IN_PATH_RE.test(pathname)) return;
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(250);
+  }
+  throw new Error(
+    `Passkey sign-in did not complete within ${timeoutMs}ms ` +
+      `(page ${pathname}, ${SESSION_COOKIE} cookie ${hasCookie ? "set" : "missing"})`,
+  );
+}
+
 async function signInWithPasskey(
   browser,
   baseUrl,
@@ -1010,18 +1033,18 @@ async function signInWithPasskey(
     });
   }
 
+  // /sign-in now redirects to /share-login; the legacy page may still be served.
   await page.goto(`${baseUrl}/sign-in`, {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
-  const signInBtn = page.getByRole("button", {
-    name: /sign in with a passkey/i,
-  });
+  const signInBtn = page
+    .getByTestId("cloud-passkey-signin-button")
+    .or(page.getByRole("button", { name: /sign in with (a )?passkey/i }))
+    .first();
   await signInBtn.waitFor({ state: "visible", timeout: 15_000 });
   await signInBtn.click();
-  await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"), {
-    timeout: 30_000,
-  });
+  await waitForPasskeySession(context, page, 30_000);
   const updated = await cdp.send("WebAuthn.getCredentials", {
     authenticatorId,
   });

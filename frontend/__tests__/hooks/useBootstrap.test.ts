@@ -1413,6 +1413,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
           active_log_field_ids: [],
           custom_dashboard_cards: [
             { id: 'cf-1', label: 'Custom 1' },
+            { id: 'lt_request_id', label: 'LT Request' },
             { id: 'status', label: 'dup-of-standard' },
           ],
         },
@@ -1431,6 +1432,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
           { id: 'cmcd_version', label: 'CMCD Version', group: 'custom', is_custom: true },
           { id: 'rum_cid', label: 'RUM Session ID', group: 'custom', is_custom: true },
           { id: 'fastly_req_id', label: 'Fastly Req ID', group: 'custom', is_custom: true },
+          { id: 'lt_run_id', label: 'LT Run', group: 'custom', is_custom: true, show_in_dashboard: true },
           { id: 'user_cf_1', label: 'My Custom Field', group: 'custom', is_custom: true, show_in_dashboard: true },
           { id: 'user_cf_2', label: 'Other Custom Field', group: 'custom', is_custom: true, show_in_dashboard: false },
         ],

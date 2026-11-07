@@ -508,6 +508,58 @@ describe("runDashboard", () => {
     );
   });
 
+  it("counts persisted selective files as cache bytes and flags unmeasured range reads", async () => {
+    const buffers = {
+      local: await parquetFixture([row(10)]),
+      remote: await parquetFixture([row(70)]),
+    };
+    const entry = (key: keyof typeof buffers, start: string, end: string) => ({
+      ...manifestEntry(key, start, end, 1),
+      size: buffers[key].byteLength,
+    });
+    const source = fixtureSource(
+      [
+        {
+          files: [
+            entry("local", "2026-10-29T10:00:00Z", "2026-10-29T10:01:00Z"),
+            entry("remote", "2026-10-29T10:01:00Z", "2026-10-29T10:02:00Z"),
+          ],
+          next_cursor: null,
+          complete: true,
+        },
+      ],
+      buffers,
+    );
+    const progress = vi.fn();
+    let clock = 0;
+    const result = await runDashboard(
+      {
+        ...source,
+        openParquet: async (file) => ({
+          kind: "buffer",
+          bytes: buffers[file.key as keyof typeof buffers],
+          cached: file.key === "local",
+        }),
+      },
+      {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:05:00Z",
+        concurrency: 1,
+        now: () => (clock += 300),
+        onProgress: progress,
+      },
+    );
+    expect(result.totalRequests).toBe(2);
+    expect(progress).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        done: 2,
+        downloadedBytes: 0,
+        cachedBytes: buffers.local.byteLength,
+        rangedFiles: 1,
+      }),
+    );
+  });
+
   it("counts boundary files whose bytes are local as decode work, not fetches", async () => {
     const buffers = {
       edge: await parquetFixture([row(10), row(250)]),

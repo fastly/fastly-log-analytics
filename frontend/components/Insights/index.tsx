@@ -56,6 +56,7 @@ interface InsightsBodyProps {
   relative: (iso: string) => string
   full: (iso: string) => string
   abbr: () => string
+  prefetchMonthBaseline?: boolean
 }
 
 function InsightsBody({
@@ -68,6 +69,7 @@ function InsightsBody({
   relative,
   full,
   abbr,
+  prefetchMonthBaseline = false,
 }: InsightsBodyProps) {
   // Which section tab is active. Controlled here (not inside InsightTabs) so the
   // selection survives the loading→loaded swap between the two InsightTabs
@@ -75,7 +77,7 @@ function InsightsBody({
   const [activeTab, setActiveTab] = useQueryState('tab', parseAsString.withDefault(normalizeTabKey(initialTab)))
   const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, isSuccess, isFetching } = useQuery({
     queryKey: hasActiveFilters
       ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
       : ['insights', activeServiceId, windowHours, baselineHours],
@@ -94,6 +96,35 @@ function InsightsBody({
     staleTime: 60000,
     placeholderData: keepPreviousData,
   })
+
+  // The 24h/720h month comparison is a full-retention scan; start it only after the
+  // selected scan has finished so the two never compete for the same backend.
+  const queryClient = useQueryClient()
+  const primarySettled = isSuccess && !isFetching
+  const monthPrefetchedFor = React.useRef<string | null>(null)
+  React.useEffect(() => {
+    if (!activeServiceId || !prefetchMonthBaseline || !primarySettled) return
+    if (monthPrefetchedFor.current === activeServiceId) return
+    const timer = setTimeout(() => {
+      monthPrefetchedFor.current = activeServiceId
+      void queryClient.prefetchQuery({
+        queryKey: ['insights', activeServiceId, '24', '720'],
+        queryFn: async ({ signal }) => {
+          return unwrapClient(client.POST('/api/insights', {
+            signal,
+            body: {
+              window_size_hrs: 24,
+              baseline_hours: 720,
+              filters: {},
+              force_refresh: false,
+            },
+          }))
+        },
+        staleTime: 60_000,
+      })
+    }, 3000)
+    return () => clearTimeout(timer)
+  }, [activeServiceId, prefetchMonthBaseline, primarySettled, queryClient])
 
   const { data: availability, error: availabilityError } = useQuery({
     queryKey: ['insights', 'availability', activeServiceId],
@@ -332,31 +363,8 @@ export function InsightsClient({
     staleTime: 60_000,
   })
 
-  // Pre-load / prefetch secondary month option (24h vs 720h) when enough data exists (>=30d history).
-  React.useEffect(() => {
-    if (!activeServiceId) return
-    const history = historyHoursFromExtents(extentsData?.earliest_log_at)
-    if (history !== null && history >= 720) {
-      const timer = setTimeout(() => {
-        void queryClient.prefetchQuery({
-          queryKey: ['insights', activeServiceId, '24', '720'],
-          queryFn: async ({ signal }) => {
-            return unwrapClient(client.POST('/api/insights', {
-              signal,
-              body: {
-                window_size_hrs: 24,
-                baseline_hours: 720,
-                filters: {},
-                force_refresh: false,
-              },
-            }))
-          },
-          staleTime: 60_000,
-        })
-      }, 3000)
-      return () => clearTimeout(timer)
-    }
-  }, [activeServiceId, extentsData?.earliest_log_at, queryClient])
+  const monthHistory = historyHoursFromExtents(extentsData?.earliest_log_at)
+  const prefetchMonthBaseline = monthHistory !== null && monthHistory >= 720
 
   // Debounce window/baseline so chained dropdown changes (e.g. switching
   // both window AND baseline in succession) only fire one /api/insights
@@ -438,6 +446,7 @@ export function InsightsClient({
             relative={relative}
             full={full}
             abbr={abbr}
+            prefetchMonthBaseline={prefetchMonthBaseline}
           />
         </>
       )}

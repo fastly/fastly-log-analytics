@@ -9896,6 +9896,7 @@ fn service_schema_adds_committed_and_enabled_custom_fields_in_name_order() {
                 } else {
                     c.kind
                 },
+                slot_only: c.slot_only,
             })
             .collect(),
     );
@@ -10680,6 +10681,117 @@ fn zstd_positional_array_raw_logs_and_period_aligned_windows_round_trip() {
         ordered_ips,
         ["198.51.100.3", "198.51.100.1", "198.51.100.2"]
     );
+}
+
+/// Renders a compact log format the way Fastly would: every `%{expr}V` becomes the value of the
+/// custom field `expr` reads, or an empty string (quoted) or `null` (bare) for anything else.
+fn render_compact_line(format: &str, values: &[(&str, &str)]) -> String {
+    let mut line = String::new();
+    let mut rest = format;
+    while let Some(start) = rest.find("%{") {
+        let end = start + rest[start..].find("}V").expect("unterminated expression");
+        let expr = &rest[start + 2..end];
+        let quoted = rest[..start].ends_with('"');
+        line.push_str(&rest[..start]);
+        let value = values
+            .iter()
+            .find(|(name, _)| expr.contains(&format!("-data:{name},")))
+            .map(|(_, value)| *value);
+        line.push_str(value.unwrap_or(if quoted { "" } else { "null" }));
+        rest = &rest[end + 2..];
+    }
+    line.push_str(rest);
+    line
+}
+
+/// Generates `fields`' compact log format, renders one line of it with `values`, and converts
+/// it the way a worker does: with the schema rebuilt from the custom columns its shard carries.
+fn convert_compact_line(fields: &Value, values: &[(&str, &str)]) -> RecordBatch {
+    let format = fastly_log_analytics::logging::generate_compact_log_format(fields).unwrap();
+    let line = render_compact_line(&format, values);
+    serde_json::from_str::<Value>(&line).expect("rendered line is JSON");
+    let zstd_bytes = zstd::stream::encode_all(format!("{line}\n").as_bytes(), 3).unwrap();
+    let planned = ingest::convert::RequestSchema::for_fields(fields);
+    let shard_custom = serde_json::from_value(json!(planned.custom())).unwrap();
+    let schema = ingest::convert::RequestSchema::new(shard_custom);
+    assert_eq!(schema.hash(), planned.hash());
+    let rows = ingest::convert::convert_object_capped(
+        &zstd_bytes,
+        300,
+        BASE,
+        ingest::convert::MAX_DECOMPRESSED_BYTES,
+        &schema,
+    )
+    .unwrap();
+    assert_eq!((rows.rows, rows.bad_lines), (1, 0));
+    rows.windows.into_values().next().unwrap()
+}
+
+fn text_at(batch: &RecordBatch, name: &str) -> Option<String> {
+    let column = batch.column_by_name(name).unwrap();
+    let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+    column.is_valid(0).then(|| column.value(0).to_owned())
+}
+
+fn number_at(batch: &RecordBatch, name: &str) -> Option<i64> {
+    let column = batch.column_by_name(name).unwrap();
+    let column = column.as_any().downcast_ref::<Int64Array>().unwrap();
+    column.is_valid(0).then(|| column.value(0))
+}
+
+#[test]
+fn compact_log_format_custom_fields_land_in_their_own_columns() {
+    let mut fields = json!({
+        "preset": "full",
+        "fields": ingest::convert::columns().iter().map(|c| c.id).collect::<Vec<_>>(),
+        "custom_fields": [
+            {"name": "lt_run_id", "vcl": "req.http.x-lt-run-id", "parquet_type": "Utf8",
+             "enabled": true, "committed": true},
+            {"name": "lt_request_id", "vcl": "req.http.x-lt-request-id", "parquet_type": "Utf8",
+             "enabled": true, "committed": true},
+        ],
+    });
+    let cmcd = fastly_log_analytics::logging::cmcd::Config {
+        enabled: true,
+        ..Default::default()
+    };
+    fastly_log_analytics::logging::cmcd::reconcile_fields(&mut fields, &cmcd, None, false).unwrap();
+    let batch = convert_compact_line(
+        &fields,
+        &[
+            ("lt_run_id", "run-7"),
+            ("lt_request_id", "req-9"),
+            ("cmcd_sid", "sess-3"),
+            ("cmcd_br", "1200"),
+        ],
+    );
+    assert_eq!(text_at(&batch, "lt_run_id").as_deref(), Some("run-7"));
+    assert_eq!(text_at(&batch, "lt_request_id").as_deref(), Some("req-9"));
+    assert_eq!(text_at(&batch, "cmcd_sid").as_deref(), Some("sess-3"));
+    assert_eq!(number_at(&batch, "cmcd_br"), Some(1200));
+    assert_eq!(number_at(&batch, "cmcd_bl"), None);
+    assert_eq!(text_at(&batch, "_source_file"), None);
+    assert_eq!(number_at(&batch, "requests"), None);
+}
+
+#[test]
+fn compact_log_format_custom_field_of_unsupported_type_keeps_its_slot() {
+    let fields = json!({
+        "preset": "full",
+        "fields": ingest::convert::columns().iter().map(|c| c.id).collect::<Vec<_>>(),
+        "custom_fields": [
+            {"name": "event_at", "vcl": "req.http.x-event-at", "parquet_type": "TIMESTAMP",
+             "enabled": true, "committed": true},
+            {"name": "lt_run_id", "vcl": "req.http.x-lt-run-id", "parquet_type": "Utf8",
+             "enabled": true, "committed": true},
+        ],
+    });
+    let batch = convert_compact_line(
+        &fields,
+        &[("event_at", "2027-01-15T08:00:00Z"), ("lt_run_id", "run-7")],
+    );
+    assert!(batch.column_by_name("event_at").is_none());
+    assert_eq!(text_at(&batch, "lt_run_id").as_deref(), Some("run-7"));
 }
 
 #[test]

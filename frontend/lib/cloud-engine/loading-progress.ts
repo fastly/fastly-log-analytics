@@ -32,6 +32,8 @@ function publish(): void {
         done: progress.reduce((sum, p) => sum + p.done, 0),
         downloadedBytes: progress.reduce((sum, p) => sum + p.downloadedBytes, 0),
         cachedBytes: progress.reduce((sum, p) => sum + p.cachedBytes, 0),
+        ...(progress.some((p) => p.rangedFiles !== undefined)
+          ? { rangedFiles: progress.reduce((sum, p) => sum + (p.rangedFiles ?? 0), 0) } : {}),
       } : null,
     };
   }

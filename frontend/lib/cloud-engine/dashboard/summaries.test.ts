@@ -2,9 +2,10 @@
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CARD_FIELDS,
+  customCards,
   decodeSummary,
   fingerprint,
   planSummaries,
@@ -526,8 +527,52 @@ describe("summary readers", () => {
         return source.fetchJson(url, signal);
       },
     };
-    const result = await runDashboard(failing, { from, to });
-    expect(expectMatchesRaw(result, raw.result)).toEqual([]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await runDashboard(failing, { from, to });
+      expect(expectMatchesRaw(result, raw.result)).toEqual([]);
+      expect(result.stats).toMatchObject({
+        summaryListing: "failed",
+        summaryFiles: 0,
+      });
+      expect(warn).toHaveBeenCalledWith(
+        "flp: summary listing failed; reading raw Parquet",
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("reports an incomplete summary listing and how many summaries a run used", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const raw = await run(from, to, RAW, []);
+    const incomplete = fixtureSource(
+      [page(RAW)],
+      BUFFERS,
+      { json: [], files: [] },
+      [{ files: pick("hour", (e) => !e.early), next_cursor: null, complete: false }],
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await runDashboard(incomplete, { from, to });
+      expect(expectMatchesRaw(result, raw.result)).toEqual([]);
+      expect(result.stats).toMatchObject({
+        summaryListing: "incomplete",
+        summaryFiles: 0,
+      });
+      expect(warn).toHaveBeenCalledWith(
+        "flp: summary listing incomplete; reading raw Parquet",
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    const listed = await run(from, to, RAW, pick("hour", (e) => !e.early));
+    expect(listed.result.stats).toMatchObject({
+      summaryListing: "listed",
+      summaryFiles: 2,
+    });
   });
 
   it("classifies summaries against filters and edgeOnly while respecting truncated fields", async () => {
@@ -755,6 +800,17 @@ describe("summary readers", () => {
     const rawSource = fixtureSource([page(RAW)], BUFFERS);
     const rawFiltered = await runDashboard(rawSource, { from, to, filters });
     expectMatchesRaw(filtered, rawFiltered);
+  });
+});
+
+describe("custom cards", () => {
+  it("drops system-managed and load-test fields", () => {
+    const ids = customCards(
+      ["tenant", "cmcd_br", "edge_x", "rum_lcp", "lt_run_id", "lt_request_id", "fastly_req_id"].map(
+        (id) => ({ id, label: id, type: "string" as const }),
+      ),
+    ).map((card) => card.id);
+    expect(ids).toEqual(["tenant"]);
   });
 });
 

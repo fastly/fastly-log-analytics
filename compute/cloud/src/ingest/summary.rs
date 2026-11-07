@@ -807,7 +807,8 @@ fn sketch_ids(ids: &mut Vec<u32>, entries: &[(u8, u8)]) -> (Hll, u64) {
 }
 
 /// The service's custom card fields: batch columns outside the catalog, minus system-managed
-/// CMCD, RUM, edge and request-id columns, which never get a dashboard card (fla v3).
+/// CMCD, RUM, edge, load-test (`lt_`) and request-id columns, which never get a dashboard card
+/// (fla v3).
 fn custom_fields(batches: &[&RecordBatch]) -> Vec<String> {
     let catalog: Vec<&str> = convert::columns().iter().map(|c| c.id).collect();
     let mut names: Vec<String> = Vec::new();
@@ -817,7 +818,7 @@ fn custom_fields(batches: &[&RecordBatch]) -> Vec<String> {
             if !catalog.contains(&name)
                 && !FIELDS.contains(&name)
                 && name != "fastly_req_id"
-                && !["cmcd_", "edge_", "rum_", "_"]
+                && !["cmcd_", "edge_", "rum_", "lt_", "_"]
                     .iter()
                     .any(|prefix| name.starts_with(prefix))
                 && !names.iter().any(|n| n == name)

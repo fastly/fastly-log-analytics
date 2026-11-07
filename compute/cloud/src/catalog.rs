@@ -13,6 +13,35 @@ pub fn data() -> &'static Value {
     })
 }
 
+/// The VCL that logs a catalog field, or `None` for columns no log line carries (derived
+/// metrics, virtual and internal columns such as `requests` or `_source_file`). The log formats
+/// and the positional-array decoder both follow it, so array slots stay aligned.
+pub fn logged_vcl(field: &Value) -> Option<&str> {
+    field["vcl"].as_str()
+}
+
+/// The custom fields a compact log line carries after the catalog fields, normalized: committed
+/// or enabled, not named like a catalog field, in name order, one per name. The log format and
+/// the positional-array decoder both follow it, so array slots stay aligned.
+pub fn logged_custom_fields(config: &Value) -> Vec<Value> {
+    let catalog = data()["fields"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let name = |field: &Value| field["name"].as_str().unwrap_or("").to_owned();
+    let mut custom: Vec<Value> = config["custom_fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["committed"] == true || f["enabled"] != false)
+        .filter(|f| !catalog.iter().any(|c| c["id"].as_str() == Some(&name(f))))
+        .map(normalize_custom_field)
+        .collect();
+    custom.sort_by_key(name);
+    custom.dedup_by(|a, b| name(a) == name(b));
+    custom
+}
+
 pub fn get_catalog_for_api(field_limits: Option<&Value>) -> Value {
     let mut fields = data()["api_fields"].clone();
     if let Some(fields) = fields.as_array_mut() {
@@ -288,8 +317,9 @@ pub fn estimate_log_line_bytes(config: &Value) -> i64 {
 }
 
 /// fla v3 `custom_dashboard_cards`: enabled custom fields marked `show_in_dashboard`, in name
-/// order, with the value type the dashboard restores from summaries. CMCD, RUM, edge and
-/// request-id fields are system-managed and never get a card.
+/// order, with the value type the dashboard restores from summaries. CMCD, RUM, edge, load-test
+/// (`lt_`) and request-id fields are system-managed and never get a card, and neither does a
+/// field of an unsupported type, which has no column.
 pub fn dashboard_cards(log_fields: &Value) -> Value {
     let fields: Vec<&Value> = log_fields["custom_fields"]
         .as_array()
@@ -300,8 +330,9 @@ pub fn dashboard_cards(log_fields: &Value) -> Value {
         .into_iter()
         .filter(|column| {
             let name = column.name.as_str();
-            name != "fastly_req_id"
-                && !["cmcd_", "edge_", "rum_"]
+            !column.slot_only
+                && name != "fastly_req_id"
+                && !["cmcd_", "edge_", "rum_", "lt_"]
                     .iter()
                     .any(|prefix| name.starts_with(prefix))
         })
@@ -350,6 +381,9 @@ mod tests {
             {"name": "edge_x", "vcl": "x", "parquet_type": "VARCHAR", "show_in_dashboard": true},
             {"name": "fastly_req_id", "vcl": "x", "parquet_type": "VARCHAR",
              "show_in_dashboard": true},
+            {"name": "lt_run_id", "vcl": "x", "parquet_type": "VARCHAR",
+             "show_in_dashboard": true},
+            {"name": "odd", "vcl": "x", "parquet_type": "UUID", "show_in_dashboard": true},
             {"name": "managed", "vcl": "x", "parquet_type": "VARCHAR", "system_managed": true,
              "show_in_dashboard": true},
             {"name": "host", "vcl": "x", "parquet_type": "VARCHAR", "show_in_dashboard": true},

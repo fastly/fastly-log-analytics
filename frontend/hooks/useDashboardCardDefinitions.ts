@@ -168,6 +168,7 @@ export function useDashboardCards(): DashboardCard[] {
             f.id.startsWith('cmcd_') ||
             f.id.startsWith('edge_') ||
             f.id.startsWith('rum_') ||
+            f.id.startsWith('lt_') ||
             f.id === 'fastly_req_id'
 
           if (isSystemField) {
@@ -197,6 +198,7 @@ export function useDashboardCards(): DashboardCard[] {
           c.id.startsWith('cmcd_') ||
           c.id.startsWith('edge_') ||
           c.id.startsWith('rum_') ||
+          c.id.startsWith('lt_') ||
           c.id === 'fastly_req_id'
         return !isSystemField
       })

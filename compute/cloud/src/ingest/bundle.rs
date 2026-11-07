@@ -2044,6 +2044,7 @@ mod tests {
             vec![convert::CustomColumn {
                 name: "tenant".into(),
                 kind: convert::Kind::Utf8,
+                slot_only: false,
             }]
         } else {
             Vec::new()

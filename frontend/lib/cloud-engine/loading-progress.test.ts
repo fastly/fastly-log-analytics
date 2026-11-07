@@ -40,6 +40,13 @@ describe("cloud loading progress", () => {
     expect(cloudLoadingStore.getSnapshot()).toBeNull();
   });
 
+  it("sums unmeasured range reads across concurrent jobs", () => {
+    beginCloudLoading("files").update({ progress: { ...progress, rangedFiles: 2 } });
+    beginCloudLoading("files").update({ progress });
+    beginCloudLoading("files").update({ progress: { ...progress, rangedFiles: 3 } });
+    expect(cloudLoadingStore.getSnapshot()?.progress?.rangedFiles).toBe(5);
+  });
+
   it("marks subsequent analysis as refreshing only after success", () => {
     beginCloudLoading("files").finish(false);
     const initial = beginCloudLoading("files");

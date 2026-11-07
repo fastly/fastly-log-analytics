@@ -71,8 +71,11 @@ _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
 _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 _INSIGHTS_TELEMETRY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
+# Results with error cards are kept briefly so retries and prewarms reuse the cards that did succeed.
+_INSIGHTS_PARTIAL_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_TELEMETRY_CACHE", _INSIGHTS_TELEMETRY_CACHE)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_PARTIAL_CACHE", _INSIGHTS_PARTIAL_CACHE)
 
 
 def _severity(items: list[dict[str, Any]]) -> str:
@@ -120,10 +123,11 @@ def insights_endpoint(
     use_cache = isinstance(service, HighScaleService)
     if use_cache and not force_refresh:
         cached = _INSIGHTS_CACHE.get(cache_key)
+        cached_telemetry = _INSIGHTS_TELEMETRY_CACHE.get(cache_key)
+        if cached is None and (partial := _INSIGHTS_PARTIAL_CACHE.get(cache_key)) is not None:
+            cached, cached_telemetry = partial
         if cached is not None:
-            cached_queries = [
-                q.copy() if isinstance(q, dict) else q for q in (_INSIGHTS_TELEMETRY_CACHE.get(cache_key) or [])
-            ]
+            cached_queries = [q.copy() if isinstance(q, dict) else q for q in (cached_telemetry or [])]
             return InsightsResponse.with_telemetry(
                 **cached, is_cached=True, cache_age_seconds=0, debug_queries=cached_queries
             )
@@ -235,11 +239,14 @@ def insights_endpoint(
         baseline_hours=baseline_hours,
         window_total_requests=window_total,
     )
-    if use_cache and not any(c.get("severity") == "error" for c in cards):
-        _INSIGHTS_CACHE[cache_key] = payload
-        _INSIGHTS_TELEMETRY_CACHE[cache_key] = [
-            {**q, "is_cached": True} if isinstance(q, dict) else q for q in get_queries()
-        ]
+    if use_cache:
+        cached_queries = [{**q, "is_cached": True} if isinstance(q, dict) else q for q in get_queries()]
+        if any(c.get("severity") == "error" for c in cards):
+            _INSIGHTS_PARTIAL_CACHE[cache_key] = (payload, cached_queries)
+        else:
+            _INSIGHTS_CACHE[cache_key] = payload
+            _INSIGHTS_TELEMETRY_CACHE[cache_key] = cached_queries
+            _INSIGHTS_PARTIAL_CACHE.pop(cache_key, None)
     return InsightsResponse.with_telemetry(**payload)
 
 

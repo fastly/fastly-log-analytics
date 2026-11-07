@@ -20,7 +20,7 @@ Defaults adapt to available history (a young service compares the last hour agai
 - Cards load from one `POST /api/insights` call; skeleton cards come from the availability response while it is in flight. Each category shows "No anomalies detected" style empty state when all of its detectors are clean.
 - Detectors whose required log fields are not in the service's log format are listed as unavailable in a banner; `GET /api/insight-availability` supplies the available and unavailable lists.
 - Admins get a Re-scan action (`force_refresh: true`). Analysts do not see it, and the server forces `force_refresh` to false for analyst sessions.
-- A 24h window with a 720h baseline is prefetched when the service has at least 30 days of history.
+- A 24h window with a 720h baseline is prefetched when the service has at least 30 days of history, once the selected request has finished.
 
 ## Detectors
 
@@ -69,7 +69,7 @@ Routes in [`backend/routers/insights.py`](../../backend/routers/insights.py), mo
 - `POST /api/insights/cache-collapse-detail` (`CacheCollapseDetailResponse`): timeline, disposition breakdown and recent misses for one URL (`url`, `window_size_hrs`, `baseline_hours`).
 - `GET /api/insight-availability` ([`backend/routers/bootstrap.py`](../../backend/routers/bootstrap.py)): `InsightsAvailabilityResponse` listing available and unavailable detectors for the active service.
 
-Results are cached in-process (TTL 300 s) and warmed by the `insights_prewarmer` cron, which is demand-driven ([cron spec](../cron/jobs/insights-prewarmer.md)).
+Results are cached in-process (TTL 300 s). If some cards fail (for example a ClickHouse timeout), the successful cards are cached for 60 s with the failed cards' errors kept, so a retry or a queued request doesn't recompute them. Results are warmed by the `insights_prewarmer` cron, which is demand-driven ([cron spec](../cron/jobs/insights-prewarmer.md)).
 
 Cache misses use the existing `HighScaleSections` telemetry: metadata reads are `insights.history` and `insights.fields`, and detector reads are `insights.<detector_id>`, all with `source=fact`. These stable labels and request correlation survive the async and worker-thread boundaries. Section events contain timings and outcomes, not SQL, filter values or request bodies.
 

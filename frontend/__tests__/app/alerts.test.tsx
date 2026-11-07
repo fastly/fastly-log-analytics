@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import {
@@ -655,6 +655,43 @@ describe('Alerts & Insights Pages', () => {
         },
         { timeout: 3000 },
       )
+    })
+
+    test('defers the 720h month prefetch until the primary insights request completes', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        apiGet.mockImplementation((url) =>
+          url === '/api/log-extents'
+            ? Promise.resolve({
+                data: {
+                  earliest_log_at: new Date(Date.now() - 40 * 24 * 3600_000).toISOString(),
+                  latest_log_at: new Date().toISOString(),
+                },
+              })
+            : Promise.resolve({ data: { unavailable: [] } }),
+        )
+        const resolvers: Array<(value: ApiResult) => void> = []
+        apiPost.mockImplementation((_url, opts) =>
+          opts?.body?.baseline_hours === 720
+            ? Promise.resolve({ data: { insights: [], computed_at: new Date().toISOString() } })
+            : new Promise<ApiResult>((resolve) => { resolvers.push(resolve) }),
+        )
+        const monthCalls = () => apiPost.mock.calls.filter(([, opts]) => opts?.body?.baseline_hours === 720).length
+
+        renderWithQuery(<InsightsClient />, { queryClient })
+        await waitFor(() => expect(resolvers.length).toBeGreaterThan(0))
+        expect(apiPost.mock.calls[0][1]?.body?.baseline_hours).toBe(168)
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+        expect(monthCalls()).toBe(0)
+
+        await act(async () => {
+          resolvers.forEach((resolve) => resolve({ data: { insights: [], computed_at: new Date().toISOString() } }))
+          await vi.advanceTimersByTimeAsync(5_000)
+        })
+        await waitFor(() => expect(monthCalls()).toBe(1))
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     test('uses the SSR service and adaptive seed before the service store hydrates', async () => {
