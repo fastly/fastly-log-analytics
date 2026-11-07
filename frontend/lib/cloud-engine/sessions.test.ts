@@ -110,7 +110,7 @@ describe("cloud-engine sessions & session scoring module", () => {
       endTime: "2026-11-02T00:00:00Z",
     });
     expect(cteSql).toContain("gap > 1800000");
-    expect(cteSql).toContain("LAG(epoch_ms(ts)) OVER (PARTITION BY");
+    expect(cteSql).toContain("first_t - LAG(last_t) OVER (PARTITION BY");
 
     const stitchSql = buildSessionsRollupStitchSql("sessions_rollup");
     expect(stitchSql).toContain("INTERVAL 30 MINUTES");

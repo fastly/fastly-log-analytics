@@ -50,6 +50,7 @@ import {
   handleSessionsDetail,
   handleSessionsList,
   openSessionToken,
+  sessionsScanColumns,
   type SessionDetailRequest,
   type SessionsListRequest,
 } from "./sessions";
@@ -419,7 +420,8 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     : url.pathname.startsWith("/api/origin/") ? originScanColumns(url.pathname, params)
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
     : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters)
-    : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters) : null;
+    : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters)
+    : url.pathname === "/api/sessions" ? sessionsScanColumns(params.filters) : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {

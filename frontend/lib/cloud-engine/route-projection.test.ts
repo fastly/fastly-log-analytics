@@ -5,6 +5,7 @@ import { assetsScanColumns, handleAssetsRequest } from "./assets";
 import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { handleValueRequest, valueScanColumns } from "./value";
+import { handleSessionsList, sessionsScanColumns } from "./sessions";
 
 type Backend = Awaited<ReturnType<typeof createNodeBackend>>;
 type Variant = { name: string; columns: string[] | null; run: (read: DuckDBReadContext) => Promise<unknown> };
@@ -209,5 +210,33 @@ describe("Cloud route column projections", () => {
     expect(performanceScanColumns({ status_1: { mode: "include", values: ["200"] } })).toContain("status");
     expect(performanceScanColumns("status")).toBeNull();
     expect(performanceScanColumns([{ field: "status" }])).toBeNull();
+  });
+
+  const sessions = (body: Record<string, unknown>): Variant => ({
+    name: `/api/sessions ${JSON.stringify(body)}`,
+    columns: sessionsScanColumns(body.filters),
+    run: async (context) => {
+      const response = await handleSessionsList({ ...RANGE, ...body }, {
+        // The Cloud view's present columns include the loader-derived ts_ms.
+        availableColumns: new Set(["ts_ms", ...await context.getPresentColumns()]),
+        runSql: (sql) => context.executeSql(sql),
+      });
+      if (!("sessions" in response.body)) throw new Error("Session scan failed");
+      return response.body.sessions;
+    },
+  });
+
+  it("loads /api/sessions scans as exact projections", async () => {
+    expect(await sessions({}).run(read)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ req_count: expect.any(Number), unique_urls: expect.any(Number) }),
+    ]));
+    await guard([
+      sessions({}),
+      sessions({ sort_by: "median_rtt_ms", flagged_only: true, min_reqs_flag: 2 }),
+      sessions({ filters: { host: { mode: "include", values: ["a.example"] } }, sort_by: "unique_urls" }),
+    ]);
+    expect(sessionsScanColumns({ host: ["a.example"] })).toContain("host");
+    expect(sessionsScanColumns("host")).toBeNull();
+    expect(sessionsScanColumns([{ field: "host" }])).toBeNull();
   });
 });

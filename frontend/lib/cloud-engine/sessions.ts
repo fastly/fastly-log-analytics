@@ -159,9 +159,22 @@ export function openSessionToken(token: string): SessionTokenPayload | null {
   }
 }
 
+/** Every request column the /api/sessions list scan reads. */
+export const SESSIONS_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "ip", "ja4", "cmcd_sid", "edge_sid", "edge", "asn", "country", "status", "resp_bytes",
+  "tcp_rtt", "ua", "url",
+] as const;
+
+/** The columns a projected /api/sessions load needs, or null when the filters can't name theirs. */
+export function sessionsScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...SESSIONS_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...SESSIONS_SCAN_COLUMNS, ...Object.keys(filters)])];
+}
+
 /**
- * Build the 5-step 30-minute inactivity-gap sessionization CTE pipeline:
- * `base` -> `gaps` -> `marks` (`INTERVAL 30 MINUTES` / 1800s) -> `sessions_raw` -> `sessions_agg`.
+ * Build the 30-minute inactivity-gap sessionization CTE pipeline (`INTERVAL 30 MINUTES` / 1800s):
+ * `base` -> `clients` -> `minutes` -> `minute_sessions` -> `sessions_agg` -> `page` (-> `page_stats`).
  */
 export function buildSessionsCteSql(options: {
   tableName?: string;
@@ -199,8 +212,6 @@ export function buildSessionsCteSql(options: {
     ]);
 
   const hasJa4 = cols.has("ja4");
-  const partKey = hasJa4 ? `"ip", "ja4"` : `"ip"`;
-  const groupKey = hasJa4 ? `"ip", "ja4"` : `"ip"`;
   const ja4Select = hasJa4 ? `"ja4"` : `NULL AS "ja4"`;
 
   const cmcdExpr = cols.has("cmcd_sid")
@@ -251,62 +262,65 @@ export function buildSessionsCteSql(options: {
   const whereClause =
     postFilters.length > 0 ? `WHERE ${postFilters.join(" AND ")}` : "";
 
-  const timestampSql = cols.has("ts_ms")
-    ? 'EPOCH_MS(CAST("ts_ms" AS BIGINT))'
-    : 'EPOCH_MS(EPOCH_MS("timestamp"))';
+  const msSql = cols.has("ts_ms") ? 'CAST("ts_ms" AS BIGINT)' : 'EPOCH_MS("timestamp")';
   const filterSql = compileFiltersToSql(Object.entries(options.filters ?? {}).flatMap(([field, spec]) =>
     (Array.isArray(spec) ? spec : spec.values ?? []).map((value) => ({
       field, value, mode: !Array.isArray(spec) && spec.mode === "exclude" ? "exclude" as const : "include" as const,
     })),
   ), false, [], options.customColumnTypes);
+  const rawColumns = ["cmcd_sid", "edge_sid", "edge", "asn", "country", "status", "resp_bytes", "tcp_rtt", "ua", "url"]
+    .filter((column) => cols.has(column)).map((column) => `"${column}"`);
+  const order = `${sortCol} ${sortDir}, "ip", "ja4", session_start`;
+  // Median RTT and distinct URLs don't combine across partial groups and are costly, so each is
+  // computed for every session only when it ranks the page, and otherwise for the page's sessions.
+  const rankStat = sortCol === "median_rtt_ms" ? rttExpr : sortCol === "unique_urls" ? urlExpr : null;
+  const pageStatExprs = [
+    ...(sortCol === "median_rtt_ms" ? [] : [{ expr: rttExpr, name: "median_rtt_ms", needs: "tcp_rtt" }]),
+    ...(sortCol === "unique_urls" ? [] : [{ expr: urlExpr, name: "unique_urls", needs: "url" }]),
+  ];
+  const pageStats = pageStatExprs.some(({ needs }) => cols.has(needs));
+  const gapMs = SESSIONS_INACTIVITY_GAP_SECONDS * 1000;
 
+  // DuckDB-WASM can't spill, and ordering every raw row by its string client key exhausted its
+  // memory. Clients get a dense integer id, and since requests less than a minute apart can't
+  // straddle a 30-minute gap, only per-client minutes are ordered to find session boundaries.
   return `
-    WITH base AS (
-      SELECT
-        ${timestampSql} AS ts,
-        "ip",
-        ${ja4Select},
-        ${cols.has("cmcd_sid") ? `"cmcd_sid"` : `NULL AS "cmcd_sid"`},
-        ${cols.has("edge_sid") ? `"edge_sid"` : `NULL AS "edge_sid"`},
-        ${cols.has("edge") ? `"edge"` : `NULL AS "edge"`},
-        ${cols.has("asn") ? `"asn"` : `NULL AS "asn"`},
-        ${cols.has("country") ? `"country"` : `NULL AS "country"`},
-        ${cols.has("status") ? `"status"` : `NULL AS "status"`},
-        ${cols.has("resp_bytes") ? `"resp_bytes"` : `NULL AS "resp_bytes"`},
-        ${cols.has("tcp_rtt") ? `"tcp_rtt"` : `NULL AS "tcp_rtt"`},
-        ${cols.has("ua") ? `"ua"` : `NULL AS "ua"`},
-        ${cols.has("url") ? `"url"` : `NULL AS "url"`}
+    WITH base AS NOT MATERIALIZED (
+      SELECT ${msSql} AS t, "ip", ${ja4Select}${rawColumns.map((column) => `, ${column}`).join("")}
       FROM ${tableName}
       WHERE "ip" IS NOT NULL AND "ip" != ''
-        AND ${timestampSql} >= EPOCH_MS(CAST(${Date.parse(options.startTime)} AS BIGINT))
-        AND ${timestampSql} < EPOCH_MS(CAST(${Date.parse(options.endTime)} AS BIGINT))
+        AND ${msSql} >= ${Date.parse(options.startTime)}
+        AND ${msSql} < ${Date.parse(options.endTime)}
         AND (${filterSql})
     ),
-    gaps AS (
-      SELECT *,
-        epoch_ms(ts) - LAG(epoch_ms(ts)) OVER (PARTITION BY ${partKey} ORDER BY ts) AS gap
+    clients AS (
+      SELECT "ip", "ja4", ROW_NUMBER() OVER () AS k
       FROM base
+      GROUP BY "ip", "ja4"
     ),
-    marks AS (
-      SELECT *,
-        CASE WHEN gap IS NULL OR gap > ${SESSIONS_INACTIVITY_GAP_SECONDS * 1000} THEN 1 ELSE 0 END AS is_new
-      FROM gaps
+    keyed AS NOT MATERIALIZED (
+      SELECT c.k, b.* EXCLUDE ("ip", "ja4")
+      FROM base b
+      JOIN clients c ON b."ip" = c."ip" AND b."ja4" IS NOT DISTINCT FROM c."ja4"
     ),
-    sessions_raw AS (
-      SELECT *,
-        SUM(is_new) OVER (
-          PARTITION BY ${partKey}
-          ORDER BY ts
-          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    minutes AS (
+      SELECT k, t // 60000 AS minute, MIN(t) AS first_t, MAX(t) AS last_t
+      FROM keyed
+      GROUP BY k, minute
+    ),
+    minute_sessions AS (
+      SELECT k, minute,
+        SUM(CASE WHEN gap IS NULL OR gap > ${gapMs} THEN 1 ELSE 0 END) OVER (
+          PARTITION BY k ORDER BY minute ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         ) AS sid
-      FROM marks
+      FROM (SELECT k, minute, first_t - LAG(last_t) OVER (PARTITION BY k ORDER BY minute) AS gap FROM minutes)
     ),
     sessions_agg AS (
       SELECT
-        "ip",
-        ${hasJa4 ? `"ja4"` : `NULL AS "ja4"`},
-        MIN(ts) AS session_start,
-        MAX(ts) AS session_end,
+        b.k,
+        m.sid,
+        MIN(b.t) AS start_t,
+        MAX(b.t) AS end_t,
         COUNT(*) AS req_count,
         ${cmcdExpr},
         ${edgeSidExpr},
@@ -315,25 +329,39 @@ export function buildSessionsCteSql(options: {
         ${countryExpr},
         ${statusExpr},
         ${bytesExpr},
-        ${rttExpr},
-        ${uaExpr},
-        ${urlExpr}
-      FROM sessions_raw
-      GROUP BY ${groupKey}, sid
+        ${uaExpr}${rankStat ? `,
+        ${rankStat}` : ""}
+      FROM keyed b
+      JOIN minute_sessions m ON b.k = m.k AND b.t // 60000 = m.minute
+      GROUP BY b.k, m.sid
     ),
     sessions_flagged AS (
-      SELECT *,
+      SELECT c."ip", c."ja4", EPOCH_MS(a.start_t) AS session_start, EPOCH_MS(a.end_t) AS session_end, a.*,
         (
           req_count >= ${minReqsFlag}
           OR ((reqs_4xx * 100.0 / NULLIF(req_count, 0)) >= ${min4xxPctFlag})
         ) AS flagged
-      FROM sessions_agg
-    )
-    SELECT *
-    FROM sessions_flagged
-    ${whereClause}
-    ORDER BY ${sortCol} ${sortDir}
-    LIMIT ${limit} OFFSET ${offset}
+      FROM sessions_agg a
+      JOIN clients c ON a.k = c.k
+    ),
+    page AS (
+      SELECT *
+      FROM sessions_flagged
+      ${whereClause}
+      ORDER BY ${order}
+      LIMIT ${limit} OFFSET ${offset}
+    )${pageStats ? `,
+    page_stats AS (
+      SELECT p.k, p.sid, ${pageStatExprs.map(({ expr }) => expr).join(", ")}
+      FROM keyed b
+      JOIN page p ON b.k = p.k AND b.t BETWEEN p.start_t AND p.end_t
+      GROUP BY p.k, p.sid
+    )` : ""}
+    SELECT p.* EXCLUDE (k, sid, start_t, end_t)${pageStatExprs
+      .map(({ expr, name }) => (pageStats ? `, s.${name}` : `, ${expr}`)).join("")}
+    FROM page p
+    ${pageStats ? "LEFT JOIN page_stats s ON p.k = s.k AND p.sid = s.sid" : ""}
+    ORDER BY ${order}
   `;
 }
 

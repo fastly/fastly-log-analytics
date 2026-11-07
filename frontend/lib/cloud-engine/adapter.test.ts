@@ -12,6 +12,7 @@ import { insightScanColumns } from "./insight-scans";
 import { NETWORK_SCAN_COLUMNS } from "./network";
 import { VALUE_SCAN_COLUMNS } from "./value";
 import { ASSETS_SCAN_COLUMNS } from "./assets";
+import { SESSIONS_SCAN_COLUMNS } from "./sessions";
 import { setCloudModeRuntime } from "./mode";
 
 vi.mock("./range-loader", async (importOriginal) => ({
@@ -325,6 +326,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       .toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS, "host"] });
     expect(await options("/api/performance", {})).toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS] });
     expect(await options("/api/performance/aggregates", { filters: [filters] })).toBeUndefined();
+    const range = { start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" };
+    expect(await options("/api/sessions", range)).toEqual({ columns: [...SESSIONS_SCAN_COLUMNS] });
+    expect(await options("/api/sessions", { ...range, filters: { host: ["example.com"] } }))
+      .toEqual({ columns: [...SESSIONS_SCAN_COLUMNS, "host"] });
+    expect(await options("/api/sessions", { ...range, filters: [filters] })).toBeUndefined();
   });
 
   it("dispatches /api/security/* routes including /proxies/export through handleSecurityRequest", async () => {
