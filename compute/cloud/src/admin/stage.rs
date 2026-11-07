@@ -60,6 +60,11 @@ pub fn reply_next(reply: &Value) -> Option<usize> {
         .filter(|next| *next < MAINT_STAGES.len())
 }
 
+/// Whether the reply's request compaction left a backlog, which brings the next turn forward.
+pub fn reply_compact_pending(reply: &Value) -> bool {
+    reply["compact_pending"].as_bool() == Some(true)
+}
+
 /// The FOS usage and API rows a stage reply carries back for the tick to write.
 pub fn reply_rows(reply: &Value) -> Vec<(telemetry::WritableLogKind, Value)> {
     reply["rows"]
@@ -141,6 +146,7 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
         "status": "ok",
         "ran": outcome.ran.map(|index| MAINT_STAGES[index]),
         "next": outcome.next,
+        "compact_pending": outcome.compact_pending,
         "worker_executions_metrics": outcome.worker_executions_metrics,
     }))
 }

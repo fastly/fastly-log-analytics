@@ -713,6 +713,8 @@ pub(super) struct MaintOutcome {
     pub(super) next: usize,
     pub(super) rows: Vec<StageRow>,
     pub(super) worker_executions_metrics: Vec<telemetry::execution::WorkerExecutionMetrics>,
+    /// Request compaction ran and has more to do.
+    pub(super) compact_pending: bool,
 }
 
 /// A maintenance execution runs no rotating stage once the Delete Data step left it past this.
@@ -721,7 +723,9 @@ const ROTATING_VCPU_MS: u64 = 300;
 /// Runs the first maintenance stage at or after `start` (cyclically) that has work, and writes
 /// its cron_runs row (a sweep that ran but found nothing to delete writes none, as before).
 /// Stages with nothing to do cost one or two reads and pass the turn on in the same execution.
-/// `next` is the stage after the one that ran, or `start` when none did.
+/// `next` is the stage after the one that ran, or `start` when none did. Request compaction runs
+/// first on every turn, when due, in the first half of the stage's wall time, so the rotation
+/// skips it: in the rotation it ran on every other turn at best, too rarely for a load hour.
 pub(super) fn maintenance_stage(
     runtime: &impl Runtime,
     tick: &TickContext<'_>,
@@ -743,6 +747,7 @@ pub(super) fn maintenance_stage(
         next: start,
         rows: Vec::new(),
         worker_executions_metrics: Vec::new(),
+        compact_pending: false,
     };
     let fencing = reset::fencing(tick.service);
     if store.within_wall() {
@@ -751,12 +756,21 @@ pub(super) fn maintenance_stage(
     // A rotating stage checks the execution's vCPU only between units of work, so none follows
     // a reset step that already spent much of the allowance.
     let spent = runtime.vcpu_ms() > ROTATING_VCPU_MS;
+    let reset_ran = !outcome.rows.is_empty();
+    if !fencing && !spent && store.within_wall() {
+        if let Some(row) =
+            request_compact_stage(&store, &buffer, &mut outcome.worker_executions_metrics)
+        {
+            outcome.compact_pending = compact_backlog(&row);
+            outcome.rows.push(row);
+        }
+    }
     for offset in 0..MAINT_STAGES.len() {
         let index = (start + offset) % MAINT_STAGES.len();
         if spent || !store.within_wall() {
             break;
         }
-        if (index == 6 && !outcome.rows.is_empty()) || (fencing && matches!(index, 0 | 3 | 4 | 5)) {
+        if index == 5 || (index == 6 && reset_ran) || (fencing && matches!(index, 0 | 3 | 4)) {
             continue;
         }
         let row = match index {
@@ -765,9 +779,8 @@ pub(super) fn maintenance_stage(
             2 => history_stage(&store, settings),
             3 => reconcile_stage(&store),
             4 => bundle_stage(&store),
-            5 => request_compact_stage(&store, &buffer, &mut outcome.worker_executions_metrics),
             6 => reset::reset_stage(&store),
-            _ => unreachable!("MAINT_STAGES has seven entries"),
+            _ => unreachable!("MAINT_STAGES has seven entries; request_compact runs first"),
         };
         if let Some(row) = row {
             outcome.rows.push(row);
@@ -794,6 +807,11 @@ pub(super) fn maintenance_stage(
         runtime.admin_event(json!({"event": "log.outbox_error", "error": error}));
     }
     outcome
+}
+
+/// A failed run retries on the regular cadence rather than the catch-up one.
+fn compact_backlog(row: &StageRow) -> bool {
+    row.more_pending && row.outcome != "error"
 }
 
 fn enough(runtime: &impl Runtime, needed: u32) -> bool {
@@ -921,11 +939,14 @@ fn compact_stage<R: Runtime>(
 const MAX_COMPACT_PASSES: u32 = 8;
 /// A further pass starts only with this much of the stage's wall time left.
 const MIN_COMPACT_PASS_WALL: Duration = Duration::from_secs(5);
+/// Wall time compaction leaves for the rotating stage after it.
+const ROTATION_WALL: Duration = Duration::from_secs(10);
 /// How long past a pass's own wall budget the stage waits for its reply (the old 40 s/45 s gap).
 const COMPACT_REPLY_MARGIN: Duration = Duration::from_secs(5);
 
 /// Merges small request window files when the service's `compaction` setting asks for it,
 /// chaining worker passes while the stage has calls and wall time and the last pass progressed.
+/// Chains passes until [`ROTATION_WALL`] is all that is left of the stage's wall time.
 fn request_compact_stage<R: Runtime>(
     store: &Store<'_, R>,
     buffer: &LogBuffer,
@@ -961,8 +982,9 @@ fn request_compact_stage<R: Runtime>(
     let mut errors = Vec::new();
     let mut failed = 0;
     loop {
-        let left =
-            crate::ingest::storage::WALL_STOP.saturating_sub(runtime.admin_elapsed(store.started));
+        let left = crate::ingest::storage::WALL_STOP
+            .saturating_sub(runtime.admin_elapsed(store.started))
+            .saturating_sub(ROTATION_WALL);
         if passes > 0
             && (passes >= MAX_COMPACT_PASSES || left < MIN_COMPACT_PASS_WALL || !enough(runtime, 1))
         {
@@ -1021,7 +1043,7 @@ fn request_compact_stage<R: Runtime>(
         // Call, wall, vCPU and heap stops end only that execution; a fresh pass resets them.
         let blocked = matches!(
             report.stopped.as_deref(),
-            Some("lease_held" | "lease_conflict" | "plan_in_flight")
+            Some("lease_held" | "lease_conflict")
         );
         stopped = report.stopped.or(stopped);
         lease_generation = report.lease_generation.or(lease_generation);

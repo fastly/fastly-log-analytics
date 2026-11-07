@@ -11040,6 +11040,47 @@ mod request_compaction {
         assert_eq!(values, expected);
     }
 
+    /// A pass that reads a job's last source completes it without first checkpointing it.
+    /// Native time for each pass of a load hour's job: 32 windows of 400 distinct clients each,
+    /// published in one commit as the catalog's compaction keeps them. Compute runs WebAssembly,
+    /// so expect a small multiple of these numbers there.
+    #[test]
+    #[ignore = "timing: cargo test --release --test ingest pass_timing -- --ignored --nocapture"]
+    fn pass_timing_for_a_load_hour_job() {
+        let fake = Fake::new(NOW);
+        let mut keys = Vec::new();
+        for i in 0..32 {
+            let start = HOUR + i * 60;
+            let lines: Vec<String> = (0..400)
+                .map(|n| line(start + n % 60, &format!("10.{i}.{}.{}", n / 256, n % 256)))
+                .collect();
+            let rows = ingest::convert::convert_object(&gz(&lines), 60, start).unwrap();
+            let bytes = ingest::convert::write_parquet(&[&rows.windows[&start]]).unwrap();
+            let key = ingest::processed_key(ROOT, start, start + 60, "abcdef012345", 400);
+            fake.bucket.borrow_mut().insert(key.clone(), bytes);
+            keys.push(key);
+        }
+        let now = fake.now.replace((HOUR + 32 * 60) as u64);
+        publish_files(&fake, &keys, &[], &[]);
+        fake.now.set(now);
+        for pass in 1..=16 {
+            let began = Instant::now();
+            let report = run(&fake, TARGET);
+            eprintln!(
+                "pass {pass}: {:.1} ms, {} sources, {} rows, {} compacts, stopped {:?}",
+                began.elapsed().as_secs_f64() * 1000.0,
+                report.sources,
+                report.rows,
+                report.compacts,
+                report.stopped,
+            );
+            if report.compacts > 0 {
+                return;
+            }
+        }
+        panic!("the job did not finish");
+    }
+
     #[test]
     fn floor_key_survives_compaction_and_catalog_retirement() {
         let fake = Fake::new(NOW);
@@ -12192,26 +12233,130 @@ mod request_compaction {
             .all(|key| fake.bucket.borrow().contains_key(key)));
     }
 
+    fn stage_turn(fake: &Fake, start: usize) -> Value {
+        let body = json!({
+            "service_id": SID,
+            "run_id": "run-1",
+            "tick_id": "",
+            "trigger": "clock",
+            "actor": "system",
+            "bucket": 0,
+            "start": start,
+        });
+        fake.new_request();
+        let path = fastly_log_analytics::admin::stage::PATH.to_owned();
+        fake.worker_dispatch(&[(path, body)], std::time::Duration::from_secs(30))
+            .remove(0)
+            .unwrap()
+    }
+
+    fn compaction_service(fake: &Fake) {
+        tick_runtime(fake);
+        let mut svc = serde_json::to_value(service()).unwrap();
+        svc["compaction"] = json!({"mode": "size_target", "size_target_mb": 64});
+        fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
+    }
+
+    /// Every maintenance turn runs due request compaction first, then the rotating stage, which
+    /// still decides where the rotation goes next; the rotation never runs it a second time.
     #[test]
-    fn waits_while_a_plan_is_in_flight() {
+    fn every_maintenance_turn_compacts_before_the_rotating_stage() {
+        for (start, ran, next) in [(0, "retention_sweep", 1), (5, "retention_sweep", 1)] {
+            let fake = Fake::new(NOW);
+            compaction_service(&fake);
+            seed(&fake, 40);
+            let reply = stage_turn(&fake, start);
+            assert_eq!(reply["ran"], ran, "{reply}");
+            assert_eq!(reply["next"], next, "{reply}");
+            assert!(!compacts(&fake).is_empty(), "{reply}");
+        }
+    }
+
+    /// A turn that leaves a compaction backlog brings the next maintenance turn forward to
+    /// `MAINT_CATCHUP_S`, and that turn compacts whatever the rotation runs.
+    #[test]
+    fn a_compaction_backlog_brings_the_next_maintenance_turn_forward() {
+        use fastly_log_analytics::admin::schedule::{MAINT_CATCHUP_S, MAINT_INTERVAL_S};
         let fake = Fake::new(NOW);
-        seed(&fake, 3);
-        fake.kv
-            .borrow_mut()
-            .insert(ingest::PLAN_KEY.into(), (1, json!({"plan_id": "p-new"})));
-        fake.kv
-            .borrow_mut()
-            .get_mut(ingest::WATERMARK_KEY)
-            .unwrap()
-            .1["run_id"] = "p-old".into();
-        assert_eq!(run(&fake, TARGET).compacts, 0);
-        assert!(compacts(&fake).is_empty());
-        fake.kv
-            .borrow_mut()
-            .get_mut(ingest::WATERMARK_KEY)
-            .unwrap()
-            .1["run_id"] = "p-new".into();
-        assert_eq!(finish(&fake, TARGET).compacts, 1);
+        compaction_service(&fake);
+        seed(&fake, 230);
+        run_tick(&fake);
+        fake.kv.borrow_mut().get_mut("cron:state").unwrap().1["maint_next"] = 5.into();
+        fake.now.set(fake.now.get() + MAINT_INTERVAL_S);
+        run_tick(&fake);
+        let runs = fake.stage_runs.borrow().clone();
+        assert_eq!(runs.len(), 2);
+        assert_ne!(runs[1]["ran"], "request_compact");
+        assert_eq!(runs[1]["compact_pending"], true, "{}", runs[1]);
+        let maint = fake.kv.borrow()["cron:state"].1["jobs"]["maint"].clone();
+        assert_eq!(maint["more_pending"], true);
+        assert_eq!(maint["retry_after"], fake.now.get() + MAINT_CATCHUP_S);
+
+        fake.now.set(fake.now.get() + MAINT_CATCHUP_S);
+        let made = compacts(&fake).len();
+        run_tick(&fake);
+        let runs = fake.stage_runs.borrow().clone();
+        assert_eq!(
+            runs.len(),
+            3,
+            "the catch-up turn came {MAINT_CATCHUP_S} s later"
+        );
+        assert_ne!(runs[2]["ran"], "request_compact");
+        assert!(compacts(&fake).len() > made, "{}", runs[2]);
+    }
+
+    /// Maintenance rides the ingest tick's dispatch, so a plan is in flight for nearly every
+    /// turn under load. The tick re-reads the watermark before its commit, so both land.
+    #[test]
+    fn compacts_alongside_the_dispatching_ticks_in_flight_plan() {
+        let fake = Fake::new(NOW);
+        tick_runtime(&fake);
+        let mut svc = serde_json::to_value(service()).unwrap();
+        svc["compaction"] = json!({"mode": "size_target", "size_target_mb": 64});
+        fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
+        let sources = seed(&fake, 3);
+        let period = NOW - 180;
+        put_raw(&fake, period, "fresh", &[line(period, "fresh")]);
+        let stage = serde_json::to_value(fastly_log_analytics::admin::stage::StageRequest {
+            service_id: SID.into(),
+            run_id: "run-1".into(),
+            tick_id: String::new(),
+            trigger: "clock".into(),
+            actor: "system".into(),
+            bucket: 0,
+            start: 5,
+        })
+        .unwrap();
+        fake.new_request();
+        let buffer = LogBuffer::new(SID, "req");
+        let options = ingest::coordinator::Options {
+            extra: vec![(fastly_log_analytics::admin::stage::PATH.into(), stage)],
+            ..ingest::coordinator::Options::request(&fake)
+        };
+        let report = ingest::coordinator::coordinate(
+            &fake,
+            &service(),
+            "ak",
+            "sk",
+            Instant::now(),
+            &buffer,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(report.converted, 1, "{report:?}");
+        assert!(!report.busy);
+        let made = compacts(&fake);
+        assert_eq!(made.len(), 1, "{:?}", report.extra_results);
+        let query = format!("from={}&to={}", iso_url(HOUR), iso_url(NOW));
+        let (_, catalog) = catalog_keys(&fake, &query);
+        assert!(catalog.contains(&made[0]));
+        assert!(sources.iter().all(|key| !catalog.contains(key)));
+        assert!(
+            catalog
+                .iter()
+                .any(|key| !key.contains("/compact=") && !sources.contains(key)),
+            "{catalog:?}"
+        );
     }
 
     /// A window file with enough wide string columns that a few of them fill a compact's footer.
@@ -12513,7 +12658,7 @@ mod request_compaction {
                 "actor": "clock", "bucket": 0, "start": 5});
             let path = fastly_log_analytics::admin::stage::PATH.to_owned();
             let reply = fake.worker_dispatch(&[(path, body)], std::time::Duration::from_secs(32));
-            assert_eq!(reply[0].as_ref().unwrap()["ran"], "request_compact");
+            assert_eq!(reply[0].as_ref().unwrap()["status"], "ok");
         };
         let wall = ingest::storage::WALL_STOP.as_secs();
         fake.elapsed_s.set(wall - 4);

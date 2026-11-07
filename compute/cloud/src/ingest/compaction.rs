@@ -15,7 +15,7 @@ mod checkpoint;
 use super::{
     bump_manifest_gen, hour_dir, parse_processed, processed_prefix,
     storage::{Object, Store},
-    PLAN_KEY, WATERMARK_KEY,
+    WATERMARK_KEY,
 };
 use crate::{shell::Runtime, telemetry::compact};
 use bytes::Bytes;
@@ -258,7 +258,6 @@ pub fn request_compact<R: Runtime>(
         .filter(|token| !token.is_empty())
         .ok_or("fastly_token_missing")?;
     let record = runtime.admin_get_fresh(STATE_KEY, &token)?;
-    let plan = runtime.admin_get(PLAN_KEY)?;
     let watermark = runtime.admin_get(WATERMARK_KEY)?;
     let state: State = record
         .as_ref()
@@ -319,19 +318,14 @@ pub fn request_compact<R: Runtime>(
         }
     }
     run.drain();
-    let in_flight = plan.is_some_and(|p| {
-        let id = p.value["plan_id"]
-            .as_str()
-            .or_else(|| p.value["run_id"].as_str());
-        id != watermark.as_ref().and_then(|w| w.value["run_id"].as_str())
-    });
+    // An in-flight ingest plan does not block a new job: compaction reads only committed
+    // catalog files and publishes by watermark CAS, and the plan's commit re-reads the watermark
+    // (or retries on `source_index_base_mismatch`), so both publications land.
     let mut pending = Vec::new();
     if run.state.job.is_some() {
         run.resume_job(&mut pending)?;
-    } else if !in_flight {
-        pending = run.scan()?;
     } else {
-        run.report.stopped = Some("plan_in_flight".into());
+        pending = run.scan()?;
     }
     if run.bump {
         let committed = match commit_watermark(store, watermark, &mut pending, tail + 2) {

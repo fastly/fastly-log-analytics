@@ -40,7 +40,7 @@ Compute runs only when a request arrives, and there is no server, scheduler proc
 4. **Due-ness** (`schedule::due`, `schedule.rs:173-191`), decided from the record's mirror of KV `cron:state.jobs` plus the service's `log_period`:
    - ingest: `sync_interval = max(5, log_period)` (v3, `MIN_PERIOD_S`). Period *p* is ready when `now - INGEST_GRACE_S ≥ (p+1) × period`, where `INGEST_GRACE_S` is 60 s plus ingest's `SETTLE_S` (120 s). Ingest is due when the newest ready period is past `last_success_period`, or when the last run left `more_pending` (catch-up on every tick until the backlog is gone);
    - raw delete: while the last run left `more_pending`;
-   - maintenance: every `MAINT_INTERVAL_S` (120 s);
+   - maintenance: every `MAINT_INTERVAL_S` (120 s), or every `MAINT_CATCHUP_S` (30 s) while the last turn's request compaction left `more_pending`. Each turn runs due request compaction first (up to 10 s of the stage's 20 s), then the first rotating stage with work;
    - a failed job backs off `RETRY_S` (30 s), a busy one `BUSY_RETRY_S` (5 s).
 5. **Run** (`dispatch`, `mod.rs:1910-2335`). The lease holder reads `cron:state` and the installed service, recomputes due-ness from the durable state, and runs:
    - **request_ingest** through `ingest::coordinator::coordinate_reporting` with `reserve = INGEST_RESERVE` (7: `RAW_DELETE_CALLS` plus what `TICK_TAIL` needs beyond the coordinator's own `TICK_RESERVE`) and, when maintenance is due, one `extra` request: the `StageRequest` for `/_internal/stage`, starting at `cron:state.maint_next`. It goes out in the same `worker_dispatch` batch as the shard workers, so it costs the tick 1 call. When only maintenance is due, the stage request is sent alone;

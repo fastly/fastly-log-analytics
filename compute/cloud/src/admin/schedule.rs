@@ -36,6 +36,9 @@ pub fn ingest_grace_s(_log_period_s: u64) -> u64 {
 }
 /// One maintenance stage dispatch per this many seconds (the 120 s clock's old cadence).
 pub const MAINT_INTERVAL_S: u64 = 120;
+/// While request compaction has a backlog, maintenance turns come this often instead. Each turn
+/// compacts first, so this sets the backlog's drain rate.
+pub const MAINT_CATCHUP_S: u64 = 30;
 /// How often an idle schedule re-reads KV, so config changes (log period, a new install) and
 /// writes made off the shield reach the mirror without a job running.
 pub const REFRESH_S: u64 = 60;

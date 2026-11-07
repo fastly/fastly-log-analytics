@@ -2338,8 +2338,13 @@ fn dispatch(
         .flatten();
     let answered = |reply: Option<&Result<Value, String>>| {
         let reply = reply?.as_ref().ok()?;
-        Some((stage::reply_next(reply)?, stage::reply_rows(reply)))
+        let pending = stage::reply_compact_pending(reply);
+        Some((
+            stage::reply_next(reply)?,
+            (stage::reply_rows(reply), pending),
+        ))
     };
+    let mut maint_more_pending = false;
     let has_creds = fos_credentials(runtime, &svc);
     let pre_stages_kv = runtime.kv_ops();
     let mut ingest_error = None;
@@ -2510,7 +2515,7 @@ fn dispatch(
             // The stage worker may have run even when the ingest step failed.
             if let Some((next, rows)) = answered(report.extra_results.first()) {
                 maint_reply = Some(Some(next));
-                stage_rows = rows;
+                (stage_rows, maint_more_pending) = rows;
             }
             stage.kv_ops += report.kv_ops;
             stage.cache_ops += report.cache_lookups;
@@ -2592,7 +2597,7 @@ fn dispatch(
             backend_requests_used += 1;
             if let Some((next, rows)) = answered(replies.first()) {
                 maint_reply = Some(Some(next));
-                stage_rows = rows;
+                (stage_rows, maint_more_pending) = rows;
             }
         }
 
@@ -2612,7 +2617,7 @@ fn dispatch(
         if let Some((stage, reply)) = rum_stage {
             if let Some((next, rows)) = reply {
                 maint_reply = Some(Some(next));
-                stage_rows = rows;
+                (stage_rows, maint_more_pending) = rows;
             }
             backend_requests_used += stage.calls;
             jobs.rum = job_state(
@@ -2709,16 +2714,17 @@ fn dispatch(
     }
     if maint_reply.is_some() {
         let answered = matches!(maint_reply, Some(Some(_)));
-        let maint_more_pending = stage_rows
-            .iter()
-            .any(|(_, row)| row["more_pending"].as_bool() == Some(true));
+        let more_pending = answered && maint_more_pending;
         jobs.maint = job_state(
             now,
             if answered { "done" } else { "missed" },
-            maint_more_pending,
+            more_pending,
             0,
             &jobs.maint,
         );
+        if more_pending {
+            jobs.maint.retry_after = now + schedule::MAINT_CATCHUP_S;
+        }
     }
     if let Some(reason) = ingest_error.clone() {
         error = Some(reason);
