@@ -48,8 +48,9 @@ beforeAll(() => {
 })
 afterEach(cleanup)
 
-test('prewarms the Cloud dashboard engine only after the session cache identity is set', async () => {
-  vi.mocked(usePathname).mockReturnValue('/insights')
+async function renderSignedIn(pathname: string) {
+  engineCalls.length = 0
+  vi.mocked(usePathname).mockReturnValue(pathname)
   vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({ isLoading: true }))
   const view = renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
@@ -66,6 +67,17 @@ test('prewarms the Cloud dashboard engine only after the session cache identity 
   }))
   view.rerender(<AppLayout><div>Content</div></AppLayout>)
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)) })
+}
 
+test('prewarms the Cloud dashboard engine only after the session cache identity is set', async () => {
+  await renderSignedIn('/dashboard')
   expect(engineCalls).toEqual(['identity:u1:admin', 'prewarm'])
+})
+
+test('does not start the dashboard engine on analytical routes that scan in their own engine', async () => {
+  for (const pathname of ['/origin', '/insights', '/network', '/fastly-value']) {
+    await renderSignedIn(pathname)
+    expect(engineCalls).toEqual(['identity:u1:admin'])
+    cleanup()
+  }
 })

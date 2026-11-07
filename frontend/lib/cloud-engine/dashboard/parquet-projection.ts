@@ -4,8 +4,12 @@ import { writeMetadata } from "hyparquet-writer/src/metadata.js";
 
 /** One tail read usually covers the whole footer. */
 export const FOOTER_PROBE_BYTES = 64 * 1024;
-/** Needed chunks closer than this share one HTTP range; requests cost more than the gap bytes. */
-export const RANGE_MERGE_GAP = 64 * 1024;
+/**
+ * Needed chunks closer than this share one HTTP range. Compacted files hold
+ * many row groups of ~100 columns, so most chunks are a few KiB and a wider
+ * gap would pull in the unneeded columns between them.
+ */
+export const RANGE_MERGE_GAP = 8 * 1024;
 
 export type FetchRange = (start: number, end: number) => Promise<ArrayBuffer>;
 
@@ -46,7 +50,11 @@ export async function readParquetFooter(size: number, fetchRange: FetchRange): P
   let tailStart = probeStart;
   if (footerLength + 8 > tail.byteLength) {
     tailStart = size - footerLength - 8;
-    tail = await fetchRange(tailStart, size);
+    const head = new Uint8Array(await fetchRange(tailStart, probeStart));
+    const whole = new Uint8Array(size - tailStart);
+    whole.set(head);
+    whole.set(new Uint8Array(tail), head.byteLength);
+    tail = whole.buffer;
   }
   const footer = tail.slice(tail.byteLength - footerLength - 8);
   return {

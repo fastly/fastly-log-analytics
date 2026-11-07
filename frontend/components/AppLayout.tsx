@@ -189,6 +189,9 @@ export function AppLayout({
   }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId, pathname])
 
   const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
+  // Other analytical routes scan in the page's own DuckDB; a dashboard worker
+  // there would download and compile a second copy of the WASM for nothing.
+  const needsDashboardEngine = matchesPrefix(pathname, ['/dashboard'])
   const cloudIdentity = isSuccess && bootstrapData ? cloudCacheIdentity(bootstrapData) : null
   React.useEffect(() => {
     if (!IS_CLOUD_MODE || !needsPlotlyPrewarm || needsLogin || cloudIdentity === null) return
@@ -196,9 +199,9 @@ export function AppLayout({
     // prewarmed before it would be killed mid-download.
     void import('@/lib/cloud-engine/dashboard/client').then(async ({ setDashboardCacheIdentity, prewarmDashboardEngine }) => {
       await setDashboardCacheIdentity(cloudIdentity)
-      prewarmDashboardEngine()
+      if (needsDashboardEngine) prewarmDashboardEngine()
     })
-  }, [needsPlotlyPrewarm, needsLogin, cloudIdentity])
+  }, [needsPlotlyPrewarm, needsDashboardEngine, needsLogin, cloudIdentity])
 
   const isLoginPage = pathname.startsWith('/share-login')
   if (isLoginPage || needsLogin) {

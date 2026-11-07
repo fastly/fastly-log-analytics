@@ -120,8 +120,8 @@ describe("Cloud first-page analytical range loading", () => {
     const { ranges, fullBytes } = projectedFiles(4);
     const read = await ensureCloudRange(from, to, signal, ["request"], projection(fullBytes / 4));
     expect(source.fetchFile).not.toHaveBeenCalled();
-    expect(ranges.peak).toBeGreaterThan(1);
-    expect(ranges.peak).toBeLessThanOrEqual(6);
+    expect(ranges.peak).toBeGreaterThan(6);
+    expect(ranges.peak).toBeLessThanOrEqual(16);
     expect(ranges.bytes).toBeLessThan(fullBytes / 2);
     expect(await read.executeSql(
       "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors, count(*) FILTER (WHERE cache = 'HIT') AS hits FROM requests",
@@ -167,6 +167,29 @@ describe("Cloud first-page analytical range loading", () => {
       end === entries.find((candidate) => candidate.key === (entry as ManifestFile).key)!.size);
     expect(source.fetchRange).toHaveBeenCalled();
     expect(footerReads).toEqual([]);
+  });
+
+  it("serves a persisted footer longer than the tail probe without reading it again", async () => {
+    const rows = 4000;
+    const bytes = parquetWriteBuffer({ codec: "SNAPPY", rowGroupSize: 2, columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rows }, (_, i) => new Date(Date.parse(from) + i)) },
+      { name: "status", type: "INT32", data: Array.from({ length: rows }, (_, i) => i % 7 ? 200 : 503) },
+      { name: "cache", type: "STRING", data: Array.from({ length: rows }, (_, i) => i % 3 ? "HIT" : "MISS") },
+    ] });
+    const entry = { ...file, key: "processed/request/long-footer.parquet", size: bytes.byteLength };
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+    source.fetchRange.mockImplementation(async (_entry: ManifestFile, start: number, end: number) => bytes.slice(start, end));
+    (await ensureCloudRange(from, to, signal, ["request"], { projection: { columns: ["timestamp", "status"] } })).release?.();
+    const footerStart = bytes.byteLength - 8 - new DataView(bytes).getUint32(bytes.byteLength - 8, true);
+    expect(bytes.byteLength - footerStart).toBeGreaterThan(64 * 1024);
+
+    await getDuckDBEngine().reset();
+    source.fetchRange.mockClear();
+    const read = await ensureCloudRange(from, to, signal, ["request"], { projection: { columns: ["timestamp", "cache"] } });
+    expect(source.fetchRange.mock.calls.filter(([, , end]) => (end as number) > footerStart)).toEqual([]);
+    expect(await read.executeSql("SELECT count(*) FILTER (WHERE cache = 'HIT') AS hits FROM requests"))
+      .toEqual([{ hits: 2666 }]);
+    read.release?.();
   });
 
   it("keeps the file-count limit for projected ranges", async () => {

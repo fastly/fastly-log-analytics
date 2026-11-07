@@ -138,6 +138,32 @@ describe("column-projected Parquet", () => {
     expect(footer.footerLength).toBeGreaterThan(64 * 1024);
     expect(source.reads).toHaveLength(2);
     expect(footer.metadata.row_groups).toHaveLength(2000);
+    // The second read fetches only the footer bytes the probe missed.
+    const probeStart = bytes.byteLength - FOOTER_PROBE_BYTES;
+    expect(source.reads[1]).toEqual([bytes.byteLength - footer.footerLength - 8, probeStart]);
+    expect(footer.tail!.start).toBe(source.reads[1][0]);
+    expect(new Uint8Array(footer.tail!.bytes)).toEqual(new Uint8Array(bytes.slice(footer.tail!.start)));
+  });
+
+  it("does not fetch unneeded columns of compacted files with many small row groups", async () => {
+    // Like compacted Cloud files: many row groups, each column chunk a few KiB.
+    const count = 6000;
+    const bytes = parquetWriteBuffer({ codec: "SNAPPY", rowGroupSize: 500, columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i)) },
+      { name: "rid", type: "STRING", data: Array.from({ length: count }, () => noise(24)) },
+      { name: "status", type: "INT32", data: Array.from({ length: count }, (_, i) => i % 11 ? 200 : 503) },
+      { name: "referer", type: "STRING", data: Array.from({ length: count }, () => noise(24)) },
+      { name: "city", type: "STRING", data: Array.from({ length: count }, (_, i) => `c${i % 3}`) },
+    ] });
+    const source = ranged(bytes);
+    const footer = await readParquetFooter(bytes.byteLength, source.fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(12);
+    const plan = planParquetProjection(footer, new Set(["timestamp", "status", "city"]));
+    expect(plan.ranges.reduce((sum, range) => sum + range.end - range.start, 0)).toBeLessThan(plan.neededBytes * 1.25);
+    const parts = await fetchProjectedRanges(plan, source.fetchRange);
+    expect(await query({ "p.parquet": assembleProjectedParquet(plan, parts) },
+      "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors FROM read_parquet('p.parquet')"))
+      .toEqual([{ n: BigInt(count), errors: BigInt(546) }]);
   });
 
   it("merges needed chunks separated by small gaps and keeps large gaps apart", async () => {

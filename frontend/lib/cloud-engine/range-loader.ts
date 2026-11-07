@@ -10,7 +10,8 @@ import { beginCloudLoading } from "./loading-progress";
 const MAX_RANGE_FILES = 256;
 const MAX_RANGE_BYTES = 64 * 1024 * 1024;
 const PREFETCH_CONCURRENCY = 6;
-const RANGE_CONCURRENCY = 6;
+// Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
+const RANGE_CONCURRENCY = 16;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 
@@ -116,8 +117,8 @@ export async function ensureCloudRange(
       const tail = cached && Number.isSafeInteger(tailStart) && tailStart >= 0
         ? { start: tailStart, bytes: await cached.bytes() } : null;
       const footer = await readParquetFooter(file.size, (start, end) =>
-        tail && start >= tail.start && end === tail.start + tail.bytes.byteLength
-          ? Promise.resolve(tail.bytes.slice(start - tail.start)) : fetchRange(file, start, end));
+        tail && start >= tail.start && end <= tail.start + tail.bytes.byteLength
+          ? Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start)) : fetchRange(file, start, end));
       if (!tail && footer.tail) {
         void source.writeDerivedFile(file.key, file.footerKey, footer.tail.bytes, String(footer.tail.start));
       }
