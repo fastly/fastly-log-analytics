@@ -971,7 +971,7 @@ async function checkSessionCookie(baseUrl, storageStatePath) {
 const SESSION_COOKIE = "flp_session";
 const SIGN_IN_PATH_RE = /^\/(sign-in|share-login)(\.html|\.txt)?\/?$/;
 
-async function waitForPasskeySession(context, page, timeoutMs) {
+async function waitForPasskeySession(context, page, timeoutMs, authCalls = []) {
   const deadline = Date.now() + timeoutMs;
   let hasCookie = false;
   let pathname = "";
@@ -984,9 +984,15 @@ async function waitForPasskeySession(context, page, timeoutMs) {
     if (Date.now() >= deadline) break;
     await page.waitForTimeout(250);
   }
+  const alert = await page
+    .getByTestId("share-login-error-alert")
+    .innerText({ timeout: 1_000 })
+    .catch(() => "");
+  const calls = authCalls.length ? `; auth calls ${authCalls.join(", ")}` : "";
   throw new Error(
     `Passkey sign-in did not complete within ${timeoutMs}ms ` +
-      `(page ${pathname}, ${SESSION_COOKIE} cookie ${hasCookie ? "set" : "missing"})`,
+      `(page ${pathname}, ${SESSION_COOKIE} cookie ${hasCookie ? "set" : "missing"}` +
+      `${alert ? `, page error: ${alert.trim().slice(0, 200)}` : ""}${calls})`,
   );
 }
 
@@ -1042,9 +1048,29 @@ async function signInWithPasskey(
     .getByTestId("cloud-passkey-signin-button")
     .or(page.getByRole("button", { name: /sign in with (a )?passkey/i }))
     .first();
+  const authCalls = [];
+  page.on("response", (res) => {
+    const { pathname } = new URL(res.url());
+    if (pathname.startsWith("/api/auth/"))
+      authCalls.push(`${res.request().method()} ${pathname} ${res.status()}`);
+  });
   await signInBtn.waitFor({ state: "visible", timeout: 15_000 });
-  await signInBtn.click();
-  await waitForPasskeySession(context, page, 30_000);
+  // The static-export button is visible before React hydrates it, and a click
+  // before hydration does nothing; click again until the passkey POST starts.
+  for (let attempt = 1; ; attempt++) {
+    const started = page
+      .waitForRequest(
+        (req) =>
+          req.method() === "POST" &&
+          new URL(req.url()).pathname.startsWith("/api/auth/"),
+        { timeout: 5_000 },
+      )
+      .then(() => true, () => false);
+    await signInBtn.click();
+    if (await started) break;
+    if (attempt >= 6) break;
+  }
+  await waitForPasskeySession(context, page, 30_000, authCalls);
   const updated = await cdp.send("WebAuthn.getCredentials", {
     authenticatorId,
   });

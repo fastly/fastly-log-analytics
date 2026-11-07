@@ -1269,10 +1269,10 @@ async function withPasskeySignInServer(options, run) {
     }
     if (url.pathname === options.signInPath) {
       return html(`<button type="button" ${options.buttonAttrs}>${options.buttonLabel}</button><script>
-document.querySelector("button").addEventListener("click", async () => {
+setTimeout(() => document.querySelector("button").addEventListener("click", async () => {
   await fetch("/api/auth/passkey/finish", { method: "POST" });
   window.location.assign("/dashboard");
-});
+}), ${options.hydrateDelayMs ?? 0});
 </script>`);
     }
     if (url.pathname === "/dashboard") return html("<p>Dashboard</p>");
@@ -1340,6 +1340,16 @@ for (const [label, options] of [
       signInPath: "/sign-in",
       buttonLabel: "Sign in with a passkey",
       buttonAttrs: "",
+    },
+  ],
+  [
+    "clicks again when the button is visible before it is hydrated",
+    {
+      redirectFrom: "/sign-in",
+      signInPath: "/share-login",
+      buttonLabel: "Sign in with Passkey",
+      buttonAttrs: 'data-testid="cloud-passkey-signin-button"',
+      hydrateDelayMs: 2_000,
     },
   ],
 ]) {
