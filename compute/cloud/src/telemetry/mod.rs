@@ -977,6 +977,15 @@ pub fn read_live(
     {
         return Ok(LivePage::default());
     }
+    // Row timestamps are milliseconds. A seconds value would admit every row, so take a time
+    // after 2001 in seconds (a millisecond time in that range is from 1970-1973) as seconds.
+    let since = since.map(|since| {
+        if (1_000_000_000..100_000_000_000).contains(&since) {
+            since.saturating_mul(1000)
+        } else {
+            since
+        }
+    });
     let limit = page_limit(limit);
     if let Some(cursor) = cursor.filter(|cursor| cursor.starts_with(LIVE_SOURCE_CURSOR)) {
         return read_live_sources(runtime, sid, kind, since, limit, cursor);

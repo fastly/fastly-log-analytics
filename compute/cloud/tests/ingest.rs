@@ -44,6 +44,11 @@ struct Fake {
     fail_compact_after_publish: Cell<bool>,
     compact_conflict_after: Cell<Option<u32>>,
     stale_compact_state: RefCell<Option<Record>>,
+    /// Each compaction state write leaves the next fresh read showing the record it replaced.
+    lag_compact_reads: Cell<bool>,
+    lagging_compact_state: RefCell<Option<Record>>,
+    /// The injected compaction state conflict writes another writer's value, not the same one.
+    foreign_compact_conflict: Cell<bool>,
     fail_fresh_compact_state: Cell<bool>,
     cdn_gets: RefCell<Vec<String>>,
     /// GET keys of each `admin_fos_many` round.
@@ -154,6 +159,9 @@ impl Fake {
             fail_compact_after_publish: Cell::new(false),
             compact_conflict_after: Cell::new(None),
             stale_compact_state: Default::default(),
+            lag_compact_reads: Cell::new(false),
+            lagging_compact_state: Default::default(),
+            foreign_compact_conflict: Cell::new(false),
             fail_fresh_compact_state: Cell::new(false),
             cdn_gets: Default::default(),
             fos_rounds: Default::default(),
@@ -414,7 +422,10 @@ impl Runtime for Fake {
             if let Some(remaining) = self.compact_conflict_after.get() {
                 if remaining == 0 {
                     self.compact_conflict_after.set(None);
-                    if let Some((g, v)) = kv.get(key).cloned() {
+                    if let Some((g, mut v)) = kv.get(key).cloned() {
+                        if self.foreign_compact_conflict.get() {
+                            v["lease_until"] = json!(u64::MAX);
+                        }
                         kv.insert(key.into(), (g + 1, v));
                     }
                     return Ok(false);
@@ -437,6 +448,12 @@ impl Runtime for Fake {
             return Ok(false);
         }
         let next = kv.get(key).map_or(1, |(g, _)| g + 1);
+        if key == ingest::compaction::STATE_KEY && self.lag_compact_reads.get() {
+            *self.lagging_compact_state.borrow_mut() = kv.get(key).map(|(g, v)| Record {
+                generation: g.to_string(),
+                value: v.clone(),
+            });
+        }
         kv.insert(key.into(), (next, value.clone()));
         Ok(true)
     }
@@ -450,6 +467,9 @@ impl Runtime for Fake {
             self.kv_reads.borrow_mut().push(key.into());
             if self.fail_fresh_compact_state.get() {
                 return Err("injected_fresh_compact_state_failure".into());
+            }
+            if let Some(record) = self.lagging_compact_state.borrow_mut().take() {
+                return Ok(Some(record));
             }
             return Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
                 generation: g.to_string(),
@@ -11136,11 +11156,24 @@ mod request_compaction {
             ),
         );
         fake.compact_conflict_after.set(Some(1));
+        fake.foreign_compact_conflict.set(true);
         fake.new_request();
         let error =
             compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 0).unwrap_err();
         assert_eq!(error, "compact_state_conflict");
         assert_eq!(fake.kv.borrow()[compaction::STATE_KEY].0, 3);
+    }
+
+    #[test]
+    fn a_lagging_read_of_the_pass_own_state_write_is_not_a_conflict() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 2);
+        fake.lag_compact_reads.set(true);
+        let report = finish(&fake, TARGET);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.sources, 2);
+        let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        assert_eq!(state["lease_until"], 0, "the pass released its lease");
     }
 
     #[test]

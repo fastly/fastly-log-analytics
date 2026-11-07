@@ -453,6 +453,30 @@ fn read_live_shows_legacy_per_request_outbox_keys() {
 }
 
 #[test]
+fn read_live_takes_since_in_seconds_as_well_as_milliseconds() {
+    let rt = Rt::on_shield();
+    let rows: String = [("old", 1_700_000_000_000i64), ("new", 1_700_000_900_000)]
+        .into_iter()
+        .map(|(id, timestamp)| {
+            format!(
+                "{}\n",
+                json!({"kind":"cron_runs","timestamp":timestamp,"event_id":id,"service_id":"global"})
+            )
+        })
+        .collect();
+    rt.put_kv("logq:global:1700000000000-mixed", json!({"ndjson": rows}));
+    for since in [1_700_000_600i64, 1_700_000_600_000] {
+        let page = read_live(&rt, "global", LogKind::CronRuns, Some(since), None, None).unwrap();
+        let ids = page
+            .rows
+            .iter()
+            .map(|row| row["event_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["new"], "since={since}");
+    }
+}
+
+#[test]
 fn read_live_source_pages_cover_old_and_legacy_sources_without_timestamp_pruning() {
     let rt = Rt::on_shield();
     let since = (NOW_S * 1000) as i64;

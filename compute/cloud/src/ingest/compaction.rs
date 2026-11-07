@@ -229,6 +229,8 @@ struct Run<'s, 'a, R: Runtime> {
     now: u64,
     state: State,
     generation: Option<String>,
+    /// The state this pass last wrote, to recognise its own write behind a lagging read.
+    saved: Option<Value>,
     report: Report,
     changed: bool,
     bump: bool,
@@ -277,6 +279,7 @@ pub fn request_compact<R: Runtime>(
         now,
         state,
         generation: record.map(|r| r.generation),
+        saved: None,
         report: Report::default(),
         changed: false,
         bump: false,
@@ -367,7 +370,7 @@ pub fn request_compact<R: Runtime>(
                         if serde_json::to_vec(&value)
                             .is_ok_and(|bytes| bytes.len() <= MAX_STATE_BYTES)
                         {
-                            let _ = runtime.admin_cas(STATE_KEY, run.generation.as_deref(), &value);
+                            let _ = run.write(&value, false);
                         }
                     }
                 }
@@ -424,9 +427,7 @@ pub fn request_compact<R: Runtime>(
         if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > MAX_STATE_BYTES {
             return Err("compact_state_limit".into());
         }
-        if !runtime.admin_cas(STATE_KEY, run.generation.as_deref(), &value)? {
-            return Err("compact_state_conflict".into());
-        }
+        run.write(&value, false)?;
     }
     Ok(run.report)
 }
@@ -551,25 +552,56 @@ impl<R: Runtime> Run<'_, '_, R> {
         if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > MAX_STATE_BYTES {
             return Err("compact_state_limit".into());
         }
-        if !self
-            .store
-            .runtime
-            .admin_cas(STATE_KEY, self.generation.as_deref(), &value)?
-        {
-            return Err("compact_state_conflict".into());
+        self.write(&value, true)
+    }
+
+    /// Writes the state over the pass's generation. KV has no write that returns the new
+    /// generation, and a fresh read can still show the value this write replaced; a generation
+    /// taken from that read would fail the pass's next write against its own state. So a write
+    /// is read back until it shows, and a conflict whose current value is the pass's own last
+    /// write takes that generation and retries once. Any other value is another writer's.
+    fn write(&mut self, value: &Value, read_back: bool) -> Result<(), String> {
+        let runtime = self.store.runtime;
+        if !runtime.admin_cas(STATE_KEY, self.generation.as_deref(), value)? {
+            let recovered = match self.saved.clone() {
+                Some(own) => {
+                    self.read_back(&own)?
+                        && runtime.admin_cas(STATE_KEY, self.generation.as_deref(), value)?
+                }
+                None => false,
+            };
+            if !recovered {
+                return Err("compact_state_conflict".into());
+            }
         }
-        let token = self
-            .store
-            .runtime
+        self.saved = Some(value.clone());
+        if read_back {
+            self.read_back(value)?;
+        }
+        Ok(())
+    }
+
+    /// Reads the state until it shows `expected` (twice at most), taking the generation read.
+    fn read_back(&mut self, expected: &Value) -> Result<bool, String> {
+        let runtime = self.store.runtime;
+        let token = runtime
             .secret(&self.store.service.fastly_token_ref)?
             .filter(|token| !token.is_empty())
             .ok_or("fastly_token_missing")?;
-        self.generation = self
-            .store
-            .runtime
-            .admin_get_fresh(STATE_KEY, &token)?
-            .map(|r| r.generation);
-        Ok(())
+        for _ in 0..2 {
+            let record = runtime.admin_get_fresh(STATE_KEY, &token)?;
+            self.generation = record.as_ref().map(|r| r.generation.clone());
+            let Some(mut value) = record.map(|r| r.value) else {
+                return Ok(false);
+            };
+            if let Some(map) = value.as_object_mut() {
+                map.remove("_kv_written_ms");
+            }
+            if &value == expected {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     fn remaining(&self) -> u32 {
         self.store.runtime.admin_remaining_calls()
