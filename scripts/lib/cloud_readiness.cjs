@@ -52,13 +52,15 @@ function installCloudReadiness() {
       const dashboardRoute = location.pathname.replace(/\/$/, '') === '/dashboard';
       const namespace = ({ 'fastly-value': 'value', 'streaming': 'cmcd', 'assets-shield': 'assets' })[location.pathname.split('/')[1]]
         ?? location.pathname.split('/')[1];
-      const adminScope = {
+      // Pages whose analytical reads are not named `<namespace>.*` or `api./api/<namespace>/*`.
+      const routeScope = {
+        '/rum': /^(?:rum-analytics|api\.\/api\/services\/[^/]+\/rum\/analytics)$/,
         '/admin/session-scoring': /^api\.\/api\/services\/[^/]+\/scoring(?:\/|$)/,
         '/admin/rum': /^api\.\/api\/services\/[^/]+\/rum\/(?:status|versions)$/,
         '/admin/share': /^api\.\/api\/admin\/share(?:\/|$)/,
         '/admin/usage-log': /^api\.\/api\/admin\/usage-log(?:\/|$)/,
       }[location.pathname.replace(/\/$/, '')];
-      const analytical = active.filter(query => adminScope ? adminScope.test(query.section) : query.section.startsWith(`${namespace}.`)
+      const analytical = active.filter(query => routeScope ? routeScope.test(query.section) : query.section.startsWith(`${namespace}.`)
         || query.section === `api./api/${namespace}`
         || query.section.startsWith(`api./api/${namespace}/`));
       const ready = pending === 0 && errors === 0 && (dashboardRoute

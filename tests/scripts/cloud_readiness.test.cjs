@@ -108,6 +108,25 @@ test('nested admin pages require their own completed data namespace, not bootstr
   }
 });
 
+test('/rum is certified by its RUM analytics read, not RUM status, versions or live events alone', () => {
+  for (const section of ['rum-analytics', 'api./api/services/svc/rum/analytics']) {
+    const doc = documentState('?range=24h');
+    doc.location.pathname = '/rum';
+    for (const [id, other] of ['api./api/bootstrap', 'api./api/services/svc/rum/status',
+      'api./api/services/svc/rum/versions', 'api./api/services/svc/rum/live-events',
+      'api./api/views/svc', 'api./api/admin/share/banner'].entries()) {
+      doc.emit({ route: '/rum', id: id + 10, section: other, state: 'success' });
+    }
+    assert.equal(doc.state().ready, false, section);
+    doc.emit({ route: '/rum', id: 2, section, state: 'pending' });
+    assert.equal(doc.state().ready, false, section);
+    doc.emit({ route: '/rum', id: 2, section, state: 'error' });
+    assert.equal(doc.state().ready, false, section);
+    doc.emit({ route: '/rum', id: 3, section, state: 'success' });
+    assert.equal(doc.state().ready, true, section);
+  }
+});
+
 function cspPage(snapshots, legacy = false) {
   let index = 0;
   return {
