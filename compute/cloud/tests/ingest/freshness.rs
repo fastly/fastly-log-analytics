@@ -485,3 +485,23 @@ fn retained_raw_backfill_reuses_receipts_after_delete_queue_consumption() {
     assert_eq!((report.converted, report.failed), (0, 0));
     assert_eq!(discover_ips(&fake), ["retained-row"]);
 }
+
+#[test]
+fn internal_worker_requests_are_read_past_the_public_body_cap() {
+    let worker = |path: &str, key: bool| fastly_log_analytics::http::Request {
+        method: "POST".into(),
+        path: path.into(),
+        headers: if key {
+            [("x-flp-worker-key".into(), "k".into())].into()
+        } else {
+            Default::default()
+        },
+        body: Vec::new(),
+    };
+    let limit = fastly_log_analytics::http::body_limit;
+    // A source_index request carries the whole watermark root; truncating it at 64 KiB stalled ingest.
+    assert!(limit(&worker(ingest::worker::PATH, true)) >= 1024 * 1024);
+    assert!(limit(&worker(ingest::worker::RANGE_PATH, true)) >= 1024 * 1024);
+    assert_eq!(limit(&worker(ingest::worker::PATH, false)), 65_536);
+    assert_eq!(limit(&worker("/api/admin/settings", true)), 65_536);
+}

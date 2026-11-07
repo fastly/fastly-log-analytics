@@ -20,16 +20,19 @@ fn main() -> Result<(), fastly::Error> {
                 .map(|value| (name.as_str().to_lowercase(), value.to_owned()))
         })
         .collect();
-    let mut body = Vec::new();
-    request.take_body().take(65_537).read_to_end(&mut body)?;
-    let input = http::Request {
+    let mut input = http::Request {
         method: method.clone(),
         path: request
             .get_query_str()
             .map_or_else(|| path.clone(), |query| format!("{path}?{query}")),
         headers,
-        body,
+        body: Vec::new(),
     };
+    let limit = http::body_limit(&input) as u64 + 1;
+    request
+        .take_body()
+        .take(limit)
+        .read_to_end(&mut input.body)?;
     let send_raw = |output: http::Response| {
         let mut response = fastly::Response::from_status(output.status).with_body(output.body);
         for (name, value) in output.headers {

@@ -1,5 +1,25 @@
 use std::collections::BTreeMap;
 
+pub const PUBLIC_BODY_LIMIT: usize = 65_536;
+/// Peer requests carry the ingest watermark root, which outgrows the public cap.
+pub const INTERNAL_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Bytes the entrypoint reads before handlers apply their own, tighter limits.
+pub fn body_limit(request: &Request) -> usize {
+    let internal = request.method == "POST"
+        && request.header("x-flp-worker-key").is_some()
+        && [
+            crate::ingest::worker::PATH,
+            crate::ingest::worker::RANGE_PATH,
+        ]
+        .contains(&request.path.as_str());
+    if internal {
+        INTERNAL_BODY_LIMIT
+    } else {
+        PUBLIC_BODY_LIMIT
+    }
+}
+
 #[derive(Default)]
 pub struct Request {
     pub method: String,
