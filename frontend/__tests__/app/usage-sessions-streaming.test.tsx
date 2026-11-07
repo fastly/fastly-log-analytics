@@ -596,6 +596,26 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(screen.getByText('Caught up')).toBeInTheDocument()
     })
 
+    it('issues one usage-log read in Cloud mode so readiness never sees a dependent follow-up query', async () => {
+      setCloudModeRuntime(true)
+      try {
+        mockGet.mockImplementation((url: string) =>
+          Promise.resolve({
+            data: url === '/api/admin/usage-log' ? SAMPLE_USAGE_LOG : SAMPLE_ACCOUNTING,
+            response: new Response(null, { status: 200 }),
+          }),
+        )
+        renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
+        await waitFor(() => expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument())
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const usageCalls = mockGet.mock.calls.filter(([url]) => url === '/api/admin/usage-log')
+        expect(usageCalls).toHaveLength(1)
+        expect(usageCalls[0][1]).toEqual(expect.objectContaining({ params: { query: expect.objectContaining({ page_size: 500 }) } }))
+      } finally {
+        setCloudModeRuntime(false)
+      }
+    })
+
     it('switches time-window presets, filters by process/operation, refreshes, and purges logs', async () => {
       mockGet.mockImplementation((url: string) =>
         Promise.resolve({

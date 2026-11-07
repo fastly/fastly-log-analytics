@@ -2686,8 +2686,8 @@ export async function main(argv = process.argv) {
     }
 
     // Mode: verify. Keep a single persistent tab (dashboardPage) open across the
-    // user session so sessionStorage (flp-dashboard-cache-session), CacheStorage
-    // (flp-parquet-v1 & flp-parquet-rollup-*), OPFS, localStorage, and HTTP cache
+    // user session so localStorage (including flp-dashboard-cache-session), CacheStorage
+    // (flp-parquet-v1 & flp-parquet-rollup-*), OPFS, and HTTP cache
     // work together like a normal user's browser tab.
     const deadline = Date.now() + args.waitTimeoutMs;
     const activeContext = await createInstrumentedContext(

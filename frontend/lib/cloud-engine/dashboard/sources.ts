@@ -29,16 +29,18 @@ const SESSION_CACHE_KEY = "flp-dashboard-cache-session";
 const IDENTITY_CACHE_KEY = "flp-dashboard-cache-identity";
 let volatileCacheScope: string | undefined;
 
+// Shared by every tab of the origin so a new tab of the same signed-in identity reuses persisted
+// files; an identity change or sign-out rotates the scope and clears the caches.
 export function dashboardCacheScope(): string {
   try {
-    let session = sessionStorage.getItem(SESSION_CACHE_KEY);
+    let session = localStorage.getItem(SESSION_CACHE_KEY);
     if (!session) {
       session = crypto.randomUUID();
-      sessionStorage.setItem(SESSION_CACHE_KEY, session);
+      localStorage.setItem(SESSION_CACHE_KEY, session);
     }
     return JSON.stringify([
       session,
-      sessionStorage.getItem(IDENTITY_CACHE_KEY) ?? "",
+      localStorage.getItem(IDENTITY_CACHE_KEY) ?? "",
     ]);
   } catch {
     return (volatileCacheScope ??= crypto.randomUUID());
@@ -47,7 +49,7 @@ export function dashboardCacheScope(): string {
 
 export function dashboardCacheIdentity(): string | null {
   try {
-    return sessionStorage.getItem(IDENTITY_CACHE_KEY);
+    return localStorage.getItem(IDENTITY_CACHE_KEY);
   } catch {
     return null;
   }
@@ -56,9 +58,9 @@ export function dashboardCacheIdentity(): string | null {
 export function updateDashboardCacheIdentity(identity: string | null): void {
   volatileCacheScope = undefined;
   try {
-    sessionStorage.removeItem(SESSION_CACHE_KEY);
-    if (identity === null) sessionStorage.removeItem(IDENTITY_CACHE_KEY);
-    else sessionStorage.setItem(IDENTITY_CACHE_KEY, identity);
+    localStorage.removeItem(SESSION_CACHE_KEY);
+    if (identity === null) localStorage.removeItem(IDENTITY_CACHE_KEY);
+    else localStorage.setItem(IDENTITY_CACHE_KEY, identity);
   } catch {
     /* A fresh in-memory scope still isolates this session. */
   }
@@ -958,8 +960,8 @@ export function browserSource(
         return { bytes: inMemory, cached: true, cdn: null };
       }
       const url = `${baseUrl}${reqPath}`;
-      const cacheUrl = scopedCacheUrl(url, mode?.identity === undefined
-        ? cacheScope : JSON.stringify([cacheScope, mode.identity]));
+      // A caller identity already carries the current scope; the one captured at creation can be stale.
+      const cacheUrl = scopedCacheUrl(url, mode?.identity ?? cacheScope);
       const cacheStart =
         typeof performance !== "undefined" ? performance.now() : Date.now();
       const cache = await getFileCache();

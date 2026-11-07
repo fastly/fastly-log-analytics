@@ -429,6 +429,24 @@ async function detectMissingTcpFields(
   return TCP_FIELDS.filter((f) => ![f, ...(aliases[f] ?? [])].some((field) => present.has(field)));
 }
 
+// Same section gates as the backend, so a page's split requests don't repeat each other's scans.
+const CORE_SECTIONS = new Set(["summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"]);
+
+function wantCore(sections?: readonly string[]): boolean {
+  return !sections?.length || sections.includes("health") || sections.some((section) => CORE_SECTIONS.has(section));
+}
+
+function wantShielding(sections?: readonly string[]): boolean {
+  return !sections?.length || sections.includes("health") || sections.includes("shielding_analysis");
+}
+
+async function queryNetworkHealthSections(params: NetworkQueryParams) {
+  if (wantCore(params.sections)) return queryNetworkHealth(params);
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
+  return { available: true, shielding_analysis: await queryNetworkShielding(params, buildWhereClause(params), engine) };
+}
+
 export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
@@ -607,7 +625,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const metro_leaderboard = deduplicateMetroLeaderboard(scoredMetros);
   const popHealth = await queryPopHealth(params);
   const bucketData = await queryNetworkBuckets(params, where, engine);
-  const shielding = !params.sections || params.sections.includes("shielding_analysis")
+  const shielding = wantShielding(params.sections)
     ? await queryNetworkShielding(params, where, engine) : undefined;
   const worstAsn = by_asn.filter((row) => row.health_score != null)
     .sort((a, b) => a.health_score! - b.health_score!)[0];
@@ -919,13 +937,9 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
   };
 }
 
-export async function queryNetworkBundle(params: NetworkQueryParams = {}) {
-  const [network_health, network_quality, pop_health, transport] = await Promise.all([
-    queryNetworkHealth(params),
-    queryNetworkQuality(params),
-    queryPopHealth(params),
-    queryNetworkTransport(params),
-  ]);
+function networkBundle<H extends object | null, Q, P, T>(
+  network_health: H, network_quality: Q, pop_health: P, transport: T,
+) {
   return {
     available: true,
     health: network_health,
@@ -934,8 +948,31 @@ export async function queryNetworkBundle(params: NetworkQueryParams = {}) {
     network_health,
     network_quality,
     pop_health,
-    missing_tcp_fields: network_health.missing_tcp_fields,
+    missing_tcp_fields: network_health && "missing_tcp_fields" in network_health
+      ? network_health.missing_tcp_fields as string[] : undefined,
   };
+}
+
+export async function queryNetworkBundle(params: NetworkQueryParams = {}) {
+  const [network_health, network_quality, pop_health, transport] = await Promise.all([
+    queryNetworkHealth(params),
+    queryNetworkQuality(params),
+    queryPopHealth(params),
+    queryNetworkTransport(params),
+  ]);
+  return networkBundle(network_health, network_quality, pop_health, transport);
+}
+
+// Same gates as the backend bundle; the page asks for one section at a time and must not pay for the rest.
+async function queryNetworkBundleSections(params: NetworkQueryParams & { sections: readonly string[] }) {
+  const { sections } = params;
+  const [network_health, network_quality, pop_health, transport] = await Promise.all([
+    wantCore(sections) || wantShielding(sections) ? queryNetworkHealthSections(params) : null,
+    sections.includes("quality") ? queryNetworkQuality(params) : null,
+    sections.includes("pop_health") ? queryPopHealth(params) : null,
+    sections.includes("transport") ? queryNetworkTransport(params) : null,
+  ]);
+  return networkBundle(network_health, network_quality, pop_health, transport);
 }
 
 export async function handleNetworkRequest(
@@ -943,10 +980,11 @@ export async function handleNetworkRequest(
   params: NetworkQueryParams = {},
 ) {
   if (path.includes("/api/network/bundle")) {
-    return queryNetworkBundle(params);
+    const { sections } = params;
+    return sections?.length ? queryNetworkBundleSections({ ...params, sections }) : queryNetworkBundle(params);
   }
   if (path.includes("/api/network-health")) {
-    return queryNetworkHealth(params);
+    return queryNetworkHealthSections(params);
   }
   if (path.includes("/api/network-quality")) {
     return queryNetworkQuality(params);

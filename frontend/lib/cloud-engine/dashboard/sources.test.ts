@@ -9,8 +9,11 @@ import {
   ROLLUP_SEMANTICS,
   browserSource,
   clearRequestLogCaches,
+  dashboardCacheIdentity,
+  dashboardCacheScope,
   pruneRequestCache,
   rollupCacheVersion,
+  updateDashboardCacheIdentity,
 } from "./sources";
 import {
   STORE_META_CACHE,
@@ -203,6 +206,45 @@ describe("browserSource", () => {
     expect(previous.cached).toBe(true);
     expect(new Uint8Array(previous.bytes)).toEqual(new Uint8Array([1]));
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses persisted range files from a new tab of the same signed-in identity", async () => {
+    const storage = (values: Map<string, string>) => ({
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+      removeItem: (key: string) => void values.delete(key),
+    });
+    const shared = new Map<string, string>();
+    const store = new Map<string, Response>();
+    vi.stubGlobal("caches", {
+      open: vi.fn(async () => ({
+        match: vi.fn(async (req: string) => store.get(req)?.clone()),
+        delete: vi.fn(async (req: string) => store.delete(req)),
+        put: vi.fn(async (req: string, res: Response) => {
+          store.set(req, res.clone());
+        }),
+      })),
+    });
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array([7])));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("localStorage", storage(shared));
+    const rangeIdentity = () => JSON.stringify([dashboardCacheScope(), "svc", "requests", "file-1", "etag", 1, ""]);
+
+    vi.stubGlobal("sessionStorage", storage(new Map()));
+    const coldTab = browserSource("");
+    if (dashboardCacheIdentity() !== "user-1:admin") updateDashboardCacheIdentity("user-1:admin");
+    expect((await coldTab.fetchFile("file-1", undefined, { identity: rangeIdentity() })).cached).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    vi.stubGlobal("sessionStorage", storage(new Map()));
+    const warmTab = browserSource("");
+    expect(dashboardCacheIdentity()).toBe("user-1:admin");
+    expect((await warmTab.fetchFile("file-1", undefined, { identity: rangeIdentity() })).cached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    updateDashboardCacheIdentity("user-2:viewer");
+    expect((await browserSource("").fetchFile("file-1", undefined, { identity: rangeIdentity() })).cached).toBe(false);
   });
 
   it("posts one beacon and swallows failures", async () => {

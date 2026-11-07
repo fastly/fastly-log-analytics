@@ -68,6 +68,40 @@ describe("Feature F21 — Network cloud-engine", () => {
     }
   });
 
+  it("runs only the requested sections, so the page's split requests never repeat the core scans", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    const executed: string[] = [];
+    const counted = new Proxy(engine, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (property !== "executeSql") return typeof value === "function" ? value.bind(target) : value;
+        return (sql: string, ...rest: unknown[]) => {
+          executed.push(sql);
+          return (value as (...args: unknown[]) => unknown).call(target, sql, ...rest);
+        };
+      },
+    });
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, edge, rid, prid, pop, ttfb, country, asn, tcp_rtt, status, proto)
+        VALUES ('native', 1700000100000, true, 'edge-request', NULL, 'IAD', 0.1, 'US', 64500, 10000, 200, 'HTTP/2'),
+               ('native', 1700000100001, false, 'shield-request', 'edge-request', 'LHR', 0.04, 'GB', 64500, 12000, 200, 'HTTP/2')`);
+
+      const shielding = await handleNetworkRequest("/api/network-health", { engine: counted, sections: ["shielding_analysis"] });
+      expect(shielding).toHaveProperty("shielding_analysis.has_data", true);
+      expect(shielding).not.toHaveProperty("summary");
+      expect(executed).toHaveLength(1);
+
+      executed.length = 0;
+      const transport = await handleNetworkRequest("/api/network/bundle", { engine: counted, sections: ["transport"] });
+      expect(transport).toHaveProperty("transport.has_transport_data", true);
+      expect(transport).toMatchObject({ health: null, quality: null, pop_health: null });
+      expect(executed).toHaveLength(2);
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("exposes native populated PoPs and health sections through page wire fields", async () => {
     const engine = new DuckDBAnalyticalEngine();
     try {

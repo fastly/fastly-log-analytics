@@ -13,6 +13,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { PageHeader, ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { LogAccountingPanel } from './LogAccountingPanel'
 import {
   DATE_PRESETS,
@@ -164,8 +165,11 @@ export function UsageLogClient(props?: UsageLogClientProps) {
     refetchIntervalInBackground: false,
   })
 
-  const headQuery = useQuery(makeUsageQueryOpts('head', 50, !!activeServiceId))
-  const fullQuery = useQuery(makeUsageQueryOpts('full', 500, !!activeServiceId && !!headQuery.data))
+  // Cloud reads the whole ops log for either page size, so a head-then-full pair would read it twice
+  // and leave a second request pending right after the first one settles.
+  const cloud = isCloudMode()
+  const headQuery = useQuery(makeUsageQueryOpts('head', cloud ? 500 : 50, !!activeServiceId))
+  const fullQuery = useQuery(makeUsageQueryOpts('full', 500, !cloud && !!activeServiceId && !!headQuery.data))
 
   const data = fullQuery.data ?? headQuery.data
   const isLoading = !mounted || (headQuery.isLoading && !data)
