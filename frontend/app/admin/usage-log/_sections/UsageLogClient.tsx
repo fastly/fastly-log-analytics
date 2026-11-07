@@ -172,6 +172,7 @@ export function UsageLogClient(props?: UsageLogClientProps) {
   const fullQuery = useQuery(makeUsageQueryOpts('full', 500, !cloud && !!activeServiceId && !!headQuery.data))
 
   const data = fullQuery.data ?? headQuery.data
+  const loadError = headQuery.error ?? fullQuery.error
   const isLoading = !mounted || (headQuery.isLoading && !data)
   const isFetching = headQuery.isFetching || fullQuery.isFetching
   const isRefreshing = mounted && isFetching && !isLoading
@@ -298,6 +299,15 @@ export function UsageLogClient(props?: UsageLogClientProps) {
         />
 
         <div className={isRefreshing ? 'opacity-40 pointer-events-none transition-opacity' : 'transition-opacity'}>
+          {loadError && (
+            <div
+              role="alert"
+              data-testid="admin-usage-log-error"
+              className="mx-4 my-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            >
+              Failed to load the usage log: {loadError.message || 'unknown error'}
+            </div>
+          )}
           {isLoading && (
             <div className="sr-only" role="status">
               Loading FOS usage ledger...

@@ -7,13 +7,14 @@ import {
 } from "../dashboard/manifest";
 import { readParquetRows as readRows } from "../dashboard/parquet";
 import { fnv1a32 } from "../parquet-key";
-import type {
-  LiveStatus,
-  LogRow,
-  LogsRange,
-  LogsResult,
-  LogsStats,
-  OpsKind,
+import {
+  OUTBOX_KINDS,
+  type LiveStatus,
+  type LogRow,
+  type LogsRange,
+  type LogsResult,
+  type LogsStats,
+  type OpsKind,
 } from "./kinds";
 
 export { fnv1a32 };
@@ -46,6 +47,7 @@ type LivePage = {
 };
 
 const LIVE_LIMIT = 2000;
+const LIVE_SOURCE_CURSOR = "source-v1";
 const MAX_LIVE_PAGES = 50;
 const CONCURRENCY = 16;
 const MINUTE_MS = 60_000;
@@ -117,7 +119,9 @@ async function readLive(
   const rows: Record<string, unknown>[] = [];
   let status: LiveStatus | null = null;
   let truncated = false;
-  let cursor: string | null = null;
+  let cursor: string | null = (OUTBOX_KINDS as readonly OpsKind[]).includes(kind)
+    ? LIVE_SOURCE_CURSOR
+    : null;
   const seen = new Set<string>();
   for (let page = 0; page < MAX_LIVE_PAGES; page++) {
     const params = new URLSearchParams({

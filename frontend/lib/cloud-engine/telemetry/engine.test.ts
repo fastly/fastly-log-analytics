@@ -161,6 +161,32 @@ describe("readLogs", () => {
     expect(result.liveTruncated).toBe(true);
   });
 
+  it("pages outbox kinds through the source cursor instead of the budget-truncated newest-first read", async () => {
+    // The live server: the default read drops older outbox sources at its backend-call
+    // budget (truncated), whatever the range; `source-v1` pages every source to a terminal page.
+    const older = [row(1, "c1"), row(2, "c2")];
+    const newer = [row(8, "c8"), row(9, "c9")];
+    const urls: string[] = [];
+    const { src } = source({ manifest: [{ files: [], next_cursor: null }], files: {} });
+    const manifest = src.fetchJson.bind(src);
+    src.fetchJson = async <T,>(url: string): Promise<T> => {
+      if (!url.startsWith("/api/logs/")) return (await manifest(url)) as T;
+      urls.push(url);
+      const cursor = new URL(url, "http://x").searchParams.get("cursor");
+      const page = cursor === "source-v1"
+        ? { rows: older, next_cursor: "source-v1:00ff", truncated: false }
+        : cursor === "source-v1:00ff"
+          ? { rows: newer, next_cursor: null, truncated: false }
+          : { rows: newer, next_cursor: null, truncated: true };
+      return page as T;
+    };
+    const result = await readLogs(src, "cron_runs", range);
+    expect(result.liveTruncated).toBe(false);
+    expect(result.rows.map((r) => r.event_id)).toEqual(["c9", "c8", "c2", "c1"]);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("cursor=source-v1");
+  });
+
   it("skips only windows covered by a valid compact file and reads late windows", async () => {
     const a = minute(10);
     const b = minute(10, 14);

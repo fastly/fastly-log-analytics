@@ -616,6 +616,18 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       }
     })
 
+    it('shows a failed usage-log read as an error instead of an empty ledger', async () => {
+      mockGet.mockImplementation((url: string) =>
+        url === '/api/admin/usage-log'
+          ? Promise.reject(new Error('Cloud usage history is incomplete'))
+          : Promise.resolve({ data: SAMPLE_ACCOUNTING, response: new Response(null, { status: 200 }) }),
+      )
+      renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
+      const alert = await screen.findByTestId('admin-usage-log-error')
+      expect(alert).toHaveAttribute('role', 'alert')
+      expect(alert).toHaveTextContent('Cloud usage history is incomplete')
+    })
+
     it('switches time-window presets, filters by process/operation, refreshes, and purges logs', async () => {
       mockGet.mockImplementation((url: string) =>
         Promise.resolve({

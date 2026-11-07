@@ -19,6 +19,16 @@ export const CLEARABLE_KINDS = [
   "platform_errors",
 ] as const satisfies readonly OpsKind[];
 
+/**
+ * Kinds whose unflushed rows sit in the KV outbox. Their default live read stops at the
+ * request's backend-call budget and drops the oldest sources (truncated, whatever the range);
+ * the `source-v1` cursor pages through every source instead.
+ */
+export const OUTBOX_KINDS = [
+  "cron_runs",
+  "ingest_files",
+] as const satisfies readonly OpsKind[];
+
 export type LogRow = Record<string, unknown> & {
   timestamp: number;
   event_id: string;
