@@ -76,6 +76,9 @@ struct Fake {
     vcpu: Cell<u64>,
     vcpu_step: Cell<u64>,
     elapsed_s: Cell<u64>,
+    /// Milliseconds each backend call advances `now` by, and the part of a second not yet added.
+    call_ms: Cell<u64>,
+    call_ms_carry: Cell<u64>,
     usage: UsageAgg,
     /// Calls the coordinator (main execution) may make before every further call fails, to
     /// simulate the execution dying at that point.
@@ -183,6 +186,8 @@ impl Fake {
             vcpu: Cell::new(0),
             vcpu_step: Cell::new(1),
             elapsed_s: Cell::new(0),
+            call_ms: Cell::new(0),
+            call_ms_carry: Cell::new(0),
             usage: UsageAgg::default(),
             crash_after: Cell::new(None),
             worker_faults: Default::default(),
@@ -288,6 +293,9 @@ impl Fake {
             return Err("injected_crash".into());
         }
         self.calls.set(self.calls.get() + 1);
+        let ms = self.call_ms_carry.get() + self.call_ms.get();
+        self.now.set(self.now.get() + ms / 1000);
+        self.call_ms_carry.set(ms % 1000);
         Ok(())
     }
     fn new_request(&self) {
@@ -11078,6 +11086,10 @@ mod request_compaction {
 
     /// Pass `pass` of maintenance turn `turn`, 20 s into the stage's 40 s of wall time.
     fn turn_pass(fake: &Fake, turn: &str, pass: u32) -> Report {
+        try_turn_pass(fake, turn, pass).unwrap()
+    }
+
+    fn try_turn_pass(fake: &Fake, turn: &str, pass: u32) -> Result<Report, String> {
         fake.new_request();
         fake.vcpu.set(0);
         fake.elapsed_s.set(20);
@@ -11090,7 +11102,7 @@ mod request_compaction {
         };
         let report = compaction::request_compact_pass(&store, "ck", TARGET, 1, Some(turn));
         fake.elapsed_s.set(0);
-        report.unwrap()
+        report
     }
 
     /// A maintenance turn's chained passes hand the lease on rather than each taking it with
@@ -11127,6 +11139,37 @@ mod request_compaction {
         let later = turn_pass(&fake, "turn-2", 1);
         assert_eq!(later.stopped, None, "{later:?}");
         assert!(later.bytes_written > 0, "{later:?}");
+    }
+
+    /// A handed-on lease runs from when it is handed on, not from when the handing pass began.
+    /// Otherwise it lapses while the next pass still works, an overlapping turn takes it, and
+    /// the next pass's state write then fails with `compact_state_conflict`.
+    #[test]
+    fn a_handed_on_lease_covers_the_next_pass_after_a_long_handing_pass() {
+        let fake = Fake::new(NOW);
+        load_windows(&fake, HOUR, 32, 50);
+        let began = fake.now.get();
+        fake.call_ms.set(300);
+        assert!(turn_pass(&fake, "turn-1", 1).more_pending);
+        fake.call_ms.set(0);
+        let handed = fake.now.get();
+        assert!(handed >= began + 6, "pass 1 took {} s", handed - began);
+        let left_by_pass_1 = fake.kv.borrow()[compaction::STATE_KEY].clone();
+        // Pass 2 starts right after pass 1 with the 20 s of wall time pass 1 had left. Another
+        // turn's cron arrives near the end of that wall time.
+        fake.now.set(handed + 18);
+        let other = turn_pass(&fake, "turn-2", 1);
+        // Pass 2 read the state before that turn arrived.
+        *fake.lagging_compact_state.borrow_mut() = Some(Record {
+            generation: left_by_pass_1.0.to_string(),
+            value: left_by_pass_1.1,
+        });
+        fake.now.set(handed + 1);
+        let second = try_turn_pass(&fake, "turn-1", 2);
+        let second = second.unwrap();
+        assert_eq!(second.stopped, None, "{second:?}");
+        assert!(second.bytes_written > 0, "{second:?}");
+        assert_eq!(other.stopped.as_deref(), Some("lease_held"), "{other:?}");
     }
 
     /// While an hour still has window files to merge, new compacts take only windows; the

@@ -471,7 +471,8 @@ pub fn request_compact_pass<R: Runtime>(
     }
     run.report.more_pending |= run.report.compacts > 0;
     // The turn's next pass gets at most this pass's remaining wall time, so a handed-on lease
-    // lapses soon after it, or soon after this pass if no next pass comes.
+    // lapses soon after it, or soon after this pass if no next pass comes. Counted from this
+    // pass's start instead, it could lapse mid-pass and let an overlapping turn take it.
     let left = super::storage::WALL_STOP
         .saturating_sub(runtime.admin_elapsed(store.started))
         .as_secs();
@@ -481,7 +482,7 @@ pub fn request_compact_pass<R: Runtime>(
             && run.report.errors.is_empty()
             && left >= HANDOFF_MIN_WALL_S
     }) {
-        run.state.lease_until = now.saturating_add(left + HANDOFF_MARGIN_S);
+        run.state.lease_until = runtime.now().saturating_add(left + HANDOFF_MARGIN_S);
         run.state.handoff = Some(format!("{}:{}", turn.id, turn.pass + 1));
     }
     run.changed = true;
