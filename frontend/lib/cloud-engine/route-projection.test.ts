@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ALL_TABLE_FIELDS, createNodeBackend, FIELD_DUCKDB_TYPES, type DuckDBReadContext } from "./dashboard/duckdb";
 import { assetsScanColumns, handleAssetsRequest } from "./assets";
 import { handleOriginRequest, originScanColumns } from "./origin";
+import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { handleValueRequest, valueScanColumns } from "./value";
 
 type Backend = Awaited<ReturnType<typeof createNodeBackend>>;
@@ -184,5 +185,29 @@ describe("Cloud route column projections", () => {
     expect(assetsScanColumns([{ column: "ua", operator: "=", value: "x" }])).not.toContain("ua");
     expect(assetsScanColumns("host")).toBeNull();
     expect(assetsScanColumns([null])).toBeNull();
+  });
+
+  const performance = (body: Record<string, unknown>): Variant => ({
+    name: `/api/performance/aggregates ${JSON.stringify(body)}`,
+    columns: performanceScanColumns(body.filters),
+    run: async (context) => (await handlePerformanceRequest(new Request("http://localhost/api/performance/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+    // The Cloud read context's querySql describes the view, so the scan filters on ts_ms.
+    }), undefined, undefined, { ...context, querySql: context.executeSql } as DuckDBReadContext))!.json(),
+  });
+
+  it("loads /api/performance/aggregates scans as exact projections", async () => {
+    expect(await performance({ filters: {}, sort_by: "p99" }).run(read)).toMatchObject({
+      top_urls: expect.arrayContaining([expect.objectContaining({ requests: expect.any(Number) })]),
+      waterfall: { avg: expect.any(Object) }, scatter: expect.any(Array),
+    });
+    await guard([
+      performance({ filters: {}, sort_by: "p99" }),
+      performance({ filters: { status_1: { mode: "include", values: ["200"] } }, sort_by: "avg" }),
+      performance({ filters: { host: ["a.example"], pop: { mode: "exclude", values: ["IAD"] } } }),
+    ]);
+    expect(performanceScanColumns({ status_1: { mode: "include", values: ["200"] } })).toContain("status");
+    expect(performanceScanColumns("status")).toBeNull();
+    expect(performanceScanColumns([{ field: "status" }])).toBeNull();
   });
 });

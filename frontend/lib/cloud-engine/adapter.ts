@@ -22,7 +22,7 @@ import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from 
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
 import { handleOriginRequest, originScanColumns } from "./origin";
-import { handlePerformanceRequest } from "./performance";
+import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import {
   executeCloudQuery,
   getQueryPresets,
@@ -417,7 +417,8 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     ? networkScanColumns(params.filters)
     : url.pathname.startsWith("/api/origin/") ? originScanColumns(url.pathname, params)
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
-    : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters) : null;
+    : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters)
+    : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters) : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {

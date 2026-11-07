@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt-in measurement of the bytes /origin, /fastly-value, /assets-shield and /network load per
+// Opt-in measurement of the bytes /origin, /fastly-value, /assets-shield, /network and /performance load per
 // cold scan, whole files against their column projections, over 720k rows of Cloud-shaped Parquet
 // (40 ZSTD files over 24h, under the 64 MiB whole-file budget), and of the projected results' exactness. Run with FLP_ROUTE_BENCH=1.
 import { describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
 import { assetsScanColumns, handleAssetsRequest } from "./assets";
 import { handleNetworkRequest, networkScanColumns } from "./network";
 import { handleOriginRequest, originScanColumns } from "./origin";
+import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { handleValueRequest, valueScanColumns } from "./value";
 
 const FILES = Number(process.env.FLP_ROUTE_BENCH_FILES ?? 40);
@@ -176,6 +177,12 @@ const ROUTES: Route[] = [
       for (const [path, params] of NETWORK_PAGE) out.push(await handleNetworkRequest(path, { ...RANGE, ...params, engine: read } as never));
       return out;
     },
+  },
+  {
+    name: "/performance", columns: performanceScanColumns({}),
+    run: async (read) => (await handlePerformanceRequest(new Request("http://localhost/api/performance/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, filters: {}, sort_by: "p99" }),
+    }), undefined, undefined, read))!.json(),
   },
 ];
 

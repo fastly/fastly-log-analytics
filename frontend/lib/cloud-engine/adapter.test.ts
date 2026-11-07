@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest } from "./adapter";
 import { ORIGIN_SCAN_COLUMNS, setOriginSqlExecutor } from "./origin";
-import { setPerformanceEngineClient } from "./performance";
+import { PERFORMANCE_SCAN_COLUMNS, setPerformanceEngineClient } from "./performance";
 import { setSecurityEngineClient } from "./security";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
@@ -274,7 +274,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       ?.projection?.columns).toEqual(insightScanColumns([]));
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))
       ?.projection?.maxBytes).toBe(32 * 1024 * 1024);
-    expect((await options("/api/performance/aggregates", post({ sections: ["waterfall"] })))?.projection).toBeUndefined();
+    expect((await options("/api/security/aggregates", post({ sections: ["summary"] })))?.projection).toBeUndefined();
   });
 
   it("loads every /network scan as the same column projection, plus filtered fields", async () => {
@@ -298,7 +298,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     })))?.projection?.columns).toEqual([...columns, "host"]);
   });
 
-  it("loads /origin, /fastly-value and /assets-shield scans as their routes' column projections", async () => {
+  it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
     const options = async (path: string, body?: Record<string, unknown>) => {
       vi.mocked(ensureCloudRange).mockClear();
       const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, body ? {
@@ -321,6 +321,10 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await options("/api/origin/aggregates", { filters: [filters] })).toBeUndefined();
     expect(await options("/api/value/summary", { filters: "host" })).toBeUndefined();
     expect(await options("/api/assets/aggregates", { filters: 5 })).toBeUndefined();
+    expect(await options("/api/performance/aggregates", { filters, sort_by: "p99" }))
+      .toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS, "host"] });
+    expect(await options("/api/performance", {})).toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS] });
+    expect(await options("/api/performance/aggregates", { filters: [filters] })).toBeUndefined();
   });
 
   it("dispatches /api/security/* routes including /proxies/export through handleSecurityRequest", async () => {

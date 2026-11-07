@@ -74,6 +74,54 @@ describe("performance cloud-engine module (F19)", () => {
     }
   });
 
+  it("ranks many distinct URLs and ASNs with exact percentiles inside DuckDB's memory", async () => {
+    const getBuiltin = (process as unknown as { getBuiltinModule: (id: string) => unknown }).getBuiltinModule;
+    const req = (getBuiltin("module") as { createRequire: (url: string) => (id: string) => unknown })
+      .createRequire(import.meta.url);
+    const path = getBuiltin("path") as { resolve: (...p: string[]) => string; join: (...p: string[]) => string };
+    const duckdb = req("@duckdb/duckdb-wasm/dist/duckdb-node-blocking") as {
+      createDuckDB(bundles: unknown, logger: unknown, runtime: unknown): Promise<{
+        instantiate(): Promise<void>; reset(): void | Promise<void>; mod: { HEAPU8: Uint8Array };
+        connect(): { query(sql: string): { toArray(): Record<string, unknown>[] }; close(): void };
+      }>;
+      VoidLogger: new () => unknown;
+      NODE_RUNTIME: unknown;
+    };
+    const dist = path.resolve(process.cwd(), "node_modules/@duckdb/duckdb-wasm/dist");
+    const db = await duckdb.createDuckDB({ eh: {
+      mainModule: path.join(dist, "duckdb-eh.wasm"), mainWorker: path.join(dist, "duckdb-node-eh.worker.cjs"),
+    } }, new duckdb.VoidLogger(), duckdb.NODE_RUNTIME);
+    await db.instantiate();
+    const conn = db.connect();
+    try {
+      conn.query("SET memory_limit = '256MB'");
+      // 20k URLs and 2k ASNs, six requests each URL: URL k takes (k·37 mod 1000) + j²·500 ms for j = 0..5.
+      conn.query(`CREATE TABLE requests AS SELECT 1700000000000 + i AS ts_ms, epoch_ms(1700000000000 + i)::TIMESTAMPTZ AS "timestamp",
+        '/u/' || (i % 20000)::VARCHAR AS url, (64500 + i % 2000)::BIGINT AS asn,
+        ((i % 20000) * 37 % 1000 + (i // 20000) * (i // 20000) * 500)::BIGINT * 1000 AS elapsed,
+        0.01::DOUBLE AS ttfb, NULL::DOUBLE AS ottfb, NULL::DOUBLE AS ottlb, 300::BIGINT AS ttl, 'MISS' AS cache
+        FROM range(120000) rows(i)`);
+      const heap = db.mod.HEAPU8.byteLength;
+      const query = async (sql: string) => conn.query(sql).toArray().map((row) => Object.fromEntries(
+        Object.entries({ ...row }).map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value])));
+      const read = {
+        assertCurrent: () => undefined, getCustomColumnTypes: () => new Map(), querySql: query, executeSql: query,
+      } as unknown as Parameters<typeof executePerformanceAggregates>[1];
+      const data = await executePerformanceAggregates({
+        start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", sections: ["top_urls"],
+      }, read);
+      // Approximate per-group digests took ~1 GB of WASM heap here, outside DuckDB's memory limit.
+      expect(db.mod.HEAPU8.byteLength - heap).toBeLessThan(64 * 1024 * 1024);
+      expect(data.top_urls).toHaveLength(20);
+      expect(data.top_urls![0]).toMatchObject({ requests: 6, avg: 5582.33, p50: 4249, p95: 12374, p99: 13274 });
+      expect(data.top_asns).toHaveLength(20);
+      expect(data.top_asns!.every((row) => row.requests === 60)).toBe(true);
+    } finally {
+      conn.close();
+      await db.reset();
+    }
+  }, 60_000);
+
   it("expands section union pairs (top_urls+top_asns and waterfall+scatter)", () => {
     expect([...expandPerformanceSections(["top_urls"])].sort()).toEqual(["top_asns", "top_urls"]);
     expect([...expandPerformanceSections(["waterfall"])].sort()).toEqual(["scatter", "waterfall"]);
@@ -97,7 +145,7 @@ describe("performance cloud-engine module (F19)", () => {
     };
 
     const topUrls = buildPerfTopUrlsSql(req);
-    expect(topUrls.sql).toContain("approx_quantile");
+    expect(topUrls.sql).toContain("QUANTILE_CONT(elapsed_ms, [0.5, 0.95, 0.99])");
     expect(topUrls.sql).toContain("HAVING COUNT(*) > 5");
     expect(topUrls.sql).toContain("ORDER BY p95_ms DESC NULLS LAST");
 

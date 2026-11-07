@@ -305,58 +305,53 @@ export function buildTtlBucketCaseSql(colExpr = "ttl_val"): string {
   END`;
 }
 
-export function buildPerfTopUrlsSql(
+// Exact percentiles hold each group's values (8 bytes a row); approx_quantile's per-group digest took ~50 KB
+// of WASM heap outside DuckDB's memory limit, so a day of distinct URLs exhausted the page.
+function buildPerfLatencyRankingSql(
   req: PerformanceRequest,
-  availableColumns?: ReadonlySet<string>,
+  availableColumns: ReadonlySet<string> | undefined,
+  key: "url" | "asn",
+  minRequests: number,
 ): { sql: string; params: unknown[] } {
   const { whereSql, params } = buildPerformanceBaseWhere(req, availableColumns);
   const sortColumn = resolveSortColumn(req.sort_by);
   const sql = `
-    SELECT
-      CAST(url AS VARCHAR) AS url,
-      COUNT(*) AS req_count,
-      AVG(TRY_CAST(elapsed AS DOUBLE) / 1000.0) AS avg_ms,
-      approx_quantile(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 0.5) AS p50_ms,
-      approx_quantile(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 0.95) AS p95_ms,
-      approx_quantile(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 0.99) AS p99_ms
-    FROM logs
-    WHERE (${whereSql})
-      AND url IS NOT NULL
-      AND CAST(url AS VARCHAR) != ''
-      AND TRY_CAST(elapsed AS DOUBLE) IS NOT NULL
-    GROUP BY url
-    HAVING COUNT(*) > ${MIN_URL_REQUESTS}
+    SELECT ${key}, req_count, avg_ms, q[1] AS p50_ms, q[2] AS p95_ms, q[3] AS p99_ms
+    FROM (
+      SELECT
+        CAST(${key} AS VARCHAR) AS ${key},
+        COUNT(*) AS req_count,
+        AVG(elapsed_ms) AS avg_ms,
+        QUANTILE_CONT(elapsed_ms, [0.5, 0.95, 0.99]) AS q
+      FROM (
+        SELECT ${key}, TRY_CAST(elapsed AS DOUBLE) / 1000.0 AS elapsed_ms
+        FROM logs
+        WHERE (${whereSql})
+          AND ${key} IS NOT NULL
+          AND CAST(${key} AS VARCHAR) != ''
+      )
+      WHERE elapsed_ms IS NOT NULL
+      GROUP BY ${key}
+      HAVING COUNT(*) > ${minRequests}
+    )
     ORDER BY ${sortColumn} DESC NULLS LAST
     LIMIT ${PERF_TOP_N}
   `.trim();
   return { sql, params };
 }
 
+export function buildPerfTopUrlsSql(
+  req: PerformanceRequest,
+  availableColumns?: ReadonlySet<string>,
+): { sql: string; params: unknown[] } {
+  return buildPerfLatencyRankingSql(req, availableColumns, "url", MIN_URL_REQUESTS);
+}
+
 export function buildPerfTopAsnsSql(
   req: PerformanceRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildPerformanceBaseWhere(req, availableColumns);
-  const sortColumn = resolveSortColumn(req.sort_by);
-  const sql = `
-    SELECT
-      CAST(asn AS VARCHAR) AS asn,
-      COUNT(*) AS req_count,
-      AVG(TRY_CAST(elapsed AS DOUBLE) / 1000.0) AS avg_ms,
-      approx_quantile(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 0.5) AS p50_ms,
-      approx_quantile(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 0.95) AS p95_ms,
-      approx_quantile(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 0.99) AS p99_ms
-    FROM logs
-    WHERE (${whereSql})
-      AND asn IS NOT NULL
-      AND CAST(asn AS VARCHAR) != ''
-      AND TRY_CAST(elapsed AS DOUBLE) IS NOT NULL
-    GROUP BY asn
-    HAVING COUNT(*) > ${MIN_ASN_REQUESTS}
-    ORDER BY ${sortColumn} DESC NULLS LAST
-    LIMIT ${PERF_TOP_N}
-  `.trim();
-  return { sql, params };
+  return buildPerfLatencyRankingSql(req, availableColumns, "asn", MIN_ASN_REQUESTS);
 }
 
 export function buildPerfTtlDistSql(
@@ -505,6 +500,18 @@ export function shapePerfScatterRows(rows: Record<string, unknown>[]): PerfScatt
     edge: roundTo(toNum(row.edge_ms ?? row.edge), 2),
     cache: String(row.cache ?? ""),
   }));
+}
+
+export const PERFORMANCE_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "url", "asn", "elapsed", "ttfb", "ottfb", "ottlb", "ttl", "cache",
+] as const;
+
+/** The columns a projected /performance load needs, or null when the filters can't name theirs. */
+export function performanceScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...PERFORMANCE_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...PERFORMANCE_SCAN_COLUMNS, ...Object.keys(filters)
+    .filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, ""))])];
 }
 
 export async function executePerformanceAggregates(
