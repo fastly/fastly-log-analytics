@@ -833,6 +833,18 @@ describe("custom cards", () => {
     ).map((card) => card.id);
     expect(ids).toEqual(["tenant"]);
   });
+
+  it("drops underscore fields, which summaries never carry", () => {
+    // The dashboard sends the `_bot_name` card; one unsummarized field sends every summary to raw.
+    const ids = customCards(
+      ["tenant", "_bot_name", "_ngwaf_bot_name"].map((id) => ({
+        id,
+        label: id,
+        type: "string" as const,
+      })),
+    ).map((card) => card.id);
+    expect(ids).toEqual(["tenant"]);
+  });
 });
 
 describe("summary field search", () => {

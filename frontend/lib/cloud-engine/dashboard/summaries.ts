@@ -177,11 +177,13 @@ export const CUSTOM_TINT: CardTint = {
   dot: "bg-slate-400",
 };
 
-const SYSTEM_PREFIXES = ["cmcd_", "edge_", "rum_", "lt_"];
+// Mirrors compute/cloud/src/ingest/summary.rs `custom_fields`.
+const SYSTEM_PREFIXES = ["cmcd_", "edge_", "rum_", "lt_", "_"];
 
 /**
  * v3 useDashboardCardDefinitions: system-managed CMCD, edge, RUM and load-test
  * fields and the request id never get a card, nor do duplicates of a built-in card.
+ * Underscore fields such as `_bot_name` render from the bots section instead.
  */
 export function customCards(cards: readonly CustomCard[] | undefined) {
   const builtIn = new Set<string>(CARD_FIELDS);

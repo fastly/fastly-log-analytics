@@ -22,7 +22,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const JOB_KEY: &str = "logs:delete_history";
 const LAST_SWEEP_KEY: &str = "retention:last_sweep";
@@ -916,7 +916,16 @@ fn compact_stage<R: Runtime>(
     Some(row)
 }
 
-/// Merges small request window files when the service's `compaction` setting asks for it.
+/// Compaction passes one maintenance turn may chain. Each is a fresh worker execution with its
+/// own 32-call budget (`ingest::worker::WORKER_CALLS`), and a 32-source compact needs about three.
+const MAX_COMPACT_PASSES: u32 = 8;
+/// A further pass starts only with this much of the stage's wall time left.
+const MIN_COMPACT_PASS_WALL: Duration = Duration::from_secs(5);
+/// How long past a pass's own wall budget the stage waits for its reply (the old 40 s/45 s gap).
+const COMPACT_REPLY_MARGIN: Duration = Duration::from_secs(5);
+
+/// Merges small request window files when the service's `compaction` setting asks for it,
+/// chaining worker passes while the stage has calls and wall time and the last pass progressed.
 fn request_compact_stage<R: Runtime>(
     store: &Store<'_, R>,
     buffer: &LogBuffer,
@@ -945,70 +954,97 @@ fn request_compact_stage<R: Runtime>(
     let span = VcpuSpan::start(runtime);
     let began = Instant::now();
     let before = runtime.admin_remaining_calls();
-    let requests = [(
-        crate::ingest::worker::PATH.to_owned(),
-        json!({
-            "maintenance":"request_compact","service":store.service,
-        }),
-    )];
-    let reply = runtime
-        .worker_dispatch(&requests, std::time::Duration::from_secs(45))
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| Err("compact_worker_reply_missing".into()));
     let mut worker_vcpu = 0;
-    worker_metrics.push(telemetry::execution::WorkerExecutionMetrics::from_reply(
-        "request_compact",
-        None,
-        reply.as_ref().ok(),
-    ));
-    let report = reply.and_then(|reply| {
-        worker_vcpu = reply["vcpu_ms"].as_u64().unwrap_or(0);
-        if let Some(rows) = reply["usage"].as_array() {
-            for value in rows {
-                write_log(runtime, buffer, WritableLogKind::FosUsage, value.clone());
+    let mut passes = 0u32;
+    let mut stopped = None;
+    let mut lease_generation = None;
+    let mut errors = Vec::new();
+    let mut failed = 0;
+    loop {
+        let left =
+            crate::ingest::storage::WALL_STOP.saturating_sub(runtime.admin_elapsed(store.started));
+        if passes > 0
+            && (passes >= MAX_COMPACT_PASSES || left < MIN_COMPACT_PASS_WALL || !enough(runtime, 1))
+        {
+            break;
+        }
+        let wall = left.max(MIN_COMPACT_PASS_WALL);
+        passes += 1;
+        let requests = [(
+            crate::ingest::worker::PATH.to_owned(),
+            json!({
+                "maintenance": "request_compact",
+                "service": store.service,
+                "wall_ms": wall.as_millis() as u64,
+            }),
+        )];
+        let reply = runtime
+            .worker_dispatch(&requests, wall + COMPACT_REPLY_MARGIN)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Err("compact_worker_reply_missing".into()));
+        worker_metrics.push(telemetry::execution::WorkerExecutionMetrics::from_reply(
+            "request_compact",
+            None,
+            reply.as_ref().ok(),
+        ));
+        let report = reply.and_then(|reply| {
+            worker_vcpu += reply["vcpu_ms"].as_u64().unwrap_or(0);
+            if let Some(rows) = reply["usage"].as_array() {
+                for value in rows {
+                    write_log(runtime, buffer, WritableLogKind::FosUsage, value.clone());
+                }
             }
-        }
-        if reply["status"] != "ok" {
-            return Err(reply["error"]
-                .as_str()
-                .unwrap_or("compact_worker_failed")
-                .to_owned());
-        }
-        serde_json::from_value::<compaction::Report>(reply["report"].clone())
-            .map_err(|e| e.to_string())
-    });
-    match report {
-        Ok(report) => {
-            row.listed = report.sources;
-            row.files = u64::from(report.compacts);
-            row.rows = report.rows;
-            row.bytes = report.bytes_written;
-            row.deleted = report.deleted;
-            row.more_pending = report.more_pending;
-            row.error = report.errors.first().cloned();
-            if let Some(stopped) = report.stopped {
-                row.details = Some(json!({
-                    "stopped": stopped,
-                    "lease_generation": report.lease_generation,
-                }));
+            if reply["status"] != "ok" {
+                return Err(reply["error"]
+                    .as_str()
+                    .unwrap_or("compact_worker_failed")
+                    .to_owned());
             }
-            if report.compacts > 0 || report.deleted > 0 || report.failed > 0 {
-                row.outcome = if report.more_pending {
-                    "partial"
-                } else {
-                    "done"
-                };
-            } else if row.error.is_some() {
-                row.outcome = "error";
-            } else if report.more_pending {
-                row.outcome = "partial";
+            serde_json::from_value::<compaction::Report>(reply["report"].clone())
+                .map_err(|e| e.to_string())
+        });
+        let report = match report {
+            Ok(report) => report,
+            Err(error) => {
+                errors.push(error);
+                break;
             }
+        };
+        row.listed += report.sources;
+        row.files += u64::from(report.compacts);
+        row.rows += report.rows;
+        row.bytes += report.bytes_written;
+        row.deleted += report.deleted;
+        failed += report.failed;
+        row.more_pending = report.more_pending;
+        // Call, wall, vCPU and heap stops end only that execution; a fresh pass resets them.
+        let blocked = matches!(
+            report.stopped.as_deref(),
+            Some("lease_held" | "lease_conflict" | "plan_in_flight")
+        );
+        stopped = report.stopped.or(stopped);
+        lease_generation = report.lease_generation.or(lease_generation);
+        let done = !report.more_pending || !report.errors.is_empty();
+        errors.extend(report.errors);
+        if done || blocked {
+            break;
         }
-        Err(error) => {
-            row.outcome = "error";
-            row.error = Some(error);
-        }
+    }
+    row.error = errors.first().cloned();
+    if passes > 1 || stopped.is_some() {
+        row.details = Some(json!({
+            "passes": passes,
+            "stopped": stopped,
+            "lease_generation": lease_generation,
+        }));
+    }
+    if row.files > 0 || row.deleted > 0 || failed > 0 {
+        row.outcome = if row.more_pending { "partial" } else { "done" };
+    } else if row.error.is_some() {
+        row.outcome = "error";
+    } else if row.more_pending {
+        row.outcome = "partial";
     }
     if row.outcome == "idle" {
         return None;

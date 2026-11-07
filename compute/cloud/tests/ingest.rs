@@ -11198,8 +11198,9 @@ mod request_compaction {
     #[test]
     fn interrupted_compaction_resumes_without_reading_checkpointed_sources() {
         let fake = Fake::new(NOW);
+        // Two 6 MiB sources fill the pass's source-byte budget, so the third waits for a resume.
         let sources = (0..3)
-            .map(|i| odd_window(&fake, HOUR + i * 60, &[vec![i as u8; 3 * 1024 * 1024]]))
+            .map(|i| odd_window(&fake, HOUR + i * 60, &[vec![i as u8; 6 << 20]]))
             .collect::<Vec<_>>();
         fake.vcpu_step.set(3);
         let first = run(&fake, TARGET);
@@ -11241,9 +11242,7 @@ mod request_compaction {
             .collect::<Vec<_>>();
         assert_eq!(
             blobs,
-            (0..3)
-                .map(|i| vec![i as u8; 3 * 1024 * 1024])
-                .collect::<Vec<_>>()
+            (0..3).map(|i| vec![i as u8; 6 << 20]).collect::<Vec<_>>()
         );
         assert!(fake.uploads.borrow().is_empty());
         assert!(fake.calls.get() <= 32);
@@ -11283,7 +11282,7 @@ mod request_compaction {
                 seed(&fake, 3)
             } else {
                 (0..3)
-                    .map(|i| odd_window(&fake, HOUR + i * 60, &[vec![i as u8; 3 << 20]]))
+                    .map(|i| odd_window(&fake, HOUR + i * 60, &[vec![i as u8; 6 << 20]]))
                     .collect::<Vec<_>>()
             };
             if final_part {
@@ -11345,7 +11344,7 @@ mod request_compaction {
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
-                assert_eq!(values, (0..3).map(|i| vec![i; 3 << 20]).collect::<Vec<_>>());
+                assert_eq!(values, (0..3).map(|i| vec![i; 6 << 20]).collect::<Vec<_>>());
             }
             run(&fake, TARGET);
             assert!(!fake.bucket.borrow().contains_key(&checkpoint));
@@ -12151,6 +12150,31 @@ mod request_compaction {
     }
 
     #[test]
+    fn a_pass_spends_its_spare_calls_reading_sources() {
+        let fake = Fake::new(NOW);
+        for i in 0..32 {
+            window(&fake, HOUR + i * 60, &["x"]);
+        }
+        let mut passes = 0;
+        let report = loop {
+            passes += 1;
+            fake.new_request();
+            fake.vcpu.set(0);
+            let report =
+                compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 1).unwrap();
+            assert!(fake.calls.get() <= BUDGET);
+            if report.compacts > 0 || passes > 16 {
+                break report;
+            }
+        };
+        assert_eq!(report.sources, 32);
+        assert!(
+            passes <= 3,
+            "{passes} worker passes for one 32-source compact"
+        );
+    }
+
+    #[test]
     fn stays_within_the_backend_call_budget() {
         let fake = Fake::new(NOW);
         for hour in 0..3 {
@@ -12302,6 +12326,61 @@ mod request_compaction {
         assert_eq!(child["status"], "ok");
         assert!(child["calls"].as_u64().unwrap() > 0);
         assert!(samples.iter().any(|sample| sample["kind"] == "maintenance"));
+    }
+
+    #[test]
+    fn one_maintenance_turn_chains_compaction_passes_until_a_compact_commits() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 32);
+        tick_runtime(&fake);
+        let mut svc = serde_json::to_value(service()).unwrap();
+        svc["compaction"] = json!({"mode": "size_target", "size_target_mb": 64});
+        fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
+        fake.kv.borrow_mut().insert(
+            "retention:last_sweep".into(),
+            (1, json!({"at": NOW, "complete": true})),
+        );
+        let first = (0..16)
+            .find_map(|_| {
+                fake.now.set(fake.now.get() + 120);
+                run_tick(&fake);
+                rows(&fake, LogKind::CronRuns)
+                    .into_iter()
+                    .find(|row| row["cron_kind"] == "request_compact")
+            })
+            .expect("a request_compact turn");
+        assert_eq!(first["parquet_files_written"], 1, "{first}");
+        assert_eq!(first["listed_files"], 32, "{first}");
+        assert_eq!(compacts(&fake).len(), 1);
+        let details: Value = serde_json::from_str(first["details_json"].as_str().unwrap()).unwrap();
+        assert!(details["passes"].as_u64().unwrap() > 1, "{details}");
+    }
+
+    #[test]
+    fn a_compaction_turn_starts_no_further_pass_without_wall_time_for_one() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 32);
+        tick_runtime(&fake);
+        let mut svc = serde_json::to_value(service()).unwrap();
+        svc["compaction"] = json!({"mode": "size_target", "size_target_mb": 64});
+        fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
+        let turn = |fake: &Fake| {
+            fake.new_request();
+            let body = json!({"service_id": SID, "run_id": "run1", "tick_id": "", "trigger": "clock",
+                "actor": "clock", "bucket": 0, "start": 5});
+            let path = fastly_log_analytics::admin::stage::PATH.to_owned();
+            let reply = fake.worker_dispatch(&[(path, body)], std::time::Duration::from_secs(32));
+            assert_eq!(reply[0].as_ref().unwrap()["ran"], "request_compact");
+        };
+        let wall = ingest::storage::WALL_STOP.as_secs();
+        fake.elapsed_s.set(wall - 4);
+        turn(&fake);
+        assert_eq!(fake.worker_runs.get(), 1);
+        assert!(compacts(&fake).is_empty());
+        fake.elapsed_s.set(0);
+        turn(&fake);
+        assert!(fake.worker_runs.get() > 2);
+        assert_eq!(compacts(&fake).len(), 1);
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub const MAX_EXECUTION_ROWS: u64 = 100_000;
 pub const HEAP_STOP_MIB: u32 = 96;
 /// Calls held back for the watermark bump (with one retry) and the state write.
 const COMMIT_RESERVE: u32 = 10;
+/// Calls that persist a pass's progress after its last source read: the checkpoint PUT, the
+/// state save's CAS and fresh read, and the final state write. A job that can't also complete in
+/// the same pass commits in a later one, so source reads need not hold [`COMMIT_RESERVE`].
+const CHECKPOINT_CALLS: u32 = 4;
 const MAX_DELETES: usize = 1000;
 const MAX_STATE_BYTES: usize = 512 * 1024;
 
@@ -97,12 +101,19 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
     if let Some(usage) = runtime.usage_agg() {
         usage.set_caller("worker:request_compact");
     }
+    // A chained pass stops within the maintenance stage's remaining `wall_ms`: the storage helpers
+    // stop at `WALL_STOP` after `started`, so backdating it shortens (never extends) the pass.
+    let wall_stop = super::storage::WALL_STOP;
+    let pass_started = body["wall_ms"].as_u64().map_or(started, |ms| {
+        let wall = std::time::Duration::from_millis(ms).min(wall_stop);
+        started.checked_sub(wall_stop - wall).unwrap_or(started)
+    });
     let store = Store {
         runtime,
         service: &service,
         access_key,
         secret_key,
-        started,
+        started: pass_started,
         vcpu_start: 0,
     };
     match request_compact(&store, &cdn_key, target, 1) {
@@ -564,6 +575,11 @@ impl<R: Runtime> Run<'_, '_, R> {
         self.remaining() >= self.tail + COMMIT_RESERVE + calls
     }
 
+    /// Whether `calls` more still leave room to checkpoint the job and save the state.
+    fn checkpointable(&self, calls: u32) -> bool {
+        self.remaining() >= self.tail + CHECKPOINT_CALLS + calls
+    }
+
     fn drain(&mut self) {
         for _ in 0..4 {
             let Some(key) = self.state.work_cleanup.last().cloned() else {
@@ -842,7 +858,8 @@ impl<R: Runtime> Run<'_, '_, R> {
             }
             return Err("compact_key_admission".into());
         }
-        if !self.affordable(9) {
+        // The upload, the job's save and a first source read with its checkpoint.
+        if !self.checkpointable(5) {
             return Ok(Outcome::Stop);
         }
         let id = self.store.multipart_create(&key)?;
@@ -1006,7 +1023,7 @@ impl<R: Runtime> Run<'_, '_, R> {
             self.completed_job(&job, pending);
             return Ok(());
         }
-        if !self.affordable(9) || !self.within_limits() {
+        if !self.checkpointable(2) || !self.within_limits() {
             self.report.more_pending = true;
             return Ok(());
         }
@@ -1075,7 +1092,7 @@ impl<R: Runtime> Run<'_, '_, R> {
                 }
                 continue;
             }
-            if !self.affordable(9)
+            if !self.checkpointable(1)
                 || !self.within_limits()
                 || bytes_read.saturating_add(source.size) > MAX_EXECUTION_SOURCE_BYTES
                 || rows_read.saturating_add(source.rows) > MAX_EXECUTION_ROWS
