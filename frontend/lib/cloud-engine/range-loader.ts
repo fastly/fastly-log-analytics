@@ -9,6 +9,9 @@ const MAX_RANGE_BYTES = 64 * 1024 * 1024;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 
+/** A range the browser won't scan: retrying the same request fails the same way. */
+export class CloudBudgetError extends Error {}
+
 export function bindCloudReadContext(request: Request, context: DuckDBReadContext): Request {
   requestReads.set(request, context);
   return request;
@@ -62,7 +65,7 @@ export async function ensureCloudRange(
     );
     if (files.length > MAX_RANGE_FILES ||
         files.reduce((total, file) => total + file.size, 0) > MAX_RANGE_BYTES) {
-      throw new Error("Cloud query range exceeds the browser scan budget; choose a smaller range");
+      throw new CloudBudgetError("Cloud query range exceeds the browser scan budget; choose a smaller range");
     }
     const progress = { phase: "files" as const, cached: 0, toFetch: files.length,
       toDecode: 0, done: 0, downloadedBytes: 0, cachedBytes: 0 };
@@ -96,7 +99,7 @@ export async function ensureCloudRange(
         const residentBytes = residentBytesByKey.get(file.scopedKey);
         if (residentBytes !== undefined) {
           bytes += residentBytes;
-          if (bytes > MAX_RANGE_BYTES) throw new Error("Cloud query scan exceeded the browser byte budget");
+          if (bytes > MAX_RANGE_BYTES) throw new CloudBudgetError("Cloud query scan exceeded the browser byte budget");
           progress.cached++;
           progress.cachedBytes += residentBytes;
           progress.done++;
@@ -107,7 +110,7 @@ export async function ensureCloudRange(
         generation.assertCurrent();
         signal.throwIfAborted();
         bytes += fetched.bytes.byteLength;
-        if (bytes > MAX_RANGE_BYTES) throw new Error("Cloud query scan exceeded the browser byte budget");
+        if (bytes > MAX_RANGE_BYTES) throw new CloudBudgetError("Cloud query scan exceeded the browser byte budget");
         if (fetched.cached) {
           progress.cached++;
           progress.cachedBytes += fetched.bytes.byteLength;

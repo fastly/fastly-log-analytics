@@ -146,6 +146,13 @@ describe('InsightsClient queued evaluation', () => {
 
   it('treats a pending response with no cards as still evaluating and keeps polling', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
+    server.use(http.get(`${getApiBase()}/api/insight-availability`, () => HttpResponse.json({
+      insights: [
+        { id: 'ddos', title: 'DDoS Detection', description: 'About ddos', category: 'security', available: true },
+        { id: 'waf', title: 'WAF Activity', description: 'About waf', category: 'security', available: true },
+      ],
+      unavailable: [],
+    })))
     const calls = serveInsights([
       envelope({ pending: true, refreshing: false, insights: [] }),
       envelope({ pending: false, refreshing: false, computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')] }),
@@ -156,10 +163,56 @@ describe('InsightsClient queued evaluation', () => {
     await waitFor(() => expect(calls()).toBe(1))
     expect(await screen.findByRole('status')).toHaveTextContent(/Evaluating/)
     expect(screen.queryByText(/No anomalies detected/)).toBeNull()
-    expect(screen.getAllByTestId('insights-loading').length).toBeGreaterThan(0)
+    expect(screen.queryByTestId('insights-loading')).toBeNull()
+    const grid = screen.getAllByTestId('insights-grid-loading')[0]
+    expect(grid).toHaveTextContent('DDoS Detection')
+    expect(grid).toHaveTextContent('WAF Activity')
 
     await vi.advanceTimersByTimeAsync(6000)
     await waitFor(() => expect(tabCount('all')).toBe('1'))
     expect(calls()).toBe(2)
+  })
+})
+
+describe('InsightsClient layout stability while evaluating', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('renders queued placeholders as skeleton cards in the grid instead of collapsing to a spinner', async () => {
+    serveInsights([envelope({ pending: true, refreshing: false, insights: [
+      card('ddos', 'info', 'Queued for evaluation', true),
+      card('waf', 'info', 'Queued for evaluation', true),
+    ] })])
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    const grid = (await screen.findAllByTestId('insights-grid'))[0]
+    expect(grid).toHaveTextContent('Title ddos')
+    expect(grid).toHaveTextContent('Title waf')
+    expect(screen.queryByTestId('insights-loading')).toBeNull()
+    expect(tabCount('all')).toBe('0')
+  })
+
+  it('keeps one status slot mounted from first paint through pending, error and final results', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const calls = serveInsights([
+      envelope({ pending: true, refreshing: false, insights: [card('ddos', 'info', 'Queued for evaluation', true)] }),
+      envelope({ pending: false, refreshing: true, refresh_error: 'ClickHouse timeout', computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')] }),
+      envelope({ pending: false, refreshing: false, computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')] }),
+    ])
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    const slot = screen.getByTestId('insights-status-slot')
+    await waitFor(() => expect(slot).toHaveTextContent(/Evaluating/))
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await waitFor(() => expect(calls()).toBe(2))
+    await waitFor(() => expect(slot).toHaveTextContent(/ClickHouse timeout/))
+    expect(screen.getByTestId('insights-status-slot')).toBe(slot)
+
+    await vi.advanceTimersByTimeAsync(6000)
+    await waitFor(() => expect(calls()).toBe(3))
+    await waitFor(() => expect(slot).toBeEmptyDOMElement())
+    expect(screen.getByTestId('insights-status-slot')).toBe(slot)
   })
 })

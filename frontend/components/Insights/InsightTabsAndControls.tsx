@@ -120,6 +120,7 @@ export function InsightTabs<T extends SectionableInsight>({
   isLoading,
   renderCards,
   emptyMessage,
+  isCounted = () => true,
 }: {
   groups: InsightSectionGroup<T>[]
   activeTab: string | null
@@ -127,6 +128,8 @@ export function InsightTabs<T extends SectionableInsight>({
   isLoading?: boolean
   renderCards: (group: InsightSectionGroup<T>) => React.ReactNode
   emptyMessage?: (group: InsightSectionGroup<T>) => { title: string; description: string }
+  // Cards excluded here (queued placeholders) still render but are not counted as findings.
+  isCounted?: (card: T) => boolean
 }) {
   const normalizedActive = normalizeTabKey(activeTab)
   const activeKey =
@@ -164,8 +167,8 @@ export function InsightTabs<T extends SectionableInsight>({
                 )}
               </span>
               <span className="inline-flex shrink-0 items-center gap-1">
-                <span className="text-xs tabular-nums">{cards.length}</span>
-                <TabSeverityBadges severities={summarizeSeverities(cards)} />
+                <span className="text-xs tabular-nums">{cards.filter(isCounted).length}</span>
+                <TabSeverityBadges severities={summarizeSeverities(cards.filter(isCounted))} />
               </span>
             </TabsTrigger>
           )
@@ -189,9 +192,9 @@ export function InsightTabs<T extends SectionableInsight>({
                 <Icon className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <span>{section.label}</span>
                 <span className="text-xs font-normal text-muted-foreground tabular-nums">
-                  ({cards.length})
+                  ({cards.filter(isCounted).length})
                 </span>
-                <SeverityChips severities={summarizeSeverities(cards)} />
+                <SeverityChips severities={summarizeSeverities(cards.filter(isCounted))} />
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">{section.description}</p>
             </div>

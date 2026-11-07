@@ -7,6 +7,7 @@ import { getDuckDBEngine } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
+import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -209,6 +210,20 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const json = await res!.json();
     expect(json).toHaveProperty("top_urls");
     expect(json).toHaveProperty("waterfall");
+  });
+
+  it("answers an over-budget range with a terminal 413 instead of a retryable failure", async () => {
+    const message = "Cloud query range exceeds the browser scan budget; choose a smaller range";
+    vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError(message));
+    const res = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/performance/aggregates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sections: ["waterfall"] }),
+      }),
+    );
+    expect(res?.status).toBe(413);
+    expect(await res?.json()).toEqual({ detail: message });
   });
 
   it("dispatches /api/security/* routes including /proxies/export through handleSecurityRequest", async () => {

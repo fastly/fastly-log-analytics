@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cloudStreamFetch, handleCloudAnalyticalRequest } from "./adapter";
+import { cloudStreamFetch, handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
 import contract from "./cloud-openapi.json";
 import { cloudLoadingStore } from "./loading-progress";
 import { NATIVE_ROUTES, isNativeCloudRoute } from "./native-routes";
@@ -26,7 +26,7 @@ beforeEach(() => {
   cloudLoadingStore.reset();
   vi.mocked(ensureCloudRange).mockImplementation(async () => getDuckDBEngine().readContext());
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); resetCloudMetadataCache(); });
 
 describe("Cloud endpoint bridges", () => {
   it("uses the native RUM default version without claiming an up-to-date SDK needs updating", async () => {
@@ -198,6 +198,7 @@ describe("Cloud endpoint bridges", () => {
       await pending;
       expect(cloudLoadingStore.getSnapshot()).toBeNull();
     }
+    resetCloudMetadataCache();
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
     await expect(handleCloudAnalyticalRequest(request("/api/log-extents"))).rejects.toThrow("offline");
     expect(cloudLoadingStore.getSnapshot()).toBeNull();

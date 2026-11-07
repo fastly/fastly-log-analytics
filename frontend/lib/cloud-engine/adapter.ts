@@ -40,7 +40,7 @@ import { cloudRumMutation } from "./rum-management";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
-import { bindCloudReadContext, cloudReadContext, ensureCloudRange } from "./range-loader";
+import { bindCloudReadContext, CloudBudgetError, cloudReadContext, ensureCloudRange } from "./range-loader";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
@@ -431,7 +431,10 @@ export async function handleCloudAnalyticalRequest(
   const url = new URL(request.url);
   const serviceId = url.searchParams.get("service_id") ?? request.headers.get("x-service-id");
   const origin = captureCloudQueryContext();
-  return measureCloudQuery(`api.${url.pathname}`, () => handleCloudRequest(request, origin), undefined, serviceId);
+  return measureCloudQuery(`api.${url.pathname}`, () => handleCloudRequest(request, origin).catch((error: unknown) => {
+    if (!(error instanceof CloudBudgetError)) throw error;
+    return Response.json({ detail: error.message }, { status: 413 });
+  }), undefined, serviceId);
 }
 
 async function handleCloudRequest(
@@ -487,6 +490,11 @@ async function handleCloudRequest(
   const stage = path === "/api/bootstrap" || path === "/api/auth/session" || path === "/api/services"
     ? "session" : path === "/api/log-extents" ? "range" : path === "/api/files" ? "listing" : null;
   if (stage && path !== "/api/bootstrap" && isNativeCloudRoute(request.method, path)) {
+    // The server answers extents for its one active service, so the page's
+    // own read can share the lookup its scans make.
+    if (path === "/api/log-extents" && !url.search) {
+      return withLoading(stage, () => fetchCloudMetadata(path, request.signal));
+    }
     return withLoading(stage, () => fetch(request));
   }
   if ((request.method !== "GET" && (
@@ -618,10 +626,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         request,
       );
     }
-    const servicesRes = await fetch("/api/services", {
-      credentials: "include",
-      signal: request.signal,
-    });
+    const servicesRes = await fetchCloudMetadata("/api/services", request.signal);
     if (!servicesRes.ok) return servicesRes;
     const servicesJson = servicesRes?.ok
       ? ((await servicesRes.json().catch(() => ({ services: [] }))) as {

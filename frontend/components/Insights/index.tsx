@@ -23,7 +23,6 @@ import { useDateFormat } from '@/hooks/useSSE'
 import { client, queryKeys, unwrapClient } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
-  categoryToSection,
   groupInsightsBySection,
   historyHoursFromExtents,
   normalizeTabKey,
@@ -158,12 +157,18 @@ function InsightsBody({
     () => (allInsights ?? []).filter((insight) => isPendingPlaceholder(insight)),
     [allInsights],
   )
+  // Queued placeholders stay in the grid (as skeletons, in their section) so the
+  // placeholder → result swap keeps every card's slot; they are never counted.
   const filteredInsights = useMemo(() => {
     if (!allInsights) return []
     const findings = allInsights.filter((insight) => !isPendingPlaceholder(insight))
-    if (statusFilter === 'all') return findings
-    return findings.filter((insight) => insight.severity === statusFilter)
-  }, [allInsights, statusFilter])
+    const shown = statusFilter === 'all' ? findings : findings.filter((insight) => insight.severity === statusFilter)
+    return [...shown, ...pendingInsights]
+  }, [allInsights, pendingInsights, statusFilter])
+  // A queued evaluation with no cards yet keeps the availability skeleton grid.
+  const showSkeletons = isLoading || (isPending && (allInsights?.length ?? 0) === 0)
+  const refreshError = data?.refresh_error
+  const reserveStatusSlot = !isCloudMode() || isEvaluating(data) || !!refreshError
 
   // Skeleton cards rendered while /api/insights is in flight come from the
   // /api/insight-availability response (titles + descriptions per available
@@ -211,27 +216,28 @@ function InsightsBody({
         </Alert>
       )}
 
-      {data && (isEvaluating(data) || data.refresh_error) && (
-        <div className="flex flex-col gap-2">
-          {isEvaluating(data) && (
-            <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+      {/* Fixed one-line slot, mounted before the first response, so background
+          status and refresh errors never push the cards down (CLS). */}
+      {reserveStatusSlot && (
+        <div data-testid="insights-status-slot" className="flex h-5 min-w-0 items-center gap-4 text-sm">
+          {data && isEvaluating(data) && (
+            <span role="status" className="flex shrink-0 items-center gap-2 text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
               {data.pending || !data.computed_at
                 ? <span>Evaluating detectors in the background…</span>
                 : <span>Refreshing (computed {relative(data.computed_at)})</span>}
-            </div>
+            </span>
           )}
-          {data.refresh_error && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Last refresh failed</AlertTitle>
-              <AlertDescription>{data.refresh_error}</AlertDescription>
-            </Alert>
+          {refreshError && (
+            <span role="alert" title={refreshError} className="flex min-w-0 items-center gap-1.5 text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span className="truncate">Last refresh failed: {refreshError}</span>
+            </span>
           )}
         </div>
       )}
 
-      {isLoading ? (
+      {showSkeletons ? (
         groupedSkeletons.length > 0 ? (
           <InsightTabs
             groups={groupedSkeletons}
@@ -274,18 +280,26 @@ function InsightsBody({
           activeTab={activeTab}
           onTabChange={setActiveTab}
           isLoading={isPending}
+          isCounted={(insight) => !isPendingPlaceholder(insight)}
           emptyMessage={isCloudMode() ? ({ section }) => {
             const supported = availableInsights.some((entry) => section.key === 'all' || entry.category === section.key)
             return supported && statusFilter !== 'all'
               ? { title: 'No insights match this status', description: 'Change the status filter to see the evaluated detectors.' }
               : { title: 'No detectors available in this category', description: 'No analysis was performed here. Check the Cloud algorithm and log-field availability below.' }
           } : undefined}
-          renderCards={({ cards, section }) => (
+          renderCards={({ cards }) => (
             <div
               className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
               data-testid="insights-grid"
             >
-              {cards.map((insight) => (
+              {cards.map((insight) => isPendingPlaceholder(insight) ? (
+                <InsightCardSkeleton
+                  key={insight.id}
+                  title={insight.title}
+                  description={insight.description}
+                  loadingMessage={insight.summary}
+                />
+              ) : (
                 <InsightCard
                   key={insight.id}
                   insight={insight}
@@ -293,16 +307,6 @@ function InsightsBody({
                   baselineHours={baselineHours}
                 />
               ))}
-              {pendingInsights
-                .filter((insight) => section.key === 'all' || categoryToSection(insight.category).key === section.key)
-                .map((insight) => (
-                  <InsightCardSkeleton
-                    key={insight.id}
-                    title={insight.title}
-                    description={insight.description}
-                    loadingMessage={insight.summary}
-                  />
-                ))}
             </div>
           )}
         />

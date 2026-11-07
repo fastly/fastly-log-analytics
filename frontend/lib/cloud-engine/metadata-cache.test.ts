@@ -18,15 +18,16 @@ function scan() {
 
 function metadataFetcher() {
   return vi.fn(async (input: RequestInfo | URL) => {
-    const path = String(input);
+    const path = input instanceof Request ? new URL(input.url).pathname : String(input);
     if (path === "/api/log-extents") return Response.json({ latest_log_at: "2026-11-02T00:00:00Z" });
     if (path === "/api/services") return Response.json({ services: [{ service_id: "fixture-a" }] });
+    if (path === "/api/auth/session") return Response.json({ user: { id: "u1", role: "admin" } });
     return Response.json({ groups: [], fields: [] });
   });
 }
 
 function calls(fetcher: ReturnType<typeof metadataFetcher>) {
-  return fetcher.mock.calls.map(([input]) => String(input)).sort();
+  return fetcher.mock.calls.map(([input]) => input instanceof Request ? new URL(input.url).pathname : String(input)).sort();
 }
 
 beforeEach(() => {
@@ -69,5 +70,17 @@ describe("Cloud scan metadata", () => {
     await expect(handleCloudAnalyticalRequest(scan())).rejects.toThrow("Cloud range discovery failed (503)");
     expect((await handleCloudAnalyticalRequest(scan()))?.ok).toBe(true);
     expect(calls(fetcher).filter((path) => path === "/api/log-extents")).toHaveLength(2);
+  });
+
+  it("shares services with bootstrap and the page's own extents read with the scans", async () => {
+    const fetcher = metadataFetcher();
+    vi.stubGlobal("fetch", fetcher);
+    expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap")))?.ok).toBe(true);
+    const extents = await handleCloudAnalyticalRequest(new Request("http://localhost/api/log-extents"));
+    expect(await extents?.json()).toEqual({ latest_log_at: "2026-11-02T00:00:00Z" });
+    expect((await handleCloudAnalyticalRequest(scan()))?.ok).toBe(true);
+    const counts = calls(fetcher).reduce<Record<string, number>>((acc, path) => ({ ...acc, [path]: (acc[path] ?? 0) + 1 }), {});
+    expect(counts["/api/services"]).toBe(1);
+    expect(counts["/api/log-extents"]).toBe(1);
   });
 });

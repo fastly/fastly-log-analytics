@@ -48,6 +48,42 @@ function paginate(rows: Row[], params: URLSearchParams) {
   return { entries: rows.slice((page - 1) * perPage, page * perPage), total: rows.length, page, per_page: perPage };
 }
 
+type OpsRead = Awaited<ReturnType<typeof queryOpsLogs>>;
+const sharedCronReads = new Map<string, { read: Promise<OpsRead>; controller: AbortController; users: number }>();
+
+// The logs page asks for runs, recent runs and the schedule at once; all of
+// them need the same cron history, so concurrent callers share one read. The
+// read is cancelled only when every caller has gone.
+async function cronHistory(key: string, range: { from: string; to: string }, signal: AbortSignal): Promise<OpsRead> {
+  signal.throwIfAborted();
+  let entry = sharedCronReads.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    const created = { read: queryOpsLogs("cron_runs", range, { signal: controller.signal }), controller, users: 0 };
+    const forget = () => { if (sharedCronReads.get(key) === created) sharedCronReads.delete(key); };
+    created.read.then(forget, forget);
+    sharedCronReads.set(key, created);
+    entry = created;
+  }
+  const shared = entry;
+  shared.users += 1;
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([shared.read, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    shared.users -= 1;
+    if (shared.users === 0 && signal.aborted) {
+      shared.controller.abort(signal.reason);
+      if (sharedCronReads.get(key) === shared) sharedCronReads.delete(key);
+    }
+  }
+}
+
 async function cron(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const params = url.searchParams;
@@ -62,7 +98,8 @@ async function cron(request: Request): Promise<Response> {
   const page = await nativePages(request, "/api/cron-runs", "runs");
   const service = params.get("service_id") ?? request.headers.get("x-service-id") ?? page.service_id;
   if (service && page.service_id !== service) throw new Error("Cloud cron service does not match the selected service");
-  const evidence = await queryOpsLogs("cron_runs", { from: start, to: end }, { signal: request.signal });
+  const defaultRange = !params.has("start") && !params.has("start_time") && !params.has("end") && !params.has("end_time");
+  const evidence = await cronHistory(defaultRange ? "default" : `${start}|${end}`, { from: start, to: end }, request.signal);
   request.signal.throwIfAborted();
   if (evidence.liveTruncated) throw new Error("Cloud cron history is incomplete; choose a smaller range");
   const stageRows = evidence.rows.filter((row) => typeof row.cron_kind === "string")

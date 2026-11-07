@@ -376,7 +376,6 @@ pub fn request_compact<R: Runtime>(
             Err(error) => return Err(error),
         };
         if committed {
-            run.state.group_limit = 0;
             run.state.queue.extend(pending);
             run.state.catalog_objects.clear();
             run.state.catalog_carry.clear();
@@ -523,6 +522,11 @@ fn file_hour(key: &str) -> Option<i64> {
         None => i64::try_from(compact::parse_compact_name(key)?.a).ok()?,
     };
     Some(start - start.rem_euclid(3600))
+}
+
+/// The footer share of a group's input: a compact carries one row group per merged input.
+fn source_weight(key: &str) -> usize {
+    compact::parse_compact_name(key).map_or(1, |name| name.sources.max(1) as usize)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -807,15 +811,18 @@ impl<R: Runtime> Run<'_, '_, R> {
                 return Ok(false);
             }
             let rest = &candidates[index..];
-            let mut take = 0;
-            let mut total = 0;
-            let limit = if self.state.group_limit == 0 {
-                MAX_SOURCES
-            } else {
-                self.state.group_limit.clamp(2, MAX_SOURCES)
+            let (mut take, mut total, mut weight) = (0, 0, 0);
+            let limit = match self.state.group_limit {
+                0 => usize::MAX,
+                limit => limit.max(2),
             };
-            while take < rest.len() && take < limit && total + rest[take].size <= self.target {
+            while take < rest.len()
+                && take < MAX_SOURCES
+                && total + rest[take].size <= self.target
+                && weight + source_weight(&rest[take].key) <= limit
+            {
                 total += rest[take].size;
+                weight += source_weight(&rest[take].key);
                 take += 1;
             }
             if take < 2 {
@@ -927,9 +934,13 @@ impl<R: Runtime> Run<'_, '_, R> {
         self.changed = true;
     }
 
-    fn abort_job(&mut self, mut job: Job, error: String) {
-        job.aborting = true;
+    fn abort_job(&mut self, job: Job, error: String) {
         self.report.errors.push(error);
+        self.discard_job(job);
+    }
+
+    fn discard_job(&mut self, mut job: Job) {
+        job.aborting = true;
         match self.store.multipart_abort(&job.upload.key, &job.upload.id) {
             Ok(()) => {
                 if let Some(key) = job.checkpoint {
@@ -946,17 +957,32 @@ impl<R: Runtime> Run<'_, '_, R> {
         self.report.more_pending = true;
     }
 
-    fn reject_input(&mut self, job: &Job, source: &str, error: &str) {
-        if matches!(error, "compact_footer_limit" | "compact_row_group_limit") && job.next > 0 {
-            if job.next > 1 {
-                self.state.group_limit = job.next.min(MAX_SOURCES);
-            } else {
-                self.state.skip.push(job.sources[0].key.clone());
-                self.state.group_limit = 0;
-            }
-        } else {
+    fn reject_input(&mut self, job: Job, source: &str, error: String) {
+        if !matches!(
+            error.as_str(),
+            "compact_footer_limit" | "compact_row_group_limit"
+        ) {
             self.state.skip.push(source.to_owned());
+            self.abort_job(job, error);
+            return;
         }
+        // A full output is planning, not a failure. The key names its sources, so the job can't
+        // be cut short in place: replan with the sources that fit, or leave a first source that
+        // fits with no other (a full compact) as it is.
+        let stopped = if job.next > 1 {
+            self.state.group_limit = job.sources[..job.next]
+                .iter()
+                .map(|source| source_weight(&source.key))
+                .sum();
+            error.trim_start_matches("compact_")
+        } else {
+            self.state.skip.push(job.sources[0].key.clone());
+            "source_full"
+        };
+        self.report
+            .stopped
+            .get_or_insert_with(|| stopped.to_owned());
+        self.discard_job(job);
     }
 
     fn upload_parts(
@@ -1085,8 +1111,7 @@ impl<R: Runtime> Run<'_, '_, R> {
                         return Ok(());
                     }
                     Err(error) => {
-                        self.reject_input(&job, &source.key, &error);
-                        self.abort_job(job, error);
+                        self.reject_input(job, &source.key, error);
                         return Ok(());
                     }
                 }
@@ -1118,8 +1143,7 @@ impl<R: Runtime> Run<'_, '_, R> {
             }
             let w = writer.get_or_insert_with(|| checkpoint::Writer::new(reader.metadata()));
             if let Err(error) = w.append(&bytes, reader.metadata()) {
-                self.reject_input(&job, &source.key, &error);
-                self.abort_job(job, error);
+                self.reject_input(job, &source.key, error);
                 return Ok(());
             }
             bytes_read += source.size;

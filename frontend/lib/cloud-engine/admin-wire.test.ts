@@ -153,6 +153,27 @@ describe("Cloud administrative wire parity", () => {
     expect(queryOpsLogs).not.toHaveBeenCalled();
   });
 
+  it("shares one cron history read across the page's concurrent default-range cron requests", async () => {
+    cronEvidence();
+    const abandoned = new AbortController();
+    const reads = [
+      cloudAdminWire(request("/api/cron-runs?page=1&per_page=500")),
+      cloudAdminWire(request("/api/cron-runs?page=1&per_page=10")),
+      cloudAdminWire(request("/api/cron-schedule")),
+      cloudAdminWire(new Request("http://localhost/api/cron-runs?page=1&per_page=50", {
+        headers: { "x-service-id": "fixture-service" }, signal: abandoned.signal,
+      })),
+    ];
+    abandoned.abort();
+    const results = await Promise.allSettled(reads);
+    expect(results.slice(0, 3).map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+    expect(results[3].status).toBe("rejected");
+    expect(queryOpsLogs).toHaveBeenCalledTimes(1);
+    const later = await cloudAdminWire(request("/api/cron-runs?page=1&per_page=10"));
+    expect(later!.ok).toBe(true);
+    expect(queryOpsLogs).toHaveBeenCalledTimes(2);
+  });
+
   it("maps native audit details and honors filtering before pagination", async () => {
     vi.mocked(adminRequest).mockResolvedValue({ entries: [
       { id: "a", time: "2026-01-01T00:00:00Z", action: "service_updated", details: '{"changed":["groups"]}' },

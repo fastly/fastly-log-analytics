@@ -12149,6 +12149,76 @@ mod request_compaction {
         assert_eq!(finish(&fake, TARGET).compacts, 1);
     }
 
+    /// A window file with enough wide string columns that a few of them fill a compact's footer.
+    fn wide_window(fake: &Fake, start: i64) -> String {
+        let names = (0..200).map(|c| format!("c{c:03}")).collect::<Vec<_>>();
+        let schema = Arc::new(arrow_schema::Schema::new(
+            names
+                .iter()
+                .map(|name| arrow_schema::Field::new(name, arrow_schema::DataType::Utf8, false))
+                .collect::<Vec<_>>(),
+        ));
+        let columns = names
+            .iter()
+            .map(|name| {
+                Arc::new(arrow_array::StringArray::from(vec![format!(
+                    "{start}-{name}-{}",
+                    "x".repeat(96)
+                )])) as arrow_array::ArrayRef
+            })
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        let bytes = writer.into_inner().unwrap();
+        let key = ingest::processed_key(ROOT, start, start + 60, "abcdef012345", 1);
+        fake.bucket.borrow_mut().insert(key.clone(), bytes);
+        let now = fake.now.replace(start.saturating_add(60) as u64);
+        publish_files(fake, std::slice::from_ref(&key), &[], &[]);
+        fake.now.set(now);
+        key
+    }
+
+    #[test]
+    fn a_full_compact_footer_regroups_without_an_error_and_is_remembered() {
+        let fake = Fake::new(NOW);
+        let sources = (0..2)
+            .flat_map(|h| (0..8).map(move |i| HOUR + h * 3600 + i * 60))
+            .map(|start| wide_window(&fake, start))
+            .collect::<Vec<_>>();
+        let mut regroups = 0;
+        for _ in 0..64 {
+            let report = run(&fake, TARGET);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            regroups += usize::from(report.stopped.as_deref() == Some("footer_limit"));
+            if !report.more_pending {
+                break;
+            }
+        }
+        assert_eq!(
+            regroups, 1,
+            "the learned group size must outlive the commit"
+        );
+        let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        assert_eq!(
+            state["skip"],
+            json!([]),
+            "a full compact is left alone, not skipped"
+        );
+        let compacts = compacts(&fake);
+        assert!(compacts.len() >= 4, "{compacts:?}");
+        let rows = compacts
+            .iter()
+            .map(|key| {
+                batches(&fake.bucket.borrow()[key])
+                    .iter()
+                    .map(|b| b.num_rows())
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+        assert_eq!(rows, sources.len());
+    }
+
     #[test]
     fn a_pass_spends_its_spare_calls_reading_sources() {
         let fake = Fake::new(NOW);
