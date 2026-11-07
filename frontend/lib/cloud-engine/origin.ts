@@ -964,6 +964,37 @@ function createDefaultOriginExecutor(context?: DuckDBReadContext): OriginSqlExec
   };
 }
 
+const ORIGIN_LATENCY_COLUMNS = ["timestamp", "ts_ms", "ottfb", "ttfb"] as const;
+
+/** Every request column each /api/origin scan reads, by route. */
+export const ORIGIN_SCAN_COLUMNS = {
+  aggregates: [...ORIGIN_LATENCY_COLUMNS, "cache", "ottlb", "elapsed", "ost", "obytes", "edge", "url", "pop", "oip"],
+  "shielding-analysis": [...ORIGIN_LATENCY_COLUMNS, "edge", "rid", "prid", "pop"],
+  drilldown: [...ORIGIN_LATENCY_COLUMNS, "ost", "obytes", "host", "pop", "server_region", "proto", "oip"],
+} as const;
+
+const ORIGIN_AGGREGATE_ROUTES = new Set([
+  "aggregates", "summary", "timeseries", "slow-urls", "status-codes", "path-breakdown", "pop-latency", "ip-health",
+]);
+
+function filterFields(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return Object.keys(filters).map((key) => key.replace(/_\d+$/, ""));
+}
+
+/** The columns a projected /api/origin load needs, or null when the route or filters can't name theirs. */
+export function originScanColumns(pathname: string, body: Record<string, unknown>): string[] | null {
+  const route = pathname.replace(/^\/api\/origin\//, "");
+  const base = ORIGIN_AGGREGATE_ROUTES.has(route)
+    ? ORIGIN_SCAN_COLUMNS.aggregates
+    : ORIGIN_SCAN_COLUMNS[route as keyof typeof ORIGIN_SCAN_COLUMNS];
+  const filters = filterFields(body.filters);
+  const custom = filterFields(body.custom_filters);
+  if (!base || !filters || !custom) return null;
+  return [...new Set([...base, ...filters, ...custom])];
+}
+
 function parseFilters(
   rawFilters?: Record<string, { mode?: string; values?: string[] }>,
   customFilters?: Record<string, { mode?: string; values?: string[] }>,

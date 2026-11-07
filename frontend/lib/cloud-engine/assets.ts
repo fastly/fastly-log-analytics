@@ -454,6 +454,27 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
   };
 }
 
+/** Every request column the /api/assets/aggregates scans read, physical Cloud names and their aliases alike. */
+export const ASSETS_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "service_id", "status", "ttl", "asset_type", "content_type", "url", "path", "cache_status",
+  "cache", "content_encoding", "resp_header_content_encoding", "resp_body_size", "resp_bytes", "ttfb_ms", "ttfb",
+  "time_to_first_byte_ns", "time_elapsed_usec", "elapsed", "origin_Whole_ms", "origin_time_ms",
+] as const;
+
+/** The columns a projected /api/assets/aggregates load needs, or null when the filters can't name theirs. */
+export function assetsScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...ASSETS_SCAN_COLUMNS];
+  if (typeof filters !== "object") return null;
+  if (!Array.isArray(filters)) return [...new Set([...ASSETS_SCAN_COLUMNS, ...Object.keys(filters)])];
+  const fields: string[] = [];
+  for (const clause of filters as unknown[]) {
+    if (!clause || typeof clause !== "object") return null;
+    const column = (clause as { column?: unknown }).column;
+    if (typeof column === "string" && ALLOWED_FILTER_COLS.has(column)) fields.push(column);
+  }
+  return [...new Set([...ASSETS_SCAN_COLUMNS, ...fields])];
+}
+
 export async function handleAssetsRequest(
   path: string,
   params: AssetsQueryParams = {},

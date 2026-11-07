@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest } from "./adapter";
-import { setOriginSqlExecutor } from "./origin";
+import { ORIGIN_SCAN_COLUMNS, setOriginSqlExecutor } from "./origin";
 import { setPerformanceEngineClient } from "./performance";
 import { setSecurityEngineClient } from "./security";
 import { getDuckDBEngine } from "./dashboard/duckdb";
@@ -10,6 +10,8 @@ import * as ops from "./telemetry/client";
 import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 import { insightScanColumns } from "./insight-scans";
 import { NETWORK_SCAN_COLUMNS } from "./network";
+import { VALUE_SCAN_COLUMNS } from "./value";
+import { ASSETS_SCAN_COLUMNS } from "./assets";
 import { setCloudModeRuntime } from "./mode";
 
 vi.mock("./range-loader", async (importOriginal) => ({
@@ -294,6 +296,31 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect((await options("/api/network-health", post({
       sections: ["summary"], filters: { host: { mode: "include", values: ["example.com"] } },
     })))?.projection?.columns).toEqual([...columns, "host"]);
+  });
+
+  it("loads /origin, /fastly-value and /assets-shield scans as their routes' column projections", async () => {
+    const options = async (path: string, body?: Record<string, unknown>) => {
+      vi.mocked(ensureCloudRange).mockClear();
+      const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, body ? {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      } : {}));
+      expect(res).not.toBeNull();
+      return vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection;
+    };
+    const filters = { host_1: { mode: "include", values: ["example.com"] } };
+    expect(await options("/api/origin/aggregates", { filters, sections: ["summary"] }))
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates, "host"] });
+    expect(await options("/api/origin/slow-urls")).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.aggregates] });
+    expect(await options("/api/origin/shielding-analysis", {}))
+      .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]] });
+    expect(await options("/api/origin/drilldown", { dimension: "pop" })).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.drilldown] });
+    expect(await options("/api/value/summary", { sections: ["overview"], custom_filters: { team: { mode: "include", values: ["a"] } } }))
+      .toEqual({ columns: [...VALUE_SCAN_COLUMNS, "team"] });
+    expect(await options("/api/assets/aggregates", { filters: [{ column: "host", operator: "=", value: "a" }] }))
+      .toEqual({ columns: [...ASSETS_SCAN_COLUMNS, "host"] });
+    expect(await options("/api/origin/aggregates", { filters: [filters] })).toBeUndefined();
+    expect(await options("/api/value/summary", { filters: "host" })).toBeUndefined();
+    expect(await options("/api/assets/aggregates", { filters: 5 })).toBeUndefined();
   });
 
   it("dispatches /api/security/* routes including /proxies/export through handleSecurityRequest", async () => {

@@ -338,6 +338,26 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
   return selectSections(result, params.sections);
 }
 
+/** Every request column the /api/value/summary scan reads, physical Cloud names and their aliases alike. */
+export const VALUE_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "service_id", "url", "cache_status", "cache", "resp_body_size", "resp_body_bytes", "resp_bytes",
+  "time_elapsed_usec", "elapsed", "protocol", "proto", "is_ssl", "tls_version", "tls", "is_ipv6", "ipv6",
+  "fastly_is_shield", "is_shield", "edge", "content_type", "resp_header_content_type", "waf_action", "ngwaf_decision",
+  "waf_sig", "bot_verified", "verified_bot", "_bot_name", "ngwaf_bot_name", "bot_category", "is_bot",
+  "io_output_format", "ofmt", "io_input_format", "ifmt", "io_input_bytes", "io_output_bytes",
+] as const;
+
+/** The columns a projected /api/value/summary load needs, or null when the filters can't name theirs. */
+export function valueScanColumns(params: { filters?: unknown; custom_filters?: unknown }): string[] | null {
+  const fields: string[] = [];
+  for (const filters of [params.filters, params.custom_filters]) {
+    if (filters == null || filters === "") continue;
+    if (typeof filters !== "object" || Array.isArray(filters)) return null;
+    fields.push(...Object.keys(filters).map((key) => key.replace(/_\d+$/, "")));
+  }
+  return [...new Set([...VALUE_SCAN_COLUMNS, ...fields])];
+}
+
 export async function handleValueRequest(_path: string, params: ValueQueryParams = {}): Promise<ValueSummary> {
   return queryValueSummary(params);
 }

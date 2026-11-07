@@ -7,7 +7,7 @@ import {
 } from "./dashboard/client";
 
 z.config({ jitless: true });
-import { handleAssetsRequest, type AssetsQueryParams } from "./assets";
+import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
 import { handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
 import type { MinuteBucket } from "./dashboard/engine";
@@ -21,7 +21,7 @@ import {
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
-import { handleOriginRequest } from "./origin";
+import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest } from "./performance";
 import {
   executeCloudQuery,
@@ -72,7 +72,7 @@ import {
   fetchUsageSummary,
   reconcileSnapshot,
 } from "./usage/summary";
-import { handleValueRequest, type ValueQueryParams } from "./value";
+import { handleValueRequest, valueScanColumns, type ValueQueryParams } from "./value";
 import {
   useDebugStore,
   useFilterStore,
@@ -413,14 +413,17 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     url.pathname === "/api/insights/cache-collapse-detail";
   const filters = url.pathname === "/api/insights"
     ? parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined) : [];
-  const networkColumns = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname)
-    ? networkScanColumns(params.filters) : null;
+  const scanColumns = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname)
+    ? networkScanColumns(params.filters)
+    : url.pathname.startsWith("/api/origin/") ? originScanColumns(url.pathname, params)
+    : url.pathname === "/api/value/summary" ? valueScanColumns(params)
+    : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters) : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
-    } } : networkColumns ? { projection: { columns: networkColumns } } : {},
+    } } : scanColumns ? { projection: { columns: scanColumns } } : {},
   });
   try {
     generation.assertCurrent();
