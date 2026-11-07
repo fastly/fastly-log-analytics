@@ -1670,7 +1670,28 @@ async function collectAggregator(
           // Persistence failures are reported by the source; native ranges remain usable.
         }
       }
-      const access = await source.openParquet(file, signal, variant);
+      let access = await source.openParquet(file, signal, variant);
+      // DuckDB-wasm reads HTTP ranges with serial synchronous XHRs, about two
+      // round trips per 32 KiB for a full-card scan; one whole fetch per file
+      // runs in the pool instead. Field search reads one column, so it keeps ranges.
+      if (
+        access.kind === "http" &&
+        searchQuery === undefined &&
+        Number.isSafeInteger(file.size) &&
+        file.size > 0 &&
+        file.size <= 8 * 1024 * 1024
+      ) {
+        access.release?.();
+        const whole = await source.fetchFile(file.key, signal, {
+          transfer: true,
+        });
+        if (!whole.cached) {
+          downloaded = true;
+          stats.bytes += whole.bytes.byteLength;
+          progress.downloadedBytes += whole.bytes.byteLength;
+        }
+        access = { kind: "buffer", bytes: whole.bytes, cached: whole.cached };
+      }
       let released = false;
       try {
         const completeRollup =

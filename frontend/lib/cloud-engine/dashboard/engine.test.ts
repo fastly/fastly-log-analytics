@@ -560,6 +560,56 @@ describe("runDashboard", () => {
     );
   });
 
+  it("reads unpersisted filtered selective files whole instead of through serial HTTP ranges", async () => {
+    const buffers = {
+      a: await parquetFixture([row(10, { country: "US" }), row(20, { country: "DE" })]),
+      b: await parquetFixture([row(70, { country: "US" })]),
+    };
+    const entry = (key: keyof typeof buffers, start: string, end: string) => ({
+      ...manifestEntry(key, start, end, buffers[key] === buffers.a ? 2 : 1),
+      size: buffers[key].byteLength,
+    });
+    const source = fixtureSource(
+      [
+        {
+          files: [
+            entry("a", "2026-10-29T10:00:00Z", "2026-10-29T10:01:00Z"),
+            entry("b", "2026-10-29T10:01:00Z", "2026-10-29T10:02:00Z"),
+          ],
+          next_cursor: null,
+          complete: true,
+        },
+      ],
+      buffers,
+    );
+    const fetchFile = vi.spyOn(source, "fetchFile");
+    const query = vi.spyOn(getDuckDBEngine(), "queryParquetIntoAggregator");
+    try {
+      const result = await runDashboard(
+        {
+          ...source,
+          openParquet: async (file) => ({
+            kind: "http",
+            url: `https://flp.example/api/file/${file.key}`,
+            cached: false,
+          }),
+        },
+        {
+          from: "2026-10-29T10:00:00Z",
+          to: "2026-10-29T10:05:00Z",
+          filters: [{ mode: "include", field: "country", value: "US" }],
+          concurrency: 1,
+        },
+      );
+      expect(result.totalRequests).toBe(2);
+      expect(fetchFile.mock.calls.map(([key]) => key).sort()).toEqual(["a", "b"]);
+      expect(query.mock.calls.map(([access]) => access.kind)).toEqual(["buffer", "buffer"]);
+      expect(result.stats).toMatchObject({ fetched: 2, cached: 0 });
+    } finally {
+      query.mockRestore();
+    }
+  });
+
   it("counts boundary files whose bytes are local as decode work, not fetches", async () => {
     const buffers = {
       edge: await parquetFixture([row(10), row(250)]),

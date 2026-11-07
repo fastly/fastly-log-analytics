@@ -109,26 +109,34 @@ function queryFailure(page, result, label) {
 
 async function waitForSnapshot(page, snapshot, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
-  const timeoutError = new Error(`Timed out after ${timeoutMs}ms waiting for current analytical results`);
+  let last;
+  const timeoutError = () => {
+    const count = value => (Number.isSafeInteger(value) ? value : 'unknown');
+    const counts = last
+      ? `pending=${count(last.pending)} complete=${count(last.complete)} missing=${last.ready ? 0 : 1}`
+      : 'no snapshot';
+    return new Error(`Timed out after ${timeoutMs}ms waiting for current analytical results on ${routeLabel(page, label)} (${counts})`);
+  };
   for (;;) {
     let remaining = deadline - Date.now();
-    if (remaining <= 0) throw timeoutError;
+    if (remaining <= 0) throw timeoutError();
     let timer;
     let result;
     try {
       result = await Promise.race([
         page.evaluate(snapshot),
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(timeoutError), remaining);
+          timer = setTimeout(() => reject(timeoutError()), remaining);
         }),
       ]);
     } finally {
       clearTimeout(timer);
     }
+    last = result;
     remaining = deadline - Date.now();
     if (result?.errors > 0) throw queryFailure(page, result, label);
     if (result?.ready && remaining >= 0) return result;
-    if (remaining <= 0) throw timeoutError;
+    if (remaining <= 0) throw timeoutError();
     await new Promise(resolve => setTimeout(resolve, Math.min(100, remaining)));
   }
 }

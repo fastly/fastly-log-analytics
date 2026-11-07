@@ -180,6 +180,17 @@ for (const [name, wait] of [['dashboard', waitForDashboardResult], ['report', wa
     await rejected;
   });
 
+  test(`CSP-safe ${name} readiness timeout names its route and last pending counts`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    const page = cspPage([{ observed: true, ready: false, pending: 2, complete: 3, errors: 0 }]);
+    const rejected = assert.rejects(wait(page, 40, '/dashboard?token=sentinel-secret'),
+      error => /[Tt]imed out.*40ms.*\/dashboard\?token=\[redacted\].*pending=2 complete=3 missing=1/.test(error.message)
+        && !error.message.includes('sentinel-secret'));
+    await new Promise(setImmediate);
+    t.mock.timers.tick(40);
+    await rejected;
+  });
+
   test(`CSP-safe ${name} readiness rejects a completed failed query without waiting for a timeout`, async () => {
     const page = cspPage([{ observed: true, ready: false, pending: 0, errors: 1 }]);
     await assert.rejects(wait(page, 1000), /query failed/i);
