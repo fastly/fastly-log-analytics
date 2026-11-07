@@ -50,6 +50,8 @@ struct Fake {
     /// The injected compaction state conflict writes another writer's value, not the same one.
     foreign_compact_conflict: Cell<bool>,
     fail_fresh_compact_state: Cell<bool>,
+    /// Compaction state CAS attempts.
+    compact_state_writes: Cell<u32>,
     cdn_gets: RefCell<Vec<String>>,
     /// GET keys of each `admin_fos_many` round.
     fos_rounds: RefCell<Vec<Vec<String>>>,
@@ -163,6 +165,7 @@ impl Fake {
             lagging_compact_state: Default::default(),
             foreign_compact_conflict: Cell::new(false),
             fail_fresh_compact_state: Cell::new(false),
+            compact_state_writes: Cell::new(0),
             cdn_gets: Default::default(),
             fos_rounds: Default::default(),
             fos_concurrent: Cell::new(true),
@@ -407,6 +410,10 @@ impl Runtime for Fake {
                 kv.insert(key.into(), (g + 1, v));
             }
             return Ok(false);
+        }
+        if key == ingest::compaction::STATE_KEY {
+            self.compact_state_writes
+                .set(self.compact_state_writes.get() + 1);
         }
         if key == ingest::compaction::STATE_KEY
             && self.fail_compact_after_publish.get()
@@ -11040,6 +11047,116 @@ mod request_compaction {
         assert_eq!(values, expected);
     }
 
+    /// `count` window files of `rows` distinct clients from `from`, five shards per minute as
+    /// a load hour's ingest writes them, each minute published in its own commit.
+    fn load_windows(fake: &Fake, from: i64, count: i64, rows: i64) -> Vec<String> {
+        let mut all = Vec::new();
+        for minute in 0..(count + 4) / 5 {
+            let start = from + minute * 60;
+            let mut keys = Vec::new();
+            for shard in 0..(count - minute * 5).min(5) {
+                let lines: Vec<String> = (0..rows)
+                    .map(|n| {
+                        let ip = format!("10.{}.{shard}.{n}", minute % 256);
+                        line(start + n % 60, &ip)
+                    })
+                    .collect();
+                let converted = ingest::convert::convert_object(&gz(&lines), 60, start).unwrap();
+                let bytes = ingest::convert::write_parquet(&[&converted.windows[&start]]).unwrap();
+                let shard_id = format!("abcdef01234{shard}");
+                let key = ingest::processed_key(ROOT, start, start + 60, &shard_id, rows as u64);
+                fake.bucket.borrow_mut().insert(key.clone(), bytes);
+                keys.push(key);
+            }
+            let now = fake.now.replace((start + 120) as u64);
+            publish_files(fake, &keys, &[], &[]);
+            fake.now.set(now);
+            all.extend(keys);
+        }
+        all
+    }
+
+    /// Pass `pass` of maintenance turn `turn`, 20 s into the stage's 40 s of wall time.
+    fn turn_pass(fake: &Fake, turn: &str, pass: u32) -> Report {
+        fake.new_request();
+        fake.vcpu.set(0);
+        fake.elapsed_s.set(20);
+        let service = service();
+        let store = store(fake, &service);
+        let turn = compaction::Turn {
+            id: turn,
+            pass,
+            last: false,
+        };
+        let report = compaction::request_compact_pass(&store, "ck", TARGET, 1, Some(turn));
+        fake.elapsed_s.set(0);
+        report.unwrap()
+    }
+
+    /// A maintenance turn's chained passes hand the lease on rather than each taking it with
+    /// its own state write, and a pass that won't complete its job records the checkpoint in its
+    /// final state write. That leaves two passes enough calls to upload a 32-source compact.
+    #[test]
+    fn a_turn_uploads_a_load_hours_32_source_compact_in_two_passes() {
+        let fake = Fake::new(NOW);
+        load_windows(&fake, HOUR, 32, 50);
+        let first = turn_pass(&fake, "turn-1", 1);
+        assert_eq!((first.compacts, first.bytes_written), (0, 0), "{first:?}");
+        assert!(first.more_pending);
+        let second = turn_pass(&fake, "turn-1", 2);
+        assert!(second.bytes_written > 0, "{second:?}");
+        let third = turn_pass(&fake, "turn-1", 3);
+        assert_eq!((third.compacts, third.sources), (1, 32), "{third:?}");
+    }
+
+    /// The handed-on lease admits only the same turn's next pass; another turn waits for it to
+    /// lapse, which it does within the stage's wall time.
+    #[test]
+    fn a_handed_on_lease_admits_only_the_same_turn() {
+        let fake = Fake::new(NOW);
+        load_windows(&fake, HOUR, 32, 50);
+        assert!(turn_pass(&fake, "turn-1", 1).more_pending);
+        for (turn, pass) in [("turn-2", 2), ("turn-1", 1), ("turn-1", 3)] {
+            let other = turn_pass(&fake, turn, pass);
+            assert_eq!(other.stopped.as_deref(), Some("lease_held"), "{other:?}");
+        }
+        let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        let lease = state["lease_until"].as_u64().unwrap();
+        assert!(lease <= fake.now.get() + 30, "{state}");
+        fake.now.set(lease + 1);
+        let later = turn_pass(&fake, "turn-2", 1);
+        assert_eq!(later.stopped, None, "{later:?}");
+        assert!(later.bytes_written > 0, "{later:?}");
+    }
+
+    /// While an hour still has window files to merge, new compacts take only windows; the
+    /// hour's compacts are merged together once, after its windows are done. So a row is
+    /// rewritten at most twice instead of once per compact the hour grows by.
+    #[test]
+    fn an_hours_compact_is_not_rewritten_with_each_new_batch_of_windows() {
+        let fake = Fake::new(NOW);
+        let windows = load_windows(&fake, HOUR, 96, 10);
+        let mut rewritten = 0;
+        for _ in 0..64 {
+            let report = run(&fake, TARGET);
+            rewritten += report.rows;
+            if !report.more_pending {
+                break;
+            }
+        }
+        let outputs = compacts(&fake);
+        let live: Vec<_> = fake
+            .keys(ROOT)
+            .into_iter()
+            .filter(|key| windows.contains(key) || key.contains("/compact="))
+            .collect();
+        assert_eq!(outputs.len(), 4, "{live:?}");
+        let query = format!("from={}&to={}", iso_url(HOUR), iso_url(HOUR + 3600));
+        let listed = catalog_keys(&fake, &query).1;
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert!(rewritten <= 2 * 960, "{rewritten} rows rewritten");
+    }
+
     /// A pass that reads a job's last source completes it without first checkpointing it.
     /// Native time for each pass of a load hour's job: 32 windows of 400 distinct clients each,
     /// published in one commit as the catalog's compaction keeps them. Compute runs WebAssembly,
@@ -11048,21 +11165,7 @@ mod request_compaction {
     #[ignore = "timing: cargo test --release --test ingest pass_timing -- --ignored --nocapture"]
     fn pass_timing_for_a_load_hour_job() {
         let fake = Fake::new(NOW);
-        let mut keys = Vec::new();
-        for i in 0..32 {
-            let start = HOUR + i * 60;
-            let lines: Vec<String> = (0..400)
-                .map(|n| line(start + n % 60, &format!("10.{i}.{}.{}", n / 256, n % 256)))
-                .collect();
-            let rows = ingest::convert::convert_object(&gz(&lines), 60, start).unwrap();
-            let bytes = ingest::convert::write_parquet(&[&rows.windows[&start]]).unwrap();
-            let key = ingest::processed_key(ROOT, start, start + 60, "abcdef012345", 400);
-            fake.bucket.borrow_mut().insert(key.clone(), bytes);
-            keys.push(key);
-        }
-        let now = fake.now.replace((HOUR + 32 * 60) as u64);
-        publish_files(&fake, &keys, &[], &[]);
-        fake.now.set(now);
+        load_windows(&fake, HOUR, 32, 400);
         for pass in 1..=16 {
             let began = Instant::now();
             let report = run(&fake, TARGET);
@@ -11257,8 +11360,19 @@ mod request_compaction {
         window(&fake, HOUR + 180, &["late-a"]);
         window(&fake, HOUR + 240, &["late-b"]);
         fake.now.set((HOUR + 3600) as u64);
-        assert_eq!(finish(&fake, TARGET).sources, 3);
+        assert_eq!(
+            finish(&fake, TARGET).sources,
+            2,
+            "late windows merge on their own"
+        );
         assert_eq!(compacts(&fake).len(), 2);
+        fake.now.set((HOUR + 3600) as u64 + compaction::MIN_AGE_S);
+        assert_eq!(
+            finish(&fake, TARGET).sources,
+            2,
+            "the closed hour's compacts merge"
+        );
+        assert_eq!(compacts(&fake).len(), 3);
         let query = format!("from={}&to={}", iso_url(HOUR), iso_url(HOUR + 3600));
         let active = catalog_keys(&fake, &query).1;
         assert_eq!(active.len(), 1);
@@ -12270,6 +12384,36 @@ mod request_compaction {
             assert_eq!(reply["next"], next, "{reply}");
             assert!(!compacts(&fake).is_empty(), "{reply}");
         }
+    }
+
+    /// Live KV paces writes to one key about a second apart, so the turn's passes go only as
+    /// fast as their state writes. Chained passes hand the lease on, and only a pass completing
+    /// its job saves the state before its final write.
+    #[test]
+    fn a_maintenance_turns_passes_write_the_state_about_once_each() {
+        let fake = Fake::new(NOW);
+        compaction_service(&fake);
+        load_windows(&fake, HOUR, 128, 50);
+        let reply = stage_turn(&fake, 0);
+        let rows = rows(&fake, LogKind::CronRuns);
+        let row = rows
+            .iter()
+            .find(|row| row["cron_kind"] == "request_compact")
+            .expect("a request_compact row");
+        let details: Value = serde_json::from_str(row["details_json"].as_str().unwrap()).unwrap();
+        let passes = details["passes"].as_u64().unwrap() as u32;
+        let jobs = compacts(&fake).len() as u32;
+        assert!(passes > 1 && jobs > 1, "{reply}");
+        let writes = fake.compact_state_writes.get();
+        assert!(
+            writes <= passes + 2 * jobs + 1,
+            "{writes} writes in {passes} passes, {jobs} jobs"
+        );
+        let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        assert_eq!(
+            state["lease_until"], 0,
+            "the last pass released its lease: {state}"
+        );
     }
 
     /// A turn that leaves a compaction backlog brings the next maintenance turn forward to

@@ -49,10 +49,15 @@ pub const MERGE_SOURCE_ROWS: u64 = 2048;
 pub const MERGE_GROUP_ROWS: u64 = 4096;
 /// Calls held back for the watermark bump (with one retry) and the state write.
 const COMMIT_RESERVE: u32 = 10;
-/// Calls that persist a pass's progress after its last source read: the checkpoint PUT, the
-/// state save's CAS and fresh read, and the final state write. A job that can't also complete in
-/// the same pass commits in a later one, so source reads need not hold [`COMMIT_RESERVE`].
-const CHECKPOINT_CALLS: u32 = 4;
+/// Calls that persist a pass's progress after its last source read: the checkpoint PUT and the
+/// final state write, which records it. A job that can't also complete in the same pass commits
+/// in a later one, so source reads need not hold [`COMMIT_RESERVE`].
+const CHECKPOINT_CALLS: u32 = 2;
+/// How long a handed-on lease outlasts the wall time its turn's next pass may still use.
+const HANDOFF_MARGIN_S: u64 = 5;
+/// The wall time the maintenance stage needs left to chain another pass
+/// (`MIN_COMPACT_PASS_WALL`); with less, a pass releases its lease instead of handing it on.
+const HANDOFF_MIN_WALL_S: u64 = 5;
 const MAX_DELETES: usize = 1000;
 const MAX_STATE_BYTES: usize = 512 * 1024;
 
@@ -123,7 +128,13 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
         started: pass_started,
         vcpu_start: 0,
     };
-    match request_compact(&store, &cdn_key, target, 1) {
+    let turn = body["turn"].as_str().zip(body["pass"].as_u64());
+    let turn = turn.map(|(id, pass)| Turn {
+        id,
+        pass: pass as u32,
+        last: body["last"].as_bool().unwrap_or(true),
+    });
+    match request_compact_pass(&store, &cdn_key, target, 1, turn) {
         Ok(report) => response(serde_json::json!({"status":"ok","report":report})),
         Err(error) => response(serde_json::json!({"status":"error","error":error})),
     }
@@ -196,6 +207,10 @@ pub struct State {
     pub catalog_open_hour: Option<i64>,
     #[serde(default)]
     pub group_limit: usize,
+    /// The maintenance turn pass the lease was handed on to, as `turn:pass`. That pass takes
+    /// over the lease without writing it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +266,29 @@ pub fn request_compact<R: Runtime>(
     target: u64,
     tail: u32,
 ) -> Result<Report, String> {
+    request_compact_pass(store, cdn_key, target, tail, None)
+}
+
+/// A pass's place in a maintenance turn's chain of passes.
+#[derive(Debug, Clone, Copy)]
+pub struct Turn<'a> {
+    pub id: &'a str,
+    /// Numbered from 1.
+    pub pass: u32,
+    /// Whether the turn chains no pass after this one.
+    pub last: bool,
+}
+
+/// [`request_compact`] as one of a maintenance turn's passes. A pass that leaves work for the
+/// turn's next pass hands it the lease in its final state write, so the next pass needn't write
+/// the state just to take the lease (a paced KV write, ~1 s live).
+pub fn request_compact_pass<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    target: u64,
+    tail: u32,
+    turn: Option<Turn<'_>>,
+) -> Result<Report, String> {
     let runtime = store.runtime;
     let now = runtime.now();
     let token = runtime
@@ -290,7 +328,13 @@ pub fn request_compact<R: Runtime>(
         changed: false,
         bump: false,
     };
-    if run.state.lease_until > now {
+    // Only the final state write sets a handoff, so a stale read can't show one meant for this
+    // pass: an earlier pass's handoff names an earlier pass.
+    let handed = run.state.lease_until > now
+        && turn.is_some_and(|turn| {
+            run.state.handoff.as_deref() == Some(&format!("{}:{}", turn.id, turn.pass))
+        });
+    if run.state.lease_until > now && !handed {
         run.report.more_pending = true;
         run.report.stopped = Some("lease_held".into());
         return Ok(run.report);
@@ -300,15 +344,18 @@ pub fn request_compact<R: Runtime>(
         run.report.stopped = Some(stop.into());
         return Ok(run.report);
     }
-    run.state.lease_until = now.saturating_add(70);
-    match run.save() {
-        Err(error) if error == "compact_state_conflict" => {
-            run.report.more_pending = true;
-            run.report.stopped = Some("lease_conflict".into());
-            run.report.lease_generation = run.generation;
-            return Ok(run.report);
+    run.state.handoff = None;
+    if !handed {
+        run.state.lease_until = now.saturating_add(70);
+        match run.save() {
+            Err(error) if error == "compact_state_conflict" => {
+                run.report.more_pending = true;
+                run.report.stopped = Some("lease_conflict".into());
+                run.report.lease_generation = run.generation;
+                return Ok(run.report);
+            }
+            result => result?,
         }
-        result => result?,
     }
     if let Some(upload) = run.state.upload.take() {
         run.changed = true;
@@ -366,6 +413,7 @@ pub fn request_compact<R: Runtime>(
             }
             Err(error) if error == "compact_watermark_conflict" => {
                 run.state.lease_until = 0;
+                run.state.handoff = None;
                 if run.changed && run.remaining() > run.tail {
                     if let Ok(value) = serde_json::to_value(&run.state) {
                         if serde_json::to_vec(&value)
@@ -422,6 +470,20 @@ pub fn request_compact<R: Runtime>(
         }
     }
     run.report.more_pending |= run.report.compacts > 0;
+    // The turn's next pass gets at most this pass's remaining wall time, so a handed-on lease
+    // lapses soon after it, or soon after this pass if no next pass comes.
+    let left = super::storage::WALL_STOP
+        .saturating_sub(runtime.admin_elapsed(store.started))
+        .as_secs();
+    if let Some(turn) = turn.filter(|turn| {
+        !turn.last
+            && run.report.more_pending
+            && run.report.errors.is_empty()
+            && left >= HANDOFF_MIN_WALL_S
+    }) {
+        run.state.lease_until = now.saturating_add(left + HANDOFF_MARGIN_S);
+        run.state.handoff = Some(format!("{}:{}", turn.id, turn.pass + 1));
+    }
     run.changed = true;
     if run.changed {
         let value = serde_json::to_value(&run.state).map_err(|e| e.to_string())?;
@@ -880,7 +942,6 @@ impl<R: Runtime> Run<'_, '_, R> {
             .flat_map(|q| q.keys.iter())
             .cloned()
             .collect();
-        let mut oldest = self.now;
         let mut candidates = Vec::new();
         for object in objects {
             let Some((start, end)) = super::catalog::file_bounds(&object.key) else {
@@ -896,18 +957,37 @@ impl<R: Runtime> Run<'_, '_, R> {
             {
                 continue;
             }
-            oldest = oldest.min(mtime(object).unwrap_or(self.now));
-            candidates.push(Candidate {
+            let candidate = Candidate {
                 key: object.key.clone(),
                 start,
                 end,
                 rows,
                 size: object.size,
-            });
+            };
+            candidates.push((candidate, mtime(object).unwrap_or(self.now)));
         }
+        // Window files merge first, so an hour still receiving them grows by new compacts rather
+        // than rewriting its earlier ones each time. Its compacts merge together once no more
+        // than one window file is left and the hour is closed, however young the compacts are.
+        let windows = candidates
+            .iter()
+            .filter(|(c, _)| compact::parse_compact_name(&c.key).is_none())
+            .count();
+        let closed = (hour + 3600).saturating_add(MIN_AGE_S as i64) <= self.now as i64;
+        let closing = windows < 2 && closed;
+        if !closing {
+            candidates.retain(|(c, _)| compact::parse_compact_name(&c.key).is_none());
+        }
+        let oldest = candidates
+            .iter()
+            .map(|(_, at)| *at)
+            .min()
+            .unwrap_or(self.now);
+        let candidates: Vec<Candidate> = candidates.into_iter().map(|(c, _)| c).collect();
         let bytes: u64 = candidates.iter().map(|c| c.size).sum();
         if candidates.len() < 2
-            || (bytes < self.target
+            || (!closing
+                && bytes < self.target
                 && candidates.len() < FILE_TRIGGER
                 && oldest.saturating_add(MIN_AGE_S) > self.now)
         {
@@ -1009,7 +1089,14 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
     }
 
-    fn checkpoint_job(&mut self, job: &mut Job, writer: &checkpoint::Writer) -> Result<(), String> {
+    /// Stores the job's writer and records it in the state, saving the state when `save` (the
+    /// pass's final state write records it otherwise).
+    fn checkpoint_job(
+        &mut self,
+        job: &mut Job,
+        writer: &checkpoint::Writer,
+        save: bool,
+    ) -> Result<(), String> {
         use sha2::{Digest, Sha256};
         let body = writer.checkpoint()?;
         let key = format!(
@@ -1023,7 +1110,11 @@ impl<R: Runtime> Run<'_, '_, R> {
         if let Some(previous) = previous.filter(|previous| previous != &key) {
             self.state.work_cleanup.push(previous);
         }
-        self.save()
+        self.changed = true;
+        if save {
+            self.save()?;
+        }
+        Ok(())
     }
 
     fn completed_job(&mut self, job: &Job, pending: &mut Vec<Queued>) {
@@ -1231,7 +1322,7 @@ impl<R: Runtime> Run<'_, '_, R> {
                     Err(error) if error == "multipart_upload_missing" => return Err(error),
                     Err(error) if super::storage::transient_error(&error) => {
                         if let Some(writer) = writer.as_ref() {
-                            self.checkpoint_job(&mut job, writer)?;
+                            self.checkpoint_job(&mut job, writer, false)?;
                         }
                         self.report.errors.push(error);
                         self.report.more_pending = true;
@@ -1303,13 +1394,20 @@ impl<R: Runtime> Run<'_, '_, R> {
             self.report.more_pending = true;
             return Ok(());
         };
-        if job.next != initial_next
+        let progressed = job.next != initial_next
             || job.etags.len() != initial_parts
-            || job.copying != initial_copy
-        {
-            self.checkpoint_job(&mut job, &writer)?;
+            || job.copying != initial_copy;
+        // Completing needs the last part, the completion and possibly a HEAD, and first the
+        // checkpoint's save, so a pass that completes the upload but fails to record it finds
+        // the finished job. A pass that can't complete leaves its checkpoint to the final state
+        // write. The commit follows when its calls are left; otherwise the next pass commits.
+        let finishing = job.next == job.sources.len()
+            && self.checkpointable(3 + if progressed { 2 } else { 0 })
+            && self.within_limits();
+        if progressed {
+            self.checkpoint_job(&mut job, &writer, finishing)?;
         }
-        if job.next < job.sources.len() || !self.affordable(5) || !self.within_limits() {
+        if !finishing {
             self.report.more_pending = true;
             return Ok(());
         }

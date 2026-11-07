@@ -758,9 +758,12 @@ pub(super) fn maintenance_stage(
     let spent = runtime.vcpu_ms() > ROTATING_VCPU_MS;
     let reset_ran = !outcome.rows.is_empty();
     if !fencing && !spent && store.within_wall() {
-        if let Some(row) =
-            request_compact_stage(&store, &buffer, &mut outcome.worker_executions_metrics)
-        {
+        if let Some(row) = request_compact_stage(
+            &store,
+            &buffer,
+            tick.run_id,
+            &mut outcome.worker_executions_metrics,
+        ) {
             outcome.compact_pending = compact_backlog(&row);
             outcome.rows.push(row);
         }
@@ -935,7 +938,8 @@ fn compact_stage<R: Runtime>(
 }
 
 /// Compaction passes one maintenance turn may chain. Each is a fresh worker execution with its
-/// own 32-call budget (`ingest::worker::WORKER_CALLS`), and a 32-source compact needs about three.
+/// own 32-call budget (`ingest::worker::WORKER_CALLS`). A 32-source compact uploads in about two
+/// and commits in the next, which writes the state once.
 const MAX_COMPACT_PASSES: u32 = 8;
 /// A further pass starts only with this much of the stage's wall time left.
 const MIN_COMPACT_PASS_WALL: Duration = Duration::from_secs(5);
@@ -946,10 +950,12 @@ const COMPACT_REPLY_MARGIN: Duration = Duration::from_secs(5);
 
 /// Merges small request window files when the service's `compaction` setting asks for it,
 /// chaining worker passes while the stage has calls and wall time and the last pass progressed.
-/// Chains passes until [`ROTATION_WALL`] is all that is left of the stage's wall time.
+/// Chains passes until [`ROTATION_WALL`] is all that is left of the stage's wall time. Each pass
+/// is numbered within the turn `turn`, so a pass can hand its lease to the next.
 fn request_compact_stage<R: Runtime>(
     store: &Store<'_, R>,
     buffer: &LogBuffer,
+    turn: &str,
     worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
 ) -> Option<StageRow> {
     let runtime = store.runtime;
@@ -998,6 +1004,9 @@ fn request_compact_stage<R: Runtime>(
                 "maintenance": "request_compact",
                 "service": store.service,
                 "wall_ms": wall.as_millis() as u64,
+                "turn": turn,
+                "pass": passes,
+                "last": passes >= MAX_COMPACT_PASSES,
             }),
         )];
         let reply = runtime
