@@ -587,7 +587,13 @@ export type DuckDBLease = {
     knownStats?: { rawRows: number; minTs: number; maxTs: number },
     signal?: AbortSignal,
     kind?: "request" | "vitals" | "errors",
+    options?: { deferView?: boolean },
   ): Promise<IngestedFileMeta>;
+  /**
+   * Rebuilds the views once over every held file. Call after ingesting with
+   * `deferView`; on failure the deferred files are retired.
+   */
+  publishView(signal?: AbortSignal): Promise<void>;
   release(): void;
   readContext(): DuckDBReadContext;
 };

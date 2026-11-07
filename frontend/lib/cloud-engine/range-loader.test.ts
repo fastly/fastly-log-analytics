@@ -68,6 +68,63 @@ async function analyticalPost(path: string, body: Record<string, unknown>) {
 }
 
 describe("Cloud first-page analytical range loading", () => {
+  it("downloads a cold range with bounded concurrency and publishes its view once", async () => {
+    const files = Array.from({ length: 24 }, (_, i) => ({ ...file, key: `processed/request/f${i}.parquet` }));
+    vi.mocked(fetchManifest).mockResolvedValue({ files, complete: true });
+    let inFlight = 0, peak = 0;
+    source.fetchFile.mockImplementation(async (key: string) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight--;
+      const index = Number(key.match(/f(\d+)\.parquet$/)![1]);
+      return { cached: false, bytes: parquetFixture([
+        { timestamp: Date.parse(from) + index, status: 200 + index, cache: "HIT", resp_bytes: 1 },
+      ]) };
+    });
+    const engine = getDuckDBEngine();
+    const lease = engine.lease.bind(engine);
+    const ingested: string[] = [];
+    let publishes = 0;
+    vi.spyOn(engine, "lease").mockImplementation((fields) => {
+      const inner = lease(fields);
+      return { ...inner,
+        ingestFile: (...args: Parameters<typeof inner.ingestFile>) => {
+          ingested.push(args[1]);
+          expect(args[6]).toEqual({ deferView: true });
+          return inner.ingestFile(...args);
+        },
+        publishView: (...args: Parameters<typeof inner.publishView>) => { publishes++; return inner.publishView(...args); },
+      };
+    });
+    const read = await ensureCloudRange(from, to, signal);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(6);
+    expect(ingested).toEqual(files.map((entry) => entry.key));
+    expect(publishes).toBe(1);
+    expect(await read.executeSql("SELECT count(*) AS count, count(DISTINCT status) AS statuses FROM requests"))
+      .toEqual([{ count: 24, statuses: 24 }]);
+    read.release?.();
+  });
+
+  it("aborts the prefetched downloads when the request is cancelled", async () => {
+    const files = Array.from({ length: 12 }, (_, i) => ({ ...file, key: `processed/request/f${i}.parquet` }));
+    vi.mocked(fetchManifest).mockResolvedValue({ files, complete: true });
+    const controller = new AbortController();
+    const seen: AbortSignal[] = [];
+    source.fetchFile.mockImplementation((_key: string, fileSignal: AbortSignal) => {
+      seen.push(fileSignal);
+      if (seen.length === 3) controller.abort(new Error("page left"));
+      return new Promise((_resolve, reject) => {
+        fileSignal.addEventListener("abort", () => reject(fileSignal.reason), { once: true });
+      });
+    });
+    await expect(ensureCloudRange(from, to, controller.signal)).rejects.toThrow(/page left/);
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.length).toBeLessThanOrEqual(6);
+    expect(seen.every((fileSignal) => fileSignal.aborted)).toBe(true);
+  });
+
   it("holds its exact selected bindings until the owning request releases them", async () => {
     source.fetchFile.mockResolvedValue({ cached: true, bytes: parquetFixture([
       { timestamp: Date.parse(from), status: 201, cache: "HIT", resp_bytes: 1 },

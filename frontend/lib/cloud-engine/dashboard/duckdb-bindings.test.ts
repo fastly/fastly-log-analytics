@@ -475,6 +475,58 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("publishes a lease's deferred files with one view rebuild instead of one per file", async () => {
+    let views = 0;
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: async (sql, signal) => {
+        if (sql.startsWith("CREATE OR REPLACE VIEW") && sql.includes("read_parquet")) views++;
+        return backend.query(sql, signal);
+      } };
+    } });
+    const lease = engine.lease();
+    for (let i = 0; i < 20; i++) {
+      await lease.ingestFile(`f${i}`, `f${i}.parquet`, parquetFixture([
+        { timestamp: 1700000000000 + i, status: 200 + i, cache: "HIT", resp_bytes: 1 },
+      ]), undefined, undefined, "request", { deferView: true });
+    }
+    expect(views).toBe(0);
+    await lease.publishView();
+    expect(views).toBe(1);
+    const read = lease.readContext();
+    expect(await read.executeSql("SELECT count(*) AS count, count(DISTINCT status) AS statuses FROM logs"))
+      .toEqual([{ count: 20, statuses: 20 }]);
+    expect(views).toBe(1);
+    lease.release();
+    await engine.reset();
+  });
+
+  it("retires a deferred batch whose view publication fails and keeps earlier files readable", async () => {
+    let fail = false;
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: async (sql, signal) => {
+        if (fail && sql.startsWith("CREATE") && sql.includes("UNION ALL")) {
+          fail = false;
+          throw new Error("Invalid Input Error: synthetic batch view publication");
+        }
+        return backend.query(sql, signal);
+      } };
+    } });
+    const bytes = parquetFixture([{ timestamp: 1700000000000, status: 201, cache: "HIT", resp_bytes: 1 }]);
+    await engine.ingestFile("one", "one.parquet", bytes);
+    const lease = engine.lease();
+    await lease.ingestFile("two", "two.parquet", bytes, undefined, undefined, "request", { deferView: true });
+    await lease.ingestFile("three", "three.parquet", bytes, undefined, undefined, "request", { deferView: true });
+    fail = true;
+    await expect(lease.publishView()).rejects.toThrow(/batch view publication/);
+    lease.release();
+    expect(engine.hasFile("two")).toBe(false);
+    expect(engine.hasFile("three")).toBe(false);
+    expect(await engine.executeSql("SELECT count(*) AS count FROM logs")).toEqual([{ count: 1 }]);
+    await engine.reset();
+  });
+
   it("does not mistake SQL input quoted in an ordinary error for a fatal database error", async () => {
     const engine = new DuckDBAnalyticalEngine();
     await expect(engine.executeSql("SELECT CAST('Out of Memory Error: user input' AS INTEGER)"))

@@ -6,6 +6,7 @@ import { beginCloudLoading } from "./loading-progress";
 
 const MAX_RANGE_FILES = 256;
 const MAX_RANGE_BYTES = 64 * 1024 * 1024;
+const PREFETCH_CONCURRENCY = 6;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 
@@ -91,7 +92,23 @@ export async function ensureCloudRange(
     }
     let bytes = 0;
     let handedOff = false;
+    const downloads = new AbortController();
+    const abortDownloads = () => downloads.abort(signal.reason);
+    signal.addEventListener("abort", abortDownloads, { once: true });
+    if (signal.aborted) abortDownloads();
+    const pending = files.filter((file) => !residentBytesByKey.has(file.scopedKey));
+    const fetches = new Map<string, ReturnType<typeof source.fetchFile>>();
+    let nextFetch = 0;
+    const prefetch = () => {
+      while (nextFetch < pending.length && fetches.size < PREFETCH_CONCURRENCY && !downloads.signal.aborted) {
+        const file = pending[nextFetch++];
+        const fetched = source.fetchFile(file.key, downloads.signal, { identity: file.scopedKey });
+        fetched.catch(() => {});
+        fetches.set(file.scopedKey, fetched);
+      }
+    };
     try {
+      prefetch();
       for (const file of files) {
         signal.throwIfAborted();
         const fileKind = kind(file);
@@ -106,7 +123,10 @@ export async function ensureCloudRange(
           loading.update({ progress: { ...progress } });
           continue;
         }
-        const fetched = await source.fetchFile(file.key, signal, { identity: file.scopedKey });
+        const fetched = await (fetches.get(file.scopedKey)
+          ?? source.fetchFile(file.key, downloads.signal, { identity: file.scopedKey }));
+        fetches.delete(file.scopedKey);
+        prefetch();
         generation.assertCurrent();
         signal.throwIfAborted();
         bytes += fetched.bytes.byteLength;
@@ -118,18 +138,21 @@ export async function ensureCloudRange(
           progress.downloadedBytes += fetched.bytes.byteLength;
         }
         const item = { key: file.key, scopedKey: file.scopedKey, bytes: fetched.bytes };
-        await lease.ingestFile(item.scopedKey, item.key, item.bytes, undefined, signal, fileKind);
+        await lease.ingestFile(item.scopedKey, item.key, item.bytes, undefined, signal, fileKind, { deferView: true });
         generation.assertCurrent();
         signal.throwIfAborted();
         progress.done++;
         loading.update({ progress: { ...progress } });
       }
+      await lease.publishView(signal);
       generation.assertCurrent();
       const read = lease.readContext();
       handedOff = true;
       success = true;
       return read;
     } finally {
+      signal.removeEventListener("abort", abortDownloads);
+      downloads.abort();
       if (!handedOff) lease.release();
     }
   } finally {

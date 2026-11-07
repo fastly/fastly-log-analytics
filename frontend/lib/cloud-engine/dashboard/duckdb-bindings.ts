@@ -356,6 +356,7 @@ export class ParquetBindingStore {
     const required = fields.map((field) => [field.id, CUSTOM_TYPES[field.type]] as const);
     for (const [id, type] of required) this.customTypes.set(id, type);
     const held = new Map<string, Binding>();
+    const deferred = new Set<Binding>();
     let released = false;
     const hold = (binding: Binding) => {
       this.check(generation);
@@ -383,13 +384,36 @@ export class ParquetBindingStore {
         hold(binding);
         return binding.meta;
       },
-      ingestFile: async (scopedKey, key, bytes, stats, signal, kind = "request") => {
+      ingestFile: async (scopedKey, key, bytes, stats, signal, kind = "request", options) => {
         this.check(generation, signal);
         const meta = await this.register(tableFor(kind), scopedKey, key, bytes, stats, signal,
-          kind === "request" ? required : [], generation, hold);
+          kind === "request" ? required : [], generation, hold, options?.deferView ? deferred : undefined);
         this.check(generation, signal);
         return meta;
       },
+      publishView: (signal) => this.operation(generation, async () => {
+        if (released) throw new ExpiredDuckDBReadError();
+        const batch = [...deferred];
+        deferred.clear();
+        try {
+          const backend = await this.ensureBackend(generation);
+          this.check(generation, signal);
+          await this.publish(backend, this.snapshot([...held.values()], new Map(required)));
+        } catch (error) {
+          this.observeFailure(generation, error);
+          // A batch the view never exposed is retired whole; its files drop once unpinned.
+          if (generation === this.generation && !this.poisoned) {
+            for (const binding of batch) {
+              const key = this.key(binding.table, binding.meta.scopedKey);
+              if (this.bindings.get(key) !== binding) continue;
+              this.bindings.delete(key);
+              binding.retired = true;
+              this.retired.add(binding);
+            }
+          }
+          throw error;
+        }
+      }, signal),
       readContext: () => {
         this.check(generation);
         if (released) throw new ExpiredDuckDBReadError();
@@ -461,6 +485,7 @@ export class ParquetBindingStore {
     signal: AbortSignal | undefined, required: readonly (readonly [string, DuckDBColumnType])[],
     generation: number,
     hold?: (binding: Binding) => void,
+    deferred?: Set<Binding>,
   ): Promise<IngestedFileMeta> {
     return this.operation(generation, async () => {
       const backend = await this.ensureBackend(generation);
@@ -544,14 +569,17 @@ export class ParquetBindingStore {
           customColumns: [...custom.keys()], presentColumns: names,
         };
         const binding: Binding = { name, table, types: typeMap, ts, meta, pins: 0, retired: false, dropped: false };
-        const next = [...this.bindings.values()];
-        next.push(binding);
-        await this.publish(backend, { ...this.snapshot(next, custom) });
-        this.check(generation, signal);
+        if (!deferred) {
+          const next = [...this.bindings.values()];
+          next.push(binding);
+          await this.publish(backend, { ...this.snapshot(next, custom) });
+          this.check(generation, signal);
+        }
         for (const [id, type] of required) this.customTypes.set(id, type);
         this.bindings.set(this.key(table, scopedKey), binding);
         committed = true;
         hold?.(binding);
+        deferred?.add(binding);
         await this.dropRetired(backend, generation);
         this.check(generation, signal);
         return meta;
