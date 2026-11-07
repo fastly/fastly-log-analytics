@@ -1,7 +1,7 @@
 import { ALL_TABLE_FIELDS, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { CustomField } from "./dashboard/summaries";
 import { fetchManifest } from "./dashboard/manifest";
-import { browserSource, dashboardCacheScope } from "./dashboard/sources";
+import { browserSource, dashboardCacheScope, type DerivedFile } from "./dashboard/sources";
 import {
   assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, type ParquetProjection,
 } from "./dashboard/parquet-projection";
@@ -77,11 +77,15 @@ export async function ensureCloudRange(
     }
     const scope = dashboardCacheScope();
     const files = manifests.flatMap((manifest, index) =>
-      manifest.files.map((file) => ({ ...file, dataset: datasets[index],
-        scopedKey: JSON.stringify([scope, options.serviceId ?? "", datasets[index],
-          file.key, file.etag ?? "", file.size, file.schema_version ?? "",
-          ...projectedColumns ? ["projection", ...[...projectedColumns].sort()] : []]),
-      })),
+      manifest.files.map((file) => {
+        const identity = [scope, options.serviceId ?? "", datasets[index],
+          file.key, file.etag ?? "", file.size, file.schema_version ?? ""];
+        return { ...file, dataset: datasets[index],
+          footerKey: JSON.stringify([...identity, "footer"]),
+          scopedKey: JSON.stringify([...identity,
+            ...projectedColumns ? ["projection", ...[...projectedColumns].sort()] : []]),
+        };
+      }),
     );
     if (files.length > MAX_RANGE_FILES || !projection &&
         files.reduce((total, file) => total + file.size, 0) > MAX_RANGE_BYTES) {
@@ -105,20 +109,36 @@ export async function ensureCloudRange(
         else slots++;
       }
     };
+    // Footers persist under the file's own identity, so any projection of it reuses them.
+    const readFooter = async (file: typeof files[number]) => {
+      const cached = await source.readDerivedFile(file.key, file.footerKey);
+      const tailStart = cached ? Number(cached.meta) : NaN;
+      const tail = cached && Number.isSafeInteger(tailStart) && tailStart >= 0
+        ? { start: tailStart, bytes: await cached.bytes() } : null;
+      const footer = await readParquetFooter(file.size, (start, end) =>
+        tail && start >= tail.start && end === tail.start + tail.bytes.byteLength
+          ? Promise.resolve(tail.bytes.slice(start - tail.start)) : fetchRange(file, start, end));
+      if (!tail && footer.tail) {
+        void source.writeDerivedFile(file.key, file.footerKey, footer.tail.bytes, String(footer.tail.start));
+      }
+      return footer;
+    };
     try {
       const plans = new Map<string, ParquetProjection>();
+      const persisted = new Map<string, DerivedFile>();
       if (projectedColumns) {
         loading.update({ stage: "files" });
         const unknown = files.filter((file) => !engine.getFileMeta(file.scopedKey));
         if (unknown.some((file) => !(file.size > 0))) throw new Error("Cloud file listing has no file size to project");
         await Promise.all(unknown.map(async (file) => {
-          const footer = await readParquetFooter(file.size, (start, end) => fetchRange(file, start, end));
-          plans.set(file.scopedKey, planParquetProjection(footer, projectedColumns));
+          const stored = await source.readDerivedFile(file.key, file.scopedKey);
+          if (stored) persisted.set(file.scopedKey, stored);
+          else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), projectedColumns));
         }));
         generation.assertCurrent();
         signal.throwIfAborted();
-        const needed = files.reduce((total, file) => total +
-          (plans.get(file.scopedKey)?.projectedBytes ?? engine.getFileMeta(file.scopedKey)?.byteLength ?? 0), 0);
+        const needed = files.reduce((total, file) => total + (plans.get(file.scopedKey)?.projectedBytes
+          ?? persisted.get(file.scopedKey)?.byteLength ?? engine.getFileMeta(file.scopedKey)?.byteLength ?? 0), 0);
         if (needed > byteLimit) {
           throw new CloudBudgetError("Cloud query range exceeds the browser scan budget; choose a smaller range");
         }
@@ -149,19 +169,25 @@ export async function ensureCloudRange(
       let handedOff = false;
       const pending = files.filter((file) => !residentBytesByKey.has(file.scopedKey));
       const fetchProjected = async (file: typeof files[number]) => {
-        let plan = plans.get(file.scopedKey);
-        if (!plan) {
-          // Resident at the budget check but evicted since.
-          plan = planParquetProjection(
-            await readParquetFooter(file.size, (start, end) => fetchRange(file, start, end)), projectedColumns!);
+        const stored = persisted.get(file.scopedKey);
+        if (stored) {
+          const presentColumns: unknown = JSON.parse(stored.meta);
+          if (!Array.isArray(presentColumns) || !presentColumns.every((name) => typeof name === "string")) {
+            throw new Error(`Cached projection of ${file.key} has no column list`);
+          }
+          return { bytes: await stored.bytes(), cached: true, presentColumns };
         }
+        // Resident at the budget check but evicted since.
+        const plan = plans.get(file.scopedKey) ?? planParquetProjection(await readFooter(file), projectedColumns!);
         let downloaded = 0;
         const parts = await fetchProjectedRanges(plan, async (start, end) => {
           const part = await fetchRange(file, start, end);
           downloaded += part.byteLength;
           return part;
         });
-        return { bytes: assembleProjectedParquet(plan, parts), cached: false, downloaded, presentColumns: plan.presentColumns };
+        const bytes = assembleProjectedParquet(plan, parts);
+        void source.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+        return { bytes, cached: false, downloaded, presentColumns: plan.presentColumns };
       };
       const fetchOne = (file: typeof files[number]): Promise<{
         bytes: ArrayBuffer; cached: boolean; downloaded?: number; presentColumns?: string[];

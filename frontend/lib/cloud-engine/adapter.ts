@@ -441,10 +441,13 @@ export async function handleCloudAnalyticalRequest(
   const url = new URL(request.url);
   const serviceId = url.searchParams.get("service_id") ?? request.headers.get("x-service-id");
   const origin = captureCloudQueryContext();
-  return measureCloudQuery(`api.${url.pathname}`, () => handleCloudRequest(request, origin).catch((error: unknown) => {
+  const handle = () => handleCloudRequest(request, origin).catch((error: unknown) => {
     if (!(error instanceof CloudBudgetError)) throw error;
     return Response.json({ detail: error.message }, { status: 413 });
-  }), undefined, serviceId);
+  });
+  // A speculative prefetch is not part of the page's selected result; its budget miss is expected.
+  if (request.headers.get("x-flp-cloud-prefetch") === "1") return handle();
+  return measureCloudQuery(`api.${url.pathname}`, handle, undefined, serviceId);
 }
 
 async function handleCloudRequest(

@@ -11,6 +11,7 @@ import {
   clearRequestLogCaches,
   dashboardCacheIdentity,
   dashboardCacheScope,
+  keyFromFileUrl,
   pruneRequestCache,
   rollupCacheVersion,
   updateDashboardCacheIdentity,
@@ -245,6 +246,35 @@ describe("browserSource", () => {
 
     updateDashboardCacheIdentity("user-2:viewer");
     expect((await browserSource("").fetchFile("file-1", undefined, { identity: rangeIdentity() })).cached).toBe(false);
+  });
+
+  it("persists derived files under their exact identity for the next page load, in the request-log cache", async () => {
+    const store = new Map<string, Response>();
+    const open = vi.fn(async () => ({
+      match: vi.fn(async (req: string) => store.get(req)?.clone()),
+      delete: vi.fn(async (req: string) => store.delete(req)),
+      put: vi.fn(async (req: string, res: Response) => {
+        store.set(req, res.clone());
+      }),
+    }));
+    vi.stubGlobal("caches", { open });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const key = "flp/processed/request/year=2026/a.parquet";
+    const first = browserSource("");
+    expect(await first.readDerivedFile(key, "projection-a")).toBeNull();
+    await first.writeDerivedFile(key, "projection-a", new Uint8Array([1, 2, 3]).buffer, "[\"url\",\"ua\"]");
+
+    const calls: unknown[] = [];
+    const next = browserSource("", { onApiCall: (call) => calls.push(call) });
+    const hit = await next.readDerivedFile(key, "projection-a");
+    expect(hit).toMatchObject({ byteLength: 3, meta: "[\"url\",\"ua\"]" });
+    expect(new Uint8Array(await hit!.bytes())).toEqual(new Uint8Array([1, 2, 3]));
+    expect(await next.readDerivedFile(key, "projection-b")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(calls).toEqual([expect.objectContaining({ source: "Browser Cache", bytes: 3, cache: "browser" })]);
+    expect(open).toHaveBeenCalledWith(CACHE_NAME);
+    expect([...store.keys()].map(keyFromFileUrl)).toEqual([key]);
   });
 
   it("posts one beacon and swallows failures", async () => {

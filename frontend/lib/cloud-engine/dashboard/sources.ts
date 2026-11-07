@@ -400,7 +400,19 @@ export type BrowserFileSource = FileSource & {
    * worker each report their own page load and calls.
    */
   withOptions(options?: BrowserSourceOptions): BrowserFileSource;
+  /**
+   * A file derived from `key` (such as a column projection) persisted in the
+   * request-log cache under its caller-built identity, so a later page load or
+   * tab reuses it. Evicted and pruned with `key`.
+   */
+  readDerivedFile(key: string, identity: string): Promise<DerivedFile | null>;
+  writeDerivedFile(key: string, identity: string, bytes: ArrayBuffer, meta: string): Promise<void>;
 };
+
+export type DerivedFile = { byteLength: number; meta: string; bytes(): Promise<ArrayBuffer> };
+
+const DERIVED_BYTES_HEADER = "x-flp-derived-bytes";
+const DERIVED_META_HEADER = "x-flp-derived-meta";
 
 const DIRECT_CDN_PARQUET_KEY =
   /^[A-Za-z0-9._=-]+(?:\/[A-Za-z0-9._=-]+)*\/processed\/(?:request|rum|ops|summary|summary_bundle)\/[A-Za-z0-9._=/-]*year=\d{4}\/[A-Za-z0-9._=/-]+\.parquet$/;
@@ -650,7 +662,57 @@ export function browserSource(
     return storeQueue;
   };
 
+  const derivedCacheUrl = (key: string, identity: string) =>
+    scopedCacheUrl(`${baseUrl}${fileRequestPath(key)}`, `derived:${identity}`);
+
   const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => ({
+    async readDerivedFile(key, identity) {
+      const cache = await getFileCache();
+      const hit = await cache?.match(derivedCacheUrl(key, identity));
+      const byteLength = Number(hit?.headers.get(DERIVED_BYTES_HEADER));
+      if (!hit || !Number.isSafeInteger(byteLength) || byteLength < 0) {
+        await hit?.body?.cancel();
+        return null;
+      }
+      return {
+        byteLength,
+        meta: decodeURIComponent(hit.headers.get(DERIVED_META_HEADER) ?? ""),
+        bytes: async () => {
+          const start = performance.now();
+          const bytes = await hit.arrayBuffer();
+          if (bytes.byteLength !== byteLength) throw new Error(`Cached derived file for ${key} is truncated`);
+          storeIndex.touch(key);
+          options?.onApiCall?.({
+            source: "Browser Cache",
+            method: "GET",
+            path: fileDisplayPath(key),
+            status: 200,
+            duration_ms: Math.max(0, Math.round(performance.now() - start)),
+            bytes: byteLength,
+            cache: "browser",
+            endpoint: "GET /api/file",
+            page_load_id: options?.getPageLoadId?.(),
+          });
+          return bytes;
+        },
+      };
+    },
+    async writeDerivedFile(key, identity, bytes, meta) {
+      // Copied before any await: the caller may hand the buffer to DuckDB, which can detach it.
+      const data = new Blob([bytes]);
+      const cache = await getFileCache();
+      if (!cache) return;
+      // Tracked through the full file's index entry so its recorded size stays the file's own.
+      await store(CACHE_NAME, cache, derivedCacheUrl(key, identity), key, async () => ({
+        data,
+        bytes: data.size,
+        headers: {
+          [DERIVED_BYTES_HEADER]: String(data.size),
+          [DERIVED_META_HEADER]: encodeURIComponent(meta),
+        },
+      }), false);
+      storeIndex.touch(key);
+    },
     cacheScope: options?.serviceId
       ? `${cacheScope ?? "browser"}:${options.serviceId}`
       : cacheScope ?? "browser",

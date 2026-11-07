@@ -11,7 +11,11 @@ import { executePerformanceAggregates } from "./performance";
 import { handleCloudAnalyticalRequest } from "./adapter";
 import * as sqlBuilder from "../sqlBuilder";
 
-const source = vi.hoisted(() => ({ fetchJson: vi.fn(), fetchFile: vi.fn(), fetchRange: vi.fn() }));
+const source = vi.hoisted(() => ({
+  fetchJson: vi.fn(), fetchFile: vi.fn(), fetchRange: vi.fn(), readDerivedFile: vi.fn(), writeDerivedFile: vi.fn(),
+}));
+// Stands in for the persisted browser file cache, which outlives a page load.
+const derived = new Map<string, { bytes: ArrayBuffer; meta: string }>();
 vi.mock("./dashboard/sources", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/sources")>(),
   browserSource: () => source,
@@ -33,6 +37,14 @@ beforeEach(async () => {
   vi.mocked(fetchManifest).mockClear();
   source.fetchFile.mockClear();
   source.fetchRange.mockReset();
+  derived.clear();
+  source.readDerivedFile.mockReset().mockImplementation(async (key: string, identity: string) => {
+    const hit = derived.get(JSON.stringify([key, identity]));
+    return hit ? { byteLength: hit.bytes.byteLength, meta: hit.meta, bytes: async () => hit.bytes.slice(0) } : null;
+  });
+  source.writeDerivedFile.mockReset().mockImplementation(async (key: string, identity: string, bytes: ArrayBuffer, meta: string) => {
+    derived.set(JSON.stringify([key, identity]), { bytes: bytes.slice(0), meta });
+  });
   cloudLoadingStore.reset();
   vi.mocked(fetchManifest).mockResolvedValue({ files: [file], complete: true });
 });
@@ -130,6 +142,31 @@ describe("Cloud first-page analytical range loading", () => {
       .rejects.toBeInstanceOf(CloudBudgetError);
     expect(ranges.count).toBe(entries.length);
     expect([...await engine.getPresentColumns()]).toEqual(resident);
+  });
+
+  it("reuses persisted projections on the next page load without range reads, and footers for another projection", async () => {
+    const { ranges, fullBytes, entries } = projectedFiles(4);
+    (await ensureCloudRange(from, to, signal, ["request"], projection(fullBytes))).release?.();
+    const cold = ranges.count;
+    expect(cold).toBeGreaterThan(0);
+
+    await getDuckDBEngine().reset();
+    const read = await ensureCloudRange(from, to, signal, ["request"], projection(fullBytes));
+    expect(ranges.count).toBe(cold);
+    expect(await read.executeSql(
+      "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors, count(*) FILTER (WHERE cache = 'HIT') AS hits FROM requests",
+    )).toEqual([{ n: 6400, errors: 4 * 229, hits: 4 * 1066 }]);
+    expect([...await read.getPresentColumns()]).toEqual(expect.arrayContaining(["ua", "referer", "status"]));
+    read.release?.();
+
+    await getDuckDBEngine().reset();
+    source.fetchRange.mockClear();
+    (await ensureCloudRange(from, to, signal, ["request"], { projection: { columns: ["timestamp", "ua"], maxBytes: fullBytes } }))
+      .release?.();
+    const footerReads = source.fetchRange.mock.calls.filter(([entry, , end]) =>
+      end === entries.find((candidate) => candidate.key === (entry as ManifestFile).key)!.size);
+    expect(source.fetchRange).toHaveBeenCalled();
+    expect(footerReads).toEqual([]);
   });
 
   it("keeps the file-count limit for projected ranges", async () => {

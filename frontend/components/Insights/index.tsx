@@ -331,7 +331,8 @@ function InsightsBody({
 
       <div className="min-h-[68px]">
         {availability?.unavailable && availability.unavailable.length > 0 && (
-          <Alert className="border-amber-500/30 bg-amber-500/5">
+          // Informational, not a failure: Cloud always lists its unimplemented detectors here.
+          <Alert role="status" className="border-amber-500/30 bg-amber-500/5">
             <Info className="h-4 w-4 text-amber-500 shrink-0" />
             <AlertTitle className="text-amber-600 dark:text-amber-400 font-medium">
               {availability.unavailable.length} {availability.unavailable.length === 1 ? 'insight is' : 'insights are'} unavailable

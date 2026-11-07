@@ -9,6 +9,7 @@ import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
 import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 import { insightScanColumns } from "./insight-scans";
+import { setCloudModeRuntime } from "./mode";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -225,6 +226,28 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     );
     expect(res?.status).toBe(413);
     expect(await res?.json()).toEqual({ detail: message });
+  });
+
+  it("keeps an over-budget speculative prefetch out of the page's query results but reports the requested window", async () => {
+    setCloudModeRuntime(true);
+    const states: string[] = [];
+    const listener = (event: Event) => states.push((event as CustomEvent<{ state: string }>).detail.state);
+    window.addEventListener("fla:cloud-query", listener);
+    const request = (headers: Record<string, string>) => new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 720 }),
+    });
+    try {
+      vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over budget"));
+      expect((await handleCloudAnalyticalRequest(request({ "x-flp-cloud-prefetch": "1" })))?.status).toBe(413);
+      expect(states).toEqual([]);
+      vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over budget"));
+      expect((await handleCloudAnalyticalRequest(request({})))?.status).toBe(413);
+      expect(states).toEqual(["pending", "error"]);
+    } finally {
+      window.removeEventListener("fla:cloud-query", listener);
+      setCloudModeRuntime(false);
+    }
   });
 
   it("loads Insights scans as column projections, with a smaller own budget for prefetches", async () => {

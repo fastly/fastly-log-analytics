@@ -235,3 +235,37 @@ describe('InsightsClient layout stability while evaluating', () => {
     expect(screen.getByTestId('insights-status-slot')).toBe(slot)
   })
 })
+
+describe('InsightsClient notices', () => {
+  const unsupported = {
+    id: 'botnet_grouping', title: 'Botnet Grouping', description: 'About botnets', category: 'security',
+    required_fields: ['ja3'], required_groups: [], available: false, missing_fields: ['ja3'], reason: 'cloud_detector_unsupported',
+  }
+
+  it('shows the unavailable-detectors notice as status, not an error alert, beside a successful result', async () => {
+    server.use(http.get(`${getApiBase()}/api/insight-availability`, () => HttpResponse.json({
+      insights: [unsupported], unavailable: [unsupported], available: true,
+    })))
+    serveInsights([envelope({ computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')] })])
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    const notice = await screen.findByText(/1 insight is unavailable/)
+    await waitFor(() => expect(tabCount('all')).toBe('1'))
+    expect(notice.closest('[role="status"]')).not.toBeNull()
+    expect(screen.queryAllByRole('alert')).toEqual([])
+  })
+
+  it('still shows a failed requested window as an error alert', async () => {
+    server.use(
+      http.get(`${getApiBase()}/api/log-extents`, () =>
+        HttpResponse.json({ earliest_log_at: new Date(Date.now() - 72 * 3600_000).toISOString(), latest_log_at: new Date().toISOString() })),
+      http.post(`${getApiBase()}/api/insights`, () =>
+        HttpResponse.json({ detail: 'Cloud query range exceeds the browser scan budget; choose a smaller range' }, { status: 413 })),
+    )
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(/Error loading insights/)
+  })
+})
