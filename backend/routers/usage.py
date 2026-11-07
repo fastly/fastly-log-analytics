@@ -188,12 +188,23 @@ def _compute_prefill_rates(
                 logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
             rum_beacons = 0
-            try:
-                val = metadata_db.get_rum_beacons_avg_per_day(source["name"])
-                rum_beacons = round(val) if val is not None else 0
+            hs_service = get_high_scale_service_registry().resolve(svc_name) if svc_name else None
+            if hs_service is not None:
+                # High-scale beacons live in ClickHouse RUM facts; it never writes ``ingested_files``.
+                from backend.high_scale.rum import rum_beacons_by_date
+
+                rum_end = datetime.now(UTC)
+                rum_start = rum_end - timedelta(days=int(result["rum_retention_days"]))
+                per_day = rum_beacons_by_date(hs_service, rum_start.isoformat(), rum_end.isoformat())
+                rum_beacons = round(sum(per_day.values()) / len(per_day)) if per_day else 0
                 result["rum_beacons_per_day"] = rum_beacons
-            except Exception as e:
-                logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
+            else:
+                try:
+                    val = metadata_db.get_rum_beacons_avg_per_day(source["name"])
+                    rum_beacons = round(val) if val is not None else 0
+                    result["rum_beacons_per_day"] = rum_beacons
+                except Exception as e:
+                    logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
 
             if svc_name:
                 _PREFILL_META_CACHE[svc_name] = (avg_nodes, rum_beacons)

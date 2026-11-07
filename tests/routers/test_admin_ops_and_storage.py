@@ -1288,6 +1288,51 @@ def test_usage_log_activity_reads_the_high_scale_source_ledger_in_the_exact_wind
     assert r_err.status_code >= 400, "a failed ledger read must surface, not render as an empty chart"
 
 
+def test_prefill_rum_beacons_per_day_averages_high_scale_beacons_over_the_rum_retention_window():
+    """High-scale beacons live in ClickHouse RUM facts; the legacy ``ingested_files`` average is frozen."""
+    from backend.routers.usage import _PREFILL_META_CACHE, _compute_prefill_rates
+
+    svc = "test_prefill_rum_hs_svc"
+    calls: list[dict] = []
+
+    class BeaconClient:
+        fail = False
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if self.fail:
+                raise RuntimeError("clickhouse unavailable")
+            calls.append(params or {})
+            assert "rum_beacons_by_date" in sql
+            return [{"date": "2026-11-06", "beacons": 100}, {"date": "2026-11-07", "beacons": 50}]
+
+    beacon_client = BeaconClient()
+    cfg = {"provisioning": {"cron_sync": {"data_retention_days": 14, "rum_retention_days": 7}}}
+    _PREFILL_META_CACHE.clear()
+    try:
+        with (
+            patch(
+                "backend.routers.usage.get_high_scale_service_registry", return_value=_hs_registry(svc, beacon_client)
+            ),
+            patch("backend.config.load_config", return_value=cfg),
+            patch("backend.core.metadata.get_node_count_avg", return_value=None),
+            patch(
+                "backend.core.metadata.get_rum_beacons_avg_per_day", side_effect=AssertionError("legacy ledger read")
+            ),
+        ):
+            result, _ = _compute_prefill_rates({"name": svc})
+            _PREFILL_META_CACHE.clear()
+            beacon_client.fail = True
+            with pytest.raises(RuntimeError, match="clickhouse unavailable"):
+                _compute_prefill_rates({"name": svc})
+    finally:
+        _PREFILL_META_CACHE.clear()
+
+    assert result["rum_beacons_per_day"] == 75
+    (params,) = calls
+    assert params["service_id"] == svc
+    assert params["end"] - params["start"] == timedelta(days=7)
+
+
 def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monkeypatch):
     from backend.routers.usage import _compute_prefill_rates
 
