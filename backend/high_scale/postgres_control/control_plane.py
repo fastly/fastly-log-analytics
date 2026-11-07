@@ -987,6 +987,20 @@ class PostgresControlPlane:
             ).fetchone()
         return {"files": int(row[0]), "bytes": int(row[1]), "rum_bytes": int(row[2])}
 
+    def request_files_per_flush(self, service_id: str, start: datetime, end: datetime) -> float | None:
+        """Average request source objects per log flush, grouped by the basename timestamp Fastly writes."""
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT avg(files) FROM (SELECT count(*) AS files FROM ("
+                r"SELECT substring(object_key from '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') AS flushed_at "
+                "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
+                "AND discovered_at >= %s AND discovered_at <= %s"
+                ") AS objects WHERE flushed_at IS NOT NULL GROUP BY flushed_at) AS flushes",
+                (service_id, start, end),
+            ).fetchone()
+        return None if row[0] is None else float(row[0])
+
     def mark_archive_expired(self, manifest_id: str) -> None:
         _require_text(manifest_id, "manifest_id")
         with self.transaction() as connection:

@@ -3783,6 +3783,36 @@ def test_source_storage_window_counts_every_discovered_object_and_splits_rum_byt
             connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
 
 
+def test_request_files_per_flush_averages_request_objects_per_basename_timestamp_in_the_inclusive_window() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-files-per-flush"
+    start, end = datetime(2026, 10, 24, 12, 0, tzinfo=UTC), datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    prefix = "raw/request/year=2026/month=11/day=07/hour=11/minute=39"
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            (f"{prefix}/2026-11-07T11:39:40.000-node1.log.zst", "request", "source_deleted", 1, 1, start),
+            (f"{prefix}/2026-11-07T11:39:40.000-node2.log.zst", "request", "discovered", 1, 0, end),
+            (f"{prefix}/2026-11-07T11:39:40.000-node3.log.zst", "request", "source_missing", 1, 0, end),
+            (f"{prefix}/2026-11-07T11:40:40.000-node1.log.zst", "request", "source_deleted", 1, 1, end),
+            ("raw/rum/year=2026/2026-11-07T11:39:40.000-rum.log.zst", "rum_vitals", "source_deleted", 1, 1, end),
+            (f"{prefix}/no-timestamp.log.zst", "request", "source_deleted", 1, 1, end),
+            (f"{prefix}/2026-11-07T11:41:40.000-early.log.zst", "request", "source_deleted", 1, 1,
+             start - timedelta(milliseconds=1)),
+            (f"{prefix}/2026-11-07T11:42:40.000-late.log.zst", "request", "source_deleted", 1, 1,
+             end + timedelta(milliseconds=1)),
+        ],
+    )  # fmt: skip
+    try:
+        assert control.request_files_per_flush(sid, start, end) == 2.0
+        assert control.request_files_per_flush("svc-with-no-sources", start, end) is None
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
 def test_clickhouse_adapter_chunks_large_inserts_and_cleans_up_on_mid_chunk_failure(monkeypatch) -> None:
     monkeypatch.setenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "2")
     base_row = _request_batch().rows[0]

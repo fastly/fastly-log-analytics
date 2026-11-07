@@ -1314,7 +1314,11 @@ def test_prefill_rum_beacons_per_day_averages_high_scale_beacons_over_the_rum_re
                 "backend.routers.usage.get_high_scale_service_registry", return_value=_hs_registry(svc, beacon_client)
             ),
             patch("backend.config.load_config", return_value=cfg),
-            patch("backend.core.metadata.get_node_count_avg", return_value=None),
+            patch(
+                "backend.high_scale.postgres_control.PostgresControlPlane.request_files_per_flush",
+                return_value=None,
+                create=True,
+            ),
             patch(
                 "backend.core.metadata.get_rum_beacons_avg_per_day", side_effect=AssertionError("legacy ledger read")
             ),
@@ -1331,6 +1335,44 @@ def test_prefill_rum_beacons_per_day_averages_high_scale_beacons_over_the_rum_re
     (params,) = calls
     assert params["service_id"] == svc
     assert params["end"] - params["start"] == timedelta(days=7)
+
+
+def test_prefill_nodes_per_flush_averages_high_scale_request_objects_over_the_log_retention_window():
+    """High-scale source objects live in the Postgres ledger; the legacy ``ingested_files`` average is frozen."""
+    from backend.routers.usage import _PREFILL_META_CACHE, _compute_prefill_rates
+
+    svc = "test_prefill_nodes_hs_svc"
+
+    class NoBeacons:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            return []
+
+    cfg = {"provisioning": {"cron_sync": {"data_retention_days": 14, "rum_retention_days": 7}}}
+    per_flush = MagicMock(return_value=2.6)
+    _PREFILL_META_CACHE.clear()
+    try:
+        with (
+            patch("backend.routers.usage.get_high_scale_service_registry", return_value=_hs_registry(svc, NoBeacons())),
+            patch("backend.config.load_config", return_value=cfg),
+            patch(
+                "backend.high_scale.postgres_control.PostgresControlPlane.request_files_per_flush",
+                per_flush,
+                create=True,
+            ),
+            patch("backend.core.metadata.get_node_count_avg", side_effect=AssertionError("legacy ledger read")),
+        ):
+            result, _ = _compute_prefill_rates({"name": svc})
+            _PREFILL_META_CACHE.clear()
+            per_flush.side_effect = RuntimeError("postgres unavailable")
+            with pytest.raises(RuntimeError, match="postgres unavailable"):
+                _compute_prefill_rates({"name": svc})
+    finally:
+        _PREFILL_META_CACHE.clear()
+
+    assert result["avg_nodes_per_flush"] == 3
+    service_id, start, end = per_flush.call_args_list[0].args
+    assert service_id == svc
+    assert end - start == timedelta(days=14)
 
 
 def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monkeypatch):

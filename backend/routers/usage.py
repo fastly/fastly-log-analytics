@@ -179,16 +179,27 @@ def _compute_prefill_rates(
             from backend.core import metadata as metadata_db
 
             avg_nodes = None
-            try:
-                avg = metadata_db.get_node_count_avg(source["name"])
+            hs_service = get_high_scale_service_registry().resolve(svc_name) if svc_name else None
+            if hs_service is not None:
+                # High-scale source objects live in the Postgres ledger; it never writes ``ingested_files``.
+                from backend.high_scale.postgres_control import PostgresControlPlane
+
+                log_end = datetime.now(UTC)
+                log_start = log_end - timedelta(days=int(result["log_retention_days"]))
+                avg = PostgresControlPlane().request_files_per_flush(svc_name, log_start, log_end)
                 if avg:
-                    avg_nodes = round(float(avg))
+                    avg_nodes = round(avg)
                     result["avg_nodes_per_flush"] = avg_nodes
-            except Exception:
-                logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
+            else:
+                try:
+                    avg = metadata_db.get_node_count_avg(source["name"])
+                    if avg:
+                        avg_nodes = round(float(avg))
+                        result["avg_nodes_per_flush"] = avg_nodes
+                except Exception:
+                    logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
 
             rum_beacons = 0
-            hs_service = get_high_scale_service_registry().resolve(svc_name) if svc_name else None
             if hs_service is not None:
                 # High-scale beacons live in ClickHouse RUM facts; it never writes ``ingested_files``.
                 from backend.high_scale.rum import rum_beacons_by_date
