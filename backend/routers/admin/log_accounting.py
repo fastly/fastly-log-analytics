@@ -11,6 +11,7 @@ from fastapi import Depends, HTTPException, Query, Response
 
 from backend.core.fastly.client import api_key_or_mock
 from backend.core.request_context import get_source
+from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.admin import (
     LogAccountingBucket,
     LogAccountingResponse,
@@ -190,6 +191,26 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
     import time as _time
     from concurrent.futures import ThreadPoolExecutor
 
+    # High-scale ingest records request files in its source-object ledger; it never writes ``ingested_files``.
+    high_scale_control = None
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        from backend.high_scale.postgres_control import PostgresControlPlane
+
+        high_scale_control = PostgresControlPlane()
+
+    def _local_counts() -> dict[str, tuple[int, int]]:
+        if high_scale_control is not None:
+            return high_scale_control.request_flush_accounting(service_id, start, end_clamp, width)
+        return metadata_db.get_log_accounting_counts(
+            service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
+        )
+
+    def _latest_ingest() -> str | None:
+        if high_scale_control is not None:
+            latest = high_scale_control.latest_request_ingest(service_id)
+            return latest.astimezone(UTC).isoformat() if latest else None
+        return metadata_db.get_latest_ingest_ts(service_id)
+
     def _run_timed(fn: Any) -> tuple[Any, float]:
         t0 = _time.perf_counter()
         res = fn()
@@ -204,9 +225,7 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
         fut_sqlite = pool.submit(
             contextvars.copy_context().run,
             _run_timed,
-            lambda: metadata_db.get_log_accounting_counts(
-                service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
-            ),
+            _local_counts,
         )
         fut_ch = pool.submit(
             contextvars.copy_context().run,
@@ -287,10 +306,7 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
                 )
             run_start = None
 
-    latest_ingest_str = timer.call(
-        "latest_ingest",
-        lambda: metadata_db.get_latest_ingest_ts(service_id),
-    )
+    latest_ingest_str = timer.call("latest_ingest", _latest_ingest)
     catchup: dict[str, Any] | None
     if latest_ingest_str:
         latest_dt = datetime.fromisoformat(latest_ingest_str.replace(" ", "T")).replace(tzinfo=UTC)

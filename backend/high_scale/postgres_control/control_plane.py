@@ -30,6 +30,18 @@ logger = logging.getLogger("backend.high_scale.postgres_control")
 # About 130 flushes on a ~35-node service: the average settles within ~1% of a 4x larger sample.
 REQUEST_FLUSH_SAMPLE_OBJECTS = 5000
 
+# Request keys sort by delivery minute, so bounding ``object_key`` walks the ``(service_id, object_key)`` index.
+# The anchor recovers the service's configured key prefix, and request keys all sort below its RUM keys.
+_REQUEST_KEY_BASE_CTE = (
+    "anchor AS (SELECT left(object_key, strpos(object_key, 'raw/request/') - 1) AS base "
+    "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
+    "AND strpos(object_key, 'raw/request/') > 0 LIMIT 1)"
+)
+_FLUSH_TIMESTAMP_RE = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+_INGESTED = "status NOT IN ('discovered', 'claimed')"
+# Fastly names the minute partition and the basename from the same timestamp; the pad matches the legacy reader.
+_FLUSH_PARTITION_PAD = timedelta(hours=2)
+
 _ACTIVITY_BUCKET_FORMATS = {
     "second": 'YYYY-MM-DD"T"HH24:MI:SS',
     "minute": 'YYYY-MM-DD"T"HH24:MI',
@@ -1003,10 +1015,8 @@ class PostgresControlPlane:
         _require_text(service_id, "service_id")
         with self.transaction(read_only=True) as connection:
             row = connection.execute(
-                "WITH anchor AS (SELECT left(object_key, strpos(object_key, 'raw/request/') - 1) AS base "
-                "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
-                "AND strpos(object_key, 'raw/request/') > 0 LIMIT 1), "
-                r"recent AS (SELECT substring(object_key from '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') AS flushed_at "
+                f"WITH {_REQUEST_KEY_BASE_CTE}, "
+                f"recent AS (SELECT substring(object_key from '{_FLUSH_TIMESTAMP_RE}') AS flushed_at "
                 "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
                 "AND object_key < (SELECT base || 'raw/rum/' FROM anchor) ORDER BY object_key DESC LIMIT %s), "
                 "flushes AS (SELECT flushed_at, count(*) AS files FROM recent WHERE flushed_at IS NOT NULL "
@@ -1016,6 +1026,51 @@ class PostgresControlPlane:
                 (service_id, service_id, recent_objects),
             ).fetchone()
         return None if row[0] is None else float(row[0])
+
+    def request_flush_accounting(
+        self, service_id: str, start: datetime, end: datetime, width: int
+    ) -> dict[str, tuple[int, int]]:
+        """``{emission bucket: (rows, files)}`` for ingested request objects, buckets inclusive of ``start``/``end``.
+
+        Buckets are the first ``width`` characters (13 = hour, 10 = day) of the basename timestamp Fastly writes.
+        """
+        from backend.provision.cli import minute_list_prefix
+
+        _require_text(service_id, "service_id")
+        if width not in (10, 13):
+            raise ValueError("width must be 10 (day) or 13 (hour)")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                f"WITH {_REQUEST_KEY_BASE_CTE}, "
+                f"files AS (SELECT left(substring(object_key from '{_FLUSH_TIMESTAMP_RE}'), %s) AS bucket, "
+                "accepted_rows FROM high_scale_source_objects "
+                f"WHERE service_id=%s AND domain='request' AND {_INGESTED} "
+                "AND object_key >= (SELECT base || %s FROM anchor) AND object_key < (SELECT base || %s FROM anchor)) "
+                "SELECT bucket, sum(accepted_rows), count(*) FROM files WHERE bucket >= %s AND bucket <= %s "
+                "GROUP BY bucket",
+                (
+                    service_id,
+                    width,
+                    service_id,
+                    minute_list_prefix(start.astimezone(UTC) - _FLUSH_PARTITION_PAD),
+                    minute_list_prefix(end.astimezone(UTC) + _FLUSH_PARTITION_PAD),
+                    start.astimezone(UTC).strftime("%Y-%m-%dT%H")[:width],
+                    end.astimezone(UTC).strftime("%Y-%m-%dT%H")[:width],
+                ),
+            ).fetchall()
+        return {str(bucket): (int(rows_sum or 0), int(files)) for bucket, rows_sum, files in rows}
+
+    def latest_request_ingest(self, service_id: str) -> datetime | None:
+        """Discovery time of the newest ingested request object: everything up to it has been picked up."""
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                f"WITH {_REQUEST_KEY_BASE_CTE} SELECT discovered_at FROM high_scale_source_objects "
+                f"WHERE service_id=%s AND domain='request' AND {_INGESTED} "
+                "AND object_key < (SELECT base || 'raw/rum/' FROM anchor) ORDER BY object_key DESC LIMIT 1",
+                (service_id, service_id),
+            ).fetchone()
+        return None if row is None else row[0]
 
     def mark_archive_expired(self, manifest_id: str) -> None:
         _require_text(manifest_id, "manifest_id")

@@ -3812,6 +3812,73 @@ def test_request_files_per_flush_averages_whole_flushes_among_the_most_recent_re
             connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
 
 
+def test_request_flush_accounting_counts_ingested_request_files_per_emission_bucket_in_the_inclusive_window() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-flush-accounting"
+    at = datetime(2026, 11, 7, 13, 0, tzinfo=UTC)
+
+    def key(hh: int, mm: int, node: str) -> str:
+        return f"tenant-a/raw/request/year=2026/month=11/day=07/hour={hh:02d}/minute={mm:02d}/2026-11-07T{hh:02d}:{mm:02d}:00.000-{node}.log.zst"
+
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            (key(9, 59, "early"), "request", "source_deleted", 1, 1000, at),
+            (key(10, 0, "a"), "request", "source_deleted", 1, 10, at),
+            (key(11, 30, "a"), "request", "appended", 1, 5, at),
+            (key(11, 30, "b"), "request", "source_missing", 1, 0, at),
+            (key(11, 31, "queued"), "request", "discovered", 1, 0, at),
+            (key(12, 59, "a"), "request", "archived", 1, 7, at),
+            (key(13, 0, "late"), "request", "source_deleted", 1, 1000, at),
+            (key(11, 30, "x").replace("raw/request/", "raw/rum/"), "rum_vitals", "source_deleted", 1, 1000, at),
+            ("tenant-a/raw/request/year=2026/month=11/day=07/hour=11/minute=30/no-timestamp.log.zst",
+             "request", "source_deleted", 1, 1000, at),
+        ],
+    )  # fmt: skip
+    start, end = datetime(2026, 11, 7, 10, 0, tzinfo=UTC), datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    try:
+        assert control.request_flush_accounting(sid, start, end, 13) == {
+            "2026-11-07T10": (10, 1),
+            "2026-11-07T11": (5, 2),
+            "2026-11-07T12": (7, 1),
+        }
+        day = datetime(2026, 11, 7, tzinfo=UTC)
+        assert control.request_flush_accounting(sid, day, day + timedelta(days=1), 10) == {"2026-11-07": (2022, 6)}
+        assert control.request_flush_accounting("svc-with-no-sources", start, end, 13) == {}
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
+def test_latest_request_ingest_is_the_discovery_time_of_the_newest_ingested_request_object() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-latest-ingest"
+    base = "tenant-a/raw/request/year=2026/month=11/day=07/hour=11"
+    ingested_at = datetime(2026, 11, 7, 11, 31, 5, tzinfo=UTC)
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            (f"{base}/minute=30/2026-11-07T11:30:00.000-a.log.zst", "request", "source_deleted", 1, 1,
+             datetime(2026, 11, 7, 11, 30, 5, tzinfo=UTC)),
+            (f"{base}/minute=31/2026-11-07T11:31:00.000-a.log.zst", "request", "source_deleted", 1, 1, ingested_at),
+            (f"{base}/minute=32/2026-11-07T11:32:00.000-a.log.zst", "request", "claimed", 1, 0,
+             datetime(2026, 11, 7, 11, 32, 5, tzinfo=UTC)),
+            ("tenant-a/raw/rum/year=2026/month=11/day=07/hour=11/minute=40/2026-11-07T11:40:00.000-a.log.zst",
+             "rum_vitals", "source_deleted", 1, 1, datetime(2026, 11, 7, 11, 40, 5, tzinfo=UTC)),
+        ],
+    )  # fmt: skip
+    try:
+        assert control.latest_request_ingest(sid) == ingested_at
+        assert control.latest_request_ingest("svc-with-no-sources") is None
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
 def test_clickhouse_adapter_chunks_large_inserts_and_cleans_up_on_mid_chunk_failure(monkeypatch) -> None:
     monkeypatch.setenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "2")
     base_row = _request_batch().rows[0]

@@ -1060,6 +1060,45 @@ def test_log_accounting_sustained_loss_normal_drift_and_missing_key(log_accounti
 
 
 @pytest.mark.usefixtures("frozen_clock", "_clear_log_accounting_ttl_caches")
+def test_log_accounting_reads_high_scale_file_counts_and_catchup_from_the_source_ledger():
+    """High-scale ingest never writes ``ingested_files``; its source-object ledger holds the request files."""
+    from backend.routers.admin import log_accounting as _la
+
+    svc = "test_log_accounting_hs_svc"
+    src = {"name": svc, "service_id": svc, "logging_service_id": "test-logging-svc-id"}
+    now_hr = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    prev_lbl = (now_hr - timedelta(hours=1)).strftime("%Y-%m-%dT%H")
+    flush_counts = MagicMock(return_value={prev_lbl: (900, 35)})
+    latest = MagicMock(return_value=datetime.now(UTC) - timedelta(seconds=120))
+    with (
+        patch.object(_la, "get_high_scale_service_registry", return_value=_hs_registry(svc, object()), create=True),
+        patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
+        patch("backend.config.load_config", return_value={}),
+        patch.object(_la, "_fetch_fastly_request_counts", return_value={prev_lbl: 1000}),
+        patch.object(_la, "_clickhouse_row_counts_per_bucket", return_value={}),
+        patch("backend.core.metadata.get_log_accounting_counts", side_effect=AssertionError("legacy ledger read")),
+        patch("backend.core.metadata.get_latest_ingest_ts", side_effect=AssertionError("legacy ledger read")),
+        patch(
+            "backend.high_scale.postgres_control.PostgresControlPlane.request_flush_accounting",
+            flush_counts,
+            create=True,
+        ),
+        patch("backend.high_scale.postgres_control.PostgresControlPlane.latest_request_ingest", latest, create=True),
+    ):
+        result = _la.compute_log_accounting(src, hours=4, by="hour")
+        flush_counts.side_effect = RuntimeError("postgres unavailable")
+        with pytest.raises(RuntimeError, match="postgres unavailable"):
+            _la.compute_log_accounting(src, hours=4, by="hour")
+
+    (bucket,) = [b for b in result["buckets"] if b.ts == f"{prev_lbl}:00:00Z"]
+    assert (bucket.file_count, bucket.our_rows, bucket.fastly_requests) == (35, 900, 1000)
+    assert flush_counts.call_args_list[0].args == (svc, now_hr - timedelta(hours=4), now_hr + timedelta(hours=1), 13)
+    assert result["catchup"]["status"] == "caught_up"
+    assert result["catchup"]["lag_seconds"] == 120
+    latest.assert_called_with(svc)
+
+
+@pytest.mark.usefixtures("frozen_clock", "_clear_log_accounting_ttl_caches")
 def test_log_accounting_clickhouse_row_counts_per_bucket():
     from backend.routers.admin import log_accounting as _la
 
