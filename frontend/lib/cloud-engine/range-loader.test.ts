@@ -50,7 +50,10 @@ beforeEach(async () => {
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); clearManifestCache(); cloudLoadingStore.reset(); });
 
-async function analyticalFiles(entries: (ManifestFile & { bytes: ArrayBuffer })[]) {
+async function analyticalFiles(fixtures: (ManifestFile & { bytes: ArrayBuffer })[]) {
+  const entries = fixtures.map((entry) => ({ ...entry, size: entry.bytes.byteLength }));
+  source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number) =>
+    entries.find((candidate) => candidate.key === entry.key)!.bytes.slice(start, end));
   const actual = await vi.importActual<typeof import("./dashboard/manifest")>("./dashboard/manifest");
   vi.mocked(fetchManifest).mockImplementation(actual.fetchManifest);
   source.fetchJson.mockImplementation(async (path: string) => {
