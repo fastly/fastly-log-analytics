@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
 import { ensureCloudRange } from "./range-loader";
 import { getDuckDBEngine } from "./dashboard/duckdb";
+import { setDashboardCacheIdentity } from "./dashboard/client";
+import { dashboardCacheIdentity, dashboardCacheScope, updateDashboardCacheIdentity } from "./dashboard/sources";
+import { cloudCacheIdentity } from "./cache-identity";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -88,6 +91,19 @@ describe("Cloud scan metadata", () => {
     await expect(handleCloudAnalyticalRequest(scan())).rejects.toThrow("Cloud range discovery failed (503)");
     expect((await handleCloudAnalyticalRequest(scan()))?.ok).toBe(true);
     expect(calls(fetcher).filter((path) => path === "/api/log-extents")).toHaveLength(2);
+  });
+
+  it("fixes the cache identity before bootstrap answers, so the page's first scans are not superseded", async () => {
+    vi.stubGlobal("fetch", metadataFetcher());
+    updateDashboardCacheIdentity(null);
+    const scopeBefore = dashboardCacheScope();
+    expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap")))?.ok).toBe(true);
+    expect(dashboardCacheIdentity()).toBe("u1:admin");
+    const scope = dashboardCacheScope();
+    expect(scope).not.toBe(scopeBefore);
+    // The page's own identity sync after bootstrap must not rotate the scope under in-flight discovery.
+    await setDashboardCacheIdentity(cloudCacheIdentity({ user: { id: "u1", role: "admin" } }));
+    expect(dashboardCacheScope()).toBe(scope);
   });
 
   it("shares services with bootstrap and the page's own extents read with the scans", async () => {

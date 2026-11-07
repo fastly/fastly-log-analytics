@@ -19,6 +19,7 @@ import {
   setCloudModeRuntime,
 } from '@/lib/cloud-engine/mode'
 import { syncOpsCacheForSession } from '@/lib/cloud-engine/telemetry/sources'
+import { cloudCacheIdentity } from '@/lib/cloud-engine/cache-identity'
 
 export {
   useUrlServiceSync,
@@ -145,11 +146,7 @@ let _lastReconciledBootstrapState: {
   activeServiceId: string | null
 } | null = null
 
-// Cloud bootstrap payloads carry the signed-in user, which the shared response type omits.
-export function cloudCacheIdentity(bootstrap: unknown): string {
-  const user = (bootstrap as { user?: { id?: string | null; role?: string | null } | null } | null | undefined)?.user
-  return user?.id ? `${user.id}:${user.role ?? 'admin'}` : 'anonymous'
-}
+export { cloudCacheIdentity }
 
 export function useBootstrapSyncEffects(
   query: { data: unknown; isStale?: boolean; dataUpdatedAt?: number },

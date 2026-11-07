@@ -5,6 +5,7 @@ import {
   searchFieldValuesInWorker,
   setDashboardCacheIdentity,
 } from "./dashboard/client";
+import { cloudCacheIdentity } from "./cache-identity";
 
 z.config({ jitless: true });
 import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
@@ -679,6 +680,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const activeServiceId = services.find((service) => service.service_id === requestedService)?.service_id ??
       services[0]?.service_id ?? null;
     const activeLogFieldIds = rawServices.find((service) => service.service_id === activeServiceId)?.log_fields?.selected_fields ?? [];
+    // Rotating the cache scope supersedes in-flight file discovery, so it settles before the page can start scans.
+    await setDashboardCacheIdentity(cloudCacheIdentity({ user }));
     return jsonResponse(
       {
         runtime_mode: "cloud",
