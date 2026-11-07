@@ -19,6 +19,9 @@ pub struct Inventory {
     pub generation: u64,
     pub current: Option<Reference>,
     pub windows: BTreeSet<String>,
+    /// Snapshotted after the hour closed, so it may build the hour's final bundle.
+    #[serde(default)]
+    pub closed: bool,
 }
 
 pub fn collect<R: Runtime>(

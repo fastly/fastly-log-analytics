@@ -9194,6 +9194,26 @@ mod summary_bundles {
     }
 
     #[test]
+    fn a_closing_hour_bundles_windows_committed_after_its_open_hour_snapshot() {
+        let fake = Fake::new(BASE + 30 * 60);
+        for m in 0..50 {
+            window(&fake, BASE + m * 30, 0, 5);
+        }
+        watermark(&fake, BASE + 30 * 60);
+        // The open hour pre-folds part of its 50 windows and keeps its catalog snapshot.
+        assert!(run(&fake).more_pending);
+        for m in 50..70 {
+            window(&fake, BASE + m * 30, 0, 5);
+        }
+        fake.now.set((BASE + 2 * HOUR) as u64);
+        watermark(&fake, BASE + 2 * HOUR);
+        settle(&fake);
+        // Only the complete hour is ever published, not one built from the open-hour snapshot.
+        assert!(one_of(&fake, "hour_bundle=").contains("hour_bundle=08-c70-"));
+        assert!(fake.keys(BUNDLES).iter().all(|k| !k.contains("-c50-")));
+    }
+
+    #[test]
     fn summary_bundle_closes_an_idle_hour_once_sweep_confirms_no_pending_raw_files() {
         let fake = Fake::new(BASE + 2 * HOUR);
         seed_hour(&fake, BASE, 4);

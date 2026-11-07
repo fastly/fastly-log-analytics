@@ -1307,11 +1307,17 @@ struct Job<'j> {
 }
 
 impl<R: Runtime> Ctx<'_, '_, R> {
-    fn catalog_windows(&self, state: &mut State, hour: i64) -> Result<Option<Vec<String>>, String> {
+    /// `closed` asks for every window of a closed hour, so an open-hour snapshot is retaken.
+    fn catalog_windows(
+        &self,
+        state: &mut State,
+        hour: i64,
+        closed: bool,
+    ) -> Result<Option<Vec<String>>, String> {
         if state
             .inventory
             .as_ref()
-            .is_none_or(|inventory| inventory.hour != hour)
+            .is_none_or(|inventory| inventory.hour != hour || closed && !inventory.closed)
         {
             let current = if let Some(key) = self.catalog.days.get(&(hour - hour.rem_euclid(DAY_S)))
             {
@@ -1328,6 +1334,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 generation: self.catalog.generation,
                 current,
                 windows: BTreeSet::new(),
+                closed,
             });
         }
         let inventory = state
@@ -1614,7 +1621,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             }
         }
         if self.catalog.version == super::catalog::VERSION {
-            let Some(committed) = self.catalog_windows(state, hour)? else {
+            let Some(committed) = self.catalog_windows(state, hour, true)? else {
                 return Ok(Step::Pending);
             };
             windows = committed;
@@ -1692,7 +1699,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             }
         }
         if self.catalog.version == super::catalog::VERSION {
-            let Some(committed) = self.catalog_windows(state, hour)? else {
+            let Some(committed) = self.catalog_windows(state, hour, false)? else {
                 return Ok(Step::Pending);
             };
             windows = committed;
