@@ -50,7 +50,13 @@ function installCloudReadiness() {
       const dashboardRoute = location.pathname.replace(/\/$/, '') === '/dashboard';
       const namespace = ({ 'fastly-value': 'value', 'streaming': 'cmcd', 'assets-shield': 'assets' })[location.pathname.split('/')[1]]
         ?? location.pathname.split('/')[1];
-      const analytical = active.filter(query => query.section.startsWith(`${namespace}.`)
+      const adminScope = {
+        '/admin/session-scoring': /^api\.\/api\/services\/[^/]+\/scoring(?:\/|$)/,
+        '/admin/rum': /^api\.\/api\/services\/[^/]+\/rum\/(?:status|versions)$/,
+        '/admin/share': /^api\.\/api\/admin\/share(?:\/|$)/,
+        '/admin/usage-log': /^api\.\/api\/admin\/usage-log(?:\/|$)/,
+      }[location.pathname.replace(/\/$/, '')];
+      const analytical = active.filter(query => adminScope ? adminScope.test(query.section) : query.section.startsWith(`${namespace}.`)
         || query.section === `api./api/${namespace}`
         || query.section.startsWith(`api./api/${namespace}/`));
       const ready = pending === 0 && errors === 0 && (dashboardRoute
@@ -93,6 +99,7 @@ async function waitForSnapshot(page, snapshot, timeoutMs) {
       clearTimeout(timer);
     }
     remaining = deadline - Date.now();
+    if (result?.errors > 0) throw new Error('Current analytical query failed');
     if (result?.ready && remaining >= 0) return result;
     if (remaining <= 0) throw timeoutError;
     await new Promise(resolve => setTimeout(resolve, Math.min(100, remaining)));
@@ -107,17 +114,26 @@ async function waitForCloudReport(page, timeoutMs = 120_000) {
   return waitForSnapshot(page, () => window.__flaCloudReadiness?.snapshot(), timeoutMs);
 }
 
+async function waitForCloudIdle(page, timeoutMs = 120_000) {
+  return waitForSnapshot(page, () => {
+    const snapshot = window.__flaCloudReadiness?.snapshot();
+    return { ...snapshot, ready: !snapshot?.pending };
+  }, timeoutMs);
+}
+
 const CLOUD_ANALYTICAL_ROUTES = Object.freeze(['/dashboard', '/origin', '/security', '/performance',
   '/network', '/streaming', '/rum', '/sessions', '/usage', '/fastly-value', '/assets-shield', '/insights']);
+const CLOUD_ADMIN_DATA_ROUTES = Object.freeze(['/admin/session-scoring', '/admin/rum',
+  '/admin/share', '/admin/usage-log']);
 
 async function waitForPageReadiness(page, route, timeoutMs = 120_000) {
   const pathname = new URL(route, 'https://redacted.invalid').pathname;
   if (pathname === '/dashboard') return waitForDashboardResult(page, timeoutMs);
-  if (CLOUD_ANALYTICAL_ROUTES.includes(pathname)) return waitForCloudReport(page, timeoutMs);
+  if (CLOUD_ANALYTICAL_ROUTES.includes(pathname) || CLOUD_ADMIN_DATA_ROUTES.includes(pathname)) return waitForCloudReport(page, timeoutMs);
   return null;
 }
 
 module.exports = {
-  CLOUD_READINESS_INIT_SCRIPT, CLOUD_ANALYTICAL_ROUTES, dashboardSnapshot,
-  waitForDashboardResult, waitForCloudReport, waitForPageReadiness,
+  CLOUD_READINESS_INIT_SCRIPT, CLOUD_ANALYTICAL_ROUTES, CLOUD_ADMIN_DATA_ROUTES, dashboardSnapshot,
+  waitForDashboardResult, waitForCloudReport, waitForCloudIdle, waitForPageReadiness,
 };

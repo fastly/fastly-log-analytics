@@ -11,7 +11,7 @@ import {
 import { useTheme } from 'next-themes'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { cn, buildServiceHref, getTimezoneAbbr } from '@/lib/utils'
+import { cn, buildServiceHref, buildFilterNavigationHref, getTimezoneAbbr } from '@/lib/utils'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { buttonVariants } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -269,8 +269,23 @@ interface NavLinkProps {
   activeServiceId?: string | null; router: ReturnType<typeof useRouter>
 }
 
-function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, onClick, className, activeServiceId, router }: NavLinkProps) {
-  const finalHref = activeServiceId ? `${href}?service=${activeServiceId}` : href
+function NavLink(props: NavLinkProps) {
+  return (
+    <React.Suspense fallback={<NavLinkWithParams {...props} />}>
+      <NavLinkFromUrl {...props} />
+    </React.Suspense>
+  )
+}
+
+function NavLinkFromUrl(props: NavLinkProps) {
+  const searchParams = useSearchParams()
+  return <NavLinkWithParams {...props} searchParams={searchParams} />
+}
+
+function NavLinkWithParams({
+  href, icon: Icon, name, isActive, disabled, collapsed, onClick, className, activeServiceId, router, searchParams,
+}: NavLinkProps & { searchParams?: Pick<URLSearchParams, 'get'> | null }) {
+  const finalHref = buildFilterNavigationHref(href, activeServiceId, searchParams ?? new URLSearchParams())
   const handlePointerHint = React.useCallback(() => {
     if (!disabled) router.prefetch(finalHref)
   }, [disabled, finalHref, router])

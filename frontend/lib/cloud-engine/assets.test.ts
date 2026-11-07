@@ -6,7 +6,7 @@ import {
   handleAssetsRequest,
   queryAssetsAggregates,
 } from "./assets";
-import { DuckDBAnalyticalEngine } from "./dashboard/duckdb";
+import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 import { formatPercent } from "@/lib/format";
 
 describe("Feature F22 — Assets & Shielding cloud-engine", () => {

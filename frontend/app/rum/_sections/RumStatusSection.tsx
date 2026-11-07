@@ -15,6 +15,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
 import { useRumStatus } from '@/hooks/useDashboardCards'
 import { adminJsonResult, client, unwrapClient, queryKeys } from '@/lib/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { formatLocalDateTime, cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
 import type { WithRequired, components } from '@/types/api'
@@ -164,6 +165,12 @@ export function RumStatusPanel() {
 
   return (
     <div className="space-y-4" data-testid="admin-rum-panel">
+      {isCloudMode() && (
+        <p role="status" className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+          Cloud RUM changes use native service reconcile jobs. Enable, disable, settings and SDK upgrades
+          are reported as successful only after the job completes. Disabling RUM preserves retained data.
+        </p>
+      )}
       <div
         className="flex items-center justify-between gap-3 rounded-lg border bg-card px-4 py-3 h-[56px] min-h-[56px]"
         data-testid="admin-rum-toolbar"

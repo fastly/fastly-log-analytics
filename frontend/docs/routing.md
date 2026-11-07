@@ -4,6 +4,12 @@ Status of every route under `app/` — rendering mode (CSR / RSC / hybrid), data
 
 ## Route table
 
+Cloud's static export and browser verifier share [`static-export-policy.json`](../static-export-policy.json). `prunePaths` defines which frontend files the release and E2E export builders remove; the release builder reads it from the frozen frontend snapshot, so policy changes invalidate the frontend export cache. The verifier recursively checks every remaining non-root `page.tsx`, including nested admin and session pages, except the policy's authentication routes. A missing supported route still fails acceptance.
+
+Coverage distinguishes `page-ready`, `query-ready`, token-backed stream detail `verified`, and `parameter-required`. The sweep obtains stream links from rendered links or a streaming row's read-only Details dialog; without a token, it checks the parameter-required state but does not claim the feature executed. Route telemetry scrolls shared `LazyMount` panels into view and waits for their query readiness. This is not exhaustive tab, download, search or management-action coverage. Informational capability/empty-data notices use `role="status"`; genuine `role="alert"` errors and failed HTTP responses still fail the sweep.
+
+`/admin/session-scoring`, `/admin/rum`, `/admin/share` and `/admin/usage-log` require completed reads from their own endpoint namespaces, not just headings or unrelated admin requests. Configuration and editor pages wait for observed pending work without requiring an invented analytical query; they remain `page-ready`, not `query-ready`. Genuine query errors fail immediately, and unfinished work still times out.
+
 | Route | Render mode | Cold-load data path | URL state model | Notes |
 |---|---|---|---|---|
 | `/` | CSR redirect | n/a | n/a | Redirects to `/dashboard` |
@@ -52,7 +58,7 @@ The serviceStore migration is intentionally scoped tight: `useUrlServiceSync` is
 
 ## Prefetch policy
 
-- **Sidebar nav links** ([`components/AppLayout.tsx`](../components/AppLayout.tsx) `NavLink`): hover-prefetch via Next.js default `<Link prefetch>`. Click-to-render feels instant on warm cache.
+- **Sidebar nav links** ([`components/AppLayoutChrome.tsx`](../components/AppLayoutChrome.tsx) `NavLink`): hover-prefetch uses the same URL as navigation. Same-route and cross-route links retain only the canonical `service`, `range`, `start_time`, `end_time`, and `filters` parameters, with the selected service taking precedence. Source-page detail tokens, auth/share parameters, SQL, and other route-specific options are not carried over.
 - **`world.geojson`** prefetched via `<link rel="prefetch">` ONLY on `/dashboard` + `/network` (the routes that mount maps). Other pages don't waste the 251 KB raw / 102 KB gzip.
 - **`/api/bootstrap`** SSR'd in root layout (every page). The dehydrated state inflates HTML by ~15 KB gzip but eliminates the cold-load client fetch RTT (~300-600 ms on prod-tunnel) for every page navigation.
 

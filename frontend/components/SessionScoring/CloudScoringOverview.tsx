@@ -84,7 +84,7 @@ export function CloudScoringOverview() {
         </Button>
         <BackToAdminLink />
       </PageHeader>
-      <Alert>
+      <Alert role="status">
         <AlertDescription>
           Cloud does not provision or manage the edge scorer. Labels, trained matrices, evaluation curves,
           thresholds, enforcement controls and scoring audit history are unavailable.
@@ -98,7 +98,7 @@ export function CloudScoringOverview() {
       ) : !serviceId ? (
         <Alert><AlertDescription>No active service selected.</AlertDescription></Alert>
       ) : !data ? (
-        <Alert><AlertDescription>
+        <Alert role="status"><AlertDescription>
           Session scoring is not configured in the retained logs for this range. No scoring metrics are available.
         </AlertDescription></Alert>
       ) : (
@@ -119,10 +119,10 @@ export function CloudScoringOverview() {
           <TopFlaggedTable serviceId={serviceId} sinceHours={sinceHours} />
           <ScoreDistChart serviceId={serviceId} sinceHours={sinceHours} />
           {'rows' in data.compliance_breakdown ? <ComplianceChart serviceId={serviceId} sinceHours={sinceHours} /> : (
-            <Alert><AlertDescription>Cookie compliance was not recorded in these logs.</AlertDescription></Alert>
+            <Alert role="status"><AlertDescription>Cookie compliance was not recorded in these logs.</AlertDescription></Alert>
           )}
           {'rows' in data.latency_timeseries ? <ScorerLatencyChart serviceId={serviceId} sinceHours={sinceHours} /> : (
-            <Alert><AlertDescription>Scorer execution and round-trip latency were not recorded in these logs.</AlertDescription></Alert>
+            <Alert role="status"><AlertDescription>Scorer execution and round-trip latency were not recorded in these logs.</AlertDescription></Alert>
           )}
         </>
       )}

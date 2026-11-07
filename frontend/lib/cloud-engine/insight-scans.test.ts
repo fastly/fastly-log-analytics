@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { getDuckDBEngine } from "./dashboard/test-fixtures";
 import { CLOUD_INSIGHT_DETECTORS, queryCloudCacheCollapse, queryCloudInsights } from "./insight-scans";
 import { handleInsightAvailability, INSIGHT_DEFINITIONS } from "./insights";
 
@@ -16,7 +16,7 @@ beforeEach(async () => {
   engine.setPresentColumnsOverride(null);
 });
 
-async function seedRichHistory() {
+async function seedRichHistory(nonAuth403 = false) {
   const baseline = endMs - 26 * 3_600_000;
   const current = endMs - 1800_000;
   await engine.executeSql(`INSERT INTO requests
@@ -27,7 +27,8 @@ async function seedRichHistory() {
   await engine.executeSql(`INSERT INTO requests
     (scoped_key, timestamp, ts_ms, url, ip, status, cache, elapsed, city, region, country, asn, p_type, pop, ua, referer, method, transport)
     SELECT 'current', epoch_ms(${current}), ${current},
-      '/login', '192.0.2.2', CASE WHEN range < 100 THEN 503 ELSE 403 END, 'MISS',
+      CASE WHEN ${nonAuth403} AND range >= 100 THEN '/assets/protected.css' ELSE '/login' END,
+      '192.0.2.2', CASE WHEN range < 100 THEN 503 ELSE 403 END, 'MISS',
       CASE WHEN range % 5 = 0 THEN 3000000 ELSE 100000 END,
       'New City', 'ON', 'CA', 64501, 'hosting', 'IAD', 'new-agent', 'https://example.test/spam', 'POST', 'tcp'
       FROM range(220)`);
@@ -67,9 +68,7 @@ describe("local Parquet insight scans", () => {
   });
 
   it("scopes every detector by filters and does not treat non-auth 403s as credential attacks", async () => {
-    await seedRichHistory();
-    await engine.executeSql(`UPDATE requests SET url = '/assets/protected.css'
-      WHERE url = '/login' AND status = 403`);
+    await seedRichHistory(true);
     const result = await queryCloudInsights(body, {
       ...options, filters: [{ field: "country", mode: "include", value: "US" }],
     });
@@ -87,8 +86,9 @@ describe("local Parquet insight scans", () => {
     const current = endMs - 1800_000;
     await engine.executeSql(`INSERT INTO requests (scoped_key, timestamp, ts_ms, url, cache)
       VALUES ('current', epoch_ms(${current}), ${current}, '/only-current', 'MISS')`);
-    const execute = vi.spyOn(engine, "executeSql");
-    const recent = await queryCloudInsights(body, options);
+    const read = engine.readContext();
+    const execute = vi.spyOn(read, "executeSql");
+    const recent = await queryCloudInsights(body, { ...options, engine: read });
     expect(recent.insights.length).toBeGreaterThan(0);
     expect(recent.insights.every((card) => card.severity === "info" && card.summary.includes("Not evaluated"))).toBe(true);
     expect(execute.mock.calls).toHaveLength(1);
@@ -137,8 +137,9 @@ describe("local Parquet insight scans", () => {
     await expect(queryCloudInsights({ ...body, window_size_hrs: Number.NaN }, options))
       .rejects.toThrow("Invalid insight analysis window");
     await seedRichHistory();
-    const execute = vi.spyOn(engine, "executeSql").mockRejectedValueOnce(new Error("Local query failed"));
-    await expect(queryCloudInsights(body, options)).rejects.toThrow("Local query failed");
+    const read = engine.readContext();
+    const execute = vi.spyOn(read, "executeSql").mockRejectedValueOnce(new Error("Local query failed"));
+    await expect(queryCloudInsights(body, { ...options, engine: read })).rejects.toThrow("Local query failed");
     execute.mockRestore();
   });
 });

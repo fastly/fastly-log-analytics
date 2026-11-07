@@ -348,17 +348,27 @@ interface UseFieldValuesOptions {
 }
 
 export function useFieldValues({ field, search, limit = 50, enabled = true }: UseFieldValuesOptions) {
+  const queryClient = useQueryClient()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { startTime, endTime } = useFilterStore(
     useShallow(s => ({ startTime: s.startTime, endTime: s.endTime }))
   )
-  const filterPayload = useDebouncedFilterPayload()
+  const filterPayload = useDebouncedFilterPayload(true)
+  const queryKey = useMemo(
+    () => queryKeys.filtered('dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search, limit),
+    [activeServiceId, startTime, endTime, filterPayload, field, search, limit],
+  )
+
+  useEffect(() => {
+    if (!enabled) void queryClient.cancelQueries({ queryKey, exact: true })
+  }, [enabled, queryClient, queryKey])
 
   return useQuery({
-    queryKey: queryKeys.filtered('dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search),
-    queryFn: async () => {
+    queryKey,
+    queryFn: async ({ signal }) => {
       return await unwrapClient(
         client.POST('/api/dashboard/field-values', {
+          signal,
           body: {
             start_time: startTime,
             end_time: endTime,

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { getDuckDBEngine } from "./dashboard/test-fixtures";
 import {
   buildPerfScatterSql,
   buildPerfTopAsnsSql,
@@ -24,6 +24,25 @@ import {
 describe("performance cloud-engine module (F19)", () => {
   beforeEach(() => {
     setPerformanceEngineClient(null);
+  });
+
+  it("does not recapture a fresh empty backend after awaited request parsing", async () => {
+    const engine = getDuckDBEngine();
+    await engine.reset();
+    const request = new Request("http://localhost/api/performance/aggregates", { method: "POST", body: "{}" });
+    const clone = request.clone();
+    let enter!: () => void, resume!: (body: object) => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const body = new Promise<object>((resolve) => { resume = resolve; });
+    vi.spyOn(clone, "json").mockImplementation(() => { enter(); return body; });
+    vi.spyOn(request, "clone").mockReturnValue(clone);
+    const pending = handlePerformanceRequest(request);
+    const rejected = expect(pending).rejects.toThrow(/generation|expired/i);
+    await entered;
+    await engine.reset();
+    resume({});
+    await rejected;
+    vi.restoreAllMocks();
   });
 
   it("returns populated short-field results using the page's table and chart contract", async () => {

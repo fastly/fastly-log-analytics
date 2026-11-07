@@ -38,7 +38,7 @@ describe("Cloud administrative wire parity", () => {
     expect(vi.mocked(adminRequest)).toHaveBeenCalledTimes(2);
   });
 
-  it("maps real native ingested files and clock state without fictional cron jobs", async () => {
+  it("maps real native ingested files", async () => {
     vi.mocked(adminRequest).mockResolvedValueOnce({
       files: [{ key: "processed/request/one.parquet", rows: 4, size: 128, last_modified: "2026-01-01T00:00:00Z" }],
       complete: true,
@@ -46,19 +46,111 @@ describe("Cloud administrative wire parity", () => {
     expect(await (await cloudAdminWire(request("/api/admin/ingested-files")))!.json()).toMatchObject({
       files: [{ file_name: "processed/request/one.parquet", row_count: 4, file_size_bytes: 128, ingested_at: "2026-01-01T00:00:00Z" }],
     });
+  });
+
+  const timestamp = Date.parse("2026-01-01T00:00:00Z");
+  function cronEvidence() {
     vi.mocked(adminRequest).mockResolvedValue({
-      configured: true, last_tick_at: "2026-01-01T00:00:00Z", next_tick_at: "2026-01-01T00:02:00Z", clock_interval_s: 120,
-      runs: [{ id: "native-run", started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z",
-        duration_ms: 1000, outcome: "done", converted_raw_files: 2, rows_written: 4 }],
+      configured: true, service_id: "fixture-service",
+      schedules: [
+        { task: "request_ingest", next_run_time: "2026-01-01T00:00:10Z", interval_s: 10 },
+        { task: "rum_ingest", next_run_time: null, disabled_reason: "RUM is disabled" },
+        { task: "raw_delete", next_run_time: null, schedule_basis: "pending_work" },
+        { task: "retention_sweep", next_run_time: null, schedule_basis: "maintenance_turn" },
+        { task: "log_flush", next_run_time: null, interval_s: 60 },
+        { task: "cloud_ingest_clock", next_run_time: "2026-01-01T00:00:01Z", interval_s: 1 },
+      ],
+      runs: [{ id: "native-run", service_id: "fixture-service", started_at: "2026-01-01T00:00:00Z",
+        finished_at: "2026-01-01T00:00:01Z", duration_ms: 1000, outcome: "idle" }],
     });
-    const runs = await (await cloudAdminWire(request("/api/cron-runs?status=success")))!.json();
-    expect(runs).toMatchObject({ total: 1, runs: [{ id: "native-run" }], entries: [
-      { task: "cloud_ingest_clock", duration_s: 1, status: "success" },
+    vi.mocked(queryOpsLogs).mockResolvedValue({
+      kind: "cron_runs", from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z",
+      rows: [
+        { timestamp, event_id: "ingest", run_id: "run-request_ingest", cron_kind: "request_ingest",
+          service_id: "fixture-service", started_at: timestamp, duration_ms: 200, outcome: "done",
+          converted_files: 2, rows_written: 4, bad_lines: 1 },
+        { timestamp: timestamp + 1000, event_id: "delete", run_id: "run-raw_delete", cron_kind: "raw_delete",
+          service_id: "fixture-service", started_at: timestamp + 1000, duration_ms: 100, outcome: "error", error: "delete failed" },
+        { timestamp: timestamp + 2000, event_id: "flush", run_id: "run-log_flush", cron_kind: "log_flush",
+          service_id: "fixture-service", started_at: timestamp + 2000, duration_ms: 50, outcome: "partial" },
+        { timestamp, event_id: "other-service", cron_kind: "rum_ingest", service_id: "other-service", outcome: "done" },
+      ],
+      oldestLiveMs: null, status: null,
+      stats: { listed: 1, read: 1, cached: 0, cdnHits: 0, skippedCovered: 0, ignoredCompact: 0, evicted: 0, liveRows: 0 },
+    });
+  }
+  const cronRange = "start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z";
+
+  it("rejects invalid cron ranges before reading native or telemetry data", async () => {
+    for (const range of ["end=invalid", "start=invalid", "start=2026-01-02T00:00:00Z&end=2026-01-01T00:00:00Z"]) {
+      expect((await cloudAdminWire(request(`/api/cron-runs?${range}`)))!.status).toBe(422);
+    }
+    expect(adminRequest).not.toHaveBeenCalled();
+    expect(queryOpsLogs).not.toHaveBeenCalled();
+  });
+
+  it("shows actual per-stage execution evidence and keeps idle coordinators distinct", async () => {
+    cronEvidence();
+    const runs = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}`)))!.json();
+    expect(runs).toMatchObject({ total: 4, entries: [
+      { task: "log_flush", status: "partial_success", duration_s: 0.05 },
+      { task: "raw_delete", status: "error", summary: "delete failed", error_message: "delete failed" },
+      { task: "request_ingest", status: "success", duration_s: 0.2,
+        files_downloaded: 2, rows_ingested: 4, corrupt_rows: 1 },
+      { task: "cloud_ingest_clock", status: "skipped" },
     ] });
-    expect(typeof runs.entries[0].id).toBe("number");
-    expect(await (await cloudAdminWire(request("/api/cron-schedule")))!.json()).toEqual({
-      schedules: [{ task: "cloud_ingest_clock", next_run_time: "2026-01-01T00:02:00Z", last_run_time: "2026-01-01T00:00:00Z", interval_s: 120 }],
-    });
+    expect(runs.entries.every((row: { id: unknown }) => typeof row.id === "number")).toBe(true);
+    expect(queryOpsLogs).toHaveBeenCalledWith("cron_runs", {
+      from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z",
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("uses native schedules without inventing runs for disabled or unseen tasks", async () => {
+    cronEvidence();
+    const data = await (await cloudAdminWire(request(`/api/cron-schedule?${cronRange}`)))!.json();
+    expect(data.schedules).toHaveLength(6);
+    expect(data.schedules).toContainEqual(expect.objectContaining({
+      task: "rum_ingest", next_run_time: null, disabled_reason: "RUM is disabled", last_run_time: null,
+    }));
+    expect(data.schedules).toContainEqual(expect.objectContaining({
+      task: "log_flush", last_run_time: "2026-01-01T00:00:02.000Z",
+    }));
+    expect(data.schedules).toContainEqual(expect.objectContaining({
+      task: "retention_sweep", last_run_time: null, next_run_time: null,
+    }));
+  });
+
+  it("filters task, status and since_id before pagination", async () => {
+    cronEvidence();
+    const all = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}`)))!.json();
+    const filtered = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&task=raw_delete&status=error&per_page=1`)))!.json();
+    expect(filtered).toMatchObject({ total: 1, entries: [{ task: "raw_delete", status: "error" }] });
+    const newer = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&since_id=${all.entries[0].id}`)))!.json();
+    expect(newer.entries).toEqual([]);
+    const second = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&page=2&per_page=1`)))!.json();
+    expect(second).toMatchObject({ total: 4, page: 2, entries: [{ task: "raw_delete" }] });
+  });
+
+  it("does not turn incomplete or failed telemetry reads into empty successful history", async () => {
+    cronEvidence();
+    vi.mocked(queryOpsLogs).mockRejectedValueOnce(new Error("telemetry unavailable"));
+    await expect(cloudAdminWire(request(`/api/cron-runs?${cronRange}`))).rejects.toThrow("telemetry unavailable");
+    const evidence = await queryOpsLogs("cron_runs", { from: "", to: "" });
+    vi.mocked(queryOpsLogs).mockResolvedValueOnce({ ...evidence, liveTruncated: true });
+    await expect(cloudAdminWire(request(`/api/cron-runs?${cronRange}`))).rejects.toThrow("incomplete");
+  });
+
+  it("honors cancellation and rejects service mismatches without querying another service's history", async () => {
+    cronEvidence();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(cloudAdminWire(new Request(`http://localhost/api/cron-runs?${cronRange}`, {
+      signal: controller.signal,
+    }))).rejects.toThrow();
+    expect(queryOpsLogs).not.toHaveBeenCalled();
+    await expect(cloudAdminWire(request(`/api/cron-runs?${cronRange}&service_id=other-service`)))
+      .rejects.toThrow("service");
+    expect(queryOpsLogs).not.toHaveBeenCalled();
   });
 
   it("maps native audit details and honors filtering before pagination", async () => {

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/duckdb";
+import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/test-fixtures";
 import { cloudRumAnalytics } from "./rum-wire";
 import {
   classifyCwvRating,
@@ -12,6 +12,52 @@ import {
 } from "./rum";
 
 describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
+  it("filters RUM-only shared, vital-only and error-only fields against their actual tables", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value, browser_name)
+        VALUES ('v', 1700000000000, 'LCP', 1000, 'Chrome'),
+          ('v', 1700000001000, 'CLS', 0.1, 'Safari')`);
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, ts_ms, error_type, error_message, browser_name)
+        VALUES ('e', 1700000000000, 'TypeError', 'Synthetic failure', 'Chrome')`);
+      for (const [field, mode, value, vitals, errors] of [
+        ["browser_name", "include", "Chrome", 1, 1],
+        ["browser", "include", "Chrome", 1, 1],
+        ["metric_name", "include", "LCP", 1, 0],
+        ["metric_value", "include", "1000.0", 1, 0],
+        ["error_type", "include", "TypeError", 0, 1],
+        ["metric_name", "exclude", "LCP", 1, 1],
+      ] as const) {
+        const params = { engine, filters: { [field]: { mode, values: [value] } } };
+        const data = await queryRumAnalytics(params);
+        expect(data.summary.total_vitals_events, field).toBe(vitals);
+        expect(data.summary.total_errors, field).toBe(errors);
+        expect((await queryRumLiveEvents(params)).events, field).toHaveLength(vitals + errors);
+      }
+      const bounded = { engine, start_time: 1700000000000, end_time: 1700000001000 };
+      expect((await queryRumAnalytics(bounded)).summary)
+        .toMatchObject({ total_vitals_events: 1, total_errors: 1 });
+      expect((await queryRumLiveEvents(bounded)).events).toHaveLength(2);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("rejects active fields absent from RUM instead of ignoring them or compiling request columns", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      for (const field of ["unknown_field", "host"]) {
+        const params = { engine, filters: { [field]: { mode: "exclude" as const, values: ["offline-value"] } } };
+        await expect(queryRumAnalytics(params)).rejects.toThrow("Unsupported RUM filter");
+        await expect(queryRumLiveEvents(params)).rejects.toThrow("Unsupported RUM filter");
+      }
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("returns CWV wire distributions as percentages for two LCP beacons", async () => {
     const engine = getDuckDBEngine();
     try {

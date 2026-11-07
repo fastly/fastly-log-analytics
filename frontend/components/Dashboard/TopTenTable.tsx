@@ -43,7 +43,7 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
   const removeFilter = useFilterStore(s => s.removeFilter)
   const filters = useFilterStore(s => s.filters)
 
-  const { data, isLoading, isFetching } = useFieldValues({ field, search: debouncedSearch, limit: 100, enabled: open })
+  const { data, isLoading, isFetching, error, refetch } = useFieldValues({ field, search: debouncedSearch, limit: 100, enabled: open })
 
   // Filters already active for this field are pinned to the top of the list,
   // so re-opening the dialog shows what's currently selected. They follow the
@@ -126,7 +126,14 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
                   <div className="border-t my-1" aria-hidden="true" />
                 </>
               )}
-              {isLoading ? (
+              {error ? (
+                <div role="alert" className="space-y-2 p-4 text-sm">
+                  <p>{error.message}</p>
+                  <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
+                    Retry search
+                  </Button>
+                </div>
+              ) : isLoading ? (
                 <div className="space-y-2 p-2">
                   <Skeleton className="h-8 w-full" />
                   <Skeleton className="h-8 w-full" />

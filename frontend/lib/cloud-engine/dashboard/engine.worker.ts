@@ -144,6 +144,8 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   }
 
   const source = sharedSource.withOptions({
+    serviceId: msg.type === "search" || msg.type === "searchSummaries"
+      ? msg.options.serviceId : undefined,
     getPageLoadId: () => msg.pageLoadId ?? "",
     onApiCall: msg.reportApiCalls
       ? (call: BrowserSourceCallEvent) =>

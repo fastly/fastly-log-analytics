@@ -48,6 +48,66 @@ function paginate(rows: Row[], params: URLSearchParams) {
   return { entries: rows.slice((page - 1) * perPage, page * perPage), total: rows.length, page, per_page: perPage };
 }
 
+async function cron(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const params = url.searchParams;
+  const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
+  const to = Date.parse(end);
+  const start = params.get("start") ?? params.get("start_time") ??
+    (Number.isFinite(to) ? new Date(to - 7 * 86400000).toISOString() : "");
+  const from = Date.parse(start);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+    return Response.json({ detail: { error: "invalid_time_range" } }, { status: 422 });
+  }
+  const page = await nativePages(request, "/api/cron-runs", "runs");
+  const service = params.get("service_id") ?? request.headers.get("x-service-id") ?? page.service_id;
+  if (service && page.service_id !== service) throw new Error("Cloud cron service does not match the selected service");
+  const evidence = await queryOpsLogs("cron_runs", { from: start, to: end }, { signal: request.signal });
+  request.signal.throwIfAborted();
+  if (evidence.liveTruncated) throw new Error("Cloud cron history is incomplete; choose a smaller range");
+  const stageRows = evidence.rows.filter((row) => typeof row.cron_kind === "string")
+    .map((row): Row => ({ ...row, task: row.cron_kind }));
+  const coordinators = (page.runs as Row[]).map((row): Row => ({ ...row, task: "cloud_ingest_clock" }));
+  const entries = [...stageRows, ...coordinators]
+    .filter((row) => !service || row.service_id === service)
+    .map((row) => {
+      const started = typeof row.started_at === "number" ? row.started_at : Date.parse(String(row.started_at));
+      const duration = typeof row.duration_ms === "number" ? row.duration_ms : null;
+      return {
+        ...row,
+        task: String(row.task),
+        id: started * 1000 + id(`${row.task}:${row.run_id ?? row.event_id ?? row.id}`) % 1000,
+        started_at: new Date(started).toISOString(),
+        finished_at: row.finished_at ?? (duration === null ? null : new Date(started + duration).toISOString()),
+        duration_s: duration === null ? null : duration / 1000,
+        error_message: row.error ?? null,
+        files_downloaded: row.converted_files ?? row.converted_raw_files ?? null,
+        files_deleted_fos: row.deleted_files ?? row.deleted_raw_files ?? null,
+        rows_ingested: row.rows_written ?? null,
+        corrupt_rows: row.bad_lines ?? null,
+        status: row.error || row.outcome === "error" ? "error" : row.outcome === "done" ? "success" :
+          row.outcome === "partial" ? "partial_success" : "skipped",
+        summary: row.error ?? `${row.task}: ${row.outcome}`,
+        result_json: JSON.stringify(row),
+      };
+    }).filter((row) => Date.parse(row.started_at) >= from && Date.parse(row.started_at) <= to)
+    .sort((a, b) => b.id - a.id);
+  const history = { history_from: start, history_to: end };
+  if (url.pathname === "/api/cron-schedule") {
+    if (!Array.isArray(page.schedules)) throw new Error("Cloud native task schedules are unavailable");
+    const schedules = (page.schedules as Row[]).map((schedule) => {
+      const observed = entries.find((row) => row.task === schedule.task)?.started_at;
+      const recorded = typeof schedule.last_run_time === "string" ? schedule.last_run_time : null;
+      return { ...schedule, last_run_time: observed && (!recorded || Date.parse(observed) > Date.parse(recorded)) ? observed : recorded };
+    });
+    return Response.json({ schedules, ...history });
+  }
+  const sinceId = params.has("since_id") ? Number(params.get("since_id")) : null;
+  const filtered = entries.filter((row) => (!params.get("task") || row.task === params.get("task")) &&
+    (!params.get("status") || row.status === params.get("status")) && (sinceId === null || row.id > sinceId));
+  return Response.json({ ...page, ...history, ...paginate(filtered, params) });
+}
+
 async function usage(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const params = url.searchParams;
@@ -153,24 +213,7 @@ export async function cloudAdminWire(request: Request): Promise<Response | null>
     return Response.json(paginate(entries, url.searchParams));
   }
   if (path === "/api/cron-runs" || path === "/api/cron-schedule") {
-    const page = await nativePages(request, "/api/cron-runs", "runs");
-    const entries = (page.runs as Row[]).map((row) => ({
-      ...row, id: Date.parse(String(row.started_at)) * 1000 + id(row.id) % 1000,
-      task: "cloud_ingest_clock", duration_s: Number(row.duration_ms) / 1000,
-      status: row.outcome === "error" ? "error" : row.outcome === "done" ? "success" : "skipped",
-      summary: row.error ?? `${row.converted_raw_files} files converted · ${row.rows_written} rows`,
-      result_json: JSON.stringify(row),
-    }));
-    if (path === "/api/cron-schedule") {
-      return Response.json({ schedules: [{
-        task: "cloud_ingest_clock", next_run_time: page.next_tick_at ?? null,
-        last_run_time: page.last_tick_at ?? null, interval_s: page.clock_interval_s,
-        ...(page.configured === false ? { disabled_reason: "Cloud ingest clock is not configured" } : {}),
-      }] });
-    }
-    const filtered = entries.filter((row) => (!url.searchParams.get("task") || row.task === url.searchParams.get("task")) &&
-      (!url.searchParams.get("status") || row.status === url.searchParams.get("status")));
-    return Response.json({ ...page, ...paginate(filtered, url.searchParams) });
+    return cron(request);
   }
   return null;
 }

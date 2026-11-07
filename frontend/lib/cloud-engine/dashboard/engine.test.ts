@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { Aggregator, runDashboard, searchFieldValues } from "./engine";
+import { getDuckDBEngine } from "./duckdb";
 import {
   discoverPresets,
   discoverPresetsWithManifest,
@@ -1272,6 +1273,87 @@ describe("dashboard filters", () => {
       { value: "alpha.example.com", count: 1 },
       { value: "Alpha.Example.com", count: 1 },
     ]);
+  });
+
+  it("finds rare values through the Cloud selective source without building every card's rollup", async () => {
+    const key = "pq/selective-search.parquet";
+    const rows = [
+      ...Array.from({ length: 4200 }, (_, i) =>
+        Array.from({ length: 3 }, () => row(5, { host: `common-${i}.example` }))).flat(),
+      row(10, { host: "rare_100%.example" }),
+      row(15, { host: "rare_100%.example" }),
+      row(20, { host: "rare_100%.example", country: "DE" }),
+      row(30, { host: "rare_100%.example" }),
+    ];
+    const bytes = await parquetFixture(rows);
+    const source = fixtureSource([{
+      files: [manifestEntry(key, "2026-10-29T10:00:00Z", "2026-10-29T10:05:00Z", rows.length)],
+      next_cursor: null,
+      complete: true,
+    }], { [key]: bytes });
+    const writeRollup = vi.spyOn(source, "writeRollup");
+    const result = await searchFieldValues({
+      ...source,
+      openParquet: async () => ({ kind: "buffer", bytes }),
+    }, {
+      from: "2026-10-29T10:00:00Z",
+      to: "2026-10-29T10:00:30Z",
+      column: "host",
+      query: "RARE_100%",
+      filters: [
+        f("include", "host", "common-1.example"),
+        f("include", "country", "US"),
+      ],
+    });
+    expect(result).toEqual([{ value: "rare_100%.example", count: 2 }]);
+    expect(writeRollup).not.toHaveBeenCalled();
+  });
+
+  it("scans only the searched field for a complete Cloud window", async () => {
+    const key = "pq/field-only.parquet";
+    const bytes = await parquetFixture([row(5)]);
+    const source = fixtureSource([{
+      files: [manifestEntry(key, "2026-10-29T10:00:00Z", "2026-10-29T10:05:00Z", 1)],
+      next_cursor: null,
+      complete: true,
+    }], { [key]: bytes });
+    const query = vi.spyOn(getDuckDBEngine(), "queryParquetIntoAggregator");
+    const writeRollup = vi.spyOn(source, "writeRollup");
+    try {
+      expect(await searchFieldValues({
+        ...source,
+        openParquet: async () => ({ kind: "buffer", bytes }),
+      }, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:05:00Z",
+        column: "host",
+        query: "",
+      })).toEqual([{ value: "a.example", count: 1 }]);
+      expect(query.mock.calls[0][4].fields).toEqual(["host"]);
+      expect(writeRollup).not.toHaveBeenCalled();
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it.each([
+    ["ttl", "100000000000000000000", 1e20],
+    ["host", "i\u0307stanbul", "İSTANBUL.example"],
+  ] as const)("preserves JavaScript search text for %s on the selective path", async (column, query, value) => {
+    const key = "pq/search-text.parquet";
+    const bytes = await parquetFixture([row(5, { [column]: value })]);
+    const source = fixtureSource([{
+      files: [manifestEntry(key, "2026-10-29T10:00:00Z", "2026-10-29T10:05:00Z", 1)],
+      next_cursor: null, complete: true,
+    }], { [key]: bytes });
+    expect(await searchFieldValues({
+      ...source,
+      openParquet: async () => ({ kind: "buffer", bytes }),
+    }, {
+      from: "2026-10-29T10:00:00Z",
+      to: "2026-10-29T10:05:00Z",
+      column, query,
+    })).toEqual([{ value, count: 1 }]);
   });
 });
 

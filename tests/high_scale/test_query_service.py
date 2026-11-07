@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from threading import Event, Lock
+from threading import Event, Lock, current_thread
 from time import monotonic, sleep
 from types import SimpleNamespace
 from typing import Any
@@ -2204,6 +2205,53 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
     for sql, params in client.calls:
         assert "svc" not in sql
         assert re.findall(r"\{(\w+):", sql) and all(name in params for name in re.findall(r"\{(\w+):", sql))
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_insights_detector_telemetry_survives_async_and_worker_boundaries(fails: bool) -> None:
+    from structlog.testing import capture_logs
+
+    class Client(_InsightsClient):
+        def __init__(self) -> None:
+            super().__init__(fail={"error_spikes"} if fails else set())
+            self.scopes: dict[str, tuple[dict[str, Any], str]] = {}
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            marker = re.search(r"/\* insight:(\w+) \*/", sql)
+            assert marker is not None
+            self.scopes[marker.group(1)] = (current_clickhouse_scope(), current_thread().name)
+            return super().execute(sql, params)
+
+    client = Client()
+    secret = "sentinel-insight-private-filter"
+    req = InsightsRequest(filters={"url": FilterSpec(mode="include", values=[secret])})
+    service = SimpleNamespace(service_id="svc", client=client)
+    token = current_attribution.set(Attribution(kind="admin", request_id="request-insights"))
+    previous_page = get_page_load_id()
+    set_page_load_id("page-insights")
+
+    async def invoke() -> Any:
+        return await asyncio.to_thread(insights_endpoint, service, req, None, None)
+
+    try:
+        with capture_logs() as logs:
+            response = asyncio.run(invoke())
+    finally:
+        set_page_load_id(previous_page)
+        current_attribution.reset(token)
+
+    assert {"history", "fields", "error_spikes"} <= client.scopes.keys()
+    for detector, (scope, thread) in client.scopes.items():
+        assert scope["component"] == "insights" and scope["section"] == f"insights.{detector}"
+        assert scope["source"] == "fact" and scope["service_id"] == "svc"
+        assert scope["request_id"] == "request-insights" and scope["page_load_id"] == "page-insights"
+        assert scope["section_id"] is not None and thread.startswith("hs-insights")
+    sections = {entry["section"]: entry for entry in logs if entry["event"] == "high_scale.section"}
+    assert set(sections) == {f"insights.{detector}" for detector in client.scopes}
+    assert sections["insights.error_spikes"]["outcome"] == ("error" if fails else "success")
+    assert _insight_cards(response)["error_spikes"]["severity"] == ("error" if fails else "clean")
+    assert secret not in json.dumps(logs, default=str)
+    assert current_clickhouse_scope()["section_id"] is None
 
 
 def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pytest.MonkeyPatch) -> None:

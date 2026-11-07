@@ -11,7 +11,7 @@
  */
 
 import { sqlEscape } from "@/lib/sqlBuilder";
-import { compileFiltersToSql, getDuckDBEngine } from "./dashboard/duckdb";
+import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import { POP_COORDINATES, haversineKm } from "./origin";
 import { formatAsnLabel, type FilterSpec } from "./performance";
@@ -104,6 +104,7 @@ export const well_known_bots: readonly WellKnownBotEntry[] = [
 ] as const;
 
 export interface SecurityAggregatesRequest {
+  customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
   start_time?: string | null;
   end_time?: string | null;
   range_token?: string | null;
@@ -265,9 +266,9 @@ export function setSecurityEngineClient(client: SecurityEngineClient | null): vo
   customSecurityClient = client;
 }
 
-export async function getSecurityEngineClient(): Promise<SecurityEngineClient> {
+export async function getSecurityEngineClient(context?: DuckDBReadContext): Promise<SecurityEngineClient> {
   if (customSecurityClient) return customSecurityClient;
-  const engine = getDuckDBEngine() as unknown as {
+  const engine = (context ?? getDuckDBEngine().readContext()) as unknown as {
     getPresentColumns: () => Promise<ReadonlySet<string>>;
     querySql?: (sql: string) => Promise<Record<string, unknown>[]>;
     executeSql?: (sql: string) => Promise<Record<string, unknown>[]>;
@@ -372,9 +373,9 @@ function buildSecurityBaseWhere(
     const ms = Date.parse(req.end_time);
     if (Number.isFinite(ms)) {
       if (availableColumns?.has("ts_ms")) {
-        clauses.push(`"ts_ms" <= ${Math.ceil(ms)}`);
+        clauses.push(`"ts_ms" < ${Math.ceil(ms)}`);
       } else {
-        clauses.push(`timestamp <= CAST('${sqlEscape(new Date(ms).toISOString())}' AS TIMESTAMPTZ)`);
+        clauses.push(`timestamp < CAST('${sqlEscape(new Date(ms).toISOString())}' AS TIMESTAMPTZ)`);
       }
     }
   }
@@ -395,7 +396,7 @@ function buildSecurityBaseWhere(
       }
     }
     if (dFilters.length > 0) {
-      clauses.push(`(${compileFiltersToSql(dFilters)})`);
+      clauses.push(`(${compileFiltersToSql(dFilters, false, [], req.customColumnTypes)})`);
     }
   }
 
@@ -970,8 +971,11 @@ export function formatProxiesExportPayload(
 
 export async function executeSecurityAggregates(
   req: SecurityAggregatesRequest,
+  context?: DuckDBReadContext,
 ): Promise<SecurityAggregatesResponse> {
-  const client = await getSecurityEngineClient();
+  const read = context ?? getDuckDBEngine().readContext();
+  req = { ...req, customColumnTypes: read.getCustomColumnTypes() };
+  const client = await getSecurityEngineClient(read);
   const availableColumns = await client.getAvailableColumns();
   const sections = expandSecuritySections(req.sections);
   const maskIps = Boolean(req.mask_ips);
@@ -1131,8 +1135,11 @@ export async function executeSecurityAggregates(
 
 export async function executeSecurityThreatIntel(
   req: SecurityAggregatesRequest,
+  context?: DuckDBReadContext,
 ): Promise<ThreatIntelListResponse> {
-  const client = await getSecurityEngineClient();
+  const read = context ?? getDuckDBEngine().readContext();
+  req = { ...req, customColumnTypes: read.getCustomColumnTypes() };
+  const client = await getSecurityEngineClient(read);
   const availableColumns = await client.getAvailableColumns();
   const { sql, params } = buildSecurityThreatIntelSql(req, availableColumns);
   const rows = await client.query(sql, params);
@@ -1181,20 +1188,24 @@ export async function handleSecurityRequest(
   req: Request,
   path?: string,
   url?: URL,
+  context?: DuckDBReadContext,
 ): Promise<Response | null> {
   const parsedUrl = url ?? new URL(req.url, "http://localhost");
   const pathname = (path ?? parsedUrl.pathname).replace(/\/+$/, "");
+  if (/^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?|threat-intel)$/.test(pathname)) {
+    context ??= getDuckDBEngine().readContext();
+  }
 
   if (pathname === "/api/security/aggregates" || pathname === "/api/security/bundle") {
     const secReq = await parseSecurityRequest(req, parsedUrl);
-    const data = await executeSecurityAggregates(secReq);
+    const data = await executeSecurityAggregates(secReq, context);
     return Response.json(data, { status: 200 });
   }
 
   if (pathname === "/api/security/top-bots") {
     const secReq = await parseSecurityRequest(req, parsedUrl);
     secReq.sections = ["top_bots"];
-    const data = await executeSecurityAggregates(secReq);
+    const data = await executeSecurityAggregates(secReq, context);
     return Response.json(
       { bots: data.bots ?? [], ngwaf_bots: data.ngwaf_bots ?? [] },
       { status: 200 },
@@ -1204,20 +1215,20 @@ export async function handleSecurityRequest(
   if (pathname === "/api/security/proxies") {
     const secReq = await parseSecurityRequest(req, parsedUrl);
     secReq.sections = ["proxies"];
-    const data = await executeSecurityAggregates(secReq);
+    const data = await executeSecurityAggregates(secReq, context);
     return Response.json(data, { status: 200 });
   }
 
   if (pathname === "/api/security/threat-intel") {
     const secReq = await parseSecurityRequest(req, parsedUrl);
-    const data = await executeSecurityThreatIntel(secReq);
+    const data = await executeSecurityThreatIntel(secReq, context);
     return Response.json(data, { status: 200 });
   }
 
   if (pathname === "/api/security/proxies/export") {
     const secReq = await parseSecurityRequest(req, parsedUrl);
     secReq.sections = ["proxies"];
-    const data = await executeSecurityAggregates(secReq);
+    const data = await executeSecurityAggregates(secReq, context);
     const threshold = parsedUrl.searchParams.get("threshold") ?? "High";
     const format = parsedUrl.searchParams.get("format") ?? "fastly-acl";
     const exported = formatProxiesExportPayload(data.active_clients ?? [], {

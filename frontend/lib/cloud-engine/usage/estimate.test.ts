@@ -439,6 +439,15 @@ const base: EstimateMeasurements = {
 };
 
 describe("measureEstimate", () => {
+  it("keeps unavailable edge traffic unmeasured instead of turning it into zero", () => {
+    const measured = measureEstimate({ ...base, traffic: [{ requests: 1000 }] });
+    expect(measured.inputs.requestsPerDay).toBe(1000);
+    expect(measured.measuredInputs.edgeRequestsPerDay).toBeUndefined();
+    expect(measured.inputs.edgeRequestsPerDay).toBe(DEFAULT_INPUTS.edgeRequestsPerDay);
+    const zero = measureEstimate({ ...base, traffic: [{ requests: 1000, edge_requests: 0 }] });
+    expect(zero.inputs.edgeRequestsPerDay).toBe(0);
+    expect(zero.measuredInputs.edgeRequestsPerDay).toBe(true);
+  });
   it("takes traffic and logging settings from the logged service", () => {
     const { inputs, measuredInputs } = measureEstimate(base);
     expect(inputs).toMatchObject({

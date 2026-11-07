@@ -46,7 +46,6 @@ export function CronTab({
   setTaskFilter,
   statusFilter,
   setStatusFilter,
-  status,
   activeServiceId,
   setDisplayedJobs,
   setSelectedConsoleJobId,
@@ -89,14 +88,11 @@ export function CronTab({
     () => orderedSchedules.filter((s) => !groupedTaskNames.includes(s.task)),
     [orderedSchedules, groupedTaskNames],
   )
-  const taskFilterOptions: Array<[string, string]> = [
-    ['rum_sync', 'RUM Sync'],
-    ['full_sync', 'Full Sync'],
-    ['gap_heal', 'Gap Heal'],
-    ['alerts', 'Alerts'],
-    ...(status?.ngwaf_workspace_id ? [['ngwaf_sync', 'NGWAF Sync'] as [string, string]] : []),
-    ['metadata_cleanup', 'Metadata Cleanup'],
-  ]
+  const taskFilterOptions = [...new Set([
+    ...orderedSchedules.map((schedule) => schedule.task),
+    ...(cronLogs?.entries ?? []).map((run) => run.task),
+  ])].sort().map((task) => [task, CRON_DISPLAY_NAMES[task] || task])
+  const availableTasks = new Set(taskFilterOptions.map(([task]) => task))
 
   return (
     <div className="p-0">
@@ -136,11 +132,11 @@ export function CronTab({
                       Fastly Log Analytics uses a distributed architecture of background jobs to ingest logs, perform
                       maintenance, and pre-calculate analytics.
                     </p>
-                    {CRON_GROUPS.map((group) => (
+                    {CRON_GROUPS.filter((group) => group.tasks.some((task) => availableTasks.has(task))).map((group) => (
                       <div key={group.title} className="space-y-2">
                         <h4 className="font-semibold text-foreground">{group.title}</h4>
                         <ul className="space-y-3">
-                          {group.tasks.map((task) => (
+                          {group.tasks.filter((task) => availableTasks.has(task)).map((task) => (
                             <li key={task} className="pl-4 border-l-2 border-muted">
                               <div className="flex items-center gap-2 mb-1">
                                 <span className="font-medium text-foreground">{CRON_DISPLAY_NAMES[task] || task}</span>
@@ -199,7 +195,6 @@ export function CronTab({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All tasks</SelectItem>
-                      <SelectItem value="log_discovery">Log Discovery</SelectItem>
                       {taskFilterOptions.map(([val, label]) => (
                         <SelectItem key={val} value={val}>
                           {label}

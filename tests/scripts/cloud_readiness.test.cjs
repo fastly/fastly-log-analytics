@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const { CLOUD_READINESS_INIT_SCRIPT, waitForDashboardResult, waitForCloudReport } = require('../../scripts/lib/cloud_readiness.cjs');
+const { CLOUD_READINESS_INIT_SCRIPT, waitForDashboardResult, waitForCloudReport, waitForCloudIdle } = require('../../scripts/lib/cloud_readiness.cjs');
 
 function documentState(search = '?range=1h') {
   const listeners = {};
@@ -89,6 +89,25 @@ test('non-dashboard routes need their own successful analytical response, not bo
   assert.equal(doc.state().ready, true);
 });
 
+test('nested admin pages require their own completed data namespace, not bootstrap or unrelated admin reads', () => {
+  for (const [route, section] of [
+    ['/admin/session-scoring', 'api./api/services/svc/scoring/analytics'],
+    ['/admin/rum', 'api./api/services/svc/rum/status'],
+    ['/admin/share', 'api./api/admin/share/status'],
+    ['/admin/usage-log', 'api./api/admin/usage-log'],
+  ]) {
+    const doc = documentState('');
+    doc.location.pathname = route;
+    doc.emit({ route, section: 'api./api/admin/debug-settings', state: 'success' });
+    assert.equal(doc.state().ready, false, route);
+    doc.emit({ route, id: 2, section, state: 'pending' });
+    assert.equal(doc.state().pending, 1, route);
+    assert.equal(doc.state().ready, false, route);
+    doc.emit({ route, id: 2, section, state: 'success' });
+    assert.equal(doc.state().ready, true, route);
+  }
+});
+
 function cspPage(snapshots, legacy = false) {
   let index = 0;
   return {
@@ -111,7 +130,16 @@ function cspPage(snapshots, legacy = false) {
   };
 }
 
-for (const [name, wait] of [['dashboard', waitForDashboardResult], ['report', waitForCloudReport]]) {
+test('configuration-only readiness does not require an invented analytical query', async () => {
+  const snapshot = await waitForCloudIdle(cspPage([
+    { observed: false, ready: false, pending: 0, errors: 0, complete: 0 },
+  ]), 1000);
+  assert.equal(snapshot.ready, true);
+  assert.equal(snapshot.observed, false);
+  assert.equal(snapshot.complete, 0);
+});
+
+for (const [name, wait] of [['dashboard', waitForDashboardResult], ['report', waitForCloudReport], ['configuration', waitForCloudIdle]]) {
   test(`CSP-safe ${name} readiness waits for real completion and accepts zero rows`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
     const page = cspPage([
@@ -129,11 +157,16 @@ for (const [name, wait] of [['dashboard', waitForDashboardResult], ['report', wa
 
   test(`CSP-safe ${name} readiness times out without inventing success`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
-    const page = cspPage([{ observed: true, ready: false, errors: 1, totalRows: 42 }]);
+    const page = cspPage([{ observed: true, ready: false, pending: 1, errors: 0, totalRows: 42 }]);
     const rejected = assert.rejects(wait(page, 40), /[Tt]imed out.*40/);
     await new Promise(setImmediate);
     t.mock.timers.tick(40);
     await rejected;
+  });
+
+  test(`CSP-safe ${name} readiness rejects a completed failed query without waiting for a timeout`, async () => {
+    const page = cspPage([{ observed: true, ready: false, pending: 0, errors: 1 }]);
+    await assert.rejects(wait(page, 1000), /query failed/i);
   });
 
   test(`CSP-safe ${name} readiness rejects completion arriving after its deadline`, async t => {

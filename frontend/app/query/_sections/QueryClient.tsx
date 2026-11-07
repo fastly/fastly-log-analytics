@@ -22,7 +22,7 @@ import { NoServiceSelected } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/confirm-dialog'
 import { applyUrlFiltersJsonToStore, downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import { buildStructuredSql } from '@/lib/sqlBuilder'
+import { buildQueryRequest, buildStructuredSql } from '@/lib/sqlBuilder'
 import { parseJsonAsync } from '@/lib/workers/parseJson'
 import type { components } from '@/types/api.generated'
 import {
@@ -204,8 +204,9 @@ function QueryPageInner() {
   })
 
   const queryMutation = useMutation({
-    mutationFn: async (params: { sql: string; max_rows: number; explain: boolean; dataset?: Dataset }) => {
-      const { data, error } = await client.POST('/api/query', { body: { dataset: 'logs', ...params }, parseAs: 'text' })
+    mutationFn: async (params: Parameters<typeof buildQueryRequest>[0]) => {
+      const body = buildQueryRequest(params, activeServiceId, startTime, endTime)
+      const { data, error } = await client.POST('/api/query', { body, parseAs: 'text' })
       if (error) {
         if (typeof error === 'string') {
           let parsed: ErrorBody | null = null

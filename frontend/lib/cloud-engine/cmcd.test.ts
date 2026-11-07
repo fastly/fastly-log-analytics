@@ -7,7 +7,7 @@ import {
   handleCmcdRequest,
   queryCmcdAggregates,
 } from "./cmcd";
-import { DuckDBAnalyticalEngine } from "./dashboard/duckdb";
+import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 
 describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
   it("does not fabricate missing optional streaming measurements", async () => {

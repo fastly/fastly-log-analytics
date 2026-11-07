@@ -10,10 +10,15 @@ import type {
 import { numericFilterValue, type DashboardFilter } from "./filters";
 import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
 import { CARD_FIELDS, type CustomField } from "./summaries";
+import {
+  boundedDuckDBCleanup,
+  DuckDBBackendInitializationError,
+  isFatalDuckDBError,
+  ParquetBindingStore,
+} from "./duckdb-bindings";
 
 // wasm32 caps the heap at 4 GiB; DuckDB's default (~3 GiB) would starve the tab.
 const MEMORY_LIMIT = "256MB";
-const DEFAULT_RESIDENT_BUDGET_BYTES = 512 * 1024 * 1024;
 const MINUTE_MS = 60_000;
 
 export type DuckDBColumnType = "BIGINT" | "DOUBLE" | "BOOLEAN" | "VARCHAR";
@@ -228,18 +233,19 @@ type ArrowSchemaField = {
   name: string;
 };
 
-type ArrowTableLike = {
+export type ArrowTableLike = {
   numRows: number;
   schema?: { fields?: ArrowSchemaField[] };
   getChild(name: string): ArrowColumnLike | null;
 };
 
-type DuckDBBackend = {
+export type DuckDBBackend = {
   registerFileBuffer(name: string, buffer: Uint8Array): Promise<void>;
   registerParquet?(name: string, file: ParquetAccess): Promise<void>;
   dropFile(name: string): Promise<void>;
   /** Rejects with the abort reason only if the statement did not complete. */
   query(sql: string, signal?: AbortSignal): Promise<ArrowTableLike>;
+  dispose(): Promise<void>;
 };
 
 export type ParquetAccess = (
@@ -271,10 +277,6 @@ function concatBatches(
       };
     },
   };
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
 }
 
 function sqlString(value: string): string {
@@ -319,7 +321,7 @@ export function compileFiltersToSql(
   filters: readonly DashboardFilter[],
   edgeOnly = false,
   noEdgeScopedKeys: readonly string[] = [],
-  customTypes: CustomTypes = new Map(),
+  customTypes: CustomTypes = getDuckDBEngine().getCustomColumnTypes(),
 ): string {
   const valid = filters.filter(
     (f) =>
@@ -357,7 +359,7 @@ export function compileFiltersToSql(
   return clauses.length > 0 ? clauses.join(" AND ") : "TRUE";
 }
 
-async function createNodeBackend(): Promise<DuckDBBackend> {
+export async function createNodeBackend(): Promise<DuckDBBackend> {
   const getBuiltin = (
     process as unknown as {
       getBuiltinModule?: (id: string) => unknown;
@@ -383,8 +385,10 @@ async function createNodeBackend(): Promise<DuckDBBackend> {
       instantiate: () => Promise<void>;
       registerFileBuffer: (name: string, buf: Uint8Array) => void;
       dropFile: (name: string) => void;
+      reset: () => void | Promise<void>;
       connect: () => {
         query: (sql: string) => ArrowTableLike;
+        close: () => void;
       };
     }>;
     VoidLogger: new () => unknown;
@@ -404,8 +408,18 @@ async function createNodeBackend(): Promise<DuckDBBackend> {
     new duckdb.VoidLogger(),
     duckdb.NODE_RUNTIME,
   );
-  await db.instantiate();
-  const conn = db.connect();
+  let conn: ReturnType<typeof db.connect>;
+  try {
+    await db.instantiate();
+    conn = db.connect();
+  } catch (error) {
+    try {
+      await boundedDuckDBCleanup(async () => { await db.reset(); });
+    } catch (cleanupError) {
+      throw new DuckDBBackendInitializationError(error, false, cleanupError);
+    }
+    throw new DuckDBBackendInitializationError(error, true);
+  }
   return {
     async registerFileBuffer(name: string, buffer: Uint8Array) {
       db.registerFileBuffer(name, buffer);
@@ -417,6 +431,10 @@ async function createNodeBackend(): Promise<DuckDBBackend> {
       // The Node build is blocking, so a statement cannot be interrupted.
       signal?.throwIfAborted();
       return conn.query(sql);
+    },
+    async dispose() {
+      conn.close();
+      await db.reset();
     },
   };
 }
@@ -431,33 +449,50 @@ export function duckdbAssetUrls(origin: string, version: string) {
   };
 }
 
-async function createBrowserBackend(): Promise<DuckDBBackend> {
+export async function createBrowserBackend(): Promise<DuckDBBackend> {
   const duckdb = await import("@duckdb/duckdb-wasm");
   const origin =
     typeof self !== "undefined" && self.location ? self.location.origin : "";
   const assets = duckdbAssetUrls(origin, duckdb.PACKAGE_VERSION);
   const worker = new Worker(assets.worker);
   const logger = new duckdb.VoidLogger();
-  const db = new duckdb.AsyncDuckDB(logger, worker);
-  await db.instantiate(assets.wasm);
-  await db.open({
-    // Disable open-time full-file fallback after the source's 206 identity
-    // probe. The SDK can still accept 200 responses on subsequent range reads.
-    filesystem: {
-      reliableHeadRequests: true,
-      allowFullHTTPReads: false,
-      forceFullHTTPReads: false,
-    },
-    opfs: { fileHandling: "manual" },
-  });
-  const conn = await db.connect();
-  await conn.query(
-    `SET custom_extension_repository = ${sqlString(assets.extensions)}`,
-  );
+  let db: InstanceType<typeof duckdb.AsyncDuckDB>;
+  try {
+    db = new duckdb.AsyncDuckDB(logger, worker);
+  } catch (error) {
+    try { worker.terminate(); }
+    catch (cleanupError) { throw new DuckDBBackendInitializationError(error, false, cleanupError); }
+    throw new DuckDBBackendInitializationError(error, true);
+  }
+  let conn: Awaited<ReturnType<typeof db.connect>>;
+  try {
+    await db.instantiate(assets.wasm);
+    await db.open({
+      // Disable open-time full-file fallback after the source's 206 identity
+      // probe. The SDK can still accept 200 responses on subsequent range reads.
+      filesystem: {
+        reliableHeadRequests: true,
+        allowFullHTTPReads: false,
+        forceFullHTTPReads: false,
+      },
+      opfs: { fileHandling: "manual" },
+    });
+    conn = await db.connect();
+    await conn.query(
+      `SET custom_extension_repository = ${sqlString(assets.extensions)}`,
+    );
+  } catch (error) {
+    try { await boundedDuckDBCleanup(() => db.terminate()); }
+    catch (cleanupError) { throw new DuckDBBackendInitializationError(error, false, cleanupError); }
+    throw new DuckDBBackendInitializationError(error, true);
+  }
   // One pending query per connection: serialize so cancelSent() only ever
   // cancels the statement that belongs to the aborted signal.
   let queue: Promise<unknown> = Promise.resolve();
   return {
+    async dispose() {
+      await db.terminate();
+    },
     async registerFileBuffer(name: string, buffer: Uint8Array) {
       // Transfers buffer.buffer to the DuckDB worker; the caller must own it.
       await db.registerFileBuffer(name, buffer);
@@ -525,6 +560,7 @@ async function createBrowserBackend(): Promise<DuckDBBackend> {
             (reader as { schema?: { fields?: ArrowSchemaField[] } }).schema,
           );
         } catch (error) {
+          if (isFatalDuckDBError(error)) throw error;
           signal?.throwIfAborted();
           throw error;
         } finally {
@@ -542,7 +578,7 @@ export type DuckDBLease = {
    * Returns resident metadata and pins the file until `release`; undefined
    * when it isn't resident with every custom column the lease needs.
    */
-  getFileMeta(scopedKey: string): IngestedFileMeta | undefined;
+  getFileMeta(scopedKey: string, kind?: "request" | "vitals" | "errors"): IngestedFileMeta | undefined;
   /** Ingests (or reuses) a file and pins it until `release`. */
   ingestFile(
     scopedKey: string,
@@ -550,11 +586,24 @@ export type DuckDBLease = {
     bytes: ArrayBuffer,
     knownStats?: { rawRows: number; minTs: number; maxTs: number },
     signal?: AbortSignal,
+    kind?: "request" | "vitals" | "errors",
   ): Promise<IngestedFileMeta>;
   release(): void;
+  readContext(): DuckDBReadContext;
+};
+
+export type DuckDBReadContext = {
+  release?(): void;
+  assertCurrent(): void;
+  executeSql<T = Record<string, unknown>>(sql: string, params?: readonly unknown[], signal?: AbortSignal): Promise<T[]>;
+  querySql<T = Record<string, unknown>>(sql: string, params?: readonly unknown[], signal?: AbortSignal): Promise<T[]>;
+  getPresentColumns(scopedKeys?: readonly string[]): Promise<Set<string>>;
+  getCustomColumnTypes(): CustomTypes;
+  getFileMeta(scopedKey: string): IngestedFileMeta | undefined;
 };
 
 export type AggregateQueryOptions = {
+  context?: DuckDBReadContext;
   edgeOnly?: boolean;
   /**
    * Return only the top-K values (plus ties) per field. Applied only while the
@@ -564,6 +613,8 @@ export type AggregateQueryOptions = {
   /** Fields that always need every value (e.g. the country map). */
   allValuesFields?: readonly string[];
   signal?: AbortSignal;
+  /** Field search must match before ranking and cannot use approximate candidates. */
+  fieldSearch?: { field: string; query: string };
 };
 
 function toScalarValue(value: unknown): Scalar | null {
@@ -579,7 +630,7 @@ function firstNumber(table: ArrowTableLike, column: string): number | null {
   return value === null || value === undefined ? null : Number(value);
 }
 
-function interpolateSqlParams(
+export function interpolateSqlParams(
   sql: string,
   params: readonly unknown[] = [],
 ): string {
@@ -636,7 +687,7 @@ function arrowTableToRows<T = Record<string, unknown>>(
   return rows;
 }
 
-const RUM_VITALS_COLUMNS: Record<string, DuckDBColumnType> = {
+export const RUM_VITALS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   request_event_id: "VARCHAR",
   client_id: "VARCHAR",
   metric_name: "VARCHAR",
@@ -662,7 +713,7 @@ const RUM_VITALS_COLUMNS: Record<string, DuckDBColumnType> = {
   service_id: "VARCHAR",
 };
 
-const RUM_ERRORS_COLUMNS: Record<string, DuckDBColumnType> = {
+export const RUM_ERRORS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   request_event_id: "VARCHAR",
   client_id: "VARCHAR",
   message: "VARCHAR",
@@ -684,600 +735,22 @@ const RUM_ERRORS_COLUMNS: Record<string, DuckDBColumnType> = {
   service_id: "VARCHAR",
 };
 
-export class DuckDBAnalyticalEngine {
-  private backendPromise: Promise<DuckDBBackend> | null = null;
-  /** Insertion order is recency order: the first entry is least recently used. */
-  private readonly ingestedFiles = new Map<string, IngestedFileMeta>();
-  private readonly ingestedRumVitals = new Set<string>();
-  private readonly ingestedRumErrors = new Set<string>();
-  private readonly inflightIngests = new Map<
-    string,
-    Promise<IngestedFileMeta>
-  >();
-  private readonly pins = new Map<string, number>();
-  private readonly customTypes = new Map<string, DuckDBColumnType>();
-  private presentColumnsOverride: Set<string> | null = null;
-  private readonly residentBudgetBytes: number;
+export class DuckDBAnalyticalEngine extends ParquetBindingStore {
   private nextVirtualFileId = 1;
 
-  constructor(options: { residentBudgetBytes?: number } = {}) {
-    this.residentBudgetBytes =
-      options.residentBudgetBytes ?? DEFAULT_RESIDENT_BUDGET_BYTES;
-  }
-
-  async prewarm(): Promise<void> {
-    await this.ensureBackend();
-  }
-
-  hasFile(scopedKey: string): boolean {
-    return this.ingestedFiles.has(scopedKey);
-  }
-
-  getFileMeta(scopedKey: string): IngestedFileMeta | undefined {
-    return this.ingestedFiles.get(scopedKey);
-  }
-
-  setPresentColumnsOverride(columns: Iterable<string> | null): void {
-    this.presentColumnsOverride = columns ? new Set(columns) : null;
-  }
-
-  async getPresentColumns(
-    scopedKeys?: readonly string[],
-  ): Promise<Set<string>> {
-    if (this.presentColumnsOverride) {
-      return new Set(this.presentColumnsOverride);
-    }
-    const result = new Set<string>();
-    const metas = scopedKeys
-      ? scopedKeys
-          .map((k) => this.ingestedFiles.get(k))
-          .filter((m): m is IngestedFileMeta => Boolean(m))
-      : [...this.ingestedFiles.values()];
-    for (const meta of metas) {
-      for (const col of meta.presentColumns ?? []) {
-        result.add(col);
-      }
-      result.add("timestamp");
-      result.add("ts_ms");
-    }
-    if (result.size > 0 || this.ingestedFiles.size > 0) {
-      return result;
-    }
-    const backend = await this.ensureBackend();
-    const countTable = await backend.query(
-      "SELECT COUNT(*)::BIGINT AS cnt FROM requests",
-    );
-    const totalRows = firstNumber(countTable, "cnt") ?? 0;
-    if (totalRows === 0) {
-      return result;
-    }
-    const exprs = ALL_TABLE_FIELDS.map(
-      (field, idx) => `COUNT(${sqlIdent(field)})::BIGINT AS c_${idx}`,
-    ).join(", ");
-    const nonNullTable = await backend.query(`SELECT ${exprs} FROM requests`);
-    ALL_TABLE_FIELDS.forEach((field, idx) => {
-      if ((firstNumber(nonNullTable, `c_${idx}`) ?? 0) > 0) {
-        result.add(field);
-      }
+  constructor(options: { backendFactory?: () => Promise<DuckDBBackend> } = {}) {
+    super({
+      factory: options.backendFactory ?? (() => typeof process !== "undefined" && process.versions?.node
+        ? createNodeBackend() : createBrowserBackend()),
+      schemas: { requests: FIELD_DUCKDB_TYPES, client_vitals: RUM_VITALS_COLUMNS, client_errors: RUM_ERRORS_COLUMNS },
+      memoryLimit: MEMORY_LIMIT,
+      rows: arrowTableToRows,
+      interpolate: interpolateSqlParams,
     });
-    result.add("timestamp");
-    result.add("ts_ms");
-    return result;
-  }
-
-  async executeSql<T = Record<string, unknown>>(
-    sql: string,
-    params: readonly unknown[] = [],
-    signal?: AbortSignal,
-  ): Promise<T[]> {
-    const backend = await this.ensureBackend();
-    signal?.throwIfAborted();
-    const finalSql = interpolateSqlParams(sql, params);
-    const table = await backend.query(finalSql, signal);
-    return arrowTableToRows<T>(table);
-  }
-
-  async querySql<T = Record<string, unknown>>(
-    sql: string,
-    params: readonly unknown[] = [],
-    signal?: AbortSignal,
-  ): Promise<T[]> {
-    return this.executeSql<T>(sql, params, signal);
-  }
-
-  async syncWindow(
-    files: readonly {
-      scopedKey?: string;
-      key: string;
-      bytes: ArrayBuffer;
-      knownStats?: { rawRows: number; minTs: number; maxTs: number };
-    }[],
-    signal?: AbortSignal,
-  ): Promise<IngestedFileMeta[]> {
-    const metas: IngestedFileMeta[] = [];
-    for (const file of files) {
-      signal?.throwIfAborted();
-      const sk = file.scopedKey ?? file.key;
-      const meta = await this.ingestFile(
-        sk,
-        file.key,
-        file.bytes,
-        file.knownStats,
-        signal,
-      );
-      metas.push(meta);
-    }
-    return metas;
-  }
-
-  async syncRumFiles(
-    vitalsFiles: readonly {
-      scopedKey?: string;
-      key: string;
-      bytes: ArrayBuffer;
-    }[],
-    errorFiles: readonly {
-      scopedKey?: string;
-      key: string;
-      bytes: ArrayBuffer;
-    }[] = [],
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const backend = await this.ensureBackend();
-    for (const file of vitalsFiles) {
-      signal?.throwIfAborted();
-      const sk = file.scopedKey ?? file.key;
-      if (this.ingestedRumVitals.has(sk)) continue;
-      await this.ingestRumTableFile(
-        backend,
-        "client_vitals",
-        RUM_VITALS_COLUMNS,
-        sk,
-        file.bytes,
-        signal,
-      );
-      this.ingestedRumVitals.add(sk);
-    }
-    for (const file of errorFiles) {
-      signal?.throwIfAborted();
-      const sk = file.scopedKey ?? file.key;
-      if (this.ingestedRumErrors.has(sk)) continue;
-      await this.ingestRumTableFile(
-        backend,
-        "client_errors",
-        RUM_ERRORS_COLUMNS,
-        sk,
-        file.bytes,
-        signal,
-      );
-      this.ingestedRumErrors.add(sk);
-    }
-  }
-
-  private async ingestRumTableFile(
-    backend: DuckDBBackend,
-    tableName: "client_vitals" | "client_errors",
-    schemaCols: Record<string, DuckDBColumnType>,
-    scopedKey: string,
-    bytes: ArrayBuffer,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const virtualName = `rum_${this.nextVirtualFileId++}.parquet`;
-    await backend.registerFileBuffer(virtualName, new Uint8Array(bytes));
-    try {
-      const schemaTable = await backend.query(
-        `DESCRIBE SELECT * FROM read_parquet(${sqlString(virtualName)})`,
-        signal,
-      );
-      const colNames =
-        (schemaTable.getChild("column_name")?.toJSON() as string[]) ?? [];
-      const colTypes =
-        (schemaTable.getChild("column_type")?.toJSON() as string[]) ?? [];
-      const typeByCol = new Map<string, string>();
-      for (let i = 0; i < colNames.length; i++) {
-        typeByCol.set(colNames[i], (colTypes[i] ?? "").toUpperCase());
-      }
-      const tsCol = typeByCol.has("timestamp")
-        ? "timestamp"
-        : typeByCol.has("ts_ms")
-          ? "ts_ms"
-          : null;
-      const tsType = tsCol ? (typeByCol.get(tsCol) ?? "") : "";
-      const tsExpr = !tsCol
-        ? "0::BIGINT"
-        : tsType.startsWith("TIMESTAMP")
-          ? `epoch_ms(${sqlIdent(tsCol)})::BIGINT`
-          : tsType.includes("CHAR")
-            ? `epoch_ms(TRY_CAST(${sqlIdent(tsCol)} AS TIMESTAMP))::BIGINT`
-            : `CAST(${sqlIdent(tsCol)} AS BIGINT)`;
-
-      const entries = Object.entries(schemaCols);
-      const aliases: Record<string, string> = {
-        request_event_id: "req_id", client_id: "cid", session_id: "cid",
-        rating: "metric_rating", page_url: "pathname", path: "pathname",
-        browser_name: "browser", os_name: "os", device_type: "device",
-        filename: "error_file", lineno: "error_line", colno: "error_col",
-      };
-      const selectCols = entries
-        .map(([field, targetType]) => {
-          const col = sqlIdent(field);
-          const sourceField = typeByCol.has(field) ? field : aliases[field];
-          if (!sourceField || !typeByCol.has(sourceField)) {
-            return `NULL::${targetType} AS ${col}`;
-          }
-          const cast = `CAST(${sqlIdent(sourceField)} AS ${targetType})`;
-          return targetType === "DOUBLE"
-            ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
-            : `${cast} AS ${col}`;
-        })
-        .join(", ");
-      const colList = [
-        "scoped_key",
-        "timestamp",
-        "ts_ms",
-        ...entries.map(([f]) => f),
-      ]
-        .map(sqlIdent)
-        .join(", ");
-      await backend.query(
-        `INSERT INTO ${tableName} (${colList}) SELECT ${sqlString(scopedKey)} AS scoped_key, epoch_ms((${tsExpr})::BIGINT)::TIMESTAMPTZ AS "timestamp", (${tsExpr})::BIGINT AS ts_ms, ${selectCols} FROM read_parquet(${sqlString(virtualName)})`,
-        signal,
-      );
-    } finally {
-      await backend.dropFile(virtualName).catch(() => {});
-    }
   }
 
   async memoryLimit(): Promise<string> {
-    const backend = await this.ensureBackend();
-    const table = await backend.query(
-      "SELECT current_setting('memory_limit') AS memory_limit",
-    );
-    return String(table.getChild("memory_limit")?.toJSON()?.[0] ?? "");
-  }
-
-  /** `customFields` are the custom columns every file the lease reads must hold. */
-  lease(customFields: readonly CustomField[] = []): DuckDBLease {
-    const required = customFields.map(
-      (field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]] as const,
-    );
-    const held = new Set<string>();
-    const pin = (scopedKey: string) => {
-      if (held.has(scopedKey)) return;
-      held.add(scopedKey);
-      this.pins.set(scopedKey, (this.pins.get(scopedKey) ?? 0) + 1);
-    };
-    return {
-      getFileMeta: (scopedKey) => {
-        const meta = this.ingestedFiles.get(scopedKey);
-        if (!meta || !this.covers(meta, required)) return undefined;
-        pin(scopedKey);
-        this.touch(scopedKey, meta);
-        return meta;
-      },
-      ingestFile: (scopedKey, key, bytes, knownStats, signal) => {
-        pin(scopedKey);
-        return this.ingestFile(
-          scopedKey,
-          key,
-          bytes,
-          knownStats,
-          signal,
-          required,
-        );
-      },
-      release: () => {
-        for (const scopedKey of held) {
-          const count = (this.pins.get(scopedKey) ?? 1) - 1;
-          if (count > 0) this.pins.set(scopedKey, count);
-          else this.pins.delete(scopedKey);
-        }
-        held.clear();
-      },
-    };
-  }
-
-  async reset(): Promise<void> {
-    this.ingestedFiles.clear();
-    this.ingestedRumVitals.clear();
-    this.ingestedRumErrors.clear();
-    this.inflightIngests.clear();
-    this.presentColumnsOverride = null;
-    if (this.backendPromise) {
-      const backend = await this.backendPromise;
-      await backend.query("DELETE FROM requests");
-      await backend.query("DELETE FROM client_vitals");
-      await backend.query("DELETE FROM client_errors");
-      await backend.query("CHECKPOINT");
-    }
-  }
-
-  private covers(
-    meta: IngestedFileMeta,
-    required: readonly (readonly [string, DuckDBColumnType])[],
-  ): boolean {
-    return required.every(
-      ([id, type]) =>
-        this.customTypes.get(id) === type &&
-        Boolean(meta.customColumns?.includes(id)),
-    );
-  }
-
-  /** Adds missing custom columns; a retyped column is recreated empty. */
-  private async ensureCustomColumns(
-    backend: DuckDBBackend,
-    required: readonly (readonly [string, DuckDBColumnType])[],
-  ): Promise<void> {
-    for (const [id, type] of required) {
-      const current = this.customTypes.get(id);
-      if (current === type) continue;
-      if (current) {
-        await backend.query(`ALTER TABLE requests DROP COLUMN ${sqlIdent(id)}`);
-        for (const [scopedKey, meta] of this.ingestedFiles) {
-          this.ingestedFiles.set(scopedKey, {
-            ...meta,
-            customColumns: meta.customColumns?.filter((name) => name !== id),
-          });
-        }
-      }
-      await backend.query(
-        `ALTER TABLE requests ADD COLUMN IF NOT EXISTS ${sqlIdent(id)} ${type}`,
-      );
-      this.customTypes.set(id, type);
-    }
-  }
-
-  private touch(scopedKey: string, meta: IngestedFileMeta): void {
-    this.ingestedFiles.delete(scopedKey);
-    this.ingestedFiles.set(scopedKey, meta);
-  }
-
-  private ensureBackend(): Promise<DuckDBBackend> {
-    if (!this.backendPromise) {
-      this.backendPromise = (async () => {
-        const isNode =
-          typeof process !== "undefined" && Boolean(process.versions?.node);
-        const backend = isNode
-          ? await createNodeBackend()
-          : await createBrowserBackend();
-        await backend.query(`SET memory_limit = ${sqlString(MEMORY_LIMIT)}`);
-        const colDefs = ALL_TABLE_FIELDS.map(
-          (field) =>
-            `${sqlIdent(field)} ${FIELD_DUCKDB_TYPES[field] ?? "VARCHAR"}`,
-        ).join(", ");
-        await backend.query(
-          `CREATE TABLE IF NOT EXISTS requests (scoped_key VARCHAR, ts_ms BIGINT, "timestamp" TIMESTAMPTZ, ${colDefs})`,
-        );
-        await backend.query(
-          `CREATE VIEW IF NOT EXISTS logs AS SELECT * FROM requests`,
-        );
-        const vitalsCols = Object.entries(RUM_VITALS_COLUMNS)
-          .map(([f, t]) => `${sqlIdent(f)} ${t}`)
-          .join(", ");
-        await backend.query(
-          `CREATE TABLE IF NOT EXISTS client_vitals (scoped_key VARCHAR, "timestamp" TIMESTAMPTZ, ts_ms BIGINT, ${vitalsCols})`,
-        );
-        const errorsCols = Object.entries(RUM_ERRORS_COLUMNS)
-          .map(([f, t]) => `${sqlIdent(f)} ${t}`)
-          .join(", ");
-        await backend.query(
-          `CREATE TABLE IF NOT EXISTS client_errors (scoped_key VARCHAR, "timestamp" TIMESTAMPTZ, ts_ms BIGINT, ${errorsCols})`,
-        );
-        return backend;
-      })();
-    }
-    return this.backendPromise;
-  }
-
-  /**
-   * Deletes least-recently-used, unpinned files while DuckDB holds more than
-   * the resident budget. Deleted rows are only reclaimed after a CHECKPOINT.
-   */
-  private async evictForIngest(backend: DuckDBBackend): Promise<void> {
-    if (this.ingestedFiles.size === 0) return;
-    const used =
-      firstNumber(
-        await backend.query(
-          "SELECT COALESCE(SUM(memory_usage_bytes), 0)::DOUBLE AS used FROM duckdb_memory()",
-        ),
-        "used",
-      ) ?? 0;
-    if (used <= this.residentBudgetBytes) return;
-    let residentRows = 0;
-    for (const meta of this.ingestedFiles.values()) {
-      residentRows += Math.max(1, meta.rawRows);
-    }
-    const bytesPerRow = used / residentRows;
-    let excess = used - this.residentBudgetBytes;
-    const victims: string[] = [];
-    for (const [scopedKey, meta] of this.ingestedFiles) {
-      if (excess <= 0) break;
-      if (this.pins.has(scopedKey)) continue;
-      victims.push(scopedKey);
-      excess -= Math.max(1, meta.rawRows) * bytesPerRow;
-    }
-    if (victims.length === 0) return;
-    // Forget victims synchronously so no lease can pin them; the queued DELETE
-    // runs before any re-ingest of the same key can insert.
-    for (const scopedKey of victims) this.ingestedFiles.delete(scopedKey);
-    await backend.query(
-      `DELETE FROM requests WHERE scoped_key IN (${victims.map(sqlString).join(", ")})`,
-    );
-    await backend.query("CHECKPOINT");
-  }
-
-  async ingestFile(
-    scopedKey: string,
-    key: string,
-    bytes: ArrayBuffer,
-    knownStats?: { rawRows: number; minTs: number; maxTs: number },
-    signal?: AbortSignal,
-    required: readonly (readonly [string, DuckDBColumnType])[] = [],
-  ): Promise<IngestedFileMeta> {
-    for (;;) {
-      signal?.throwIfAborted();
-      const existing = this.ingestedFiles.get(scopedKey);
-      if (existing && this.covers(existing, required)) {
-        this.touch(scopedKey, existing);
-        return existing;
-      }
-      const inflight = this.inflightIngests.get(scopedKey);
-      if (!inflight) break;
-      try {
-        const meta = await inflight;
-        if (this.covers(meta, required)) return meta;
-      } catch (error) {
-        // Another caller's abort must not fail this one: ingest it ourselves.
-        if (signal?.aborted || !isAbortError(error)) throw error;
-      }
-    }
-
-    const promise: Promise<IngestedFileMeta> = this.ingestNew(
-      scopedKey,
-      key,
-      bytes,
-      knownStats,
-      signal,
-      required,
-    ).finally(() => {
-      if (this.inflightIngests.get(scopedKey) === promise) {
-        this.inflightIngests.delete(scopedKey);
-      }
-    });
-    this.inflightIngests.set(scopedKey, promise);
-    return promise;
-  }
-
-  private async ingestNew(
-    scopedKey: string,
-    key: string,
-    bytes: ArrayBuffer,
-    knownStats: { rawRows: number; minTs: number; maxTs: number } | undefined,
-    signal: AbortSignal | undefined,
-    required: readonly (readonly [string, DuckDBColumnType])[],
-  ): Promise<IngestedFileMeta> {
-    const byteLength = bytes.byteLength;
-    const backend = await this.ensureBackend();
-    signal?.throwIfAborted();
-    await this.ensureCustomColumns(backend, required);
-    signal?.throwIfAborted();
-    await this.evictForIngest(backend);
-    signal?.throwIfAborted();
-    const virtualName = `ingest_${this.nextVirtualFileId++}.parquet`;
-    await backend.registerFileBuffer(virtualName, new Uint8Array(bytes));
-    try {
-      signal?.throwIfAborted();
-      const schemaTable = await backend.query(
-        `DESCRIBE SELECT * FROM read_parquet(${sqlString(virtualName)})`,
-        signal,
-      );
-      signal?.throwIfAborted();
-      const colNames =
-        (schemaTable.getChild("column_name")?.toJSON() as string[]) ?? [];
-      const colTypes =
-        (schemaTable.getChild("column_type")?.toJSON() as string[]) ?? [];
-      const typeByCol = new Map<string, string>();
-      for (let i = 0; i < colNames.length; i++) {
-        typeByCol.set(colNames[i], (colTypes[i] ?? "").toUpperCase());
-      }
-      const tsCol = typeByCol.has("timestamp")
-        ? "timestamp"
-        : typeByCol.has("ts_ms")
-          ? "ts_ms"
-          : null;
-      const tsType = tsCol ? typeByCol.get(tsCol) : undefined;
-      if (!tsCol || !tsType) {
-        throw new Error(`${key} has no timestamp column`);
-      }
-
-      const tsIdent = sqlIdent(tsCol);
-      const tsExpr = tsType.startsWith("TIMESTAMP")
-        ? `epoch_ms(${tsIdent})::BIGINT`
-        : tsType.includes("CHAR")
-          ? `epoch_ms(TRY_CAST(${tsIdent} AS TIMESTAMP))::BIGINT`
-          : `CAST(${tsIdent} AS BIGINT)`;
-
-      let rawRows = knownStats?.rawRows ?? 0;
-      let minTs = knownStats?.minTs ?? Infinity;
-      let maxTs = knownStats?.maxTs ?? -Infinity;
-      if (!knownStats) {
-        const statsTable = await backend.query(
-          `SELECT COUNT(*)::BIGINT AS raw_rows, MIN(${tsExpr})::BIGINT AS min_ts, MAX(${tsExpr})::BIGINT AS max_ts FROM read_parquet(${sqlString(virtualName)})`,
-          signal,
-        );
-        signal?.throwIfAborted();
-        rawRows = firstNumber(statsTable, "raw_rows") ?? 0;
-        minTs = firstNumber(statsTable, "min_ts") ?? Infinity;
-        maxTs = firstNumber(statsTable, "max_ts") ?? -Infinity;
-      }
-
-      const custom = [...this.customTypes];
-      const selectCols = [
-        ...ALL_TABLE_FIELDS.map(
-          (field) => [field, FIELD_DUCKDB_TYPES[field] ?? "VARCHAR"] as const,
-        ),
-        ...custom,
-      ]
-        .map(([field, targetType]) => {
-          const col = sqlIdent(field);
-          if (!typeByCol.has(field)) {
-            return `NULL::${targetType} AS ${col}`;
-          }
-          const cast = `CAST(${col} AS ${targetType})`;
-          // JavaScript treats NaN as a missing value; store it as NULL so
-          // filters and aggregates agree with the JS aggregator.
-          return targetType === "DOUBLE"
-            ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
-            : `${cast} AS ${col}`;
-        })
-        .join(", ");
-
-      const replacing = this.ingestedFiles.has(scopedKey);
-      // A re-ingest inserts under a staging key and swaps in one UPDATE, so
-      // concurrent queries see the old rows or the new ones, never neither.
-      const insertKey = replacing ? `${scopedKey}#reingest-new` : scopedKey;
-      const columnList = [
-        "scoped_key",
-        "ts_ms",
-        "timestamp",
-        ...ALL_TABLE_FIELDS,
-        ...custom.map(([id]) => id),
-      ]
-        .map(sqlIdent)
-        .join(", ");
-      // The INSERT is atomic, so cancelling it leaves no partial rows. Once it
-      // completes, record the file before any further abort check.
-      await backend.query(
-        `INSERT INTO requests (${columnList}) SELECT ${sqlString(insertKey)} AS scoped_key, (${tsExpr})::BIGINT AS ts_ms, epoch_ms((${tsExpr})::BIGINT)::TIMESTAMPTZ AS "timestamp", ${selectCols} FROM read_parquet(${sqlString(virtualName)})`,
-        signal,
-      );
-      if (replacing) {
-        const oldKey = `${scopedKey}#reingest-old`;
-        await backend.query(
-          `UPDATE requests SET scoped_key = CASE WHEN scoped_key = ${sqlString(insertKey)} THEN ${sqlString(scopedKey)} ELSE ${sqlString(oldKey)} END WHERE scoped_key IN (${sqlString(scopedKey)}, ${sqlString(insertKey)})`,
-        );
-        await backend.query(
-          `DELETE FROM requests WHERE scoped_key = ${sqlString(oldKey)}`,
-        );
-      }
-      const meta: IngestedFileMeta = {
-        scopedKey,
-        key,
-        rawRows,
-        byteLength,
-        hasBytes:
-          typeByCol.has("resp_bytes") || typeByCol.has("resp_body_size"),
-        hasEdge: typeByCol.has("edge") || typeByCol.has("is_edge"),
-        minTs,
-        maxTs,
-        customColumns: custom.map(([id]) => id),
-        presentColumns: colNames,
-      };
-      this.ingestedFiles.set(scopedKey, meta);
-      return meta;
-    } finally {
-      await backend.dropFile(virtualName).catch(() => {});
-    }
+    return this.getMemoryLimit();
   }
 
   /**
@@ -1294,13 +767,14 @@ export class DuckDBAnalyticalEngine {
   ): Promise<void> {
     const { signal } = options;
     signal?.throwIfAborted();
+    const context = options.context ?? this.readContext(scopedKeys);
+    context.assertCurrent();
     if (scopedKeys.length === 0) return;
-    const backend = await this.ensureBackend();
-    signal?.throwIfAborted();
+    const customTypes = context.getCustomColumnTypes();
     const noEdgeKeys: string[] = [];
     let hasBytes = false;
     for (const sk of scopedKeys) {
-      const meta = this.ingestedFiles.get(sk);
+      const meta = context.getFileMeta(sk);
       if (meta?.hasBytes) hasBytes = true;
       if (meta && !meta.hasEdge) noEdgeKeys.push(sk);
     }
@@ -1309,18 +783,12 @@ export class DuckDBAnalyticalEngine {
       "ts_ms IS NOT NULL",
       ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
       ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
-      `(${compileFiltersToSql(filters, Boolean(options.edgeOnly), noEdgeKeys, this.customTypes)})`,
+      `(${compileFiltersToSql(filters, Boolean(options.edgeOnly), noEdgeKeys, customTypes)})`,
     ].join(" AND ");
 
-    await this.queryRelation(
-      backend,
-      "requests",
-      where,
-      hasBytes,
-      this.customTypes,
-      aggregator,
-      options,
-    );
+    await this.runRead(context, signal, (backend) => this.queryRelation(
+      backend, "requests", where, hasBytes, customTypes, aggregator, options,
+    ));
   }
 
   async queryParquetIntoAggregator(
@@ -1332,99 +800,114 @@ export class DuckDBAnalyticalEngine {
     options: AggregateQueryOptions = {},
     customFields: readonly CustomField[] = [],
   ): Promise<void> {
-    const backend = await this.ensureBackend();
     const { signal } = options;
-    signal?.throwIfAborted();
-    const name = `selective_${this.nextVirtualFileId++}.parquet`;
-    let registered = false;
-    const customTypes = new Map(
-      customFields.map((field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]]),
-    );
-    try {
-      if (file.kind === "buffer") {
-        await backend.registerFileBuffer(name, new Uint8Array(file.bytes));
-      } else if (backend.registerParquet) {
-        await backend.registerParquet(name, file);
-      } else {
-        throw new Error(
-          "Remote Parquet reads require the browser DuckDB runtime",
-        );
-      }
-      registered = true;
+    return this.runRead(options.context, signal, async (backend) => {
       signal?.throwIfAborted();
-      const parquet = `read_parquet(${sqlString(name)})`;
-      const schema = await backend.query(
-        `DESCRIBE SELECT * FROM ${parquet}`,
-        signal,
+      const name = `selective_${this.nextVirtualFileId++}.parquet`;
+      let registered = false;
+      let failure: unknown;
+      const customTypes = new Map(
+        customFields.map((field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]]),
       );
-      const names =
-        (schema.getChild("column_name")?.toJSON() as string[]) ?? [];
-      const types =
-        (schema.getChild("column_type")?.toJSON() as string[]) ?? [];
-      const typeByCol = new Map(
-        names.map((field, i) => [field, types[i].toUpperCase()]),
-      );
-      const tsType = typeByCol.get("timestamp");
-      if (!tsType) throw new Error("Parquet file has no timestamp column");
-      const tsExpr = tsType.startsWith("TIMESTAMP")
-        ? `epoch_ms("timestamp")::BIGINT`
-        : tsType.includes("CHAR")
-          ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
-          : `CAST("timestamp" AS BIGINT)`;
-      const needed = new Set([
-        "status",
-        "cache",
-        "resp_bytes",
-        "edge",
-        ...aggregator.fields,
-        ...filters.map((filter) => filter.field),
-      ]);
-      const columns = [...needed].flatMap((field) => {
-        const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field);
-        if (!type) return [];
-        const col = sqlIdent(field);
-        const cast = `CAST(${col} AS ${type})`;
-        return [
-          !typeByCol.has(field)
-            ? `NULL::${type} AS ${col}`
-            : type === "DOUBLE"
-              ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
-              : `${cast} AS ${col}`,
-        ];
-      });
-      // The native timestamp predicate can prune row groups; the millisecond
-      // predicate below remains authoritative for all timestamp encodings.
-      const nativeBounds =
-        tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE")
-          ? [
-              ...(Number.isFinite(fromMs)
-                ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
-                : []),
-              ...(Number.isFinite(toMs)
-                ? [`"timestamp" < epoch_ms(${Math.ceil(toMs) + 1}::BIGINT)`]
-                : []),
-            ]
-          : [];
-      const relation = `(SELECT ${tsExpr} AS ts_ms, ${columns.join(", ")} FROM ${parquet}${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""})`;
-      const where = [
-        "ts_ms IS NOT NULL",
-        ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
-        ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
-        `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && typeByCol.has("edge")), [], customTypes)})`,
-      ].join(" AND ");
-      await this.queryRelation(
-        backend,
-        relation,
-        where,
-        typeByCol.has("resp_bytes"),
-        customTypes,
-        aggregator,
-        options,
-        true,
-      );
-    } finally {
-      if (registered) await backend.dropFile(name);
-    }
+      try {
+        if (file.kind === "buffer") {
+          await backend.registerFileBuffer(name, new Uint8Array(file.bytes.slice(0)));
+        } else if (backend.registerParquet) {
+          await backend.registerParquet(name, file);
+        } else {
+          throw new Error(
+            "Remote Parquet reads require the browser DuckDB runtime",
+          );
+        }
+        registered = true;
+        signal?.throwIfAborted();
+        const parquet = `read_parquet(${sqlString(name)})`;
+        const schema = await backend.query(
+          `DESCRIBE SELECT * FROM ${parquet}`,
+          signal,
+        );
+        const names =
+          (schema.getChild("column_name")?.toJSON() as string[]) ?? [];
+        const types =
+          (schema.getChild("column_type")?.toJSON() as string[]) ?? [];
+        const typeByCol = new Map(
+          names.map((field, i) => [field, types[i].toUpperCase()]),
+        );
+        const tsType = typeByCol.get("timestamp");
+        if (!tsType) throw new Error("Parquet file has no timestamp column");
+        const tsExpr = tsType.startsWith("TIMESTAMP")
+          ? `epoch_ms("timestamp")::BIGINT`
+          : tsType.includes("CHAR")
+            ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
+            : `CAST("timestamp" AS BIGINT)`;
+        const needed = new Set([
+          "status",
+          "cache",
+          "resp_bytes",
+          "edge",
+          ...aggregator.fields,
+          ...filters.map((filter) => filter.field),
+        ]);
+        const columns = [...needed].flatMap((field) => {
+          const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field);
+          if (!type) return [];
+          const col = sqlIdent(field);
+          const cast = `CAST(${col} AS ${type})`;
+          return [
+            !typeByCol.has(field)
+              ? `NULL::${type} AS ${col}`
+              : type === "DOUBLE"
+                ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
+                : `${cast} AS ${col}`,
+          ];
+        });
+        // The native timestamp predicate can prune row groups; the millisecond
+        // predicate below remains authoritative for all timestamp encodings.
+        const nativeBounds =
+          tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE")
+            ? [
+                ...(Number.isFinite(fromMs)
+                  ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
+                  : []),
+                ...(Number.isFinite(toMs)
+                  ? [`"timestamp" < epoch_ms(${Math.ceil(toMs) + 1}::BIGINT)`]
+                  : []),
+              ]
+            : [];
+        const relation = `(SELECT ${tsExpr} AS ts_ms, ${columns.join(", ")} FROM ${parquet}${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""})`;
+        const where = [
+          "ts_ms IS NOT NULL",
+          ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
+          ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
+          `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && typeByCol.has("edge")), [], customTypes)})`,
+        ].join(" AND ");
+        await this.queryRelation(
+          backend,
+          relation,
+          where,
+          typeByCol.has("resp_bytes"),
+          customTypes,
+          aggregator,
+          options,
+          !options.fieldSearch,
+        );
+      } catch (error) {
+        failure = error;
+        throw error;
+      } finally {
+        if (registered) {
+          try {
+            await backend.dropFile(name);
+          } catch (cleanupError) {
+            if (failure !== undefined && failure !== cleanupError) {
+              throw new AggregateError([failure, cleanupError],
+                `${failure instanceof Error ? failure.message : "Cloud query failed"}; ${cleanupError instanceof Error ? cleanupError.message : "DuckDB file cleanup failed"}`);
+            }
+            throw cleanupError;
+          }
+        }
+      }
+    });
   }
 
   private async queryRelation(
@@ -1450,7 +933,16 @@ export class DuckDBAnalyticalEngine {
           : sqlIdent(field),
       )
       .join(", ");
-    const base = `WITH base AS (SELECT ts_ms, ${projection} FROM ${relation} WHERE ${where})`;
+    const search = options.fieldSearch;
+    const searchType = search &&
+      (FIELD_DUCKDB_TYPES[search.field] ?? customTypes.get(search.field));
+    // Numeric casts and Unicode case folding differ from JavaScript's search text.
+    const searchWhere = search &&
+      (searchType === "VARCHAR" || searchType === "BOOLEAN") &&
+      /^[ -~]*$/.test(search.query)
+      ? ` AND contains(lower(CAST(${sqlIdent(search.field)} AS VARCHAR)), ${sqlString(search.query.trim().toLowerCase())})`
+      : "";
+    const base = `WITH base AS (SELECT ts_ms, ${projection} FROM ${relation} WHERE ${where}${searchWhere})`;
 
     const bucketTable = await backend.query(
       `${base} SELECT (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1 ORDER BY 1`,

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { DuckDBAnalyticalEngine } from "./dashboard/duckdb";
+import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 import {
   SESSIONS_INACTIVITY_GAP_SECONDS,
   SESSIONS_MAX_WINDOW_DAYS,
@@ -15,7 +15,7 @@ import {
 } from "./sessions";
 
 describe("cloud-engine sessions & session scoring module", () => {
-  it("sessionizes plain UTC timestamps without timezone extensions and preserves offset bounds", async () => {
+  it("sessionizes plain UTC timestamps without timezone extensions and preserves half-open offset bounds", async () => {
     const engine = new DuckDBAnalyticalEngine();
     try {
       await engine.executeSql("SET autoinstall_known_extensions = false");
@@ -41,11 +41,18 @@ describe("cloud-engine sessions & session scoring module", () => {
         },
       });
       expect(result.body).toMatchObject({
-        sessions: [
-          { ip: "192.0.2.1", req_count: 2 },
-          { ip: "192.0.2.1", req_count: 1 },
-        ],
+        sessions: [{ ip: "192.0.2.1", req_count: 2 }],
       });
+      const next = await handleSessionsList({
+        start_time: "2026-11-04T05:00:00.124-08:00",
+        end_time: "2026-11-04T05:00:00.125-08:00",
+        filters: { country: { mode: "include", values: ["US"] } },
+      }, {
+        tableName: "core_sessions",
+        availableColumns: new Set(["timestamp", "ts_ms", "ip", "country"]),
+        runSql: (sql) => engine.executeSql(sql),
+      });
+      expect(next.body).toMatchObject({ sessions: [{ ip: "192.0.2.1", req_count: 1 }] });
     } finally {
       await engine.reset();
     }

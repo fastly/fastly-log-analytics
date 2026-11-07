@@ -1,4 +1,4 @@
-import { getDuckDBEngine, compileFiltersToSql } from "./dashboard/duckdb";
+import { getDuckDBEngine, compileFiltersToSql, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import {
   _coalesced_url_aggregates,
@@ -23,14 +23,14 @@ export { CLOUD_INSIGHT_DETECTORS } from "./insights";
 
 export async function queryCloudInsights(
   body: InsightsRequest,
-  options: { signal: AbortSignal; maskIps: boolean; filters: DashboardFilter[] },
+  options: { signal: AbortSignal; maskIps: boolean; filters: DashboardFilter[]; engine?: DuckDBReadContext },
 ) {
-  const engine = getDuckDBEngine();
+  const engine = options.engine ?? getDuckDBEngine().readContext();
   const { end, start, baselineHours, windowStart: windowStartMs } = resolveInsightWindow(body);
   const windowStart = new Date(windowStartMs).toISOString();
-  const filters = compileFiltersToSql(options.filters);
+  const filters = compileFiltersToSql(options.filters, false, [], engine.getCustomColumnTypes());
   const scope = `WITH cloud_insight_scope AS (
-    SELECT * FROM requests WHERE ts_ms >= ${start} AND ts_ms <= ${end} AND (${filters || "TRUE"})
+    SELECT * FROM requests WHERE ts_ms >= ${start} AND ts_ms < ${end} AND (${filters || "TRUE"})
   )`;
   const [availableColumns, totals] = await Promise.all([
     engine.getPresentColumns(),
@@ -82,11 +82,11 @@ export async function queryCloudInsights(
 
 export async function queryCloudCacheCollapse(
   body: CacheCollapseDetailRequest,
-  options: { signal: AbortSignal; maskIps: boolean },
+  options: { signal: AbortSignal; maskIps: boolean; engine?: DuckDBReadContext },
 ) {
-  const engine = getDuckDBEngine();
+  const engine = options.engine ?? getDuckDBEngine().readContext();
   const { end, start, windowStart } = resolveInsightWindow(body);
-  const where = `url = '${escapeSqlLiteral(body.url)}' AND ts_ms >= ${start} AND ts_ms <= ${end}`;
+  const where = `url = '${escapeSqlLiteral(body.url)}' AND ts_ms >= ${start} AND ts_ms < ${end}`;
   const [rates, timelineRows, missRows] = await Promise.all([
     engine.executeSql(`SELECT
       COUNT(*) FILTER (WHERE ts_ms >= ${windowStart}) AS w_total,

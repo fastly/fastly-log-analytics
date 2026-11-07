@@ -40,7 +40,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import cloudReadiness from "../../../scripts/lib/cloud_readiness.cjs";
 
-const { CLOUD_READINESS_INIT_SCRIPT, dashboardSnapshot, waitForDashboardResult, waitForCloudReport } = cloudReadiness;
+const { CLOUD_READINESS_INIT_SCRIPT, dashboardSnapshot, waitForDashboardResult, waitForCloudReport, waitForCloudIdle } = cloudReadiness;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const PLAYWRIGHT_PATH = fs.existsSync(
@@ -1849,7 +1849,7 @@ export async function measureWarmDashboardReload(
 /**
  * Measure a single non-dashboard route (clean or filtered) with its own API waterfall & UI health.
  */
-async function measureRouteWithTelemetry(page, url, waitFn) {
+export async function measureRouteWithTelemetry(page, url, waitFn) {
   const t0 = Date.now();
   const apiRecorder = attachApiWaterfallRecorder(page, t0);
   try {
@@ -1864,6 +1864,18 @@ async function measureRouteWithTelemetry(page, url, waitFn) {
     if (waitFn) {
       await waitFn(page);
     }
+    let lazyPanelsActivated = 0;
+    const panels = page.locator("[data-lazy-panel]");
+    for (let index = 0; index < await panels.count(); index += 1) {
+      await panels.nth(index).scrollIntoViewIfNeeded({ timeout: 10_000 });
+      await page.waitForFunction(
+        index => document.querySelectorAll("[data-lazy-panel]")[index]?.getAttribute("data-lazy-panel") === "ready",
+        index,
+        { timeout: 10_000 },
+      );
+      if (waitFn) await waitFn(page);
+      lazyPanelsActivated += 1;
+    }
     const loadMs = Date.now() - t0;
     const lastFetch = await readLastFetchLocator(page);
     const uiHealth = await collectUiHealth(page);
@@ -1876,13 +1888,63 @@ async function measureRouteWithTelemetry(page, url, waitFn) {
       lastFetch,
       uiHealth,
       apiSummary,
+      interactions: { lazyPanelsActivated },
     };
   } finally {
     apiRecorder.detach();
   }
 }
 
-async function sweepUnifiedPages(context, baseUrl, appDir) {
+async function findStreamDetailUrl(page, baseUrl) {
+  const findLink = async () => {
+    const hrefs = await page.locator('a[href*="/sessions/stream?"]').evaluateAll(links => links.map(link => link.href));
+    return hrefs.find(href => {
+      const url = new URL(href);
+      return url.origin === new URL(baseUrl).origin && url.pathname === "/sessions/stream" && url.searchParams.get("token");
+    }) ?? null;
+  };
+  const existing = await findLink();
+  if (existing) return existing;
+  const row = page.getByTestId("sessions-table-container").getByRole("row")
+    .filter({ has: page.locator('[title="Streaming Session"]') }).first();
+  if (!await row.count()) return null;
+  await row.getByRole("button", { name: "Details", exact: true }).click();
+  try {
+    const dialog = page.getByTestId("session-detail-dialog");
+    await dialog.waitFor({ state: "visible", timeout: 10_000 });
+    await dialog.getByRole("cell", { name: "Loading...", exact: true }).waitFor({ state: "hidden", timeout: 30_000 });
+    await waitForCloudReport(page);
+    if (await dialog.getByRole("alert").count()) {
+      throw new Error("Streaming session detail query failed");
+    }
+    return await findLink();
+  } finally {
+    await page.keyboard.press("Escape");
+  }
+}
+
+function unifiedExportRoutes(appDir) {
+  const webDir = path.dirname(appDir);
+  const policy = JSON.parse(fs.readFileSync(path.join(webDir, "static-export-policy.json"), "utf8"));
+  const routes = [];
+  function visit(directory) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const filename = path.join(directory, entry.name);
+      const relative = path.relative(webDir, filename).split(path.sep).join("/");
+      if (policy.prunePaths.some(pruned => relative === pruned || relative.startsWith(`${pruned}/`))) continue;
+      if (entry.isDirectory()) {
+        visit(filename);
+      } else if (entry.name === "page.tsx" && directory !== appDir) {
+        const route = `/${path.relative(appDir, directory).split(path.sep).join("/")}`;
+        if (!policy.authenticationRoutes.includes(route)) routes.push(route);
+      }
+    }
+  }
+  visit(appDir);
+  return routes.sort();
+}
+
+async function sweepUnifiedPages(context, baseUrl, appDir, queryTimeoutMs) {
   const page = await context.newPage();
   const recorder = attachApiWaterfallRecorder(page);
   const consoleErrors = [];
@@ -1890,50 +1952,78 @@ async function sweepUnifiedPages(context, baseUrl, appDir) {
   const httpErrors = [];
   const pages = {};
   const routeCoverage = {};
+  let streamDetailUrl = null;
+  const redactStreamToken = value => {
+    const token = streamDetailUrl && new URL(streamDetailUrl).searchParams.get("token");
+    if (typeof value === "string" && token) return value.replaceAll(token, "[redacted]").replaceAll(encodeURIComponent(token), "[redacted]");
+    if (Array.isArray(value)) return value.map(redactStreamToken);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactStreamToken(item)]));
+    return value;
+  };
+  const safeUrl = value => {
+    const url = new URL(value);
+    if (url.searchParams.has("token")) url.searchParams.set("token", "[redacted]");
+    return url.href;
+  };
   const analytical = new Set(cloudReadiness.CLOUD_ANALYTICAL_ROUTES);
+  const adminData = new Set(cloudReadiness.CLOUD_ADMIN_DATA_ROUTES);
   page.on("console", message => {
-    if (message.type() === "error") consoleErrors.push({ url: page.url(), message: message.text() });
+    if (message.type() === "error") consoleErrors.push({ url: safeUrl(page.url()), message: message.text() });
   });
-  page.on("pageerror", error => pageErrors.push({ url: page.url(), message: String(error) }));
+  page.on("pageerror", error => pageErrors.push({ url: safeUrl(page.url()), message: String(error) }));
   page.on("response", response => {
-    if (response.status() >= 400) httpErrors.push({ url: response.url(), status: response.status() });
+    if (response.status() >= 400) httpErrors.push({ url: safeUrl(response.url()), status: response.status() });
   });
   try {
-    const routes = fs.readdirSync(appDir, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && entry.name !== "share-login"
-        && fs.existsSync(path.join(appDir, entry.name, "page.tsx")))
-      .map(entry => `/${entry.name}`);
+    const routes = unifiedExportRoutes(appDir);
     for (const route of routes) {
       const queries = analytical.has(route) && FILTER_BAR_ROUTE_PREFIXES.includes(route)
         ? [buildFilterQueryString("24h"), buildFilterQueryString("24h", "+status:200")]
         : [analytical.has(route) ? buildFilterQueryString("24h") : ""];
       for (const query of queries) {
+        const streamDetail = route === "/sessions/stream";
+        const needsFreshQuery = analytical.has(route) || adminData.has(route) || streamDetail && Boolean(streamDetailUrl);
         const label = `${route}${query.includes("f=") ? " (filtered)" : ""}`;
-        const result = await measureRouteWithTelemetry(page, `${baseUrl}${route}${compatibleDashboardQuery(query)}`, async p => {
-          if (analytical.has(route)) {
-            await waitForCloudReport(p);
+        const url = streamDetail && streamDetailUrl ? streamDetailUrl : `${baseUrl}${route}${compatibleDashboardQuery(query)}`;
+        const result = await measureRouteWithTelemetry(page, url, async p => {
+          if (needsFreshQuery) {
+            await waitForCloudReport(p, queryTimeoutMs);
+            if (streamDetail) await p.getByTestId("stream-detail-client").waitFor({ state: "visible", timeout: 30_000 });
+          } else if (streamDetail) {
+            await p.getByTestId("stream-detail-parameter-required").waitFor({ state: "visible", timeout: 30_000 });
           } else {
             await p.getByRole("heading").first().waitFor({ state: "visible", timeout: 30_000 });
           }
+          if (!needsFreshQuery) await waitForCloudIdle(p, queryTimeoutMs);
         });
         if (!result.deployed || result.status < 200 || result.status >= 400) {
           throw new Error(`Unified route unavailable: ${route}`);
         }
         const readiness = await page.evaluate(() => window.__flaCloudReadiness?.snapshot() ?? null);
-        if (analytical.has(route) && !readiness?.ready) throw new Error(`Fresh query incomplete: ${route}`);
+        if (needsFreshQuery && !readiness?.ready) throw new Error(`Fresh query incomplete: ${route}`);
         if (readiness?.pending || readiness?.errors || result.uiHealth?.errorBannerTexts?.length) {
           throw new Error(`Unified route has pending or failed work: ${route}`);
         }
+        if (httpErrors.length) throw new Error(`Unified route HTTP failure: ${route}`);
         pages[label] = { ...result, readiness };
-        routeCoverage[route] = { deployed: true, analytical: analytical.has(route) };
+        routeCoverage[route] = {
+          deployed: true,
+          analytical: needsFreshQuery,
+          execution: streamDetail ? streamDetailUrl ? "verified" : "parameter-required" : needsFreshQuery ? "query-ready" : "page-ready",
+          queryVerified: needsFreshQuery,
+          featureVerified: streamDetail && needsFreshQuery,
+        };
+        if (route === "/sessions" && !streamDetailUrl) streamDetailUrl = await findStreamDetailUrl(page, baseUrl);
       }
     }
-    return { pages, routeCoverage, apiWaterfall: recorder.getWaterfall(), consoleErrors, pageErrors, httpErrors };
+    return redactStreamToken({ pages, routeCoverage, apiWaterfall: recorder.getWaterfall(), consoleErrors, pageErrors, httpErrors });
   } catch (error) {
-    error.dashboardFailure = {
+    error.message = redactStreamToken(error.message);
+    if (error.stack) error.stack = redactStreamToken(error.stack);
+    error.dashboardFailure = redactStreamToken({
       readiness: await readinessFailure(page),
       pendingRequests: recorder.getPending(),
-    };
+    });
     throw error;
   } finally {
     recorder.detach();
@@ -1941,10 +2031,10 @@ async function sweepUnifiedPages(context, baseUrl, appDir) {
   }
 }
 
-export async function sweepPages(context, baseUrl, existingPage = null) {
+export async function sweepPages(context, baseUrl, existingPage = null, queryTimeoutMs = 120_000) {
   const unifiedFrontend = path.resolve(__dirname, "../../../frontend/app");
   if (fs.existsSync(path.join(unifiedFrontend, "dashboard/page.tsx"))) {
-    return sweepUnifiedPages(context, baseUrl, unifiedFrontend);
+    return sweepUnifiedPages(context, baseUrl, unifiedFrontend, queryTimeoutMs);
   }
   const page = existingPage ?? (await context.newPage());
   const shouldClosePage = !existingPage;

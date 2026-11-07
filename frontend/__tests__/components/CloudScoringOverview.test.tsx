@@ -44,6 +44,8 @@ describe('Cloud scoring capability views', () => {
     render(<CloudScoringOverview />, { wrapper })
     await screen.findByText(/Session scoring is not configured in the retained logs/)
     expect(screen.getByText(/Labels, trained matrices, evaluation curves/)).toBeInTheDocument()
+    expect(screen.getByText(/Labels, trained matrices, evaluation curves/).closest('[role]')).toHaveAttribute('role', 'status')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'Labels' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Retrain|Rotate key|Enable scoring/ })).not.toBeInTheDocument()
     expect(vi.mocked(adminFetch).mock.calls.map(([path]) => String(path))).toEqual([
@@ -64,11 +66,18 @@ describe('Cloud scoring capability views', () => {
     expect(screen.getByText('81.5')).toBeInTheDocument()
     expect(screen.getByText('Recorded distribution')).toBeInTheDocument()
     expect(screen.getByText(/Cookie compliance was not recorded/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByText('Recorded compliance')).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole('combobox', { name: 'Scoring time range' }), { target: { value: '6' } })
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
       '/api/services/fixture-service/scoring/analytics?since_hours=6', expect.anything(),
     ))
+  })
+
+  it('keeps failed scoring reads as alerts', async () => {
+    vi.mocked(adminFetch).mockResolvedValue(Response.json({ detail: 'unavailable' }, { status: 500 }))
+    render(<CloudScoringOverview />, { wrapper })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Session scoring read failed (500)')
   })
 
   it('suppresses session label reads and disables flags in Cloud', () => {

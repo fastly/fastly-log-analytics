@@ -1072,6 +1072,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             "clock_interval_s": crate::admin::CLOCK_INTERVAL_S,
             "last_ingest_at": snapshot.last_ingest_at,
             "runs": snapshot.runs,
+            "schedules": snapshot.schedules,
         })
     }
 

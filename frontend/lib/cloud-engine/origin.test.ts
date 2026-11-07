@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { parquetWriteBuffer } from "hyparquet-writer";
+import { getDuckDBEngine } from "./dashboard/test-fixtures";
 import {
   buildOriginDrilldownSql,
   buildOriginIpHealthSql,
@@ -36,6 +37,55 @@ describe("origin cloud-engine module (F18)", () => {
   beforeEach(() => {
     setOriginSqlExecutor(null);
   });
+
+  it.each(["aggregates", "shielding-analysis", "drilldown"])(
+    "uses captured custom types for %s while another lease changes the global schema", async (path) => {
+      const engine = getDuckDBEngine();
+      const selected = engine.lease([{ id: "tenant", type: "string" }]);
+      const other = engine.lease([{ id: "tenant", type: "number" }]);
+      try {
+        await selected.ingestFile("origin-selected", "origin-selected.parquet", parquetWriteBuffer({
+          columnData: [
+            { name: "timestamp", type: "TIMESTAMP", data: [new Date(1700000000000), new Date(1700000000001)] },
+            { name: "tenant", type: "STRING", data: ["selected", "selected"] },
+            { name: "cache", type: "STRING", data: ["MISS", "MISS"] },
+            { name: "ttfb", type: "DOUBLE", data: [0.02, 0.01] },
+            { name: "edge", type: "BOOLEAN", data: [true, false] },
+            { name: "rid", type: "STRING", data: ["edge-request", "shield-request"] },
+            { name: "prid", type: "STRING", data: ["", "edge-request"] },
+            { name: "pop", type: "STRING", data: ["IAD", "CHI"] },
+            { name: "host", type: "STRING", data: ["origin.example.test", "origin.example.test"] },
+          ],
+        }));
+        const read = selected.readContext();
+        await other.ingestFile("origin-other", "origin-other.parquet", parquetWriteBuffer({
+          columnData: [
+            { name: "timestamp", type: "TIMESTAMP", data: [new Date(1700000000000)] },
+            { name: "tenant", type: "DOUBLE", data: [1] },
+          ],
+        }));
+        const response = await handleOriginRequest(new Request(`https://example.test/api/origin/${path}`, {
+          method: "POST",
+          body: JSON.stringify({
+            sections: ["summary"],
+            custom_filters: { tenant: { mode: "include", values: ["selected"] } },
+          }),
+        }), undefined, undefined, read);
+        const data = await response!.json();
+        if (path === "aggregates") {
+          expect(data.summary).toMatchObject({ has_data: true, total_misses: 2 });
+        } else {
+          expect(data.has_data).toBe(true);
+          expect(data.rows).toHaveLength(1);
+          expect(data.rows[0].requests).toBe(path === "shielding-analysis" ? 1 : 2);
+        }
+      } finally {
+        selected.release();
+        other.release();
+        await engine.reset();
+      }
+    },
+  );
 
   it("preserves query-string URL filters with the default executor and request signal", async () => {
     const engine = getDuckDBEngine();

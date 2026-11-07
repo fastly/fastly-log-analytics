@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useTimeseriesToTraces } from "@/lib/chartUtils";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { getDuckDBEngine } from "./dashboard/test-fixtures";
 import {
   ACTIVE_CLIENTS_LIMIT,
   buildConnReuseBucketCaseSql,
@@ -32,6 +32,26 @@ import {
 } from "./security";
 
 describe("security cloud-engine module (F20)", () => {
+  it("does not recapture a fresh empty backend after awaited request parsing", async () => {
+    setSecurityEngineClient(null);
+    const engine = getDuckDBEngine();
+    await engine.reset();
+    const request = new Request("http://localhost/api/security/aggregates", { method: "POST", body: "{}" });
+    const clone = request.clone();
+    let enter!: () => void, resume!: (body: object) => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const body = new Promise<object>((resolve) => { resume = resolve; });
+    vi.spyOn(clone, "json").mockImplementation(() => { enter(); return body; });
+    vi.spyOn(request, "clone").mockReturnValue(clone);
+    const pending = handleSecurityRequest(request);
+    const rejected = expect(pending).rejects.toThrow(/generation|expired/i);
+    await entered;
+    await engine.reset();
+    resume({});
+    await rejected;
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     setSecurityEngineClient(null);
   });

@@ -25,7 +25,9 @@ const COMMIT_CRON_COLUMNS: ColumnDef<CronRun>[] = [
     accessorKey: 'files_deleted_fos',
     header: 'Log Files Deleted',
     cell: ({ row }) =>
-      row.original.status === 'running' || row.original.task !== 'log_discovery' ? (
+      row.original.status === 'running' ||
+      (row.original.task !== 'log_discovery' && row.original.task !== 'raw_delete') ||
+      (row.original.task === 'raw_delete' && row.original.files_deleted_fos == null) ? (
         DASH_CELL
       ) : (
         <span className="font-mono text-muted-foreground tabular-nums text-xs">
@@ -123,7 +125,7 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
           if (val === 'skipped') {
             return (
               <Badge variant="secondary" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">
-                No Alerts
+                {row.original.task === 'alerts' ? 'No Alerts' : 'Skipped'}
               </Badge>
             )
           }
@@ -197,6 +199,7 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
         cell: ({ row }) => {
           if (row.original.status === 'running') return PROCESSING_CELL
           const { task, files_downloaded } = row.original
+          if (files_downloaded == null && ('cron_kind' in row.original || task === 'cloud_ingest_clock')) return DASH_CELL
           if (NO_FILES_TASKS.has(task)) {
             return DASH_CELL
           }
@@ -226,6 +229,7 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
         cell: ({ row }) => {
           if (row.original.status === 'running') return PROCESSING_CELL
           const { task, rows_ingested, corrupt_rows, error_message } = row.original
+          if (rows_ingested == null && ('cron_kind' in row.original || task === 'cloud_ingest_clock')) return DASH_CELL
           if (NO_ROWS_TASKS.has(task)) return DASH_CELL
           if (task === 'alerts') {
             const triggered = rows_ingested || 0

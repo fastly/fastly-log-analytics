@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it } from "vitest";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { getDuckDBEngine } from "./dashboard/test-fixtures";
 import { CLOUD_INSIGHT_DETECTORS, queryCloudCacheCollapse, queryCloudInsights } from "./insight-scans";
 import { cloudRumAnalytics, cloudRumLiveEvents } from "./rum-wire";
 

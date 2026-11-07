@@ -14,6 +14,15 @@ Source: [`frontend/app/rum/`](../../frontend/app/rum/) (`page.tsx` re-exports `_
 
 Standard filters apply; supported filter columns are `browser`, `os`, `device`, `country`, `pathname`, `city`, `region`, `pop`, `tls`. An unsupported column or malformed JSON is a `400 rum_filters_unsupported`; a filter is never silently dropped.
 
+Cloud accepts fields present in its RUM tables, including `browser_name`,
+`metric_name`, `metric_value` and `error_type`, plus the `browser`, `os`, `device`
+and `pathname` aliases. Request-only custom fields are unsupported even after
+visiting request analytics. A field absent from one RUM dataset has NULL semantics:
+an include filter excludes those rows; an exclude filter keeps them.
+Cloud keeps vitals and errors in separate typed Parquet views over cached
+compressed files. Request-schema changes do not change their SQL types, and
+stale range reads fail rather than returning success against a replacement dataset.
+
 ## Roles
 
 | Capability | Admin | Analyst (remote share) |

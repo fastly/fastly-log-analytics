@@ -855,7 +855,8 @@ export function measureEstimate(m: EstimateMeasurements): EstimatePrefill {
     const avg = (key: "requests" | "edge_requests") =>
       days.reduce((sum, day) => sum + (day[key] ?? 0), 0) / days.length;
     setInput("requestsPerDay", Math.round(avg("requests")));
-    setInput("edgeRequestsPerDay", Math.round(avg("edge_requests")));
+    if (days.every((day) => day.edge_requests != null))
+      setInput("edgeRequestsPerDay", Math.round(avg("edge_requests")));
   }
 
   const converted = m.files.filter((file) => CONVERTED.has(file.status));

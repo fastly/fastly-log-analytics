@@ -8,7 +8,10 @@ import { getDuckDBEngine } from "./dashboard/duckdb";
 import { sealSessionToken } from "./sessions";
 import { cloudServiceStatus } from "./service-bridges";
 
-vi.mock("./range-loader", () => ({ ensureCloudRange: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./range-loader", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./range-loader")>(),
+  ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
+}));
 
 function request(path: string, method = "GET", body?: unknown, serviceId?: string) {
   return new Request(`http://localhost${path}`, {
@@ -21,7 +24,7 @@ function request(path: string, method = "GET", body?: unknown, serviceId?: strin
 beforeEach(() => {
   localStorage.clear();
   cloudLoadingStore.reset();
-  vi.mocked(ensureCloudRange).mockResolvedValue(undefined);
+  vi.mocked(ensureCloudRange).mockImplementation(async () => getDuckDBEngine().readContext());
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); });
 
@@ -171,7 +174,7 @@ describe("Cloud endpoint bridges", () => {
   it.each([
     ["POST", "/api/admin/share/start"],
     ["PATCH", "/api/admin/share/settings"],
-    ["POST", "/api/services/fixture/rum/enable"],
+    ["POST", "/api/services/fixture/rum/not-supported"],
     ["PATCH", "/api/services/fixture/scoring/threshold"],
     ["GET", "/api/admin/queries/summary"],
     ["GET", "/api/not-a-compute-endpoint"],
@@ -202,11 +205,13 @@ describe("Cloud endpoint bridges", () => {
 
   it("loads the requested range before executing SQL and does not conceal scan errors", async () => {
     const engine = getDuckDBEngine();
-    vi.spyOn(engine, "executeSql").mockResolvedValue([{ requests: 7 }]);
+    vi.mocked(ensureCloudRange).mockResolvedValue({
+      ...engine.readContext(), executeSql: vi.fn().mockResolvedValue([{ requests: 7 }]),
+    });
     const response = await handleCloudAnalyticalRequest(request("/api/query", "POST", {
       sql: "SELECT count(*) AS requests FROM logs", start_time: "2026-11-01T00:00:00Z", end_time: "2026-11-02T00:00:00Z",
     }));
-    expect(ensureCloudRange).toHaveBeenCalledWith("2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z", expect.any(AbortSignal), ["request"], { customFields: [], serviceId: undefined });
+    expect(ensureCloudRange).toHaveBeenCalledWith("2026-11-01T00:00:00Z", "2026-11-02T00:00:00.001Z", expect.any(AbortSignal), ["request"], { customFields: [], serviceId: undefined });
     expect((await response!.json()).data).toEqual([{ requests: 7 }]);
     vi.mocked(ensureCloudRange).mockRejectedValueOnce(new Error("incomplete listing"));
     await expect(handleCloudAnalyticalRequest(request("/api/query", "POST", {

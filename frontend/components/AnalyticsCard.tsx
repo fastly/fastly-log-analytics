@@ -225,7 +225,7 @@ export function LazyMount({
   const visible = useInViewOnce(ref, { rootMargin })
 
   return (
-    <div ref={ref} className={className} style={visible ? undefined : { minHeight }}>
+    <div ref={ref} data-lazy-panel={visible ? 'ready' : 'pending'} className={className} style={visible ? undefined : { minHeight }}>
       {visible ? children : null}
     </div>
   )

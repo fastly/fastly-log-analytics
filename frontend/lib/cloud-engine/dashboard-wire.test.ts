@@ -10,7 +10,10 @@ vi.mock("./dashboard/client", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/client")>(),
   runInWorker: vi.fn(),
 }));
-vi.mock("./range-loader", () => ({ ensureCloudRange: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./range-loader", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./range-loader")>(),
+  ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
+}));
 
 const from = "2026-01-01T00:00:00Z";
 const to = "2026-01-01T01:00:00Z";

@@ -13,6 +13,8 @@ import {
 import { getApiBase, queryKeys } from '@/lib/api'
 import RumPageClient, { RumFaroVersionCard, RumStatusPanel } from '@/app/rum/_sections/RumClient'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
+import { DisableRumDialog } from '@/components/Rum/RumLifecycleDialogs'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
 
@@ -252,6 +254,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
   }
 
   beforeEach(() => {
+    setCloudModeRuntime(false)
     resetDefaultStores()
     useRealApiClient = true
     useMockAdminFetch = false
@@ -261,6 +264,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
   })
 
   afterEach(() => {
+    setCloudModeRuntime(false)
     server.resetHandlers()
   })
 
@@ -871,6 +875,45 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(await screen.findByRole('button', { name: /enable rum/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /disable rum/i })).toBeInTheDocument()
       expect(screen.queryByText(/rum not enabled/i)).not.toBeInTheDocument()
+    })
+
+    it('Cloud disable preserves retained data rather than advertising High-Scale deletion options', async () => {
+      setCloudModeRuntime(true)
+      sseState.status = 'idle'
+      mockStart.mockClear()
+      const qc = createTestQueryClient()
+      render(
+        <DisableRumDialog
+          service={{ service_id: SVC_PANEL, name: 'Cloud Service', logging_enabled: false }}
+          open
+          onOpenChange={vi.fn()}
+        />,
+        { wrapper: makeQueryWrapper(qc) },
+      )
+      expect(await screen.findByRole('status')).toHaveTextContent(/Cloud.*preserves retained RUM data/i)
+      expect(screen.queryByRole('switch', { name: /delete/i })).not.toBeInTheDocument()
+      await userEvent.click(screen.getByRole('button', { name: 'Disable RUM' }))
+      expect(mockStart).toHaveBeenLastCalledWith(`/api/services/${SVC_PANEL}/rum/disable`, {})
+    })
+
+    it('High-Scale disable retains its supported resource-removal options', async () => {
+      sseState.status = 'idle'
+      mockStart.mockClear()
+      const qc = createTestQueryClient()
+      render(
+        <DisableRumDialog
+          service={{ service_id: SVC_PANEL, name: 'Elevation Service', logging_enabled: false }}
+          open
+          onOpenChange={vi.fn()}
+        />,
+        { wrapper: makeQueryWrapper(qc) },
+      )
+      expect(screen.getByRole('switch', { name: 'Delete RUM cloud files' })).toBeChecked()
+      expect(screen.getByRole('switch', { name: 'Delete FOS bucket and all data' })).not.toBeChecked()
+      await userEvent.click(screen.getByRole('button', { name: 'Disable RUM' }))
+      expect(mockStart).toHaveBeenLastCalledWith(`/api/services/${SVC_PANEL}/rum/disable`, {
+        remove_cloud_files: true, remove_bucket: false,
+      })
     })
   })
 })

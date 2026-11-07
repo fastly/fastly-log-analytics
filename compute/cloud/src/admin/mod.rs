@@ -2188,6 +2188,7 @@ fn job_state(
     previous: &schedule::JobState,
 ) -> schedule::JobState {
     schedule::JobState {
+        service_id: previous.service_id.clone(),
         last_run: Some(now),
         last_success_period: previous.last_success_period,
         last_success_period_s: previous.last_success_period_s,
@@ -2693,6 +2694,7 @@ fn dispatch(
                 stage.duration_ms,
                 &jobs.raw_delete,
             );
+            jobs.raw_delete.service_id = Some(svc.service_id.clone());
             if stage.outcome != "idle" {
                 stages.push(stage);
             }
@@ -3056,6 +3058,7 @@ pub struct CronAuditSnapshot {
     pub runs: Vec<CronRun>,
     pub service_audit: Vec<Value>,
     pub last_ingest_at: Option<String>,
+    pub schedules: Vec<Value>,
 }
 
 pub fn cron_audit_snapshot(runtime: &impl Runtime) -> CronAuditSnapshot {
@@ -3069,6 +3072,7 @@ pub fn cron_audit_snapshot(runtime: &impl Runtime) -> CronAuditSnapshot {
     let (svc_rec, active_service) = load_installed_service(runtime)
         .map(|(rec, svc, _)| (rec, svc))
         .unwrap_or((None, None));
+    let schedules = schedule::task_schedules(runtime, &cron_state, active_service.as_ref());
     let active_service_id = active_service.map(|svc| svc.service_id);
     let last_ingest_at = active_service_id
         .as_deref()
@@ -3089,6 +3093,7 @@ pub fn cron_audit_snapshot(runtime: &impl Runtime) -> CronAuditSnapshot {
         runs: active_runs,
         service_audit,
         last_ingest_at,
+        schedules,
     }
 }
 

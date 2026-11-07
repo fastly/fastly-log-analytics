@@ -140,11 +140,12 @@ export type FileSource = {
   /**
    * With `transfer`, the caller takes ownership of `bytes` (it may be
    * detached by a transfer), so the source must not keep it in memory.
+   * `identity` distinguishes manifest revisions without changing the fetch URL.
    */
   fetchFile: (
     key: string,
     signal?: AbortSignal,
-    mode?: { transfer?: boolean },
+    mode?: { transfer?: boolean; identity?: string },
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
   /** Whether `fetchFile` can serve the bytes without a network request. */
   hasFile?: (key: string) => Promise<boolean>;
@@ -214,6 +215,7 @@ export type SearchFieldOptions = {
   concurrency?: number;
   now?: () => number;
   customFields?: readonly CustomField[];
+  serviceId?: string;
 };
 
 export const MINUTE_MS = 60_000;
@@ -1083,6 +1085,7 @@ async function collectAggregator(
   fields: readonly string[],
   topK: number | null,
   lease: DuckDBLease,
+  searchQuery?: string,
 ): Promise<{
   aggregator: Aggregator;
   stats: FetchStats;
@@ -1097,11 +1100,14 @@ async function collectAggregator(
   const toMs = Date.parse(to);
   const hasFilters = Boolean(options.filters && options.filters.length > 0);
   const customFields = options.customFields ?? [];
+  const generation = lease.readContext();
   const cardFields = [...CARD_FIELDS, ...customFields.map((field) => field.id)];
   const variant = customFieldsKey(customFields);
   const manifest =
     options.manifest ??
     (await fetchManifest(source.fetchJson, from, to, signal));
+  generation.assertCurrent();
+  signal?.throwIfAborted();
   if (!manifest.complete) {
     throw new Error(
       "The file manifest for this range is incomplete; choose a shorter range.",
@@ -1200,6 +1206,8 @@ async function collectAggregator(
   const keptRows = { cached: 0, rows: 0, bytes: 0 };
   const scopeListings = summaryListings.get(scope);
   const scopeDecoded = decodedSummaries.get(scope);
+  generation.assertCurrent();
+  signal?.throwIfAborted();
   if (next) {
     for (const meta of [...next.interior.values(), ...next.boundary.values()]) {
       keptRows.cached++;
@@ -1325,7 +1333,8 @@ async function collectAggregator(
     }
   }
   const buildFullRollup =
-    fields.length === cardFields.length || Boolean(source.writeRollup);
+    topK !== null &&
+    (fields.length === cardFields.length || Boolean(source.writeRollup));
   const wanted = [...BASE_COLUMNS, ...(buildFullRollup ? cardFields : fields)];
   const duckdb = getDuckDBEngine();
   const scopedKeyOf = (key: string) => `${scope}:${key}`;
@@ -1637,6 +1646,7 @@ async function collectAggregator(
       let released = false;
       try {
         const completeRollup =
+          topK !== null &&
           !hasFilters &&
           !edgeOnly &&
           Boolean(source.writeRollup) &&
@@ -1651,7 +1661,15 @@ async function collectAggregator(
           toMs,
           options.filters ?? [],
           target,
-          { edgeOnly, topK: null, allValuesFields: [ALL_VALUES_FIELD], signal },
+          {
+            edgeOnly,
+            topK: null,
+            allValuesFields: [ALL_VALUES_FIELD],
+            signal,
+            fieldSearch: searchQuery === undefined
+              ? undefined : { field: fields[0], query: searchQuery },
+            context: lease.readContext(),
+          },
           customFields,
         );
         released = true;
@@ -1812,9 +1830,14 @@ async function collectAggregator(
         topK,
         allValuesFields: [ALL_VALUES_FIELD],
         signal,
+        fieldSearch: searchQuery === undefined
+          ? undefined : { field: fields[0], query: searchQuery },
+        context: lease.readContext(),
       },
     );
   }
+  generation.assertCurrent();
+  signal?.throwIfAborted();
   if (next) {
     aggregator.hasBytes =
       [...next.interior.values()].some((meta) => meta.hasBytes) ||
@@ -1833,7 +1856,11 @@ export async function runDashboard(
   source: FileSource,
   options: EngineOptions,
 ): Promise<DashboardResult> {
-  const lease = getDuckDBEngine().lease(options.customFields);
+  const duckdb = getDuckDBEngine();
+  const generation = await duckdb.beginRequest();
+  generation.assertCurrent();
+  options.signal?.throwIfAborted();
+  const lease = duckdb.lease(options.customFields);
   const { aggregator, stats, started, now } = await collectAggregator(
     source,
     options,
@@ -1841,6 +1868,8 @@ export async function runDashboard(
     TOP_N,
     lease,
   ).finally(() => lease.release());
+  generation.assertCurrent();
+  options.signal?.throwIfAborted();
   const aggregated = aggregator.result();
   // The kept aggregate's buckets change on the next refresh.
   aggregated.buckets = aggregated.buckets.map((bucket) => ({ ...bucket }));
@@ -1856,7 +1885,11 @@ export async function searchFieldValues(
   const filters = (options.filters ?? []).filter(
     (f) => f.field !== options.column,
   );
-  const lease = getDuckDBEngine().lease(options.customFields);
+  const duckdb = getDuckDBEngine();
+  const generation = await duckdb.beginRequest();
+  generation.assertCurrent();
+  options.signal?.throwIfAborted();
+  const lease = duckdb.lease(options.customFields);
   const { aggregator } = await collectAggregator(
     source,
     {
@@ -1873,7 +1906,10 @@ export async function searchFieldValues(
     [options.column],
     null,
     lease,
+    options.query,
   ).finally(() => lease.release());
+  generation.assertCurrent();
+  options.signal?.throwIfAborted();
   return aggregator.searchValues(
     options.column,
     options.query,

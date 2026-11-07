@@ -150,9 +150,13 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     }
     const worker = this.getWorker(this.handleMessage);
     if (!worker) {
+      const source = getInlineSource().withOptions({
+        ...debugTelemetry(),
+        serviceId: options.serviceId,
+      });
       return mode === "searchSummaries"
-        ? searchSummariesInline(getInlineSource(), options)
-        : searchInline(getInlineSource(), options);
+        ? searchSummariesInline(source, options)
+        : searchInline(source, options);
     }
 
     const id = this.allocateId();
@@ -448,6 +452,7 @@ export function searchFieldValuesInWorker(
     limit?: number;
     signal?: AbortSignal;
     customFields?: readonly CustomField[];
+    serviceId?: string;
   } = {},
 ): Promise<{ value: Scalar; count: number }[]> {
   return searchFieldValues({
@@ -481,6 +486,7 @@ export function searchFieldSummariesInWorker(
     limit?: number;
     signal?: AbortSignal;
     customFields?: readonly CustomField[];
+    serviceId?: string;
   } = {},
 ): Promise<{ entries: { value: Scalar; count: number }[]; partial: boolean }> {
   return searchFieldSummaries({

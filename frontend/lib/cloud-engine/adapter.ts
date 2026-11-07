@@ -29,19 +29,20 @@ import {
   getQuerySchema,
   type QueryRequest,
 } from "./query";
-import { handleRumRequest, type RumQueryParams } from "./rum";
+import { handleRumRequest, UnsupportedRumFilterError, type RumQueryParams } from "./rum";
 import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
 import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
 import { isNativeCloudRoute } from "./native-routes";
 import { handleSavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
+import { cloudRumMutation } from "./rum-management";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
-import { ensureCloudRange } from "./range-loader";
+import { bindCloudReadContext, cloudReadContext, ensureCloudRange } from "./range-loader";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
-import { compileFiltersToSql, getDuckDBEngine } from "./dashboard/duckdb";
+import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
 import { handleSecurityRequest } from "./security";
 import {
@@ -267,14 +268,6 @@ function unsupportedCloudEndpoint(request: Request): Response {
   }, request, undefined, 501);
 }
 
-function executeSql(sql: string, params: readonly unknown[] = [], signal?: AbortSignal) {
-  return getDuckDBEngine().executeSql<Record<string, unknown>>(sql, params, signal);
-}
-
-function getPresentColumns(_keys?: readonly string[], _signal?: AbortSignal) {
-  return getDuckDBEngine().getPresentColumns(_keys);
-}
-
 async function withLoading<T>(stage: LoadingStage, work: () => Promise<T>): Promise<T> {
   const loading = beginCloudLoading(stage);
   let success = false;
@@ -316,9 +309,15 @@ function isLocalScan(path: string, method: string): boolean {
 }
 
 async function prepareCloudScan(request: Request): Promise<Request> {
+  const engine = getDuckDBEngine();
+  const generation = await engine.beginRequest();
+  generation.assertCurrent();
+  request.signal.throwIfAborted();
   const url = new URL(request.url);
   const body = request.method === "POST"
     ? await request.clone().json() as Record<string, unknown> : {};
+  generation.assertCurrent();
+  request.signal.throwIfAborted();
   const params = { ...Object.fromEntries(url.searchParams), ...body };
   const token = typeof params.session_token === "string" ? openSessionToken(params.session_token) : null;
   let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
@@ -327,6 +326,8 @@ async function prepareCloudScan(request: Request): Promise<Request> {
       fetch("/api/log-extents", { signal: request.signal }));
     if (!response.ok) throw new Error(`Cloud range discovery failed (${response.status})`);
     const extents = await response.json() as { latest_log_at?: string | null };
+    generation.assertCurrent();
+    request.signal.throwIfAborted();
     end = extents.latest_log_at ?? new Date().toISOString();
   }
   const scoring = /\/scoring\//.test(url.pathname);
@@ -351,6 +352,8 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     const catalogUrl = new URL("/api/log-fields/catalog", request.url);
     catalogUrl.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
     const catalog = await loadCloudCatalog(new Request(catalogUrl, request));
+    generation.assertCurrent();
+    request.signal.throwIfAborted();
     if (catalog instanceof Response) throw new Error(`Cloud field discovery failed (${catalog.status})`);
     customFields = (catalog.fields ?? []).filter((field) => field.is_custom).map((field) => ({
       id: field.id,
@@ -358,21 +361,29 @@ async function prepareCloudScan(request: Request): Promise<Request> {
         : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(field.sql_type)) ? "number" : "string",
     }));
   }
-  const scanEnd = token ? new Date(Date.parse(end) + 1).toISOString() : end;
-  await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
+  // Detail and arbitrary SQL may explicitly include their upper endpoint.
+  const scanEnd = token || url.pathname === "/api/query" ? new Date(Date.parse(end) + 1).toISOString() : end;
+  const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
   });
-  if (request.method === "POST") {
-    return new Request(request, { body: JSON.stringify({ ...params,
-      start_time: params.start_time ?? start, end_time: params.end_time ?? end,
-      ...(serviceId ? { service_id: decodeURIComponent(String(serviceId)) } : {}),
-      ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
-    }) });
+  try {
+    generation.assertCurrent();
+    request.signal.throwIfAborted();
+    if (request.method === "POST") {
+      return bindCloudReadContext(new Request(request, { body: JSON.stringify({ ...params,
+        start_time: params.start_time ?? start, end_time: params.end_time ?? end,
+        ...(serviceId ? { service_id: decodeURIComponent(String(serviceId)) } : {}),
+        ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
+      }) }), read);
+    }
+    if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
+    if (!url.searchParams.has("end_time")) url.searchParams.set("end_time", end);
+    if (serviceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
+    return bindCloudReadContext(new Request(url, request), read);
+  } catch (error) {
+    read.release?.();
+    throw error;
   }
-  if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
-  if (!url.searchParams.has("end_time")) url.searchParams.set("end_time", end);
-  if (serviceId && !url.searchParams.has("service_id")) url.searchParams.set("service_id", decodeURIComponent(String(serviceId)));
-  return new Request(url, request);
 }
 
 export async function handleCloudAnalyticalRequest(
@@ -390,6 +401,21 @@ async function handleCloudRequest(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
+  if (request.method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
+    return cloudRumMutation(request, (jobId, signal) => {
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream<Uint8Array>({
+        async start(controller) {
+          try {
+            await stepJobToCompletion(jobId, controller, encoder, signal);
+            controller.close();
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    });
+  }
   if (/^\/api\/(?:cron-runs|cron-schedule|audit-logs|admin\/(?:usage-log(?:\/export)?|raw-tree|storage-tree|ingested-files|quarantine\/purge))$/.test(path)) {
     const administrative = await withLoading("listing", () => cloudAdminWire(request));
     if (administrative) return administrative;
@@ -448,14 +474,19 @@ async function handleCloudRequest(
       await previous;
       const loading = beginCloudLoading("files");
       let success = false;
+      let read: DuckDBReadContext | undefined;
       try {
         request.signal.throwIfAborted();
         const prepared = await prepareCloudScan(request);
+        read = cloudReadContext(prepared);
         const response = /\/scoring\//.test(path)
-          ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared, origin);
+          ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared));
+        cloudReadContext(prepared).assertCurrent();
+        prepared.signal.throwIfAborted();
         success = Boolean(response?.ok);
         return response ?? unsupportedCloudEndpoint(request);
       } finally {
+        read?.release?.();
         loading.finish(success);
         release();
       }
@@ -468,7 +499,13 @@ async function handleCloudRequest(
   return stage ? withLoading(stage, work) : work();
 }
 
-async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext): Promise<Response | null> {
+async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext, read?: DuckDBReadContext): Promise<Response | null> {
+  const executeSql = (sql: string, params: readonly unknown[] = [], signal?: AbortSignal) =>
+    (read ?? cloudReadContext(request)).executeSql<Record<string, unknown>>(sql, params, signal);
+  const getPresentColumns = (keys?: readonly string[], signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    return (read ?? cloudReadContext(request)).getPresentColumns(keys);
+  };
   const url = new URL(request.url, "http://localhost");
   const { pathname, searchParams } = url;
   const method = (request.method || "GET").toUpperCase();
@@ -967,7 +1004,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       SELECT FLOOR(ts_ms / ${bucketMs}) * ${bucketMs} AS bucket_ms,
         ${rawMetric}${metric === "throughput" ? ` / ${bucketMs / 1000}` : ""} AS value
       FROM requests
-      WHERE ts_ms >= ? AND ts_ms <= ? AND (${whereClause})
+      WHERE ts_ms >= ? AND ts_ms < ? AND (${whereClause})
       GROUP BY 1 ORDER BY 1
     `;
     const rawSeries = rawMetric
@@ -1103,6 +1140,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
             start_time?: string;
             end_time?: string;
             limit?: number;
+            filters?: Record<string, { mode?: string; values?: string[] }>;
+            custom_filters?: Record<string, { mode?: string; values?: string[] }>;
           })
         : {
             field: searchParams.get("field") ?? undefined,
@@ -1114,30 +1153,53 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const now = Date.now();
     const fromIso = body.start_time ?? new Date(now - 86_400_000).toISOString();
     const toIso = body.end_time ?? new Date(now).toISOString();
+    const filters = parseFiltersPayload(body.filters, body.custom_filters);
+    const serviceId = searchParams.get("service_id") ?? request.headers.get("x-service-id") ?? undefined;
+    const fieldName = (body.fields?.[0] ?? body.field ?? "url") as CardField;
+    const customIds = new Set([fieldName, ...filters.map((filter) => filter.field)]
+      .filter((id) => !Object.hasOwn(FIELD_DUCKDB_TYPES, id)));
+    let customFields: CustomField[] = [];
+    if (customIds.size) {
+      const catalog = await loadCloudCatalog(request);
+      if (catalog instanceof Response) return catalog;
+      customFields = (catalog.fields ?? [])
+        .filter((field) => field.is_custom && customIds.has(field.id))
+        .map((field) => ({
+          id: field.id,
+          type: /BOOL/i.test(String(field.sql_type)) ? "boolean"
+            : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(field.sql_type)) ? "number" : "string",
+        }));
+      if ([...customIds].some((id) => !customFields.some((field) => field.id === id))) {
+        return jsonResponse({ detail: "Unknown field in Cloud field search" }, request, undefined, 400);
+      }
+    }
     if (Array.isArray(body.fields) && body.fields.length > 0) {
       const summaries = await searchFieldSummariesInWorker(
         fromIso,
         toIso,
         body.fields[0] as CardField,
         body.search ?? "",
-        [],
+        filters,
         {
           limit: body.limit ?? 20,
           signal: request.signal,
+          serviceId,
+          customFields,
         },
       );
       return jsonResponse({ summaries }, request);
     }
-    const fieldName = (body.field ?? "url") as CardField;
     const items = await searchFieldValuesInWorker(
       fromIso,
       toIso,
       fieldName,
       body.search ?? "",
-      [],
+      filters,
       {
         limit: body.limit ?? 50,
         signal: request.signal,
+        serviceId,
+        customFields,
       },
     );
     return jsonResponse(
@@ -1156,6 +1218,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       start_time: searchParams.get("start_time")!,
       end_time: searchParams.get("end_time")!,
       signal: request.signal,
+      engine: read,
     }, settings.class_a_rate_per_1k), request);
   }
   if (pathname.startsWith("/api/usage/")) {
@@ -1319,7 +1382,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   }
   // Page 8: Origin Analytics (/api/origin/*)
   if (pathname.startsWith("/api/origin/")) {
-    return handleOriginRequest(request, pathname, url);
+    return handleOriginRequest(request, pathname, url, read);
   }
 
   // Page 9: Performance Analytics (/api/performance, /api/performance/aggregates)
@@ -1328,12 +1391,12 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     pathname === "/api/performance" ||
     pathname.startsWith("/api/performance/")
   ) {
-    return handlePerformanceRequest(request, pathname, url);
+    return handlePerformanceRequest(request, pathname, url, read);
   }
 
   // Page 10: Security Analytics (/api/security/*)
   if (pathname.startsWith("/api/security/")) {
-    return handleSecurityRequest(request, pathname, url);
+    return handleSecurityRequest(request, pathname, url, read);
   }
 
   const parseRequestParams = async (): Promise<Record<string, unknown>> => {
@@ -1391,6 +1454,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const data = await handleNetworkRequest(pathname, {
       ...params,
       signal: request.signal,
+      engine: read,
     } as NetworkQueryParams);
     return jsonResponse(data, request);
   }
@@ -1401,6 +1465,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const data = await handleValueRequest(pathname, {
       ...params,
       signal: request.signal,
+      engine: read,
     } as ValueQueryParams);
     return jsonResponse(data, request);
   }
@@ -1414,6 +1479,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const data = await handleAssetsRequest(pathname, {
       ...params,
       signal: request.signal,
+      engine: read,
     } as AssetsQueryParams);
     return jsonResponse(data, request);
   }
@@ -1436,11 +1502,19 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       ...params,
       service_id: serviceId,
       signal: request.signal,
+      engine: read,
     } as RumQueryParams;
-    const data = pathname.endsWith("/analytics") ? await cloudRumAnalytics(rumParams)
-      : pathname.endsWith("/live-events") ? await cloudRumLiveEvents(rumParams)
-      : await handleRumRequest(pathname, rumParams);
-    return jsonResponse(data, request);
+    try {
+      const data = pathname.endsWith("/analytics") ? await cloudRumAnalytics(rumParams)
+        : pathname.endsWith("/live-events") ? await cloudRumLiveEvents(rumParams)
+        : await handleRumRequest(pathname, rumParams);
+      return jsonResponse(data, request);
+    } catch (error) {
+      if (!(error instanceof UnsupportedRumFilterError)) throw error;
+      return jsonResponse({
+        detail: { error: "rum_filters_unsupported", message: error.message },
+      }, request, undefined, 400);
+    }
   }
 
   // Page 14: CMCD Streaming Analytics (/api/cmcd/aggregates, /api/cmcd/*, /api/services/{id}/cmcd/*)
@@ -1460,6 +1534,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       ...params,
       service_id: serviceId,
       signal: request.signal,
+      engine: read,
     } as CmcdQueryParams);
     return jsonResponse(data, request);
   }
@@ -1468,9 +1543,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   if (pathname === "/api/sessions" && method === "POST") {
     const params = await parseRequestParams();
     const { maskIps, role } = resolveMaskIpsAndRole(params);
-    const cols = await getPresentColumns(undefined, request.signal).catch(
-      () => undefined,
-    );
+    const cols = await getPresentColumns(undefined, request.signal);
     const res = await handleSessionsList(
       params as unknown as SessionsListRequest,
       {
@@ -1478,6 +1551,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         maskIps,
         role,
         availableColumns: cols && cols.size > 0 ? cols : undefined,
+        customColumnTypes: read?.getCustomColumnTypes(),
         runSql: (sql) => executeSql(sql, [], request.signal),
       },
     );
@@ -1553,6 +1627,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       signal: request.signal,
       maskIps,
       filters: parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined),
+      engine: read,
     });
     return jsonResponse(data, request);
   }
@@ -1562,7 +1637,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const { maskIps } = resolveMaskIpsAndRole(params);
     const data = await queryCloudCacheCollapse(
       params as unknown as CacheCollapseDetailRequest,
-      { maskIps, signal: request.signal },
+      { maskIps, signal: request.signal, engine: read },
     );
     return jsonResponse(data, request);
   }

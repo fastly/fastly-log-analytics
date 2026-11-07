@@ -36,6 +36,21 @@ Routes in [`backend/routers/query.py`](../../backend/routers/query.py); models i
 
 Validation ([`backend/core/sql_validator.py`](../../backend/core/sql_validator.py), `validate_user_sql`): the statement is parsed into an AST and only `SELECT` and set-operation nodes are accepted, with input size limits, a NUL-byte check and table/function allow-listing; a rejection is 403 `sql_not_permitted`. Validated queries execute against ClickHouse, where the user SQL is never spliced with scope: service, publication and window scope are sent as server-enforced `additional_table_filters` ([AGENTS.md](../../AGENTS.md), ClickHouse readers section).
 
+## Cloud
+
+The selected service and time window travel alongside SQL as file-loading scope;
+explicit request bounds take precedence. Structured queries use half-open
+`[start, end)` bounds. Raw SQL keeps its own predicates: Cloud does not inject a
+time condition or rewrite the user's comparison operators. Discovery
+conservatively includes the upper-endpoint file and rounds outward to native
+second precision; SQL still decides which loaded rows match.
+
+SQL reads complete normalized views over cached Parquet bytes, rather than
+full-width decoded copies. The selected service, file versions and loaded range
+stay bound to that read. Range replacement or backend recovery invalidates an old
+read instead of letting it query a newer or empty dataset. A failed query is not
+automatically replayed by the engine.
+
 ## Tests
 
 - Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/security/test_no_raw_exception_in_responses.py`](../../tests/security/test_no_raw_exception_in_responses.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)

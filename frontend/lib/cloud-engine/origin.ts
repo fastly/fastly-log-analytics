@@ -1,5 +1,5 @@
 import { quoteIdent, sqlEscape } from "@/lib/sqlBuilder";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { getDuckDBEngine, type DuckDBColumnType, type DuckDBReadContext } from "./dashboard/duckdb";
 import { compileFiltersToSql } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 
@@ -185,6 +185,7 @@ export type OriginSqlRow = Record<string, unknown>;
 export interface OriginSqlExecutor {
   query(sql: string, signal?: AbortSignal): Promise<OriginSqlRow[]>;
   getColumns?(tableName?: string, signal?: AbortSignal): Promise<Set<string>>;
+  getCustomColumnTypes?(): ReadonlyMap<string, DuckDBColumnType>;
   tableName?: string;
 }
 
@@ -899,11 +900,13 @@ export function setOriginSqlExecutor(executor: OriginSqlExecutor | null): void {
   customOriginExecutor = executor;
 }
 
-function createDefaultOriginExecutor(): OriginSqlExecutor {
+function createDefaultOriginExecutor(context?: DuckDBReadContext): OriginSqlExecutor {
+  const read = context ?? getDuckDBEngine().readContext();
   return {
     tableName: "requests",
+    getCustomColumnTypes: () => read.getCustomColumnTypes(),
     async query(sql: string, signal?: AbortSignal): Promise<OriginSqlRow[]> {
-      const engine = getDuckDBEngine() as unknown as {
+      const engine = read as unknown as {
         querySql?: (sql: string, params: readonly unknown[], signal?: AbortSignal) => Promise<OriginSqlRow[]>;
         executeSql?: (sql: string, params: readonly unknown[], signal?: AbortSignal) => Promise<OriginSqlRow[]>;
         ensureBackend?: () => Promise<{
@@ -951,9 +954,11 @@ function createDefaultOriginExecutor(): OriginSqlExecutor {
       return [];
     },
     async getColumns(tableName = "requests", signal?: AbortSignal): Promise<Set<string>> {
-      const rows = await this.query(`DESCRIBE SELECT * FROM ${tableName}`, signal).catch(
-        () => [],
-      );
+      const rows = await this.query(`DESCRIBE SELECT * FROM ${tableName}`, signal).catch(() => {
+        signal?.throwIfAborted();
+        read.assertCurrent();
+        return [];
+      });
       return new Set(rows.map((r) => String(r.column_name ?? "")).filter(Boolean));
     },
   };
@@ -988,6 +993,7 @@ function buildWhereClause(
     custom_filters?: Record<string, { mode?: string; values?: string[] }>;
   },
   actualCols: ReadonlySet<string>,
+  customTypes: ReadonlyMap<string, DuckDBColumnType>,
 ): { where: string; timeWhere: string } {
   const clauses: string[] = [];
   const startMs = body.start_time ? Date.parse(body.start_time) : NaN;
@@ -1003,16 +1009,16 @@ function buildWhereClause(
   }
   if (Number.isFinite(endMs)) {
     if (actualCols.has("ts_ms")) {
-      clauses.push(`"ts_ms" <= ${Math.ceil(endMs)}`);
+      clauses.push(`"ts_ms" < ${Math.ceil(endMs)}`);
     } else if (actualCols.has("timestamp")) {
       clauses.push(
-        `"timestamp" <= CAST('${sqlEscape(new Date(endMs).toISOString())}' AS TIMESTAMPTZ)`,
+        `"timestamp" < CAST('${sqlEscape(new Date(endMs).toISOString())}' AS TIMESTAMPTZ)`,
       );
     }
   }
   const timeWhere = clauses.length > 0 ? clauses.join(" AND ") : "TRUE";
   const filters = parseFilters(body.filters, body.custom_filters);
-  const filterSql = filters.length > 0 ? compileFiltersToSql(filters) : "TRUE";
+  const filterSql = filters.length > 0 ? compileFiltersToSql(filters, false, [], customTypes) : "TRUE";
   const where = `${timeWhere} AND (${filterSql})`;
   return { where, timeWhere };
 }
@@ -1100,7 +1106,7 @@ export async function queryOriginAggregates(
 
   const wanted = body.sections ? new Set(body.sections) : null;
   const want = (s: OriginSectionName) => !wanted || wanted.has(s);
-  const { where } = buildWhereClause(body, actualCols);
+  const { where } = buildWhereClause(body, actualCols, executor.getCustomColumnTypes?.() ?? new Map());
   const out = emptyOriginAggregates();
 
   if (want("summary")) {
@@ -1225,7 +1231,7 @@ export async function queryOriginShieldingAnalysis(
     };
   }
 
-  const { where, timeWhere } = buildWhereClause(body, actualCols);
+  const { where, timeWhere } = buildWhereClause(body, actualCols, executor.getCustomColumnTypes?.() ?? new Map());
   const limit = body.limit ?? 50;
   const sql = buildOriginShieldingAnalysisSql(table, where, timeWhere, limit);
   const rows = await executor.query(sql, signal);
@@ -1270,7 +1276,7 @@ export async function queryOriginDrilldown(
   const actualCols = executor.getColumns
     ? await executor.getColumns(table, signal)
     : new Set<string>();
-  const { where } = buildWhereClause(body, actualCols);
+  const { where } = buildWhereClause(body, actualCols, executor.getCustomColumnTypes?.() ?? new Map());
   const sql = buildOriginDrilldownSql(
     table,
     where,
@@ -1296,6 +1302,7 @@ export async function handleOriginRequest(
   request: Request,
   pathArg?: string,
   urlArg?: URL,
+  context?: DuckDBReadContext,
 ): Promise<Response | null> {
   const url = urlArg ?? new URL(request.url, "http://localhost");
   const pathname = pathArg ?? url.pathname;
@@ -1308,19 +1315,21 @@ export async function handleOriginRequest(
     return null;
   }
 
+  const executor = customOriginExecutor ?? createDefaultOriginExecutor(context);
   const body =
     method === "POST"
       ? ((await request.clone().json().catch(() => ({}))) as Record<string, unknown>)
       : {};
 
   if (pathname === "/api/origin/aggregates") {
-    const res = await queryOriginAggregates(body, request.signal);
+    const res = await queryOriginAggregates(body, request.signal, executor);
     return jsonResp(res);
   }
   if (pathname === "/api/origin/summary") {
     const res = await queryOriginAggregates(
       { ...body, sections: ["summary"] },
       request.signal,
+      executor,
     );
     return jsonResp(res.summary);
   }
@@ -1339,6 +1348,7 @@ export async function handleOriginRequest(
         sections: ["timeseries"],
       },
       request.signal,
+      executor,
     );
     return jsonResp(res.timeseries);
   }
@@ -1353,6 +1363,7 @@ export async function handleOriginRequest(
         sections: ["slow_urls"],
       },
       request.signal,
+      executor,
     );
     return jsonResp(res.slow_urls);
   }
@@ -1360,6 +1371,7 @@ export async function handleOriginRequest(
     const res = await queryOriginAggregates(
       { ...body, sections: ["status_codes"] },
       request.signal,
+      executor,
     );
     return jsonResp(res.status_codes);
   }
@@ -1367,6 +1379,7 @@ export async function handleOriginRequest(
     const res = await queryOriginAggregates(
       { ...body, sections: ["path_breakdown"] },
       request.signal,
+      executor,
     );
     return jsonResp(res.path_breakdown);
   }
@@ -1378,6 +1391,7 @@ export async function handleOriginRequest(
         sections: ["pop_latency"],
       },
       request.signal,
+      executor,
     );
     return jsonResp(res.pop_latency);
   }
@@ -1389,11 +1403,12 @@ export async function handleOriginRequest(
         sections: ["ip_health"],
       },
       request.signal,
+      executor,
     );
     return jsonResp(res.ip_health);
   }
   if (pathname === "/api/origin/shielding-analysis") {
-    const res = await queryOriginShieldingAnalysis(body, request.signal);
+    const res = await queryOriginShieldingAnalysis(body, request.signal, executor);
     return jsonResp(res);
   }
   if (pathname === "/api/origin/drilldown") {
@@ -1404,6 +1419,7 @@ export async function handleOriginRequest(
         limit: Number(body.limit ?? 30),
       },
       request.signal,
+      executor,
     );
     return jsonResp(res);
   }

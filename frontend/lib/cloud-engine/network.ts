@@ -2,6 +2,7 @@ import {
   getDuckDBEngine,
   compileFiltersToSql,
   type DuckDBAnalyticalEngine,
+  type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { buildOriginShieldingAnalysisSql, enrichShieldingRouteWithPopDistance } from "./origin";
@@ -53,7 +54,8 @@ export interface NetworkQueryParams {
   map_asn?: string;
   region_country?: string;
   sections?: readonly string[];
-  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
+  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
+  customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
   signal?: AbortSignal;
 }
 
@@ -295,7 +297,7 @@ function buildWhereClause(params: NetworkQueryParams): string {
     clauses.push(`ts_ms >= ${startMs}`);
   }
   if (endMs !== null) {
-    clauses.push(`ts_ms <= ${endMs}`);
+    clauses.push(`ts_ms < ${endMs}`);
   }
   if (params.service_id) {
     const escaped = String(params.service_id).replaceAll("'", "''");
@@ -317,7 +319,7 @@ function buildWhereClause(params: NetworkQueryParams): string {
   }
   clauses.push(compileFiltersToSql(Object.entries(params.filters ?? {}).flatMap(([field, spec]) =>
     spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-  )));
+  ), false, [], params.customColumnTypes));
   return clauses.join(" AND ");
 }
 
@@ -428,7 +430,8 @@ async function detectMissingTcpFields(
 }
 
 export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const missingTcpFields = await detectMissingTcpFields(engine);
   const where = buildWhereClause(params);
 
@@ -645,7 +648,8 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
 }
 
 export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const missingTcpFields = await detectMissingTcpFields(engine);
   const where = buildWhereClause(params);
 
@@ -821,7 +825,8 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
 }
 
 export async function queryPopHealth(params: NetworkQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildWhereClause(params);
 
   const rows = await engine.executeSql<Record<string, unknown>>(
@@ -885,7 +890,8 @@ export async function queryPopHealth(params: NetworkQueryParams = {}) {
 }
 
 async function queryNetworkTransport(params: NetworkQueryParams) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildWhereClause(params);
   const rows = await engine.executeSql<Record<string, unknown>>(`SELECT
     COUNT(*) AS total_requests,

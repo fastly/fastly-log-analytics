@@ -428,7 +428,7 @@ function StreamDetailClient() {
     return (
       <div className="space-y-6">
         <PageHeader title="Stream Details" icon={Film} />
-        <Alert>
+        <Alert role="status" data-testid="stream-detail-parameter-required">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>No session token</AlertTitle>
           <AlertDescription>
@@ -496,7 +496,7 @@ function StreamDetailClient() {
       )}
 
       {aggregates && aggregates.summary.videoRequests === 0 && (
-        <Alert>
+        <Alert role="status">
           <Film className="h-4 w-4" />
           <AlertTitle>No video segment requests</AlertTitle>
           <AlertDescription>

@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
 from backend.core.clickhouse import ClickHouseError
+from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     build_clickhouse_filters,
     visible_fact_clauses,
@@ -127,6 +128,7 @@ def insights_endpoint(
                 **cached, is_cached=True, cache_age_seconds=0, debug_queries=cached_queries
             )
     get_queries()
+    trace = HighScaleSections(service.service_id, "insights")
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -156,11 +158,11 @@ def insights_endpoint(
         f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
     )
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta") as meta_pool:
-        fut_history = meta_pool.submit(
-            contextvars.copy_context().run, lambda: service.client.execute(history_sql, params)
+        fut_history = trace.submit(
+            meta_pool, "history", lambda: service.client.execute(history_sql, params), source="fact"
         )
-        fut_sample = meta_pool.submit(
-            contextvars.copy_context().run, lambda: service.client.execute(sample_sql, params)
+        fut_sample = trace.submit(
+            meta_pool, "fields", lambda: service.client.execute(sample_sql, params), source="fact"
         )
         history = fut_history.result()
         sample = fut_sample.result()
@@ -189,7 +191,10 @@ def insights_endpoint(
                     "AND event_timestamp <= {window_end:DateTime64(3)}",
                     f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
                 )
-            rows = [tuple(row.values()) for row in service.client.execute(sql, params)]
+            rows = [
+                tuple(row.values())
+                for row in trace.run(definition.id, lambda: service.client.execute(sql, params), source="fact")
+            ]
             return shape_insight_card_from_rows(
                 definition,
                 rows,

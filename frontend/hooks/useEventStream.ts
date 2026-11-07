@@ -187,7 +187,7 @@ export function useSeededReady(
       for (const keyFn of keyFns) {
         const key = keyFn(serviceId)
         if (queryClient.getQueryData(key) === undefined) {
-          queryClient.setQueryData(key, null)
+          queryClient.setQueryData(key, null, { updatedAt: 0 })
         }
       }
     }

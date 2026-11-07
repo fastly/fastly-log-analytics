@@ -5,10 +5,12 @@ const BEACON_IDENTITY = `coalesce(nullif(request_event_id, ''), nullif(client_id
   scoped_key || ':' || ts_ms::VARCHAR)`;
 
 export async function cloudRumUsage(params: RumQueryParams, classARate: number) {
+  const engine = params.engine ?? getDuckDBEngine().readContext();
   const where = buildRumWhere(params);
-  const rows = await getDuckDBEngine().executeSql<Record<string, unknown>>(`WITH events AS (
+  const errorWhere = buildRumWhere(params, "client_errors");
+  const rows = await engine.executeSql<Record<string, unknown>>(`WITH events AS (
     SELECT ts_ms, ${BEACON_IDENTITY} AS beacon_id FROM client_vitals WHERE ${where}
-    UNION ALL SELECT ts_ms, ${BEACON_IDENTITY} FROM client_errors WHERE ${where}
+    UNION ALL SELECT ts_ms, ${BEACON_IDENTITY} FROM client_errors WHERE ${errorWhere}
   ) SELECT strftime(epoch_ms(ts_ms), '%Y-%m-%d') AS date,
     count(DISTINCT beacon_id) AS beacons FROM events GROUP BY 1 ORDER BY 1`, [], params.signal);
   const data = rows.map((row) => ({
@@ -27,15 +29,16 @@ export async function cloudRumUsage(params: RumQueryParams, classARate: number) 
 }
 
 export async function cloudRumAnalytics(params: RumQueryParams) {
-  const data = await queryRumAnalytics(params);
-  const engine = getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  const data = await queryRumAnalytics({ ...params, engine });
   const where = buildRumWhere(params);
+  const errorWhere = buildRumWhere(params, "client_errors");
   const identity = BEACON_IDENTITY;
   const events = `WITH events AS (
     SELECT ts_ms, ${identity} AS beacon_id, page_url, browser_name, os_name, device_type,
       metric_name, metric_value, FALSE AS is_error FROM client_vitals WHERE ${where}
     UNION ALL SELECT ts_ms, ${identity}, page_url, browser_name, os_name, device_type,
-      NULL, NULL, TRUE FROM client_errors WHERE ${where}
+      NULL, NULL, TRUE FROM client_errors WHERE ${errorWhere}
   )`;
   const counts = (await engine.executeSql<Record<string, unknown>>(`${events} SELECT
     count(DISTINCT beacon_id) AS beacons,

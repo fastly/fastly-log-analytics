@@ -11,6 +11,7 @@ import pytest
 import release
 from release import (
     frozen_source,
+    prepare_static_export_tree,
     restore_node_modules,
     restore_web_out,
     save_web_caches,
@@ -19,6 +20,27 @@ from release import (
     stabilize_mtimes,
     verify_source,
 )
+
+
+def test_static_export_uses_policy_from_its_snapshot(tmp_path: Path) -> None:
+    web = tmp_path / "frontend"
+    for relative in ("app/alerts/page.tsx", "app/admin/rum/page.tsx", "app/sessions/stream/page.tsx"):
+        page = web / relative
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text('export const dynamic = "force-dynamic";')
+    (web / "static-export-policy.json").write_text(json.dumps({"prunePaths": ["app/alerts"]}))
+
+    prepare_static_export_tree(web)
+
+    assert not (web / "app/alerts").exists()
+    assert (web / "app/admin/rum/page.tsx").is_file()
+    assert (web / "app/sessions/stream/page.tsx").is_file()
+
+    (web / "static-export-policy.json").write_text(json.dumps({"prunePaths": ["app/admin/rum"]}))
+    prepare_static_export_tree(web)
+
+    assert not (web / "app/admin/rum").exists()
+    assert (web / "app/sessions/stream/page.tsx").is_file()
 
 
 def git(root: Path, *args: str) -> str:

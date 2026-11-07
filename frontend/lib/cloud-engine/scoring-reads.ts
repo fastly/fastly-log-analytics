@@ -1,4 +1,4 @@
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { cloudReadContext } from "./range-loader";
 import { buildScoringSourceSql } from "./sessions";
 import { escapeSqlLiteral } from "./sql-validator";
 import { useSessionRoleStore } from "@/stores/filterStore";
@@ -34,7 +34,7 @@ function bounded(value: string | null, fallback: number, max: number): number {
 }
 
 export async function queryCloudScoring(request: Request, route: string) {
-  const engine = getDuckDBEngine();
+  const engine = cloudReadContext(request);
   const cols = await engine.getPresentColumns();
   if (!cols.has("edge_score")) return unavailable("scoring_fields_not_present");
   const url = new URL(request.url);

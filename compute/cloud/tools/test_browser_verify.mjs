@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import cloudReadiness from "../../../scripts/lib/cloud_readiness.cjs";
@@ -24,11 +25,24 @@ import {
   runDashboardCase,
   measureDashboardOnce,
   measureWarmDashboardReload,
+  measureRouteWithTelemetry,
   summarizeApiCalls,
   summarizeNumericSeries,
   sweepPages,
   validateDashboardPresets,
 } from "./browser_verify.mjs";
+
+function fixtureQuerySection(pathname) {
+  const nested = {
+    "/admin/session-scoring": "api./api/services/fixture-service/scoring/analytics",
+    "/admin/rum": "api./api/services/fixture-service/rum/status",
+    "/admin/share": "api./api/admin/share/status",
+    "/admin/usage-log": "api./api/admin/usage-log",
+  };
+  const namespace = ({ "fastly-value": "value", streaming: "cmcd", "assets-shield": "assets" })[pathname.slice(1)]
+    ?? pathname.split("/")[1];
+  return nested[pathname] ?? `${namespace}.bundle`;
+}
 
 test("unified page sweep dispatch reaches its browser context", async () => {
   let opened = false;
@@ -39,6 +53,246 @@ test("unified page sweep dispatch reaches its browser context", async () => {
     },
   }, "https://offline.invalid"), /offline-context-boundary/);
   assert.equal(opened, true);
+});
+
+test("unified export sweep excludes pruned pages but requires supported nested pages", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  const excluded = ["/alerts", "/control-room", "/high-scale/request-facts",
+    "/admin/clickhouse", "/admin/queue", "/admin/queries", "/admin/trends",
+    "/share-login", "/share-login/acknowledge"];
+  try {
+    for (const missing of [null, "/admin/rum"]) {
+      const context = await browser.newContext();
+      await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+      const visited = new Set();
+      await context.route("https://offline.invalid/**", async route => {
+        const url = new URL(route.request().url());
+        visited.add(url.pathname);
+        const unavailable = excluded.includes(url.pathname) || url.pathname === missing;
+        await route.fulfill({
+          status: unavailable ? 404 : 200,
+          contentType: "text/html",
+          body: `<!doctype html><body><h1>Offline route fixture</h1><script>
+            window.dispatchEvent(new CustomEvent('fla:cloud-query', {detail: {
+              id: 1, section: ${JSON.stringify(fixtureQuerySection(url.pathname))}, route: location.pathname,
+              search: location.search, state: 'success', totalRows: 42,
+            }}));
+          </script>${url.pathname === "/sessions/stream" ? '<div data-testid="stream-detail-parameter-required" role="status">No session token</div>' : ""}</body>`,
+        });
+      });
+      try {
+        if (missing) {
+          await assert.rejects(sweepPages(context, "https://offline.invalid"), /Unified route unavailable: \/admin\/rum/);
+        } else {
+          const result = await sweepPages(context, "https://offline.invalid");
+          for (const route of ["/sessions/stream", "/admin/rum", "/admin/session-scoring", "/admin/share", "/admin/usage-log"]) {
+            assert.equal(result.routeCoverage[route]?.deployed, true, route);
+          }
+          for (const route of excluded) assert.equal(visited.has(route), false, route);
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("unified feature sweep distinguishes capability notices, required parameters, real detail queries and failures", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  const scoringSource = fs.readFileSync(new URL("../../../frontend/components/SessionScoring/CloudScoringOverview.tsx", import.meta.url), "utf8");
+  const capability = scoringSource.match(/<Alert([^>]*)>\s*<AlertDescription>\s*(Cloud does not provision[\s\S]*?)<\/AlertDescription>/);
+  const capabilityRole = capability[1].match(/role="([^"]+)"/)?.[1] ?? "alert";
+  const capabilityText = capability[2].replace(/\s+/g, " ").trim();
+  const fixtureToken = "offline-session-detail-fixture";
+  try {
+    for (const scenario of ["parameter-required", "token", "token-failure", "alert", "api-error"]) {
+      const context = await browser.newContext();
+      await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+      let detailQueries = 0;
+      await context.route("https://offline.invalid/**", async route => {
+        const url = new URL(route.request().url());
+        if (scenario === "token-failure" && url.pathname === "/sessions/stream" && url.searchParams.has("token")) {
+          await route.abort("failed");
+          return;
+        }
+        if (url.pathname === "/api/offline-failure") {
+          await route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"failed"}' });
+          return;
+        }
+        if (url.pathname === "/api/sessions/detail") {
+          assert.equal(JSON.parse(route.request().postData()).session_token, fixtureToken);
+          detailQueries += 1;
+          await route.fulfill({ contentType: "application/json", body: '{"data":[{"url":"/segment.m4s"}]}' });
+          return;
+        }
+        let content = "";
+        let query = "";
+        if (url.pathname === "/admin/session-scoring") {
+          content = `<div role="${capabilityRole}">${capabilityText}</div>`;
+          if (scenario === "alert") content += '<div role="alert">Scoring query failed</div>';
+          if (scenario === "api-error") query = 'await fetch("/api/offline-failure");';
+        }
+        if (url.pathname === "/sessions" && scenario.startsWith("token")) {
+          content = `<div data-testid="sessions-table-container"><table><tbody><tr>
+            <td><span title="Streaming Session">Streaming</span></td><td><button id="open-session">Details</button></td>
+          </tr></tbody></table></div>`;
+          query = `document.getElementById('open-session').addEventListener('click', async () => {
+            document.body.insertAdjacentHTML('beforeend', '<div role="dialog" data-testid="session-detail-dialog"><table><tbody><tr><td>Loading...</td></tr></tbody></table></div>');
+            await fetch('/api/sessions/detail', {method:'POST',headers:{'content-type':'application/json'},
+              body:JSON.stringify({session_token:${JSON.stringify(fixtureToken)}})});
+            document.querySelector('[data-testid="session-detail-dialog"]').innerHTML =
+              '<a href="/sessions/stream?token=${fixtureToken}">Stream Details</a>';
+          });`;
+        }
+        if (url.pathname === "/sessions/stream") {
+          if (url.searchParams.has("token")) {
+            content = '<div data-testid="stream-detail-client">Stream request timeline</div>';
+            query = `await fetch("/api/sessions/detail", { method:"POST", headers:{"content-type":"application/json"},
+              body:JSON.stringify({session_token:new URLSearchParams(location.search).get("token")}) });`;
+          } else {
+            content = '<div role="status" data-testid="stream-detail-parameter-required">No session token</div>';
+          }
+        }
+        await route.fulfill({ contentType: "text/html", body: `<!doctype html><h1>Offline fixture</h1>${content}
+          <script>(async () => { ${query}
+            window.dispatchEvent(new CustomEvent('fla:cloud-query', {detail:{
+              id:1,section:${JSON.stringify(fixtureQuerySection(url.pathname))},route:location.pathname,search:location.search,state:'success',totalRows:42
+            }}));
+          })();</script>` });
+      });
+      try {
+        if (scenario === "token-failure") {
+          await assert.rejects(sweepPages(context, "https://offline.invalid"), error => {
+            assert.equal(`${error.message}${error.stack}${JSON.stringify(error.dashboardFailure)}`.includes(fixtureToken), false);
+            return /ERR_FAILED/.test(error.message);
+          });
+        } else if (scenario === "alert" || scenario === "api-error") {
+          await assert.rejects(sweepPages(context, "https://offline.invalid"), /Unified route (has pending or failed work|HTTP failure): \/admin\/session-scoring/);
+        } else {
+          const result = await sweepPages(context, "https://offline.invalid");
+          const coverage = result.routeCoverage["/sessions/stream"];
+          assert.equal(coverage.execution, scenario === "token" ? "verified" : "parameter-required");
+          assert.equal(coverage.featureVerified, scenario === "token");
+          assert.equal(detailQueries, scenario === "token" ? 2 : 0);
+          assert.equal(JSON.stringify(result).includes(fixtureToken), false);
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("nested data routes await delayed namespaced results, reject delayed errors and bound pending queries", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  const dataRoutes = ["/admin/session-scoring", "/admin/rum", "/admin/share", "/admin/usage-log"];
+  try {
+    for (const scenario of ["success", "error", "timeout"]) {
+      const context = await browser.newContext();
+      await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+      await context.route("https://offline.invalid/**", async route => {
+        const pathname = new URL(route.request().url()).pathname;
+        const configurationOnly = ["/admin", "/query", "/logs", "/sessions/stream"].includes(pathname);
+        const delayed = dataRoutes.includes(pathname);
+        const delayMs = scenario === "success" && delayed ? 1000
+          : scenario === "error" && pathname === "/admin/session-scoring" ? 60 : 0;
+        const section = fixtureQuerySection(pathname);
+        const script = configurationOnly ? "" : `
+          const detail = {id:1,section:${JSON.stringify(section)},route:location.pathname,search:location.search,totalRows:42};
+          window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,state:'pending'}}));
+          const complete = () => window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,
+            state:${JSON.stringify(scenario === "error" && pathname === "/admin/session-scoring" ? "error" : "success")}
+          }}));
+          ${scenario === "timeout" && pathname === "/admin/session-scoring" ? ""
+            : delayMs ? `setTimeout(complete,${delayMs});` : "complete();"}`;
+        await route.fulfill({ contentType: "text/html", body: `<!doctype html><h1>Immediate heading</h1>
+          ${pathname === "/sessions/stream" ? '<div role="status" data-testid="stream-detail-parameter-required">No session token</div>' : ""}
+          <script>${script}</script>` });
+      });
+      try {
+        if (scenario === "success") {
+          const result = await sweepPages(context, "https://offline.invalid", null, 2000);
+          for (const route of dataRoutes) {
+            assert.equal(result.routeCoverage[route].queryVerified, true, route);
+            assert.equal(result.pages[route].readiness.pending, 0, route);
+            assert.ok(result.pages[route].loadMs >= 900, route);
+          }
+          for (const route of ["/admin", "/query", "/logs"]) {
+            assert.equal(result.routeCoverage[route].execution, "page-ready", route);
+            assert.equal(result.routeCoverage[route].queryVerified, false, route);
+          }
+        } else {
+          await assert.rejects(sweepPages(context, "https://offline.invalid", null, scenario === "timeout" ? 80 : 2000), error => {
+            const readiness = error.dashboardFailure?.readiness;
+            assert.equal(readiness?.route, "/admin/session-scoring");
+            if (scenario === "timeout") {
+              assert.match(error.message, /Timed out after 80ms/);
+              assert.equal(readiness.pending, 1);
+            } else {
+              assert.match(error.message, /query failed/i);
+              assert.equal(readiness.errors, 1);
+              assert.equal(readiness.pending, 0);
+            }
+            return true;
+          });
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("route telemetry activates offscreen lazy panels and waits for their actual query results", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+    let queries = 0;
+    await context.route("https://offline.invalid/**", async route => {
+      if (new URL(route.request().url()).pathname === "/api/lazy-data") {
+        queries += 1;
+        await route.fulfill({ contentType: "application/json", body: '{"rows":7}' });
+        return;
+      }
+      await route.fulfill({ contentType: "text/html", body: `<!doctype html><h1>Dashboard</h1>
+        <div style="height:3000px"></div><div data-lazy-panel="pending" style="height:200px">Offscreen</div>
+        <script>
+          const detail = {id:1,route:location.pathname,search:location.search,state:'success',totalRows:42};
+          window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,section:'dashboard.bundle'}}));
+          const panel = document.querySelector('[data-lazy-panel]');
+          const observer = new IntersectionObserver(async ([entry]) => {
+            if (!entry.isIntersecting) return;
+            observer.disconnect();
+            panel.dataset.lazyPanel = 'ready';
+            window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,section:'dashboard.lazy',state:'pending'}}));
+            const result = await (await fetch('/api/lazy-data')).json();
+            panel.textContent = result.rows + ' lazy rows';
+            window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{...detail,section:'dashboard.lazy',totalRows:result.rows}}));
+          });
+          observer.observe(panel);
+        </script>` });
+    });
+    const page = await context.newPage();
+    const result = await measureRouteWithTelemetry(page, "https://offline.invalid/dashboard", cloudReadiness.waitForCloudReport);
+    assert.equal(result.interactions.lazyPanelsActivated, 1);
+    assert.equal(queries, 1);
+    assert.equal(await page.locator('[data-lazy-panel]').textContent(), "7 lazy rows");
+    assert.equal((await page.evaluate(() => window.__flaCloudReadiness.snapshot())).complete, 2);
+    await context.close();
+  } finally {
+    await browser.close();
+  }
 });
 
 test("unified cold and warm dashboards measure actual fresh query rows without legacy DOM selectors", async () => {

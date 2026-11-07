@@ -8,7 +8,7 @@ import { CopyButton } from '@/components/ui/confirm-dialog'
 import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
-import { client, extractApiError } from '@/lib/api'
+import { client, extractApiError, getPageLoadId } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
 import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
@@ -33,7 +33,7 @@ type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
 }
 
 export function DebugPanel() {
-  const { enabled, apiCallsEnabled } = useDebugStore()
+  const { enabled, apiCallsEnabled, apiCalls } = useDebugStore()
   const cloudActive = IS_CLOUD_MODE || isCloudMode()
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
   const [isCallsOpen, setIsCallsOpen] = React.useState(false)
@@ -41,7 +41,7 @@ export function DebugPanel() {
   const pathname = usePathname()
   const queryClient = useQueryClient()
   const [queries, setQueries] = useState<DebugQuery[]>([])
-  const [calls, setCalls] = useState<DebugCall[]>([])
+  const [responseCalls, setCalls] = useState<DebugCall[]>([])
   // SQLite scope: 'page' shows the statements embedded in this page's API
   // responses (_debug_sqlite, request-scoped on the backend); 'buffer'
   // shows the process-global ring buffer, which includes cron/background
@@ -275,6 +275,23 @@ export function DebugPanel() {
 
   if (!enabled && !apiCallsEnabled) return null
 
+  const pageLoadId = cloudActive ? getPageLoadId() : null
+  const calls: DebugCall[] = [
+    ...responseCalls,
+    ...(cloudActive && apiCallsEnabled
+      ? apiCalls.filter(call => call.page_load_id === pageLoadId).map((call, index) => ({
+          id: `cloud-call-${index}`,
+          service: call.source,
+          method: call.method,
+          path: call.path,
+          time_ms: call.duration_ms,
+          status: call.status == null ? 'Unavailable' : String(call.status),
+          caller: call.endpoint,
+          details: call.details,
+          vcpu_ms: call.vcpu_ms,
+        }))
+      : []),
+  ]
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
   const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
   const isCached = queries.some(q => q.is_cached)
@@ -530,7 +547,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                         <span className="text-muted-foreground break-all">{c.path}</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <Badge variant={c.status === 'Error' ? 'destructive' : 'outline'} className="text-[10px]">
+                        <Badge variant={c.status === 'Error' || Number(c.status) >= 400 ? 'destructive' : 'outline'} className="text-[10px]">
                           {c.status}
                         </Badge>
                         <span className={`font-bold ${c.time_ms > 1000 ? 'text-red-500' : c.time_ms > 200 ? 'text-yellow-600' : 'text-green-500'}`}>

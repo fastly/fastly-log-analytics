@@ -8,6 +8,22 @@ export function buildServiceHref(path: string, serviceId: string | null | undefi
   return serviceId ? `${path}${path.includes('?') ? '&' : '?'}service=${encodeURIComponent(serviceId)}` : path
 }
 
+const CANONICAL_FILTER_URL_PARAMS = ['range', 'start_time', 'end_time', 'filters'] as const
+
+export function buildFilterNavigationHref(
+  path: string,
+  serviceId: string | null | undefined,
+  currentParams: Pick<URLSearchParams, 'get'>,
+): string {
+  const target = new URL(path, 'http://localhost')
+  for (const key of ['service', ...CANONICAL_FILTER_URL_PARAMS]) {
+    const value = currentParams.get(key)
+    if (value !== null && !target.searchParams.has(key)) target.searchParams.set(key, value)
+  }
+  if (serviceId) target.searchParams.set('service', serviceId)
+  return `${target.pathname}${target.search}${target.hash}`
+}
+
 export function buildStreamDetailUrl(token: string, serviceId?: string | null): string {
   const base = `/sessions/stream?token=${encodeURIComponent(token)}`
   return serviceId ? `${base}&service=${encodeURIComponent(serviceId)}` : base
@@ -126,7 +142,7 @@ export function hydrateFilterStoreFromUrl(): void {
   }
   if (touchedRange || touchedFilters) {
     const url = new URL(window.location.href)
-    for (const k of ['range', 'start_time', 'end_time', 'filters']) url.searchParams.delete(k)
+    for (const k of CANONICAL_FILTER_URL_PARAMS) url.searchParams.delete(k)
     Array.from(url.searchParams.keys()).forEach((key) => {
       if (key.startsWith('filter_')) url.searchParams.delete(key)
     })

@@ -1,6 +1,8 @@
 import {
   getDuckDBEngine,
   compileFiltersToSql,
+  RUM_VITALS_COLUMNS,
+  RUM_ERRORS_COLUMNS,
   type DuckDBAnalyticalEngine,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
@@ -167,12 +169,27 @@ function parseEpochMs(val: string | number | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-export function buildRumWhere(params: RumQueryParams): string {
+export class UnsupportedRumFilterError extends Error {
+  constructor() {
+    super("Unsupported RUM filter");
+    this.name = "UnsupportedRumFilterError";
+  }
+}
+
+const RUM_FILTER_ALIASES: Readonly<Record<string, string>> = {
+  browser: "browser_name", os: "os_name", device: "device_type", pathname: "path",
+};
+const RUM_FILTER_FIELDS = new Set([...Object.keys(RUM_VITALS_COLUMNS), ...Object.keys(RUM_ERRORS_COLUMNS)]);
+
+export function buildRumWhere(
+  params: RumQueryParams,
+  table: "client_vitals" | "client_errors" = "client_vitals",
+): string {
   const clauses: string[] = ["1=1"];
   const startMs = parseEpochMs(params.start_time);
   const endMs = parseEpochMs(params.end_time);
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms <= ${endMs}`);
+  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
   if (params.service_id) {
     const escaped = String(params.service_id).replaceAll("'", "''");
     clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
@@ -189,16 +206,39 @@ export function buildRumWhere(params: RumQueryParams): string {
     const escaped = String(params.page_url).replaceAll("'", "''");
     clauses.push(`COALESCE(page_url, url, path) = '${escaped}'`);
   }
-  const filters: FiltersPayload = typeof params.filters === "string" ? JSON.parse(params.filters) : params.filters ?? {};
-  clauses.push(compileFiltersToSql(Object.entries(filters).flatMap(([field, spec]) =>
-    spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-  )));
+  let filters: FiltersPayload;
+  try {
+    filters = typeof params.filters === "string" ? JSON.parse(params.filters) : params.filters ?? {};
+  } catch {
+    throw new UnsupportedRumFilterError();
+  }
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) throw new UnsupportedRumFilterError();
+  const columns = table === "client_vitals" ? RUM_VITALS_COLUMNS : RUM_ERRORS_COLUMNS;
+  const predicates = Object.entries(filters).flatMap(([rawField, spec]) => {
+    if (!spec || !Array.isArray(spec.values) || spec.mode && !["include", "exclude"].includes(spec.mode)) {
+      throw new UnsupportedRumFilterError();
+    }
+    if (!spec.values.length) return [];
+    const name = rawField.replace(/_\d+$/, "");
+    const field = RUM_FILTER_ALIASES[name] ?? name;
+    if (!RUM_FILTER_FIELDS.has(field)) throw new UnsupportedRumFilterError();
+    if (!Object.hasOwn(columns, field)) {
+      // Missing columns have NULL semantics in the other RUM dataset.
+      if (spec.mode !== "exclude") clauses.push("FALSE");
+      return [];
+    }
+    return spec.values.map((value) => ({
+      field, value: String(value), mode: spec.mode === "exclude" ? "exclude" as const : "include" as const,
+    }));
+  });
+  clauses.push(compileFiltersToSql(predicates, false, [], new Map(Object.entries(columns))));
   return clauses.join(" AND ");
 }
 
 export async function queryRumAnalytics(params: RumQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
   const where = buildRumWhere(params);
+  const errorWhere = buildRumWhere(params, "client_errors");
 
   const countRows = await engine.executeSql<{
     vitals_cnt: number;
@@ -222,7 +262,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
       COUNT(DISTINCT session_id)::BIGINT AS affected_sessions,
       COUNT(DISTINCT COALESCE(error_message, message))::BIGINT AS unique_msgs
     FROM client_errors
-    WHERE ${where}`,
+    WHERE ${errorWhere}`,
     [],
     params.signal,
   );
@@ -369,7 +409,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
       COUNT(DISTINCT session_id)::BIGINT AS affected_sessions,
       MAX(ts_ms)::BIGINT AS last_seen_ms
     FROM client_errors
-    WHERE ${where}
+    WHERE ${errorWhere}
     GROUP BY 1, 2
     ORDER BY count DESC
     LIMIT 25`,
@@ -423,7 +463,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
 }
 
 export async function queryRumLiveEvents(params: RumQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
   const sinceMs = parseEpochMs(params.since) ?? 0;
   const limit = Math.min(200, Math.max(1, Number(params.limit ?? 100)));
 
@@ -459,7 +499,7 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       country,
       session_id
     FROM client_errors
-    WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params)}
+    WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params, "client_errors")}
     ORDER BY ts_ms DESC
     LIMIT ${limit}`,
     [],
@@ -478,7 +518,7 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
 }
 
 export async function queryRumBeaconHealth(params: RumQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
   const rows = await engine.executeSql<{
     total_beacons: number;
     s2xx: number;

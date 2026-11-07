@@ -71,6 +71,8 @@ Routes in [`backend/routers/insights.py`](../../backend/routers/insights.py), mo
 
 Results are cached in-process (TTL 300 s) and warmed by the `insights_prewarmer` cron, which is demand-driven ([cron spec](../cron/jobs/insights-prewarmer.md)).
 
+Cache misses use the existing `HighScaleSections` telemetry: metadata reads are `insights.history` and `insights.fields`, and detector reads are `insights.<detector_id>`, all with `source=fact`. These stable labels and request correlation survive the async and worker-thread boundaries. Section events contain timings and outcomes, not SQL, filter values or request bodies.
+
 The Insights engine ([`backend/high_scale/insights/`](../../backend/high_scale/insights/)) runs every registered detection natively in ClickHouse over visible `request_facts` (`sql_queries.py`, one query per detection), so cards, thresholds and severities come from the unified registry. Detections whose required field is absent are omitted; a service with less history than the baseline gets the standard `info` card ("Requires Nh of historical data"), except `impossible_distance`, which needs no baseline; a failing query becomes an `error` card, never `clean`.
 
 ## Tests

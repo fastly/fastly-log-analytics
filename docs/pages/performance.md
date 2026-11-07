@@ -32,6 +32,29 @@ Shared range and filter parameters (see [dashboard.md](dashboard.md)) plus `sort
 
 The ClickHouse reader ([`backend/high_scale/performance.py`](../../backend/high_scale/performance.py)) serves unfiltered requests from the minute projections (`performance_minute_dimensions` for URLs/ASNs, `performance_minute_summary` for the waterfall, `performance_scatter_samples` for the scatter); any active filter reroutes every section to `request_facts`. Projection percentiles are request-weighted averages (`_approx: true`); filtered percentiles are exact. Stored latency columns hold microseconds and the reader divides by 1000. See [AGENTS.md](../../AGENTS.md) for the projection-table checklist.
 
+## Cloud
+
+Cloud runs these sections against normalized Parquet views in local DuckDB, not
+the dashboard's summary rollups. Cached compressed files stay reusable; loading
+does not copy every decoded column into a resident table. DuckDB can project the
+columns needed by each query and apply eligible Parquet pruning.
+Range loading reconciles the current manifest with resident
+files: unchanged files stay loaded, fresh tails are added, and retired or replaced
+files are removed before querying. File identities include the service and file
+version, so changing services or replacing a file cannot reuse its old rows.
+Discovered custom filters retain their native string, numeric or boolean types.
+The existing 256-file and 64 MiB compressed scan limits still apply.
+
+The 256 MB DuckDB query budget is separate from the compressed-file budget.
+An out-of-memory or fatal database error fails the current request without replay.
+A new request recreates the backend only after its old worker cleanup is confirmed
+and can reuse the cached compressed bytes. High-cardinality queries can still
+exceed the budget; Cloud does not thin the selected data to make them pass.
+
+Analytical windows use half-open `[start, end)` bounds. File discovery rounds
+outward to native second precision without widening the SQL window, so an
+exact-endpoint record cannot change the count merely because files are regrouped.
+
 ## Tests
 
 - Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py)

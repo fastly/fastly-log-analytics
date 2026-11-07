@@ -1868,6 +1868,146 @@ fn superseded_teardown_cannot_delete_data_after_loading_service_before_lease() {
 }
 
 #[test]
+fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history() {
+    let platform = Platform::new();
+    let job = platform.provision();
+    platform.drain(job["job"].clone());
+    let now = platform.now();
+    let old = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
+    let mut service = old.value;
+    service["log_period"] = json!(5);
+    service["rum"]["enabled"] = json!(true);
+    service["rum"]["log_period"] = json!(300);
+    assert!(platform
+        .adapter
+        .cas("svc:fixtureService", Some(&old.generation), &service)
+        .unwrap());
+    let period = admin::schedule::ready_rum_period(now, 300);
+    let state = json!({
+        "jobs": {
+            "ingest": {"last_run": now - 5, "more_pending": true, "retry_after": now + 30},
+            "raw_delete": {"last_run": now - 10, "more_pending": false, "last_status": "idle",
+                "service_id": "fixtureService"},
+            "maint": {"last_run": now - 20, "retry_after": now + 200},
+            "rum": {"last_run": now - 300, "last_success_period": period,
+                "last_success_period_s": 300, "retry_after": now + 10}
+        }
+    });
+    assert!(platform.adapter.cas("cron:state", None, &state).unwrap());
+    let before = platform.adapter.get("cron:state").unwrap().unwrap();
+    let snapshot = admin::cron_audit_snapshot(&platform);
+    let find = |task: &str| {
+        snapshot
+            .schedules
+            .iter()
+            .find(|row| row["task"] == task)
+            .unwrap()
+    };
+    let time = |at| {
+        time::OffsetDateTime::from_unix_timestamp(at as i64)
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    assert_eq!(find("request_ingest")["interval_s"], 5);
+    assert_eq!(find("request_ingest")["next_run_time"], time(now + 30));
+    assert!(find("raw_delete")["next_run_time"].is_null());
+    assert_eq!(
+        find("raw_delete")["execution"],
+        json!({
+            "service_id": "fixtureService", "last_run": now - 10, "status": "idle",
+            "more_pending": false, "retry_after": 0,
+        })
+    );
+    assert_eq!(find("maintenance")["next_run_time"], time(now + 200));
+    assert_eq!(
+        find("rum_ingest")["next_run_time"],
+        time((period + 1) * 300 + fastly_log_analytics::ingest::settle_s(300))
+    );
+    assert!(find("rum_ingest")["disabled_reason"].is_null());
+    for task in admin::logs::MAINT_STAGES {
+        assert!(find(task)["last_run_time"].is_null());
+        assert!(find(task)["next_run_time"].is_null());
+    }
+    assert!(snapshot.runs.is_empty());
+    let after = platform.adapter.get("cron:state").unwrap().unwrap();
+    assert_eq!(before.generation, after.generation);
+    assert_eq!(before.value, after.value);
+}
+
+#[test]
+fn cron_schedule_raw_delete_execution_rejects_unscoped_state_and_exports_only_known_statuses() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    for (service_id, status, expected_status) in [
+        (None, "idle", None),
+        (Some("otherService"), "idle", None),
+        (
+            Some("fixtureService"),
+            "unexpected-private-detail",
+            Some("unknown"),
+        ),
+        (Some("fixtureService"), "error", Some("error")),
+    ] {
+        let prior = platform.adapter.get("cron:state").unwrap();
+        let value = json!({"jobs": {"raw_delete": {
+            "service_id": service_id, "last_run": platform.now(), "last_status": status,
+            "more_pending": true, "retry_after": platform.now() + 30,
+        }}});
+        assert!(platform
+            .adapter
+            .cas(
+                "cron:state",
+                prior.as_ref().map(|r| r.generation.as_str()),
+                &value
+            )
+            .unwrap());
+        let snapshot = admin::cron_audit_snapshot(&platform);
+        let row = snapshot
+            .schedules
+            .iter()
+            .find(|row| row["task"] == "raw_delete")
+            .unwrap();
+        if let Some(status) = expected_status {
+            assert_eq!(
+                row["execution"],
+                json!({
+                    "service_id": "fixtureService", "last_run": platform.now(), "status": status,
+                    "more_pending": true, "retry_after": platform.now() + 30,
+                })
+            );
+        } else {
+            assert!(row["execution"].is_null());
+        }
+        assert!(!serde_json::to_string(&snapshot.schedules)
+            .unwrap()
+            .contains("unexpected-private-detail"));
+    }
+}
+
+#[test]
+fn cron_schedule_natural_idle_raw_delete_records_the_executing_service_without_inventing_a_run() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    platform.shield.store(true, Ordering::SeqCst);
+    CALLS.with(|c| c.set(0));
+    SECRETS.with(|s| s.borrow_mut().clear());
+    admin::record_tick(&platform, "clock", "clock").unwrap();
+    let state = platform.adapter.get("cron:state").unwrap().unwrap().value;
+    assert_eq!(state["jobs"]["raw_delete"]["last_status"], "idle");
+    assert_eq!(state["jobs"]["raw_delete"]["service_id"], "fixtureService");
+    let snapshot = admin::cron_audit_snapshot(&platform);
+    let row = snapshot
+        .schedules
+        .iter()
+        .find(|row| row["task"] == "raw_delete")
+        .unwrap();
+    assert_eq!(row["execution"]["status"], "idle");
+    assert_eq!(row["execution"]["last_run"], platform.now());
+    assert_eq!(snapshot.runs.len(), 1);
+}
+
+#[test]
 fn metadata_status_fresh_bypasses_cache_and_reads_one_post_extents_cron_snapshot() {
     use fastly_log_analytics::{
         auth::{self, webauthn::Credential, AuthState, Role, User},
@@ -2015,6 +2155,23 @@ fn metadata_status_fresh_bypasses_cache_and_reads_one_post_extents_cron_snapshot
     let cron: Value = serde_json::from_slice(&cron.body).unwrap();
     assert_eq!(cron["runs"], value["cron_runs"]);
     assert_eq!(cron["last_ingest_at"], value["latest_ingested_file_at"]);
+    let schedules = cron["schedules"].as_array().expect("native task schedules");
+    let tasks: Vec<_> = schedules
+        .iter()
+        .map(|row| row["task"].as_str().unwrap())
+        .collect();
+    assert!(tasks.contains(&"request_ingest"));
+    assert!(tasks.contains(&"log_flush"));
+    assert!(tasks.contains(&"cloud_ingest_clock"));
+    for task in admin::logs::MAINT_STAGES {
+        assert!(tasks.contains(&task), "missing maintenance task {task}");
+    }
+    let rum = schedules
+        .iter()
+        .find(|row| row["task"] == "rum_ingest")
+        .unwrap();
+    assert_eq!(rum["disabled_reason"], "RUM is disabled");
+    assert!(rum["next_run_time"].is_null());
     assert_eq!(
         platform
             .metadata_reads

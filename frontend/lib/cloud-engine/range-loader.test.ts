@@ -1,32 +1,307 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureCloudRange } from "./range-loader";
-import { fetchManifest } from "./dashboard/manifest";
+import { clearManifestCache, fetchManifest, filesOverlapping, type ManifestFile } from "./dashboard/manifest";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { cloudLoadingStore } from "./loading-progress";
 import { parquetFixture } from "./dashboard/test-fixtures";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { cloudRumAnalytics, cloudRumUsage } from "./rum-wire";
+import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
+import { executePerformanceAggregates } from "./performance";
+import { handleCloudAnalyticalRequest } from "./adapter";
+import * as sqlBuilder from "../sqlBuilder";
 
 const source = vi.hoisted(() => ({ fetchJson: vi.fn(), fetchFile: vi.fn() }));
-vi.mock("./dashboard/sources", () => ({
+vi.mock("./dashboard/sources", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./dashboard/sources")>(),
   browserSource: () => source,
   dashboardCacheScope: () => "fixture-session",
 }));
-vi.mock("./dashboard/manifest", () => ({ fetchManifest: vi.fn() }));
+vi.mock("./dashboard/manifest", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./dashboard/manifest")>(),
+  fetchManifest: vi.fn(),
+}));
 
 const from = "2026-11-01T00:00:00Z";
 const to = "2026-11-02T00:00:00Z";
 const signal = new AbortController().signal;
 const file = { key: "processed/request/fixture.parquet", start: from, end: to, size: 100, rows: 1 };
 
-beforeEach(() => {
+beforeEach(async () => {
+  clearManifestCache();
+  await getDuckDBEngine().reset();
+  vi.mocked(fetchManifest).mockClear();
+  source.fetchFile.mockClear();
   cloudLoadingStore.reset();
   vi.mocked(fetchManifest).mockResolvedValue({ files: [file], complete: true });
 });
-afterEach(() => { vi.restoreAllMocks(); cloudLoadingStore.reset(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); clearManifestCache(); cloudLoadingStore.reset(); });
+
+async function analyticalFiles(entries: (ManifestFile & { bytes: ArrayBuffer })[]) {
+  const actual = await vi.importActual<typeof import("./dashboard/manifest")>("./dashboard/manifest");
+  vi.mocked(fetchManifest).mockImplementation(actual.fetchManifest);
+  source.fetchJson.mockImplementation(async (path: string) => {
+    const url = new URL(path, "http://localhost");
+    expect(url.searchParams.get("service_id")).toBe("fixture-service");
+    const nativeSeconds = (name: string) => Math.floor(Date.parse(url.searchParams.get(name)!) / 1000) * 1000;
+    return {
+      files: filesOverlapping(entries.map(({ bytes: _bytes, ...entry }) => entry),
+        nativeSeconds("from"), nativeSeconds("to")),
+      complete: true, next_cursor: null,
+    };
+  });
+  source.fetchFile.mockImplementation(async (key: string) => ({
+    bytes: entries.find((entry) => entry.key === key)!.bytes, cached: true,
+  }));
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+    String(input) === "/api/log-extents" ? Response.json({ latest_log_at: "2026-11-06T00:00:00Z" })
+      : String(input) === "/api/services" ? Response.json({ services: [{ service_id: "fixture-service" }] })
+        : Response.json({ fields: [], groups: [] })));
+}
+
+async function analyticalPost(path: string, body: Record<string, unknown>) {
+  const response = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, {
+    method: "POST", headers: { "x-service-id": "fixture-service" }, body: JSON.stringify(body),
+  }));
+  expect(response?.status).toBe(200);
+  return response!.json();
+}
 
 describe("Cloud first-page analytical range loading", () => {
+  it("holds its exact selected bindings until the owning request releases them", async () => {
+    source.fetchFile.mockResolvedValue({ cached: true, bytes: parquetFixture([
+      { timestamp: Date.parse(from), status: 201, cache: "HIT", resp_bytes: 1 },
+    ]) });
+    const read = await ensureCloudRange(from, to, signal);
+    await getDuckDBEngine().retainFiles({ request: [], vitals: [], errors: [] });
+    expect(await read.executeSql("SELECT count(*) AS count FROM requests")).toEqual([{ count: 1 }]);
+    read.release?.();
+    await expect(read.executeSql("SELECT count(*) FROM requests")).rejects.toThrow(/expired/i);
+  });
+
+  it("rejects a request invalidated while awaiting healthy backend readiness", async () => {
+    const pending = ensureCloudRange(from, to, signal);
+    const rejected = expect(pending).rejects.toThrow(/generation|expired/i);
+    await getDuckDBEngine().reset();
+    await rejected;
+    expect(fetchManifest).not.toHaveBeenCalled();
+    expect(source.fetchFile).not.toHaveBeenCalled();
+  });
+
+  it("binds load-to-query metadata to the loaded generation rather than a replacement database", async () => {
+    source.fetchFile.mockResolvedValue({ bytes: parquetFixture([
+      { timestamp: Date.parse(from), status: 200, cache: "HIT", resp_bytes: 1 },
+    ]), cached: true });
+    const read = await ensureCloudRange(from, to, signal);
+    await getDuckDBEngine().reset();
+    await ensureCloudRange(from, to, signal);
+    await expect(read.executeSql("SELECT count(*) FROM requests")).rejects.toThrow(/generation|expired/i);
+    await expect(read.getPresentColumns()).rejects.toThrow(/generation|expired/i);
+  });
+
+  it("rejects a listing that completes after its generation was reset", async () => {
+    let resume!: () => void, entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { resume = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    vi.mocked(fetchManifest).mockImplementationOnce(async () => {
+      entered();
+      await waiting;
+      return { files: [file], complete: true };
+    });
+    source.fetchFile.mockResolvedValue({ bytes: parquetFixture([
+      { timestamp: Date.parse(from), status: 200, cache: "HIT", resp_bytes: 1 },
+    ]), cached: true });
+    const loaded = ensureCloudRange(from, to, signal).then(
+      () => "unexpected success", (error: Error) => error.message,
+    );
+    await started;
+    await getDuckDBEngine().reset();
+    resume();
+    expect(await loaded).toMatch(/generation|expired/i);
+    expect(await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM requests"))
+      .toEqual([{ count: 0 }]);
+  });
+
+  it("carries the selected historical Query window independently of generated SQL", async () => {
+    const recentFrom = "2026-11-05T00:00:00Z", recentTo = "2026-11-06T00:00:00Z";
+    await analyticalFiles([
+      { ...file, bytes: parquetFixture([{ timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10 }]) },
+      { ...file, key: "recent.parquet", start: recentFrom, end: recentTo,
+        bytes: parquetFixture([{ timestamp: Date.parse(recentFrom) + 1000, status: 200, cache: "HIT", resp_bytes: 10 }]) },
+    ]);
+    const body = sqlBuilder.buildQueryRequest({
+      sql: sqlBuilder.buildStructuredSql({}, from, to, [], 10), max_rows: 10, explain: false,
+    }, "fixture-service", from, to);
+    expect((await analyticalPost("/api/query", body)).row_count).toBe(1);
+    const rawSql = `SELECT count(*) AS count FROM logs WHERE timestamp >= '${recentFrom}' AND timestamp <= '${recentTo}'`;
+    const explicit = sqlBuilder.buildQueryRequest({
+      sql: rawSql, max_rows: 10, explain: false, service_id: "fixture-service",
+      start_time: recentFrom, end_time: recentTo,
+    }, "ignored-service", from, to);
+    expect((await analyticalPost("/api/query", explicit)).data).toEqual([{ count: 1 }]);
+  });
+
+  it("keeps a Performance half-open window invariant under valid Parquet regrouping", async () => {
+    const end = "2026-11-01T01:00:00Z", later = "2026-11-01T02:00:00Z";
+    const rows = [Date.parse(from) + 1000, Date.parse(end)].map((timestamp) => ({
+      timestamp, status: 200, cache: "HIT", resp_bytes: 10, ttl: 30,
+    }));
+    const split = [
+      { ...file, end, bytes: parquetFixture([rows[0]]) },
+      { ...file, key: "next.parquet", start: end, end: later, bytes: parquetFixture([rows[1]]) },
+    ];
+    const request = { start_time: from, end_time: end, sections: ["ttl_dist"] };
+    const count = (body: { ttl_dist: { count: number }[] }) => body.ttl_dist.reduce((sum, bucket) => sum + bucket.count, 0);
+    await analyticalFiles(split);
+    expect(count(await analyticalPost("/api/performance/aggregates", request))).toBe(1);
+    clearManifestCache();
+    await analyticalFiles([{ ...file, key: "joined.parquet", end: later, bytes: parquetFixture(rows) }]);
+    expect(count(await analyticalPost("/api/performance/aggregates", request))).toBe(1);
+    const raw = sqlBuilder.buildQueryRequest({
+      sql: `SELECT count(*) AS count FROM logs WHERE timestamp >= '${from}' AND timestamp <= '${end}'`,
+      max_rows: 10, explain: false,
+    }, "fixture-service", from, end);
+    expect((await analyticalPost("/api/query", raw)).data).toEqual([{ count: 2 }]);
+    clearManifestCache();
+    await analyticalFiles(split);
+    expect((await analyticalPost("/api/query", raw)).data).toEqual([{ count: 2 }]);
+  });
+
+  it("conservatively discovers sub-second windows despite native manifest second precision", async () => {
+    const start = "2026-11-01T00:00:00.500Z", end = "2026-11-01T00:00:01.500Z";
+    await analyticalFiles([{ ...file, start: "2026-11-01T00:00:01Z", end: "2026-11-01T00:00:02Z",
+      bytes: parquetFixture([1100, 1600].map((offset) => ({
+        timestamp: Date.parse(from) + offset, status: 200, cache: "HIT", resp_bytes: 10, ttl: 30,
+      }))) }]);
+    const data = await analyticalPost("/api/performance/aggregates", {
+      start_time: start, end_time: end, sections: ["ttl_dist"],
+    });
+    expect(data.ttl_dist.reduce((sum: number, bucket: { count: number }) => sum + bucket.count, 0)).toBe(1);
+  });
+
+  it("isolates RUM filters from retired request custom columns without losing request filters", async () => {
+    const requestBytes = parquetFixture([
+      { timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10, ttl: 30, tenant: "selected" },
+      { timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10, ttl: 30, tenant: "other" },
+    ]);
+    const rumKey = "processed/rum/client_vitals/transition.parquet";
+    const rumBytes = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [new Date(from)] },
+      { name: "metric_name", type: "STRING", data: ["LCP"] },
+      { name: "metric_value", type: "DOUBLE", data: [1000] },
+      { name: "browser", type: "STRING", data: ["Chrome"] },
+    ] });
+    source.fetchFile.mockImplementation(async (key: string) => ({
+      bytes: key === rumKey ? rumBytes : requestBytes, cached: true,
+    }));
+    const options = { serviceId: "fixture-service", customFields: [{ id: "tenant", type: "string" as const }] };
+    const requestParams = {
+      start_time: from, end_time: to, service_id: "fixture-service", sections: ["ttl_dist" as const],
+      filters: { tenant: { mode: "include" as const, values: ["selected"] } },
+    };
+    const assertRequestFilter = async () => {
+      const result = await executePerformanceAggregates(requestParams);
+      expect(result.ttl_dist?.reduce((sum, bucket) => sum + bucket.count, 0)).toBe(1);
+    };
+    await ensureCloudRange(from, to, signal, ["request"], options);
+    await assertRequestFilter();
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ complete: true, files: [{ ...file, key: rumKey }] });
+    await ensureCloudRange(from, to, signal, ["rum"]);
+    expect(await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM requests")).toEqual([{ count: 0 }]);
+    const params = { start_time: from, end_time: to, filters: requestParams.filters };
+    await expect(cloudRumAnalytics(params)).rejects.toThrow("Unsupported RUM filter");
+    await expect(cloudRumLiveEvents(params)).rejects.toThrow("Unsupported RUM filter");
+    expect((await cloudRumAnalytics({ filters: { browser_name: { mode: "include", values: ["Chrome"] } } })).beacon_count).toBe(1);
+    expect(await cloudRumLiveEvents({ filters: { browser_name: { mode: "include", values: ["Chrome"] } } })).toHaveLength(1);
+    await ensureCloudRange(from, to, signal, ["request"], options);
+    await assertRequestFilter();
+  });
+
+  it("reuses unchanged resident files while discovering and ingesting fresh tails", async () => {
+    const files = [0, 1].map((index) => ({ ...file, key: `resident-${index}.parquet`, etag: String(index) }));
+    const buffers = files.map((_, index) => parquetFixture([
+      { timestamp: Date.parse(from) + index + 1000, status: 200, cache: "HIT", resp_bytes: 10 },
+    ]));
+    vi.mocked(fetchManifest)
+      .mockResolvedValueOnce({ complete: true, files: [files[0]] })
+      .mockResolvedValueOnce({ complete: true, files: [files[0]] })
+      .mockResolvedValueOnce({ complete: true, files });
+    source.fetchFile.mockImplementation(async (key: string) => ({
+      bytes: buffers[files.findIndex((entry) => entry.key === key)], cached: true,
+    }));
+    const engine = getDuckDBEngine();
+    for (let index = 0; index < 3; index++) {
+      await ensureCloudRange(from, to, signal, ["request"], { serviceId: "fixture-service" });
+    }
+    expect(await engine.executeSql("SELECT count(*) AS count FROM requests")).toEqual([{ count: 2 }]);
+    expect(source.fetchFile).toHaveBeenCalledTimes(2);
+    expect(fetchManifest).toHaveBeenCalledTimes(3);
+  });
+
+  it("removes replaced, retired and other-service rows before using a new manifest", async () => {
+    const original = parquetFixture([
+      { timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10 },
+    ]);
+    const replacement = parquetFixture([
+      { timestamp: Date.parse(from) + 1000, status: 503, cache: "MISS", resp_bytes: 20 },
+    ]);
+    source.fetchFile.mockResolvedValueOnce({ bytes: original, cached: true })
+      .mockResolvedValue({ bytes: replacement, cached: true });
+    vi.mocked(fetchManifest).mockResolvedValueOnce({
+      complete: true, files: [{ ...file, etag: "original" }],
+    }).mockResolvedValue({ complete: true, files: [{ ...file, etag: "replacement" }] });
+    const engine = getDuckDBEngine();
+    await ensureCloudRange(from, to, signal, ["request"], { serviceId: "first" });
+    await ensureCloudRange(from, to, signal, ["request"], { serviceId: "first" });
+    expect(await engine.executeSql("SELECT status FROM requests")).toEqual([{ status: 503 }]);
+    await ensureCloudRange(from, to, signal, ["request"], { serviceId: "second" });
+    expect(source.fetchFile).toHaveBeenCalledTimes(3);
+    expect(await engine.executeSql("SELECT count(*) AS count FROM requests")).toEqual([{ count: 1 }]);
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ complete: true, files: [] });
+    await ensureCloudRange(from, to, signal, ["request"], { serviceId: "second" });
+    expect(await engine.executeSql("SELECT count(*) AS count FROM requests")).toEqual([{ count: 0 }]);
+  });
+
+  it("retries an interrupted tail without duplicating already resident rows", async () => {
+    const tail = { ...file, key: "tail.parquet" };
+    const bytes = parquetFixture([
+      { timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10 },
+    ]);
+    source.fetchFile.mockResolvedValue({ bytes, cached: true });
+    await ensureCloudRange(from, to, signal);
+    vi.mocked(fetchManifest).mockResolvedValue({ complete: true, files: [file, tail] });
+    source.fetchFile.mockRejectedValueOnce(new DOMException("Aborted", "AbortError"));
+    await expect(ensureCloudRange(from, to, signal)).rejects.toThrow("Aborted");
+    await ensureCloudRange(from, to, signal);
+    expect(await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM requests")).toEqual([{ count: 2 }]);
+    expect(source.fetchFile).toHaveBeenCalledTimes(3);
+  });
+
+  it("honors registered string, numeric and boolean custom filters in raw domain queries", async () => {
+    const bytes = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [new Date(from), new Date(from)] },
+      { name: "ttl", type: "DOUBLE", data: [30, 30] },
+      { name: "tenant", type: "STRING", data: ["selected", "excluded"] },
+      { name: "plan", type: "DOUBLE", data: [2, 3] },
+      { name: "flag", type: "BOOLEAN", data: [true, false] },
+    ] });
+    source.fetchFile.mockResolvedValue({ bytes, cached: true });
+    await ensureCloudRange(from, to, signal, ["request"], { serviceId: "fixture-service" });
+    await ensureCloudRange(from, to, signal, ["request"], {
+      serviceId: "fixture-service", customFields: [
+        { id: "tenant", type: "string" }, { id: "plan", type: "number" }, { id: "flag", type: "boolean" },
+      ],
+    });
+    for (const [field, value] of [["tenant", "selected"], ["plan", "2.0"], ["flag", "true"]]) {
+      const result = await executePerformanceAggregates({
+        start_time: from, end_time: to, service_id: "fixture-service", sections: ["ttl_dist"],
+        filters: { [field]: { mode: "include", values: [value] } },
+      });
+      expect(result.ttl_dist?.reduce((total, bucket) => total + bucket.count, 0), field).toBe(1);
+    }
+    expect(source.fetchFile).toHaveBeenCalledTimes(1);
+  });
+
   it("installs optional native custom columns before ingesting the first scoring file", async () => {
     const bytes = parquetWriteBuffer({ columnData: [
       { name: "timestamp", type: "TIMESTAMP", data: [new Date(from)] },
@@ -84,6 +359,21 @@ describe("Cloud first-page analytical range loading", () => {
       total_beacons: 2, total_estimated_class_a: 2, total_estimated_cost_usd: 0.00001,
       data: [{ date: "2026-11-01", beacon_count: 2 }],
     });
+    vi.mocked(fetchManifest).mockResolvedValue({
+      complete: true, files: [{ ...file, key: vitalsKey }, { ...file, key: errorsKey }],
+    });
+    source.fetchFile.mockClear();
+    await ensureCloudRange(from, to, signal, ["rum"]);
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    vi.mocked(fetchManifest).mockResolvedValue({
+      complete: true, files: [{ ...file, key: vitalsKey }],
+    });
+    await ensureCloudRange(from, to, signal, ["rum"]);
+    expect(await cloudRumUsage({ start_time: from, end_time: to, signal }, 0.005))
+      .toMatchObject({ total_beacons: 1 });
+    vi.mocked(fetchManifest).mockResolvedValue({ complete: true, files: [] });
+    await ensureCloudRange(from, to, signal, ["request"]);
+    expect(await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM client_vitals")).toEqual([{ count: 0 }]);
   });
 
   it("loads real Parquet into DuckDB without visiting dashboard and clears the previous range", async () => {
@@ -107,16 +397,20 @@ describe("Cloud first-page analytical range loading", () => {
   });
 
   it("records cached file bytes and clears progress when a scan fails", async () => {
-    vi.spyOn(getDuckDBEngine(), "reset").mockResolvedValue(undefined);
-    vi.spyOn(getDuckDBEngine(), "syncWindow").mockResolvedValue([]);
-    source.fetchFile.mockResolvedValue({ bytes: new ArrayBuffer(16), cached: true });
+    const bytes = parquetFixture([
+      { timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10 },
+    ]);
+    source.fetchFile.mockResolvedValue({ bytes, cached: true });
     let cachedBytes = 0;
     const unsubscribe = cloudLoadingStore.subscribe(() => {
       cachedBytes = Math.max(cachedBytes, cloudLoadingStore.getSnapshot()?.progress?.cachedBytes ?? 0);
     });
 
     await ensureCloudRange(from, to, signal);
-    expect(cachedBytes).toBe(16);
+    expect(cachedBytes).toBe(bytes.byteLength);
+    vi.mocked(fetchManifest).mockResolvedValueOnce({
+      files: [{ ...file, key: "unavailable.parquet" }], complete: true,
+    });
     source.fetchFile.mockRejectedValueOnce(new Error("file unavailable"));
     await expect(ensureCloudRange(from, to, signal)).rejects.toThrow("file unavailable");
     expect(cloudLoadingStore.getSnapshot()).toBeNull();
@@ -124,17 +418,14 @@ describe("Cloud first-page analytical range loading", () => {
   });
 
   it("keeps cached file buffers owned by the source across worker transfers and repeated scans", async () => {
-    vi.spyOn(getDuckDBEngine(), "reset").mockResolvedValue(undefined);
-    vi.spyOn(getDuckDBEngine(), "syncWindow").mockImplementation(async (files) => {
-      const bytes = files[0].bytes;
-      structuredClone(bytes, { transfer: [bytes] });
-      return [];
-    });
-    const bytes = new ArrayBuffer(16);
+    const bytes = parquetFixture([{ timestamp: Date.parse(from), status: 200, cache: "HIT", resp_bytes: 1 }]);
+    const original = new Uint8Array(bytes).slice();
     source.fetchFile.mockResolvedValue({ bytes, cached: true });
     await ensureCloudRange(from, to, signal);
     await ensureCloudRange(from, to, signal);
-    expect(bytes.byteLength).toBe(16);
+    expect(new Uint8Array(bytes)).toEqual(original);
+    expect(await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM logs")).toEqual([{ count: 1 }]);
+    expect(source.fetchFile).toHaveBeenCalledTimes(1);
   });
 
   it.each([

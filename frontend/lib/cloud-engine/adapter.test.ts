@@ -8,9 +8,23 @@ import * as usage from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
 
-vi.mock("./range-loader", () => ({ ensureCloudRange: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./range-loader", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./range-loader")>(),
+  ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
+}));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
+  it.each(["analytics", "live-events"])("returns an explicit client error for unsupported RUM %s filters", async (route) => {
+    const filters = JSON.stringify({ unknown_field: { mode: "include", values: ["offline-value"] } });
+    const response = await handleCloudAnalyticalRequest(new Request(
+      `http://localhost/api/services/svc-1/rum/${route}?start_time=2026-11-01T00:00:00Z&end_time=2026-11-02T00:00:00Z&filters=${encodeURIComponent(filters)}`,
+    ));
+    expect(response?.status).toBe(400);
+    expect(await response?.json()).toEqual({
+      detail: { error: "rum_filters_unsupported", message: "Unsupported RUM filter" },
+    });
+  });
+
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) =>
       Response.json(String(input).includes("/api/services")

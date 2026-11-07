@@ -11,6 +11,16 @@ Source: [`frontend/app/admin/rum/page.tsx`](../../../frontend/app/admin/rum/page
 - Settings dialog: capture toggles `capture_vitals`, `capture_performance`, `capture_errors`, `capture_events`, and a custom VCL condition.
 - Faro SDK version card (current, latest, update available) with an upgrade action.
 
+### Cloud runtime
+
+Cloud uses the same enable, disable, settings and SDK upgrade dialogs, bridged to its native, generation-checked
+`POST /api/admin/services/{id}/reconcile` job with the updated RUM configuration.
+Progress comes from `/api/admin/jobs/{id}/step`; a failed job remains a failure, and settings are not
+reported as saved until the job completes. Existing endpoint names, log periods and sampling settings are preserved.
+
+Cloud disable preserves retained RUM data. The High-Scale log-file and bucket-deletion switches are not
+shown in Cloud, and Cloud rejects requests that ask this action to delete either.
+
 ## Roles
 
 Admin only. Enable, disable, settings, versions and upgrade are `require_admin` and are also blocked for analysts by `_ANALYST_BLOCKED_RUM_SUFFIXES` (`403 admin_only`). Analysts may call `GET /api/services/{id}/rum/status`, which returns only `{enabled, enabled_at}`.

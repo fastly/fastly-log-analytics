@@ -234,9 +234,10 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
     if api_key:
         from backend.core.fastly.client import fastly, find_condition, get_active_version
 
-        stats_svc_id = (source.get("cdn_service_id") or get_fastly_logging_service_id() or "").strip()
-        logging_svc_id = (source.get("logging_service_id") or get_fastly_logging_service_id() or "").strip()
-        svc_id = stats_svc_id
+        logging_svc_id = (
+            source.get("logging_service_id") or source.get("service_id") or get_fastly_logging_service_id() or ""
+        ).strip()
+        svc_id = logging_svc_id
         now = datetime.now(UTC)
         from_ts = int((now - timedelta(days=3)).timestamp())
         to_ts = int(now.timestamp())
@@ -296,20 +297,26 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
 
             daily_reqs: dict[str, int] = {}
             daily_edge: dict[str, int] = {}
+            missing_edge_days: set[str] = set()
             if payload:
                 for rec in payload.get("data", []):
                     ts = rec.get("start_time")
                     if ts is None:
                         continue
                     day = datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
-                    daily_reqs[day] = daily_reqs.get(day, 0) + int(rec.get("requests") or 0)
-                    daily_edge[day] = daily_edge.get(day, 0) + int(rec.get("edge_requests") or 0)
+                    if rec.get("requests") is not None:
+                        daily_reqs[day] = daily_reqs.get(day, 0) + int(rec["requests"])
+                    if rec.get("edge_requests") is not None:
+                        daily_edge[day] = daily_edge.get(day, 0) + int(rec["edge_requests"])
+                    else:
+                        missing_edge_days.add(day)
             today = now.strftime("%Y-%m-%d")
-            complete_days = [d for d, v in daily_reqs.items() if v > 0 and d != today]
-            avg_days = complete_days if complete_days else [d for d, v in daily_reqs.items() if v > 0]
+            complete_days = [d for d in daily_reqs if d != today]
+            avg_days = complete_days if complete_days else list(daily_reqs)
             if avg_days:
                 result["requests_per_day"] = round(sum(daily_reqs[d] for d in avg_days) / len(avg_days))
-                result["edge_requests_per_day"] = round(sum(daily_edge[d] for d in avg_days) / len(avg_days))
+                if all(d in daily_edge and d not in missing_edge_days for d in avg_days):
+                    result["edge_requests_per_day"] = round(sum(daily_edge[d] for d in avg_days) / len(avg_days))
         except Exception:
             logger.debug("prefill: step failed (ignored)", exc_info=True)
 

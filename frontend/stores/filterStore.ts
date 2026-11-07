@@ -303,6 +303,7 @@ export interface ApiCallEntry {
   method: string
   path: string
   endpoint?: string
+  page_load_id?: string
   status: number | string | null
   duration_ms: number
   vcpu_ms?: number | null

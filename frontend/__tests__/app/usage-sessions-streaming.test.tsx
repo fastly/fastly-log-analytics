@@ -21,6 +21,8 @@ import {
 } from '../helpers/page-smoke'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
+import { DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES } from '@/lib/cloud-engine/usage/estimate'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -145,7 +147,7 @@ vi.mock('@/hooks/useDashboardCards', async (importOriginal) => {
 
 vi.mock('@/components/CostCalculator/CostCalculator', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/CostCalculator/CostCalculator')>()),
-  CostCalculator: () => <div data-testid="cost-calculator" />,
+  CostCalculator: ({ prefillNote }: { prefillNote?: string }) => <div data-testid="cost-calculator">{prefillNote}</div>,
 }))
 
 function resetDefaultStores() {
@@ -299,6 +301,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   })
 
   afterEach(() => {
+    setCloudModeRuntime(false)
     reportLayoutChildArgs = null
     useMockDataTable = false
     mockIsDataReady = null
@@ -309,6 +312,44 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     expect(screen.getByText('System Usage')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  test('Cloud usage renders Compute, KV, secrets and CDN requests from measured prefill', async () => {
+    setCloudModeRuntime(true)
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates') return { data: LIST_PRICE_RATES }
+      if (path === '/api/usage/prefill') return {
+        data: {
+          inputs: { ...DEFAULT_INPUTS, requestsPerDay: 12345, edgeRequestsPerDay: 10000 },
+          units: { ...DEFAULT_UNITS, secrets: 3 },
+          measuredInputs: { requestsPerDay: true, edgeRequestsPerDay: true },
+          measuredUnits: { secrets: true },
+          rates: { ...LIST_PRICE_RATES, secret_rate_per_month: 7 },
+          window: { days: 7, files: 10, lines: 100 },
+        },
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
+    expect(screen.getByText('KV Store operations')).toBeInTheDocument()
+    expect(screen.getByText('3 secrets')).toBeInTheDocument()
+    expect(screen.getByText('$21.00')).toBeInTheDocument()
+    expect(screen.getByText(/front reqs/)).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(12345)
+    expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
+  })
+
+  test('High-Scale missing traffic is labelled reference rather than measured service traffic', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill')
+        return { data: makePrefill({ requests_per_day: null, edge_requests_per_day: null, edge_only: true }) }
+      return undefined
+    })
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText(/Traffic measurements are unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText('Compute (app + worker)')).not.toBeInTheDocument()
   })
 
   test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flagged partial on a storage 5xx', async () => {

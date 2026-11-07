@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DuckDBAnalyticalEngine, duckdbAssetUrls } from "./duckdb";
+import { fixtureEngine } from "./test-fixtures";
 
 describe("DuckDB browser assets", () => {
   it("load from an immutable versioned path", () => {
@@ -78,7 +79,7 @@ describe("DuckDB browser assets", () => {
   });
 
   it("creates requests, logs view, client_vitals, and client_errors with executeSql and getPresentColumns", async () => {
-    const engine = new DuckDBAnalyticalEngine();
+    const engine = fixtureEngine(new DuckDBAnalyticalEngine());
     await engine.executeSql(
       `INSERT INTO requests (scoped_key, ts_ms, "timestamp", status, client_rtt_us, cmcd_sid, asset_type)
        VALUES ($1, $2, epoch_ms($2)::TIMESTAMPTZ, $3, $4, $5, $6)`,

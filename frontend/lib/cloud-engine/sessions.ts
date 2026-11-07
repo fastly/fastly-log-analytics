@@ -7,7 +7,7 @@
  */
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
-import { compileFiltersToSql } from "./dashboard/duckdb";
+import { compileFiltersToSql, type DuckDBColumnType } from "./dashboard/duckdb";
 
 export const SESSIONS_INACTIVITY_GAP_SECONDS = 1800; // 30 * 60 seconds (INTERVAL 30 MINUTES)
 export const SESSIONS_MAX_WINDOW_DAYS = 7;
@@ -95,6 +95,7 @@ export interface SessionDetailResponse {
 }
 
 export interface CloudSessionsContext {
+  customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
   serviceId?: string;
   tableName?: string;
   maskIps?: boolean;
@@ -176,6 +177,7 @@ export function buildSessionsCteSql(options: {
   limit?: number;
   offset?: number;
   filters?: SessionsListRequest["filters"];
+  customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
 }): string {
   const tableName = requireSafeIdent(options.tableName ?? "requests", "tableName");
   const cols =
@@ -256,7 +258,7 @@ export function buildSessionsCteSql(options: {
     (Array.isArray(spec) ? spec : spec.values ?? []).map((value) => ({
       field, value, mode: !Array.isArray(spec) && spec.mode === "exclude" ? "exclude" as const : "include" as const,
     })),
-  ));
+  ), false, [], options.customColumnTypes);
 
   return `
     WITH base AS (
@@ -277,7 +279,7 @@ export function buildSessionsCteSql(options: {
       FROM ${tableName}
       WHERE "ip" IS NOT NULL AND "ip" != ''
         AND ${timestampSql} >= EPOCH_MS(CAST(${Date.parse(options.startTime)} AS BIGINT))
-        AND ${timestampSql} <= EPOCH_MS(CAST(${Date.parse(options.endTime)} AS BIGINT))
+        AND ${timestampSql} < EPOCH_MS(CAST(${Date.parse(options.endTime)} AS BIGINT))
         AND (${filterSql})
     ),
     gaps AS (
@@ -460,6 +462,7 @@ export async function handleSessionsList(
     limit,
     offset,
     filters: body.filters,
+    customColumnTypes: ctx.customColumnTypes,
   });
 
   const rawRows = ctx.runSql ? await ctx.runSql(sql) : [];

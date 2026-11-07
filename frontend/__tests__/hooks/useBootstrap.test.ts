@@ -665,7 +665,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
         })
       }),
     )
-    const { result, unmount } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper({ staleSeed: true }) })
+    const { result, unmount } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper() })
     await waitFor(() => expect(result.current.data?.local_rows).toBe(12345))
     expect(result.current.data?.latest_log_at).toBe('2026-06-14T00:00:00Z')
     expect(observedSkipFos).toBe('true')
@@ -673,7 +673,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
 
     calls = 0
     const { result: analystRes } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper({ staleSeed: true, remoteAnalyst: true }) })
-    await new Promise((r) => setTimeout(r, 30))
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()
   })
@@ -691,7 +691,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
         })
       }),
     )
-    const { result, unmount } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true }) })
+    const { result, unmount } = renderHook(() => useLastSync(), { wrapper: syncWrapper() })
     await waitFor(() => expect(result.current.data?.started_at).toBe('2026-06-15T23:37:41Z'))
     expect(result.current.data).toMatchObject({ started_at: '2026-06-15T23:37:41Z', status: 'success', duration_s: 7.2 })
     expect(params!.get('task')).toBe('log_discovery')
@@ -706,7 +706,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
 
     calls = 0
     const { result: analystRes } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true, remoteAnalyst: true }) })
-    await new Promise((r) => setTimeout(r, 30))
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()
   })

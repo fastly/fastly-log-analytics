@@ -84,7 +84,7 @@ function buildWhereClause(params: ValueQueryParams, types: Map<string, DuckDBCol
   const startMs = parseEpochMs(params.start_time);
   const endMs = parseEpochMs(params.end_time);
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms <= ${endMs}`);
+  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
   if (params.service_id) {
     clauses.push(`(service_id = '${sqlEscape(params.service_id)}' OR service_id IS NULL)`);
   }
@@ -113,7 +113,7 @@ const CHART_INTERVAL_SECONDS: Record<string, number> = {
 };
 
 export async function queryValueSummary(params: ValueQueryParams = {}): Promise<ValueSummary> {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
   const types = new Map<string, DuckDBColumnType>();
   if (Object.keys(params.filters ?? {}).length || Object.keys(params.custom_filters ?? {}).length) {
     const schema = await engine.executeSql<{ column_name: string; column_type: string }>(

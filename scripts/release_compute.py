@@ -175,27 +175,8 @@ def save_web_caches(web: Path, cache_dir: Path, npm_ready: bool) -> None:
 
 def prepare_static_export_tree(web: Path) -> None:
     """Prune server-only routes/middleware in the temporary frontend worktree for STATIC_EXPORT=1."""
-    for rel in (
-        "app/api",
-        "app/js",
-        "proxy.ts",
-        "app/high-scale",
-        "app/admin/clickhouse",
-        "app/admin/queue",
-        "app/admin/queries",
-        "app/admin/trends",
-        "app/control-room/page.tsx",
-        "app/alerts",
-        "app/share",
-        "components/high-scale",
-        "__tests__",
-        "e2e",
-        "vitest.setup.ts",
-        "vitest.config.ts",
-        "playwright.config.ts",
-        "knip.config.ts",
-        "tsconfig.tsbuildinfo",
-    ):
+    policy = json.loads((web / "static-export-policy.json").read_text())
+    for rel in policy["prunePaths"]:
         target = web / rel
         if target.is_dir():
             shutil.rmtree(target)

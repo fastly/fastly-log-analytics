@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { DuckDBAnalyticalEngine } from "./dashboard/duckdb";
+import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,

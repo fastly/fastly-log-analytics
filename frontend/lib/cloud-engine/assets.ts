@@ -2,6 +2,7 @@ import {
   getDuckDBEngine,
   compileFiltersToSql,
   type DuckDBAnalyticalEngine,
+  type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 
@@ -19,7 +20,8 @@ export interface AssetsQueryParams {
   end_time?: string | number;
   service_id?: string;
   filters?: readonly AssetFilterClause[] | FiltersPayload;
-  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
+  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
+  customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
   signal?: AbortSignal;
 }
 
@@ -282,7 +284,7 @@ function buildAssetsWhere(params: AssetsQueryParams): string {
   const startMs = parseEpochMs(params.start_time);
   const endMs = parseEpochMs(params.end_time);
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms <= ${endMs}`);
+  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
   if (params.service_id) {
     const escaped = String(params.service_id).replaceAll("'", "''");
     clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
@@ -290,7 +292,7 @@ function buildAssetsWhere(params: AssetsQueryParams): string {
   if (params.filters && !Array.isArray(params.filters)) {
     clauses.push(compileFiltersToSql(Object.entries(params.filters as FiltersPayload).flatMap(([field, spec]) =>
       spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-    )));
+    ), false, [], params.customColumnTypes));
   }
   for (const f of Array.isArray(params.filters) ? params.filters : []) {
     if (!ALLOWED_FILTER_COLS.has(f.column)) continue;
@@ -341,7 +343,8 @@ const DERIVED_ASSET_CTE = `
 `;
 
 export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildAssetsWhere(params);
 
   const dimRows = await engine.executeSql<DimRowInput>(

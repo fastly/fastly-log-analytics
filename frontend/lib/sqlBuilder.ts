@@ -57,7 +57,7 @@ export function buildWhereClause(
 ): string {
   const parts: string[] = []
   if (startTime) parts.push(`timestamp >= '${sqlEscape(toCanonicalSqlTs(startTime))}'`)
-  if (endTime) parts.push(`timestamp <= '${sqlEscape(toCanonicalSqlTs(endTime))}'`)
+  if (endTime) parts.push(`timestamp < '${sqlEscape(toCanonicalSqlTs(endTime))}'`)
 
   for (const [rawCol, spec] of Object.entries(filters)) {
     if (!spec || !Array.isArray(spec.values) || spec.values.length === 0) continue
@@ -87,4 +87,27 @@ export function buildStructuredSql(
   const sort = sorting[0]
   const orderBy = sort ? `ORDER BY ${quoteIdent(sort.id)} ${sort.desc ? 'DESC' : 'ASC'}` : 'ORDER BY timestamp DESC'
   return ['SELECT *', `FROM ${tableName}`, where, orderBy, `LIMIT ${maxRows}`].filter(Boolean).join('\n')
+}
+
+export function buildQueryRequest(
+  params: {
+    sql: string
+    max_rows: number
+    explain: boolean
+    dataset?: 'logs' | 'client_vitals' | 'client_errors'
+    service_id?: string
+    start_time?: string
+    end_time?: string
+  },
+  serviceId: string | null,
+  startTime: string | null,
+  endTime: string | null,
+) {
+  return {
+    ...params,
+    dataset: params.dataset ?? 'logs',
+    service_id: params.service_id ?? serviceId ?? undefined,
+    start_time: params.start_time ?? startTime ?? undefined,
+    end_time: params.end_time ?? endTime ?? undefined,
+  }
 }

@@ -76,41 +76,68 @@ export function useHeaderBadgeStream(enabled: boolean) {
     if (!enabled || !cloudActive) return
     const controller = new AbortController()
     let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let inFlight = false
+    let resumePending = false
     const source = browserOpsSource(
       typeof window !== 'undefined' ? window.location.origin : '',
     )
 
     const poll = async () => {
-      while (!stopped && !controller.signal.aborted) {
-        try {
-          const { readIngestEvents } = await import('@/lib/cloud-engine/telemetry/engine')
-          if (stopped || controller.signal.aborted) return
-          const now = Date.now()
-          const result = await readIngestEvents(source, {
-            from: new Date(cursorRef.current ?? now - 300_000).toISOString(),
-            to: new Date(now).toISOString(),
-            seenIds: seenIdsRef.current,
-            lastCursorMs: cursorRef.current ?? 0,
-            signal: controller.signal,
+      if (stopped || controller.signal.aborted || document.hidden || inFlight) return
+      inFlight = true
+      try {
+        const { readIngestEvents } = await import('@/lib/cloud-engine/telemetry/engine')
+        if (stopped || controller.signal.aborted || document.hidden) return
+        const now = Date.now()
+        const result = await readIngestEvents(source, {
+          from: new Date(cursorRef.current ?? now - 300_000).toISOString(),
+          to: new Date(now).toISOString(),
+          seenIds: new Set(seenIdsRef.current),
+          lastCursorMs: cursorRef.current ?? 0,
+          signal: controller.signal,
+        })
+        if (stopped || controller.signal.aborted || document.hidden) return
+        if (result.nextCursorMs > 0) cursorRef.current = result.nextCursorMs
+        seenIdsRef.current = result.seenIds
+        if (result.events.length > 0) {
+          observeCatalogCommit(source.fetchJson, {
+            type: 'commit',
+            generation: result.nextCursorMs,
           })
-          if (result.nextCursorMs > 0) cursorRef.current = result.nextCursorMs
-          if (result.events.length > 0) {
-            observeCatalogCommit(source.fetchJson, {
-              type: 'commit',
-              generation: result.nextCursorMs,
-            })
-            void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
-          }
-        } catch {
-          /* ignore transient poll error */
+          void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
         }
-        await new Promise((r) => setTimeout(r, 15_000))
+      } catch {
+        /* ignore transient poll error */
+      } finally {
+        inFlight = false
+        if (!stopped && !controller.signal.aborted && !document.hidden) {
+          if (resumePending) {
+            resumePending = false
+            void poll()
+          } else {
+            timer = setTimeout(() => {
+              timer = undefined
+              void poll()
+            }, 15_000)
+          }
+        }
       }
     }
 
+    const onVisibilityChange = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      timer = undefined
+      resumePending = !document.hidden && inFlight
+      if (!document.hidden && !inFlight) void poll()
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
     void poll()
     return () => {
       stopped = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      if (timer !== undefined) clearTimeout(timer)
       controller.abort()
     }
   }, [enabled, cloudActive, activeServiceId, queryClient])

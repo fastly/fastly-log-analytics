@@ -73,6 +73,7 @@ def test_cloud_export_prunes_only_a_snapshot_and_cleans_it_up(
     (tmp_path / ".gitignore").write_text(ignore)
     frontend = tmp_path / "frontend"
     (frontend / "app/api").mkdir(parents=True)
+    (frontend / "static-export-policy.json").write_text((ROOT / "frontend/static-export-policy.json").read_text())
     (frontend / "node_modules").mkdir()
     (frontend / "node_modules/fixture.json").write_text("{}")
     (frontend / "app/dashboard").mkdir()

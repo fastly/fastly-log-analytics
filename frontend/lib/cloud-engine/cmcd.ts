@@ -2,6 +2,7 @@ import {
   getDuckDBEngine,
   compileFiltersToSql,
   type DuckDBAnalyticalEngine,
+  type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 
@@ -73,7 +74,8 @@ export interface CmcdQueryParams {
   filters?: FiltersPayload;
   bucket_seconds?: number;
   top_n?: number;
-  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
+  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
+  customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
   signal?: AbortSignal;
 }
 
@@ -155,7 +157,7 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
   const startMs = parseEpochMs(params.start_time);
   const endMs = parseEpochMs(params.end_time);
   if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms <= ${endMs}`);
+  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
   if (params.service_id) {
     const escaped = String(params.service_id).replaceAll("'", "''");
     clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
@@ -178,12 +180,13 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
   }
   clauses.push(compileFiltersToSql(Object.entries(params.filters ?? {}).flatMap(([field, spec]) =>
     spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-  )));
+  ), false, [], params.customColumnTypes));
   return clauses.join(" AND ");
 }
 
 export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
-  const engine = params.engine ?? getDuckDBEngine();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildCmcdWhere(params);
   const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 60))) * 1000;
   const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));

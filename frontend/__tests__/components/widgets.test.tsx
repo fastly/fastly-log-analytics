@@ -46,6 +46,8 @@ const mocks = vi.hoisted(() => ({
   maskIps: vi.fn(() => false),
   fieldValues: undefined as { values: { value: string | null; count: number; label?: string }[] } | undefined,
   fieldValuesLoading: false,
+  fieldValuesError: null as Error | null,
+  fieldValuesRefetch: vi.fn(),
   activeFields: new Set<string>(),
   logFieldsCatalog: vi.fn(() => ({ data: undefined as unknown })),
   useRealPlotly: false,
@@ -199,7 +201,10 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   useMounted: () => true, useMaskIps: () => mocks.maskIps(), useEnforceMaskedFilters: () => {},
   useLogFieldsCatalog: () => mocks.logFieldsCatalog(),
   useFieldLabel: () => (id: string) => id,
-  useFieldValues: () => ({ data: mocks.fieldValues, isLoading: mocks.fieldValuesLoading, isFetching: false }),
+  useFieldValues: () => ({
+    data: mocks.fieldValues, isLoading: mocks.fieldValuesLoading, isFetching: false,
+    error: mocks.fieldValuesError, refetch: mocks.fieldValuesRefetch,
+  }),
   useActiveLogFields: () => ({
     ready: true,
     isFieldActive: (id: string) => mocks.activeFields.has(id),
@@ -238,7 +243,8 @@ import { getTimezoneAbbr, DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
 import { DebugPanel } from '@/components/DebugPanel'
 import { DiagnosticsPanel } from '@/app/admin/_sections/OperationsOverview'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { client, getApiBase } from '@/lib/api'
+import { client, getApiBase, getPageLoadId } from '@/lib/api'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
 import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
@@ -724,9 +730,43 @@ const renderDebugWith = (qc: QueryClient) => renderWithQuery(<DebugPanel />, { q
 
 describe('DebugPanel & DiagnosticsPanel', () => {
   beforeEach(() => {
-    act(() => { useDebugStore.setState({ enabled: false, apiCallsEnabled: false }) })
+    act(() => { useDebugStore.setState({ enabled: false, apiCallsEnabled: false, apiCalls: [] }) })
     document.cookie = `${DEBUG_RESPONSES_COOKIE}=1; path=/`
     server.use(http.get(`${API_BASE}/api/debug/recent-postgres`, () => HttpResponse.json({ queries: [], buffer_size: 0, buffer_cap: 500, dropped: 0 })))
+  })
+
+  afterEach(() => setCloudModeRuntime(false))
+
+  test('Cloud call panel displays current-page worker observations and updates as calls arrive', async () => {
+    setCloudModeRuntime(true)
+    const currentCall = {
+      source: 'FOS S3', method: 'GET', path: '/processed/current.parquet',
+      status: 206, duration_ms: 12.5, page_load_id: getPageLoadId() ?? undefined,
+    }
+    act(() => {
+      useDebugStore.setState({
+        apiCallsEnabled: true,
+        apiCalls: [
+          { ...currentCall, path: '/processed/previous.parquet', page_load_id: 'previous-page' },
+          currentCall,
+        ],
+      })
+    })
+    renderDebugWith(makeDebugClient())
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: /Show 1 calls/i }))
+    expect(screen.getByText('/processed/current.parquet')).toBeInTheDocument()
+    expect(screen.queryByText('/processed/previous.parquet')).not.toBeInTheDocument()
+    expect(screen.getByText('FOS S3')).toBeInTheDocument()
+    act(() => {
+      useDebugStore.getState().addApiCall({
+        ...currentCall, source: 'Fastly API', path: '/service/current', status: 503, duration_ms: 7.25,
+      })
+    })
+    await screen.findByRole('button', { name: /Hide 2 calls/i })
+    expect(screen.getByText('/service/current')).toBeInTheDocument()
+    expect(screen.getByText('503')).toBeInTheDocument()
+    expect(screen.getByText('19.75ms')).toBeInTheDocument()
   })
 
   test('cookie-heal shim writes missing cookie + invalidates cache, and skips when cookie present', async () => {
@@ -2002,6 +2042,8 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
 
   describe('FieldSearchDialog', () => {
     beforeEach(() => {
+      mocks.fieldValuesError = null
+      mocks.fieldValuesRefetch.mockReset()
       useFilterStore.setState({ filters: [] })
       usePopGeoStore.setState({ map: {} })
       mocks.fieldValues = {
@@ -2013,6 +2055,18 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
         ],
       }
       mocks.fieldValuesLoading = false
+    })
+
+    it('surfaces a failed search instead of showing an empty success and permits retry', async () => {
+      mocks.fieldValues = undefined
+      mocks.fieldValuesError = new Error('The file manifest for this range is incomplete; choose a shorter range.')
+      const user = userEvent.setup()
+      render(<FieldSearchDialog field="host" title="Host" />)
+      await user.click(screen.getByRole('button', { name: 'Search Host' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('file manifest for this range is incomplete')
+      expect(screen.queryByText('No results found')).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Retry search' }))
+      expect(mocks.fieldValuesRefetch).toHaveBeenCalledOnce()
     })
 
     it('pins selected values for its own field (including unfetched/exclude/geo), filters by search, and removes on click', async () => {

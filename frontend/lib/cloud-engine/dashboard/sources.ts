@@ -299,6 +299,7 @@ export type BrowserSourceOptions = {
   getPageLoadId?: () => string;
   debugResponses?: () => boolean;
   onApiCall?: (call: BrowserSourceCallEvent) => void;
+  serviceId?: string;
 };
 
 export type BrowserSourceTelemetry = BrowserSourceOptions;
@@ -458,6 +459,7 @@ export function browserSource(
   >();
   let memoryRollupBytes = 0;
   const memoryFiles = new Map<string, ArrayBuffer>();
+  const memoryFileIdentities = new Map<string, string | undefined>();
   let memoryFileBytes = 0;
   let fileCachePromise: Promise<Cache | null> | null = null;
   let rollupCachePromise: Promise<Cache | null> | null = null;
@@ -503,6 +505,7 @@ export function browserSource(
     if (options?.debugResponses?.()) {
       headers["X-Debug-Responses"] = "1";
     }
+    if (options?.serviceId) headers["x-service-id"] = options.serviceId;
     return Object.keys(headers).length > 0 ? headers : undefined;
   };
 
@@ -555,11 +558,12 @@ export function browserSource(
     memoryRollupBytes += bytes;
   };
 
-  const rememberFile = (key: string, bytes: ArrayBuffer): void => {
+  const rememberFile = (key: string, bytes: ArrayBuffer, identity?: string): void => {
     const existing = memoryFiles.get(key);
     if (existing) {
       memoryFileBytes -= existing.byteLength;
       memoryFiles.delete(key);
+      memoryFileIdentities.delete(key);
     }
     const size = bytes.byteLength;
     if (size > MAX_MEMORY_FILE_BYTES) return;
@@ -571,9 +575,11 @@ export function browserSource(
       if (oldestKey === undefined) break;
       const oldest = memoryFiles.get(oldestKey);
       memoryFiles.delete(oldestKey);
+      memoryFileIdentities.delete(oldestKey);
       if (oldest) memoryFileBytes -= oldest.byteLength;
     }
     memoryFiles.set(key, bytes);
+    memoryFileIdentities.set(key, identity);
     memoryFileBytes += size;
   };
 
@@ -581,6 +587,7 @@ export function browserSource(
     const bytes = memoryFiles.get(key);
     if (bytes) memoryFileBytes -= bytes.byteLength;
     memoryFiles.delete(key);
+    memoryFileIdentities.delete(key);
   };
 
   /**
@@ -641,7 +648,9 @@ export function browserSource(
   };
 
   const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => ({
-    cacheScope: cacheScope ?? "browser",
+    cacheScope: options?.serviceId
+      ? `${cacheScope ?? "browser"}:${options.serviceId}`
+      : cacheScope ?? "browser",
     withOptions: (next) => sourceWith(next),
     async openParquet(file, signal, variant) {
       signal?.throwIfAborted();
@@ -806,6 +815,11 @@ export function browserSource(
     fetchJson: Object.assign(
       async (url: string, signal?: AbortSignal) => {
         const headers = buildRequestHeaders(options);
+        if (options?.serviceId) {
+          const scopedUrl = new URL(url, globalThis.location?.origin ?? "http://localhost");
+          scopedUrl.searchParams.set("service_id", options.serviceId);
+          url = `${scopedUrl.pathname}${scopedUrl.search}`;
+        }
         const pageLoadId = options?.getPageLoadId?.();
         const start =
           typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -848,7 +862,11 @@ export function browserSource(
       },
       {
         manifestCacheScope: () =>
-          JSON.stringify([baseUrl, limits.cacheScope ?? dashboardCacheScope()]),
+          JSON.stringify([
+            baseUrl,
+            limits.cacheScope ?? dashboardCacheScope(),
+            ...(options?.serviceId ? [options.serviceId] : []),
+          ]),
       },
     ),
     async fetchFile(key, signal, mode) {
@@ -857,12 +875,13 @@ export function browserSource(
       const path = fileDisplayPath(key);
       const pageLoadId = options?.getPageLoadId?.();
       const inMemory = memoryFiles.get(key);
-      if (inMemory) {
+      if (inMemory && memoryFileIdentities.get(key) === mode?.identity) {
         if (transfer) {
           memoryFiles.delete(key);
+          memoryFileIdentities.delete(key);
           memoryFileBytes -= inMemory.byteLength;
         } else {
-          rememberFile(key, inMemory);
+          rememberFile(key, inMemory, mode?.identity);
         }
         options?.onApiCall?.({
           source: "Browser Cache",
@@ -878,7 +897,8 @@ export function browserSource(
         return { bytes: inMemory, cached: true, cdn: null };
       }
       const url = `${baseUrl}${reqPath}`;
-      const cacheUrl = scopedCacheUrl(url, cacheScope);
+      const cacheUrl = scopedCacheUrl(url, mode?.identity === undefined
+        ? cacheScope : JSON.stringify([cacheScope, mode.identity]));
       const cacheStart =
         typeof performance !== "undefined" ? performance.now() : Date.now();
       const cache = await getFileCache();
@@ -888,7 +908,7 @@ export function browserSource(
         storeIndex.touch(key, bytes.byteLength);
         const cacheEnd =
           typeof performance !== "undefined" ? performance.now() : Date.now();
-        if (!transfer) rememberFile(key, bytes);
+        if (!transfer) rememberFile(key, bytes, mode?.identity);
         options?.onApiCall?.({
           source: "Browser Cache",
           method: "GET",
@@ -933,7 +953,7 @@ export function browserSource(
       const bytes = await response.arrayBuffer();
       const end =
         typeof performance !== "undefined" ? performance.now() : Date.now();
-      if (!transfer) rememberFile(key, bytes);
+      if (!transfer) rememberFile(key, bytes, mode?.identity);
       const cdn = response.headers.get("x-flp-cdn-cache");
       const cdnHit = isCdnHit(cdn);
       const vcpuMs = parseVcpuMsHeader(response?.headers);
@@ -987,7 +1007,7 @@ export function browserSource(
       };
     },
     async hasFile(key) {
-      if (memoryFiles.has(key)) return true;
+      if (memoryFiles.has(key) && memoryFileIdentities.get(key) === undefined) return true;
       try {
         const cache = await getFileCache();
         const url = `${baseUrl}${fileRequestPath(key)}`;
@@ -1126,6 +1146,7 @@ export function browserSource(
       memoryRollups.clear();
       memoryRollupBytes = 0;
       memoryFiles.clear();
+      memoryFileIdentities.clear();
       memoryFileBytes = 0;
       fileCachePromise = null;
       rollupCachePromise = null;

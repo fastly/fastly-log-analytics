@@ -50,6 +50,9 @@ const RECORD_TTL: Duration = Duration::from_secs(86_400);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobState {
+    /// Attribution from actual execution; legacy global state is not service evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
     #[serde(default)]
     pub last_run: Option<u64>,
     /// Ingest only: the newest period index (`(t - ingest_grace_s) / period`) fully ingested.
@@ -364,6 +367,129 @@ pub fn due(mirror: &Mirror, now: u64) -> Due {
                     || jobs.rum.success_period(mirror.rum_log_period_s) < Some(*ready)
             }),
     }
+}
+
+/// Read-only projection of the dispatcher's jobs. Rotating stages have no independent timer.
+pub fn task_schedules(
+    runtime: &impl Runtime,
+    state: &CronState,
+    service: Option<&super::model::Service>,
+) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let Some(service) = service else {
+        return Vec::new();
+    };
+    let now = runtime.now();
+    let mirror = Mirror::from_state(state, Some(service.log_period))
+        .with_rum(service.rum.enabled.then_some(service.rum.log_period));
+    let jobs = &mirror.jobs;
+    let raw_delete_execution =
+        (jobs.raw_delete.service_id.as_deref() == Some(service.service_id.as_str())).then(|| {
+            let status = match jobs.raw_delete.last_status.as_str() {
+                status @ ("idle" | "done" | "partial" | "busy" | "error" | "missed"
+                | "unprovisioned") => status,
+                _ => "unknown",
+            };
+            json!({
+                "service_id": service.service_id,
+                "last_run": jobs.raw_delete.last_run,
+                "status": status,
+                "more_pending": jobs.raw_delete.more_pending,
+                "retry_after": jobs.raw_delete.retry_after,
+            })
+        });
+    let pending_at = |job: &JobState| job.more_pending.then_some(job.retry_after.max(now));
+    let ingest_at = |job: &JobState, next: u64| {
+        if job.more_pending {
+            job.retry_after.max(now)
+        } else {
+            next.max(now)
+        }
+    };
+    let maint_at = if jobs.maint.more_pending {
+        jobs.maint.retry_after
+    } else {
+        jobs.maint
+            .last_run
+            .map_or(0, |last| last.saturating_add(MAINT_INTERVAL_S))
+            .max(jobs.maint.retry_after)
+    }
+    .max(now);
+    let entry =
+        |task: &str, last: Option<u64>, next: Option<u64>, interval: Option<u64>, basis: &str| {
+            json!({
+                "task": task,
+                "last_run_time": last.map(super::rfc3339_from_secs),
+                "next_run_time": next.map(super::rfc3339_from_secs),
+                "interval_s": interval,
+                "schedule_basis": basis,
+            })
+        };
+    let mut schedules = vec![
+        entry(
+            super::TICK_STAGES[0],
+            jobs.ingest.last_run,
+            Some(ingest_at(&jobs.ingest, next_ingest_at(&mirror))),
+            Some(period_s(mirror.log_period_s)),
+            "log_period",
+        ),
+        entry(
+            super::TICK_STAGES[1],
+            jobs.rum.last_run,
+            service
+                .rum
+                .enabled
+                .then(|| ingest_at(&jobs.rum, next_rum_at(&mirror))),
+            service
+                .rum
+                .enabled
+                .then(|| period_s(mirror.rum_log_period_s)),
+            "log_period",
+        ),
+        entry(
+            super::TICK_STAGES[2],
+            jobs.raw_delete.last_run,
+            pending_at(&jobs.raw_delete),
+            None,
+            "pending_work",
+        ),
+        entry(
+            "maintenance",
+            jobs.maint.last_run,
+            Some(maint_at),
+            Some(MAINT_INTERVAL_S),
+            "dispatcher",
+        ),
+        entry(
+            "log_flush",
+            None,
+            peek(runtime, FLUSH_SCHED_KEY).map(|record| record.wake_at.max(now)),
+            Some(FLUSH_WAKE_S),
+            "flush_wake",
+        ),
+        entry(
+            "cloud_ingest_clock",
+            state.last_tick,
+            next_tick_at(runtime, state.last_tick),
+            Some(super::CLOCK_INTERVAL_S),
+            "coordinator",
+        ),
+    ];
+    schedules[2]["execution"] = raw_delete_execution.into();
+    if !service.rum.enabled {
+        schedules[1]["disabled_reason"] = json!("RUM is disabled");
+    }
+    for task in super::logs::MAINT_STAGES {
+        let mut row = entry(task, None, None, None, "maintenance_turn");
+        if task == "delete_data" && service.data_reset.is_none() {
+            row["disabled_reason"] = json!("No manual data reset is queued");
+        }
+        if task == "request_compact" && service.compaction.target_bytes().is_none() {
+            row["disabled_reason"] = json!("Request compaction is disabled");
+        }
+        schedules.push(row);
+    }
+    schedules
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -21,6 +21,20 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("browserSource", () => {
+  it("keeps a field search bound to its service in manifest requests and cache identity", async () => {
+    const fetcher = vi.fn(async () => Response.json({ files: [], complete: true }));
+    vi.stubGlobal("fetch", fetcher);
+    const source = browserSource("").withOptions({ serviceId: "search-service" });
+    await source.fetchJson("/api/files?from=2026-10-29&to=2026-10-30");
+    const [path, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new URL(path, "http://localhost").searchParams.get("service_id")).toBe("search-service");
+    expect(new Headers(init.headers).get("x-service-id")).toBe("search-service");
+    expect(source.fetchJson.manifestCacheScope?.()).not.toBe(
+      browserSource("").withOptions({ serviceId: "other-service" }).fetchJson.manifestCacheScope?.(),
+    );
+    expect(source.cacheScope).not.toBe(browserSource("").withOptions({ serviceId: "other-service" }).cacheScope);
+  });
+
   it("reads x-flp-cdn-cache on network fetches", async () => {
     vi.stubGlobal(
       "fetch",
@@ -117,6 +131,7 @@ describe("browserSource", () => {
       getPageLoadId: () => "page-a",
       onApiCall: (call) => callsA.push(call.page_load_id ?? ""),
     });
+
     const b = base.withOptions({
       getPageLoadId: () => "page-b",
       onApiCall: (call) => callsB.push(call.page_load_id ?? ""),
@@ -129,6 +144,33 @@ describe("browserSource", () => {
     expect(callsA).toEqual(["page-a"]);
     expect(callsB).toEqual(["page-b"]);
     expect(await a.hasFile!("y")).toBe(true);
+  });
+
+  it("isolates manifest identities in memory and persistent file caches", async () => {
+    const store = new Map<string, Response>();
+    vi.stubGlobal("caches", {
+      open: vi.fn(async () => ({
+        match: vi.fn(async (req: string) => store.get(req)?.clone()),
+        delete: vi.fn(async (req: string) => store.delete(req)),
+        put: vi.fn(async (req: string, res: Response) => {
+          store.set(req, res.clone());
+        }),
+      })),
+    });
+    let version = 0;
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array([++version])));
+    vi.stubGlobal("fetch", fetchMock);
+    const source = browserSource("");
+    const first = await source.fetchFile("replaced", undefined, { identity: "v1" });
+    expect(new Uint8Array(first.bytes)).toEqual(new Uint8Array([1]));
+    expect((await source.fetchFile("replaced", undefined, { identity: "v1" })).cached).toBe(true);
+    const second = await source.fetchFile("replaced", undefined, { identity: "v2" });
+    expect(new Uint8Array(second.bytes)).toEqual(new Uint8Array([2]));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const previous = await source.fetchFile("replaced", undefined, { identity: "v1", transfer: true });
+    expect(previous.cached).toBe(true);
+    expect(new Uint8Array(previous.bytes)).toEqual(new Uint8Array([1]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("posts one beacon and swallows failures", async () => {

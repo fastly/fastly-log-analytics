@@ -12,7 +12,7 @@
  */
 
 import { sqlEscape } from "@/lib/sqlBuilder";
-import { compileFiltersToSql, getDuckDBEngine } from "./dashboard/duckdb";
+import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 
 export type PerformanceSectionName =
@@ -83,6 +83,7 @@ export type FilterSpec = Record<
 >;
 
 export interface PerformanceRequest {
+  customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
   start_time?: string | null;
   end_time?: string | null;
   range_token?: string | null;
@@ -154,9 +155,10 @@ export function setPerformanceEngineClient(client: PerformanceEngineClient | nul
   customPerformanceClient = client;
 }
 
-export async function getPerformanceEngineClient(): Promise<PerformanceEngineClient> {
+export async function getPerformanceEngineClient(context?: DuckDBReadContext): Promise<PerformanceEngineClient> {
   if (customPerformanceClient) return customPerformanceClient;
-  const engine = getDuckDBEngine() as unknown as {
+  const read = context ?? getDuckDBEngine().readContext();
+  const engine = read as unknown as {
     querySql?: (sql: string) => Promise<Record<string, unknown>[]>;
     executeSql?: (sql: string) => Promise<Record<string, unknown>[]>;
     queryRollup?: (
@@ -167,7 +169,10 @@ export async function getPerformanceEngineClient(): Promise<PerformanceEngineCli
   return {
     async getAvailableColumns(): Promise<ReadonlySet<string>> {
       if (typeof engine.querySql === "function") {
-        const rows = await engine.querySql("DESCRIBE SELECT * FROM requests").catch(() => []);
+        const rows = await engine.querySql("DESCRIBE SELECT * FROM requests").catch(() => {
+          read.assertCurrent();
+          return [];
+        });
         return new Set(rows.map((r) => String(r.column_name ?? "")).filter(Boolean));
       }
       return new Set(["timestamp", "elapsed", "ttfb", "ottfb", "ottlb", "cache", "ttl", "url", "asn"]);
@@ -258,9 +263,9 @@ function buildPerformanceBaseWhere(
     const ms = Date.parse(req.end_time);
     if (Number.isFinite(ms)) {
       if (availableColumns?.has("ts_ms")) {
-        clauses.push(`"ts_ms" <= ${Math.ceil(ms)}`);
+        clauses.push(`"ts_ms" < ${Math.ceil(ms)}`);
       } else {
-        clauses.push(`timestamp <= CAST('${sqlEscape(new Date(ms).toISOString())}' AS TIMESTAMPTZ)`);
+        clauses.push(`timestamp < CAST('${sqlEscape(new Date(ms).toISOString())}' AS TIMESTAMPTZ)`);
       }
     }
   }
@@ -281,7 +286,7 @@ function buildPerformanceBaseWhere(
       }
     }
     if (dFilters.length > 0) {
-      clauses.push(`(${compileFiltersToSql(dFilters)})`);
+      clauses.push(`(${compileFiltersToSql(dFilters, false, [], req.customColumnTypes)})`);
     }
   }
 
@@ -504,8 +509,11 @@ export function shapePerfScatterRows(rows: Record<string, unknown>[]): PerfScatt
 
 export async function executePerformanceAggregates(
   req: PerformanceRequest,
+  context?: DuckDBReadContext,
 ): Promise<PerformanceAggregatesResponse> {
-  const client = await getPerformanceEngineClient();
+  const read = context ?? getDuckDBEngine().readContext();
+  req = { ...req, customColumnTypes: read.getCustomColumnTypes() };
+  const client = await getPerformanceEngineClient(read);
   const availableColumns = await client.getAvailableColumns();
   const sections = expandPerformanceSections(req.sections);
   const filtered = hasActiveFilters(req.filters);
@@ -630,13 +638,15 @@ export async function handlePerformanceRequest(
   req: Request,
   path?: string,
   url?: URL,
+  context?: DuckDBReadContext,
 ): Promise<Response | null> {
   const parsedUrl = url ?? new URL(req.url, "http://localhost");
   const pathname = (path ?? parsedUrl.pathname).replace(/\/+$/, "");
 
   if (pathname === "/api/performance/aggregates" || pathname === "/api/performance") {
+    const read = context ?? getDuckDBEngine().readContext();
     const perfReq = await parsePerformanceRequest(req, parsedUrl);
-    const data = await executePerformanceAggregates(perfReq);
+    const data = await executePerformanceAggregates(perfReq, read);
     return Response.json(data, { status: 200 });
   }
 
