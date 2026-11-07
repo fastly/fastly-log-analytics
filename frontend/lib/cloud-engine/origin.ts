@@ -788,7 +788,7 @@ export function buildOriginShieldingAnalysisSql(
       FROM ${table}
       WHERE ${where} AND "edge" = true
     ),
-    shield_logs AS (
+    shield_logs AS MATERIALIZED (
       SELECT "prid", "pop", "ottfb", "ttfb"
       FROM ${table}
       WHERE ${timeWhere} AND "edge" = false AND "prid" IS NOT NULL AND "prid" != ''

@@ -20,7 +20,7 @@ import {
 } from "./insights";
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead } from "./scoring-reads";
-import { handleNetworkRequest, type NetworkQueryParams } from "./network";
+import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
 import { handleOriginRequest } from "./origin";
 import { handlePerformanceRequest } from "./performance";
 import {
@@ -281,10 +281,12 @@ async function withLoading<T>(stage: LoadingStage, work: () => Promise<T>): Prom
 }
 
 // Every Cloud scan needs the extents, catalog and services lookups, and a page
-// load runs many scans. Share one answer for a short window; writes clear it.
+// load runs many scans. Share one answer while it keeps being used within a short
+// window, so a long page load reads it once, but never past a hard cap; writes clear it.
 const METADATA_TTL_MS = 15_000;
+const METADATA_MAX_AGE_MS = 60_000;
 type MetadataSnapshot = { status: number; contentType: string | null; body: string };
-const metadataCache = new Map<string, { at: number; value: Promise<MetadataSnapshot> }>();
+const metadataCache = new Map<string, { at: number; usedAt: number; value: Promise<MetadataSnapshot> }>();
 
 export function resetCloudMetadataCache(): void {
   metadataCache.clear();
@@ -292,12 +294,15 @@ export function resetCloudMetadataCache(): void {
 
 async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Response> {
   signal.throwIfAborted();
+  const now = Date.now();
   let entry = metadataCache.get(path);
-  if (!entry || Date.now() - entry.at > METADATA_TTL_MS) {
+  if (entry && now - entry.usedAt <= METADATA_TTL_MS && now - entry.at < METADATA_MAX_AGE_MS) {
+    entry.usedAt = now;
+  } else {
     const value = fetch(path).then(async (response) => ({
       status: response.status, contentType: response.headers.get("content-type"), body: await response.text(),
     }));
-    const created = { at: Date.now(), value };
+    const created = { at: now, usedAt: now, value };
     entry = created;
     metadataCache.set(path, created);
     const evict = () => { if (metadataCache.get(path) === created) metadataCache.delete(path); };
@@ -408,12 +413,14 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     url.pathname === "/api/insights/cache-collapse-detail";
   const filters = url.pathname === "/api/insights"
     ? parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined) : [];
+  const networkColumns = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname)
+    ? networkScanColumns(params.filters) : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
-    } } : {},
+    } } : networkColumns ? { projection: { columns: networkColumns } } : {},
   });
   try {
     generation.assertCurrent();

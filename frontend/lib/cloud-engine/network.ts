@@ -276,6 +276,23 @@ export function emptyNetworkBundle(missingTcpFields: string[] = []) {
   };
 }
 
+/** Every request column the /network scans read, physical Cloud names and their aliases alike. */
+export const NETWORK_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "service_id", "status", "cache", "cache_status", "resp_bytes", "resp_body_size",
+  "elapsed", "time_elapsed_usec", "proto", "protocol", "pop", "fastly_pop", "edge", "rid", "prid",
+  "ttfb", "ttfb_ms", "ottfb", "country", "geo_country", "city", "geo_city", "region", "geo_region",
+  "lat", "lon", "asn", "client_asn", "as_name", "tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt",
+  "ploss", "client_ploss", "client_cwnd", "rtt_var", "tcpi_rtt_var", "client_tcpi_rttvar",
+  "client_tcpi_delta_retrans", "delivery_rate", "tcpi_delivery_rate",
+] as const;
+
+/** The columns a projected /network load needs, or null when the filters can't name theirs. */
+export function networkScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...NETWORK_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...NETWORK_SCAN_COLUMNS, ...Object.keys(filters)])];
+}
+
 function parseEpochMs(val: string | number | undefined): number | null {
   if (val === undefined || val === null || val === "") return null;
   if (typeof val === "number") {
@@ -331,20 +348,36 @@ async function queryNetworkBuckets(
   const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300))) * 1000;
   const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
   const bucket = `(floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT`;
-  const metrics = `COUNT(*)::BIGINT AS reqs,
-    QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5) AS rtt_med_us,
-    QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1) AS baseline,
-    AVG(COALESCE(client_ploss, ploss)) AS avg_ploss,
-    COUNT(*) FILTER (WHERE status >= 500) * 100.0 / COUNT(*) AS error_pct`;
-  const asnRows = await engine.executeSql<Record<string, unknown>>(`SELECT ${bucket} AS bucket_ms,
-    COALESCE(client_asn, asn, 0) AS asn, ${metrics} FROM requests WHERE ${where} GROUP BY 1, 2 ORDER BY 1`, [], params.signal);
   const mapAsn = params.map_asn && params.map_asn !== "all" ? Number(params.map_asn) : null;
-  const cityRows = await engine.executeSql<Record<string, unknown>>(`SELECT ${bucket} AS bucket_ms,
-    COALESCE(geo_city, city) AS city, COALESCE(geo_country, country) AS country,
-    AVG(lat) AS lat, AVG(lon) AS lon, ${metrics}
-    FROM requests WHERE ${where} AND COALESCE(geo_city, city) IS NOT NULL
-    ${mapAsn !== null && Number.isFinite(mapAsn) ? `AND COALESCE(client_asn, asn, 0) = ${Math.floor(mapAsn)}` : ""}
-    GROUP BY 1, 2, 3 ORDER BY 1, reqs DESC`, [], params.signal);
+  const mapAsnFilter = mapAsn !== null && Number.isFinite(mapAsn) ? Math.floor(mapAsn) : null;
+  // The ASN heatmap and city map share one pass; with a map ASN chosen, only its rows make city groups.
+  const rows = await engine.executeSql<Record<string, unknown>>(`WITH scoped AS (
+      SELECT ${bucket} AS bucket_ms,
+        COALESCE(client_asn, asn, 0) AS asn_key,
+        COALESCE(geo_city, city) AS city_key,
+        COALESCE(geo_country, country) AS country_key,
+        ${mapAsnFilter === null ? "1" : `CASE WHEN COALESCE(client_asn, asn, 0) = ${mapAsnFilter} THEN 1 END`} AS map_key,
+        lat, lon,
+        COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) AS rtt_us,
+        COALESCE(client_ploss, ploss) AS ploss_value,
+        status
+      FROM requests WHERE ${where}
+    ), grouped AS (
+      SELECT GROUPING(asn_key) = 0 AS is_asn,
+        bucket_ms, asn_key AS asn, city_key AS city, country_key AS country, map_key,
+        AVG(lat) AS lat, AVG(lon) AS lon,
+        COUNT(*)::BIGINT AS reqs,
+        QUANTILE_CONT(rtt_us, [0.5, 0.1]) AS rtt_quantiles,
+        AVG(ploss_value) AS avg_ploss,
+        COUNT(*) FILTER (WHERE status >= 500) * 100.0 / COUNT(*) AS error_pct
+      FROM scoped
+      GROUP BY GROUPING SETS ((bucket_ms, asn_key), (bucket_ms, city_key, country_key, map_key))
+    )
+    SELECT is_asn, bucket_ms, asn, city, country, map_key, lat, lon, reqs,
+      rtt_quantiles[1] AS rtt_med_us, rtt_quantiles[2] AS baseline, avg_ploss, error_pct
+    FROM grouped ORDER BY bucket_ms, reqs DESC`, [], params.signal);
+  const asnRows = rows.filter((row) => row.is_asn);
+  const cityRows = rows.filter((row) => !row.is_asn && row.city != null && row.map_key != null);
   const buckets = [...new Set([...asnRows, ...cityRows].map((row) => new Date(Number(row.bucket_ms)).toISOString()))].sort();
   const bucketIndexes = new Map(buckets.map((value, index) => [value, index]));
   const cell = (row: Record<string, unknown>) => ({
@@ -453,35 +486,57 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const missingTcpFields = await detectMissingTcpFields(engine);
   const where = buildWhereClause(params);
 
-  const summaryRows = await engine.executeSql<{
-    total_requests: number;
-    avg_rtt_us: number | null;
-    med_rtt_us: number | null;
-    p95_rtt_us: number | null;
-    p10_rtt_us: number | null;
-    avg_ploss: number | null;
-    error_pct: number | null;
-  }>(
-    `SELECT
-      COUNT(*)::BIGINT AS total_requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS med_rtt_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.95)::DOUBLE AS p95_rtt_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS p10_rtt_us,
-      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
-      (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
-    FROM requests
-    WHERE ${where}`,
+  // One pass for the summary and the country, ASN and metro tables; quantiles stay exact per grouping set.
+  const coreRows = await engine.executeSql<Record<string, unknown>>(
+    `WITH scoped AS (
+      SELECT
+        COALESCE(geo_country, country, 'Unknown') AS country_key,
+        COALESCE(client_asn, asn, 0)::BIGINT AS asn_key,
+        COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name_key,
+        COALESCE(geo_city, city, 'Unknown') AS city_key,
+        COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) AS rtt_us,
+        COALESCE(client_ploss, ploss) AS ploss_value,
+        status
+      FROM requests
+      WHERE ${where}
+    ), grouped AS (
+      SELECT
+        CASE
+          WHEN GROUPING(country_key) = 1 AND GROUPING(asn_key) = 1 AND GROUPING(city_key) = 1 THEN 'summary'
+          WHEN GROUPING(asn_key) = 0 THEN 'asn'
+          WHEN GROUPING(city_key) = 0 THEN 'metro'
+          ELSE 'country'
+        END AS grouping_set,
+        country_key, asn_key, as_name_key, city_key,
+        COUNT(*)::BIGINT AS reqs,
+        AVG(rtt_us)::DOUBLE AS avg_rtt_us,
+        QUANTILE_CONT(rtt_us, [0.5, 0.95, 0.1]) AS rtt_quantiles,
+        AVG(ploss_value)::DOUBLE AS avg_ploss,
+        (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
+      FROM scoped
+      GROUP BY GROUPING SETS ((), (country_key), (asn_key, as_name_key), (city_key, country_key))
+    )
+    SELECT
+      grouping_set, country_key, asn_key, as_name_key, city_key, reqs, avg_rtt_us,
+      rtt_quantiles[1]::DOUBLE AS med_rtt_us,
+      rtt_quantiles[2]::DOUBLE AS p95_rtt_us,
+      rtt_quantiles[3]::DOUBLE AS p10_rtt_us,
+      avg_ploss, error_pct
+    FROM grouped
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY grouping_set ORDER BY reqs DESC)
+      <= CASE grouping_set WHEN 'metro' THEN 400 WHEN 'summary' THEN 1 ELSE 100 END
+    ORDER BY grouping_set, reqs DESC`,
     [],
     params.signal,
   );
+  const coreSet = (name: string) => coreRows.filter((row) => row.grouping_set === name);
+  const s = coreSet("summary")[0];
 
-  const totalRequests = Number(summaryRows[0]?.total_requests ?? 0);
+  const totalRequests = Number(s?.reqs ?? 0);
   if (totalRequests === 0) {
     return emptyNetworkHealth(missingTcpFields);
   }
 
-  const s = summaryRows[0];
   const medRttUs = Number(s.med_rtt_us ?? 0);
   const baseRttUs = Math.max(1, Number(s.p10_rtt_us ?? medRttUs ?? 1));
   const avgPloss = Number(s.avg_ploss ?? 0);
@@ -493,23 +548,9 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     errorPct,
   );
 
-  const byCountryRows = await engine.executeSql<Record<string, unknown>>(
-    `SELECT
-      COALESCE(geo_country, country, 'Unknown') AS country,
-      COUNT(*)::BIGINT AS reqs,
-      COUNT(*)::BIGINT AS total_reqs,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
-      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
-      (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1
-    ORDER BY reqs DESC
-    LIMIT 100`,
-    [],
-    params.signal,
-  );
+  const byCountryRows = coreSet("country").map((row): Record<string, unknown> => ({
+    ...row, country: row.country_key, total_reqs: row.reqs, rtt_med_us: row.med_rtt_us, rtt_base_us: row.p10_rtt_us,
+  }));
 
   const by_country = byCountryRows.map((row) => {
     const rttMedUs = Number(row.rtt_med_us ?? 0);
@@ -534,23 +575,9 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     };
   });
 
-  const byAsnRows = await engine.executeSql<Record<string, unknown>>(
-    `SELECT
-      COALESCE(client_asn, asn, 0)::BIGINT AS asn,
-      COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name,
-      COUNT(*)::BIGINT AS reqs,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
-      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
-      (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1, 2
-    ORDER BY reqs DESC
-    LIMIT 100`,
-    [],
-    params.signal,
-  );
+  const byAsnRows = coreSet("asn").map((row): Record<string, unknown> => ({
+    ...row, asn: row.asn_key, as_name: row.as_name_key, rtt_med_us: row.med_rtt_us, rtt_base_us: row.p10_rtt_us,
+  }));
 
   const by_asn = byAsnRows.map((row) => {
     const rttMedUs = Number(row.rtt_med_us ?? 0);
@@ -574,23 +601,9 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     };
   });
 
-  const metroRawRows = await engine.executeSql<MetroRow>(
-    `SELECT
-      COALESCE(geo_city, city, 'Unknown') AS city,
-      COALESCE(geo_country, country, 'Unknown') AS country,
-      COUNT(*)::BIGINT AS reqs,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.5)::DOUBLE AS rtt_med_us,
-      QUANTILE_CONT(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt), 0.1)::DOUBLE AS rtt_base_us,
-      AVG(COALESCE(client_ploss, ploss))::DOUBLE AS avg_ploss,
-      (COUNT(*) FILTER (WHERE status >= 500 AND status < 600) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS error_pct
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1, 2
-    ORDER BY reqs DESC
-    LIMIT 400`,
-    [],
-    params.signal,
-  );
+  const metroRawRows = coreSet("metro").map((row) => ({
+    ...row, city: row.city_key, country: row.country_key, rtt_med_us: row.med_rtt_us, rtt_base_us: row.p10_rtt_us,
+  })) as unknown as MetroRow[];
 
   const scoredMetros: MetroRow[] = metroRawRows.map((row) => {
     const rttMedUs = Number(row.rtt_med_us ?? 0);
@@ -623,7 +636,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   });
 
   const metro_leaderboard = deduplicateMetroLeaderboard(scoredMetros);
-  const popHealth = await queryPopHealth(params);
+  const popHealth = params.sections?.length ? null : await queryPopHealth(params);
   const bucketData = await queryNetworkBuckets(params, where, engine);
   const shielding = wantShielding(params.sections)
     ? await queryNetworkShielding(params, where, engine) : undefined;
@@ -659,7 +672,7 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     timeseries: [] as Record<string, unknown>[],
     by_country,
     by_asn,
-    by_pop: popHealth.by_pop,
+    ...popHealth ? { by_pop: popHealth.by_pop } : {},
     metro_leaderboard,
     missing_tcp_fields: missingTcpFields,
   };
@@ -671,48 +684,65 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const missingTcpFields = await detectMissingTcpFields(engine);
   const where = buildWhereClause(params);
 
-  const summaryRows = await engine.executeSql<{
-    total_requests: number;
-    avg_cwnd: number | null;
-    avg_rtt_us: number | null;
-    avg_rttvar_us: number | null;
-    retrans_rate_pct: number | null;
-    avg_throughput_mbps: number | null;
-  }>(
-    `SELECT
-      COUNT(*)::BIGINT AS total_requests,
-      AVG(client_cwnd)::DOUBLE AS avg_cwnd,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
-      AVG(COALESCE(client_tcpi_rttvar, rtt_var, tcpi_rtt_var))::DOUBLE AS avg_rttvar_us,
-      (COUNT(*) FILTER (WHERE COALESCE(client_tcpi_delta_retrans, 0) > 0) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS retrans_rate_pct,
-      AVG(CASE WHEN COALESCE(time_elapsed_usec, elapsed) > 0 THEN (COALESCE(resp_body_size, resp_bytes, 0) * 8.0) / COALESCE(time_elapsed_usec, elapsed) ELSE NULL END)::DOUBLE AS avg_throughput_mbps
-    FROM requests
-    WHERE ${where}`,
+  const regionCountry = String(params.region_country ?? "US").replaceAll("'", "''");
+  // One pass for the summary and every grouped table except the scatter sample.
+  const qualityRows = await engine.executeSql<Record<string, unknown>>(
+    `WITH scoped AS (
+      SELECT
+        COALESCE(geo_country, country, 'Unknown') AS country_key,
+        COALESCE(client_asn, asn, 0)::BIGINT AS asn_key,
+        COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name_key,
+        COALESCE(protocol, proto, 'Other') AS proto_key,
+        COALESCE(fastly_pop, pop) AS pop_key,
+        CASE WHEN COALESCE(geo_country, country) = '${regionCountry}'
+          THEN COALESCE(geo_region, region, 'Unknown') END AS region_key,
+        COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) AS rtt_us,
+        client_cwnd, client_tcpi_rttvar, client_ploss,
+        COALESCE(client_tcpi_rttvar, rtt_var, tcpi_rtt_var) AS rttvar_us,
+        COALESCE(client_tcpi_delta_retrans, 0) AS retrans_value,
+        CASE WHEN COALESCE(time_elapsed_usec, elapsed) > 0 THEN (COALESCE(resp_body_size, resp_bytes, 0) * 8.0) / COALESCE(time_elapsed_usec, elapsed) ELSE NULL END AS throughput_mbps
+      FROM requests
+      WHERE ${where}
+    ), grouped AS (
+      SELECT
+        CASE
+          WHEN GROUPING(country_key) = 0 THEN 'region'
+          WHEN GROUPING(asn_key) = 0 THEN 'asn'
+          WHEN GROUPING(proto_key) = 0 THEN 'proto'
+          WHEN GROUPING(pop_key) = 0 THEN 'pop'
+          WHEN GROUPING(region_key) = 0 THEN 'region_country'
+          ELSE 'summary'
+        END AS grouping_set,
+        country_key, asn_key, as_name_key, proto_key, pop_key, region_key,
+        COUNT(*)::BIGINT AS requests,
+        COUNT(*) AS reqs,
+        AVG(client_cwnd)::DOUBLE AS avg_cwnd,
+        AVG(rtt_us)::DOUBLE AS avg_rtt_us,
+        AVG(rtt_us) / 1000.0 AS rtt_ms,
+        AVG(rttvar_us)::DOUBLE AS avg_any_rttvar_us,
+        AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
+        AVG(client_ploss)::DOUBLE AS avg_ploss,
+        (COUNT(*) FILTER (WHERE retrans_value > 0) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS retrans_rate_pct,
+        AVG(throughput_mbps)::DOUBLE AS avg_throughput_mbps
+      FROM scoped
+      GROUP BY GROUPING SETS ((), (country_key), (asn_key, as_name_key), (proto_key), (pop_key), (region_key))
+    )
+    SELECT * FROM grouped
+    WHERE grouping_set <> 'region_country' OR region_key IS NOT NULL
+    QUALIFY grouping_set NOT IN ('region', 'asn') OR ROW_NUMBER() OVER (PARTITION BY grouping_set ORDER BY requests DESC) <= 100
+    ORDER BY grouping_set, requests DESC`,
     [],
     params.signal,
   );
+  const qualitySet = (name: string) => qualityRows.filter((row) => row.grouping_set === name);
+  const summaryRow = qualitySet("summary")[0];
 
-  const totalRequests = Number(summaryRows[0]?.total_requests ?? 0);
+  const totalRequests = Number(summaryRow?.requests ?? 0);
   if (totalRequests === 0) {
     return emptyNetworkQuality(missingTcpFields);
   }
 
-  const byRegionRows = await engine.executeSql<Record<string, unknown>>(
-    `SELECT
-      COALESCE(geo_country, country, 'Unknown') AS region,
-      COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
-      AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
-      AVG(client_cwnd)::DOUBLE AS avg_cwnd
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1
-    ORDER BY requests DESC
-    LIMIT 100`,
-    [],
-    params.signal,
-  );
+  const byRegionRows = qualitySet("region").map((row): Record<string, unknown> => ({ ...row, region: row.country_key }));
 
   const by_region = byRegionRows.map((r) => ({
     region: String(r.region ?? "Unknown"),
@@ -723,23 +753,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     avg_cwnd: roundTo(Number(r.avg_cwnd ?? 0), 1),
   }));
 
-  const byAsnRows = await engine.executeSql<Record<string, unknown>>(
-    `SELECT
-      COALESCE(client_asn, asn, 0)::BIGINT AS asn,
-      COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name,
-      COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us,
-      AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
-      AVG(client_ploss)::DOUBLE AS avg_ploss,
-      AVG(client_cwnd)::DOUBLE AS avg_cwnd
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1, 2
-    ORDER BY requests DESC
-    LIMIT 100`,
-    [],
-    params.signal,
-  );
+  const byAsnRows = qualitySet("asn").map((row): Record<string, unknown> => ({ ...row, asn: row.asn_key, as_name: row.as_name_key }));
 
   const by_asn = byAsnRows.map((r) => ({
     asn: Number(r.asn ?? 0),
@@ -758,21 +772,9 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     WHERE ${where} AND COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) IS NOT NULL
       AND COALESCE(ttfb_ms, ttfb * 1000.0) IS NOT NULL LIMIT 2000`, [], params.signal);
 
-  const protoRows = await engine.executeSql<{
-    proto: string | null;
-    requests: number;
-    avg_rtt_us: number | null;
-  }>(
-    `SELECT
-      COALESCE(protocol, proto, 'Other') AS proto,
-      COUNT(*)::BIGINT AS requests,
-      AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt))::DOUBLE AS avg_rtt_us
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1`,
-    [],
-    params.signal,
-  );
+  const protoRows = qualitySet("proto").map((row) => ({
+    proto: row.proto_key as string | null, requests: Number(row.requests), avg_rtt_us: row.avg_rtt_us as number | null,
+  }));
 
   const protoMap = new Map<
     string,
@@ -806,20 +808,12 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
     };
   });
 
-  const s = summaryRows[0];
+  const s = { ...summaryRow, avg_rttvar_us: summaryRow.avg_any_rttvar_us } as Record<string, unknown>;
   const bar = (value: string, label: string, row: { avg_rtt_ms: number; requests: number }) => ({
     value, label, rtt_ms: row.avg_rtt_ms, reqs: row.requests,
   });
-  const byPopRows = await engine.executeSql<Record<string, unknown>>(`SELECT
-    COALESCE(fastly_pop, pop) AS pop,
-    AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt)) / 1000.0 AS rtt_ms,
-    COUNT(*) AS reqs FROM requests WHERE ${where} GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
-  const regionCountry = String(params.region_country ?? "US").replaceAll("'", "''");
-  const regionRows = await engine.executeSql<Record<string, unknown>>(`SELECT
-    COALESCE(geo_region, region, 'Unknown') AS value,
-    AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt)) / 1000.0 AS rtt_ms,
-    COUNT(*) AS reqs FROM requests WHERE ${where}
-      AND COALESCE(geo_country, country) = '${regionCountry}' GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
+  const byPopRows = qualitySet("pop").map((row) => ({ pop: row.pop_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
+  const regionRows = qualitySet("region_country").map((row) => ({ value: row.region_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
   return {
     available: s.avg_rtt_us != null,
     by_country: by_region.map((row) => bar(row.region, row.region, row)),
@@ -911,20 +905,43 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildWhereClause(params);
-  const rows = await engine.executeSql<Record<string, unknown>>(`SELECT
-    COUNT(*) AS total_requests,
-    SUM(COALESCE(resp_body_size, resp_bytes, 0)) AS bandwidth_bytes,
-    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.5) / 1000.0 AS tcp_rtt_p50_ms,
-    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.9) / 1000.0 AS tcp_rtt_p90_ms,
-    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.95) / 1000.0 AS tcp_rtt_p95_ms,
-    QUANTILE_CONT(COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt), 0.99) / 1000.0 AS tcp_rtt_p99_ms,
-    AVG(COALESCE(client_ploss, ploss)) * 100.0 AS packet_loss_pct,
-    AVG(COALESCE(delivery_rate, tcpi_delivery_rate)) * 8.0 / 1000000.0 AS delivery_rate_mbps
-    FROM requests WHERE ${where}`, [], params.signal);
-  const row = rows[0] ?? {};
-  const protocols = await engine.executeSql<Record<string, unknown>>(`SELECT
-    COALESCE(proto, protocol, 'Unknown') AS protocol, COUNT(*) AS requests
-    FROM requests WHERE ${where} GROUP BY 1 ORDER BY requests DESC`, [], params.signal);
+  // The summary and the protocol split share one pass.
+  const rows = await engine.executeSql<Record<string, unknown>>(`WITH scoped AS (
+      SELECT COALESCE(proto, protocol, 'Unknown') AS protocol_key,
+        COALESCE(resp_body_size, resp_bytes, 0) AS bytes,
+        COALESCE(tcp_rtt, client_rtt_us, client_tcpi_rtt, tcpi_rtt) AS rtt_us,
+        COALESCE(client_ploss, ploss) AS ploss_value,
+        COALESCE(delivery_rate, tcpi_delivery_rate) AS delivery_rate_value
+      FROM requests WHERE ${where}
+    ), grouped AS (
+      SELECT GROUPING(protocol_key) = 0 AS is_protocol, protocol_key,
+        COUNT(*) AS total_requests,
+        SUM(bytes) AS bandwidth_bytes,
+        QUANTILE_CONT(rtt_us, [0.5, 0.9, 0.95, 0.99]) AS rtt_quantiles,
+        AVG(ploss_value) * 100.0 AS packet_loss_pct,
+        AVG(delivery_rate_value) * 8.0 / 1000000.0 AS delivery_rate_mbps
+      FROM scoped GROUP BY GROUPING SETS ((), (protocol_key))
+    )
+    SELECT is_protocol, protocol_key, total_requests, bandwidth_bytes,
+      rtt_quantiles[1] / 1000.0 AS tcp_rtt_p50_ms,
+      rtt_quantiles[2] / 1000.0 AS tcp_rtt_p90_ms,
+      rtt_quantiles[3] / 1000.0 AS tcp_rtt_p95_ms,
+      rtt_quantiles[4] / 1000.0 AS tcp_rtt_p99_ms,
+      packet_loss_pct, delivery_rate_mbps
+    FROM grouped ORDER BY is_protocol, total_requests DESC`, [], params.signal);
+  const summary = rows.find((entry) => !entry.is_protocol);
+  const row: Record<string, unknown> = summary ? {
+    total_requests: summary.total_requests,
+    bandwidth_bytes: summary.bandwidth_bytes,
+    tcp_rtt_p50_ms: summary.tcp_rtt_p50_ms,
+    tcp_rtt_p90_ms: summary.tcp_rtt_p90_ms,
+    tcp_rtt_p95_ms: summary.tcp_rtt_p95_ms,
+    tcp_rtt_p99_ms: summary.tcp_rtt_p99_ms,
+    packet_loss_pct: summary.packet_loss_pct,
+    delivery_rate_mbps: summary.delivery_rate_mbps,
+  } : {};
+  const protocols = rows.filter((entry) => entry.is_protocol)
+    .map((entry) => ({ protocol: entry.protocol_key, requests: entry.total_requests }));
   const total = Number(row.total_requests ?? 0);
   return {
     ...row,

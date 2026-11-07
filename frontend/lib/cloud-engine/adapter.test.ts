@@ -9,6 +9,7 @@ import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
 import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 import { insightScanColumns } from "./insight-scans";
+import { NETWORK_SCAN_COLUMNS } from "./network";
 import { setCloudModeRuntime } from "./mode";
 
 vi.mock("./range-loader", async (importOriginal) => ({
@@ -272,6 +273,27 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))
       ?.projection?.maxBytes).toBe(32 * 1024 * 1024);
     expect((await options("/api/performance/aggregates", post({ sections: ["waterfall"] })))?.projection).toBeUndefined();
+  });
+
+  it("loads every /network scan as the same column projection, plus filtered fields", async () => {
+    const options = async (path: string, init: RequestInit = {}) => {
+      vi.mocked(ensureCloudRange).mockClear();
+      const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, init));
+      expect(res).not.toBeNull();
+      return vi.mocked(ensureCloudRange).mock.calls[0]?.[4];
+    };
+    const post = (body: Record<string, unknown>) => ({
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const columns = [...NETWORK_SCAN_COLUMNS];
+    expect((await options("/api/network-health", post({ sections: ["summary"] })))?.projection)
+      .toEqual({ columns });
+    expect((await options("/api/network-quality", post({})))?.projection).toEqual({ columns });
+    expect((await options("/api/network/bundle", post({ sections: ["transport"] })))?.projection).toEqual({ columns });
+    expect((await options("/api/network/pop-health"))?.projection).toEqual({ columns });
+    expect((await options("/api/network-health", post({
+      sections: ["summary"], filters: { host: { mode: "include", values: ["example.com"] } },
+    })))?.projection?.columns).toEqual([...columns, "host"]);
   });
 
   it("dispatches /api/security/* routes including /proxies/export through handleSecurityRequest", async () => {

@@ -1,10 +1,15 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { parquetWriteBuffer } from "hyparquet-writer";
+import {
+  ALL_TABLE_FIELDS, createNodeBackend, DuckDBAnalyticalEngine as ParquetEngine, FIELD_DUCKDB_TYPES, type DuckDBReadContext,
+} from "./dashboard/duckdb";
 import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
   handleNetworkRequest,
+  NETWORK_SCAN_COLUMNS,
   queryNetworkBundle,
   queryNetworkHealth,
 } from "./network";
@@ -68,6 +73,72 @@ describe("Feature F21 — Network cloud-engine", () => {
     }
   });
 
+  it("joins edge and shield requests across retained Parquet files without exhausting DuckDB memory", async () => {
+    const engine = new ParquetEngine();
+    const rows = 10_000;
+    const rid = (i: number) => i.toString(16).padStart(8, "0").repeat(4);
+    const lease = engine.lease([]);
+    try {
+      for (let file = 0; file < 4; file++) {
+        const ids = Array.from({ length: rows }, (_, row) => file * rows + row + 1);
+        await lease.ingestFile(`shield-${file}`, `shield-${file}.parquet`, parquetWriteBuffer({ columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: ids.map((i) => new Date(1700000000000 + i)) },
+          { name: "edge", type: "BOOLEAN", data: ids.map((i) => i % 5 !== 0) },
+          { name: "pop", type: "STRING", data: ids.map((i) => (i % 5 ? "IAD" : "LHR")) },
+          { name: "ttfb", type: "DOUBLE", data: ids.map((i) => (i % 5 ? 0.1 : 0.04)) },
+          { name: "rid", type: "STRING", data: ids.map(rid) },
+          { name: "prid", type: "STRING", data: ids.map((i) => (i % 5 ? null : rid(i - 1))) },
+        ] }), undefined, undefined, "request", { deferView: true });
+      }
+      await lease.publishView();
+      // The per-file view used to exhaust this scaled-down limit, as ~1M real rows exhausted the page's 256MB.
+      await engine.executeSql("SET memory_limit = '16MB'");
+      const data = await handleNetworkRequest("/api/network-health", {
+        engine: lease.readContext(), sections: ["shielding_analysis"],
+      });
+      expect(data).toHaveProperty("shielding_analysis.rows", [
+        expect.objectContaining({ edge_pop: "IAD", shield_pop: "LHR", requests: 8_000, p50_ms: 60 }),
+      ]);
+    } finally {
+      lease.release();
+      await engine.reset();
+    }
+  });
+
+  it("reads only the columns a projected /network load fetches", async () => {
+    const backend = await createNodeBackend();
+    try {
+      // Only the projected columns exist, so any other column reference fails to bind.
+      const physical = NETWORK_SCAN_COLUMNS.filter((column) => column !== "timestamp" && column !== "ts_ms");
+      await backend.query(`CREATE TABLE requests AS SELECT ts_ms, epoch_ms(ts_ms)::TIMESTAMPTZ AS "timestamp",
+        ${physical.map((column) => `NULL::${FIELD_DUCKDB_TYPES[column]} AS "${column}"`).join(", ")}
+        FROM (VALUES (1700000100000::BIGINT), (1700000100001::BIGINT)) rows(ts_ms)`);
+      await backend.query(`UPDATE requests SET edge = ts_ms = 1700000100000, rid = 'r' || ts_ms::VARCHAR,
+        prid = CASE WHEN ts_ms = 1700000100001 THEN 'r1700000100000' END, pop = 'IAD', ttfb = 0.1, country = 'US',
+        city = 'Ashburn', asn = 64500, tcp_rtt = 10000, status = 200, proto = 'HTTP/2'`);
+      const sqls: string[] = [];
+      const read = {
+        executeSql: async (sql: string) => {
+          sqls.push(sql);
+          const result = await backend.query(sql) as unknown as { toArray(): Record<string, unknown>[] };
+          return result.toArray().map((row) => Object.fromEntries(Object.entries({ ...row })
+            .map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value])));
+        },
+        getPresentColumns: async () => new Set(ALL_TABLE_FIELDS),
+        getCustomColumnTypes: () => new Map(),
+      } as unknown as DuckDBReadContext;
+      const filters = { country: { mode: "include" as const, values: ["US"] } };
+      const health = await handleNetworkRequest("/api/network-health", { engine: read, filters, map_asn: "64500" });
+      expect(health).toHaveProperty("summary.total_requests", 2);
+      expect(health).toHaveProperty("shielding_analysis.has_data", true);
+      expect(await handleNetworkRequest("/api/network/bundle", { engine: read, filters }))
+        .toHaveProperty("transport.has_transport_data", true);
+      expect(sqls.length).toBeGreaterThan(8);
+    } finally {
+      await backend.dispose();
+    }
+  });
+
   it("runs only the requested sections, so the page's split requests never repeat the core scans", async () => {
     const engine = new DuckDBAnalyticalEngine();
     const executed: string[] = [];
@@ -96,6 +167,24 @@ describe("Feature F21 — Network cloud-engine", () => {
       const transport = await handleNetworkRequest("/api/network/bundle", { engine: counted, sections: ["transport"] });
       expect(transport).toHaveProperty("transport.has_transport_data", true);
       expect(transport).toMatchObject({ health: null, quality: null, pop_health: null });
+      expect(transport).toHaveProperty("transport.protocol_distribution", [
+        { protocol: "HTTP/2", requests: 2, share_pct: 100 },
+      ]);
+      expect(executed).toHaveLength(1);
+
+      // Each page section shares one aggregation pass per grouping instead of a scan per table.
+      executed.length = 0;
+      const core = await handleNetworkRequest("/api/network-health", {
+        engine: counted, sections: ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets", "cities", "map_buckets"],
+      });
+      expect(core).toHaveProperty("summary.total_requests", 2);
+      // The page reads POP health from its own pop-health request; the core sections don't repeat that scan.
+      expect(core).not.toHaveProperty("by_pop");
+      expect(executed).toHaveLength(2);
+
+      executed.length = 0;
+      const quality = await handleNetworkRequest("/api/network-quality", { engine: counted });
+      expect(quality).toHaveProperty("summary.total_requests", 2);
       expect(executed).toHaveLength(2);
     } finally {
       await engine.reset();

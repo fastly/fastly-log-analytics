@@ -63,6 +63,24 @@ describe("Cloud scan metadata", () => {
     }
   });
 
+  it("keeps sharing one lookup across a page load whose scans run past the reuse window, up to a hard cap", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const fetcher = metadataFetcher();
+      vi.stubGlobal("fetch", fetcher);
+      for (let scanIndex = 0; scanIndex < 6; scanIndex++) {
+        await handleCloudAnalyticalRequest(scan());
+        vi.setSystemTime(Date.now() + 10_000);
+      }
+      expect(calls(fetcher)).toHaveLength(3);
+      // Back-to-back use never holds an answer past a minute from when it was fetched.
+      await handleCloudAnalyticalRequest(scan());
+      expect(calls(fetcher)).toHaveLength(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not keep a failed lookup", async () => {
     const fetcher = metadataFetcher();
     fetcher.mockResolvedValueOnce(new Response("busy", { status: 503 }));
