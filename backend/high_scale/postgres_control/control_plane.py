@@ -27,6 +27,9 @@ from backend.high_scale.ingest_controller import INITIAL_SOURCE_CURSOR, RUM_SOUR
 logger = logging.getLogger("backend.high_scale.postgres_control")
 
 # Bucket labels match the legacy ``ingested_files`` log-activity shape the usage page joins with Fastly stats.
+# About 130 flushes on a ~35-node service: the average settles within ~1% of a 4x larger sample.
+REQUEST_FLUSH_SAMPLE_OBJECTS = 5000
+
 _ACTIVITY_BUCKET_FORMATS = {
     "second": 'YYYY-MM-DD"T"HH24:MI:SS',
     "minute": 'YYYY-MM-DD"T"HH24:MI',
@@ -987,17 +990,30 @@ class PostgresControlPlane:
             ).fetchone()
         return {"files": int(row[0]), "bytes": int(row[1]), "rum_bytes": int(row[2])}
 
-    def request_files_per_flush(self, service_id: str, start: datetime, end: datetime) -> float | None:
-        """Average request source objects per log flush, grouped by the basename timestamp Fastly writes."""
+    def request_files_per_flush(
+        self, service_id: str, recent_objects: int = REQUEST_FLUSH_SAMPLE_OBJECTS
+    ) -> float | None:
+        """Average request source objects per log flush among the most recent request objects.
+
+        Request keys sort by delivery minute, so the newest objects are a backward walk of the
+        ``(service_id, object_key)`` index that stops below the service's RUM keys. Flushes group by the
+        basename timestamp Fastly writes; the oldest sampled flush may be cut off by the sample and the
+        newest may still be arriving, so both are left out.
+        """
         _require_text(service_id, "service_id")
         with self.transaction(read_only=True) as connection:
             row = connection.execute(
-                "SELECT avg(files) FROM (SELECT count(*) AS files FROM ("
-                r"SELECT substring(object_key from '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') AS flushed_at "
+                "WITH anchor AS (SELECT left(object_key, strpos(object_key, 'raw/request/') - 1) AS base "
                 "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
-                "AND discovered_at >= %s AND discovered_at <= %s"
-                ") AS objects WHERE flushed_at IS NOT NULL GROUP BY flushed_at) AS flushes",
-                (service_id, start, end),
+                "AND strpos(object_key, 'raw/request/') > 0 LIMIT 1), "
+                r"recent AS (SELECT substring(object_key from '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') AS flushed_at "
+                "FROM high_scale_source_objects WHERE service_id=%s AND domain='request' "
+                "AND object_key < (SELECT base || 'raw/rum/' FROM anchor) ORDER BY object_key DESC LIMIT %s), "
+                "flushes AS (SELECT flushed_at, count(*) AS files FROM recent WHERE flushed_at IS NOT NULL "
+                "GROUP BY flushed_at) "
+                "SELECT avg(files) FROM flushes WHERE flushed_at > (SELECT min(flushed_at) FROM flushes) "
+                "AND flushed_at < (SELECT max(flushed_at) FROM flushes)",
+                (service_id, service_id, recent_objects),
             ).fetchone()
         return None if row[0] is None else float(row[0])
 

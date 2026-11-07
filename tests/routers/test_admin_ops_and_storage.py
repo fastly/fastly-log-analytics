@@ -1337,7 +1337,7 @@ def test_prefill_rum_beacons_per_day_averages_high_scale_beacons_over_the_rum_re
     assert params["end"] - params["start"] == timedelta(days=7)
 
 
-def test_prefill_nodes_per_flush_averages_high_scale_request_objects_over_the_log_retention_window():
+def test_prefill_nodes_per_flush_averages_recent_high_scale_request_flushes():
     """High-scale source objects live in the Postgres ledger; the legacy ``ingested_files`` average is frozen."""
     from backend.routers.usage import _PREFILL_META_CACHE, _compute_prefill_rates
 
@@ -1370,9 +1370,8 @@ def test_prefill_nodes_per_flush_averages_high_scale_request_objects_over_the_lo
         _PREFILL_META_CACHE.clear()
 
     assert result["avg_nodes_per_flush"] == 3
-    service_id, start, end = per_flush.call_args_list[0].args
-    assert service_id == svc
-    assert end - start == timedelta(days=14)
+    assert per_flush.call_args_list[0].args == (svc,)
+    assert per_flush.call_args_list[0].kwargs == {}
 
 
 def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monkeypatch):

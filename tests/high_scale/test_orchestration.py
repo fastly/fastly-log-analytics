@@ -3783,31 +3783,30 @@ def test_source_storage_window_counts_every_discovered_object_and_splits_rum_byt
             connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
 
 
-def test_request_files_per_flush_averages_request_objects_per_basename_timestamp_in_the_inclusive_window() -> None:
+def test_request_files_per_flush_averages_whole_flushes_among_the_most_recent_request_objects() -> None:
     control = PostgresControlPlane()
     control.create_schema()
     sid = "svc-files-per-flush"
-    start, end = datetime(2026, 10, 24, 12, 0, tzinfo=UTC), datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
-    prefix = "raw/request/year=2026/month=11/day=07/hour=11/minute=39"
-    _insert_source_objects(
-        control,
-        sid,
-        [
-            (f"{prefix}/2026-11-07T11:39:40.000-node1.log.zst", "request", "source_deleted", 1, 1, start),
-            (f"{prefix}/2026-11-07T11:39:40.000-node2.log.zst", "request", "discovered", 1, 0, end),
-            (f"{prefix}/2026-11-07T11:39:40.000-node3.log.zst", "request", "source_missing", 1, 0, end),
-            (f"{prefix}/2026-11-07T11:40:40.000-node1.log.zst", "request", "source_deleted", 1, 1, end),
-            ("raw/rum/year=2026/2026-11-07T11:39:40.000-rum.log.zst", "rum_vitals", "source_deleted", 1, 1, end),
-            (f"{prefix}/no-timestamp.log.zst", "request", "source_deleted", 1, 1, end),
-            (f"{prefix}/2026-11-07T11:41:40.000-early.log.zst", "request", "source_deleted", 1, 1,
-             start - timedelta(milliseconds=1)),
-            (f"{prefix}/2026-11-07T11:42:40.000-late.log.zst", "request", "source_deleted", 1, 1,
-             end + timedelta(milliseconds=1)),
-        ],
-    )  # fmt: skip
+    at = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    request = "tenant-a/raw/request/year=2026/month=11/day=07/hour=11"
+    flushes = {35: 6, 36: 4, 37: 1, 38: 5, 39: 1}
+    objects = [
+        (f"{request}/minute={m}/2026-11-07T11:{m}:00.000-node{n}.log.zst", "request", "source_deleted", 1, 1, at)
+        for m, count in flushes.items()
+        for n in range(count)
+    ]
+    objects += [
+        (f"{request}/minute=39/no-timestamp.log.zst", "request", "source_deleted", 1, 1, at),
+        ("tenant-a/raw/rum/year=2026/month=11/day=07/hour=11/minute=40/2026-11-07T11:40:00.000-a.log.zst",
+         "rum_vitals", "source_deleted", 1, 1, at),
+    ]  # fmt: skip
+    _insert_source_objects(control, sid, objects)
     try:
-        assert control.request_files_per_flush(sid, start, end) == 2.0
-        assert control.request_files_per_flush("svc-with-no-sources", start, end) is None
+        # The oldest sampled flush may be cut off by the sample and the newest may still be arriving.
+        assert control.request_files_per_flush(sid) == pytest.approx(10 / 3)
+        assert control.request_files_per_flush(sid, recent_objects=9) == 3.0
+        assert control.request_files_per_flush(sid, recent_objects=2) is None
+        assert control.request_files_per_flush("svc-with-no-sources") is None
     finally:
         with control.transaction() as connection:
             connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))

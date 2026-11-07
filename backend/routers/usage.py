@@ -184,9 +184,7 @@ def _compute_prefill_rates(
                 # High-scale source objects live in the Postgres ledger; it never writes ``ingested_files``.
                 from backend.high_scale.postgres_control import PostgresControlPlane
 
-                log_end = datetime.now(UTC)
-                log_start = log_end - timedelta(days=int(result["log_retention_days"]))
-                avg = PostgresControlPlane().request_files_per_flush(svc_name, log_start, log_end)
+                avg = PostgresControlPlane().request_files_per_flush(svc_name)
                 if avg:
                     avg_nodes = round(avg)
                     result["avg_nodes_per_flush"] = avg_nodes
