@@ -6,6 +6,10 @@ use std::sync::OnceLock;
 pub mod cmcd;
 pub mod rum;
 
+/// Log period (seconds) when the service state names none. Short periods keep ingest lag near
+/// the goal of period + 15 s; the ingest window stays at 60 s regardless.
+pub const DEFAULT_LOG_PERIOD: i64 = 10;
+
 pub(crate) fn templates() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
     DATA.get_or_init(|| {
@@ -497,7 +501,7 @@ pub fn generate_capture_vcl_with_cmcd(
 }
 
 pub fn rum_from_state(state: &Value) -> Result<rum::Config, String> {
-    let default_period = number(&state["log_period"], 60)?;
+    let default_period = number(&state["log_period"], DEFAULT_LOG_PERIOD)?;
     let rum_obj = state.get("rum").filter(|v| v.is_object());
     let mut cfg: rum::Config = match rum_obj {
         Some(value) => serde_json::from_value(value.clone()).map_err(|e| e.to_string())?,
@@ -769,7 +773,7 @@ pub fn desired_logging_endpoints(state: &Value) -> Result<Value, String> {
         || state["log_fields"]["wire_format"].as_str() == Some("array");
     let mut endpoints = Vec::new();
     if logging_enabled {
-        let period = number(&state["log_period"], 60)?;
+        let period = number(&state["log_period"], DEFAULT_LOG_PERIOD)?;
         if !(1..=3600).contains(&period) {
             return Err("log_period must be in range [1, 3600]".into());
         }

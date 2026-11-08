@@ -27,7 +27,9 @@ fn all_cmcd_modes_and_versions_match_independently_executed_pinned_generators() 
             logging::generate_capture_vcl_with_cmcd(&case["config"], &cmcd).unwrap(),
             case["capture"]
         );
-        let state = json!({"logging_enabled":true,"log_fields":case["config"],"cmcd":cmcd});
+        // The fixtures pin the original generator's period of 60 s; the default is shorter now.
+        let state =
+            json!({"logging_enabled":true,"log_period":60,"log_fields":case["config"],"cmcd":cmcd});
         assert_eq!(logging::desired_snippets(&state).unwrap(), case["snippets"]);
         let endpoints = logging::desired_logging_endpoints(&state).unwrap();
         assert_eq!(endpoints, case["endpoints"]);
@@ -102,7 +104,7 @@ fn pure_generators_match_full_inputs_from_pinned_python() {
 fn routed_adapter_resources_match_pinned_python_for_every_case() {
     for case in fixtures()["cases"].as_array().unwrap() {
         let config = &case["config"];
-        let state = json!({"log_fields": {
+        let state = json!({"log_period": 60, "log_fields": {
             "groups": config.get("groups").cloned().unwrap_or(json!([])),
             "custom_fields": config.get("custom_fields").cloned().unwrap_or(json!([])),
             "field_overrides": config.get("field_overrides").cloned().unwrap_or(json!({})),
@@ -143,8 +145,10 @@ fn assert_endpoint_body_bytes(endpoints: &Value, bodies: &Value, canonical: &Val
 #[test]
 fn full_input_endpoint_specs_and_body_bytes_match_pure_python_boundaries() {
     for case in fixtures()["cases"].as_array().unwrap() {
-        let endpoints =
-            logging::desired_logging_endpoints(&json!({"log_fields":case["config"]})).unwrap();
+        let endpoints = logging::desired_logging_endpoints(
+            &json!({"log_period":60,"log_fields":case["config"]}),
+        )
+        .unwrap();
         assert_eq!(endpoints, case["direct_endpoints"], "{}", case["name"]);
         assert_endpoint_body_bytes(
             &endpoints,

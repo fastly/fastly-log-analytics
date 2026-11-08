@@ -78,7 +78,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   sample_rate: 100,
   edge_only: true,
   custom_condition: "",
-  log_period: 60,
+  log_period: 10,
   rum_log_period: 300,
   cdn_service_name: "",
   cdn_prefix: "",

@@ -141,7 +141,7 @@ impl Mirror {
     pub fn from_state(state: &CronState, log_period: Option<u32>) -> Self {
         Self {
             configured: log_period.is_some(),
-            log_period_s: log_period.map_or(60, u64::from),
+            log_period_s: log_period.map_or(crate::logging::DEFAULT_LOG_PERIOD as u64, u64::from),
             jobs: state.jobs.clone(),
             rum_log_period_s: 0,
         }

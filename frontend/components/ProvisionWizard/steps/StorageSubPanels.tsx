@@ -239,7 +239,7 @@ export function LoggingSetupSection({ config, update }: StorageSectionProps) {
                 label="Log Period"
                 info="How often Fastly will write log files to the bucket. A shorter period means more real-time data but creates more files."
               />
-              <Select value={String(config.log_period)} onValueChange={(v) => update("log_period", Number(v) || 60)}>
+              <Select value={String(config.log_period)} onValueChange={(v) => update("log_period", Number(v) || 10)}>
                 <SelectTrigger className="h-9">
                   <SelectValue>{(val) => PERIOD_LABELS[String(val)] || val}</SelectValue>
                 </SelectTrigger>
