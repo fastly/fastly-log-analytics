@@ -33,6 +33,9 @@ pub struct StageRequest {
     pub actor: String,
     pub bucket: u64,
     pub start: usize,
+    /// Run the request compaction job instead of a rotating maintenance stage.
+    #[serde(default)]
+    pub compact_only: bool,
 }
 
 fn valid(request: &StageRequest) -> bool {
@@ -60,7 +63,7 @@ pub fn reply_next(reply: &Value) -> Option<usize> {
         .filter(|next| *next < MAINT_STAGES.len())
 }
 
-/// Whether the reply's request compaction left a backlog, which brings the next turn forward.
+/// Whether the reply's request compaction left a backlog, which brings its next run forward.
 pub fn reply_compact_pending(reply: &Value) -> bool {
     reply["compact_pending"].as_bool() == Some(true)
 }
@@ -125,28 +128,32 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
     let started = now
         .checked_sub(crate::ingest::storage::WALL_STOP.saturating_sub(STAGE_STOP))
         .unwrap_or(now);
+    let tick = TickContext {
+        service: &service,
+        access_key: &access_key,
+        secret_key: &secret_key,
+        run_id: &body.run_id,
+        tick_id: &body.tick_id,
+        trigger: &body.trigger,
+        actor: &body.actor,
+        bucket: body.bucket,
+        started,
+    };
+    if body.compact_only {
+        let outcome = logs::compact_execution(runtime, &tick);
+        return reply(json!({
+            "status": "ok",
+            "ran": outcome.row.is_some().then_some("request_compact"),
+            "compact_pending": outcome.compact_pending,
+            "worker_executions_metrics": outcome.worker_executions_metrics,
+        }));
+    }
     let settings = telemetry::api::operational_settings(runtime);
-    let outcome = logs::maintenance_stage(
-        runtime,
-        &TickContext {
-            service: &service,
-            access_key: &access_key,
-            secret_key: &secret_key,
-            run_id: &body.run_id,
-            tick_id: &body.tick_id,
-            trigger: &body.trigger,
-            actor: &body.actor,
-            bucket: body.bucket,
-            started,
-        },
-        &settings,
-        body.start,
-    );
+    let outcome = logs::maintenance_stage(runtime, &tick, &settings, body.start);
     reply(json!({
         "status": "ok",
         "ran": outcome.ran.map(|index| MAINT_STAGES[index]),
         "next": outcome.next,
-        "compact_pending": outcome.compact_pending,
         "worker_executions_metrics": outcome.worker_executions_metrics,
     }))
 }

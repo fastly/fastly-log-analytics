@@ -36,9 +36,10 @@ pub fn ingest_grace_s(_log_period_s: u64) -> u64 {
 }
 /// One maintenance stage dispatch per this many seconds (the 120 s clock's old cadence).
 pub const MAINT_INTERVAL_S: u64 = 120;
-/// While request compaction has a backlog, maintenance turns come this often instead. Each turn
-/// compacts first, so this sets the backlog's drain rate.
-pub const MAINT_CATCHUP_S: u64 = 30;
+/// Request compaction runs on its own job, apart from the maintenance rotation: every
+/// `COMPACT_INTERVAL_S` when it has caught up, `COMPACT_CATCHUP_S` after a run that left work.
+pub const COMPACT_INTERVAL_S: u64 = 30;
+pub const COMPACT_CATCHUP_S: u64 = 10;
 /// How often an idle schedule re-reads KV, so config changes (log period, a new install) and
 /// writes made off the shield reach the mirror without a job running.
 pub const REFRESH_S: u64 = 60;
@@ -102,6 +103,9 @@ pub struct Jobs {
     /// The RUM stream's ingest, on its own log period.
     #[serde(default)]
     pub rum: JobState,
+    /// Request compaction, on its own cadence so a backlog never waits for the rotation.
+    #[serde(default)]
+    pub compact: JobState,
 }
 
 impl Jobs {
@@ -112,6 +116,7 @@ impl Jobs {
             (&mut self.raw_delete, &ours.raw_delete),
             (&mut self.maint, &ours.maint),
             (&mut self.rum, &ours.rum),
+            (&mut self.compact, &ours.compact),
         ] {
             let same_cadence = mine.last_success_period_s.is_some()
                 && mine.last_success_period_s == theirs.last_success_period_s;
@@ -135,6 +140,9 @@ pub struct Mirror {
     /// The RUM endpoint's log period; `0` while RUM is off.
     #[serde(default)]
     pub rum_log_period_s: u64,
+    /// Whether request compaction is configured, so its job is scheduled.
+    #[serde(default)]
+    pub compaction: bool,
 }
 
 impl Mirror {
@@ -144,7 +152,14 @@ impl Mirror {
             log_period_s: log_period.map_or(crate::logging::DEFAULT_LOG_PERIOD as u64, u64::from),
             jobs: state.jobs.clone(),
             rum_log_period_s: 0,
+            compaction: false,
         }
+    }
+
+    /// Schedules the request compaction job while compaction is configured.
+    pub fn with_compaction(mut self, enabled: bool) -> Self {
+        self.compaction = enabled;
+        self
     }
 
     /// Schedules RUM ingest on `rum_log_period` (`None` while RUM is off).
@@ -233,7 +248,16 @@ pub fn tick_wake_at(record: &Sched) -> u64 {
         } else {
             next_rum_at(&record.mirror)
         };
-        ingest_at.min(raw_delete_at).min(maint_at).min(rum_at)
+        let compact_at = if record.mirror.compaction {
+            compact_at(jobs)
+        } else {
+            u64::MAX
+        };
+        ingest_at
+            .min(raw_delete_at)
+            .min(maint_at)
+            .min(rum_at)
+            .min(compact_at)
     } else {
         u64::MAX
     };
@@ -280,11 +304,12 @@ pub struct Due {
     pub maint: bool,
     /// The RUM period index a successful RUM ingest reaches.
     pub rum: Option<u64>,
+    pub compact: bool,
 }
 
 impl Due {
     pub fn any(&self) -> bool {
-        self.ingest.is_some() || self.raw_delete || self.maint || self.rum.is_some()
+        self.ingest.is_some() || self.raw_delete || self.maint || self.rum.is_some() || self.compact
     }
 }
 
@@ -369,6 +394,20 @@ pub fn due(mirror: &Mirror, now: u64) -> Due {
                 jobs.rum.more_pending
                     || jobs.rum.success_period(mirror.rum_log_period_s) < Some(*ready)
             }),
+        compact: mirror.compaction && now >= compact_at(jobs),
+    }
+}
+
+/// When the compaction job next runs: its catch-up time while it has a backlog, otherwise its
+/// interval after the last run.
+pub fn compact_at(jobs: &Jobs) -> u64 {
+    if jobs.compact.more_pending {
+        jobs.compact.retry_after
+    } else {
+        jobs.compact
+            .last_run
+            .map_or(0, |last| last.saturating_add(COMPACT_INTERVAL_S))
+            .max(jobs.compact.retry_after)
     }
 }
 
@@ -483,7 +522,17 @@ pub fn task_schedules(
         schedules[1]["disabled_reason"] = json!("RUM is disabled");
     }
     for task in super::logs::MAINT_STAGES {
-        let mut row = entry(task, None, None, None, "maintenance_turn");
+        let mut row = if task == "request_compact" && service.compaction.target_bytes().is_some() {
+            entry(
+                task,
+                jobs.compact.last_run,
+                Some(compact_at(jobs).max(now)),
+                Some(COMPACT_INTERVAL_S),
+                "dispatcher",
+            )
+        } else {
+            entry(task, None, None, None, "maintenance_turn")
+        };
         if task == "delete_data" && service.data_reset.is_none() {
             row["disabled_reason"] = json!("No manual data reset is queued");
         }
@@ -744,6 +793,7 @@ mod tests {
                     ..Default::default()
                 },
                 rum_log_period_s: 0,
+                compaction: false,
             },
             ..Default::default()
         };

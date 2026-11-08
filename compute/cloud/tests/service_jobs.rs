@@ -1929,10 +1929,41 @@ fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history
         assert!(find(task)["last_run_time"].is_null());
         assert!(find(task)["next_run_time"].is_null());
     }
+    assert_eq!(
+        find("request_compact")["disabled_reason"],
+        "Request compaction is disabled"
+    );
     assert!(snapshot.runs.is_empty());
     let after = platform.adapter.get("cron:state").unwrap().unwrap();
     assert_eq!(before.generation, after.generation);
     assert_eq!(before.value, after.value);
+
+    // With compaction configured, request_compact is its own job with a real schedule.
+    let old = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
+    let mut service = old.value;
+    service["compaction"] = json!({"mode": "size_target", "size_target_mb": 32});
+    assert!(platform
+        .adapter
+        .cas("svc:fixtureService", Some(&old.generation), &service)
+        .unwrap());
+    let old = platform.adapter.get("cron:state").unwrap().unwrap();
+    let mut state = old.value;
+    state["jobs"]["compact"] =
+        json!({"last_run": now - 10, "more_pending": true, "retry_after": now + 7});
+    assert!(platform
+        .adapter
+        .cas("cron:state", Some(&old.generation), &state)
+        .unwrap());
+    let snapshot = admin::cron_audit_snapshot(&platform);
+    let compact = snapshot
+        .schedules
+        .iter()
+        .find(|row| row["task"] == "request_compact")
+        .unwrap();
+    assert!(compact["disabled_reason"].is_null(), "{compact}");
+    assert_eq!(compact["last_run_time"], time(now - 10));
+    assert_eq!(compact["next_run_time"], time(now + 7));
+    assert_eq!(compact["interval_s"], admin::schedule::COMPACT_INTERVAL_S);
 }
 
 #[test]

@@ -2267,8 +2267,9 @@ fn dispatch(
     };
     let service_id = Some(svc.service_id.clone());
     let rum_period = svc.rum.enabled.then_some(svc.rum.log_period);
-    let mirror =
-        schedule::Mirror::from_state(&cron_state, Some(svc.log_period)).with_rum(rum_period);
+    let mirror = schedule::Mirror::from_state(&cron_state, Some(svc.log_period))
+        .with_rum(rum_period)
+        .with_compaction(svc.compaction.target_bytes().is_some());
     let mut due = schedule::due(&mirror, now);
     let ready = schedule::ready_period(now, mirror.log_period_s);
     if manual {
@@ -2277,12 +2278,14 @@ fn dispatch(
             raw_delete: true,
             maint: shield,
             rum: rum_period.map(|_| schedule::ready_period(now, mirror.rum_log_period_s)),
+            compact: shield && mirror.compaction,
         };
     }
     if reset::fencing(&svc) {
         due.ingest = None;
         due.rum = None;
         due.raw_delete = false;
+        due.compact = false;
     }
     if reset::rum_held(&svc) {
         due.rum = None;
@@ -2334,19 +2337,56 @@ fn dispatch(
                 actor: actor.into(),
                 bucket,
                 start: maint_start,
+                compact_only: false,
             })
             .ok()
         })
         .flatten();
-    let answered = |reply: Option<&Result<Value, String>>| {
-        let reply = reply?.as_ref().ok()?;
-        let pending = stage::reply_compact_pending(reply);
-        Some((
-            stage::reply_next(reply)?,
-            (stage::reply_rows(reply), pending),
-        ))
+    let compact_body = due
+        .compact
+        .then(|| {
+            serde_json::to_value(stage::StageRequest {
+                service_id: svc.service_id.clone(),
+                run_id: run_id.to_owned(),
+                tick_id: String::new(),
+                trigger: trigger.into(),
+                actor: actor.into(),
+                bucket,
+                start: 0,
+                compact_only: true,
+            })
+            .ok()
+        })
+        .flatten();
+    let maint_sent = stage_body.is_some();
+    let compact_sent = compact_body.is_some();
+    // The maintenance stage and the compaction job ride along the fan-out as extras, in this
+    // order, and `extra_results` answers in the same order.
+    let extras: Vec<(String, Value)> = stage_body
+        .into_iter()
+        .chain(compact_body)
+        .map(|body| (stage::PATH.to_owned(), body))
+        .collect();
+    let compact_at = usize::from(maint_sent);
+    let answered = |replies: &[Result<Value, String>]| {
+        let reply = replies.first().filter(|_| maint_sent)?.as_ref().ok()?;
+        Some((stage::reply_next(reply)?, stage::reply_rows(reply)))
     };
-    let mut maint_more_pending = false;
+    // `None`: not dispatched; `Some(None)`: unanswered; `Some(Some(pending))`: ran.
+    let mut compact_reply: Option<Option<bool>> = None;
+    let mut compact_rows = Vec::new();
+    let mut compact_answered = |replies: &[Result<Value, String>]| {
+        if !compact_sent {
+            return;
+        }
+        compact_reply = Some(None);
+        if let Some(Ok(reply)) = replies.get(compact_at) {
+            if reply["status"] == "ok" {
+                compact_reply = Some(Some(stage::reply_compact_pending(reply)));
+                compact_rows = stage::reply_rows(reply);
+            }
+        }
+    };
     let has_creds = fos_credentials(runtime, &svc);
     let pre_stages_kv = runtime.kv_ops();
     let mut ingest_error = None;
@@ -2357,35 +2397,40 @@ fn dispatch(
     let rum_enabled = rum_due.is_some();
     let rum_first = rum_enabled && cron_state.rum_first;
     let mut next_rum_first = None;
-    let mut stage_body = stage_body;
+    let mut extras = extras;
     let relayed_workers = std::cell::Cell::new(0u32);
     let worker_metrics = std::cell::RefCell::new(Vec::new());
     let maintenance_children = std::cell::Cell::new(0u32);
-    let observe_maintenance = |reply: Option<&Result<Value, String>>| {
-        let reply = reply.and_then(|r| r.as_ref().ok());
-        worker_metrics
-            .borrow_mut()
-            .push(telemetry::execution::WorkerExecutionMetrics::from_reply(
-                "maintenance",
-                None,
-                reply,
-            ));
-        if let Some(reply) = reply {
-            maintenance_children.set(
-                maintenance_children.get()
-                    + reply["worker_requests"].as_u64().unwrap_or(0).min(32) as u32,
+    let observe_extra =
+        |name: &'static str, reply: Option<&Result<Value, String>>| {
+            let reply = reply.and_then(|r| r.as_ref().ok());
+            worker_metrics.borrow_mut().push(
+                telemetry::execution::WorkerExecutionMetrics::from_reply(name, None, reply),
             );
-            if let Some(children) = reply["worker_executions_metrics"].as_array() {
-                for child in children.iter().take(32) {
-                    worker_metrics.borrow_mut().push(
-                        telemetry::execution::WorkerExecutionMetrics::from_reply(
-                            "request_compact",
-                            None,
-                            (child["answered"] == true).then_some(child),
-                        ),
-                    );
+            if let Some(reply) = reply {
+                maintenance_children.set(
+                    maintenance_children.get()
+                        + reply["worker_requests"].as_u64().unwrap_or(0).min(32) as u32,
+                );
+                if let Some(children) = reply["worker_executions_metrics"].as_array() {
+                    for child in children.iter().take(32) {
+                        worker_metrics.borrow_mut().push(
+                            telemetry::execution::WorkerExecutionMetrics::from_reply(
+                                "request_compact",
+                                None,
+                                (child["answered"] == true).then_some(child),
+                            ),
+                        );
+                    }
                 }
             }
+        };
+    let observe_extras = |replies: &[Result<Value, String>]| {
+        if maint_sent {
+            observe_extra("maintenance", replies.first());
+        }
+        if compact_sent {
+            observe_extra("compaction", replies.get(compact_at));
         }
     };
     if let Some((ak, sk)) = &has_creds {
@@ -2393,7 +2438,7 @@ fn dispatch(
         let mut rum_converted_files = 0u64;
         let held_cleanup_pending = std::cell::Cell::new(false);
         let rum_step = |extra: Vec<(String, Value)>| {
-            let maintenance_sent = !extra.is_empty();
+            let extras_sent = !extra.is_empty();
             let options = crate::ingest::coordinator::Options {
                 reserve: INGEST_RESERVE,
                 extra,
@@ -2411,14 +2456,14 @@ fn dispatch(
             worker_metrics
                 .borrow_mut()
                 .append(&mut report.worker_executions_metrics);
-            if maintenance_sent {
-                observe_maintenance(report.extra_results.first());
+            if extras_sent {
+                observe_extras(&report.extra_results);
             }
             let pq = report.pending_deleteq.take();
             if result.is_ok() && report.failed > 0 {
                 held_cleanup_pending.set(true);
             }
-            let reply = answered(report.extra_results.first());
+            let reply = extras_sent.then(|| report.extra_results.clone());
             stage.kv_ops += report.kv_ops;
             stage.cache_ops += report.cache_lookups;
             stage.cache_replaces += report.cache_replaces;
@@ -2468,11 +2513,8 @@ fn dispatch(
         let mut rum_stage = None;
         let ingest_at = stages.len();
         if rum_first {
-            let extra = stage_body
-                .take()
-                .map(|body| vec![(stage::PATH.to_owned(), body)])
-                .unwrap_or_default();
-            if !extra.is_empty() {
+            let extra = std::mem::take(&mut extras);
+            if maint_sent && !extra.is_empty() {
                 maint_reply = Some(None);
             }
             let (stage, reply, pq, processed) = rum_step(extra);
@@ -2486,16 +2528,13 @@ fn dispatch(
         if let Some(period) = due.ingest.filter(|_| !rum_first || second_fits()) {
             let options = crate::ingest::coordinator::Options {
                 reserve: INGEST_RESERVE,
-                extra: stage_body
-                    .clone()
-                    .map(|body| vec![(stage::PATH.to_owned(), body)])
-                    .unwrap_or_default(),
+                extra: extras.clone(),
                 allow_backfill: true,
                 sweep: true,
                 defer_deleteq: true,
                 ..crate::ingest::coordinator::Options::request(runtime)
             };
-            if !options.extra.is_empty() {
+            if maint_sent && !options.extra.is_empty() {
                 maint_reply = Some(None);
             }
             let span = VcpuSpan::start(runtime);
@@ -2510,15 +2549,16 @@ fn dispatch(
                 .borrow_mut()
                 .append(&mut report.worker_executions_metrics);
             if !options.extra.is_empty() {
-                observe_maintenance(report.extra_results.first());
+                observe_extras(&report.extra_results);
+                compact_answered(&report.extra_results);
             }
             if let Some(pq) = report.pending_deleteq.take() {
                 inline_queues.push(pq);
             }
             // The stage worker may have run even when the ingest step failed.
-            if let Some((next, rows)) = answered(report.extra_results.first()) {
+            if let Some((next, rows)) = answered(&report.extra_results) {
                 maint_reply = Some(Some(next));
-                (stage_rows, maint_more_pending) = rows;
+                stage_rows = rows;
             }
             stage.kv_ops += report.kv_ops;
             stage.cache_ops += report.cache_lookups;
@@ -2590,17 +2630,17 @@ fn dispatch(
             // A scheduled ingest is logged even when it found nothing: its row carries the
             // idle ticks and keeps the once-per-period cadence visible.
             stages.push(stage);
-        } else if let Some(body) = stage_body {
-            maint_reply = Some(None);
-            let replies = runtime.worker_dispatch(
-                &[(stage::PATH.to_owned(), body)],
-                crate::ingest::coordinator::DRAIN_AT,
-            );
-            observe_maintenance(replies.first());
-            backend_requests_used += 1;
-            if let Some((next, rows)) = answered(replies.first()) {
+        } else if !extras.is_empty() {
+            if maint_sent {
+                maint_reply = Some(None);
+            }
+            let replies = runtime.worker_dispatch(&extras, crate::ingest::coordinator::DRAIN_AT);
+            observe_extras(&replies);
+            compact_answered(&replies);
+            backend_requests_used += extras.len() as u32;
+            if let Some((next, rows)) = answered(&replies) {
                 maint_reply = Some(Some(next));
-                (stage_rows, maint_more_pending) = rows;
+                stage_rows = rows;
             }
         }
 
@@ -2618,9 +2658,12 @@ fn dispatch(
             }
         }
         if let Some((stage, reply)) = rum_stage {
-            if let Some((next, rows)) = reply {
-                maint_reply = Some(Some(next));
-                (stage_rows, maint_more_pending) = rows;
+            if let Some(replies) = reply {
+                compact_answered(&replies);
+                if let Some((next, rows)) = answered(&replies) {
+                    maint_reply = Some(Some(next));
+                    stage_rows = rows;
+                }
             }
             backend_requests_used += stage.calls;
             jobs.rum = job_state(
@@ -2717,16 +2760,25 @@ fn dispatch(
     }
     if maint_reply.is_some() {
         let answered = matches!(maint_reply, Some(Some(_)));
-        let more_pending = answered && maint_more_pending;
         jobs.maint = job_state(
             now,
             if answered { "done" } else { "missed" },
-            more_pending,
+            false,
             0,
             &jobs.maint,
         );
-        if more_pending {
-            jobs.maint.retry_after = now + schedule::MAINT_CATCHUP_S;
+    }
+    if let Some(reply) = compact_reply {
+        let pending = reply == Some(true);
+        jobs.compact = job_state(
+            now,
+            if reply.is_some() { "done" } else { "missed" },
+            pending,
+            0,
+            &jobs.compact,
+        );
+        if pending {
+            jobs.compact.retry_after = now + schedule::COMPACT_CATCHUP_S;
         }
     }
     if let Some(reason) = ingest_error.clone() {
@@ -2808,7 +2860,9 @@ fn dispatch(
             == Some(schedule::period_s(u64::from(svc.log_period)))
         && outcome == "idle"
         && maint_reply.is_none()
+        && compact_reply.is_none()
         && stage_rows.is_empty()
+        && compact_rows.is_empty()
         && stages.len() == 1
         && stages[0].kind == TICK_STAGES[0]
         && stages[0].outcome == "idle"
@@ -2853,6 +2907,7 @@ fn dispatch(
         })
         .collect();
     rows.extend(stage_rows);
+    rows.extend(compact_rows);
     if let Some((_, row)) = rows
         .iter_mut()
         .find(|(kind, _)| *kind == WritableLogKind::CronRuns)
@@ -2967,7 +3022,8 @@ fn dispatch(
         return Ok(Dispatched {
             mirror: Some(
                 schedule::Mirror::from_state(&cron_state, Some(svc.log_period))
-                    .with_rum(rum_period),
+                    .with_rum(rum_period)
+                    .with_compaction(svc.compaction.target_bytes().is_some()),
             ),
             value: tick_response(
                 true,
@@ -3034,7 +3090,9 @@ fn dispatch(
 
     Ok(Dispatched {
         mirror: Some(
-            schedule::Mirror::from_state(&cron_state, Some(svc.log_period)).with_rum(rum_period),
+            schedule::Mirror::from_state(&cron_state, Some(svc.log_period))
+                .with_rum(rum_period)
+                .with_compaction(svc.compaction.target_bytes().is_some()),
         ),
         value: tick_response(
             true,

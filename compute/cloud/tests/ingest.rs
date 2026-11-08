@@ -12479,7 +12479,7 @@ mod request_compaction {
             .all(|key| fake.bucket.borrow().contains_key(key)));
     }
 
-    fn stage_turn(fake: &Fake, start: usize) -> Value {
+    fn stage_turn(fake: &Fake, start: usize, compact_only: bool) -> Value {
         let body = json!({
             "service_id": SID,
             "run_id": "run-1",
@@ -12488,6 +12488,7 @@ mod request_compaction {
             "actor": "system",
             "bucket": 0,
             "start": start,
+            "compact_only": compact_only,
         });
         fake.new_request();
         let path = fastly_log_analytics::admin::stage::PATH.to_owned();
@@ -12503,18 +12504,27 @@ mod request_compaction {
         fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
     }
 
-    /// Every maintenance turn runs due request compaction first, then the rotating stage, which
-    /// still decides where the rotation goes next; the rotation never runs it a second time.
+    /// Request compaction is its own job: a maintenance turn never runs it, whichever stage the
+    /// rotation starts from, and a compact-only execution runs nothing but it.
     #[test]
-    fn every_maintenance_turn_compacts_before_the_rotating_stage() {
-        for (start, ran, next) in [(0, "retention_sweep", 1), (5, "retention_sweep", 1)] {
+    fn request_compaction_runs_on_its_own_execution_not_in_the_rotation() {
+        for start in [0, 5] {
             let fake = Fake::new(NOW);
             compaction_service(&fake);
             seed(&fake, 40);
-            let reply = stage_turn(&fake, start);
-            assert_eq!(reply["ran"], ran, "{reply}");
-            assert_eq!(reply["next"], next, "{reply}");
+            let reply = stage_turn(&fake, start, false);
+            assert_eq!(reply["ran"], "retention_sweep", "{reply}");
+            assert_eq!(reply["next"], 1, "{reply}");
+            assert!(compacts(&fake).is_empty(), "{reply}");
+            let reply = stage_turn(&fake, start, true);
+            assert_eq!(reply["ran"], "request_compact", "{reply}");
+            assert!(reply.get("next").is_none(), "{reply}");
             assert!(!compacts(&fake).is_empty(), "{reply}");
+            let rows = rows(&fake, LogKind::CronRuns);
+            assert!(
+                rows.iter().any(|row| row["cron_kind"] == "request_compact"),
+                "{rows:?}"
+            );
         }
     }
 
@@ -12526,7 +12536,7 @@ mod request_compaction {
         let fake = Fake::new(NOW);
         compaction_service(&fake);
         load_windows(&fake, HOUR, 128, 50);
-        let reply = stage_turn(&fake, 0);
+        let reply = stage_turn(&fake, 0, true);
         let rows = rows(&fake, LogKind::CronRuns);
         let row = rows
             .iter()
@@ -12548,37 +12558,60 @@ mod request_compaction {
         );
     }
 
-    /// A turn that leaves a compaction backlog brings the next maintenance turn forward to
-    /// `MAINT_CATCHUP_S`, and that turn compacts whatever the rotation runs.
+    /// The tick dispatches the compaction job beside the maintenance stage. A run that leaves a
+    /// backlog brings the job's next run forward to `COMPACT_CATCHUP_S` without touching the
+    /// maintenance cadence; a caught-up job waits `COMPACT_INTERVAL_S`.
     #[test]
-    fn a_compaction_backlog_brings_the_next_maintenance_turn_forward() {
-        use fastly_log_analytics::admin::schedule::{MAINT_CATCHUP_S, MAINT_INTERVAL_S};
+    fn a_compaction_backlog_brings_the_jobs_next_run_forward() {
+        use fastly_log_analytics::admin::schedule::{COMPACT_CATCHUP_S, COMPACT_INTERVAL_S};
         let fake = Fake::new(NOW);
         compaction_service(&fake);
         seed(&fake, 230);
         run_tick(&fake);
-        fake.kv.borrow_mut().get_mut("cron:state").unwrap().1["maint_next"] = 5.into();
-        fake.now.set(fake.now.get() + MAINT_INTERVAL_S);
+        let runs = fake.stage_runs.borrow().clone();
+        assert_eq!(runs.len(), 2, "a maintenance turn and a compaction run");
+        assert_ne!(runs[0]["ran"], "request_compact", "{}", runs[0]);
+        assert_eq!(runs[1]["ran"], "request_compact", "{}", runs[1]);
+        assert_eq!(runs[1]["compact_pending"], true, "{}", runs[1]);
+        let jobs = fake.kv.borrow()["cron:state"].1["jobs"].clone();
+        assert_eq!(jobs["compact"]["more_pending"], true, "{jobs}");
+        assert_eq!(
+            jobs["compact"]["retry_after"],
+            fake.now.get() + COMPACT_CATCHUP_S
+        );
+        assert_eq!(jobs["maint"]["more_pending"], false, "{jobs}");
+        assert_eq!(jobs["maint"]["retry_after"], 0, "{jobs}");
+
+        fake.now.set(fake.now.get() + COMPACT_CATCHUP_S);
+        let made = compacts(&fake).len();
         run_tick(&fake);
         let runs = fake.stage_runs.borrow().clone();
-        assert_eq!(runs.len(), 2);
-        assert_ne!(runs[1]["ran"], "request_compact");
-        assert_eq!(runs[1]["compact_pending"], true, "{}", runs[1]);
-        let maint = fake.kv.borrow()["cron:state"].1["jobs"]["maint"].clone();
-        assert_eq!(maint["more_pending"], true);
-        assert_eq!(maint["retry_after"], fake.now.get() + MAINT_CATCHUP_S);
+        assert_eq!(runs.len(), 3, "only the compaction job came back early");
+        assert_eq!(runs[2]["ran"], "request_compact", "{}", runs[2]);
+        assert!(compacts(&fake).len() > made, "{}", runs[2]);
 
-        fake.now.set(fake.now.get() + MAINT_CATCHUP_S);
-        let made = compacts(&fake).len();
+        while fake.kv.borrow()["cron:state"].1["jobs"]["compact"]["more_pending"] == true {
+            fake.now.set(fake.now.get() + COMPACT_CATCHUP_S);
+            run_tick(&fake);
+        }
+        let caught_up = fake.stage_runs.borrow().len();
+        fake.now.set(fake.now.get() + COMPACT_INTERVAL_S - 1);
+        run_tick(&fake);
+        assert_eq!(fake.stage_runs.borrow().len(), caught_up, "not due yet");
+        fake.now.set(fake.now.get() + 1);
         run_tick(&fake);
         let runs = fake.stage_runs.borrow().clone();
         assert_eq!(
             runs.len(),
-            3,
-            "the catch-up turn came {MAINT_CATCHUP_S} s later"
+            caught_up + 1,
+            "{COMPACT_INTERVAL_S} s after the last run"
         );
-        assert_ne!(runs[2]["ran"], "request_compact");
-        assert!(compacts(&fake).len() > made, "{}", runs[2]);
+        assert_eq!(runs[caught_up]["status"], "ok");
+        assert!(
+            runs[caught_up]["ran"].is_null() || runs[caught_up]["ran"] == "request_compact",
+            "{}",
+            runs[caught_up]
+        );
     }
 
     /// Maintenance rides the ingest tick's dispatch, so a plan is in flight for nearly every
@@ -12601,6 +12634,7 @@ mod request_compaction {
             actor: "system".into(),
             bucket: 0,
             start: 5,
+            compact_only: true,
         })
         .unwrap();
         fake.new_request();
@@ -12931,7 +12965,7 @@ mod request_compaction {
         let turn = |fake: &Fake| {
             fake.new_request();
             let body = json!({"service_id": SID, "run_id": "run1", "tick_id": "", "trigger": "clock",
-                "actor": "clock", "bucket": 0, "start": 5});
+                "actor": "clock", "bucket": 0, "start": 5, "compact_only": true});
             let path = fastly_log_analytics::admin::stage::PATH.to_owned();
             let reply = fake.worker_dispatch(&[(path, body)], std::time::Duration::from_secs(32));
             assert_eq!(reply[0].as_ref().unwrap()["status"], "ok");

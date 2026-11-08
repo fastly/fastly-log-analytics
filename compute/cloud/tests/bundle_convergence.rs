@@ -479,6 +479,7 @@ fn bundling_keeps_up_with_windows_arriving_at_the_live_rate() {
         log_period_s: PERIOD_S as u64,
         jobs: Jobs::default(),
         rum_log_period_s: 0,
+        compaction: false,
     };
     let (start, end) = (BASE, BASE + 4 * HOUR);
     let mut written = start;
