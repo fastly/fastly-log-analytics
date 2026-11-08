@@ -116,6 +116,8 @@ CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx ON high_scale_
 CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_domain_expiry_idx
     ON high_scale_archive_manifests (service_id, domain, coverage_end)
     WHERE state = 'source_deleted' AND archive_expired_at IS NULL;
+CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_committed_idx
+    ON high_scale_archive_manifests (service_id, created_at, manifest_id) WHERE state = 'manifest_committed';
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id) ON DELETE CASCADE,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -136,9 +138,22 @@ CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
     batch_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL, generation TEXT NOT NULL,
     batch_digest TEXT NOT NULL, expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
     visible_rows BIGINT NOT NULL DEFAULT 0 CHECK (visible_rows >= 0),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'visible')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'visible', 'superseded')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'high_scale_publication_manifests'::regclass
+          AND conname = 'high_scale_publication_manifests_status_check'
+          AND position('superseded' IN pg_get_constraintdef(oid)) > 0
+    ) THEN
+        ALTER TABLE high_scale_publication_manifests DROP CONSTRAINT IF EXISTS high_scale_publication_manifests_status_check;
+        ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT high_scale_publication_manifests_status_check
+            CHECK (status IN ('pending', 'visible', 'superseded')) NOT VALID;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS high_scale_publication_manifests_domain_status_idx
     ON high_scale_publication_manifests (service_id, domain, status);
 CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
@@ -775,6 +790,103 @@ class PostgresControlPlane:
                     manifest.status.value,
                 ),
             )
+
+    def committed_archive_manifests(
+        self,
+        service_id: str,
+        *,
+        min_age_seconds: float,
+        max_age_seconds: float | None = None,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 500,
+    ) -> list[tuple[str, str, datetime]]:
+        """Archive manifests still ``manifest_committed`` (never acknowledged), oldest first, keyset-paged."""
+        _require_text(service_id, "service_id")
+        sql = (
+            "SELECT manifest_id, domain, created_at FROM high_scale_archive_manifests "
+            "WHERE service_id=%s AND state='manifest_committed' "
+            "AND created_at < clock_timestamp() - make_interval(secs => %s)"
+        )
+        params: list[Any] = [service_id, float(min_age_seconds)]
+        if max_age_seconds is not None:
+            sql += " AND created_at >= clock_timestamp() - make_interval(secs => %s)"
+            params.append(float(max_age_seconds))
+        if after is not None:
+            sql += " AND (created_at, manifest_id) > (%s, %s)"
+            params.extend(after)
+        sql += " ORDER BY created_at, manifest_id LIMIT %s"
+        params.append(max(1, int(limit)))
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(sql, tuple(params)).fetchall()
+        return [(str(r[0]), str(r[1]), r[2]) for r in rows]
+
+    def pending_publication_domains(self, service_id: str) -> tuple[str, ...]:
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT domain FROM high_scale_publication_manifests WHERE service_id=%s AND status='pending'",
+                (service_id,),
+            ).fetchall()
+        return tuple(sorted(str(r[0]) for r in rows))
+
+    def publication_manifest_states(self, service_id: str, batch_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        _require_text(service_id, "service_id")
+        if not batch_ids:
+            return {}
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT batch_id, status, domain, generation, "
+                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)) FROM high_scale_publication_manifests "
+                "WHERE service_id=%s AND batch_id = ANY(%s)",
+                (service_id, list(batch_ids)),
+            ).fetchall()
+        return {
+            str(r[0]): {"status": str(r[1]), "domain": str(r[2]), "generation": str(r[3]), "age_seconds": float(r[4])}
+            for r in rows
+        }
+
+    def archive_manifest_source_states(
+        self, service_id: str, manifest_ids: Sequence[str]
+    ) -> dict[str, list[tuple[str | None, str | None]]]:
+        """``(source status, owning archive manifest)`` for each source of each manifest; ``None`` when untracked."""
+        _require_text(service_id, "service_id")
+        if not manifest_ids:
+            return {}
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT ms.manifest_id, so.status, so.archive_manifest_id FROM high_scale_archive_manifest_sources ms "
+                "LEFT JOIN high_scale_source_objects so ON so.service_id=%s AND so.object_key=ms.source_key "
+                "WHERE ms.manifest_id = ANY(%s)",
+                (service_id, list(manifest_ids)),
+            ).fetchall()
+        states: dict[str, list[tuple[str | None, str | None]]] = {}
+        for manifest_id, status, owner in rows:
+            states.setdefault(str(manifest_id), []).append((status, owner))
+        return states
+
+    def archive_manifest_domains(self, service_id: str, manifest_ids: Sequence[str]) -> dict[str, str]:
+        _require_text(service_id, "service_id")
+        if not manifest_ids:
+            return {}
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT manifest_id, domain FROM high_scale_archive_manifests WHERE service_id=%s AND manifest_id = ANY(%s)",
+                (service_id, list(manifest_ids)),
+            ).fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
+
+    def mark_publications_superseded(self, service_id: str, batch_ids: Sequence[str]) -> int:
+        """Move still-pending publications to ``superseded``; never touches a row that became visible."""
+        _require_text(service_id, "service_id")
+        if not batch_ids:
+            return 0
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE high_scale_publication_manifests SET status='superseded', updated_at=clock_timestamp() "
+                "WHERE service_id=%s AND batch_id = ANY(%s) AND status='pending'",
+                (service_id, list(batch_ids)),
+            )
+            return int(cursor.rowcount or 0)
 
     def register_archive_manifest(
         self, manifest: ArchiveManifest, *, owner_epoch: int, state: ArchiveState = ArchiveState.ARTIFACT_UPLOADING

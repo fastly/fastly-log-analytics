@@ -375,6 +375,13 @@ _DOMAIN_COLUMNS = {
 class PublicationStatus(StrEnum):
     PENDING = "pending"
     VISIBLE = "visible"
+    # Postgres bookkeeping only: a failed attempt whose sources were later published under another batch.
+    SUPERSEDED = "superseded"
+
+
+class SupersededPublication(RuntimeError):
+    def __init__(self, batch_id: str) -> None:
+        super().__init__(f"publication {batch_id} was superseded by a replacement batch; refusing to publish it")
 
 
 class PartialInsert(RuntimeError):
@@ -459,7 +466,12 @@ class ClickHouseBatchAdapter(BaseClickHouseBatchAdapter):
 
 
 def _batch_uuid(batch: HighScaleBatch) -> str:
-    return str(uuid5(_BATCH_NAMESPACE, "\0".join((batch.service_id, batch.domain, batch.generation, batch.batch_id))))
+    return publication_batch_uuid(batch.service_id, batch.domain, batch.generation, batch.batch_id)
+
+
+def publication_batch_uuid(service_id: str, domain: str, generation: str, batch_id: str) -> str:
+    """The ``batch_id`` a publication's ClickHouse rows and receipt carry."""
+    return str(uuid5(_BATCH_NAMESPACE, "\0".join((service_id, domain, generation, batch_id))))
 
 
 def _event_uuid(value: Any, *, field: str) -> str:
@@ -697,6 +709,8 @@ class ClickHousePublication:
             self._manifests.put(manifest)
         else:
             self._validate_existing(manifest, batch)
+            if manifest.status is PublicationStatus.SUPERSEDED:
+                raise SupersededPublication(batch.batch_id)
             if manifest.status is PublicationStatus.VISIBLE:
                 return PublicationResult(batch.batch_id, manifest.status, manifest.visible_rows, True)
 

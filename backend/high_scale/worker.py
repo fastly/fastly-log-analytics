@@ -30,6 +30,7 @@ from backend.high_scale.postgres_control import (
     PostgresControlPlane,
     PostgresDeletionLedger,
 )
+from backend.high_scale.publication_reaper import reaper_from_environment
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import (
@@ -383,6 +384,7 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
                     control=control,
                     controller=deletion_controller,
                     archive_expirer=HighScaleArchiveExpirer(control=control, archive=archive),
+                    publication_reaper=reaper_from_environment(control, clickhouse),
                 )
             )
         else:
