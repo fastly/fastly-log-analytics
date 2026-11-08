@@ -2209,6 +2209,28 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
         assert re.findall(r"\{(\w+):", sql) and all(name in params for name in re.findall(r"\{(\w+):", sql))
 
 
+@pytest.mark.parametrize("insight_id", ["low_and_slow", "new_probe_urls"])
+def test_probe_detections_filter_in_a_time_free_prewhere(insight_id: str) -> None:
+    # ClickHouse's query condition cache keys on the exact filter; a PREWHERE free of the
+    # moving time bounds lets later evaluations skip granules that never matched the regex.
+    client = _InsightsClient()
+    _run_insights(client)
+    sql, _ = client.queries()[insight_id]
+    prewhere = re.search(r"FROM request_facts PREWHERE (.*?) WHERE ", sql)
+    assert prewhere, sql
+    assert prewhere.group(1) == "match(url, {probe_regex:String})"
+    assert sql.count("{probe_regex:String}") == 1
+
+
+def test_crawler_disparity_guard_reads_only_window_rows() -> None:
+    client = _InsightsClient()
+    _run_insights(client)
+    sql, _ = client.queries()["crawler_disparity"]
+    # Each reference to the full-range crawler_traffic CTE is another full baseline scan.
+    assert sql.count("FROM crawler_traffic") == 1
+    assert "FROM base WHERE is_w) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING count() >= 50" in sql
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_insights_detector_telemetry_survives_async_and_worker_boundaries(fails: bool) -> None:
     from structlog.testing import capture_logs

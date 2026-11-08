@@ -77,6 +77,9 @@ class Detection:
     sql: str
     row_filter: str = ""
     window_only: bool = False
+    # Must name only real request_facts columns and never the moving time bounds: ClickHouse's
+    # query condition cache keys on this exact text, so later evaluations skip non-matching granules.
+    prewhere: str = ""
     needs_baseline: bool = True
 
 
@@ -328,6 +331,17 @@ def impossible_distance(
     )
 
 
+_CRAWLER_TOKEN = "'([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)'"
+_BOT_STEM_SUFFIX = "'(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$'"
+_BOT_STEM = f"if(replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, '') != '', replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, ''), raw_tok)"
+# crawler_traffic is non-empty exactly when a bot stem has 50+ window requests; deciding that
+# from window rows alone avoids re-running crawler_traffic's full-range scan for the guard.
+_CRAWLER_IN_WINDOW = (
+    f"(SELECT count() FROM (SELECT {_BOT_STEM} AS bot_stem FROM (SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok "
+    "FROM base WHERE is_w) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING count() >= 50)) > 0"
+)
+
+
 DETECTIONS: dict[str, Detection] = {
     "error_spikes": Detection(("url", "status"), _error_spike("url")),
     "new_country_traffic": Detection(("country",), _new_traffic("country", 3, where="country != ''")),
@@ -337,11 +351,12 @@ DETECTIONS: dict[str, Detection] = {
         _base_group_sql(
             "url, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt, avgIf(if(status >= 400, 1.0, 0.0), is_w) * 100 AS w_error_pct",
             "url",
-            where="url != '' AND match(url, {probe_regex:String})",
+            where="url != ''",
             having="w_cnt > 0 AND b_cnt = 0",
             order_by="w_cnt DESC",
             limit=25,
         ),
+        prewhere="match(url, {probe_regex:String})",
     ),
     "proxy_surge": Detection(
         ("p_type",),
@@ -564,7 +579,8 @@ DETECTIONS: dict[str, Detection] = {
             order_by="distinct_paths DESC, span_s DESC",
             limit=15,
         ),
-        row_filter="ip != '' AND url != '' AND match(url, {probe_regex:String})",
+        row_filter="ip != '' AND url != ''",
+        prewhere="match(url, {probe_regex:String})",
     ),
     "credential_enumeration": Detection(
         ("ip", "url", "status"),
@@ -713,15 +729,14 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "crawler_disparity": Detection(
         ("ua", "referer", "ip", "resp_bytes"),
-        """ , ua_groups AS (SELECT lower(ua) AS l_ua, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+        f""" , ua_groups AS (SELECT lower(ua) AS l_ua, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
             sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b) AS b_b,
             greatest(sum(sumIf(coalesce(resp_bytes, 0), is_w)) OVER (), 1) AS site_resp_total FROM base WHERE is_w OR lower(ua) IN (SELECT lower(ua) FROM base WHERE is_w GROUP BY lower(ua)) GROUP BY l_ua),
     ua_tagged AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total,
-            extract(l_ua, '([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)') AS raw_tok,
+            extract(l_ua, {_CRAWLER_TOKEN}) AS raw_tok,
             extract(l_ua, 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom FROM ua_groups),
     ua_classified AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total, raw_tok, ua_dom,
-            if(replaceRegexpOne(raw_tok, '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$', '') != '',
-               replaceRegexpOne(raw_tok, '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$', ''), raw_tok) AS bot_stem
+            {_BOT_STEM} AS bot_stem
             FROM ua_tagged WHERE raw_tok != ''),
     crawler_traffic AS (SELECT bot_stem, min(raw_tok) AS raw_tok, max(ua_dom) AS ua_dom, sum(w_cnt) AS w_crawls, sum(b_cnt) AS b_crawls,
                sum(w_b) AS w_bytes, sum(b_b) AS b_bytes, any(site_resp_total) AS site_resp_total FROM ua_classified WHERE bot_stem != '' GROUP BY bot_stem HAVING w_crawls >= 50),
@@ -730,8 +745,8 @@ DETECTIONS: dict[str, Detection] = {
                extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)'),
                extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
         FROM base
-        WHERE (SELECT count() FROM crawler_traffic) > 0 AND ip != '' AND (referer != '' OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
-          AND extract(lower(ua), '([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)') = ''
+        WHERE {_CRAWLER_IN_WINDOW} AND ip != '' AND (referer != '' OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
+          AND extract(lower(ua), {_CRAWLER_TOKEN}) = ''
         GROUP BY ip, ref_stem HAVING ref_stem != ''
         UNION ALL SELECT '' AS ip, 0 AS is_w, 0 AS is_b, '' AS ref_stem),
     combined AS (SELECT c.bot_stem AS bot_stem, any(c.raw_tok) AS raw_tok, any(c.w_crawls) AS w_crawls, any(c.b_crawls) AS b_crawls,
@@ -764,12 +779,13 @@ def _base_sql(detection: Detection, insight_id: str) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
     row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
+    prewhere = f" PREWHERE {detection.prewhere}" if detection.prewhere else ""
     scope = " AND ".join(visible_fact_clauses("request"))
     return (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
-        f"FROM request_facts WHERE {scope} AND event_timestamp >= {lower} "
+        f"FROM request_facts{prewhere} WHERE {scope} AND event_timestamp >= {lower} "
         f"AND event_timestamp <= {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
     )
 
