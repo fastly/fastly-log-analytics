@@ -1865,6 +1865,7 @@ struct StageRow {
     kv_ops: u32,
     purges: u32,
     more_pending: bool,
+    backlog: bool,
     listed: u64,
     converted: u64,
     lines_read: u64,
@@ -1892,6 +1893,7 @@ impl StageRow {
             kv_ops: 0,
             purges: 0,
             more_pending: false,
+            backlog: false,
             listed: 0,
             converted: 0,
             lines_read: 0,
@@ -1944,7 +1946,7 @@ impl StageRow {
             "cache_replaces": self.cache_replaces,
             "kv_ops": self.kv_ops,
             "purges": self.purges,
-            "more_pending": self.more_pending, "error": self.error,
+            "more_pending": self.more_pending, "backlog": self.backlog, "error": self.error,
             "severity": if self.error.is_some() { "error" } else { "info" },
         });
         if self.outcome == "error" {
@@ -2422,6 +2424,7 @@ fn dispatch(
             stage.cache_replaces += report.cache_replaces;
             stage.purges += report.purges;
             stage.more_pending = report.more_pending;
+            stage.backlog = report.backlog;
             stage.listed = report.listed;
             stage.converted = report.converted;
             stage.lines_read = report.lines_read;

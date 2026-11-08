@@ -205,6 +205,10 @@ pub struct Plan {
     pub lease_until: u64,
     #[serde(default)]
     pub more_pending: bool,
+    /// Raw objects this plan listed but did not take, or further listing pages: still unconverted
+    /// after the commit.
+    #[serde(default)]
+    pub backlog: bool,
     pub created_at: u64,
     #[serde(default)]
     pub abandoning: Option<String>,
@@ -865,6 +869,8 @@ fn plan_new<R: Runtime>(
     }
     ctx.report.more_pending = (page.next_token.is_some() && !unsettled)
         || recent_after.as_ref().is_some_and(|after| !after.is_empty());
+    ctx.report.backlog_listing = page.next_token.is_some() && !unsettled;
+    ctx.report.backlog |= ctx.report.backlog_listing;
     if candidates.is_empty() && !ctx.rum() && !ctx.report.more_pending {
         if let Some((recent, after)) = recent_candidates(ctx, watermark)? {
             candidates = recent;
@@ -878,6 +884,7 @@ fn plan_new<R: Runtime>(
         }
         return Ok(());
     }
+    ctx.report.backlog = true;
     if !commit_fields(ctx, 2 + AFTER_DISPATCH)? {
         return Ok(());
     }
@@ -944,6 +951,7 @@ fn plan_new<R: Runtime>(
     );
     ctx.report.more_pending = ctx.report.more_pending || plan.raw_keys.len() < objects.len();
     plan.more_pending = ctx.report.more_pending;
+    plan.backlog = ctx.report.backlog_listing || plan.raw_keys.len() < objects.len();
     let saved = runtime.admin_cas(
         &ctx.plan_key,
         record.map(|r| r.generation.as_str()),
@@ -1191,6 +1199,7 @@ fn plan_backfill<R: Runtime>(
     if !commit_fields(ctx, 3 + AFTER_DISPATCH)? {
         return Ok(());
     }
+    ctx.report.backlog = true;
     let width = ctx.width_room(2).min(ctx.options.max_width);
     if width == 0 || ctx.elapsed() >= DISPATCH_BY || !ctx.within_vcpu() {
         ctx.report.more_pending = true;
@@ -1475,6 +1484,7 @@ fn resume<R: Runtime>(
     generation: &str,
     watermark: Option<&Record>,
 ) -> Result<(), String> {
+    ctx.report.backlog = true;
     let runtime = ctx.store.runtime;
     ctx.report.resumed = true;
     ctx.report.listed = plan.raw_keys.len() as u64;
@@ -2313,6 +2323,7 @@ fn commit<R: Runtime>(
         ctx.report.pending_deleteq = Some((deleteq, record));
     }
     ctx.report.more_pending |= ctx.report.resumed && plan.created_at < now;
+    ctx.report.backlog = plan.backlog;
     for id in plan.shards.keys() {
         for output in &plan.results[id].outputs {
             ctx.report.rows += output.rows;

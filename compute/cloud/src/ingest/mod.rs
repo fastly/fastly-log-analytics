@@ -137,6 +137,12 @@ pub struct Report {
     pub resumed: bool,
     pub busy: bool,
     pub more_pending: bool,
+    /// Raw objects known to be unconverted remain (a plan in flight, listed candidates not yet
+    /// dispatched, or further listing pages). Unlike `more_pending`, scans and sweeps never set it.
+    pub backlog: bool,
+    /// This tick's raw listing had another page (feeds `Plan::backlog`).
+    #[serde(skip)]
+    pub backlog_listing: bool,
     pub backend_calls: u32,
     pub kv_ops: u32,
     pub cache_lookups: u32,

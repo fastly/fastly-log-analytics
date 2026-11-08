@@ -1742,6 +1742,38 @@ fn ingest_plans_and_dispatches_nothing_past_the_dispatch_deadline() {
 }
 
 #[test]
+fn backlog_names_unconverted_raw_only() {
+    let fake = Fake::new(BASE + 7200);
+    for i in 0..4 {
+        let at = BASE + i * 60;
+        put_raw(&fake, at, "o", &[line(at, &format!("w{i}"))]);
+    }
+    fake.elapsed_s
+        .set(ingest::coordinator::DISPATCH_BY.as_secs());
+    let deferred = tick(&fake).unwrap();
+    assert!(deferred.more_pending && deferred.backlog);
+    fake.elapsed_s.set(0);
+    let mut last = deferred;
+    for _ in 0..8 {
+        last = tick(&fake).unwrap();
+        if processed_ips(&fake).len() == 4 {
+            break;
+        }
+    }
+    assert_eq!(processed_ips(&fake), ["w0", "w1", "w2", "w3"]);
+    assert!(
+        !last.backlog,
+        "commit of the last raw object leaves no backlog"
+    );
+    // Recent-window scans and sweeps keep the scheduler ticking but name no unconverted raw.
+    for _ in 0..3 {
+        let idle = tick(&fake).unwrap();
+        assert_eq!(idle.converted, 0);
+        assert!(!idle.backlog);
+    }
+}
+
+#[test]
 fn immutable_requests_commit_before_the_closed_partition_allowance() {
     let fake = Fake::new(BASE + 60 + ingest::SETTLE_S as i64 - 1);
     put_raw(&fake, BASE, "a", &[line(BASE, "a")]);
