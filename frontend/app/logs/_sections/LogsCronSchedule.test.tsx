@@ -33,6 +33,17 @@ describe('Cloud cron schedule evidence', () => {
     expect(screen.queryByText('Never')).not.toBeInTheDocument()
   })
 
+  it('shows request compaction as a scheduled job with its own countdown when enabled', () => {
+    render(<CronScheduleBox schedule={{
+      task: 'request_compact', last_run_time: '2025-12-31T23:59:40Z', next_run_time: '2026-01-01T00:00:10Z',
+      ...{ schedule_basis: 'dispatcher' },
+    }} />)
+    expect(screen.queryByText('Next: Waiting')).not.toBeInTheDocument()
+    expect(screen.queryByText('Last: No record')).not.toBeInTheDocument()
+    expect(screen.getByText(/^Last:/)).toBeInTheDocument()
+    expect(screen.getByText(/^Next:/)).toBeInTheDocument()
+  })
+
   it('does not label an idle Cloud coordinator as No Alerts', () => {
     function Status() {
       const column = useCronColumns().find((item) => item.id === 'status')!

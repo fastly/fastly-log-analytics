@@ -98,6 +98,14 @@ export const DEFAULT_COMPACTION: CompactionInputs = {
 
 /** One execution: 4 secret reads + create + complete + 2 calls per source within 32. */
 export const COMPACT_SOURCES_PER_EXECUTION = 13;
+/**
+ * The request compaction cron job's cadence once caught up (`schedule::COMPACT_INTERVAL_S`).
+ * Each run is a compact-only stage execution on the worker service that reads the installed
+ * service and the catalog head, and returns without a merge when nothing is due.
+ */
+export const COMPACT_JOB_INTERVAL_S = 30;
+/** vCPU of one compaction job run that finds nothing to merge (assumed). */
+export const COMPACT_DISPATCH_VCPU_MS = 8;
 /** Output one execution can stream within its heap and 60 s. */
 export const COMPACT_MAX_OUTPUT_MB = 250;
 /** A one-row summary file: footer and schema of the long table (native, ZSTD(1)). */
@@ -313,6 +321,9 @@ export interface IngestScaleDay {
 }
 
 export interface CompactionDay {
+  /** Compaction job runs a day (one worker-service request each), merges or not. */
+  dispatchesPerDay: number;
+  /** Worker executions that merged files. */
   executionsPerDay: number;
   classAPerDay: number;
   classBPerDay: number;
@@ -490,16 +501,21 @@ export function estimateMonthly(
       compaction,
     );
     // Per execution: create, complete and a DeleteObjects after the reader grace, plus one
-    // part per source; one LIST per closed hour finds the sources.
+    // part per source; one LIST per closed hour finds the sources. The job itself runs every
+    // COMPACT_JOB_INTERVAL_S, reading the installed service and the catalog head each time.
+    const dispatches = 86_400 / COMPACT_JOB_INTERVAL_S;
     compactionDay = {
+      dispatchesPerDay: dispatches,
       executionsPerDay: hour.executions * 24,
       classAPerDay:
         (hour.sourcesRead + 3 * hour.executions) * 24 +
         (hour.executions > 0 ? 24 : 0),
       classBPerDay: hour.sourcesRead * 24,
       kvClassAPerDay: 2 * hour.executions * 24,
-      kvClassBPerDay: hour.executions * 24,
-      vcpuMsPerDay: hour.mbRewritten * units.compactVcpuMsPerMb * 24,
+      kvClassBPerDay: hour.executions * 24 + 2 * dispatches,
+      vcpuMsPerDay:
+        hour.mbRewritten * units.compactVcpuMsPerMb * 24 +
+        dispatches * COMPACT_DISPATCH_VCPU_MS,
       extraStoredGb: ((hour.deletedBytes * 24) / 1e9) * inputs.minBilledDays,
       fileReadsSavedPerDay:
         Math.max(0, Math.round(filesPerHour) - hour.filesLeft) *
@@ -696,14 +712,15 @@ export function estimateMonthly(
     lines.push({
       id: "compaction",
       label: "Compaction",
-      detail: `${count(month(c.executionsPerDay))} runs · +${gb(c.extraStoredGb)} GB-months min-billed · A ${count(month(c.classAPerDay))} · B ${count(month(c.classBPerDay))} · −${count(saved)} file reads`,
+      detail: `${count(month(c.dispatchesPerDay))} job runs · ${count(month(c.executionsPerDay))} merges · +${gb(c.extraStoredGb)} GB-months min-billed · A ${count(month(c.classAPerDay))} · B ${count(month(c.classBPerDay))} · −${count(saved)} file reads`,
+      help: `The compaction job runs every ${COMPACT_JOB_INTERVAL_S} s (sooner while it has a backlog): one worker-service request and two KV reads each, ${COMPACT_DISPATCH_VCPU_MS} vCPU ms when nothing is due (assumed). Merges are extra worker executions that read every source and write one compact.`,
       usd:
         c.extraStoredGb * rates.storage_rate_per_gb_month +
         classAUsd(month(c.classAPerDay)) +
         classBUsd(month(c.classBPerDay)) +
         frontUsd(month(c.classBPerDay)) +
-        requestUsd(month(c.executionsPerDay)) +
-        vcpuExecUsd(c.vcpuMsPerDay, c.executionsPerDay) +
+        requestUsd(month(c.dispatchesPerDay + c.executionsPerDay)) +
+        vcpuExecUsd(c.vcpuMsPerDay, c.dispatchesPerDay + c.executionsPerDay) +
         (month(c.kvClassAPerDay) / 1e6) * rates.kv_class_a_rate_per_million +
         (month(c.kvClassBPerDay) / 1e6) * rates.kv_class_b_rate_per_million -
         (frontUsd(saved) + classBUsd(saved)),

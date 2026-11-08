@@ -9,6 +9,8 @@ import {
   SUMMARY_BASE_BYTES,
   SUMMARY_HALF_ROWS,
   compactionPlan,
+  COMPACT_JOB_INTERVAL_S,
+  COMPACT_DISPATCH_VCPU_MS,
   estimateMonthly,
   measureEstimate,
   rawFilesPerDay,
@@ -362,7 +364,9 @@ describe("compaction", () => {
     // Per execution: create, complete, DeleteObjects plus one part per source; and a LIST per hour.
     expect(c.classAPerDay).toBe((26 + 3 * 3) * 24 + 24);
     expect(c.classBPerDay).toBe(26 * 24);
-    expect(c.vcpuMsPerDay).toBeCloseTo(48 * 20 * 24);
+    expect(c.vcpuMsPerDay - c.dispatchesPerDay * COMPACT_DISPATCH_VCPU_MS).toBeCloseTo(
+      48 * 20 * 24,
+    );
     const at90 = estimateMonthly(
       { ...inputs, retentionDays: 90 },
       units,
@@ -370,6 +374,31 @@ describe("compaction", () => {
       on,
     ).compaction!;
     expect(at90.extraStoredGb).toBeCloseTo(c.extraStoredGb);
+  });
+
+  it("charges the compaction job's own 30 s dispatch cadence when enabled", () => {
+    const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, on);
+    const c = estimate.compaction!;
+    expect(COMPACT_JOB_INTERVAL_S).toBe(30);
+    expect(c.dispatchesPerDay).toBe(86_400 / 30);
+    expect(c.kvClassBPerDay).toBe(3 * 24 + 2 * (86_400 / 30));
+    expect(c.vcpuMsPerDay).toBeCloseTo(
+      48 * 20 * 24 + (86_400 / 30) * COMPACT_DISPATCH_VCPU_MS,
+    );
+    // With nothing to merge the job still probes: its requests remain in the line.
+    const idle = estimateMonthly(
+      { ...inputs, edgeRequestsPerDay: 0 },
+      units,
+      LIST_PRICE_RATES,
+      on,
+    );
+    expect(idle.compaction!.executionsPerDay).toBe(0);
+    expect(idle.compaction!.dispatchesPerDay).toBe(86_400 / 30);
+    expect(line(idle, "compaction").usd).toBeCloseTo(
+      ((86_400 / 30) * 30 * LIST_PRICE_RATES.compute_request_rate_per_million) / 1e6 +
+        ((86_400 / 30) * 30 * 2 * LIST_PRICE_RATES.kv_class_b_rate_per_million) / 1e6,
+      6,
+    );
   });
 
   it("offsets the cost with fewer dashboard file reads", () => {

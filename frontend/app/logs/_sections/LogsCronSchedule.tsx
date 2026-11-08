@@ -21,7 +21,7 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
   delete_history: 'Processes a manually queued operational-log history deletion on a maintenance turn.',
   storage_reconcile: 'Reconciles stored object metadata in bounded maintenance work.',
   summary_bundle: 'Bundles eligible request summaries on a maintenance turn.',
-  request_compact: 'Compacts eligible request Parquet files when request compaction is enabled.',
+  request_compact: 'Merges small request Parquet files into larger compacts on its own schedule: every 30 s once caught up, every 10 s while a backlog remains. Disabled when request compaction is off.',
   delete_data: 'Resumes an explicitly queued manual data reset. This page never starts a reset.',
   log_discovery:
     'Lists recent raw/ minute prefixes in Fastly Object Storage to discover new files and registers them in the ingest ledger so stateless workers download, archive to Parquet, and publish batches into ClickHouse.',
@@ -73,8 +73,8 @@ export const CRON_GROUPS = [
   { title: 'Ingestion Pipeline', tasks: ['log_discovery', 'full_sync', 'gap_heal', 'ledger_sweep'] },
   { title: 'Metadata & Enrichments', tasks: ['metadata_cleanup', 'ngwaf_sync', 'alerts', 'insights_prewarmer'] },
   { title: 'Real User Monitoring', tasks: ['rum_sync', 'rum_discovery'] },
-  { title: 'Cloud Ingestion & Telemetry', tasks: ['request_ingest', 'rum_ingest', 'raw_delete', 'log_flush'] },
-  { title: 'Cloud Maintenance', tasks: ['retention_sweep', 'log_compact', 'delete_history', 'storage_reconcile', 'summary_bundle', 'request_compact', 'delete_data'] },
+  { title: 'Cloud Ingestion & Telemetry', tasks: ['request_ingest', 'rum_ingest', 'raw_delete', 'request_compact', 'log_flush'] },
+  { title: 'Cloud Maintenance', tasks: ['retention_sweep', 'log_compact', 'delete_history', 'storage_reconcile', 'summary_bundle', 'delete_data'] },
   { title: 'Cloud Coordination', tasks: ['cloud_ingest_clock', 'maintenance'] },
 ]
 
