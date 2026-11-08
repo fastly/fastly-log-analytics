@@ -37,6 +37,9 @@ pub const MAX_SOURCES: usize = 32;
 /// A window this recently written may belong to a plan that is later abandoned.
 pub const MIN_AGE_S: u64 = 15 * 60;
 pub const FILE_TRIGGER: usize = 32;
+/// An open hour's compacts merge together once this many have piled up, so an hour that is
+/// still receiving windows keeps a bounded file count instead of one compact per trigger.
+pub const COMPACT_TRIGGER: usize = 8;
 pub const VCPU_STOP_MS: u64 = 40;
 pub const MAX_EXECUTION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EXECUTION_ROWS: u64 = 100_000;
@@ -969,13 +972,15 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
         // Window files merge first, so an hour still receiving them grows by new compacts rather
         // than rewriting its earlier ones each time. Its compacts merge together once no more
-        // than one window file is left and the hour is closed, however young the compacts are.
+        // than one window file is left and either the hour is closed, however young the
+        // compacts are, or [`COMPACT_TRIGGER`] of them have piled up in the open hour.
         let windows = candidates
             .iter()
             .filter(|(c, _)| compact::parse_compact_name(&c.key).is_none())
             .count();
+        let compacts = candidates.len() - windows;
         let closed = (hour + 3600).saturating_add(MIN_AGE_S as i64) <= self.now as i64;
-        let closing = windows < 2 && closed;
+        let closing = windows < 2 && (closed || compacts >= COMPACT_TRIGGER);
         if !closing {
             candidates.retain(|(c, _)| compact::parse_compact_name(&c.key).is_none());
         }

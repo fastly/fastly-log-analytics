@@ -11784,6 +11784,43 @@ mod request_compaction {
     }
 
     #[test]
+    fn an_open_hours_compacts_merge_together_once_they_pile_up() {
+        let fake = Fake::new(NOW);
+        fake.vcpu_step.set(0);
+        // `NOW` is on the hour: this hour is still open for the whole test.
+        let hour = NOW;
+        let mut second = 0;
+        for round in 0..compaction::COMPACT_TRIGGER {
+            for _ in 0..compaction::FILE_TRIGGER {
+                odd_window(&fake, hour + second, &[vec![round as u8; 16]]);
+                second += 1;
+            }
+            fake.now.set((hour + second + 60) as u64);
+            assert!(
+                finish(&fake, TARGET).compacts >= 1,
+                "round {round} merges its windows"
+            );
+        }
+        let query = format!("from={}&to={}", iso_url(hour), iso_url(hour + 3600));
+        assert_eq!(
+            catalog_keys(&fake, &query).1.len(),
+            compaction::COMPACT_TRIGGER
+        );
+        assert!(
+            ((fake.now.get() as i64) + compaction::MIN_AGE_S as i64)
+                < hour + 3600 + compaction::MIN_AGE_S as i64,
+            "hour still open"
+        );
+        let report = finish(&fake, TARGET);
+        assert_eq!(report.compacts, 1);
+        assert_eq!(
+            report.rows,
+            (compaction::COMPACT_TRIGGER * compaction::FILE_TRIGGER) as u64
+        );
+        assert_eq!(catalog_keys(&fake, &query).1.len(), 1);
+    }
+
+    #[test]
     fn a_failed_range_copy_part_keeps_every_unacknowledged_byte_for_retry() {
         let fake = Fake::new(NOW);
         fake.vcpu_step.set(0);
