@@ -104,6 +104,36 @@ describe("closed-hour manifest cache", () => {
     }
   });
 
+  it("shares one listing between concurrent callers of the same range", async () => {
+    const { fetchJson, calls } = server({ files: [file(T0)], gen: 1, before: T0 });
+    const args = [fetchJson, iso(T0), iso(T0 + H)] as const;
+    const results = await Promise.all([
+      fetchManifest(...args),
+      fetchManifest(...args),
+      fetchManifest(...args),
+      fetchManifest(...args),
+    ]);
+    expect(calls).toHaveLength(1);
+    for (const result of results) expect(keys(result.files)).toEqual(keys(results[0].files));
+  });
+
+  it("retries on its own signal when the shared listing's owner aborted", async () => {
+    const owner = new AbortController();
+    let listings = 0;
+    const fetchJson = vi.fn(async (_url: string, signal?: AbortSignal) => {
+      listings++;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      return { files: [file(T0)], next_cursor: null, complete: true, catalog_generation: 1 };
+    });
+    const first = fetchManifest(fetchJson, iso(T0), iso(T0 + H), owner.signal);
+    const second = fetchManifest(fetchJson, iso(T0), iso(T0 + H), new AbortController().signal);
+    owner.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    expect(keys((await second).files)).toEqual(keys([file(T0)]));
+    expect(listings).toBe(2);
+  });
+
   it("rejects pages from different committed catalog generations", async () => {
     const fetchJson = vi
       .fn()

@@ -114,6 +114,7 @@ export function manifestCacheKey(
 }
 
 export function clearCatalogManifests(): void {
+  inFlight.clear();
   snapshots.clear();
   requirements.clear();
   fetchIds = new WeakMap();
@@ -339,7 +340,63 @@ async function delta(
   };
 }
 
+const inFlight = new Map<string, Promise<Manifest>>();
+
+function isAbort(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  );
+}
+
+/**
+ * Concurrent callers asking for the same listing share one request. A page
+ * opens several panels at once; without this each one listed the range
+ * itself before the first snapshot could be cached. A caller whose own signal
+ * is still live retries if the shared request was aborted by its owner.
+ */
 export async function fetchCatalogManifest(
+  fetchJson: FetchJson,
+  from: string,
+  to: string,
+  signal: AbortSignal | undefined,
+  dataset: string | undefined,
+  view: ListView | undefined,
+  summaries: boolean | undefined,
+  loadSnapshot: (budget: ManifestBudget, fresh: boolean) => Promise<Manifest>,
+): Promise<Manifest> {
+  const key = manifestCacheKey(fetchJson, dataset, view, summaries);
+  const shareKey = `${key}|${from}|${to}`;
+  const shared = inFlight.get(shareKey);
+  if (shared) {
+    try {
+      const result = await shared;
+      signal?.throwIfAborted();
+      return result;
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (!isAbort(error)) throw error;
+    }
+  }
+  const own = fetchCatalogManifestUncached(
+    fetchJson,
+    from,
+    to,
+    signal,
+    dataset,
+    view,
+    summaries,
+    loadSnapshot,
+  );
+  inFlight.set(shareKey, own);
+  try {
+    return await own;
+  } finally {
+    if (inFlight.get(shareKey) === own) inFlight.delete(shareKey);
+  }
+}
+
+async function fetchCatalogManifestUncached(
   fetchJson: FetchJson,
   from: string,
   to: string,
