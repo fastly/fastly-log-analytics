@@ -522,6 +522,29 @@ def test_cron_task_preserves_telemetry_context(monkeypatch):
     assert captured.get("ctx") == "ctx-test"
 
 
+def test_cron_task_attributes_queries_to_the_job_in_worker_threads():
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    import backend.cron.scheduler.lifecycle as sched_mod
+    from backend.core.request_telemetry import current_attribution
+
+    seen: dict[str, object] = {}
+
+    @sched_mod.cron_task("insights_prewarmer", job_name="insights_prewarmer_job")
+    def _job(service_id: str) -> None:
+        seen["body"] = current_attribution.get()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            seen["worker"] = pool.submit(contextvars.copy_context().run, current_attribution.get).result()
+
+    _job("svc-attr")
+    for where in ("body", "worker"):
+        attribution = seen[where]
+        assert getattr(attribution, "kind", None) == "cron", where
+        assert getattr(attribution, "cron_job", None) == "insights_prewarmer_job", where
+    assert current_attribution.get() is None
+
+
 def test_cron_task_heartbeat_thread_releases_its_connection(monkeypatch):
     import backend.cron.scheduler.lifecycle as sched_mod
 

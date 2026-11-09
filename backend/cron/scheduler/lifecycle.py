@@ -94,6 +94,7 @@ def cron_task(name: str, job_name: str | None = None):
         @wraps(func)
         def wrapper(service_id: str, *args, **kwargs):
             def _body():
+                from backend.core.request_telemetry import Attribution, current_attribution
                 from backend.utils.telemetry import (
                     flush_usage_log,
                     process_context_scope,
@@ -101,11 +102,15 @@ def cron_task(name: str, job_name: str | None = None):
                 )
 
                 with process_context_scope(name):
+                    # Bare job names don't map to an attribution, so queries (and the worker
+                    # threads that copy this context) would otherwise be tagged "system".
+                    attribution_token = current_attribution.set(Attribution.cron(cron_job=job_name or name))
                     start_call_tracking()
                     try:
                         return func(service_id, *args, **kwargs)
                     finally:
                         flush_usage_log(service_id)
+                        current_attribution.reset(attribution_token)
 
             cap = _CRON_HARD_CAP_S
             with CronHeartbeat(service_id, job_name):
