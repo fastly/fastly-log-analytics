@@ -114,6 +114,11 @@ def _move_cached_path(src: Path, dst: Path) -> None:
     shutil.move(str(src), str(dst))
 
 
+def web_out_cache_key(web_tree_sha: str, recipe: bytes) -> str:
+    """Key cached web/out by the frontend tree and this build recipe, so a recipe fix rebuilds."""
+    return hashlib.sha256(web_tree_sha.encode() + b"\0" + recipe).hexdigest()
+
+
 def restore_web_out(web: Path, cache_dir: Path, web_tree_sha: str) -> bool:
     cached_out = cache_dir / "web-out"
     cached_sha = cache_dir / "web-out.sha256"
@@ -132,6 +137,15 @@ def save_web_out(web: Path, cache_dir: Path, web_tree_sha: str, web_out_ready: b
         (cache_dir / "web-out.sha256").write_text(web_tree_sha + "\n")
 
 
+REQUIRED_STATIC_ASSETS = ("maplibre-gl-worker.mjs", "maplibre-gl-shared.mjs")
+
+
+def check_static_assets(out: Path) -> None:
+    missing = [name for name in REQUIRED_STATIC_ASSETS if not (out / name).is_file()]
+    if missing:
+        raise RuntimeError(f"Static export is missing {', '.join(missing)}; map pages cannot load their worker")
+
+
 def restore_node_modules(web: Path, cache_dir: Path) -> None:
     lock_sha = hashlib.sha256((web / "package-lock.json").read_bytes()).hexdigest()
     cached_nm = cache_dir / "node_modules"
@@ -142,6 +156,8 @@ def restore_node_modules(web: Path, cache_dir: Path) -> None:
         _move_cached_path(cache_dir / "next-cache", web / ".next/cache")
         _move_cached_path(cache_dir / "tsconfig.tsbuildinfo", web / "tsconfig.tsbuildinfo")
         _move_cached_path(cache_dir / "duckdb", web / "public/duckdb")
+        # The snapshot lacks gitignored files that postinstall copies into public/ (MapLibre's worker).
+        subprocess.run(["npm", "run", "postinstall", "--if-present"], cwd=web, check=True)
         return
     for stale in (
         cached_nm,
@@ -227,14 +243,14 @@ def build(root: Path, crate: str = "cloud") -> str:
     snapshot.mkdir(parents=True, exist_ok=True)
     (snapshot / ".git").mkdir(exist_ok=True)
     web = snapshot / web_rel
-    web_tree_sha = git(root, "rev-parse", f"{sha}:{web_rel}")
+    web_out_key = web_out_cache_key(git(root, "rev-parse", f"{sha}:{web_rel}"), Path(__file__).read_bytes())
     npm_ready = False
     web_out_ready = False
     try:
         snapshot_sources(root, sha, snapshot)
         stabilize_mtimes(snapshot / crate_rel, cache_dir / "source-mtimes.json")
         if crate != "scorer":
-            if restore_web_out(web, cache_dir, web_tree_sha):
+            if restore_web_out(web, cache_dir, web_out_key):
                 web_out_ready = True
             else:
                 restore_node_modules(web, cache_dir)
@@ -254,6 +270,7 @@ def build(root: Path, crate: str = "cloud") -> str:
                         env=environment,
                         check=True,
                     )
+                    check_static_assets(web / "out")
                 else:
                     subprocess.run(["npm", "run", "build"], cwd=web, env=environment, check=True)
                 if (web / "out").is_dir():
@@ -274,7 +291,7 @@ def build(root: Path, crate: str = "cloud") -> str:
     finally:
         if crate != "scorer":
             save_web_caches(web, cache_dir, npm_ready)
-            save_web_out(web, cache_dir, web_tree_sha, web_out_ready)
+            save_web_out(web, cache_dir, web_out_key, web_out_ready)
         shutil.rmtree(snapshot, ignore_errors=True)
 
     provenance = {

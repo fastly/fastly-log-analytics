@@ -14,6 +14,7 @@ from scripts.release_compute import (  # noqa: E402, F401
     app_tree_sha,
     build,
     check_clean_app_tree,
+    check_static_assets,
     frozen_source,
     git,
     prepare_static_export_tree,
@@ -24,6 +25,7 @@ from scripts.release_compute import (  # noqa: E402, F401
     snapshot_sources,
     stabilize_mtimes,
     verify_source,
+    web_out_cache_key,
 )
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import release
 from release import (
+    check_static_assets,
     frozen_source,
     prepare_static_export_tree,
     restore_node_modules,
@@ -19,6 +20,7 @@ from release import (
     snapshot_sources,
     stabilize_mtimes,
     verify_source,
+    web_out_cache_key,
 )
 
 
@@ -108,8 +110,9 @@ def test_release_web_cache_reuses_and_invalidates_by_lockfile(tmp_path: Path, mo
 
     def fake_run(cmd: list[str], cwd: Path, check: bool) -> None:
         npm_calls.append(cmd)
-        (cwd / "node_modules").mkdir(exist_ok=True)
-        (cwd / "node_modules" / "marker.txt").write_text(f"installed-{len(npm_calls)}")
+        if cmd[:2] == ["npm", "ci"]:
+            (cwd / "node_modules").mkdir(exist_ok=True)
+            (cwd / "node_modules" / "marker.txt").write_text(f"installed-{len(npm_calls)}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -129,7 +132,8 @@ def test_release_web_cache_reuses_and_invalidates_by_lockfile(tmp_path: Path, mo
 
     # Second run with identical package-lock.json skips npm ci and restores caches
     restore_node_modules(web, cache_dir)
-    assert len(npm_calls) == 1
+    assert [call[:2] for call in npm_calls] == [["npm", "ci"], ["npm", "run"]]
+    assert npm_calls[1][2:] == ["postinstall", "--if-present"]
     assert (web / "node_modules" / "marker.txt").read_text() == "installed-1"
     assert (web / ".next/cache/webpack.pack").read_text() == "cached-webpack"
     assert (web / "tsconfig.tsbuildinfo").read_text() == "cached-tsbuildinfo"
@@ -139,8 +143,9 @@ def test_release_web_cache_reuses_and_invalidates_by_lockfile(tmp_path: Path, mo
     # Third run with modified package-lock.json invalidates cache and runs npm ci
     (web / "package-lock.json").write_text('{"lockfileVersion": 3, "v": 2}')
     restore_node_modules(web, cache_dir)
-    assert len(npm_calls) == 2
-    assert (web / "node_modules" / "marker.txt").read_text() == "installed-2"
+    assert len(npm_calls) == 3
+    assert npm_calls[2][:2] == ["npm", "ci"]
+    assert (web / "node_modules" / "marker.txt").read_text() == "installed-3"
     assert not (web / ".next/cache").exists()
     assert not (web / "tsconfig.tsbuildinfo").exists()
     assert not (web / "public/duckdb").exists()
@@ -186,6 +191,22 @@ def test_web_out_cache_reuses_and_invalidates_by_web_tree_sha(tmp_path: Path) ->
     # Different web_tree_sha invalidates cached out/
     assert not restore_web_out(web, cache_dir, "tree-sha-2")
     assert not (cache_dir / "web-out").exists()
+
+
+def test_static_export_without_maplibre_worker_fails_the_build(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "maplibre-gl-shared.mjs").write_text("shared")
+    with pytest.raises(RuntimeError, match="maplibre-gl-worker.mjs"):
+        check_static_assets(out)
+    (out / "maplibre-gl-worker.mjs").write_text("worker")
+    check_static_assets(out)
+
+
+def test_web_out_cache_key_changes_when_build_recipe_changes() -> None:
+    assert web_out_cache_key("tree-sha-1", b"recipe-1") == web_out_cache_key("tree-sha-1", b"recipe-1")
+    assert web_out_cache_key("tree-sha-1", b"recipe-1") != web_out_cache_key("tree-sha-1", b"recipe-2")
+    assert web_out_cache_key("tree-sha-1", b"recipe-1") != web_out_cache_key("tree-sha-2", b"recipe-1")
 
 
 def write_package(repository: Path, sha: str) -> Path:
