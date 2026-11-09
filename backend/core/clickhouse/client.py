@@ -489,12 +489,23 @@ class ClickHouseClient:
         """Synchronously remove a failed high-scale batch before a retry."""
         if table not in CLICKHOUSE_HIGH_SCALE_TABLES:
             raise ValueError("ClickHouse table is not internally allowlisted")
-        # request_insight_hourly is filled by a materialized view on request_facts, so it holds the batch too.
-        for target in (table, "request_insight_hourly") if table == "request_facts" else (table,):
+        targets = [table]
+        # request_insight_hourly is filled by a materialized view on request_facts, so it holds the batch too;
+        # it exists only once the rollup schema is installed, and retry cleanup must not depend on that.
+        if table == "request_facts" and self._table_exists("request_insight_hourly"):
+            targets.append("request_insight_hourly")
+        for target in targets:
             self.execute(
                 f"ALTER TABLE `{target}` DELETE WHERE batch_id={{batch_id:UUID}} SETTINGS mutations_sync=2",
                 {"batch_id": batch_id},
             )
+
+    def _table_exists(self, name: str) -> bool:
+        rows = self.execute(
+            "SELECT count() AS n FROM system.tables WHERE database = currentDatabase() AND name = {name:String}",
+            {"name": name},
+        )
+        return bool(rows and int(rows[0].get("n") or 0))
 
     def health(self) -> dict:
         """Exercise authenticated database access; unavailable is an explicit exception."""

@@ -395,13 +395,29 @@ def test_internal_ddl_and_insert_and_delete(clients, settings):
     clients(lambda _: pytest.fail("HTTP called for empty batch")).insert_rows(ch.CLICKHOUSE_FACT_TABLE, ["country"], [])
 
     seen: list[dict] = []
-    client = clients(lambda req: seen.append(query_form(req)) or httpx.Response(200, content=b""))
+    rollup_installed = [True]
+
+    def delete_handler(req):
+        form = query_form(req)
+        if "system.tables" in form["query"][0]:
+            return httpx.Response(200, json={"data": [{"n": int(rollup_installed[0])}]})
+        seen.append(form)
+        return httpx.Response(200, content=b"")
+
+    client = clients(delete_handler)
     client.delete_batch_rows("request_facts", "123e4567-e89b-12d3-a456-426614174000")
     assert [form["query"] for form in seen] == [
         ["ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"],
         ["ALTER TABLE `request_insight_hourly` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"],
     ]
     assert all(form["param_batch_id"] == ["123e4567-e89b-12d3-a456-426614174000"] for form in seen)
+    seen.clear()
+    # Before the rollup schema is installed, retry cleanup must still succeed on request_facts alone.
+    rollup_installed[0] = False
+    client.delete_batch_rows("request_facts", "123e4567-e89b-12d3-a456-426614174000")
+    assert [form["query"] for form in seen] == [
+        ["ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"]
+    ]
     seen.clear()
     client.delete_batch_rows("rum_vitals_facts", "123e4567-e89b-12d3-a456-426614174000")
     assert [form["query"] for form in seen] == [
