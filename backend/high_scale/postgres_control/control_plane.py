@@ -50,7 +50,14 @@ _ACTIVITY_BUCKET_FORMATS = {
     "day": "YYYY-MM-DD",
 }
 
-SCHEMA_DDL = """
+# Advisory lock keys; 2080406 is the ClickHouse control schema lock in backend/core/clickhouse/health.py.
+SCHEMA_LOCK_KEY = 2080407
+COMMITTED_MANIFEST_INDEX_LOCK_KEY = 2080408
+
+# Every pod runs this at boot. The transaction lock serializes them: concurrent CREATE TABLE IF NOT EXISTS races on
+# the catalog, and concurrent constraint swaps would each drop the other's constraint.
+SCHEMA_DDL = f"""
+SELECT pg_advisory_xact_lock({SCHEMA_LOCK_KEY});
 CREATE TABLE IF NOT EXISTS high_scale_ownership (
     service_id TEXT PRIMARY KEY, owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0),
     current_owner TEXT NOT NULL, previous_owner TEXT, source_cursor TEXT NOT NULL,
@@ -187,8 +194,6 @@ CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
 
 # Built by ``ensure_committed_manifest_index``, not SCHEMA_DDL: CONCURRENTLY cannot run inside a transaction.
 COMMITTED_MANIFEST_INDEX = "high_scale_archive_manifests_committed_idx"
-# Advisory lock keys; 2080406 is the ClickHouse control schema lock in backend/core/clickhouse/health.py.
-COMMITTED_MANIFEST_INDEX_LOCK_KEY = 2080408
 _COMMITTED_MANIFEST_INDEX_DDL = (
     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {COMMITTED_MANIFEST_INDEX} "
     "ON high_scale_archive_manifests (service_id, created_at, manifest_id) WHERE state = 'manifest_committed'"

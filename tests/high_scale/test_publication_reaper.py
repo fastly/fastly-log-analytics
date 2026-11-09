@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import psycopg
 import pytest
+from psycopg_pool import ConnectionPool
 
 from backend.high_scale import publication_reaper
 from backend.high_scale.archive import (
@@ -25,6 +26,7 @@ from backend.high_scale.postgres_control import SCHEMA_DDL, HighScaleDeletionSwe
 from backend.high_scale.postgres_control.control_plane import (
     COMMITTED_MANIFEST_INDEX,
     COMMITTED_MANIFEST_INDEX_LOCK_KEY,
+    SCHEMA_LOCK_KEY,
 )
 from backend.high_scale.publication_reaper import PublicationReaper, clickhouse_visible_receipts, publication_batch_id
 
@@ -252,6 +254,77 @@ def test_a_no_op_schema_bootstrap_takes_no_lock_on_archive_manifests(seed) -> No
                 connection.execute(SCHEMA_DDL)
         finally:
             index_build.rollback()
+
+
+def test_schema_bootstrap_waits_for_another_pods_schema_transaction(seed) -> None:
+    with _session() as other_pod:
+        other_pod.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK_KEY,))
+        with pytest.raises(psycopg.errors.LockNotAvailable), seed.control.transaction() as connection:
+            connection.execute("SET LOCAL lock_timeout = '200ms'")
+            connection.execute(SCHEMA_DDL)
+
+
+def _create_schema_from_several_pods_at_once(control: PostgresControlPlane, pods: int = 4) -> None:
+    barrier = threading.Barrier(pods)
+    errors: list[BaseException] = []
+
+    def boot() -> None:
+        barrier.wait(10)
+        try:
+            control.create_schema()
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=boot) for _ in range(pods)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    assert errors == []
+
+
+def test_several_pods_creating_and_upgrading_the_schema_at_once_all_succeed() -> None:
+    schema = f"pubreaper_race_{os.getpid()}_{time.monotonic_ns()}"
+    with _session() as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    pool = ConnectionPool(
+        conninfo=os.environ["METADATA_DSN"],
+        kwargs={"autocommit": True, "options": f"-csearch_path={schema}"},
+        min_size=4,
+        max_size=4,
+        timeout=30,
+    )
+    try:
+        pool.open(wait=True)
+        control = PostgresControlPlane(pool=pool, pool_timeout=30)
+        _create_schema_from_several_pods_at_once(control)
+        with pool.connection() as connection:
+            connection.execute(
+                "ALTER TABLE high_scale_publication_manifests "
+                "DROP CONSTRAINT high_scale_publication_manifests_status_check"
+            )
+            connection.execute(
+                "ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT "
+                "high_scale_publication_manifests_status_check CHECK (status IN ('pending', 'visible'))"
+            )
+
+        _create_schema_from_several_pods_at_once(control)
+
+        with pool.connection() as connection:
+            checks = connection.execute(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = 'high_scale_publication_manifests'::regclass AND contype = 'c' "
+                "AND pg_get_constraintdef(oid) LIKE '%%status%%'"
+            ).fetchall()
+            index = connection.execute(
+                "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (COMMITTED_MANIFEST_INDEX,)
+            ).fetchone()
+        assert len(checks) == 1 and "superseded" in checks[0][0]
+        assert index is not None and index[0]
+    finally:
+        pool.close()
+        with _session() as admin:
+            admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
 
 
 def test_reaper_supersedes_orphan_only_on_apply_and_is_idempotent(seed) -> None:
