@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from psycopg_pool import ConnectionPool
 
 from backend.core.metadata.base import get_pg_pool
@@ -110,14 +111,33 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     CHECK (coverage_end >= coverage_start), CHECK (retention_deadline >= coverage_end),
     CHECK (deletion_authorization_deadline >= retention_deadline)
 );
-ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
-ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS archive_expired_at TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx ON high_scale_archive_manifests (service_id, source_key);
-CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_domain_expiry_idx
-    ON high_scale_archive_manifests (service_id, domain, coverage_end)
-    WHERE state = 'source_deleted' AND archive_expired_at IS NULL;
-CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_committed_idx
-    ON high_scale_archive_manifests (service_id, created_at, manifest_id) WHERE state = 'manifest_committed';
+-- Catalog-guarded so a boot with nothing to change takes no lock on the table. ALTER and CREATE INDEX lock it
+-- even when IF NOT EXISTS makes them no-ops, which would queue them (and every writer behind them) behind
+-- another pod's concurrent index build, and that build would then deadlock waiting for this transaction.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_archive_manifests'::regclass
+          AND attname = 'sources_json' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_archive_manifests'::regclass
+          AND attname = 'archive_expired_at' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS archive_expired_at TIMESTAMPTZ;
+    END IF;
+    IF to_regclass('high_scale_archive_manifest_source_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx
+            ON high_scale_archive_manifests (service_id, source_key);
+    END IF;
+    IF to_regclass('high_scale_archive_manifests_domain_expiry_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_archive_manifests_domain_expiry_idx
+            ON high_scale_archive_manifests (service_id, domain, coverage_end)
+            WHERE state = 'source_deleted' AND archive_expired_at IS NULL;
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id) ON DELETE CASCADE,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -164,6 +184,18 @@ CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     PRIMARY KEY (object_id, manifest_id)
 );
 """
+
+# Built by ``ensure_committed_manifest_index``, not SCHEMA_DDL: CONCURRENTLY cannot run inside a transaction.
+COMMITTED_MANIFEST_INDEX = "high_scale_archive_manifests_committed_idx"
+# Advisory lock keys; 2080406 is the ClickHouse control schema lock in backend/core/clickhouse/health.py.
+COMMITTED_MANIFEST_INDEX_LOCK_KEY = 2080408
+_COMMITTED_MANIFEST_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {COMMITTED_MANIFEST_INDEX} "
+    "ON high_scale_archive_manifests (service_id, created_at, manifest_id) WHERE state = 'manifest_committed'"
+)
+# A concurrent build waits for every older transaction in the database; an idle-in-transaction session would
+# otherwise stall the booting worker forever. Timing out leaves an INVALID index the next boot rebuilds.
+_INDEX_BUILD_LOCK_TIMEOUT = "60s"
 
 
 @dataclass(frozen=True)
@@ -232,6 +264,39 @@ class PostgresControlPlane:
     def create_schema(self) -> None:
         with self.transaction() as connection:
             connection.execute(SCHEMA_DDL)
+        try:
+            self.ensure_committed_manifest_index()
+        except psycopg.Error:
+            logger.warning(
+                "high-scale committed-manifest index build failed; the publication reaper scans without it",
+                exc_info=True,
+            )
+
+    def ensure_committed_manifest_index(self) -> str:
+        """Build the publication reaper's partial index without blocking writers.
+
+        Runs on an autocommit connection after the schema transaction has committed. One pod builds under a
+        session advisory lock and the others skip; an INVALID leftover of an interrupted build is dropped and
+        rebuilt. The reaper only reads faster with the index. Returns present, built, rebuilt or skipped.
+        """
+        ctx = (
+            self.pool.connection(timeout=self.pool_timeout) if self.pool_timeout is not None else self.pool.connection()
+        )
+        with ctx as connection:
+            autocommit = connection.autocommit
+            connection.autocommit = True
+            try:
+                locked = connection.execute(
+                    "SELECT pg_try_advisory_lock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,)
+                ).fetchone()
+                if locked is None or not locked[0]:
+                    return "skipped"
+                try:
+                    return _build_committed_manifest_index(connection)
+                finally:
+                    connection.execute("SELECT pg_advisory_unlock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,))
+            finally:
+                connection.autocommit = autocommit
 
     def operational_snapshot(self, service_id: str) -> dict[str, list[dict[str, Any]]]:
         """Return bounded aggregate state for high-scale operational metrics."""
@@ -1405,6 +1470,23 @@ class PostgresControlPlane:
     @classmethod
     def _locked_archive_manifest(cls, connection: Any, manifest_id: str) -> ArchiveManifestRecord:
         return cls._archive_manifest(connection, manifest_id, for_update=True)
+
+
+def _build_committed_manifest_index(connection: Any) -> str:
+    row = connection.execute(
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (COMMITTED_MANIFEST_INDEX,)
+    ).fetchone()
+    if row is not None and row[0]:
+        return "present"
+    if row is not None:
+        logger.warning("dropping invalid %s left by an interrupted concurrent build", COMMITTED_MANIFEST_INDEX)
+        connection.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {COMMITTED_MANIFEST_INDEX}")
+    connection.execute(f"SET lock_timeout = '{_INDEX_BUILD_LOCK_TIMEOUT}'")
+    try:
+        connection.execute(_COMMITTED_MANIFEST_INDEX_DDL)
+    finally:
+        connection.execute("RESET lock_timeout")
+    return "built" if row is None else "rebuilt"
 
 
 def _fetch_required(connection: Any, sql: str, params: Sequence[Any], key: Any, *, for_update: bool = False) -> Any:

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 from unittest.mock import MagicMock
 
+import psycopg
 import pytest
 
 from backend.high_scale import publication_reaper
@@ -17,7 +21,11 @@ from backend.high_scale.archive import (
 )
 from backend.high_scale.archive.clickhouse_batch import SupersededPublication, publication_batch_uuid
 from backend.high_scale.archive.manifests import build_batch_id_from_manifest_id
-from backend.high_scale.postgres_control import HighScaleDeletionSweeper, PostgresControlPlane
+from backend.high_scale.postgres_control import SCHEMA_DDL, HighScaleDeletionSweeper, PostgresControlPlane
+from backend.high_scale.postgres_control.control_plane import (
+    COMMITTED_MANIFEST_INDEX,
+    COMMITTED_MANIFEST_INDEX_LOCK_KEY,
+)
 from backend.high_scale.publication_reaper import PublicationReaper, clickhouse_visible_receipts, publication_batch_id
 
 
@@ -25,23 +33,68 @@ def _no_receipts(_service_id: str, _batch_uuids: frozenset[str]) -> set[str]:
     return set()
 
 
+_ARCHIVE_INSERT_SQL = (
+    "INSERT INTO high_scale_archive_manifests (manifest_id, service_id, domain, source_key, source_checksum, "
+    "source_size, artifact_uri, artifact_checksum, artifact_size, row_count, byte_count, canonical_digest, "
+    "schema_version, transform_version, coverage_start, coverage_end, retention_deadline, "
+    "deletion_authorization_deadline, archive_epoch, owner_epoch, state, created_at) VALUES "
+    "(%s, %s, %s, 'raw/k', 'c', 1, %s, 'c', 1, 1, 1, 'd', 'v', 'v', clock_timestamp(), clock_timestamp(), "
+    "clock_timestamp(), clock_timestamp(), 0, 1, %s, clock_timestamp() - make_interval(secs => %s))"
+)
+
+
+def _session(*, autocommit: bool = True) -> psycopg.Connection:
+    """A connection outside the pool, standing in for another pod."""
+    return psycopg.connect(os.environ["METADATA_DSN"], autocommit=autocommit)
+
+
+def _committed_index(control: PostgresControlPlane) -> tuple[bool, bool] | None:
+    """``(valid, unique)`` of the committed-manifest index, or None when it does not exist."""
+    with control.transaction(read_only=True) as connection:
+        row = connection.execute(
+            "SELECT indisvalid, indisunique FROM pg_index WHERE indexrelid = to_regclass(%s)",
+            (COMMITTED_MANIFEST_INDEX,),
+        ).fetchone()
+    return None if row is None else (bool(row[0]), bool(row[1]))
+
+
+def _drop_committed_index(control: PostgresControlPlane) -> None:
+    with control.transaction() as connection:
+        connection.execute(f"DROP INDEX IF EXISTS {COMMITTED_MANIFEST_INDEX}")
+
+
+def _wait_for_index_build_to_wait_on_a_lock() -> None:
+    deadline = time.monotonic() + 10
+    with _session() as observer:
+        while time.monotonic() < deadline:
+            if observer.execute(
+                "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() "
+                "AND query LIKE 'CREATE INDEX CONCURRENTLY%' AND wait_event_type = 'Lock'"
+            ).fetchone():
+                return
+            time.sleep(0.05)
+    raise AssertionError("the concurrent index build never reached its wait for the open writer")
+
+
 class _Seed:
     def __init__(self, control: PostgresControlPlane, sid: str) -> None:
         self.control, self.sid = control, sid
 
     def archive(
-        self, manifest_id: str, domain: str, *, state: str = "manifest_committed", age_hours: float = 2
+        self,
+        manifest_id: str,
+        domain: str,
+        *,
+        state: str = "manifest_committed",
+        age_hours: float = 2,
+        connection: psycopg.Connection | None = None,
     ) -> None:
-        with self.control.transaction() as connection:
-            connection.execute(
-                "INSERT INTO high_scale_archive_manifests (manifest_id, service_id, domain, source_key, source_checksum, "
-                "source_size, artifact_uri, artifact_checksum, artifact_size, row_count, byte_count, canonical_digest, "
-                "schema_version, transform_version, coverage_start, coverage_end, retention_deadline, "
-                "deletion_authorization_deadline, archive_epoch, owner_epoch, state, created_at) VALUES "
-                "(%s, %s, %s, 'raw/k', 'c', 1, %s, 'c', 1, 1, 1, 'd', 'v', 'v', clock_timestamp(), clock_timestamp(), "
-                "clock_timestamp(), clock_timestamp(), 0, 1, %s, clock_timestamp() - make_interval(secs => %s))",
-                (manifest_id, self.sid, domain, f"s3://a/{manifest_id}.parquet", state, age_hours * 3600),
-            )
+        params = (manifest_id, self.sid, domain, f"s3://a/{manifest_id}.parquet", state, age_hours * 3600)
+        if connection is not None:
+            connection.execute(_ARCHIVE_INSERT_SQL, params)
+            return
+        with self.control.transaction() as pooled:
+            pooled.execute(_ARCHIVE_INSERT_SQL, params)
 
     def source(
         self, manifest_id: str, key: str, *, status: str, owner_manifest: str | None, domain: str = "request"
@@ -135,6 +188,70 @@ def test_superseded_status_is_accepted_by_existing_schema_and_round_trips(seed) 
     assert manifest is not None and manifest.status is PublicationStatus.SUPERSEDED
     publications = {p["domain"]: p for p in seed.control.operational_snapshot(seed.sid)["publications"]}
     assert publications["request"]["pending"] == 0 and publications["request"]["lag_seconds"] == 0
+
+
+def test_create_schema_builds_the_committed_manifest_index_and_a_second_run_leaves_it(seed) -> None:
+    _drop_committed_index(seed.control)
+    seed.control.create_schema()
+    assert _committed_index(seed.control) == (True, False)
+    assert seed.control.ensure_committed_manifest_index() == "present"
+
+
+def test_an_invalid_leftover_committed_manifest_index_is_dropped_and_rebuilt(seed) -> None:
+    _drop_committed_index(seed.control)
+    seed.archive("dup-a", "request")
+    seed.archive("dup-b", "request")
+    with _session() as interrupted, pytest.raises(psycopg.errors.UniqueViolation):
+        interrupted.execute(
+            f"CREATE UNIQUE INDEX CONCURRENTLY {COMMITTED_MANIFEST_INDEX} "
+            "ON high_scale_archive_manifests (service_id) WHERE state = 'manifest_committed'"
+        )
+    assert _committed_index(seed.control) == (False, True)
+
+    seed.control.create_schema()
+
+    assert _committed_index(seed.control) == (True, False)
+
+
+def test_committed_manifest_index_build_is_skipped_while_another_pod_holds_the_build_lock(seed) -> None:
+    _drop_committed_index(seed.control)
+    with _session() as other_pod:
+        other_pod.execute("SELECT pg_advisory_lock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,))
+        assert seed.control.ensure_committed_manifest_index() == "skipped"
+        assert _committed_index(seed.control) is None
+    assert seed.control.ensure_committed_manifest_index() == "built"
+    assert _committed_index(seed.control) == (True, False)
+
+
+def test_committed_manifest_index_build_does_not_block_writers(seed) -> None:
+    _drop_committed_index(seed.control)
+    results: list[str] = []
+    with _session(autocommit=False) as open_writer:
+        seed.archive("open-writer", "request", connection=open_writer)
+        build = threading.Thread(target=lambda: results.append(seed.control.ensure_committed_manifest_index()))
+        build.start()
+        try:
+            _wait_for_index_build_to_wait_on_a_lock()
+            with _session() as later_writer:
+                later_writer.execute("SET lock_timeout = '2s'")
+                seed.archive("later-writer", "request", connection=later_writer)
+        finally:
+            open_writer.rollback()
+            build.join(30)
+    assert results == ["built"]
+    assert _committed_index(seed.control) == (True, False)
+
+
+def test_a_no_op_schema_bootstrap_takes_no_lock_on_archive_manifests(seed) -> None:
+    """A running concurrent index build holds SHARE UPDATE EXCLUSIVE; another pod's boot must not queue behind it."""
+    with _session(autocommit=False) as index_build:
+        index_build.execute("LOCK TABLE high_scale_archive_manifests IN SHARE UPDATE EXCLUSIVE MODE")
+        try:
+            with seed.control.transaction() as connection:
+                connection.execute("SET LOCAL lock_timeout = '1s'")
+                connection.execute(SCHEMA_DDL)
+        finally:
+            index_build.rollback()
 
 
 def test_reaper_supersedes_orphan_only_on_apply_and_is_idempotent(seed) -> None:
