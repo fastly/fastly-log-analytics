@@ -394,14 +394,19 @@ def test_internal_ddl_and_insert_and_delete(clients, settings):
     assert clients(handler).insert_rows(ch.CLICKHOUSE_FACT_TABLE, columns, [r]) is None
     clients(lambda _: pytest.fail("HTTP called for empty batch")).insert_rows(ch.CLICKHOUSE_FACT_TABLE, ["country"], [])
 
-    seen = {}
-    clients(lambda req: seen.update(query_form(req)) or httpx.Response(200, content=b"")).delete_batch_rows(
-        "request_facts", "123e4567-e89b-12d3-a456-426614174000"
-    )
-    assert seen["query"] == [
-        "ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"
+    seen: list[dict] = []
+    client = clients(lambda req: seen.append(query_form(req)) or httpx.Response(200, content=b""))
+    client.delete_batch_rows("request_facts", "123e4567-e89b-12d3-a456-426614174000")
+    assert [form["query"] for form in seen] == [
+        ["ALTER TABLE `request_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"],
+        ["ALTER TABLE `request_insight_hourly` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"],
     ]
-    assert seen["param_batch_id"] == ["123e4567-e89b-12d3-a456-426614174000"]
+    assert all(form["param_batch_id"] == ["123e4567-e89b-12d3-a456-426614174000"] for form in seen)
+    seen.clear()
+    client.delete_batch_rows("rum_vitals_facts", "123e4567-e89b-12d3-a456-426614174000")
+    assert [form["query"] for form in seen] == [
+        ["ALTER TABLE `rum_vitals_facts` DELETE WHERE batch_id={batch_id:UUID} SETTINGS mutations_sync=2"]
+    ]
 
 
 @pytest.mark.parametrize("table", ["arbitrary_table", "system.users", "logs; DROP TABLE logs", "`logs`", ""])

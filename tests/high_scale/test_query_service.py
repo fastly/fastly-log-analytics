@@ -37,6 +37,7 @@ from backend.high_scale.insights import (
     cache_collapse_detail_endpoint,
     insights_endpoint,
 )
+from backend.high_scale.insights.rollup import ROLLUP_DETECTIONS, ROLLUP_SHAPES
 from backend.high_scale.network import (
     get_pop_health,
     get_transport_metrics,
@@ -2229,6 +2230,98 @@ def test_crawler_disparity_guard_reads_only_window_rows() -> None:
     # Each reference to the full-range crawler_traffic CTE is another full baseline scan.
     assert sql.count("FROM crawler_traffic") == 1
     assert "FROM base WHERE is_w) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING count() >= 50" in sql
+
+
+class _RollupInsightsClient(_InsightsClient):
+    """History reports per-hour totals; the rollup matches them except for the ``mismatch``-th baseline hour."""
+
+    def __init__(self, *, mismatch: int | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.mismatch = mismatch
+
+    @staticmethod
+    def _hours(start: datetime, end: datetime) -> list[int]:
+        hour = int(start.timestamp()) // 3600 * 3600
+        return list(range(hour, int(end.timestamp()) + 1, 3600))
+
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+        rows = super().execute(sql, params)
+        params = params or {}
+        if "/* insight:history */" in sql and "groupArray(hour)" in sql:
+            hours = self._hours(params["baseline_start"], params["window_end"])
+            rows[0] |= {"hours": hours, "hour_rows": [7] * len(hours), "hour_checksums": [str(h * 3) for h in hours]}
+        if "/* insight:rollup_coverage */" in sql:
+            hours = self._hours(params["coverage_start"], params["coverage_end"] - timedelta(seconds=1))
+            assert params["coverage_start"] == datetime.fromtimestamp(hours[0], UTC)
+            bad = hours[self.mismatch] if self.mismatch is not None else None
+            return [
+                {"shape": shape, "hour": str(h), "row_count": "7", "batch_checksum": str(h * 3 + (h == bad))}
+                for shape in ROLLUP_SHAPES
+                for h in hours
+            ]
+        return rows
+
+
+def _floor_hour(value: datetime) -> datetime:
+    return value.replace(minute=0, second=0, microsecond=0)
+
+
+def _ceil_hour(value: datetime) -> datetime:
+    floor = _floor_hour(value)
+    return floor if floor == value else floor + timedelta(hours=1)
+
+
+def test_insights_read_fully_matched_baseline_hours_from_the_rollup() -> None:
+    client = _RollupInsightsClient()
+    cards = _insight_cards(_run_insights(client))
+    assert all(card["severity"] == "clean" for card in cards.values())
+    queries = client.queries()
+    history_sql, params = queries["history"]
+    assert "sum(cityHash64(batch_id)) AS batch_checksum" in history_sql and "GROUP BY hour" in history_sql
+    expected = (_ceil_hour(params["baseline_start"]), _floor_hour(params["window_start"]))
+    coverage_sql, coverage_params = queries["rollup_coverage"]
+    assert (coverage_params["coverage_start"], coverage_params["coverage_end"]) == expected
+    assert "high_scale_batch_publications FINAL" in coverage_sql and "FROM request_insight_hourly" in coverage_sql
+    for insight_id in EVERY_CARD:
+        sql, detection_params = queries[insight_id]
+        if insight_id in ROLLUP_DETECTIONS:
+            assert f"shape = '{ROLLUP_DETECTIONS[insight_id]}'" in sql, insight_id
+            assert (detection_params["rollup_start"], detection_params["rollup_end"]) == expected
+        else:
+            assert "request_insight_hourly" not in sql and "rollup_start" not in detection_params, insight_id
+    for sql, call_params in client.calls:
+        assert "svc" not in sql and all(name in call_params for name in re.findall(r"\{(\w+):", sql))
+
+
+def test_insights_rollup_skips_hours_whose_totals_disagree() -> None:
+    # Baseline hour 100 of ~168 disagrees: the hours before it form the longest matching run.
+    client = _RollupInsightsClient(mismatch=100)
+    _run_insights(client)
+    first = client.queries()["rollup_coverage"][1]["coverage_start"]
+    _, detection_params = client.queries()["error_spikes"]
+    assert (detection_params["rollup_start"], detection_params["rollup_end"]) == (first, first + timedelta(hours=100))
+
+
+@pytest.mark.parametrize("case", ["filtered", "coverage_fails", "no_hours"])
+def test_insights_fall_back_to_raw_facts_when_the_rollup_cannot_be_trusted(case: str) -> None:
+    if case == "no_hours":
+        client: _InsightsClient = _InsightsClient()
+    else:
+        client = _RollupInsightsClient(fail={"rollup_coverage"} if case == "coverage_fails" else None)
+    if case == "filtered":
+        req = InsightsRequest(filters={"url": FilterSpec(mode="include", values=["/a"])})
+        response = insights_endpoint(SimpleNamespace(service_id="svc", client=client), req, None, None, False)  # type: ignore[arg-type]
+    else:
+        response = _run_insights(client)
+    cards = _insight_cards(response)
+    assert all(card["severity"] == "clean" for card in cards.values())
+    queries = client.queries()
+    assert ("rollup_coverage" in queries) == (case == "coverage_fails")
+    if case == "filtered":
+        assert "groupArray" not in queries["history"][0]
+    for insight_id in ROLLUP_DETECTIONS:
+        sql, params = queries[insight_id]
+        assert "request_insight_hourly" not in sql and "rollup_start" not in params, (case, insight_id)
 
 
 @pytest.mark.parametrize("fails", [False, True])

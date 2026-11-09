@@ -29,6 +29,7 @@ CLICKHOUSE_HIGH_SCALE_TABLES = frozenset(
         "high_scale_batch_publications",
         "request_facts",
         "request_aggregates",
+        "request_insight_hourly",
         "rum_vitals_facts",
         "rum_error_facts",
         "cmcd_projection_facts",

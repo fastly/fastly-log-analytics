@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import contextvars
+import logging
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as _wait_futures
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
@@ -69,7 +71,10 @@ from backend.repositories.utils.response_shaping import (
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
+from .rollup import ROLLUP_DETECTIONS, baseline_hours_span, coverage_sql, covered_span, hour_totals, rollup_base_sql
 from .sql_queries import Detection, _base_sql, _detection_for
+
+logger = logging.getLogger(__name__)
 
 _MAX_WORKERS = 4
 _FIELD_SAMPLE_ROWS = 1000
@@ -129,6 +134,24 @@ def _asn_context(service_id: str, rows: list[tuple[Any, ...]], insight_id: str) 
     return build_insight_asn_context(service_id, rows, insight_id, include_dma="metro" in insight_id)
 
 
+def _rollup_spans(
+    history: dict[str, Any], coverage: list[dict[str, Any]], baseline_start: datetime, window_start: datetime
+) -> dict[str, tuple[datetime, datetime]]:
+    """Per rollup shape, the baseline hours its rows can replace (absent when none match the raw facts)."""
+    hours = history.get("hours")
+    if not hours or not coverage:
+        return {}
+    raw = hour_totals(zip(hours, history.get("hour_rows") or [], history.get("hour_checksums") or [], strict=True))
+    by_shape: dict[str, list[tuple[object, object, object]]] = {}
+    for row in coverage:
+        by_shape.setdefault(str(row["shape"]), []).append((row["hour"], row["row_count"], row["batch_checksum"]))
+    spans: dict[str, tuple[datetime, datetime]] = {}
+    for shape, rows in by_shape.items():
+        if span := covered_span(baseline_start, window_start, raw, hour_totals(rows)):
+            spans[shape] = span
+    return spans
+
+
 def _evaluate(
     service: HighScaleService,
     window_hours: float,
@@ -160,17 +183,45 @@ def _evaluate(
         **filter_params,
     }
     in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
-    history_sql = (
-        "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
-        "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
-        f"FROM request_facts WHERE {scope} AND {in_range}"
-    )
+    # The rollup has no per-request columns, so a filtered evaluation always reads raw facts.
+    use_rollup = not filter_clause
+    if use_rollup:
+        # Per-hour row counts and batch checksums let the rollup replace exactly the hours it matches.
+        history_sql = (
+            "/* insight:history */ SELECT min(earliest) AS earliest, sum(window_total) AS window_total, "
+            "groupArray(hour) AS hours, groupArray(row_count) AS hour_rows, "
+            "groupArray(batch_checksum) AS hour_checksums FROM ("
+            "SELECT toUInt32(toUnixTimestamp(toStartOfHour(event_timestamp))) AS hour, "
+            "min(event_timestamp) AS earliest, "
+            "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total, "
+            "count() AS row_count, sum(cityHash64(batch_id)) AS batch_checksum "
+            f"FROM request_facts WHERE {scope} AND {in_range} GROUP BY hour)"
+        )
+    else:
+        history_sql = (
+            "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
+            "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
+            f"FROM request_facts WHERE {scope} AND {in_range}"
+        )
+    coverage_start, coverage_end = baseline_hours_span(baseline_start, window_start)
+    coverage_params = {**params, "coverage_start": coverage_start, "coverage_end": coverage_end}
+
+    def read_coverage() -> list[dict[str, Any]]:
+        try:
+            return service.client.execute(coverage_sql(), coverage_params)
+        except Exception as exc:
+            logger.warning("insights rollup coverage unavailable for %s: %s", service.service_id, exc)
+            return []
+
     sample_sql = (
         "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
         f"SELECT custom_fields FROM request_facts WHERE {scope} AND {in_range} "
         f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
     )
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta") as meta_pool:
+    # Pending cards need only history and fields; the coverage read finishes behind them.
+    meta_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta")
+    fut_coverage = None
+    try:
         fut_history = trace.submit(
             meta_pool, "history", lambda: service.client.execute(history_sql, params), source="fact"
         )
@@ -179,9 +230,13 @@ def _evaluate(
         )
         history = fut_history.result()
         sample = fut_sample.result()
-    earliest = history[0].get("earliest") if history else None
-    window_total = int(history[0].get("window_total") or 0) if history else 0
-    history_hours = compute_available_history_hours(now, earliest)
+        earliest = history[0].get("earliest") if history else None
+        window_total = int(history[0].get("window_total") or 0) if history else 0
+        history_hours = compute_available_history_hours(now, earliest)
+        if use_rollup and coverage_start < coverage_end and history_hours >= baseline_hours and history[0].get("hours"):
+            fut_coverage = trace.submit(meta_pool, "rollup_coverage", read_coverage, source="projection")
+    finally:
+        meta_pool.shutdown(wait=False)
     present = set(_BASE_FIELDS)
     present.update(sample[0].get("fields") or [] if sample else [])
     fingerprint = _fingerprint_column(present) or "ja3"
@@ -198,7 +253,16 @@ def _evaluate(
                 history_hours,
             )
         try:
-            sql = _base_sql(detection, definition.id)
+            shape = ROLLUP_DETECTIONS.get(definition.id)
+            span = rollup_spans.get(shape) if shape else None
+            query_params = params
+            source: Literal["fact", "mixed"] = "fact"
+            if shape and span:
+                sql = rollup_base_sql(detection, definition.id, shape)
+                query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
+                source = "mixed"
+            else:
+                sql = _base_sql(detection, definition.id)
             if filter_clause:
                 sql = sql.replace(
                     "AND event_timestamp <= {window_end:DateTime64(3)}",
@@ -206,7 +270,7 @@ def _evaluate(
                 )
             rows = [
                 tuple(row.values())
-                for row in trace.run(definition.id, lambda: service.client.execute(sql, params), source="fact")
+                for row in trace.run(definition.id, lambda: service.client.execute(sql, query_params), source=source)
             ]
             return shape_insight_card_from_rows(
                 definition,
@@ -270,6 +334,8 @@ def _evaluate(
                 pending=True,
             )
         )
+    coverage = fut_coverage.result() if fut_coverage is not None else []
+    rollup_spans = _rollup_spans(history[0] if history else {}, coverage, baseline_start, window_start)
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
         futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
         cards = [future.result() for future in futures]

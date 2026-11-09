@@ -165,3 +165,54 @@ GROUP BY
     bucket_start,
     dimension,
     value;
+
+CREATE TABLE IF NOT EXISTS request_insight_hourly
+(
+    service_id LowCardinality(String),
+    bucket_start DateTime('UTC'),
+    shape LowCardinality(String),
+    batch_id UUID,
+    publication_state Enum8('pending' = 1, 'visible' = 2),
+    url String,
+    country LowCardinality(String),
+    cf_status LowCardinality(String),
+    cf_cache LowCardinality(String),
+    cf_transport LowCardinality(String),
+    cf_ost LowCardinality(String),
+    cf_p_type LowCardinality(String),
+    cf_method LowCardinality(String),
+    cf_c_type LowCardinality(String),
+    cf_c_speed LowCardinality(String),
+    cf_city LowCardinality(String),
+    cf_region LowCardinality(String),
+    cf_asn LowCardinality(String),
+    cf_ua LowCardinality(String),
+    cf_referer LowCardinality(String),
+    cf_waf_sig LowCardinality(String),
+    request_count UInt64
+)
+ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/request_insight_hourly', '{replica}')
+PARTITION BY toYYYYMMDD(bucket_start)
+ORDER BY (service_id, shape, bucket_start, batch_id, publication_state,
+          url, country, cf_status, cf_cache, cf_transport, cf_ost, cf_p_type, cf_method, cf_c_type, cf_c_speed, cf_city, cf_region, cf_asn, cf_ua, cf_referer, cf_waf_sig)
+TTL bucket_start + INTERVAL 30 DAY;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS request_insight_hourly_mv
+TO request_insight_hourly
+AS SELECT service_id, bucket_start, k.1 AS shape, batch_id, publication_state,
+    k.2 AS url, k.3 AS country, k.4 AS cf_status, k.5 AS cf_cache, k.6 AS cf_transport, k.7 AS cf_ost, k.8 AS cf_p_type, k.9 AS cf_method, k.10 AS cf_c_type, k.11 AS cf_c_speed, k.12 AS cf_city, k.13 AS cf_region, k.14 AS cf_asn, k.15 AS cf_ua, k.16 AS cf_referer, k.17 AS cf_waf_sig,
+    count() AS request_count
+FROM (
+    SELECT service_id, toStartOfHour(event_timestamp) AS bucket_start, batch_id, publication_state,
+    [('url_status', url, '', custom_fields['status'], '', '', '', '', '', '', '', '', '', '', '', '', ''),
+     ('url_cache', url, '', '', custom_fields['cache'], '', '', '', '', '', '', '', '', '', '', '', ''),
+     ('misc', '', '', '', custom_fields['cache'], custom_fields['transport'], custom_fields['ost'], custom_fields['p_type'], custom_fields['method'], custom_fields['c_type'], custom_fields['c_speed'], '', '', '', '', '', ''),
+     ('geo', '', CAST(country AS String), custom_fields['status'], '', '', '', '', '', '', '', custom_fields['city'], custom_fields['region'], '', '', '', ''),
+     ('asn', '', '', '', '', '', '', custom_fields['p_type'], '', '', '', '', '', custom_fields['asn'], '', '', ''),
+     ('ua', '', '', '', '', '', '', '', '', '', '', '', '', '', custom_fields['ua'], '', ''),
+     ('referer', '', '', '', '', '', '', '', '', '', '', '', '', '', '', custom_fields['referer'], ''),
+     ('waf', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', custom_fields['waf_sig'])] AS keys
+    FROM request_facts
+)
+ARRAY JOIN keys AS k
+GROUP BY service_id, bucket_start, shape, batch_id, publication_state, url, country, cf_status, cf_cache, cf_transport, cf_ost, cf_p_type, cf_method, cf_c_type, cf_c_speed, cf_city, cf_region, cf_asn, cf_ua, cf_referer, cf_waf_sig;

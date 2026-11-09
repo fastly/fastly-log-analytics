@@ -489,10 +489,12 @@ class ClickHouseClient:
         """Synchronously remove a failed high-scale batch before a retry."""
         if table not in CLICKHOUSE_HIGH_SCALE_TABLES:
             raise ValueError("ClickHouse table is not internally allowlisted")
-        self.execute(
-            f"ALTER TABLE `{table}` DELETE WHERE batch_id={{batch_id:UUID}} SETTINGS mutations_sync=2",
-            {"batch_id": batch_id},
-        )
+        # request_insight_hourly is filled by a materialized view on request_facts, so it holds the batch too.
+        for target in (table, "request_insight_hourly") if table == "request_facts" else (table,):
+            self.execute(
+                f"ALTER TABLE `{target}` DELETE WHERE batch_id={{batch_id:UUID}} SETTINGS mutations_sync=2",
+                {"batch_id": batch_id},
+            )
 
     def health(self) -> dict:
         """Exercise authenticated database access; unavailable is an explicit exception."""
