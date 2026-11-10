@@ -23,6 +23,7 @@ import { cn, copyToClipboard, formatBytes, REGION_LABELS, SHIELD_LABELS } from '
 import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps } from '@/lib/api'
 import { RAW_LOG_COMPRESSION_RATIO } from '@/components/CostCalculator/costCalculatorModel'
 import type { WizardState } from '../types'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { FeatureSummaryBadge, StatusCheckIcon } from '../WizardChrome'
 
 export function ExecuteStep({ s }: { s: WizardState }) {
@@ -35,16 +36,21 @@ export function ExecuteStep({ s }: { s: WizardState }) {
     () => evaluateLogFieldPresetSummary(config.log_fields, catalog),
     [config.log_fields, catalog],
   )
-  const automationChecks = [
-    {
-      label: `Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`,
-      enabled: config.enable_cron_sync,
-    },
-    {
-      label: "Auto-delete Raw Logs",
-      enabled: config.delete_after && config.enable_cron_sync,
-    },
-  ]
+  // Cloud ingests on its own edge clock; cron sync, CDN prefix and shield are self-hosted settings.
+  const cloud = isCloudMode()
+  const syncEnabled = cloud || config.enable_cron_sync
+  const automationChecks = cloud
+    ? [{ label: "Auto-delete Raw Logs", enabled: config.delete_after }]
+    : [
+        {
+          label: `Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`,
+          enabled: config.enable_cron_sync,
+        },
+        {
+          label: "Auto-delete Raw Logs",
+          enabled: config.delete_after && config.enable_cron_sync,
+        },
+      ]
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 flex flex-col p-8 items-center text-left">
@@ -54,7 +60,7 @@ export function ExecuteStep({ s }: { s: WizardState }) {
             <div className="text-center space-y-2">
               <h3 className="text-2xl font-semibold tracking-tight">Provisioning: {selectedService?.name}</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                Setting up Fastly Object Storage, logging endpoints, and CDN proxy...
+                {cloud ? "Setting up Fastly Object Storage and logging endpoints..." : "Setting up Fastly Object Storage, logging endpoints, and CDN proxy..."}
               </p>
             </div>
             <SSEProgressView
@@ -116,13 +122,15 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                   )}
                 </ReviewContent>
               </ReviewCard>
-              <ReviewCard>
-                <ReviewHeader icon={Globe}>CDN Edge Proxy</ReviewHeader>
-                <ReviewContent>
-                  <ReviewItem label="Domain" value={`${config.cdn_prefix}.global.ssl.fastly.net`} />
-                  <ReviewItem label="Shield POP" value={SHIELD_LABELS[config.cdn_shield] || "None"} />
-                </ReviewContent>
-              </ReviewCard>
+              {!cloud && (
+                <ReviewCard>
+                  <ReviewHeader icon={Globe}>CDN Edge Proxy</ReviewHeader>
+                  <ReviewContent>
+                    <ReviewItem label="Domain" value={`${config.cdn_prefix}.global.ssl.fastly.net`} />
+                    <ReviewItem label="Shield POP" value={SHIELD_LABELS[config.cdn_shield] || "None"} />
+                  </ReviewContent>
+                </ReviewCard>
+              )}
               <ReviewCard>
                 <ReviewHeader icon={Database}>Object Storage</ReviewHeader>
                 <ReviewContent>
@@ -147,7 +155,7 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                     <ReviewItem
                       variant="between"
                       label="Log Retention"
-                      className={cn(!config.enable_cron_sync && "text-muted-foreground")}
+                      className={cn(!syncEnabled && "text-muted-foreground")}
                       value={config.log_retention_days === 0 ? "Forever" : `${config.log_retention_days} days`}
                     />
                   )}
@@ -155,7 +163,7 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                     <ReviewItem
                       variant="between"
                       label="RUM Retention"
-                      className={cn(!config.enable_cron_sync && "text-muted-foreground")}
+                      className={cn(!syncEnabled && "text-muted-foreground")}
                       value={config.rum_retention_days === 0 ? "Forever" : `${config.rum_retention_days} days`}
                     />
                   )}

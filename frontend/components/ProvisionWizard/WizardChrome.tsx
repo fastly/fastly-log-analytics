@@ -1,6 +1,7 @@
 "use client"
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -188,7 +189,7 @@ export function WizardFooter({ s }: { s: WizardState }) {
           )}
           {step === "storage" && (
             <Button
-              onClick={() => setStep(config.logging_enabled ? "ngwaf" : "execute")}
+              onClick={() => setStep(config.logging_enabled ? (isCloudMode() ? "fields" : "ngwaf") : "execute")}
               disabled={domainStatus === "taken" || domainStatus === "checking"}
               className="h-9 text-xs"
             >

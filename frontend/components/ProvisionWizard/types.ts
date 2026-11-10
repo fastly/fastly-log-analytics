@@ -1,5 +1,6 @@
 import type React from 'react'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/stores/filterStore'
 import type { SSELine, SSEStatus } from '@/hooks/useSSE'
@@ -131,7 +132,9 @@ export function getStepsForMode(
   if (mode === "ingest") steps.push({ id: "connect", label: "Connect" })
   steps.push({ id: "features", label: "Features" }, { id: "storage", label: "Storage" })
   if (!config || config.logging_enabled !== false) {
-    steps.push({ id: "ngwaf", label: "NGWAF" }, { id: "fields", label: "Log Fields" })
+    // Cloud has no NGWAF workspace lookup; its server ignores ngwaf_workspace_id.
+    if (!isCloudMode()) steps.push({ id: "ngwaf", label: "NGWAF" })
+    steps.push({ id: "fields", label: "Log Fields" })
   }
   steps.push({ id: "execute", label: "Review" })
   return steps

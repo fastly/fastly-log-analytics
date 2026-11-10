@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useState, useEffect, useEffectEvent, useRef } from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import {
   client,
@@ -131,7 +132,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   }, [open, reset, pendingDraft])
 
   useEffect(() => {
-    if (step === "storage" && config.cdn_prefix) {
+    if (step === "storage" && config.cdn_prefix && !isCloudMode()) {
       const timer = setTimeout(() => checkDomain(config.cdn_prefix), 500)
       return () => clearTimeout(timer)
     }

@@ -27,7 +27,7 @@ import {
   type LogFieldsCatalog, type WizardDraft, type WizardState,
   ConnectStep,
 } from '@/components/ProvisionWizard/ProvisionWizard'
-import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep'
+import { RumVersionPicker, StorageStep } from '@/components/ProvisionWizard/steps/StorageStep'
 import {
   WIZARD_DRAFT_KEY, buildHandleModalClose, buildValidateOnSuccess, clearDraft, loadDraft,
   mergePersistedConfig, runAdminIngest, runCheckConfig, runCheckDomain,
@@ -35,6 +35,7 @@ import {
   validateMutationFn,
 } from '@/components/ProvisionWizard/useWizardState'
 import { useServiceStore } from '@/stores/filterStore'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { server } from '@/__tests__/helpers/msw/handlers'
 
 vi.mock('@tanstack/react-virtual', async () => (await import('../../helpers/page-smoke')).reactVirtualModuleMock())
@@ -165,6 +166,16 @@ describe('getStepsForMode', () => {
     expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
   })
 
+  it('drops the NGWAF step in Cloud mode, where the server has no NGWAF or CDN front', () => {
+    setCloudModeRuntime(true)
+    try {
+      expect(ids('provision')).toEqual(['mode', 'token', 'service', 'features', 'storage', 'fields', 'execute'])
+      expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
+    } finally {
+      setCloudModeRuntime(false)
+    }
+  })
+
   it('never contains the removed analyst-join steps', () => {
     for (const mode of ['provision', 'ingest', null] as const) {
       for (const removed of ['join', 'analyze', 'settings', 'confirm']) expect(ids(mode)).not.toContain(removed)
@@ -214,6 +225,53 @@ function makeFooterState(overrides: Partial<WizardState> = {}): WizardState {
     ...overrides,
   } as WizardState
 }
+
+describe('WizardFooter — Cloud mode skips the NGWAF step', () => {
+  afterEach(() => setCloudModeRuntime(false))
+
+  it('storage Continue goes straight to log fields in Cloud and to NGWAF when self-hosted', async () => {
+    const selfHosted = vi.fn()
+    const { unmount } = render(<WizardFooter s={makeFooterState({ step: 'storage', setStep: selfHosted, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
+    expect(selfHosted).toHaveBeenCalledWith('ngwaf')
+    unmount()
+    setCloudModeRuntime(true)
+    const cloud = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'storage', setStep: cloud, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
+    expect(cloud).toHaveBeenCalledWith('fields')
+  })
+
+  it('Back from log fields returns to storage in Cloud', async () => {
+    setCloudModeRuntime(true)
+    const setStep = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'fields', setStep, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /back/i }))
+    expect(setStep).toHaveBeenCalledWith('storage')
+  })
+})
+
+describe('StorageStep — Cloud mode hides self-hosted-only sections', () => {
+  afterEach(() => setCloudModeRuntime(false))
+
+  const storageState = () => makeFooterState({
+    step: 'storage', checkDomain: vi.fn(), setConfig: vi.fn(), domainMessage: '',
+    config: { ...INITIAL_CONFIG, logging_enabled: true, cdn_prefix: 'demo' },
+  } as Partial<WizardState>)
+
+  it('self-hosted shows the CDN front and Background Sync controls', () => {
+    renderWithQuery(<StorageStep s={storageState()} />)
+    expect(screen.getByText(/CDN Performance Front/i)).toBeInTheDocument()
+    expect(screen.getByLabelText('Background Sync')).toBeInTheDocument()
+  })
+
+  it('Cloud hides them: the Cloud server has no CDN prefix, domain check or cron sync', () => {
+    setCloudModeRuntime(true)
+    renderWithQuery(<StorageStep s={storageState()} />)
+    expect(screen.queryByText(/CDN Performance Front/i)).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Background Sync')).not.toBeInTheDocument()
+  })
+})
 
 describe('WizardFooter — terraform (Terraform & VCL preview) step', () => {
   it("provision and ingest modes: 'Back to Review' returns to Review without deploying or ingesting", async () => {
