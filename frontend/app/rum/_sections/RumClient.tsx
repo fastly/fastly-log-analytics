@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BookOpen, Radio } from 'lucide-react'
 import { CardErrorState } from '@/components/AnalyticsCard'
@@ -75,6 +75,17 @@ export {
   type RumLiveEvent,
 }
 
+// Columns the RUM analytics API accepts (backend/high_scale/rum.py _FILTER_COLUMNS). The shared
+// FilterBar carries request-log fields such as status across pages; both backends answer 400 for
+// those on RUM, so they are dropped here instead of failing the whole report.
+const RUM_FILTER_COLUMNS = new Set(['browser', 'os', 'device', 'country', 'pathname', 'city', 'region', 'pop', 'tls'])
+
+export function rumSupportedFilters(filterPayload: FiltersPayload): FiltersPayload {
+  return Object.fromEntries(
+    Object.entries(filterPayload ?? {}).filter(([key]) => RUM_FILTER_COLUMNS.has(key.replace(/_\d+$/, ''))),
+  )
+}
+
 export interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   serviceId: string | null
   startTime: string | null
@@ -86,12 +97,13 @@ export function RumClient({
   serviceId,
   startTime,
   endTime,
-  filterPayload,
+  filterPayload: rawFilterPayload,
   relativeRange,
   isAutoRange,
   anchor,
 }: RumClientProps) {
   const timezone = useTimezone()
+  const filterPayload = useMemo(() => rumSupportedFilters(rawFilterPayload), [rawFilterPayload])
   const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId)
 
   const { data: analytics, isLoading, isError, refetch } = useAnalyticsReportQuery<RumAnalytics | null>({

@@ -549,6 +549,39 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         .find((k) => k[0] === 'rum-analytics')
       expect(key).toEqual(['rum-analytics', SVC, '24h', params?.get('anchor'), {}])
     })
+
+    it('drops filter fields RUM has no column for so a status filter carried over from another page cannot 400 the report', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      useFilterStore.getState().resetAll()
+      useFilterStore.getState().addFilter('status', '200', 'include')
+      useFilterStore.getState().addFilter('country', 'US', 'include')
+      mockRumEndpoints()
+      const seen: string[] = []
+      server.use(
+        http.get('/api/services/:service_id/rum/analytics', ({ request }) => {
+          seen.push(new URL(request.url).searchParams.get('filters') ?? '')
+          return HttpResponse.json(analytics())
+        }),
+        http.get('/api/services/:service_id/rum/live-events', ({ request }) => {
+          seen.push(new URL(request.url).searchParams.get('filters') ?? '')
+          return HttpResponse.json([])
+        }),
+      )
+
+      const qc = createTestQueryClient()
+      render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
+      expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+      await waitFor(() => expect(seen.length).toBeGreaterThanOrEqual(2))
+
+      for (const raw of seen) {
+        const filters = JSON.parse(raw) as Record<string, unknown>
+        expect(Object.keys(filters)).toEqual(['country'])
+      }
+    })
   })
 
   function renderCard(rumEnabled = true) {
