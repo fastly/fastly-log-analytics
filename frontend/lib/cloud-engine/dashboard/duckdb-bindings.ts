@@ -32,6 +32,8 @@ type Config = {
   interpolate(sql: string, params: readonly unknown[]): string;
 };
 const literal = (value: string) => `'${sqlEscape(value)}'`;
+// Pseudo-column naming the file each row came from in a multi-file scan.
+const SOURCE_FILE_COLUMN = "__flp_source_file";
 const MAX_COMPRESSED_BYTES = 64 * 1024 * 1024;
 const CUSTOM_TYPES = { string: "VARCHAR", number: "DOUBLE", boolean: "BOOLEAN" } as const;
 
@@ -426,26 +428,38 @@ export class ParquetBindingStore {
     };
   }
 
-  private projection(binding: Binding | undefined, schema: Schema, custom: Schema): string {
+  private projection(bindings: readonly Binding[], schema: Schema, custom: Schema): string {
+    const shape = bindings[0];
+    const scopedKey = !shape ? "NULL::VARCHAR"
+      : bindings.length === 1 ? literal(shape.meta.scopedKey)
+        : `CASE ${SOURCE_FILE_COLUMN} ${bindings.map((binding) => `WHEN ${literal(binding.name)} THEN ${literal(binding.meta.scopedKey)}`).join(" ")} END`;
     const columns = [
-      `${binding ? literal(binding.meta.scopedKey) : "NULL::VARCHAR"} AS scoped_key`,
-      `${binding ? `(${binding.ts})::BIGINT` : "NULL::BIGINT"} AS ts_ms`,
-      `${binding ? `epoch_ms((${binding.ts})::BIGINT)::TIMESTAMPTZ` : "NULL::TIMESTAMPTZ"} AS "timestamp"`,
+      `${scopedKey} AS scoped_key`,
+      `${shape ? `(${shape.ts})::BIGINT` : "NULL::BIGINT"} AS ts_ms`,
+      `${shape ? `epoch_ms((${shape.ts})::BIGINT)::TIMESTAMPTZ` : "NULL::TIMESTAMPTZ"} AS "timestamp"`,
       ...Object.entries({ ...schema, ...custom }).map(([name, type]) => {
         const column = quoteIdent(name);
-        const aliases: Record<string, string> = binding?.table === "requests" ? {} : {
+        const aliases: Record<string, string> = shape?.table === "requests" ? {} : {
           request_event_id: "req_id", client_id: "cid", session_id: "cid",
           rating: "metric_rating", page_url: "pathname", path: "pathname",
           browser_name: "browser", os_name: "os", device_type: "device",
           filename: "error_file", lineno: "error_line", colno: "error_col",
         };
-        const source = binding?.types.has(name) ? name : aliases[name];
-        const cast = source && binding?.types.has(source) ? `CAST(${quoteIdent(source)} AS ${type})` : `NULL::${type}`;
+        const source = shape?.types.has(name) ? name : aliases[name];
+        const cast = source && shape?.types.has(source) ? `CAST(${quoteIdent(source)} AS ${type})` : `NULL::${type}`;
         return `${type === "DOUBLE" ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END` : cast} AS ${column}`;
       }),
     ];
-    return `SELECT ${columns.join(", ")}${binding
-      ? ` FROM read_parquet(${literal(binding.name)})` : " WHERE false"}`;
+    if (!shape) return `SELECT ${columns.join(", ")} WHERE false`;
+    if (bindings.length === 1) return `SELECT ${columns.join(", ")} FROM read_parquet(${literal(shape.name)})`;
+    // Same-shaped files share one scan: a branch per file costs DuckDB planner and
+    // per-branch aggregate state, which a day of per-period RUM files turned into OOM.
+    const names = bindings.map((binding) => literal(binding.name)).join(", ");
+    return `SELECT ${columns.join(", ")} FROM read_parquet([${names}], filename = ${literal(SOURCE_FILE_COLUMN)}, union_by_name = true)`;
+  }
+
+  private shapeKey(binding: Binding): string {
+    return JSON.stringify([binding.ts, [...binding.types.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))]);
   }
 
   private async publish(backend: DuckDBBackend, snapshot: Snapshot): Promise<void> {
@@ -456,8 +470,13 @@ export class ParquetBindingStore {
     for (const table of ["requests", "client_vitals", "client_errors"] as const) {
       const bindings = snapshot.bindings.filter((binding) => binding.table === table);
       const custom = table === "requests" ? Object.fromEntries(snapshot.custom) : {};
-      const parts = bindings.length ? bindings.map((binding) => this.projection(binding, this.config.schemas[table], custom))
-        : [this.projection(undefined, this.config.schemas[table], custom)];
+      const shapes = new Map<string, Binding[]>();
+      for (const binding of bindings) {
+        const key = this.shapeKey(binding);
+        shapes.set(key, [...(shapes.get(key) ?? []), binding]);
+      }
+      const parts = shapes.size ? [...shapes.values()].map((group) => this.projection(group, this.config.schemas[table], custom))
+        : [this.projection([], this.config.schemas[table], custom)];
       commands.push(`CREATE OR REPLACE VIEW ${table} AS ${parts.join(" UNION ALL ")}`);
     }
     commands.push("CREATE OR REPLACE VIEW logs AS SELECT * FROM requests");

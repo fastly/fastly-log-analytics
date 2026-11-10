@@ -253,6 +253,46 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("reads same-schema files through one view branch while keeping per-file scoped keys", async () => {
+    const views: string[] = [];
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: async (sql, signal) => {
+        if (sql.startsWith("CREATE OR REPLACE VIEW")) views.push(sql);
+        return backend.query(sql, signal);
+      } };
+    } });
+    const files = 300;
+    const vitals = Array.from({ length: files }, (_, i) => ({
+      key: `rum/vitals-${i}.parquet`,
+      bytes: parquetWriteBuffer({ columnData: [
+        { name: "ts_ms", type: "INT64", data: [BigInt(1700000000000 + i)] },
+        { name: "cid", type: "STRING", data: [`client-${i}`] },
+        { name: "metric_name", type: "STRING", data: ["LCP"] },
+        { name: "metric_value", type: "DOUBLE", data: [i] },
+      ] }),
+    }));
+    const other = parquetWriteBuffer({ columnData: [
+      { name: "ts_ms", type: "INT64", data: [BigInt(1700000001000)] },
+      { name: "metric_name", type: "STRING", data: ["CLS"] },
+      { name: "metric_value", type: "DOUBLE", data: [0.5] },
+    ] });
+    await engine.syncRumFiles([...vitals, { key: "rum/other.parquet", bytes: other }]);
+    const view = views.filter((sql) => sql.includes("client_vitals")).at(-1)!;
+    // One branch for the 300 identical files, one for the differently shaped file, one empty errors branch.
+    expect(view.split("read_parquet(").length - 1).toBe(2);
+    expect(await engine.executeSql(
+      "SELECT count(*) AS rows, count(DISTINCT scoped_key) AS keys, count(DISTINCT client_id) AS clients FROM client_vitals",
+    )).toEqual([{ rows: files + 1, keys: files + 1, clients: files }]);
+    expect(await engine.executeSql(
+      "SELECT scoped_key, metric_value FROM client_vitals WHERE client_id = 'client-7' OR metric_name = 'CLS' ORDER BY metric_value",
+    )).toEqual([
+      { scoped_key: "rum/other.parquet", metric_value: 0.5 },
+      { scoped_key: "rum/vitals-7.parquet", metric_value: 7 },
+    ]);
+    await engine.reset();
+  });
+
   it("does not evict a binding pinned while compressed-budget admission awaits publication", async () => {
     let enter!: () => void, resume!: () => void, delay = false;
     const entered = new Promise<void>((resolve) => { enter = resolve; });
@@ -361,7 +401,7 @@ describe("bounded complete Parquet bindings", () => {
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
       const backend = await createNodeBackend();
       return { ...backend, query: async (sql, signal) => {
-        if (fail && sql.startsWith("CREATE") && sql.includes("UNION ALL")) {
+        if (fail && sql.startsWith("CREATE") && sql.includes("read_parquet([")) {
           fail = false;
           await backend.query(sql.split(";")[0], signal);
           throw new Error("Invalid Input Error: synthetic partial view publication");
@@ -506,7 +546,7 @@ describe("bounded complete Parquet bindings", () => {
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
       const backend = await createNodeBackend();
       return { ...backend, query: async (sql, signal) => {
-        if (fail && sql.startsWith("CREATE") && sql.includes("UNION ALL")) {
+        if (fail && sql.startsWith("CREATE") && sql.includes("read_parquet([")) {
           fail = false;
           throw new Error("Invalid Input Error: synthetic batch view publication");
         }
