@@ -78,6 +78,43 @@ pub fn watermark_key(stream: &str) -> String {
 /// no raw key below it is ever planned again, whichever path lists it.
 pub const FLOOR_FIELD: &str = "floor_key";
 
+/// The RUM watermark field holding the stream's running extents (`latest_log`, `rows`,
+/// `at`). RUM has no catalog, so each commit folds its outputs in here for the sync badge.
+pub const RUM_STATS_FIELD: &str = "rum_stats";
+
+/// `RUM_STATS_FIELD` after a commit of `outputs` at `now`, folded onto `prev`.
+pub(crate) fn rum_stats_value(prev: Option<&Value>, outputs: &[worker::Output], now: u64) -> Value {
+    let prev = prev.map(|v| &v[RUM_STATS_FIELD]);
+    let prev_latest = prev.and_then(|v| v["latest_log"].as_i64());
+    let prev_rows = prev.and_then(|v| v["rows"].as_u64()).unwrap_or(0);
+    let now_s = now as i64;
+    let latest = outputs
+        .iter()
+        .filter_map(|output| parse_processed(&output.key))
+        .map(|name| name.end.min(now_s).max(name.start))
+        .chain(prev_latest)
+        .max();
+    let rows = prev_rows + outputs.iter().map(|output| output.rows).sum::<u64>();
+    json!({"latest_log": latest, "rows": rows, "at": now})
+}
+
+/// The RUM stream's extents for the sync badge, read from its watermark record, in the shape
+/// of the self-hosted `sync_status.rum`: `latest_log_at`, `total_rows`, `last_sync_at`.
+pub fn rum_extents<R: Runtime>(runtime: &R) -> Result<Option<Value>, String> {
+    let Some(record) = runtime.admin_get(&watermark_key(rum::STREAM))? else {
+        return Ok(None);
+    };
+    let stats = &record.value[RUM_STATS_FIELD];
+    if stats.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "latest_log_at": stats["latest_log"].as_i64().map(rfc3339),
+        "total_rows": stats["rows"].as_u64(),
+        "last_sync_at": stats["at"].as_u64().map(|at| rfc3339(at as i64)),
+    })))
+}
+
 pub fn below_floor(key: &str, watermark: Option<&Value>) -> bool {
     watermark
         .and_then(|value| value[FLOOR_FIELD].as_str())
@@ -386,7 +423,13 @@ pub(crate) fn watermark_value(
     if let Some(catalog) = prev.map(|v| &v["catalog"]).filter(|v| !v.is_null()) {
         value["catalog"] = catalog.clone();
     }
-    for field in ["raw_sources", "raw_scan", "raw_scan_due", FLOOR_FIELD] {
+    for field in [
+        "raw_sources",
+        "raw_scan",
+        "raw_scan_due",
+        FLOOR_FIELD,
+        RUM_STATS_FIELD,
+    ] {
         if let Some(saved) = prev.map(|v| &v[field]).filter(|v| !v.is_null()) {
             value[field] = saved.clone();
         }

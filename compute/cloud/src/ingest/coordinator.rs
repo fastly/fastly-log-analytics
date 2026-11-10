@@ -2274,7 +2274,15 @@ fn commit<R: Runtime>(
     if late {
         value = super::bump_manifest_gen(watermark.map(|r| &r.value), value);
     }
-    if !ctx.rum() {
+    if ctx.rum() {
+        let outputs = plan
+            .shards
+            .keys()
+            .flat_map(|id| plan.results[id].outputs.iter().cloned())
+            .collect::<Vec<_>>();
+        value[super::RUM_STATS_FIELD] =
+            super::rum_stats_value(watermark.map(|r| &r.value), &outputs, now);
+    } else {
         let files = plan
             .shards
             .keys()

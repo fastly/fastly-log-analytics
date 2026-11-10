@@ -10608,6 +10608,41 @@ fn the_rum_stream_converts_into_both_tables_under_its_own_plan_keys() {
 }
 
 #[test]
+fn rum_commits_fold_running_extents_into_the_watermark_for_the_sync_badge() {
+    let fake = Fake::new(BASE + 3600);
+    let svc = rum_service();
+    assert_eq!(
+        ingest::rum_extents(&fake).unwrap(),
+        None,
+        "nothing before the first commit"
+    );
+    put_rum(&fake, BASE, "a", &[rum_beacon(BASE + 5, "LCP", "100")]);
+    rum_tick(&fake, &svc).unwrap();
+    let first = ingest::rum_extents(&fake).unwrap().unwrap();
+    assert_eq!(first["total_rows"], 1);
+    assert_eq!(first["latest_log_at"], ingest::rfc3339(BASE + 60));
+    assert_eq!(first["last_sync_at"], ingest::rfc3339(BASE + 3600));
+    fake.now.set(BASE as u64 + 3660);
+    put_rum(
+        &fake,
+        BASE + 120,
+        "b",
+        &[
+            rum_beacon(BASE + 125, "INP", "40"),
+            rum_beacon(BASE + 130, "CLS", "0.1"),
+        ],
+    );
+    rum_tick(&fake, &svc).unwrap();
+    let second = ingest::rum_extents(&fake).unwrap().unwrap();
+    assert_eq!(second["total_rows"], 3, "rows accumulate across commits");
+    assert_eq!(second["latest_log_at"], ingest::rfc3339(BASE + 180));
+    assert_eq!(second["last_sync_at"], ingest::rfc3339(BASE + 3660));
+    let kv = fake.kv.borrow();
+    let stats = &kv[&ingest::watermark_key("rum")].1[ingest::RUM_STATS_FIELD];
+    assert_eq!(stats["rows"], 3);
+}
+
+#[test]
 fn raw_delete_keeps_the_raw_keys_of_an_uncommitted_rum_plan() {
     let fake = Fake::new(BASE + 3600);
     let svc = rum_service();

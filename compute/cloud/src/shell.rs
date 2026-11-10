@@ -1051,6 +1051,10 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         let last_sync_at = last_tick_at
             .clone()
             .or_else(|| cron_runs.first().map(|r| r.started_at.clone()));
+        let rum = configured
+            .then(|| crate::ingest::rum_extents(self.runtime).ok().flatten())
+            .flatten()
+            .unwrap_or(Value::Null);
         let request = configured.then(|| {
             json!({
                 "latest_log_at": latest_log_at,
@@ -1062,7 +1066,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         json!({
             "configured":configured,"busy":false,
             "earliest_log_at":edge("earliest_log_at"),"latest_log_at":latest_log_at,
-            "local_rows":total_rows,"request":request,"rum":null,"storage_mode":null,
+            "local_rows":total_rows,"request":request,"rum":rum,"storage_mode":null,
             "latest_ingested_file_at":snapshot.last_ingest_at,"latest_available_file_at":null,
             "duckdb_size_bytes":null,"duckdb_exists":null,"active_run":null,
             "last_tick_at":last_tick_at,"next_tick_at":next_tick_at,"clock_interval_s":crate::admin::CLOCK_INTERVAL_S,
