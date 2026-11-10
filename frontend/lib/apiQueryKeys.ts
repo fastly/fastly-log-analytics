@@ -135,7 +135,10 @@ export function seedBootstrapDependentCaches(
     if (data.log_fields_catalog) {
       queryClient.setQueryData(queryKeys.logFieldsCatalog(sid), data.log_fields_catalog);
     }
-    queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status ?? null);
+    // Cloud's bootstrap carries neither; a seeded null would count as fresh and stop the header fetching.
+    if (data.sync_status !== undefined) {
+      queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status);
+    }
     if (data.log_extents) {
       queryClient.setQueryData(queryKeys.logExtents(sid), data.log_extents);
     }
@@ -154,7 +157,9 @@ export function seedBootstrapDependentCaches(
     if (data.cron_runs_first_page) {
       queryClient.setQueryData(queryKeys.admin.cronLogsRecent(sid), data.cron_runs_first_page);
     }
-    queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync ?? null);
+    if (data.last_sync !== undefined) {
+      queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync);
+    }
     if (data.scoring_labels) {
       queryClient.setQueryData(queryKeys.scoringLabels(sid), data.scoring_labels);
     }

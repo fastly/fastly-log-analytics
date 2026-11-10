@@ -55,7 +55,7 @@ vi.mock('@/stores/filterStore', async (importOriginal) => {
 
 import {
   client, extractApiError, customFieldsApi, adminJson, adminJsonResult,
-  queryKeys, throwIfStaleAggregates, isStaleDashboardViewError,
+  queryKeys, seedBootstrapDependentCaches, throwIfStaleAggregates, isStaleDashboardViewError,
   STALE_VIEW_RETRY_OPTIONS, STALE_VIEW_POLL_MS, ssrUpstreamGet,
   type CustomField, type VclLintRequest,
 } from '@/lib/api'
@@ -400,6 +400,21 @@ describe('narrow helpers', () => {
     expect(arrayOrEmpty(null)).toEqual([])
     const looseArrayOrEmpty = arrayOrEmpty as (v: unknown) => unknown
     expect(looseArrayOrEmpty({})).toEqual([])
+  })
+})
+
+describe('seedBootstrapDependentCaches header keys', () => {
+  it('leaves sync-status and last-sync unseeded when the bootstrap omits them, so the header fetches', () => {
+    const qc = new QueryClient()
+    seedBootstrapDependentCaches(qc, { active_service_id: SVC })
+    expect(qc.getQueryState(queryKeys.syncStatus(SVC))).toBeUndefined()
+    expect(qc.getQueryState(queryKeys.lastSync(SVC))).toBeUndefined()
+
+    const status = { request: { latest_log_at: null, total_rows: 0 }, rum: null }
+    seedBootstrapDependentCaches(qc, { active_service_id: SVC, sync_status: status, last_sync: null })
+    expect(qc.getQueryData(queryKeys.syncStatus(SVC))).toEqual(status)
+    expect(qc.getQueryState(queryKeys.lastSync(SVC))?.status).toBe('success')
+    expect(qc.getQueryData(queryKeys.lastSync(SVC))).toBeNull()
   })
 })
 
