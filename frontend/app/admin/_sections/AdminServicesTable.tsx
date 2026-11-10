@@ -8,6 +8,8 @@ import type { ServiceConfig } from '@/types/api'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
+import { formatDuration } from '@/lib/format'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
@@ -81,7 +83,9 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
       cell: ({ row: { original: service } }) => (
         <div className="flex items-center gap-2">
           {IS_CLOUD_MODE ? (
-            <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">2m Tick</Badge>
+            <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold" title="Ingest runs once per log period">
+              {formatDuration(Number(service.log_period) || SERVICE_DEFAULTS.logPeriodSeconds)} Tick
+            </Badge>
           ) : (
             <>
               {service.cron_sync?.enabled ? <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge> : <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>}

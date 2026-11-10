@@ -6,6 +6,7 @@ import { AlertCircle, CheckCircle2, DollarSign, Loader2, MapPin, Pencil, Refresh
 import type { components } from '@/types/api.generated'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialogHeaderMuted } from '@/lib/utils'
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
 import { useDerivedState } from '@/hooks/useSSE'
@@ -237,7 +238,7 @@ export function GlobalSettings() {
   const { data: queryUsageLoggingSettings } = useQuery({ queryKey: ['usage-logging-settings'], queryFn: async () => unwrapClient(client.GET('/api/admin/usage-logging')), staleTime: 60_000 })
   const usageLoggingSettings = mounted ? queryUsageLoggingSettings : undefined
   const usageLoggingEnabled = usageLoggingSettings?.enabled ?? false
-  const usageLogRetention = usageLoggingSettings?.retention_days ?? 30
+  const usageLogRetention = usageLoggingSettings?.retention_days ?? SERVICE_DEFAULTS.usageLogRetentionDays
   const retentionMutation = useMutation({
     mutationFn: async (days: number) => { await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } })) },
     onMutate: (days) => queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days })),
