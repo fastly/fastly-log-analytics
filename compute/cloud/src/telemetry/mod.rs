@@ -372,8 +372,8 @@ pub(crate) fn set_dev_telemetry_enabled(enabled: bool) {
     DEV_TELEMETRY_ENABLED.with(|cell| cell.set(enabled));
 }
 
-/// Whether developer-only telemetry datasets (`ingest_files`, `fos_usage`, `api_telemetry`)
-/// are currently active.
+/// Whether developer-only telemetry datasets (`fos_usage`, `api_telemetry`) are currently
+/// active.
 pub fn effective_dev_telemetry(runtime: &impl Runtime) -> bool {
     dev_telemetry_available(runtime) && DEV_TELEMETRY_ENABLED.with(Cell::get)
 }
@@ -385,9 +385,11 @@ fn write_log_inner(
     row: Value,
     preset_id: Option<&str>,
 ) -> String {
+    // `ingest_files` feeds the Logs page's Ingestion History on both deployments, so it is
+    // always on; only the cost-auditing kinds are developer telemetry.
     if matches!(
         kind,
-        WritableLogKind::IngestFiles | WritableLogKind::FosUsage | WritableLogKind::ApiTelemetry
+        WritableLogKind::FosUsage | WritableLogKind::ApiTelemetry
     ) && !effective_dev_telemetry(runtime)
     {
         return String::new();
@@ -988,10 +990,8 @@ pub fn read_live(
     limit: Option<usize>,
     cursor: Option<&str>,
 ) -> Result<LivePage, String> {
-    if matches!(
-        kind,
-        LogKind::FosUsage | LogKind::ApiTelemetry | LogKind::IngestFiles
-    ) && !effective_dev_telemetry(runtime)
+    if matches!(kind, LogKind::FosUsage | LogKind::ApiTelemetry)
+        && !effective_dev_telemetry(runtime)
     {
         return Ok(LivePage::default());
     }

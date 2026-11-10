@@ -1471,8 +1471,14 @@ fn dev_telemetry_gate_and_toggle_drop_dev_only_streams_while_preserving_audit_an
         .borrow()
         .cache
         .contains_key(&LogKind::ApiTelemetry));
-    assert_eq!(buf.inner.borrow().outbox.len(), 1);
-    assert!(buf.inner.borrow().outbox[0].contains("\"kind\":\"cron_runs\""));
+    let outbox = buf.inner.borrow().outbox.clone();
+    assert_eq!(
+        outbox.len(),
+        2,
+        "ingest_files stays on: it backs Ingestion History"
+    );
+    assert!(outbox[0].contains("\"kind\":\"ingest_files\""));
+    assert!(outbox[1].contains("\"kind\":\"cron_runs\""));
 
     // When dev_telemetry config is available, admin toggle controls dev-only streams.
     let dev_rt = Rt::on_shield();

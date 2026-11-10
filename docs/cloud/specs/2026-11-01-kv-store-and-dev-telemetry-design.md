@@ -18,7 +18,8 @@
 ### 2.1 Developer Telemetry Gate (`FLP_DEV_TELEMETRY`)
 - **Dataset classification**:
   - **Always-on production logs**: `admin_audit`, `cron_runs`, `platform_errors`.
-  - **Developer-only telemetry (off by default)**: `ingest_files`, `fos_usage`, `api_telemetry` (and client-side `browser_query_telemetry` beacons).
+  - **Developer-only telemetry (off by default)**: `fos_usage`, `api_telemetry` (and client-side `browser_query_telemetry` beacons).
+  - *Amendment (2026-11-10):* `ingest_files` moved to always-on. It backs the Logs page's Ingestion History tab and the cost-calculator prefill on both deployments, and the unified UI has no developer-telemetry toggle, so gating it left that tab empty on Cloud.
 - **Unlock check (`telemetry::dev_telemetry_available(runtime)`)**:
   - Checks `runtime.config("dev_telemetry")` (`"1"` or `"true"`, case-insensitive) with fallback to compile-time `option_env!("FLP_DEV_TELEMETRY")`.
   - `app/infra/provision.py` and `app/tools/release.py` propagate `FLP_DEV_TELEMETRY` from `.env` / environment into the `flp_config` Config Store (`dev_telemetry`) when present.

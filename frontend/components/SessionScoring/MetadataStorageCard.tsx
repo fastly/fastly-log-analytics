@@ -200,7 +200,7 @@ function CloudMetadataStorageCard() {
       description="Operational records are persisted as FOS Parquet. Cloud has no PostgreSQL database file or host table-size metrics."
       isLoading={isLoading} isFetching={isFetching} error={error as AnalyticsCardError | null}>
       {data && <div className="space-y-3">
-        <p className="text-sm text-muted-foreground">Native retention policy by record kind. Saved views remain in this browser; operational history is managed through its native log pages.</p>
+        <p className="text-sm text-muted-foreground">Native retention policy by record kind. Saved views live in the install's KV store; operational history is managed through its native log pages.</p>
         <Table>
           <TableHeader><TableRow><TableHead>Record kind</TableHead><TableHead className="text-right">Retention (days)</TableHead></TableRow></TableHeader>
           <TableBody>{Object.entries(data.settings.retention_days_by_kind).map(([kind, days]) => (
