@@ -13015,6 +13015,52 @@ mod request_compaction {
     }
 
     #[test]
+    fn a_learned_group_limit_never_leaves_a_closed_hour_in_pieces() {
+        // Live: `group_limit: 33` with every compact at weight 32 left hours of four-minute
+        // files that could never pair, so a 6 h window stayed at 100+ files.
+        let fake = Fake::new(NOW);
+        for i in 0..4 {
+            window(&fake, HOUR + i * 60, &["x"]);
+        }
+        let settle = |fake: &Fake| {
+            for _ in 0..64 {
+                let report = run(fake, TARGET);
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+                if !report.more_pending && report.compacts == 0 {
+                    break;
+                }
+            }
+            let query = format!("from={}&to={}", iso_url(HOUR), iso_url(NOW));
+            catalog_keys(fake, &query).1
+        };
+        fake.kv.borrow_mut().insert(
+            compaction::STATE_KEY.into(),
+            (1, json!({ "group_limit": 2 })),
+        );
+        let pieces = settle(&fake);
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        assert!(pieces.iter().all(|key| key.contains("-c2-n2-")));
+        {
+            let mut kv = fake.kv.borrow_mut();
+            let state = &mut kv.get_mut(compaction::STATE_KEY).unwrap().1;
+            state["group_limit"] = json!(3);
+        }
+        let whole = settle(&fake);
+        assert_eq!(whole.len(), 1, "{whole:?}");
+        assert!(
+            whole.iter().next().unwrap().contains("-c2-n4-"),
+            "{whole:?}"
+        );
+        let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        assert_eq!(state["skip"], json!([]));
+        assert_eq!(
+            state["group_limit"],
+            json!(0),
+            "a limit a pair outgrew is forgotten"
+        );
+    }
+
+    #[test]
     fn a_pass_spends_its_spare_calls_reading_sources() {
         let fake = Fake::new(NOW);
         for i in 0..32 {

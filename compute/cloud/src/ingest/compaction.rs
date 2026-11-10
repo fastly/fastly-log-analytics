@@ -1009,15 +1009,21 @@ impl<R: Runtime> Run<'_, '_, R> {
             let (mut take, mut total, mut weight) = (0, 0, 0);
             let limit = match self.state.group_limit {
                 0 => usize::MAX,
-                limit => limit.max(2),
+                limit => limit,
             };
-            while take < rest.len()
-                && take < MAX_SOURCES
-                && total + rest[take].size <= self.target
-                && weight + source_weight(&rest[take].key) <= limit
-            {
+            // Two sources each under the limit still probe a pair when their sum is over it:
+            // the limit is a sum of source counts learned from other files, a rough model that
+            // undercounts compacts, and without the probe a closed hour of such compacts would
+            // stay in pieces for good. `reject_input` settles a failed probe; `completed_job`
+            // forgets the limit after a successful one.
+            while take < rest.len() && take < MAX_SOURCES {
+                let next = source_weight(&rest[take].key);
+                let fits = weight + next <= limit || (take == 1 && weight < limit && next < limit);
+                if !fits || total + rest[take].size > self.target {
+                    break;
+                }
                 total += rest[take].size;
-                weight += source_weight(&rest[take].key);
+                weight += next;
                 take += 1;
             }
             if take < 2 {
@@ -1124,6 +1130,16 @@ impl<R: Runtime> Run<'_, '_, R> {
     }
 
     fn completed_job(&mut self, job: &Job, pending: &mut Vec<Queued>) {
+        let weight = job
+            .sources
+            .iter()
+            .map(|c| source_weight(&c.key))
+            .sum::<usize>();
+        if self.state.group_limit != 0 && weight > self.state.group_limit {
+            // A probe past the learned limit fit, so the limit was wrong for these sources.
+            // Group freely again; a real overflow relearns it.
+            self.state.group_limit = 0;
+        }
         self.report.compacts += 1;
         self.report.sources += job.sources.len() as u64;
         self.report.rows += job.sources.iter().map(|c| c.rows).sum::<u64>();
@@ -1174,12 +1190,23 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
         // A full output is planning, not a failure. The key names its sources, so the job can't
         // be cut short in place: replan with the sources that fit, or leave a first source that
-        // fits with no other (a full compact) as it is.
+        // fits with no other (a full compact) as it is. A failed pair probe (two sources under
+        // the limit whose sum is over it) makes the heavier one the limit, so like sources are
+        // left alone from now on without being skipped.
+        let weights = job
+            .sources
+            .iter()
+            .map(|source| source_weight(&source.key))
+            .collect::<Vec<_>>();
+        let probe = weights.len() == 2
+            && self.state.group_limit != 0
+            && weights.iter().all(|w| *w < self.state.group_limit)
+            && weights.iter().sum::<usize>() > self.state.group_limit;
         let stopped = if job.next > 1 {
-            self.state.group_limit = job.sources[..job.next]
-                .iter()
-                .map(|source| source_weight(&source.key))
-                .sum();
+            self.state.group_limit = weights[..job.next].iter().sum();
+            error.trim_start_matches("compact_")
+        } else if probe {
+            self.state.group_limit = weights.iter().copied().max().unwrap_or(1);
             error.trim_start_matches("compact_")
         } else {
             self.state.skip.push(job.sources[0].key.clone());
