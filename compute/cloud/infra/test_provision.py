@@ -419,6 +419,15 @@ def test_bootstrap_prompts_only_for_the_deploy_token(inventory_path, monkeypatch
         assert token not in output.out + output.err + inventory_path.read_text()
 
 
+def test_deploy_token_falls_back_to_the_products_fastly_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("FASTLY_API_TOKEN", raising=False)
+    monkeypatch.setenv("FASTLY_API_KEY", "synthetic-product-key")
+    monkeypatch.setattr(provision.getpass, "getpass", lambda _: pytest.fail("prompted despite FASTLY_API_KEY"))
+    assert provision._credential("FASTLY_API_TOKEN", "Local deploy token: ") == "synthetic-product-key"
+    monkeypatch.setenv("FASTLY_API_TOKEN", "synthetic-deploy-token")
+    assert provision._credential("FASTLY_API_TOKEN", "Local deploy token: ") == "synthetic-deploy-token"
+
+
 def test_admin_reset_securely_prompts_without_environment_token(monkeypatch, capsys) -> None:
     api = SyntheticBootstrapAPI()
     monkeypatch.delenv("FASTLY_API_TOKEN", raising=False)

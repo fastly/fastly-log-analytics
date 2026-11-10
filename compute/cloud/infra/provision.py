@@ -992,9 +992,17 @@ def bootstrap(
     return inventory
 
 
+# The rest of the product reads its Fastly token as FASTLY_API_KEY; accept it here too so an
+# install does not need a second, separately rotated copy of the same credential.
+CREDENTIAL_FALLBACKS = {"FASTLY_API_TOKEN": ("FASTLY_API_KEY",)}
+
+
 def _credential(env_name: str, prompt: str) -> str:
     _environments.load_dotenv()
-    value = os.environ.get(env_name) or getpass.getpass(prompt)
+    value = os.environ.get(env_name)
+    for fallback in CREDENTIAL_FALLBACKS.get(env_name, ()):
+        value = value or os.environ.get(fallback)
+    value = value or getpass.getpass(prompt)
     if not value:
         raise ValueError(f"{env_name} is required")
     return value

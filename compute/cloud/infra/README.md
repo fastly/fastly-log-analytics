@@ -23,7 +23,7 @@ uv run app/infra/provision.py bootstrap \
   --apply
 ```
 
-Provide one `FASTLY_API_TOKEN` (requested with `getpass` if unset; never put
+Provide one `FASTLY_API_TOKEN`, or the product's `FASTLY_API_KEY` (requested with `getpass` if both are unset; never put
 credentials in command arguments). Bootstrap uses it to create services and
 stores, and stores it in the Secret Store as `fastly_token` for the app's Fastly
 API reads, following the log-analytics pattern. `admin-reset` also prompts for a
