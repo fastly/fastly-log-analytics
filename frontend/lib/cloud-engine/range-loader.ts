@@ -8,6 +8,9 @@ import {
 import { beginCloudLoading } from "./loading-progress";
 
 const MAX_RANGE_FILES = 256;
+// RUM window files are a few KiB each and nothing compacts them yet, so a day lists far more of
+// them than the request table does; the byte budget, not the file count, bounds that scan.
+const MAX_RUM_RANGE_FILES = 2048;
 const MAX_RANGE_BYTES = 64 * 1024 * 1024;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
@@ -88,7 +91,8 @@ export async function ensureCloudRange(
         };
       }),
     );
-    if (files.length > MAX_RANGE_FILES || !projection &&
+    const fileLimit = datasets.every((dataset) => dataset === "rum") ? MAX_RUM_RANGE_FILES : MAX_RANGE_FILES;
+    if (files.length > fileLimit || !projection &&
         files.reduce((total, file) => total + file.size, 0) > MAX_RANGE_BYTES) {
       throw new CloudBudgetError("Cloud query range exceeds the browser scan budget; choose a smaller range");
     }

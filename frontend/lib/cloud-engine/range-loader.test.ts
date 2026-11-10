@@ -638,6 +638,30 @@ describe("Cloud first-page analytical range loading", () => {
     expect(source.fetchFile).toHaveBeenCalledTimes(1);
   });
 
+  it("loads a RUM range of many small window files that would exceed the request file cap", async () => {
+    // Nothing compacts RUM windows: a day at a 300 s RUM period lists ~576 files of a few KiB.
+    const at = new Date(Date.parse(from) + 1000);
+    const vitalBytes = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [at] },
+      { name: "metric_name", type: "STRING", data: ["LCP"] },
+      { name: "metric_value", type: "DOUBLE", data: [2000] },
+      ...["pathname", "browser", "os", "device", "cid", "req_id"].map((name, index) => ({
+        name, type: "STRING" as const, data: [["/home", "Chrome", "Test OS", "desktop", "client-a", "beacon"][index]],
+      })),
+    ] });
+    const files = Array.from({ length: 600 }, (_, i) => ({
+      ...file, key: `processed/rum/client_vitals/w${i}.parquet`, size: vitalBytes.byteLength,
+    }));
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ complete: true, files });
+    source.fetchFile.mockImplementation(async () => ({ bytes: vitalBytes.slice(0), cached: false }));
+    await ensureCloudRange(from, to, signal, ["rum"]);
+    expect(await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM client_vitals")).toEqual([{ count: 600 }]);
+    vi.mocked(fetchManifest).mockResolvedValueOnce({
+      complete: true, files: Array.from({ length: 2049 }, (_, i) => ({ ...files[0], key: `processed/rum/client_vitals/x${i}.parquet` })),
+    });
+    await expect(ensureCloudRange(from, to, signal, ["rum"])).rejects.toBeInstanceOf(CloudBudgetError);
+  });
+
   it.each([
     { complete: false, files: [file] },
     { complete: true, files: [{ ...file, size: 65 * 1024 * 1024 }] },
