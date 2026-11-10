@@ -38,6 +38,7 @@ import { isNativeCloudRoute } from "./native-routes";
 import { handleSavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
 import { cloudRumMutation } from "./rum-management";
+import { cloudLoggingSettings } from "./logging-settings";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
@@ -471,20 +472,25 @@ async function handleCloudRequest(
   const url = new URL(request.url);
   const path = url.pathname;
   if (!["GET", "HEAD"].includes(request.method) && !isLocalScan(path, request.method)) resetCloudMetadataCache();
+  const runJobStream = (jobId: string, signal: AbortSignal) => {
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          await stepJobToCompletion(jobId, controller, encoder, signal);
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+    }), { headers: { "content-type": "text/event-stream" } });
+  };
   if (request.method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
-    return cloudRumMutation(request, (jobId, signal) => {
-      const encoder = new TextEncoder();
-      return new Response(new ReadableStream<Uint8Array>({
-        async start(controller) {
-          try {
-            await stepJobToCompletion(jobId, controller, encoder, signal);
-            controller.close();
-          } catch (error) {
-            controller.error(error);
-          }
-        },
-      }), { headers: { "content-type": "text/event-stream" } });
-    });
+    return cloudRumMutation(request, runJobStream);
+  }
+  if (/^\/api\/services\/[^/]+\/(?:logging-settings(?:\/update)?|log-fields)$/.test(path)) {
+    const bridged = await cloudLoggingSettings(request, runJobStream);
+    if (bridged) return bridged;
   }
   if (/^\/api\/(?:cron-runs|cron-schedule|audit-logs|admin\/(?:usage-log(?:\/export)?|raw-tree|storage-tree|ingested-files|quarantine\/purge))$/.test(path)) {
     const administrative = await withLoading("listing", () => cloudAdminWire(request));
