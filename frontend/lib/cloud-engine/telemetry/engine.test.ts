@@ -187,6 +187,29 @@ describe("readLogs", () => {
     expect(urls[0]).toContain("cursor=source-v1");
   });
 
+  it("restarts the source walk from the first page when a source changed under it", async () => {
+    // The server answers 409 when an outbox record a cursor was mid-way through was
+    // rewritten; the walk starts over instead of failing the whole live view.
+    const urls: string[] = [];
+    const { src } = source({ manifest: [{ files: [], next_cursor: null }], files: {} });
+    const manifest = src.fetchJson.bind(src);
+    let attempt = 0;
+    src.fetchJson = async <T,>(url: string): Promise<T> => {
+      if (!url.startsWith("/api/logs/")) return (await manifest(url)) as T;
+      urls.push(url);
+      const cursor = new URL(url, "http://x").searchParams.get("cursor");
+      if (cursor === "source-v1") {
+        attempt += 1;
+        return { rows: [row(1, `c1-${attempt}`)], next_cursor: "source-v1:00ff", truncated: false } as T;
+      }
+      if (attempt === 1) throw new Error("Live log source changed. (409)");
+      return { rows: [row(9, "c9")], next_cursor: null, truncated: false } as T;
+    };
+    const result = await readLogs(src, "cron_runs", range);
+    expect(result.rows.map((r) => r.event_id)).toEqual(["c9", "c1-2"]);
+    expect(urls).toHaveLength(4);
+  });
+
   it("skips only windows covered by a valid compact file and reads late windows", async () => {
     const a = minute(10);
     const b = minute(10, 14);

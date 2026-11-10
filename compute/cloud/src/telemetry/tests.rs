@@ -560,7 +560,7 @@ fn read_live_source_page_lists_sources_in_batches_so_reads_get_the_call_budget()
 }
 
 #[test]
-fn read_live_source_cursor_binds_query_and_rejects_changed_partial_source() {
+fn read_live_source_cursor_binds_query_resumes_appended_sources_and_skips_flushed_ones() {
     let rt = Rt::on_shield();
     let key = "logq_global_0000000001";
     let body = format!(
@@ -615,7 +615,31 @@ fn read_live_source_cursor_binds_query_and_rejects_changed_partial_source() {
         Some("source-v1:invalid")
     )
     .is_err());
+    // Outbox records only grow until the flush deletes them; a reader mid-record
+    // continues from its offset rather than failing the live view under load.
     rt.put_kv(key, json!({"ndjson":format!("{body}{}\n", json!({"kind":"cron_runs","timestamp":2,"event_id":"append"}))}));
+    let second = read_live(
+        &rt,
+        "global",
+        LogKind::CronRuns,
+        Some(0),
+        Some(1),
+        Some(&cursor),
+    )
+    .unwrap();
+    assert_eq!(second.rows[0]["event_id"], "old");
+    let third = read_live(
+        &rt,
+        "global",
+        LogKind::CronRuns,
+        Some(0),
+        Some(1),
+        second.next_cursor.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(third.rows[0]["event_id"], "append");
+    // A rewritten prefix is a different source.
+    rt.put_kv(key, json!({"ndjson":format!("{}\n{body}", json!({"kind":"cron_runs","timestamp":9,"event_id":"rewritten"}))}));
     assert!(read_live(
         &rt,
         "global",
@@ -625,16 +649,19 @@ fn read_live_source_cursor_binds_query_and_rejects_changed_partial_source() {
         Some(&cursor)
     )
     .is_err());
+    // A flushed source has moved to the durable log: the page skips it.
     rt.kv.borrow_mut().remove(key);
-    assert!(read_live(
+    let after_flush = read_live(
         &rt,
         "global",
         LogKind::CronRuns,
         Some(0),
         Some(1),
-        Some(&cursor)
+        Some(&cursor),
     )
-    .is_err());
+    .unwrap();
+    assert!(after_flush.rows.is_empty());
+    assert_eq!(after_flush.next_cursor, None);
 }
 
 #[test]

@@ -48,6 +48,7 @@ type LivePage = {
 
 const LIVE_LIMIT = 2000;
 const LIVE_SOURCE_CURSOR = "source-v1";
+const MAX_LIVE_RESTARTS = 2;
 const MAX_LIVE_PAGES = 50;
 const CONCURRENCY = 16;
 const MINUTE_MS = 60_000;
@@ -116,23 +117,42 @@ async function readLive(
   status: LiveStatus | null;
   truncated: boolean;
 }> {
-  const rows: Record<string, unknown>[] = [];
+  let rows: Record<string, unknown>[] = [];
   let status: LiveStatus | null = null;
   let truncated = false;
-  let cursor: string | null = (OUTBOX_KINDS as readonly OpsKind[]).includes(kind)
-    ? LIVE_SOURCE_CURSOR
-    : null;
-  const seen = new Set<string>();
+  const sourceWalk = (OUTBOX_KINDS as readonly OpsKind[]).includes(kind);
+  let cursor: string | null = sourceWalk ? LIVE_SOURCE_CURSOR : null;
+  let seen = new Set<string>();
+  let restarts = 0;
   for (let page = 0; page < MAX_LIVE_PAGES; page++) {
     const params = new URLSearchParams({
       since: String(fromMs),
       limit: String(LIVE_LIMIT),
     });
     if (cursor) params.set("cursor", cursor);
-    const body = (await source.fetchJson(
-      `/api/logs/${kind}/live?${params}`,
-      signal,
-    )) as LivePage;
+    let body: LivePage;
+    try {
+      body = (await source.fetchJson(
+        `/api/logs/${kind}/live?${params}`,
+        signal,
+      )) as LivePage;
+    } catch (error) {
+      // 409: an outbox record this cursor was mid-way through was rewritten.
+      // The sources are small; walk them again from the start.
+      if (
+        sourceWalk &&
+        restarts < MAX_LIVE_RESTARTS &&
+        error instanceof Error &&
+        /\(409\)$/.test(error.message)
+      ) {
+        restarts += 1;
+        rows = [];
+        seen = new Set();
+        cursor = LIVE_SOURCE_CURSOR;
+        continue;
+      }
+      throw error;
+    }
     rows.push(...body.rows);
     status ??= body.status ?? null;
     if (body.truncated) truncated = true;

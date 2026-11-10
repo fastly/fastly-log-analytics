@@ -844,6 +844,9 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     "next_cursor": page.next_cursor,
                     "truncated": page.truncated,
                 })),
+                Err(code) if code == "live_source_changed" => {
+                    error(409, "Live log source changed.")
+                }
                 Err(_) => error(503, "Live log read failed."),
             });
         }

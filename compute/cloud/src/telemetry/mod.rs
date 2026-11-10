@@ -824,21 +824,25 @@ fn read_live_sources(
         let key = state.key.as_deref().ok_or_else(invalid)?;
         let record = runtime.admin_get(key)?;
         calls += 1;
-        let record = record.ok_or("live_source_changed")?;
+        // A flushed source has moved to the durable log; the live view skips it.
+        let Some(record) = record else {
+            state.key = None;
+            state.offset = 0;
+            state.hash = None;
+            continue;
+        };
         let body = record.value["ndjson"]
             .as_str()
             .ok_or("invalid_live_source")?;
         bytes_read += body.len();
-        let hash = compute_common::crypto::sha256_hex(body.as_bytes());
-        if state
-            .hash
-            .as_ref()
-            .is_some_and(|expected| expected != &hash)
-        {
+        if state.offset > body.len() || !body.is_char_boundary(state.offset) {
             return Err("live_source_changed".into());
         }
-        if !body.is_char_boundary(state.offset) || state.offset > body.len() {
-            return Err(invalid());
+        // Sources only grow between pages, so the hash covers the part already read.
+        if state.hash.as_ref().is_some_and(|expected| {
+            expected != &compute_common::crypto::sha256_hex(&body.as_bytes()[..state.offset])
+        }) {
+            return Err("live_source_changed".into());
         }
         for line in body[state.offset..].split_inclusive('\n') {
             if rows.len() >= limit || scanned_rows >= MAX_PAGE {
@@ -870,7 +874,9 @@ fn read_live_sources(
             state.offset = 0;
             state.hash = None;
         } else {
-            state.hash = Some(hash);
+            state.hash = Some(compute_common::crypto::sha256_hex(
+                &body.as_bytes()[..state.offset],
+            ));
         }
     }
 }
