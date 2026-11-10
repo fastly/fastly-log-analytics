@@ -158,14 +158,14 @@ mod tests {
     fn app_and_per_service_fastly_tokens_are_rotatable_but_other_secrets_are_not() {
         assert!(rotatable_secret("fastly_token"));
         assert!(rotatable_secret("admin_setup_hash"));
-        assert!(rotatable_secret("fastly_token.xa20dYfOsL4MhjIo66mVhh"));
+        assert!(rotatable_secret("fastly_token.svcFixture0123456789ab"));
         for name in [
             "fastly_token.",
             "fastly_tokens",
             "fastly_token.a/b",
             "cdn_key",
             "session_key",
-            "fos_ak.xa20dYfOsL4MhjIo66mVhh",
+            "fos_ak.svcFixture0123456789ab",
             "flp_bundle",
         ] {
             assert!(!rotatable_secret(name), "{name}");
