@@ -28,7 +28,10 @@ credentials in command arguments). Bootstrap uses it to create services and
 stores, and stores it in the Secret Store as `fastly_token` for the app's Fastly
 API reads, following the log-analytics pattern. `admin-reset` also prompts for a
 token and only writes the setup-code hash to the Secret Store, so it may use a
-token scoped to Secret Store updates if Fastly allows it. The CLI does not
+token scoped to Secret Store updates if Fastly allows it. To rotate the app's
+token later, write a standalone `fastly_token` secret to the install's Secret
+Store: the app reads it ahead of its secret bundle, folds it into the bundle on
+its next admin pass and then removes the standalone entry. The CLI does not
 create tokens. Bootstrap stores an expired placeholder and prints no setup code. The first
 `make deploy` issues the one-time admin setup code, prints it once at the end
 of activation and records `admin_code_issued` in the inventory; later deploys
