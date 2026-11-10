@@ -848,7 +848,6 @@ fn read_live_sources(
             if rows.len() >= limit || scanned_rows >= MAX_PAGE {
                 break;
             }
-            scanned_rows += 1;
             state.offset += line.len();
             if line.trim().is_empty() {
                 continue;
@@ -858,7 +857,11 @@ fn read_live_sources(
             else {
                 return Err("invalid_live_source".into());
             };
+            // Sources mix every kind; only lines of the asked kind spend the page, so a
+            // cron_runs read is not cut into dozens of pages by ingest_files rows. Bytes and
+            // calls still bound the work on the rest.
             if row.get("kind").and_then(Value::as_str) == Some(kind.as_str()) {
+                scanned_rows += 1;
                 let timestamp = row
                     .get("timestamp")
                     .and_then(Value::as_i64)

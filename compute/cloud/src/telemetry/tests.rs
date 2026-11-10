@@ -534,6 +534,41 @@ fn read_live_source_pages_cover_old_and_legacy_sources_without_timestamp_pruning
 }
 
 #[test]
+fn read_live_source_page_limit_counts_rows_of_the_asked_kind_not_every_outbox_line() {
+    let rt = Rt::on_shield();
+    let since = (NOW_S * 1000) as i64;
+    // Two sources holding mostly ingest_files rows (one per raw file under load) with a few
+    // cron_runs rows each; a cron_runs read must not spend its page on the other kind's lines.
+    for n in 0..2 {
+        let mut body = String::new();
+        for i in 0..(MAX_PAGE + 500) {
+            body.push_str(&format!(
+                "{}\n",
+                json!({"kind":"ingest_files","timestamp":since + i as i64,"event_id":format!("f{n}-{i}")})
+            ));
+        }
+        for i in 0..3 {
+            body.push_str(&format!(
+                "{}\n",
+                json!({"kind":"cron_runs","timestamp":since + i,"event_id":format!("c{n}-{i}")})
+            ));
+        }
+        rt.put_kv(&format!("logq_global_{n:010}"), json!({"ndjson":body}));
+    }
+    let page = read_live(
+        &rt,
+        "global",
+        LogKind::CronRuns,
+        Some(since),
+        Some(MAX_PAGE),
+        Some("source-v1"),
+    )
+    .unwrap();
+    assert_eq!(page.rows.len(), 6, "{:?}", page.next_cursor);
+    assert!(page.next_cursor.is_none());
+}
+
+#[test]
 fn read_live_source_page_lists_sources_in_batches_so_reads_get_the_call_budget() {
     let rt = Rt::on_shield();
     let since = (NOW_S * 1000) as i64;
