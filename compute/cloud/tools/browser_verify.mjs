@@ -171,6 +171,11 @@ export function buildFilterQueryString(range = "24h", filterSpec = "") {
   return qs ? `?${qs}` : "";
 }
 
+// RUM beacons have no HTTP status; both backends reject request-log fields on /rum.
+export function filteredSweepQuery(route, range = "24h") {
+  return buildFilterQueryString(range, route === "/rum" ? "+device:desktop" : "+status:200");
+}
+
 export function parseArgs(argv) {
   const args = {
     mode: "verify",
@@ -2027,7 +2032,7 @@ async function sweepUnifiedPages(context, baseUrl, appDir, queryTimeoutMs) {
     const routes = unifiedExportRoutes(appDir);
     for (const route of routes) {
       const queries = analytical.has(route) && FILTER_BAR_ROUTE_PREFIXES.includes(route)
-        ? [buildFilterQueryString("24h"), buildFilterQueryString("24h", "+status:200")]
+        ? [buildFilterQueryString("24h"), filteredSweepQuery(route)]
         : [analytical.has(route) ? buildFilterQueryString("24h") : ""];
       for (const query of queries) {
         const streamDetail = route === "/sessions/stream";
@@ -2364,7 +2369,7 @@ export async function sweepPages(context, baseUrl, existingPage = null, queryTim
         if (route === "/cloud-files") continue;
         const filtRes = await measureRouteWithTelemetry(
           page,
-          `${baseUrl}${route}${buildFilterQueryString("24h", "+status:200")}`,
+          `${baseUrl}${route}${filteredSweepQuery(route)}`,
           async (p) => {
             await p
               .getByRole("heading", { level: 1 })

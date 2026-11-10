@@ -19,6 +19,7 @@ import {
   formatBenchmarkCaseEntry,
   EXTENDED_PRESETS,
   FILTER_BAR_ROUTE_PREFIXES,
+  filteredSweepQuery,
   parseArgs,
   parseLastFetchText,
   PLAYWRIGHT_PATH,
@@ -714,6 +715,13 @@ test("buildFilterQueryString formats single and multi-filter expressions", () =>
     () => buildFilterQueryString("1h", "status=200"),
     /Invalid filter token/,
   );
+});
+
+test("filtered sweeps use a RUM field on /rum and a request-log field elsewhere", () => {
+  assert.deepEqual(new URLSearchParams(filteredSweepQuery("/rum")).getAll("f"), ["+device:desktop"]);
+  for (const route of FILTER_BAR_ROUTE_PREFIXES.filter(r => r !== "/rum")) {
+    assert.equal(filteredSweepQuery(route), buildFilterQueryString("24h", "+status:200"), route);
+  }
 });
 
 test("unified dashboard filters preserve legacy tokens and actually apply current filter payloads", () => {
