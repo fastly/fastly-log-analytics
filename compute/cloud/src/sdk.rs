@@ -20,9 +20,6 @@ use std::{
 const SECRET_BUNDLE_KEY: &str = "flp_bundle";
 const CONFIG_BUNDLE_KEY: &str = "flp_config_bundle";
 const MAX_RAW_SECRET_READS: u32 = 24;
-// Secrets an operator rotates by writing a standalone entry: the standalone value
-// wins over the bundle until reconcile_secret_bundle folds it in and deletes it.
-const ROTATABLE_SECRETS: &[&str] = &["admin_setup_hash", "fastly_token"];
 
 pub struct FastlyRuntime {
     config: Option<ConfigStore>,
@@ -459,7 +456,7 @@ impl FastlyRuntime {
             if name.starts_with("fos_recovery.") || name.starts_with("fos_tmp_") {
                 continue;
             }
-            if (!edge_bundle.contains_key(name) || ROTATABLE_SECRETS.contains(&name.as_str()))
+            if (!edge_bundle.contains_key(name) || crate::setup::rotatable_secret(name))
                 && self.secret_reads.get() < MAX_RAW_SECRET_READS
             {
                 if let Some(val) = self.read_raw_secret(name)? {
@@ -586,7 +583,7 @@ impl Runtime for FastlyRuntime {
         if let Some(value) = self.secret_cache.borrow().get(name) {
             return Ok(value.clone());
         }
-        if ROTATABLE_SECRETS.contains(&name) {
+        if crate::setup::rotatable_secret(name) {
             if let Some(standalone) = self.read_raw_secret(name)? {
                 self.secret_cache
                     .borrow_mut()

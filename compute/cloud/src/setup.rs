@@ -29,6 +29,17 @@ pub const SECRET_KEYS: &[&str] = &[
     "fastly_token",
 ];
 
+/// Secrets an operator rotates by writing a standalone Secret Store entry: the app
+/// reads that entry ahead of its secret bundle, folds it in, then deletes it. Covers
+/// the per-service `fastly_token.<service_id>` refs that compaction and admin
+/// confirmations use, not just the install-wide `fastly_token`.
+pub fn rotatable_secret(name: &str) -> bool {
+    matches!(name, "admin_setup_hash" | "fastly_token")
+        || name.strip_prefix("fastly_token.").is_some_and(|sid| {
+            !sid.is_empty() && sid.len() <= 64 && sid.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
 pub trait SetupStores {
     fn config_present(&self, name: &str) -> Result<bool, String>;
     fn secret_present(&self, name: &str) -> Result<bool, String>;
@@ -141,6 +152,24 @@ mod tests {
             kv_linked: true,
         };
         assert!(missing_entries(&stores).unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_and_per_service_fastly_tokens_are_rotatable_but_other_secrets_are_not() {
+        assert!(rotatable_secret("fastly_token"));
+        assert!(rotatable_secret("admin_setup_hash"));
+        assert!(rotatable_secret("fastly_token.xa20dYfOsL4MhjIo66mVhh"));
+        for name in [
+            "fastly_token.",
+            "fastly_tokens",
+            "fastly_token.a/b",
+            "cdn_key",
+            "session_key",
+            "fos_ak.xa20dYfOsL4MhjIo66mVhh",
+            "flp_bundle",
+        ] {
+            assert!(!rotatable_secret(name), "{name}");
+        }
     }
 
     #[test]

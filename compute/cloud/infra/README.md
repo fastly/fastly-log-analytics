@@ -31,7 +31,9 @@ token and only writes the setup-code hash to the Secret Store, so it may use a
 token scoped to Secret Store updates if Fastly allows it. To rotate the app's
 token later, write a standalone `fastly_token` secret to the install's Secret
 Store: the app reads it ahead of its secret bundle, folds it into the bundle on
-its next admin pass and then removes the standalone entry. The CLI does not
+its next admin pass and then removes the standalone entry. Compaction and
+admin state confirmations use each service's own `fastly_token.<service_id>`;
+rotate it the same way, with a standalone entry of that name. The CLI does not
 create tokens. Bootstrap stores an expired placeholder and prints no setup code. The first
 `make deploy` issues the one-time admin setup code, prints it once at the end
 of activation and records `admin_code_issued` in the inventory; later deploys
