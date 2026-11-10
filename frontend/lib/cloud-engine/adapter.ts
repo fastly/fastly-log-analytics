@@ -49,7 +49,7 @@ import { bindCloudReadContext, CloudBudgetError, cloudReadContext, ensureCloudRa
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
-import { handleSecurityRequest, securityScanColumns } from "./security";
+import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
 import {
   handleSessionsDetail,
   handleSessionsList,
@@ -428,6 +428,7 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     : url.pathname === "/api/sessions" ? sessionsScanColumns(params.filters)
     : /^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?)$/.test(url.pathname)
       ? securityScanColumns(params.filters)
+    : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
     : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters) : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,

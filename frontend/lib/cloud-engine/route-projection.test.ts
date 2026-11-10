@@ -6,7 +6,7 @@ import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { handleValueRequest, valueScanColumns } from "./value";
 import { handleSessionsList, sessionsScanColumns } from "./sessions";
-import { handleSecurityRequest, securityScanColumns } from "./security";
+import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
 import { cmcdScanColumns, handleCmcdRequest } from "./cmcd";
 
 type Backend = Awaited<ReturnType<typeof createNodeBackend>>;
@@ -265,6 +265,26 @@ describe("Cloud route column projections", () => {
     expect(securityScanColumns({ filter_mode: "all" })).not.toContain("filter_mode");
     expect(securityScanColumns("status")).toBeNull();
     expect(securityScanColumns([{ field: "status" }])).toBeNull();
+  });
+
+  const threatIntel = (body: Record<string, unknown>): Variant => ({
+    name: `/api/security/threat-intel ${JSON.stringify(body)}`,
+    columns: threatIntelScanColumns(body.filters),
+    run: async (context) => (await handleSecurityRequest(new Request("http://localhost/api/security/threat-intel", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+    }), undefined, undefined, context))!.json(),
+  });
+
+  it("loads /api/security/threat-intel scans as exact projections", async () => {
+    expect(await threatIntel({ filters: {} }).run(read)).toMatchObject({
+      data: expect.arrayContaining([expect.objectContaining({ requests: expect.any(Number) })]),
+    });
+    await guard([
+      threatIntel({ filters: {} }),
+      threatIntel({ filters: { status_1: { mode: "include", values: ["200"] } } }),
+    ]);
+    expect(threatIntelScanColumns({ host_2: { mode: "exclude", values: ["x"] } })).toContain("host");
+    expect(threatIntelScanColumns("host")).toBeNull();
   });
 
   const cmcd = (body: Record<string, unknown>): Variant => ({

@@ -984,6 +984,18 @@ export function securityScanColumns(filters: unknown): string[] | null {
     .filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, ""))])];
 }
 
+export const THREAT_INTEL_SCAN_COLUMNS = [
+  "timestamp", "ja3", "ja4", "is_bot", "p_type", "waf_logged_rules", "waf_blocked_rules", "country",
+] as const;
+
+/** The columns a projected /api/security/threat-intel load needs, or null when the filters can't name theirs. */
+export function threatIntelScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...THREAT_INTEL_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...THREAT_INTEL_SCAN_COLUMNS, ...Object.keys(filters)
+    .filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, ""))])];
+}
+
 export async function executeSecurityAggregates(
   req: SecurityAggregatesRequest,
   context?: DuckDBReadContext,
