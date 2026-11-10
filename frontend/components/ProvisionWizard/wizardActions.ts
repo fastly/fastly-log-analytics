@@ -1,6 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { client, unwrapClient, queryKeys, adminFetch } from '@/lib/api'
 import { downloadBlob } from '@/lib/utils'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import type { Service } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import { WizardDraftHeaderSchema } from './wizardSchemas'
@@ -31,7 +32,7 @@ function buildTerraformPayload(token: string, selectedService: ProvisionService,
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
     log_period: String(config.log_period),
-    rum_log_period: String(config.rum_log_period || 300),
+    rum_log_period: String(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds),
     cdn_service_name: config.cdn_service_name,
     cdn_prefix: config.cdn_prefix,
     cdn_shield: config.cdn_shield,
@@ -170,7 +171,7 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
     log_period: String(config.log_period),
-    rum_log_period: String(config.rum_log_period || 300),
+    rum_log_period: String(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds),
     cdn_service_name: config.cdn_service_name,
     cdn_shield: config.cdn_shield,
     enable_cron_sync: config.enable_cron_sync,

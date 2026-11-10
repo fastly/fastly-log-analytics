@@ -10,6 +10,7 @@ import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal
 import { Button } from '@/components/ui/button'
 import { useOpenGeneration, useSSE } from '@/hooks/useSSE'
 import { queryKeys } from "@/lib/api"
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import type { ServiceConfig } from '@/types/api'
 import {
   SYNC_INTERVAL_OPTIONS,
@@ -55,7 +56,7 @@ function initialSettings(service: ServiceConfig | null): CronSettingsFormValues 
   const rumCfg = service?.rum as Record<string, unknown> | null | undefined
   const rumSyncVal = typeof rumCfg?.enabled === 'boolean' ? rumCfg.enabled : undefined
   const rumPeriodVal = typeof rumCfg?.log_period === 'number' ? rumCfg.log_period : undefined
-  const initialRumPeriod = rumPeriodVal ?? service?.rum_log_period ?? service?.log_period ?? 300
+  const initialRumPeriod = rumPeriodVal ?? service?.rum_log_period ?? service?.log_period ?? SERVICE_DEFAULTS.rumLogPeriodSeconds
   const rumDeleteVal = typeof rumCfg?.delete_after === 'boolean' ? rumCfg.delete_after : undefined
 
   return {
