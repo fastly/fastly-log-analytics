@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest } from "./adapter";
 import { ORIGIN_SCAN_COLUMNS, setOriginSqlExecutor } from "./origin";
 import { PERFORMANCE_SCAN_COLUMNS, setPerformanceEngineClient } from "./performance";
-import { setSecurityEngineClient } from "./security";
+import { securityScanColumns, setSecurityEngineClient } from "./security";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
@@ -275,7 +275,8 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       ?.projection?.columns).toEqual(insightScanColumns([]));
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))
       ?.projection?.maxBytes).toBe(32 * 1024 * 1024);
-    expect((await options("/api/security/aggregates", post({ sections: ["summary"] })))?.projection).toBeUndefined();
+    expect((await options("/api/security/aggregates", post({ sections: ["summary"] })))?.projection)
+      .toEqual({ columns: securityScanColumns(undefined) });
   });
 
   it("loads every /network scan as the same column projection, plus filtered fields", async () => {

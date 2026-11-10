@@ -3,8 +3,10 @@ import {
   clearManifestCache,
   fetchManifest,
   invalidateManifestCache,
+  observeManifestCommit,
   type ManifestFile,
 } from "./manifest";
+import { SNAPSHOT_REUSE_MS } from "./catalog-manifest";
 
 const H = 3_600_000;
 const T0 = Date.parse("2026-01-10T00:00:00Z");
@@ -215,6 +217,7 @@ describe("closed-hour manifest cache", () => {
     state.files.push(file(T0 + 2 * H));
     state.gen = 4;
     calls.length = 0;
+    vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS);
     const second = await fetchManifest(fetchJson, iso(T0), iso(T0 + 5 * H));
     expect(calls).toEqual([iso(T0 + 3 * H), iso(T0)]);
     expect(keys(second.files)).toEqual(keys(state.files));
@@ -263,7 +266,38 @@ describe("closed-hour manifest cache", () => {
     await fetchManifest(fetchJson, iso(T0), iso(T0 + 5 * H));
     state.from = T0 + H;
     calls.length = 0;
+    vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS);
     await fetchManifest(fetchJson, iso(T0), iso(T0 + 5 * H));
     expect(calls).toEqual([iso(T0 + 3 * H), iso(T0)]);
+  });
+
+  it("serves a just-taken snapshot of the same range without another listing", async () => {
+    const state = { files: [file(T0), file(T0 + 4 * H)], gen: 3, before: T0 + 3 * H };
+    const { fetchJson, calls } = server(state);
+    const first = await fetchManifest(fetchJson, iso(T0), iso(T0 + 5 * H));
+    calls.length = 0;
+    vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS - 1);
+    expect(await fetchManifest(fetchJson, iso(T0), iso(T0 + 5 * H))).toEqual(first);
+    expect(calls).toEqual([]);
+    // A different range or a snapshot past the window lists again.
+    await fetchManifest(fetchJson, iso(T0 + 60_000), iso(T0 + 5 * H + 60_000));
+    expect(calls).toEqual([iso(T0 + 3 * H)]);
+    calls.length = 0;
+    vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS);
+    await fetchManifest(fetchJson, iso(T0 + 60_000), iso(T0 + 5 * H + 60_000));
+    expect(calls).toEqual([iso(T0 + 3 * H)]);
+  });
+
+  it("does not serve a young snapshot that a commit notification has moved past", async () => {
+    const state = { files: [file(T0)], gen: 3, before: T0 + 3 * H };
+    const { fetchJson, calls } = server(state);
+    await fetchManifest(fetchJson, iso(T0), iso(T0 + 2 * H));
+    state.files.push(file(T0 + H));
+    state.gen = 4;
+    calls.length = 0;
+    observeManifestCommit(fetchJson, { type: "commit", generation: 4 });
+    const current = await fetchManifest(fetchJson, iso(T0), iso(T0 + 2 * H));
+    expect(calls).not.toEqual([]);
+    expect(keys(current.files)).toEqual(keys(state.files));
   });
 });

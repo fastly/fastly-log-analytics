@@ -9,6 +9,7 @@ import {
   presetRange,
 } from "./range";
 import { fetchManifest } from "./manifest";
+import { SNAPSHOT_REUSE_MS } from "./catalog-manifest";
 import { readColumns } from "./parquet";
 import { parseFilters, serializeFilter, type DashboardFilter } from "./filters";
 import {
@@ -287,11 +288,19 @@ describe("runDashboard", () => {
       next_cursor: null,
       complete: true,
     };
-    const second = await runDashboard(source, {
-      from: "2026-10-29T10:00:00Z",
-      to: "2026-10-29T10:05:00Z",
-      concurrency: 1,
-    });
+    // A listing this young would be served again; the new file lands on a later run.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS);
+    let second;
+    try {
+      second = await runDashboard(source, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:05:00Z",
+        concurrency: 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(second.stats).toMatchObject({
       listed: 3,
       fetched: 1,

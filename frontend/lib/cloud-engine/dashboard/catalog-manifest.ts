@@ -49,6 +49,14 @@ const MAX_REPLAY = 32;
 const MAX_SNAPSHOTS = 8;
 const MAX_DELTA_PAGES = 64;
 const DAY_MS = 86_400_000;
+/**
+ * A page's scans run one after another, and each asks for the same range
+ * again within a second or two. A listing this young is served again without
+ * a round trip unless a commit notification or a cache reset arrived since.
+ */
+export const SNAPSHOT_REUSE_MS = 2_000;
+type Recent = { manifest: Manifest; at: number; epoch: number; required: number | undefined };
+const recent = new Map<string, Recent>();
 
 export class ManifestRequestError extends Error {
   constructor(
@@ -115,6 +123,7 @@ export function manifestCacheKey(
 
 export function clearCatalogManifests(): void {
   inFlight.clear();
+  recent.clear();
   snapshots.clear();
   requirements.clear();
   fetchIds = new WeakMap();
@@ -385,6 +394,16 @@ export async function fetchCatalogManifest(
   const key = manifestCacheKey(fetchJson, dataset, view, summaries);
   const shareKey = `${key}|${from}|${to}`;
   signal?.throwIfAborted();
+  const identity = scope(fetchJson);
+  const required = requirements.get(identity)?.generation;
+  const young = recent.get(shareKey);
+  if (
+    young &&
+    young.epoch === epoch &&
+    young.required === required &&
+    Date.now() - young.at < SNAPSHOT_REUSE_MS
+  )
+    return young.manifest;
   const shared = inFlight.get(shareKey);
   if (shared && !shared.settled) {
     try {
@@ -395,6 +414,7 @@ export async function fetchCatalogManifest(
     }
   }
   const controller = new AbortController();
+  const startEpoch = epoch;
   const own: SharedListing = {
     controller,
     waiters: 0,
@@ -410,6 +430,14 @@ export async function fetchCatalogManifest(
     view,
     summaries,
     loadSnapshot,
+  ).then(
+    (manifest) => {
+      if (startEpoch === epoch) {
+        recent.set(shareKey, { manifest, at: Date.now(), epoch, required });
+        while (recent.size > MAX_SNAPSHOTS) recent.delete(recent.keys().next().value!);
+      }
+      return manifest;
+    },
   ).finally(() => {
     own.settled = true;
     if (inFlight.get(shareKey) === own) inFlight.delete(shareKey);
