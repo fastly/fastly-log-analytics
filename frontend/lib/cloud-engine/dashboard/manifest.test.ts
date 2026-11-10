@@ -117,21 +117,47 @@ describe("closed-hour manifest cache", () => {
     for (const result of results) expect(keys(result.files)).toEqual(keys(results[0].files));
   });
 
-  it("retries on its own signal when the shared listing's owner aborted", async () => {
-    const owner = new AbortController();
+  function slowServer() {
     let listings = 0;
+    let aborted = 0;
     const fetchJson = vi.fn(async (_url: string, signal?: AbortSignal) => {
       listings++;
       await new Promise((resolve) => setTimeout(resolve, 5));
-      if (signal?.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      if (signal?.aborted) {
+        aborted++;
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }
       return { files: [file(T0)], next_cursor: null, complete: true, catalog_generation: 1 };
     });
+    return { fetchJson, count: () => ({ listings, aborted }) };
+  }
+
+  it("keeps the shared listing alive for other callers when its first caller aborts", async () => {
+    const owner = new AbortController();
+    const { fetchJson, count } = slowServer();
     const first = fetchManifest(fetchJson, iso(T0), iso(T0 + H), owner.signal);
     const second = fetchManifest(fetchJson, iso(T0), iso(T0 + H), new AbortController().signal);
     owner.abort();
     await expect(first).rejects.toMatchObject({ name: "AbortError" });
     expect(keys((await second).files)).toEqual(keys([file(T0)]));
-    expect(listings).toBe(2);
+    expect(count()).toEqual({ listings: 1, aborted: 0 });
+  });
+
+  it("aborts the shared listing only once every caller has aborted", async () => {
+    const a = new AbortController();
+    const b = new AbortController();
+    const { fetchJson, count } = slowServer();
+    const first = fetchManifest(fetchJson, iso(T0), iso(T0 + H), a.signal);
+    const second = fetchManifest(fetchJson, iso(T0), iso(T0 + H), b.signal);
+    a.abort();
+    b.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(count()).toEqual({ listings: 1, aborted: 1 });
+    const third = await fetchManifest(fetchJson, iso(T0), iso(T0 + H), new AbortController().signal);
+    expect(keys(third.files)).toEqual(keys([file(T0)]));
+    expect(count().listings).toBe(2);
   });
 
   it("rejects pages from different committed catalog generations", async () => {

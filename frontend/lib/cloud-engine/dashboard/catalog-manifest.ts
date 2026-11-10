@@ -340,7 +340,14 @@ async function delta(
   };
 }
 
-const inFlight = new Map<string, Promise<Manifest>>();
+type SharedListing = {
+  promise: Promise<Manifest>;
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+};
+
+const inFlight = new Map<string, SharedListing>();
 
 function isAbort(error: unknown): boolean {
   return (
@@ -349,11 +356,17 @@ function isAbort(error: unknown): boolean {
   );
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? Object.assign(new Error("aborted"), { name: "AbortError" });
+}
+
 /**
  * Concurrent callers asking for the same listing share one request. A page
  * opens several panels at once; without this each one listed the range
- * itself before the first snapshot could be cached. A caller whose own signal
- * is still live retries if the shared request was aborted by its owner.
+ * itself before the first snapshot could be cached. The shared request runs
+ * on its own signal and is aborted only once every caller has aborted, so a
+ * panel that re-renders and cancels its query does not restart the listing
+ * for the others.
  */
 export async function fetchCatalogManifest(
   fetchJson: FetchJson,
@@ -363,48 +376,95 @@ export async function fetchCatalogManifest(
   dataset: string | undefined,
   view: ListView | undefined,
   summaries: boolean | undefined,
-  loadSnapshot: (budget: ManifestBudget, fresh: boolean) => Promise<Manifest>,
+  loadSnapshot: (
+    budget: ManifestBudget,
+    fresh: boolean,
+    signal: AbortSignal,
+  ) => Promise<Manifest>,
 ): Promise<Manifest> {
   const key = manifestCacheKey(fetchJson, dataset, view, summaries);
   const shareKey = `${key}|${from}|${to}`;
+  signal?.throwIfAborted();
   const shared = inFlight.get(shareKey);
-  if (shared) {
+  if (shared && !shared.settled) {
     try {
-      const result = await shared;
-      signal?.throwIfAborted();
-      return result;
+      return await join(shared, signal);
     } catch (error) {
       signal?.throwIfAborted();
       if (!isAbort(error)) throw error;
     }
   }
-  const own = fetchCatalogManifestUncached(
+  const controller = new AbortController();
+  const own: SharedListing = {
+    controller,
+    waiters: 0,
+    settled: false,
+    promise: undefined as unknown as Promise<Manifest>,
+  };
+  own.promise = fetchCatalogManifestUncached(
     fetchJson,
     from,
     to,
-    signal,
+    controller.signal,
     dataset,
     view,
     summaries,
     loadSnapshot,
-  );
-  inFlight.set(shareKey, own);
-  try {
-    return await own;
-  } finally {
+  ).finally(() => {
+    own.settled = true;
     if (inFlight.get(shareKey) === own) inFlight.delete(shareKey);
-  }
+  });
+  inFlight.set(shareKey, own);
+  return join(own, signal);
+}
+
+/** Waits on a shared listing, leaving it when this caller's own signal aborts. */
+function join(shared: SharedListing, signal: AbortSignal | undefined): Promise<Manifest> {
+  shared.waiters++;
+  let left = false;
+  const leave = () => {
+    if (left) return;
+    left = true;
+    if (--shared.waiters === 0 && !shared.settled) shared.controller.abort();
+  };
+  return new Promise<Manifest>((resolve, reject) => {
+    const onAbort = () => {
+      leave();
+      reject(abortReason(signal!));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    shared.promise.then(
+      (value) => {
+        signal?.removeEventListener("abort", onAbort);
+        leave();
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal?.removeEventListener("abort", onAbort);
+        leave();
+        reject(error);
+      },
+    );
+  });
 }
 
 async function fetchCatalogManifestUncached(
   fetchJson: FetchJson,
   from: string,
   to: string,
-  signal: AbortSignal | undefined,
+  signal: AbortSignal,
   dataset: string | undefined,
   view: ListView | undefined,
   summaries: boolean | undefined,
-  loadSnapshot: (budget: ManifestBudget, fresh: boolean) => Promise<Manifest>,
+  loadSnapshot: (
+    budget: ManifestBudget,
+    fresh: boolean,
+    signal: AbortSignal,
+  ) => Promise<Manifest>,
 ): Promise<Manifest> {
   const key = manifestCacheKey(fetchJson, dataset, view, summaries);
   const identity = scope(fetchJson);
@@ -429,7 +489,7 @@ async function fetchCatalogManifestUncached(
           summaries,
           budget,
         )
-      : await loadSnapshot(budget, false);
+      : await loadSnapshot(budget, false, signal);
   } catch (error) {
     if (
       !base ||
@@ -444,7 +504,7 @@ async function fetchCatalogManifestUncached(
     )
       throw error;
     signal?.throwIfAborted();
-    result = await loadSnapshot(budget, true);
+    result = await loadSnapshot(budget, true, signal);
     if (!result.complete || result.catalogGeneration === undefined)
       throw new Error("Catalog resync snapshot is incomplete or unversioned");
     resynced = true;

@@ -310,12 +310,12 @@ export async function fetchManifest(
     dataset,
     view,
     includeSummaries,
-    (budget, fresh) =>
+    (budget, fresh, shared) =>
       fetchSnapshot(
         fetchJson,
         from,
         to,
-        signal,
+        shared,
         dataset,
         view,
         includeSummaries,
