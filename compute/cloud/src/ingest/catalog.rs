@@ -334,6 +334,11 @@ fn put_limit<T: Serialize, R: Runtime>(
     Ok(key)
 }
 
+/// vCPU the catalog may spend in one execution, counted from the ingest step's start. A tick
+/// reaches the commit with 40-50 ms already spent on plan parsing and the source index; a gate
+/// below that re-plans the same files every tick and never commits.
+pub const VCPU_STOP_MS: u64 = 150;
+
 const PREPARING: &str = "ingest:catalog_preparing";
 const REPLACEMENT_PREPARING: &str = "ingest:catalog_replacement_preparing";
 
@@ -803,7 +808,7 @@ pub fn prepare_reserving<R: Runtime>(
 
 pub fn admitted<R: Runtime>(store: &Store<'_, R>) -> bool {
     store.within_wall()
-        && store.vcpu_ms() < 35
+        && store.vcpu_ms() < VCPU_STOP_MS
         && store.runtime.heap_mib().is_none_or(|heap| heap < 96)
 }
 

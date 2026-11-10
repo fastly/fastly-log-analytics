@@ -1141,6 +1141,37 @@ fn tick(fake: &Fake) -> Result<ingest::Report, String> {
     report
 }
 
+#[test]
+fn a_tick_that_arrives_with_execution_vcpu_already_spent_still_commits() {
+    // Live ticks reach the catalog commit with 40-50 ms of execution vCPU behind them (tick
+    // startup, plan parsing, the source-index dispatch). The catalog's admission gate must not
+    // turn that into a tick that re-plans forever and never writes a row.
+    let fake = Fake::new(BASE + 3600);
+    for (m, name) in ["a", "b", "c"].iter().enumerate() {
+        let minute = BASE + m as i64 * 60;
+        let lines: Vec<String> = (0..4)
+            .map(|i| line(minute + i * 10, &format!("{name}{i}")))
+            .collect();
+        put_raw(&fake, minute, name, &lines);
+    }
+    let mut report = None;
+    for _ in 0..4 {
+        fake.new_request();
+        fake.vcpu.set(45);
+        let buffer = LogBuffer::new(SID, "req");
+        let r = ingest::run(&fake, &service(), "ak", "sk", Instant::now(), &buffer).unwrap();
+        let committed = fake.kv.borrow()[ingest::WATERMARK_KEY].1["run_id"].is_string();
+        report = Some(r);
+        if committed {
+            break;
+        }
+    }
+    let report = report.unwrap();
+    assert_eq!((report.converted, report.rows), (3, 12));
+    assert_eq!(fake.keys("processed/request/").len(), 3);
+    assert!(fake.kv.borrow()[ingest::WATERMARK_KEY].1["run_id"].is_string());
+}
+
 fn rows(fake: &Fake, kind: LogKind) -> Vec<Value> {
     fake.new_request();
     telemetry::read_live(fake, SID, kind, None, Some(2000), None)
