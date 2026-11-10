@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { describe, expect, it } from "vitest";
 import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/test-fixtures";
 import { cloudRumAnalytics } from "./rum-wire";
@@ -144,6 +145,33 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
     expect(shaped.browsers[1].pct).toBe(25);
     expect(shaped.devices[0].pct).toBe(100);
   });
+
+  it("aggregates a day of per-period RUM files within the engine memory limit", async () => {
+    // Cloud exposes client_vitals as one UNION ALL branch per parquet file, and
+    // every branch pays for each count(DISTINCT …) hash table: a few hundred
+    // files × the analytics distinct counts exhausted the 256 MB limit on ~10k rows.
+    const engine = new DuckDBAnalyticalEngine();
+    const base = 1700000000000;
+    const files = Array.from({ length: 500 }, (_, index) => {
+      const columnData = [
+        { name: "ts_ms", type: "INT64" as const, data: Array.from({ length: 20 }, (_, row) => BigInt(base + index * 60000 + row * 1000)) },
+        { name: "req_id", type: "STRING" as const, data: Array.from({ length: 20 }, (_, row) => `req-${index}-${row}`) },
+        { name: "metric_name", type: "STRING" as const, data: Array.from({ length: 20 }, (_, row) => row % 2 ? "LCP" : "CLS") },
+        { name: "metric_value", type: "DOUBLE" as const, data: Array.from({ length: 20 }, (_, row) => row % 2 ? 2000 : 0.05) },
+        { name: "pathname", type: "STRING" as const, data: Array.from({ length: 20 }, () => "/home") },
+      ];
+      const bytes = parquetWriteBuffer({ columnData, codec: "SNAPPY" });
+      return { scopedKey: `rum:period-${index}`, key: `period-${index}.parquet`, bytes };
+    });
+    try {
+      await engine.syncRumFiles(files, []);
+      const data = await cloudRumAnalytics({ engine });
+      expect(data.beacon_count).toBe(10000);
+      expect(data.trends.timestamps.length).toBeGreaterThan(1);
+    } finally {
+      await engine.reset();
+    }
+  }, 90_000);
 
   it("queries RUM analytics, live events, and beacon health from DuckDB", async () => {
     const engine = new DuckDBAnalyticalEngine();

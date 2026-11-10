@@ -34,7 +34,10 @@ export async function cloudRumAnalytics(params: RumQueryParams) {
   const where = buildRumWhere(params);
   const errorWhere = buildRumWhere(params, "client_errors");
   const identity = BEACON_IDENTITY;
-  const events = `WITH events AS (
+  // MATERIALIZED: the vitals/errors views are one UNION ALL branch per parquet
+  // file, and DuckDB keeps a hash table per branch for every count(DISTINCT …)
+  // below; a day of per-period files blew the memory limit without it.
+  const events = `WITH events AS MATERIALIZED (
     SELECT ts_ms, ${identity} AS beacon_id, page_url, browser_name, os_name, device_type,
       metric_name, metric_value, FALSE AS is_error FROM client_vitals WHERE ${where}
     UNION ALL SELECT ts_ms, ${identity}, page_url, browser_name, os_name, device_type,
