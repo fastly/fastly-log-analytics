@@ -969,6 +969,21 @@ export function formatProxiesExportPayload(
   };
 }
 
+/** Every request column a /api/security/aggregates section scan reads. */
+export const SECURITY_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "ip", "client_ip", "tls_ciphers_sha", "req_header_bytes", "conn_requests", "is_ipv6",
+  "p_type", "waf_sig", "ua", "asn", "rtt_min", "tcpi_min_rtt", "tcp_rtt", "tcpi_rtt", "lat", "lon", "pop",
+  "country", "city",
+] as const;
+
+/** The columns a projected /api/security/aggregates load needs, or null when the filters can't name theirs. */
+export function securityScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...SECURITY_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...SECURITY_SCAN_COLUMNS, ...Object.keys(filters)
+    .filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, ""))])];
+}
+
 export async function executeSecurityAggregates(
   req: SecurityAggregatesRequest,
   context?: DuckDBReadContext,

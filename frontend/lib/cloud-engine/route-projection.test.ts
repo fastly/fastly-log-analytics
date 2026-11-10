@@ -6,6 +6,8 @@ import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { handleValueRequest, valueScanColumns } from "./value";
 import { handleSessionsList, sessionsScanColumns } from "./sessions";
+import { handleSecurityRequest, securityScanColumns } from "./security";
+import { cmcdScanColumns, handleCmcdRequest } from "./cmcd";
 
 type Backend = Awaited<ReturnType<typeof createNodeBackend>>;
 type Variant = { name: string; columns: string[] | null; run: (read: DuckDBReadContext) => Promise<unknown> };
@@ -39,7 +41,7 @@ const DATA: Record<string, string> = {
   service_id: cycle(["svc", null, "other"]),
   waf_action: cycle(["block", "log", "allow", null]),
   ngwaf_decision: cycle([null, "BLOCKED", "PASS"]),
-  waf_sig: cycle(["SQLI,XSS", null, "CMDEXE"]),
+  waf_sig: cycle(["SQLI,XSS", null, "CMDEXE", "VERIFIED-BOT.Googlebot"]),
   _bot_name: cycle([null, "Googlebot", ""]),
   ngwaf_bot_name: cycle(["", "Bingbot", null]),
   bot_category: cycle([null, null, "crawler"]),
@@ -238,5 +240,50 @@ describe("Cloud route column projections", () => {
     expect(sessionsScanColumns({ host: ["a.example"] })).toContain("host");
     expect(sessionsScanColumns("host")).toBeNull();
     expect(sessionsScanColumns([{ field: "host" }])).toBeNull();
+  });
+
+  const security = (body: Record<string, unknown>): Variant => ({
+    name: `/api/security/aggregates ${JSON.stringify(body)}`,
+    columns: securityScanColumns(body.filters),
+    run: async (context) => (await handleSecurityRequest(new Request("http://localhost/api/security/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...RANGE, ...body }),
+    }), undefined, undefined, context))!.json(),
+  });
+
+  it("loads /api/security/aggregates scans as exact projections", async () => {
+    expect(await security({ filters: {} }).run(read)).toMatchObject({
+      tls_fingerprints: expect.arrayContaining([expect.objectContaining({ request_count: expect.any(Number) })]),
+      verified_bots_ts: expect.arrayContaining([expect.objectContaining({ bot_type: "Googlebot" })]),
+      traffic_quality: expect.any(Array), proxy_dist: expect.any(Array),
+    });
+    await guard([
+      security({ filters: {} }),
+      security({ filters: { status_1: { mode: "include", values: ["200"] } }, sections: ["proxies", "ipv6_adoption"] }),
+      security({ filters: { host: ["a.example"] }, sections: ["tls_fingerprints", "top_ips_header", "wellknown_bots"], bucket_seconds: 60 }),
+    ]);
+    expect(securityScanColumns({ status_1: { mode: "include", values: ["200"] }, filter_mode: "all" })).toContain("status");
+    expect(securityScanColumns({ filter_mode: "all" })).not.toContain("filter_mode");
+    expect(securityScanColumns("status")).toBeNull();
+    expect(securityScanColumns([{ field: "status" }])).toBeNull();
+  });
+
+  const cmcd = (body: Record<string, unknown>): Variant => ({
+    name: `/api/cmcd/aggregates ${JSON.stringify(body)}`,
+    columns: cmcdScanColumns(body.filters),
+    run: (context) => handleCmcdRequest("/api/cmcd/aggregates", { ...RANGE, ...body, engine: context }),
+  });
+
+  it("loads /api/cmcd/aggregates scans as exact projections", async () => {
+    expect(await cmcd({ service_id: "svc" }).run(read)).toMatchObject({
+      has_data: true, summary: { total_requests: expect.any(Number) }, rebuffer_by_asn: expect.any(Array),
+    });
+    await guard([
+      cmcd({ service_id: "svc" }),
+      cmcd({ service_id: "svc", filters: { host: { mode: "include", values: ["a.example"] } }, bucket_seconds: 600, top_n: 3 }),
+      cmcd({ service_id: "svc", filter_sf: "cmcd_sf-1", filter_ot: "cmcd_ot-2", filter_st: "cmcd_st-3", filter_cid: "cmcd_cid-4" }),
+    ]);
+    expect(cmcdScanColumns({ host: { mode: "include", values: ["a.example"] } })).toContain("host");
+    expect(cmcdScanColumns("host")).toBeNull();
+    expect(cmcdScanColumns([{ field: "host" }])).toBeNull();
   });
 });

@@ -9,7 +9,7 @@ import { cloudCacheIdentity } from "./cache-identity";
 
 z.config({ jitless: true });
 import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
-import { handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
+import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
 import type { MinuteBucket } from "./dashboard/engine";
 import { parseVcpuMsHeader } from "./dashboard/sources";
@@ -49,7 +49,7 @@ import { bindCloudReadContext, CloudBudgetError, cloudReadContext, ensureCloudRa
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
-import { handleSecurityRequest } from "./security";
+import { handleSecurityRequest, securityScanColumns } from "./security";
 import {
   handleSessionsDetail,
   handleSessionsList,
@@ -425,7 +425,10 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
     : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters)
     : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters)
-    : url.pathname === "/api/sessions" ? sessionsScanColumns(params.filters) : null;
+    : url.pathname === "/api/sessions" ? sessionsScanColumns(params.filters)
+    : /^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?)$/.test(url.pathname)
+      ? securityScanColumns(params.filters)
+    : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters) : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {

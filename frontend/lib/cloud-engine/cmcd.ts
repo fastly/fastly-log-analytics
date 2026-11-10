@@ -184,6 +184,20 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
   return clauses.join(" AND ");
 }
 
+/** Every request column the /api/cmcd/aggregates scans read. */
+export const CMCD_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_cid", "cmcd_br", "cmcd_bl", "cmcd_bs", "cmcd_mtp", "cmcd_ot",
+  "cmcd_sf", "cmcd_st", "cmcd_tb", "cmcd_d", "cmcd_su", "url", "geo_country", "country", "client_asn", "asn",
+  "as_name", "ttfb_ms", "ttfb", "time_elapsed_usec", "elapsed",
+] as const;
+
+/** The columns a projected /api/cmcd/aggregates load needs, or null when the filters can't name theirs. */
+export function cmcdScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...CMCD_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...CMCD_SCAN_COLUMNS, ...Object.keys(filters)])];
+}
+
 export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
