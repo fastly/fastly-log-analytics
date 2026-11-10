@@ -1111,11 +1111,14 @@ fn request_compact_stage<R: Runtime>(
         }
     }
     row.error = errors.first().cloned();
-    if passes > 1 || stopped.is_some() {
+    if passes > 0 {
+        // Each pass is its own worker execution: its vCPU belongs beside the row, as the
+        // ingest rows report it, not inside the admin execution's own `vcpu_ms`.
         row.details = Some(json!({
             "passes": passes,
             "stopped": stopped,
             "lease_generation": lease_generation,
+            "worker_vcpu_ms": worker_vcpu,
         }));
     }
     if row.files > 0 || row.deleted > 0 || failed > 0 {
@@ -1129,7 +1132,6 @@ fn request_compact_stage<R: Runtime>(
         return None;
     }
     finish_row(runtime, &mut row, before, began, &span);
-    row.vcpu_ms += worker_vcpu;
     Some(row)
 }
 

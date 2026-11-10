@@ -152,6 +152,29 @@ describe("summarizeUsage", () => {
     expect(counted.computeRequests).toBe(3 + 2 + 4 + 4);
   });
 
+  it("counts worker vCPU carried in a run's details beside the admin execution's own", () => {
+    const run = fixtureUsageInput.rows.cron_runs[2];
+    const withWorkers = summarizeUsage({
+      ...fixtureUsageInput,
+      rows: {
+        ...fixtureUsageInput.rows,
+        cron_runs: [
+          {
+            ...run,
+            cron_kind: "request_compact",
+            vcpu_ms: 80,
+            worker_executions: 4,
+            details_json: JSON.stringify({ passes: 4, worker_vcpu_ms: 400 }),
+          },
+        ],
+        cron_ticks: [],
+      },
+    });
+    expect(withWorkers.computeByCron).toEqual([
+      { key: "request_compact", requests: 1, vcpuMs: 480 },
+    ]);
+  });
+
   it("estimates storage as snapshot + PUT bytes - deleted bytes after the snapshot", () => {
     expect(summary.storage.snapshotAt).toBe(
       fixtureUsageInput.now - 3 * 86_400_000,
@@ -336,7 +359,10 @@ describe("fetchUsageInput", () => {
       vi.useRealTimers();
     });
     respond(fixtureUsageInput.settings);
-    const row = { ...fixtureUsageInput.rows.fos_usage[0], timestamp: FIXTURE_NOW - 1000 };
+    const row = {
+      ...fixtureUsageInput.rows.fos_usage[0],
+      timestamp: FIXTURE_NOW - 1000,
+    };
     const read = reader({ fos_usage: [row] });
     const bounds = { from: FIXTURE_NOW - 3_600_000, to: FIXTURE_NOW };
 
@@ -432,7 +458,8 @@ describe("usage-logging settings sharing", () => {
     ]);
     await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
     expect(settingsCalls(fetcher)).toHaveLength(1);
-    for (const resolve of pending) resolve(Response.json(fixtureUsageInput.settings));
+    for (const resolve of pending)
+      resolve(Response.json(fixtureUsageInput.settings));
     const [a, b, c, d] = await reads;
     for (const settings of [a, b, c.settings, d.settings]) {
       expect(settings).toEqual(fixtureUsageInput.settings);
@@ -447,7 +474,9 @@ describe("usage-logging settings sharing", () => {
     const stays = fetchUsageSettings();
     leaving.abort();
     await expect(left).rejects.toMatchObject({ name: "AbortError" });
-    expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(false);
+    expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(
+      false,
+    );
     pending[0](Response.json(fixtureUsageInput.settings));
     await expect(stays).resolves.toEqual(fixtureUsageInput.settings);
     expect(settingsCalls(fetcher)).toHaveLength(1);
@@ -457,11 +486,17 @@ describe("usage-logging settings sharing", () => {
     const { fetcher } = deferredFetch();
     const first = new AbortController();
     const second = new AbortController();
-    const reads = [fetchUsageSettings(first.signal), fetchUsageSettings(second.signal)];
+    const reads = [
+      fetchUsageSettings(first.signal),
+      fetchUsageSettings(second.signal),
+    ];
     first.abort();
     second.abort();
-    for (const r of reads) await expect(r).rejects.toMatchObject({ name: "AbortError" });
-    expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
+    for (const r of reads)
+      await expect(r).rejects.toMatchObject({ name: "AbortError" });
+    expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(
+      true,
+    );
   });
 
   it("rejects every reader on failure and fetches again on the next call", async () => {
@@ -472,8 +507,12 @@ describe("usage-logging settings sharing", () => {
     const reads = [fetchUsageSettings(), fetchUsageSettings()];
     for (const r of reads) await expect(r).rejects.toThrow("nope");
     expect(fetcher).toHaveBeenCalledTimes(1);
-    fetcher.mockImplementation(async () => Response.json(fixtureUsageInput.settings));
-    await expect(fetchUsageSettings()).resolves.toEqual(fixtureUsageInput.settings);
+    fetcher.mockImplementation(async () =>
+      Response.json(fixtureUsageInput.settings),
+    );
+    await expect(fetchUsageSettings()).resolves.toEqual(
+      fixtureUsageInput.settings,
+    );
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });
@@ -885,9 +924,9 @@ describe("incurredCost", () => {
       loggedComputeSegments: summary.computeSegments,
       billing: null,
     });
-    expect(loggedIncurred.lines.find((l) => l.id === "compute")?.usd).toBeCloseTo(
-      (101 / 1e6) * 0.5 + (30 / 1000) * 0.00005,
-    );
+    expect(
+      loggedIncurred.lines.find((l) => l.id === "compute")?.usd,
+    ).toBeCloseTo((101 / 1e6) * 0.5 + (30 / 1000) * 0.00005);
   });
 
   it("rejects a response without services", () => {
@@ -1000,6 +1039,10 @@ describe("deriveFosUsageFromCronRuns summary bundles", () => {
   });
 
   it("counts no PUT for a run that only deleted stale partials", () => {
-    expect(puts([run({ listed_files: 0, deleted_files: 4, parquet_files_written: 0 })])).toBe(0);
+    expect(
+      puts([
+        run({ listed_files: 0, deleted_files: 4, parquet_files_written: 0 }),
+      ]),
+    ).toBe(0);
   });
 });

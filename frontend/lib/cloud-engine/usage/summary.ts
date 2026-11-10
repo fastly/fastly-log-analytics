@@ -251,9 +251,7 @@ export function billedVcpuMsPerRequest(
   roundingMs = 10,
 ): number {
   const excess = Math.max(0, vcpuMs - freeMs);
-  return roundingMs > 0
-    ? Math.round(excess / roundingMs) * roundingMs
-    : excess;
+  return roundingMs > 0 ? Math.round(excess / roundingMs) * roundingMs : excess;
 }
 
 export function billedVcpuForExecutions(
@@ -311,6 +309,18 @@ function emptyTotals(): OpTotals {
   return { classA: 0, classB: 0, cdnHit: 0, usd: 0 };
 }
 
+/** Worker executions a run dispatched report their vCPU in its details, not in `vcpu_ms`. */
+function workerVcpuMs(run: CronRunRow): number {
+  if (!run.details_json) return 0;
+  try {
+    const parsed = JSON.parse(run.details_json) as { worker_vcpu_ms?: unknown };
+    const value = Number(parsed.worker_vcpu_ms ?? 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function addOps(totals: OpTotals, row: FosUsageRow) {
   if (row.op_class === "A") totals.classA += row.op_count;
   else if (row.op_class === "B") totals.classB += row.op_count;
@@ -324,7 +334,8 @@ function attachGroupSegments(
   settings: UsageLoggingSettings,
 ) {
   const billedVcpuMs = segments.reduce(
-    (sum, s) => sum + billedVcpuForExecutions(s.vcpuMs, s.requests, settings).billedMs,
+    (sum, s) =>
+      sum + billedVcpuForExecutions(s.vcpuMs, s.requests, settings).billedMs,
     0,
   );
   Object.defineProperty(entry, "segments", {
@@ -423,7 +434,12 @@ export function deriveFosUsageFromCronRuns(
     bytes_out: number,
     bytes_deleted: number,
   ) => {
-    if (op_count <= 0 && bytes_in <= 0 && bytes_out <= 0 && bytes_deleted <= 0) {
+    if (
+      op_count <= 0 &&
+      bytes_in <= 0 &&
+      bytes_out <= 0 &&
+      bytes_deleted <= 0
+    ) {
       return;
     }
     const est_cost_usd =
@@ -461,15 +477,43 @@ export function deriveFosUsageFromCronRuns(
         if (
           run.outcome !== "error" &&
           run.outcome !== "busy" &&
-          (listed > 0 || converted > 0 || filesWritten > 0 || bytesWritten > 0 || calls > 0)
+          (listed > 0 ||
+            converted > 0 ||
+            filesWritten > 0 ||
+            bytesWritten > 0 ||
+            calls > 0)
         ) {
           const listOps = Math.max(1, Math.ceil(listed / 1000));
-          push(ts, "LIST", "A", listOps, "pq_request", "cron:ingest", "DIRECT", 0, 0, 0);
+          push(
+            ts,
+            "LIST",
+            "A",
+            listOps,
+            "pq_request",
+            "cron:ingest",
+            "DIRECT",
+            0,
+            0,
+            0,
+          );
         }
         if (converted > 0) {
           const rawBytes =
-            bytesWritten > 0 ? Math.round(bytesWritten * 1.5) : converted * 1024;
-          push(ts, "GET", "B", converted, "pq_request", "worker:ingest", "MISS", 0, rawBytes, 0);
+            bytesWritten > 0
+              ? Math.round(bytesWritten * 1.5)
+              : converted * 1024;
+          push(
+            ts,
+            "GET",
+            "B",
+            converted,
+            "pq_request",
+            "worker:ingest",
+            "MISS",
+            0,
+            rawBytes,
+            0,
+          );
         }
         if (filesWritten > 0 || bytesWritten > 0) {
           push(
@@ -491,15 +535,41 @@ export function deriveFosUsageFromCronRuns(
         if (
           run.outcome !== "error" &&
           run.outcome !== "busy" &&
-          (listed > 0 || converted > 0 || filesWritten > 0 || bytesWritten > 0 || calls > 0)
+          (listed > 0 ||
+            converted > 0 ||
+            filesWritten > 0 ||
+            bytesWritten > 0 ||
+            calls > 0)
         ) {
           const listOps = Math.max(1, Math.ceil(listed / 1000));
-          push(ts, "LIST", "A", listOps, "pq_rum", "cron:rum_ingest", "DIRECT", 0, 0, 0);
+          push(
+            ts,
+            "LIST",
+            "A",
+            listOps,
+            "pq_rum",
+            "cron:rum_ingest",
+            "DIRECT",
+            0,
+            0,
+            0,
+          );
         }
         if (converted > 0) {
           const rawBytes =
             bytesWritten > 0 ? Math.round(bytesWritten * 1.5) : converted * 512;
-          push(ts, "GET", "B", converted, "pq_rum", "worker:rum_ingest", "MISS", 0, rawBytes, 0);
+          push(
+            ts,
+            "GET",
+            "B",
+            converted,
+            "pq_rum",
+            "worker:rum_ingest",
+            "MISS",
+            0,
+            rawBytes,
+            0,
+          );
         }
         if (filesWritten > 0 || bytesWritten > 0) {
           push(
@@ -756,7 +826,10 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
   }
 
   const crons = new Map<string, RouteTotals>();
-  const cronRunSegments = new Map<string, Map<string, ComputeExecutionSegment>>();
+  const cronRunSegments = new Map<
+    string,
+    Map<string, ComputeExecutionSegment>
+  >();
   const activeRunSegments = new Map<string, ComputeExecutionSegment>();
   const clockRuns = new Set<string>();
   let cacheLookups = 0;
@@ -780,7 +853,7 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
     const idle = Number(run.idle_ticks ?? 0);
     const idleVcpu = Number(run.idle_vcpu_ms ?? 0);
     const workers = Number(run.worker_executions ?? 0);
-    const runVcpu = Number(run.vcpu_ms ?? 0);
+    const runVcpu = Number(run.vcpu_ms ?? 0) + workerVcpuMs(run);
     computeRequests += idle;
     computeRequests += workers;
     computeVcpuMs += idleVcpu;
@@ -815,7 +888,7 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
         requests: 1 + workers,
       });
     }
-    bump(crons, run.cron_kind, run.vcpu_ms);
+    bump(crons, run.cron_kind, runVcpu);
     cacheLookups += run.cache_lookups;
     if (typeof run.kv_ops === "number") {
       loggedKvOps += run.kv_ops;
@@ -852,7 +925,8 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
   computeRequests += clockRuns.size;
   const computeBilledVcpuMs = computeSegments.reduce(
     (sum, s) =>
-      sum + billedVcpuForExecutions(s.vcpuMs, s.requests, input.settings).billedMs,
+      sum +
+      billedVcpuForExecutions(s.vcpuMs, s.requests, input.settings).billedMs,
     0,
   );
 
@@ -875,7 +949,11 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
     let windowPutBytes = effectiveFosUsage
       .filter((row) => row.dataset === dataset && row.op === "PUT")
       .reduce((sum, row) => sum + row.bytes_in, 0);
-    if (dataset === "pq_rum" && windowPutBytes === 0 && rumIngestRuns.length > 0) {
+    if (
+      dataset === "pq_rum" &&
+      windowPutBytes === 0 &&
+      rumIngestRuns.length > 0
+    ) {
       windowPutBytes = rumIngestRuns.reduce(
         (sum, run) => sum + (run.bytes_written ?? 0),
         0,
@@ -1414,8 +1492,7 @@ export function telemetryCostUsd(
     0,
   );
   const egressUsd =
-    ((summary.telemetryBytesRead ?? 0) / 1e9) *
-    settings.cdn_egress_rate_per_gb;
+    ((summary.telemetryBytesRead ?? 0) / 1e9) * settings.cdn_egress_rate_per_gb;
 
   const cronCompute = summary.computeByCron.filter(
     (c) => c.key === "log_flush" || c.key === "log_compact",

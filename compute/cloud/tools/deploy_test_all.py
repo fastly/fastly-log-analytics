@@ -140,6 +140,19 @@ def _extract_cron_row_metric(row: dict[str, Any], *keys: str) -> int | float | N
     return None
 
 
+def _cron_row_details(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("details_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _summarize_stage_cron_rows(
     stage_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -235,6 +248,19 @@ def evaluate_cron_health(
             errors.append(f"{stage} exceeded cache_lookups budget: {c_lookups} > 56")
         if vcpu is not None and vcpu >= stage_budget:
             errors.append(f"{stage} exceeded vcpu_ms budget: {vcpu:.2f} >= {stage_budget:.1f}")
+        # Worker executions a row dispatched report their vCPU in its details; each pass is one
+        # execution, so the budget applies to the per-pass share, not the sum.
+        details = _cron_row_details(row)
+        worker_vcpu = _extract_cron_row_metric(details, "worker_vcpu_ms")
+        passes = _extract_cron_row_metric(details, "passes")
+        if worker_vcpu is not None and passes:
+            per_pass = float(worker_vcpu) / float(passes)
+            max_vcpu_ms = max(max_vcpu_ms or 0.0, per_pass)
+            if per_pass >= stage_budget:
+                errors.append(
+                    f"{stage} exceeded worker vcpu_ms budget per pass: {per_pass:.2f} >= {stage_budget:.1f} "
+                    f"({worker_vcpu} over {int(passes)} passes)"
+                )
 
     missing_stages = sorted(required_stages - set(by_stage.keys()))
     if missing_stages:

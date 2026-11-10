@@ -12589,6 +12589,33 @@ mod request_compaction {
         );
     }
 
+    /// Every pass is its own worker execution, so the row's `vcpu_ms` is the admin execution's
+    /// own time (what the per-execution budget applies to), and the passes' worker time sits in
+    /// `details.worker_vcpu_ms` as the ingest rows report it.
+    #[test]
+    fn a_compaction_rows_vcpu_is_the_admin_executions_not_the_sum_of_its_passes() {
+        let fake = Fake::new(NOW);
+        compaction_service(&fake);
+        load_windows(&fake, HOUR, 128, 50);
+        fake.vcpu_step.set(45);
+        stage_turn(&fake, 0, true);
+        let rows = rows(&fake, LogKind::CronRuns);
+        let row = rows
+            .iter()
+            .find(|row| row["cron_kind"] == "request_compact")
+            .expect("a request_compact row");
+        let details: Value = serde_json::from_str(row["details_json"].as_str().unwrap()).unwrap();
+        let passes = details["passes"].as_u64().unwrap();
+        let worker = details["worker_vcpu_ms"].as_u64().unwrap();
+        let own = details["stage_execution_metrics"]["vcpu_ms"]
+            .as_u64()
+            .unwrap();
+        assert!(passes > 1, "{details}");
+        assert!(worker >= passes * 45, "{details}");
+        assert_eq!(row["vcpu_ms"].as_u64().unwrap(), own, "{row}");
+        assert!(row["vcpu_ms"].as_u64().unwrap() < worker, "{row}");
+    }
+
     /// The tick dispatches the compaction job beside the maintenance stage. A run that leaves a
     /// backlog brings the job's next run forward to `COMPACT_CATCHUP_S` without touching the
     /// maintenance cadence; a caught-up job waits `COMPACT_INTERVAL_S`.

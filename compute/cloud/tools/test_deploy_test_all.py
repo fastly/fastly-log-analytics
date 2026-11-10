@@ -130,6 +130,30 @@ def test_evaluate_cron_health_passes_and_detects_budget_violations() -> None:
     assert any("vcpu_ms" in e for e in bad["errors"])
 
 
+def test_evaluate_cron_health_budgets_compaction_worker_vcpu_per_pass() -> None:
+    required = {"request_compact"}
+    base = {
+        "cron_kind": "request_compact",
+        "status": "ok",
+        "error_count": 0,
+        "backend_requests_used": 8,
+        "cache_lookups": 2,
+        "vcpu_ms": 82.0,
+    }
+    # Eight worker executions of ~120 ms each: fine per execution even though the sum is ~960 ms.
+    spread = evaluate_cron_health(
+        [{**base, "details_json": json.dumps({"passes": 8, "worker_vcpu_ms": 960})}], required
+    )
+    assert spread["ok"] is True, spread["errors"]
+    assert spread["max_vcpu_ms"] == 120.0
+    # One worker execution of 960 ms busts the budget.
+    single = evaluate_cron_health(
+        [{**base, "details_json": json.dumps({"passes": 1, "worker_vcpu_ms": 960})}], required
+    )
+    assert single["ok"] is False
+    assert any("worker vcpu_ms" in e for e in single["errors"])
+
+
 def test_validate_dashboard_presets_rejects_10m() -> None:
     assert validate_dashboard_presets(["1h", "6h", "24h"]) == ("1h", "6h", "24h")
     assert validate_dashboard_presets(["1h", "7d", "30d"], allow_extended=True) == (
