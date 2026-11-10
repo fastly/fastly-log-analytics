@@ -4,7 +4,7 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
   assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, planParquetProjection, readParquetFooter,
-  RANGE_MERGE_GAP,
+  RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
 } from "./parquet-projection";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
@@ -159,7 +159,7 @@ describe("column-projected Parquet", () => {
     const footer = await readParquetFooter(bytes.byteLength, source.fetchRange);
     expect(footer.metadata.row_groups).toHaveLength(12);
     const plan = planParquetProjection(footer, new Set(["timestamp", "status", "city"]));
-    expect(plan.ranges.reduce((sum, range) => sum + range.end - range.start, 0)).toBeLessThan(plan.neededBytes * 1.25);
+    expect(plan.ranges.reduce((sum, range) => sum + range.end - range.start, 0)).toBeLessThan(bytes.byteLength);
     const parts = await fetchProjectedRanges(plan, source.fetchRange);
     expect(await query({ "p.parquet": assembleProjectedParquet(plan, parts) },
       "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors FROM read_parquet('p.parquet')"))
@@ -172,6 +172,33 @@ describe("column-projected Parquet", () => {
     const plan = planParquetProjection(footer, new Set(["timestamp", "status"]));
     for (let i = 1; i < plan.ranges.length; i++)
       expect(plan.ranges[i].start - plan.ranges[i - 1].end).toBeGreaterThan(RANGE_MERGE_GAP);
+    for (const chunk of plan.chunks)
+      expect(plan.ranges.some((range) => range.start <= chunk.start && chunk.start + chunk.length <= range.end)).toBe(true);
+  });
+
+  it("trades a few unneeded columns for far fewer requests on a file of many narrow row groups", async () => {
+    // Shaped like a live compact: many columns, a few KiB per chunk, dozens of row groups.
+    const count = 24000;
+    const columnData = Array.from({ length: 60 }, (_, c) => ({
+      name: c % 4 === 0 ? `want_${c}` : `skip_${c}`, type: "STRING" as const,
+      data: Array.from({ length: count }, () => noise(6)),
+    }));
+    const bytes = parquetWriteBuffer({ codec: "SNAPPY", rowGroupSize: 1000, columnData });
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(24);
+    const wanted = new Set(columnData.map((column) => column.name).filter((name) => name.startsWith("want_")));
+    const plan = planParquetProjection(footer, wanted);
+    const tight: { start: number; end: number }[] = [];
+    for (const chunk of [...plan.chunks].sort((a, b) => a.start - b.start)) {
+      const last = tight[tight.length - 1];
+      if (last && chunk.start - last.end <= RANGE_MERGE_GAP) last.end = Math.max(last.end, chunk.start + chunk.length);
+      else tight.push({ start: chunk.start, end: chunk.start + chunk.length });
+    }
+    const fetched = (ranges: { start: number; end: number }[]) => ranges.reduce((sum, range) => sum + range.end - range.start, 0);
+    expect(tight.length).toBeGreaterThan(100);
+    expect(plan.ranges.length).toBeLessThanOrEqual(tight.length / 4);
+    expect(fetched(plan.ranges) + plan.ranges.length * RANGE_REQUEST_COST_BYTES)
+      .toBeLessThan(fetched(tight) + tight.length * RANGE_REQUEST_COST_BYTES);
     for (const chunk of plan.chunks)
       expect(plan.ranges.some((range) => range.start <= chunk.start && chunk.start + chunk.length <= range.end)).toBe(true);
   });

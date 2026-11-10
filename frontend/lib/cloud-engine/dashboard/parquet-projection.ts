@@ -5,11 +5,18 @@ import { writeMetadata } from "hyparquet-writer/src/metadata.js";
 /** One tail read usually covers the whole footer. */
 export const FOOTER_PROBE_BYTES = 64 * 1024;
 /**
- * Needed chunks closer than this share one HTTP range. Compacted files hold
- * many row groups of ~100 columns, so most chunks are a few KiB and a wider
- * gap would pull in the unneeded columns between them.
+ * Needed chunks closer than this always share one HTTP range. Compacted files
+ * hold many row groups of ~100 columns, so most chunks are a few KiB and a
+ * wider gap pulls in the unneeded columns between them.
  */
 export const RANGE_MERGE_GAP = 8 * 1024;
+/**
+ * What one more range request costs, in bytes of transfer. The gap widens from
+ * [`RANGE_MERGE_GAP`] while that lowers `bytes + ranges × cost`: a 6 h window of
+ * compacts otherwise needs 100+ requests per file, which under load takes
+ * longer than reading the unneeded columns would.
+ */
+export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
 
 export type FetchRange = (start: number, end: number) => Promise<ArrayBuffer>;
 
@@ -100,18 +107,34 @@ export function planParquetProjection(footer: ParquetFooter, columns: ReadonlySe
     if (!(start >= 4 && length > 0 && start + length <= dataEnd)) throw new Error("Parquet column chunk is outside the file");
     chunks.push({ rowGroup, column, start, length });
   }));
-  const ranges: { start: number; end: number }[] = [];
-  for (const chunk of [...chunks].sort((a, b) => a.start - b.start)) {
-    const last = ranges[ranges.length - 1];
-    if (last && chunk.start - last.end <= RANGE_MERGE_GAP) last.end = Math.max(last.end, chunk.start + chunk.length);
-    else ranges.push({ start: chunk.start, end: chunk.start + chunk.length });
-  }
+  const ranges = coalesceRanges([...chunks].sort((a, b) => a.start - b.start));
   const neededBytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   return {
     footer, columns, chunks, ranges, neededBytes,
     presentColumns: topLevel(metadata.schema).map((field) => field.name),
     projectedBytes: neededBytes + footerLength + 12,
   };
+}
+
+/** The cheapest coalescing of the chunks (sorted by start) by bytes plus request cost. */
+function coalesceRanges(chunks: readonly Chunk[]): { start: number; end: number }[] {
+  let best: { start: number; end: number }[] = [];
+  let bestCost = Infinity;
+  for (let gap = RANGE_MERGE_GAP; ; gap *= 2) {
+    const ranges: { start: number; end: number }[] = [];
+    for (const chunk of chunks) {
+      const last = ranges[ranges.length - 1];
+      if (last && chunk.start - last.end <= gap) last.end = Math.max(last.end, chunk.start + chunk.length);
+      else ranges.push({ start: chunk.start, end: chunk.start + chunk.length });
+    }
+    const bytes = ranges.reduce((sum, range) => sum + range.end - range.start, 0);
+    const cost = bytes + ranges.length * RANGE_REQUEST_COST_BYTES;
+    if (cost < bestCost) {
+      best = ranges;
+      bestCost = cost;
+    }
+    if (ranges.length <= 1) return best;
+  }
 }
 
 /** The planned ranges' bytes, fetching only what the footer read didn't already cover. */
