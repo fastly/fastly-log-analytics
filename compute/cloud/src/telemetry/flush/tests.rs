@@ -1417,3 +1417,29 @@ fn multi_hour_svc_audit_outbox_drains_across_flushes_without_livelocking_behind(
     let third = run(&rt, false);
     assert_eq!(third.status, FlushStatus::NotDue);
 }
+
+#[test]
+fn a_closed_outbox_bucket_is_due_once_the_interval_floor_passes_not_only_at_max_age() {
+    let settings = OperationalLogSettings::default();
+    let now = 1_000_000 * OUTBOX_BUCKET_S;
+    let bucket = now / OUTBOX_BUCKET_S - 3;
+    let outbox = vec![format!(
+        "{}{bucket:010}",
+        crate::telemetry::outbox_stem("svc")
+    )];
+    let cursor = Cursor {
+        last_flush_s: now - u64::from(settings.flush_min_interval_s),
+        ..Cursor::default()
+    };
+    let due = check_due(&cursor, &outbox, "svc", now, &settings, false);
+    assert!(
+        due.due,
+        "a closed bucket cannot gain rows, so it must not wait for flush_max_age_s"
+    );
+    let recent = Cursor {
+        last_flush_s: now - 1,
+        ..Cursor::default()
+    };
+    assert!(!check_due(&recent, &outbox, "svc", now, &settings, false).due);
+    assert!(!check_due(&cursor, &[], "svc", now, &settings, false).due);
+}

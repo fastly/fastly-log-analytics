@@ -434,8 +434,12 @@ fn check_due(
         || now.saturating_sub(cursor.last_flush_s) >= settings.flush_min_interval_s.into();
     let aged = oldest_s
         .is_some_and(|oldest| now.saturating_sub(oldest) >= u64::from(settings.flush_max_age_s));
+    // `outbox` holds closed bucket keys, each carrying up to minutes of rows that can no longer
+    // grow, so counting them against `flush_max_rows` would hold them until `flush_max_age_s`.
+    let closed_outbox = !outbox.is_empty();
     Due {
-        due: floor_passed && (cursor.behind || rows >= settings.flush_max_rows.into() || aged),
+        due: floor_passed
+            && (cursor.behind || closed_outbox || rows >= settings.flush_max_rows.into() || aged),
         oldest_s,
     }
 }

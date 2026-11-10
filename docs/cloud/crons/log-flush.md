@@ -49,7 +49,7 @@ Rows are buffered by tier (`telemetry/mod.rs:126-132`):
 6. **Due check** (`check_due`, `388`) reads 1 page of the `logq` list prefix, keeps this sid's keys and only **closed** buckets: `bucket + 1 < now / 120`, so the current bucket and the one before it are never read (`closed_bucket`, `372`). The extra bucket of grace covers a writer that read its bucket just before it closed and whose CAS lands within the 60 s execution limit, and KV's eventual list consistency. The flush is due when there are rows pending and either:
    - the flush is manual; or
    - the previous flush was cut short (`cursor.behind`), which bypasses the floor; or
-   - `flush_min_interval_s` (300) has passed, and either rows ≥ `flush_max_rows` (500) or the oldest row ≥ `flush_max_age_s` (3600).
+   - `flush_min_interval_s` (300) has passed, and either a closed outbox key exists, pending rows ≥ `flush_max_rows` (500) or the oldest row ≥ `flush_max_age_s` (3600). A closed outbox bucket is final and can carry minutes of rows, so it is never held for `flush_max_age_s`; `flush_max_rows` applies to the per-minute cache buckets `pending` counts.
 
    `behind` is set when `collect` left sources unread (cache-op or call budget, row or group cap, truncated outbox listing). Without it, steady traffic (12–16 non-empty buckets a minute) outran one transaction per 5 minutes and pending grew to `MAX_PENDING_ENTRIES` (regression `every_bucket_busy_for_hours_drains_with_bounded_pending_and_scan_lag`).
 7. **Not due:** purge ready hours, then CAS the cursor under the lease if it changed, unless a manifest is open.
@@ -117,7 +117,7 @@ Admin only. The manual flush, clear-cache and settings endpoints go through `she
 - `docs/runbook.md:351` says "Flush wall time 100 s". The code uses 40 s.
 - The manual and automatic flushes share the lease. Clear-cache also takes it.
 - The row's `cache_lookups` field records every Core Cache operation in the flush (lookups, replaces and purges), not lookups alone.
-- **The outbox grows on purpose between flushes.** `check_due` counts each closed outbox key as one row, and the clock writes about one key per 2-minute bucket. So about 30 keys never reach `flush_max_rows` (500). Without `behind`, the flush waits for `flush_max_age_s` (3600). The `logq_` count therefore climbs to about `flush_max_age_s / 120` keys, then drains within about 30 s. Live g2 (2026-10-31) showed `log_flush` rows about every 58 min (07:48, 08:46, 09:44, 10:42, 11:40 UTC). During T2, the outbox rose from 19 to 29 keys at 300 RPS and drained at the hour mark. That is this cadence, not starvation by ingest. Lower `flush_max_age_s` to archive more often, at the cost of one PUT per (kind, hour) group per flush.
+- **A closed outbox key makes the next flush due.** Before 2026-11-10 `check_due` counted each closed outbox key as one row, and the clock writes about one key per 2-minute bucket, so about 30 keys never reached `flush_max_rows` (500) and the flush waited for `flush_max_age_s` (3600). Live g2 showed `log_flush` rows about every 58 min and `cron_runs/live` reads paging through an hour of outbox under load. Now any closed outbox key is due once `flush_min_interval_s` (300) has passed, so a busy install archives about every 5 minutes, as the design intended, at the cost of one PUT per (kind, hour) group per flush.
 
 ## Failure modes and recovery
 
