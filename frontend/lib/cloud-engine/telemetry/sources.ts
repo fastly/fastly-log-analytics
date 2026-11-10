@@ -19,6 +19,9 @@ export type OpsIdentity = { user: string; role: string };
 
 let activeUserId: string | null = null;
 
+/** The signed-in user whose session cookies the browser sends with ops reads. */
+export const activeOpsUser = (): string | null => activeUserId;
+
 /** Deletes ops caches: all of them, or one user's (optionally keeping one partition). */
 export async function clearOpsCaches(
   options: { user?: string; keep?: string } = {},

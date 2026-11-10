@@ -1,9 +1,22 @@
+import { createSharedRequests } from "../shared-request";
 import { reconcileStorage, adminRequest } from "../telemetry/admin";
 import type { LogsRange } from "../telemetry/kinds";
+import { activeOpsUser } from "../telemetry/sources";
 import { DAY_MS, LIST_RATES } from "./rates";
 
 const readLogs: UsageLogReader = async (...args) =>
   (await import("../telemetry/client")).readLogs(...args);
+
+const sharedSettings = createSharedRequests<unknown>();
+
+/** Concurrent readers of the usage-logging settings share one request per user. */
+const readUsageLogging = (signal?: AbortSignal) =>
+  sharedSettings(
+    JSON.stringify([activeOpsUser()]),
+    (shared) =>
+      adminRequest<unknown>("/api/admin/usage-logging", { signal: shared }),
+    { signal },
+  );
 
 export type OpClass = "A" | "B" | "CDN_HIT";
 
@@ -1151,7 +1164,7 @@ export async function fetchUsageInput(
     to: new Date(now).toISOString(),
   };
   const [settings, ...results] = await Promise.all([
-    adminRequest<unknown>("/api/admin/usage-logging", { signal }),
+    readUsageLogging(signal),
     ...USAGE_KINDS.map((kind) => read(kind, range, { ...identity, signal })),
   ]);
   const raw = Object.fromEntries(
@@ -1175,9 +1188,7 @@ export async function fetchUsageInput(
 export async function fetchUsageSettings(
   signal?: AbortSignal,
 ): Promise<UsageLoggingSettings> {
-  return parseSettings(
-    await adminRequest<unknown>("/api/admin/usage-logging", { signal }),
-  );
+  return parseSettings(await readUsageLogging(signal));
 }
 
 /** One log kind over `[from, to]`, so each dashboard section loads on its own. */

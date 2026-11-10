@@ -7,6 +7,7 @@ import {
   billedVcpuForExecutions,
   billedVcpuMsPerRequest,
   fetchUsageInput,
+  fetchUsageSettings,
   incurredCost,
   parseComputeBilling,
   perTenThousandToPerMillion,
@@ -395,6 +396,85 @@ describe("fetchUsageInput", () => {
         throw new Error("Request failed (503)");
       }),
     ).rejects.toThrow("Request failed (503)");
+  });
+});
+
+describe("usage-logging settings sharing", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const identity = { user: "u1", role: "admin" };
+  const read = async () => ({ rows: [] });
+  const settingsCalls = (fetcher: ReturnType<typeof vi.fn>) =>
+    fetcher.mock.calls.filter(([url]) =>
+      String(url).endsWith("/api/admin/usage-logging"),
+    );
+  const deferredFetch = () => {
+    const pending: ((response: Response) => void)[] = [];
+    const fetcher = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          pending.push(resolve);
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    return { fetcher, pending };
+  };
+
+  it("fetches the settings once for concurrent readers", async () => {
+    const { fetcher, pending } = deferredFetch();
+    const reads = Promise.all([
+      fetchUsageSettings(),
+      fetchUsageSettings(),
+      fetchUsageInput(7, identity, read),
+      fetchUsageInput(7, identity, read),
+    ]);
+    await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    expect(settingsCalls(fetcher)).toHaveLength(1);
+    for (const resolve of pending) resolve(Response.json(fixtureUsageInput.settings));
+    const [a, b, c, d] = await reads;
+    for (const settings of [a, b, c.settings, d.settings]) {
+      expect(settings).toEqual(fixtureUsageInput.settings);
+    }
+    expect(a).not.toBe(b);
+  });
+
+  it("keeps the shared fetch for the others when one reader aborts", async () => {
+    const { fetcher, pending } = deferredFetch();
+    const leaving = new AbortController();
+    const left = fetchUsageSettings(leaving.signal);
+    const stays = fetchUsageSettings();
+    leaving.abort();
+    await expect(left).rejects.toMatchObject({ name: "AbortError" });
+    expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(false);
+    pending[0](Response.json(fixtureUsageInput.settings));
+    await expect(stays).resolves.toEqual(fixtureUsageInput.settings);
+    expect(settingsCalls(fetcher)).toHaveLength(1);
+  });
+
+  it("aborts the shared fetch once every reader has aborted", async () => {
+    const { fetcher } = deferredFetch();
+    const first = new AbortController();
+    const second = new AbortController();
+    const reads = [fetchUsageSettings(first.signal), fetchUsageSettings(second.signal)];
+    first.abort();
+    second.abort();
+    for (const r of reads) await expect(r).rejects.toMatchObject({ name: "AbortError" });
+    expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
+  });
+
+  it("rejects every reader on failure and fetches again on the next call", async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json({ detail: "nope", error: "nope" }, { status: 500 }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const reads = [fetchUsageSettings(), fetchUsageSettings()];
+    for (const r of reads) await expect(r).rejects.toThrow("nope");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    fetcher.mockImplementation(async () => Response.json(fixtureUsageInput.settings));
+    await expect(fetchUsageSettings()).resolves.toEqual(fixtureUsageInput.settings);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });
 

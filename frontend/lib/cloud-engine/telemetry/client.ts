@@ -1,6 +1,7 @@
 import { getPageLoadId } from "@/lib/api";
 import { BaseWorkerRpcClient } from "../worker-rpc";
 import { beginCloudLoading } from "../loading-progress";
+import { createSharedRequests } from "../shared-request";
 import type { RunProgress } from "../dashboard/engine";
 import {
   readLogs as readLogsInline,
@@ -10,7 +11,7 @@ import {
   type OpsKind,
   type ReadLogsOptions,
 } from "./engine";
-import { browserOpsSource } from "./sources";
+import { activeOpsUser, browserOpsSource } from "./sources";
 
 type WorkerRequest = {
   id: number;
@@ -107,6 +108,31 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
 let rpcClient: OpsWorkerClient | null = null;
 const getClient = () => (rpcClient ??= new OpsWorkerClient());
 
+const sharedReads = createSharedRequests<LogsResult, RunProgress>();
+
+// Several panels often ask for the same kind and range at once; they share one
+// read. The key carries every identity the request could depend on.
+function sharedRead(
+  { kind, from, to, signal, onProgress }: ReadLogsOptions,
+  scope: { user?: string; role?: string } = {},
+): Promise<LogsResult> {
+  const key = JSON.stringify([
+    kind,
+    from,
+    to,
+    scope.user ?? null,
+    scope.role ?? null,
+    activeOpsUser(),
+    getPageLoadId(),
+  ]);
+  return sharedReads(
+    key,
+    (shared, notify) =>
+      getClient().run({ kind, from, to, signal: shared, onProgress: notify }),
+    { signal, onProgress },
+  );
+}
+
 export function readLogs(options: ReadLogsOptions): Promise<LogsResult>;
 export function readLogs(
   kind: OpsKind,
@@ -119,14 +145,17 @@ export function readLogs(
   options?: { user?: string; role?: string; signal?: AbortSignal },
 ): Promise<LogsResult> {
   if (typeof kindOrOptions === "string") {
-    return getClient().run({
-      kind: kindOrOptions,
-      from: range!.from,
-      to: range!.to,
-      signal: options?.signal,
-    });
+    return sharedRead(
+      {
+        kind: kindOrOptions,
+        from: range!.from,
+        to: range!.to,
+        signal: options?.signal,
+      },
+      { user: options?.user, role: options?.role },
+    );
   }
-  return getClient().run(kindOrOptions);
+  return sharedRead(kindOrOptions);
 }
 
 export const queryOpsLogs = readLogs;
