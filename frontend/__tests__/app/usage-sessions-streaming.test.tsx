@@ -429,7 +429,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('correctly calculates RUM beacon costs and storage when rumBeaconsDay is set', () => {
-      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
+      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 90 })
       expect(results.rumBeaconsMonth).toBe(300000)
       const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)
       // RUM storage follows the RUM retention: 90 days is three times the 30-day monthly volume.

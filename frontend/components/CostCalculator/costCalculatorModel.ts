@@ -1,4 +1,5 @@
 import { formatAbbreviatedCount } from '@/lib/utils'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import type { components } from '@/types/api.generated'
 
 export type PrefillResponse = components['schemas']['PrefillResponse']
@@ -67,11 +68,12 @@ export type CalcAction =
   | { type: 'AUTO_NODES' }
 
 export const DEFAULTS: CalcState = {
-  reqDay: 1_000_000, sampleRate: 100, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
-  logPeriod: 60, bytesPerLine: 500,
+  reqDay: 1_000_000, sampleRate: SERVICE_DEFAULTS.sampleRatePercent, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
+  logPeriod: SERVICE_DEFAULTS.logPeriodSeconds, bytesPerLine: 500,
   logNodes: 1, userEditedNodes: false,
   logsChecksPerDay: 2,
-  cdnEnabled: true, retentionDays: 90, rumRetentionDays: 90, deleteLogs: true,
+  cdnEnabled: true, retentionDays: SERVICE_DEFAULTS.logRetentionDays, rumRetentionDays: SERVICE_DEFAULTS.rumRetentionDays,
+  deleteLogs: true,
   archiveBatchObjects: 100,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',

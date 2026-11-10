@@ -197,7 +197,7 @@ function QueryPageInner() {
   const effectiveSql = mode === 'structured' ? structuredSql : rawSql
 
   const { data: presets } = useQuery({
-    queryKey: ['query', 'presets', activeServiceId],
+    queryKey: queryKeys.presets(activeServiceId),
     queryFn: async ({ signal }) => (await unwrapClient(client.GET('/api/presets', { signal }))) ?? [],
     enabled: !!activeServiceId,
     staleTime: 5 * 60_000,

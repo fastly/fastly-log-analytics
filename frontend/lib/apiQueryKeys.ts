@@ -13,6 +13,8 @@ export const queryKeys = {
 
   views: (serviceId: string | null | undefined) => ["views", serviceId] as const,
 
+  presets: (serviceId: string | null | undefined) => ["query", "presets", serviceId] as const,
+
   logExtents: (serviceId: string | null | undefined) => ["log-extents", serviceId] as const,
   logExtentsAll: () => ["log-extents"] as const,
 

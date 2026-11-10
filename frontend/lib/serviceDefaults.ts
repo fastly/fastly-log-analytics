@@ -1,0 +1,14 @@
+/**
+ * Per-service setting defaults shared by every form, calculator and fallback in the UI.
+ *
+ * They mirror what both deployments persist when a value is absent: the self-hosted backend
+ * (`backend/config.py` log_period, `backend/models/common/provision.py` retention) and the Cloud
+ * app (`compute/cloud/src/admin/model.rs` `default_retention_days`, sample-rate bounds). Change
+ * them together with those sources so the UI never shows a default a backend would not apply.
+ */
+export const SERVICE_DEFAULTS = {
+  logPeriodSeconds: 60,
+  sampleRatePercent: 100,
+  logRetentionDays: 30,
+  rumRetentionDays: 30,
+} as const;

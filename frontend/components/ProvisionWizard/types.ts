@@ -1,4 +1,5 @@
 import type React from 'react'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import type { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/stores/filterStore'
 import type { SSELine, SSEStatus } from '@/hooks/useSSE'
@@ -94,8 +95,8 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cmcd_version: 1,
   logging_enabled: true,
   rum_enabled: false,
-  log_retention_days: 30,
-  rum_retention_days: 30,
+  log_retention_days: SERVICE_DEFAULTS.logRetentionDays,
+  rum_retention_days: SERVICE_DEFAULTS.rumRetentionDays,
   rum_custom_condition: "",
   faro_version: null,
 }
