@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { WizardState } from '../types'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 function errorCode(e: unknown): string | undefined {
   return e && typeof e === "object" && "code" in e
@@ -23,6 +24,7 @@ function errorCode(e: unknown): string | undefined {
 }
 
 export function ModeStep({ s }: { s: WizardState }) {
+  const cloud = isCloudMode()
   const modeCards = [
     {
       mode: "provision" as const,
@@ -32,10 +34,11 @@ export function ModeStep({ s }: { s: WizardState }) {
       iconColor: "text-primary",
       hoverBorder: "hover:border-primary",
       title: "Admin: Provision",
-      description:
-        "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.",
+      description: cloud
+        ? "Deploy new Fastly Object Storage resources and logging endpoints. Best for new projects."
+        : "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.",
     },
-    {
+    ...(cloud ? [] : [{
       mode: "ingest" as const,
       nextStep: "token" as const,
       icon: Settings,
@@ -45,7 +48,7 @@ export function ModeStep({ s }: { s: WizardState }) {
       title: "Admin: Connect Terraform",
       description:
         "Set up ingestion for a service that is already managed via Terraform. We'll skip creating Fastly resources but set up data sync.",
-    },
+    }]),
   ]
 
   return (

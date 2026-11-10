@@ -122,6 +122,18 @@ describe('ProvisionWizard modes and ingest connect step', () => {
     expect(screen.queryByRole('button', { name: /analyst/i })).not.toBeInTheDocument()
   })
 
+  it('offers only Provision in Cloud, which has no Terraform-connect ingest route', () => {
+    setCloudModeRuntime(true)
+    try {
+      render(<ModeStep s={makeConnectState({ step: 'mode', mode: null })} />)
+      expect(screen.getAllByRole('button')).toHaveLength(1)
+      expect(screen.getByRole('button', { name: /admin: provision/i })).toBeEnabled()
+      expect(screen.queryByText(/CDN proxy/i)).not.toBeInTheDocument()
+    } finally {
+      setCloudModeRuntime(false)
+    }
+  })
+
   it.each([
     ['provision', 'Admin: Provision'],
     ['ingest', 'Admin: Connect Terraform'],

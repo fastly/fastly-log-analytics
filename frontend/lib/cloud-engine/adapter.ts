@@ -41,6 +41,7 @@ import { cloudRumMutation } from "./rum-management";
 import { cloudLoggingSettings } from "./logging-settings";
 import { cloudDeleteData } from "./delete-data";
 import { cloudTeardown } from "./teardown";
+import { cloudProvisionExecute } from "./provision";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
@@ -500,6 +501,10 @@ async function handleCloudRequest(
   }
   if (path === "/api/provision/teardown") {
     const bridged = await cloudTeardown(request, runJobStream);
+    if (bridged) return bridged;
+  }
+  if (path === "/api/provision/execute") {
+    const bridged = await cloudProvisionExecute(request, runJobStream);
     if (bridged) return bridged;
   }
   if (/^\/api\/(?:cron-runs|cron-schedule|audit-logs|admin\/(?:usage-log(?:\/export)?|raw-tree|storage-tree|ingested-files|quarantine\/purge))$/.test(path)) {
@@ -1838,6 +1843,8 @@ async function stepJobToCompletion(
   }
 }
 
+const BRIDGED_NATIVE_STREAMS = new Set(["/api/provision/teardown", "/api/provision/execute"]);
+
 export async function cloudStreamFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -1859,8 +1866,8 @@ export async function cloudStreamFetch(
     return (await handleCloudAnalyticalRequest(localRequest())) ??
       unsupportedCloudEndpoint(localRequest());
   }
-  // Teardown is native but the dialog speaks the self-hosted body; the bridge translates it.
-  if (pathname === "/api/provision/teardown" ||
+  // Native routes whose dialogs speak the self-hosted body; the bridges translate it.
+  if (BRIDGED_NATIVE_STREAMS.has(pathname) ||
       (!isNativeCloudRoute(method, pathname) &&
       !["/api/cron-runs/cloud-tick/stream", "/api/admin/ingest-logs", "/api/provision/ingest"].includes(pathname))) {
     return (await handleCloudAnalyticalRequest(localRequest())) ??
