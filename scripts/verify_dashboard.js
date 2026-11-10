@@ -258,9 +258,12 @@ async function verifyAnalyticsRouteWithPlotly(browser, adminTlsOptions, certific
     const url24h = getUrlWithParam(baseUrl, "range", "24h");
     let bodyText24h = "", totalMatch24h = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const response24h = await page.goto(url24h, { timeout: 20000 });
+      let response24h = null, navError = null;
+      try { response24h = await page.goto(url24h, { timeout: 35000 }); } catch (e) { navError = e; }
       if (!response24h || !response24h.ok()) {
-        if (attempt === 3) await failAndExit(browser, `[Dashboard 24h] Failed to load. Status: ${response24h ? response24h.status() : 'Unknown'}`);
+        const reason = navError ? navError.message : `Status: ${response24h ? response24h.status() : 'Unknown'}`;
+        if (attempt === 3) await failAndExit(browser, `[Dashboard 24h] Failed to load. ${reason}`);
+        console.warn(`⚠️ [Dashboard 24h] navigation attempt ${attempt}/3 failed under load: ${reason}`);
         await page.waitForTimeout(4000); continue;
       }
       await page.waitForSelector('main', { timeout: 30000 });

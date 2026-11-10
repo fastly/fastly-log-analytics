@@ -666,20 +666,21 @@ process.stdout.write(JSON.stringify({values}));
 
 
 @pytest.mark.parametrize(
-    ("flags", "request_count", "beacons", "age", "charts", "exit_code"),
+    ("flags", "request_count", "beacons", "age", "charts", "stall", "exit_code"),
     [
-        (["--no-traffic"], None, 0, "6h 26m ago", True, 0),
-        (["--no-traffic"], None, 0, "Never", False, 1),
-        (["--no-traffic"], None, 0, "6h 26m ago", "/rum", 1),
-        (["--no-traffic"], None, 0, "6h 26m ago", "/streaming", 1),
-        ([], None, 100, "1s ago", True, 1),
-        ([], 149, 100, "1s ago", True, 1),
-        ([], 150, 49, "1s ago", True, 1),
-        ([], 150, 50, "6h 26m ago", True, 1),
-        ([], 150, 50, {"REQUEST": "1s ago", "RUM": "6h 26m ago"}, True, 1),
-        ([], 150, 50, "1s ago", True, 0),
-        ([], [149, 150], [49, 50], "1s ago", True, 0),
-        (["--no-trafic"], 150, 50, "1s ago", True, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", True, None, 0),
+        (["--no-traffic"], None, 0, "6h 26m ago", True, "/dashboard?range=24h", 0),
+        (["--no-traffic"], None, 0, "Never", False, None, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", "/rum", None, 1),
+        (["--no-traffic"], None, 0, "6h 26m ago", "/streaming", None, 1),
+        ([], None, 100, "1s ago", True, None, 1),
+        ([], 149, 100, "1s ago", True, None, 1),
+        ([], 150, 49, "1s ago", True, None, 1),
+        ([], 150, 50, "6h 26m ago", True, None, 1),
+        ([], 150, 50, {"REQUEST": "1s ago", "RUM": "6h 26m ago"}, True, None, 1),
+        ([], 150, 50, "1s ago", True, None, 0),
+        ([], [149, 150], [49, 50], "1s ago", True, None, 0),
+        (["--no-trafic"], 150, 50, "1s ago", True, None, 1),
     ],
 )
 def test_verify_script_modes_without_browser_or_network(
@@ -688,9 +689,17 @@ def test_verify_script_modes_without_browser_or_network(
     beacons: int | list[int],
     age: str | dict,
     charts: bool | str,
+    stall: str | None,
     exit_code: int,
 ) -> None:
-    options = {"flags": flags, "requestCount": request_count, "beacons": beacons, "age": age, "charts": charts}
+    options = {
+        "flags": flags,
+        "requestCount": request_count,
+        "beacons": beacons,
+        "age": age,
+        "charts": charts,
+        "stall": stall,
+    }
     result = _verify_node(
         _frontend_node_runtime()
         + f"\nconst vm = require('node:vm'); const source = {json.dumps(_src())}; const opts = {json.dumps(options)};"
@@ -710,6 +719,7 @@ const document = {
 };
 const page = {
   on() {}, async goto(url) {
+    if (opts.stall && url.endsWith(opts.stall)) { opts.stall = null; now += 20000; throw Error('page.goto: Timeout 20000ms exceeded.'); }
     currentUrl = url; visits.push(url); now += 1000; displayedBeacons = 1000;
     if (pendingResponse) {
       const pending = pendingResponse; pendingResponse = null;
