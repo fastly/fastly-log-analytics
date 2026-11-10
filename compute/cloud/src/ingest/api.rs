@@ -34,7 +34,13 @@ struct Cursor {
     /// LIST `start-after` key a raw listing of an uncompacted dataset resumes from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     after: Option<String>,
+    /// The table folder (one of `RUM_TABLES`) a `rum` listing is reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    table: Option<String>,
 }
+
+/// RUM writes one folder per table under `processed/rum/`; a `rum` listing reads them in order.
+const RUM_TABLES: [&str; 2] = [super::rum::ERRORS, super::rum::VITALS];
 
 fn default_dataset() -> String {
     "request".into()
@@ -298,6 +304,7 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
                         dataset: dataset.to_owned(),
                         view: Some(marker.to_owned()),
                         after: None,
+                        table: None,
                     },
                 )?
                 .into();
@@ -336,6 +343,7 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
                         dataset: dataset.to_owned(),
                         view: Some(marker.to_owned()),
                         after: None,
+                        table: None,
                     },
                 )
             })
@@ -363,8 +371,19 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         Some(_) => return Err((400, "view must be raw or summary")),
     }
     let (mut day, mut token, mut after) = (0usize, None, None);
+    let mut table = (dataset == "rum").then_some(RUM_TABLES[0]);
     if let Some(value) = param("cursor") {
         let cursor = decode_cursor(secret.as_bytes(), value)?;
+        let cursor_table = match (&cursor.table, dataset == "rum") {
+            (None, false) => None,
+            (Some(name), true) => Some(
+                *RUM_TABLES
+                    .iter()
+                    .find(|t| **t == name.as_str())
+                    .ok_or((400, "Invalid cursor"))?,
+            ),
+            _ => return Err((400, "Invalid cursor")),
+        };
         if cursor.from != from
             || cursor.to != to
             || cursor.dataset != dataset
@@ -377,20 +396,55 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         day = cursor.day;
         token = cursor.token;
         after = cursor.after;
+        table = cursor_table;
     }
     let include_summaries =
         dataset == "request" && param("summaries") == Some("1") && param("cursor").is_none();
     let store = open(runtime, service, started)?;
     if !compacted(dataset) {
-        return hour_files(
-            &store,
-            &root,
-            dataset,
-            (from, to),
-            (day, after),
-            secret.as_bytes(),
-            include_summaries,
-        );
+        loop {
+            let table_root = match table {
+                Some(table) => format!("{root}{table}/"),
+                None => root.clone(),
+            };
+            let mut page = hour_files(
+                &store,
+                &table_root,
+                (dataset, table),
+                (from, to),
+                (day, after.take()),
+                secret.as_bytes(),
+                include_summaries,
+            )?;
+            let next_table = table.and_then(|table| {
+                let at = RUM_TABLES.iter().position(|t| *t == table)?;
+                RUM_TABLES.get(at + 1).copied()
+            });
+            let Some(next) = next_table.filter(|_| page["complete"] == true) else {
+                return Ok(page);
+            };
+            // An empty finished table rolls straight into the next one, so no page is empty.
+            if page["files"].as_array().is_some_and(Vec::is_empty) {
+                (table, day) = (Some(next), 0);
+                continue;
+            }
+            page["complete"] = false.into();
+            page["next_cursor"] = encode_cursor(
+                secret.as_bytes(),
+                &Cursor {
+                    from,
+                    to,
+                    day: 0,
+                    token: None,
+                    dataset: dataset.to_owned(),
+                    view: None,
+                    after: None,
+                    table: Some(next.to_owned()),
+                },
+            )?
+            .into();
+            return Ok(page);
+        }
     }
     let prefix = root;
     // Operational file names carry minutes, every other dataset seconds.
@@ -498,6 +552,7 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
                 dataset: dataset.to_owned(),
                 view: None,
                 after: None,
+                table: None,
             }
         )?)
     };
@@ -511,7 +566,7 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
 fn hour_files<R: Runtime>(
     store: &Store<'_, R>,
     root: &str,
-    dataset: &str,
+    (dataset, table): (&str, Option<&str>),
     (from, to): (i64, i64),
     (mut day, mut after): (usize, Option<String>),
     secret: &[u8],
@@ -641,6 +696,7 @@ fn hour_files<R: Runtime>(
                 dataset: dataset.to_owned(),
                 view: None,
                 after,
+                table: table.map(str::to_owned),
             }
         )?)
     };
@@ -1174,6 +1230,7 @@ fn summary_files<R: Runtime>(
                 dataset: "request".to_owned(),
                 view: Some("summary".to_owned()),
                 after: None,
+                table: None,
             }
         )?)
     };

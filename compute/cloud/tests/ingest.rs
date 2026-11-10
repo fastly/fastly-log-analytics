@@ -6188,7 +6188,7 @@ fn files_dataset_selects_request_rum_or_one_ops_kind() {
     let fake = Fake::new(BASE);
     for (prefix, name) in [
         ("processed/request/", 1),
-        ("processed/rum/", 2),
+        ("processed/rum/client_vitals/", 2),
         ("processed/ops/cron_ticks/", 3),
         ("processed/ops/platform_errors/", 4),
     ] {
@@ -6208,7 +6208,7 @@ fn files_dataset_selects_request_rum_or_one_ops_kind() {
             .map(|f| f["key"].as_str().unwrap().to_owned())
             .collect()
     };
-    assert!(keys("rum")[0].starts_with("processed/rum/"));
+    assert!(keys("rum")[0].starts_with("processed/rum/client_vitals/"));
     assert!(keys("ops:cron_ticks")[0].starts_with("processed/ops/cron_ticks/"));
     assert_eq!(keys("ops:cron_ticks").len(), 1);
     assert!(keys("request")[0].starts_with("processed/request/"));
@@ -6239,19 +6239,21 @@ fn files_cursor_is_bound_to_its_dataset() {
     for i in 0..600 {
         put_processed(
             &fake,
-            "processed/rum/",
+            "processed/rum/client_errors/",
             BASE,
             &format!("{}-{}-a-n1", BASE + i, BASE + i + 60),
         );
     }
     let first = files_for(&fake, "rum").unwrap();
     let cursor = first["next_cursor"].as_str().unwrap().to_owned();
-    let query = format!(
-        "from={}&to={}&dataset=ops:cron_ticks&cursor={cursor}",
-        iso_url(BASE),
-        iso_url(BASE + 3600)
-    );
-    assert_eq!(files_page(&fake, &query).unwrap_err().0, 400);
+    for dataset in ["ops:cron_ticks", "request"] {
+        let query = format!(
+            "from={}&to={}&dataset={dataset}&cursor={cursor}",
+            iso_url(BASE),
+            iso_url(BASE + 3600)
+        );
+        assert_eq!(files_page(&fake, &query).unwrap_err().0, 400, "{dataset}");
+    }
 }
 
 #[test]
@@ -6286,6 +6288,45 @@ fn file_reads_request_rum_and_ops_roots_only() {
         "processed/ops/cron_ticks/a.parquet"
     ));
     assert!(!api::is_ops_key(&service(), "processed/rum/a.parquet"));
+}
+
+#[test]
+fn rum_file_listing_pages_through_both_rum_tables() {
+    let fake = Fake::new(BASE);
+    let hour = BASE - BASE.rem_euclid(3600);
+    let mut expected = std::collections::BTreeSet::new();
+    for (table, count) in [("client_errors", 3), ("client_vitals", api::FILES_PAGE + 3)] {
+        for i in 0..count {
+            let key = ingest::processed_key(
+                &format!("processed/rum/{table}/"),
+                hour,
+                hour + 60,
+                &format!("source{i:04}"),
+                1,
+            );
+            fake.bucket.borrow_mut().insert(key.clone(), vec![1, 2, 3]);
+            expected.insert(key);
+        }
+    }
+    let query = format!(
+        "from={}&to={}&dataset=rum",
+        iso_url(hour),
+        iso_url(hour + 3600)
+    );
+    let mut listed = std::collections::BTreeSet::new();
+    let mut page = files_page(&fake, &query).unwrap();
+    for _ in 0..10 {
+        for file in page["files"].as_array().unwrap() {
+            assert!(listed.insert(file["key"].as_str().unwrap().to_owned()));
+        }
+        if page["complete"] == true {
+            break;
+        }
+        let cursor = page["next_cursor"].as_str().unwrap().to_owned();
+        page = files_page(&fake, &format!("{query}&cursor={cursor}")).unwrap();
+    }
+    assert_eq!(page["complete"], true);
+    assert_eq!(listed, expected);
 }
 
 #[test]
