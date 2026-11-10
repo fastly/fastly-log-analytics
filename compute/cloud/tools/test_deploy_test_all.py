@@ -146,6 +146,7 @@ def test_evaluate_cron_health_budgets_compaction_worker_vcpu_per_pass() -> None:
     )
     assert spread["ok"] is True, spread["errors"]
     assert spread["max_vcpu_ms"] == 120.0
+    assert spread["per_stage_distributions"]["request_compact"]["worker_vcpu_ms"]["sum"] == 960
     # One worker execution of 960 ms busts the budget.
     single = evaluate_cron_health(
         [{**base, "details_json": json.dumps({"passes": 1, "worker_vcpu_ms": 960})}], required

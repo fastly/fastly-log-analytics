@@ -153,6 +153,12 @@ def _cron_row_details(row: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _cron_row_detail_metric(row: dict[str, Any], key: str) -> int | float | None:
+    """Live rows carry worker metrics inside `details_json`; retained cron:state rows flatten them."""
+    direct = _extract_cron_row_metric(row, key)
+    return direct if direct is not None else _extract_cron_row_metric(_cron_row_details(row), key)
+
+
 def _summarize_stage_cron_rows(
     stage_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -193,9 +199,9 @@ def _summarize_stage_cron_rows(
         ),
         "duration_ms": summarize_numeric_series([_extract_cron_row_metric(r, "duration_ms") for r in stage_rows]),
         "vcpu_ms": summarize_numeric_series([_extract_cron_row_metric(r, "vcpu_ms") for r in stage_rows]),
-        "worker_vcpu_ms": summarize_numeric_series([_extract_cron_row_metric(r, "worker_vcpu_ms") for r in stage_rows]),
+        "worker_vcpu_ms": summarize_numeric_series([_cron_row_detail_metric(r, "worker_vcpu_ms") for r in stage_rows]),
         "summary_vcpu_ms": summarize_numeric_series(
-            [_extract_cron_row_metric(r, "summary_vcpu_ms") for r in stage_rows]
+            [_cron_row_detail_metric(r, "summary_vcpu_ms") for r in stage_rows]
         ),
         "backend_requests_used": summarize_numeric_series(
             [_extract_cron_row_metric(r, "backend_requests_used") for r in stage_rows]
