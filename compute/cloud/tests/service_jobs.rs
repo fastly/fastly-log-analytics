@@ -1356,6 +1356,24 @@ fn empty_reconcile_does_not_clone_and_ip_reset_precedes_capture() {
 }
 
 #[test]
+fn reconcile_step_confirms_a_stale_cached_service_record_instead_of_failing() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let service = platform.service();
+    let before = platform.adapter.records()["svc:fixtureService"].clone();
+    let job = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"],"cmcd":{"enabled":true,"mode":"query_string","version":1}}),
+    );
+    platform
+        .adapter
+        .cache_stale("svc:fixtureService", Some(before));
+    let result = platform.drain(job["job"].clone());
+    assert_eq!(result["status"], "complete");
+}
+
+#[test]
 fn reconcile_forces_blank_message_type_on_the_request_endpoint() {
     let platform = Platform::new();
     platform.drain(platform.provision()["job"].clone());

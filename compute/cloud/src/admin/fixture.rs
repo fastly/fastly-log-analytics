@@ -215,6 +215,15 @@ impl FixtureAdapter {
             .stale_confirmations
             .insert(key.into(), (reads, record));
     }
+    /// Plants `record` in the read cache, as an edge cache can after a read lands inside KV's
+    /// propagation window.
+    pub fn cache_stale(&self, key: &str, record: Option<Record>) {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .kv_cache
+            .insert(key.into(), record);
+    }
     pub fn advance_kv_clock(&self, millis: u64) {
         let mut state = self.state.lock().expect("fixture lock");
         if let Some(now) = state.kv_clock_ms.as_mut() {

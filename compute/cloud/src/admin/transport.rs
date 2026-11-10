@@ -430,6 +430,17 @@ impl<'a, R: Runtime> Context<'a, R> {
             Error::new(503, "state_propagating")
         })
     }
+    /// Reads past the edge read cache, which can hold a record read inside KV's propagation window.
+    pub fn get_confirmed(&self, key: &str) -> Result<Option<Record>, Error> {
+        if self.writes.borrow().contains_key(key) {
+            return self.get(key);
+        }
+        let token = self.confirmation_token()?;
+        self.charge()?;
+        self.runtime
+            .admin_get_fresh(key, &token)
+            .map_err(|_| Error::new(503, "state_unavailable"))
+    }
     pub fn cas(&self, key: &str, generation: Option<&str>, value: &Value) -> Result<(), Error> {
         self.charge()?;
         let mut value = value.clone();

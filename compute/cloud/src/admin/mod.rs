@@ -123,12 +123,24 @@ fn load_service(
     context: &Context<'_, impl Runtime>,
     sid: &str,
 ) -> Result<(Record, Service), Error> {
+    load_service_from(context, sid, false)
+}
+
+fn load_service_from(
+    context: &Context<'_, impl Runtime>,
+    sid: &str,
+    confirmed: bool,
+) -> Result<(Record, Service), Error> {
     if !valid_service_id(sid) {
         return Err(Error::new(400, "invalid_service_id"));
     }
-    let record = context
-        .get(&format!("svc:{sid}"))?
-        .ok_or_else(|| Error::new(404, "service_not_found"))?;
+    let key = format!("svc:{sid}");
+    let record = if confirmed {
+        context.get_confirmed(&key)?
+    } else {
+        context.get(&key)?
+    }
+    .ok_or_else(|| Error::new(404, "service_not_found"))?;
     let mut service: Service = decode(record.value.clone())?;
     if service.compression_codec.is_empty() {
         service.compression_codec = "zstd".into();
@@ -1266,6 +1278,14 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
     context.set_uncertain_operations(job.uncertain_operations.clone());
     context.journal_job(format!("job:{id}"), claimed.clone());
     let result = load_service(context, &job.service_id)
+        .and_then(|current| {
+            // A cached read can predate the job's own service write; confirm before failing.
+            if bind_service(&mut job.clone(), &current.0, &current.1).is_ok() {
+                Ok(current)
+            } else {
+                load_service_from(context, &job.service_id, true)
+            }
+        })
         .and_then(|current| run_step(context, &mut job, current));
     if result.is_ok() {
         context.settle_secret_propagation();
@@ -1364,11 +1384,7 @@ fn advance(job: &mut Job, next: &str) {
     job.step = next.into();
 }
 
-fn run_step(
-    context: &Context<'_, impl Runtime>,
-    job: &mut Job,
-    (record, mut service): (Record, Service),
-) -> Result<(), Error> {
+fn bind_service(job: &mut Job, record: &Record, service: &Service) -> Result<(), Error> {
     if record.generation != job.expected_generation {
         let checkpoint = &record.value["_job_checkpoint"];
         if checkpoint["job_id"] == job.id
@@ -1398,6 +1414,15 @@ fn run_step(
     {
         return Err(Error::new(409, "service_changed_rerun"));
     }
+    Ok(())
+}
+
+fn run_step(
+    context: &Context<'_, impl Runtime>,
+    job: &mut Job,
+    (record, mut service): (Record, Service),
+) -> Result<(), Error> {
+    bind_service(job, &record, &service)?;
     let token = if job.step == "finalize" {
         String::new()
     } else {
