@@ -10,7 +10,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 pub const FILES_PAGE: usize = 500;
 pub const MAX_RANGE_S: i64 = 62 * 24 * 3600;
@@ -1390,22 +1390,28 @@ pub fn ingested_files<R: Runtime>(
             }
         }
     }
-    // Later states omit the row count and size they inherit from the conversion state.
-    let known = |key: &Value, field: &str| {
-        rows.iter()
-            .filter(|row| row["raw_key"] == *key)
-            .map(|row| &row[field])
-            .find(|value| !value.is_null())
-            .cloned()
-    };
+    // Later states omit the row count and size they inherit from the conversion state; one pass
+    // collects the first non-null value per raw key (a page holds tens of thousands of rows).
+    let mut known: HashMap<&str, [Value; 2]> = HashMap::new();
+    for row in &rows {
+        let Some(key) = row["raw_key"].as_str() else {
+            continue;
+        };
+        let entry = known.entry(key).or_insert([Value::Null, Value::Null]);
+        for (slot, source) in entry.iter_mut().zip(["rows", "raw_size"]) {
+            if slot.is_null() && !row[source].is_null() {
+                *slot = row[source].clone();
+            }
+        }
+    }
     let files: Vec<Value> = telemetry::latest_ingest_state(&rows)
         .iter()
         .filter_map(|row| {
             let mut file = ingest_file_json(service, row)?;
-            for field in ["rows", "size"] {
+            let inherited = row["raw_key"].as_str().and_then(|key| known.get(key));
+            for (field, index) in [("rows", 0), ("size", 1)] {
                 if file[field].is_null() {
-                    let source = if field == "size" { "raw_size" } else { field };
-                    file[field] = known(&row["raw_key"], source).unwrap_or(Value::Null);
+                    file[field] = inherited.map_or(Value::Null, |values| values[index].clone());
                 }
             }
             Some(file)

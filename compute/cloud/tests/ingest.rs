@@ -13,7 +13,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     io::Write,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[path = "ingest/freshness.rs"]
@@ -6193,6 +6193,52 @@ fn ingested_files_reports_the_latest_state_per_raw_key_from_outbox_then_parquet(
         .borrow()
         .iter()
         .any(|k| k.starts_with("processed/ops/ingest_files/")));
+}
+
+/// Live, one archived page held ~27k `ingest_files` rows over ~10k raw keys, and filling the
+/// `rows`/`size` a deleted state inherits rescanned every row per file: the request hit the
+/// 60 s Compute limit and the Ingestion History tab showed a 503.
+#[test]
+fn ingested_files_inherits_rows_and_size_in_one_pass_over_a_large_archived_page() {
+    let fake = Fake::new(BASE + 3600);
+    let keys = 20_000;
+    let mut rows = Vec::with_capacity(keys * 3);
+    for n in 0..keys {
+        let raw = raw_key(BASE - 7200, &format!("f{n:05}"));
+        let at = (BASE - 7200) * 1000 + n as i64;
+        for (version, status, deleted) in [
+            (1, "converted", false),
+            (2, "deleting", false),
+            (3, "deleted", true),
+        ] {
+            let mut row = json!({"timestamp": at + version, "event_id": format!("{n}-{version}"),
+                   "service_id": SID, "severity": "info", "run_id": "r0", "dataset": "request",
+                   "raw_key": raw, "status": status, "state_version": version,
+                   "raw_deleted": deleted});
+            if version == 1 {
+                row["raw_size"] = json!(9);
+                row["rows"] = json!(n + 1);
+            }
+            rows.push(row);
+        }
+    }
+    ops_parquet(&fake, LogKind::IngestFiles, BASE - 7200, &rows);
+    let started = Instant::now();
+    let page = admin_page(&fake, None, "").unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    let files = page["files"].as_array().unwrap();
+    assert_eq!(files.len(), keys);
+    let last = files
+        .iter()
+        .find(|f| f["key"].as_str().unwrap().contains("f19999"))
+        .unwrap();
+    assert_eq!(last["status"], "deleted");
+    assert_eq!(last["rows"], 20_000);
+    assert_eq!(last["size"], 9);
 }
 
 fn files_for(fake: &Fake, dataset: &str) -> Result<Value, (u16, &'static str)> {
