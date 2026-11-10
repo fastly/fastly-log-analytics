@@ -21,6 +21,7 @@ import {
   browserSource,
   clearRequestLogCaches,
   dashboardCacheIdentity,
+  dashboardCacheScope,
   updateDashboardCacheIdentity,
   type BrowserSourceTelemetry,
 } from "./sources";
@@ -136,6 +137,7 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
         options: serializable,
         pageLoadId: getPageLoadId(),
         reportApiCalls: useDebugStore.getState().apiCallsEnabled,
+        cacheScope: dashboardCacheScope(),
       };
       worker.postMessage(req);
     });
@@ -172,6 +174,7 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
         options: serializable,
         pageLoadId: getPageLoadId(),
         reportApiCalls: useDebugStore.getState().apiCallsEnabled,
+        cacheScope: dashboardCacheScope(),
       };
       worker.postMessage(req);
     });

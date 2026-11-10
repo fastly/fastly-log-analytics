@@ -20,6 +20,7 @@ type RunMessage = {
   options: Omit<EngineOptions, "signal" | "onProgress" | "now" | "wallNow">;
   pageLoadId?: string | null;
   reportApiCalls?: boolean;
+  cacheScope?: string;
 };
 
 type SearchMessage = {
@@ -28,6 +29,7 @@ type SearchMessage = {
   options: Omit<SearchFieldOptions, "signal" | "now">;
   pageLoadId?: string | null;
   reportApiCalls?: boolean;
+  cacheScope?: string;
 };
 
 type ControlMessage = {
@@ -99,11 +101,23 @@ export type WorkerMessage =
     }
   | { id: number; type: "error"; message: string };
 
-const sharedSource = browserSource(
-  typeof self !== "undefined" && self.location ? self.location.origin : "",
-  undefined,
-  { foldFileTelemetry: true },
-);
+// The page owns the cache scope (session + signed-in identity): a worker has no
+// localStorage, so deriving it here would mint a fresh scope per worker and
+// orphan every file persisted by the previous page load.
+let sharedSource: ReturnType<typeof browserSource> | null = null;
+let sharedScope: string | undefined;
+const sourceForScope = (cacheScope: string | undefined) => {
+  if (!sharedSource || sharedScope !== cacheScope) {
+    sharedSource?.clearMemoryCache?.();
+    sharedScope = cacheScope;
+    sharedSource = browserSource(
+      typeof self !== "undefined" && self.location ? self.location.origin : "",
+      undefined,
+      { foldFileTelemetry: true, cacheScope },
+    );
+  }
+  return sharedSource;
+};
 
 self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   if (msg.type === "prewarm") {
@@ -114,7 +128,7 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   if (msg.type === "clearCache") {
     clearDashboardMemo();
     clearManifestCache();
-    sharedSource.clearMemoryCache?.();
+    sharedSource?.clearMemoryCache?.();
     await getDuckDBEngine().reset();
     ctx.post({ id: msg.id, type: "result", result: null });
     return;
@@ -143,7 +157,9 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     return;
   }
 
-  const source = sharedSource.withOptions({
+  const source = sourceForScope(
+    "cacheScope" in msg ? msg.cacheScope : sharedScope,
+  ).withOptions({
     serviceId: msg.type === "search" || msg.type === "searchSummaries"
       ? msg.options.serviceId : undefined,
     getPageLoadId: () => msg.pageLoadId ?? "",
