@@ -41,6 +41,12 @@ struct Fake {
     fail_put_number: Cell<Option<u32>>,
     fail_watermark: Cell<bool>,
     conflict_watermark: Cell<bool>,
+    /// Plan writes left whose next read answers with the record they replaced, as an
+    /// eventually consistent KV read right after this execution's own write does.
+    stale_plan_reads: Cell<u32>,
+    /// Plan reads after such a write that still answer correctly before the stale one.
+    stale_plan_skip: Cell<u32>,
+    previous_plan: RefCell<Option<Record>>,
     fail_compact_after_publish: Cell<bool>,
     compact_conflict_after: Cell<Option<u32>>,
     stale_compact_state: RefCell<Option<Record>>,
@@ -161,6 +167,9 @@ impl Fake {
             fail_put_number: Cell::new(None),
             fail_watermark: Cell::new(false),
             conflict_watermark: Cell::new(false),
+            stale_plan_reads: Cell::new(0),
+            stale_plan_skip: Cell::new(0),
+            previous_plan: Default::default(),
             fail_compact_after_publish: Cell::new(false),
             compact_conflict_after: Cell::new(None),
             stale_compact_state: Default::default(),
@@ -397,6 +406,13 @@ impl Runtime for Fake {
                 return Ok(Some(record.clone()));
             }
         }
+        if key == ingest::PLAN_KEY && self.previous_plan.borrow().is_some() {
+            if self.stale_plan_skip.get() > 0 {
+                self.stale_plan_skip.set(self.stale_plan_skip.get() - 1);
+            } else if let Some(record) = self.previous_plan.borrow_mut().take() {
+                return Ok(Some(record));
+            }
+        }
         Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
             generation: g.to_string(),
             value: v.clone(),
@@ -465,6 +481,13 @@ impl Runtime for Fake {
         let next = kv.get(key).map_or(1, |(g, _)| g + 1);
         if key == ingest::compaction::STATE_KEY && self.lag_compact_reads.get() {
             *self.lagging_compact_state.borrow_mut() = kv.get(key).map(|(g, v)| Record {
+                generation: g.to_string(),
+                value: v.clone(),
+            });
+        }
+        if key == ingest::PLAN_KEY && self.stale_plan_reads.get() > 0 {
+            self.stale_plan_reads.set(self.stale_plan_reads.get() - 1);
+            *self.previous_plan.borrow_mut() = kv.get(key).map(|(g, v)| Record {
                 generation: g.to_string(),
                 value: v.clone(),
             });
@@ -8127,6 +8150,70 @@ fn a_live_lease_makes_another_tick_busy_without_writes() {
     assert!(report.busy);
     assert_eq!(fake.kv.borrow()[ingest::PLAN_KEY], before);
     assert_eq!(report.shards_dispatched, 0);
+}
+
+#[test]
+fn a_watermark_conflict_at_commit_releases_the_lease_for_the_next_tick() {
+    // Compaction commits to the same watermark key from its own execution, so a tick whose
+    // shards are all done can lose the watermark CAS. That tick must hand the plan back with
+    // its lease released: the next tick commits the finished results instead of sitting out
+    // LEASE_S as busy.
+    let fake = Fake::new(BASE + 7200);
+    seed(&fake, 1, 3);
+    fake.conflict_watermark.set(true);
+    let lost = tick(&fake).unwrap();
+    assert!(lost.busy);
+    assert_eq!(lost.converted, 0);
+    let saved = plan(&fake).expect("the finished plan is kept for the next tick");
+    assert_eq!(
+        saved["lease_until"], 0,
+        "lease released on watermark conflict"
+    );
+    assert_eq!(saved["results"].as_object().unwrap().len(), 1);
+    // A resumed plan with every shard done goes straight to commit; losing there too must
+    // release the lease the resume just took.
+    let lost_again = tick(&fake).unwrap();
+    assert!(lost_again.busy);
+    assert_eq!(lost_again.shards_dispatched, 0);
+    let saved = plan(&fake).unwrap();
+    assert_eq!(
+        saved["lease_until"], 0,
+        "lease released on a resumed commit conflict"
+    );
+    fake.conflict_watermark.set(false);
+    let next = tick(&fake).unwrap();
+    assert!(!next.busy, "the next tick must not wait out the lease");
+    assert_eq!(next.converted, 3);
+    assert_eq!(next.shards_dispatched, 0, "finished shards are not re-run");
+}
+
+#[test]
+fn a_stale_plan_read_at_the_commit_fence_does_not_park_the_plan_for_a_lease() {
+    // Seen live: a resumed, fully converted plan takes a fresh lease, then the fence re-read
+    // answers with the record from before that write (KV is eventually consistent). The
+    // attempt there is lower than ours, which cannot be a takeover; a takeover bumps it.
+    // Treating it as one left the plan parked behind a 90 s lease, three times in 15 minutes.
+    let fake = Fake::new(BASE + 7200);
+    seed(&fake, 1, 3);
+    fake.conflict_watermark.set(true);
+    let lost = tick(&fake).unwrap();
+    assert!(lost.busy);
+    assert_eq!(plan(&fake).unwrap()["lease_until"], 0);
+    fake.conflict_watermark.set(false);
+    // The catalog worker reads the plan first; the fence read is the one answered stale.
+    fake.stale_plan_reads.set(1);
+    fake.stale_plan_skip.set(1);
+    let resumed = tick(&fake).unwrap();
+    assert_eq!(resumed.shards_dispatched, 0);
+    assert_eq!(
+        resumed.converted, 3,
+        "a stale fence read must not block the commit"
+    );
+    assert!(!resumed.busy);
+    assert!(committed(&fake), "the finished plan is committed");
+    fake.now.set(fake.now.get() + 10);
+    let next = tick(&fake).unwrap();
+    assert!(!next.busy, "nothing is parked behind a lease");
 }
 
 #[test]

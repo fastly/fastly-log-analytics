@@ -61,6 +61,9 @@ const RESULT_JSON_BYTES: usize = 320;
 /// Room for fields a plan gains while it runs (`abandoning`, `sweep_after`, `sweep_next`).
 const PLAN_SLACK_BYTES: usize = 4096;
 pub const LEASE_S: u64 = 90;
+/// Lease a resumed plan takes when every shard already has a result: the commit happens in
+/// this execution, so a tick that dies here only needs to keep the next tick out briefly.
+pub const COMMIT_LEASE_S: u64 = 20;
 pub const SHARD_MAX_GZ_BYTES: u64 = 8 * 1024 * 1024;
 /// No worker is dispatched once the tick has run this long.
 pub const DISPATCH_BY: Duration = Duration::from_secs(10);
@@ -1494,10 +1497,10 @@ fn resume<R: Runtime>(
         return Ok(());
     }
     plan.attempt += 1;
-    plan.lease_until = now + LEASE_S;
     // Every shard already has a verified result: committing needs no conversion, so another
     // schema is no reason to throw the outputs away.
     let complete = plan.shards.keys().all(|id| plan.results.contains_key(id));
+    plan.lease_until = now + if complete { COMMIT_LEASE_S } else { LEASE_S };
     let deciding = plan.abandoning.is_none() && !complete && plan.schema != ctx.schema_hash;
     if deciding {
         // Workers of an earlier attempt may still be running; clean up on a later tick.
@@ -1531,6 +1534,15 @@ fn resume<R: Runtime>(
     dispatch(ctx, plan, watermark)
 }
 
+/// True when `record` is `plan_id` at an attempt below `attempt`: KV answered from before this
+/// execution's own write. Takeovers only ever raise the attempt.
+fn stale_plan_read(record: &Record, plan_id: &str, attempt: u32) -> bool {
+    record.value["plan_id"].as_str() == Some(plan_id)
+        && record.value["attempt"]
+            .as_u64()
+            .is_some_and(|seen| seen < u64::from(attempt))
+}
+
 /// Re-reads the plan and writes `plan` only if this tick still holds the lease for `plan_id`.
 fn save_fenced<R: Runtime>(
     ctx: &mut Ctx<'_, '_, R>,
@@ -1539,9 +1551,16 @@ fn save_fenced<R: Runtime>(
     plan: &Plan,
 ) -> Result<bool, String> {
     let runtime = ctx.store.runtime;
-    let Some(current) = runtime.admin_get(&ctx.plan_key)? else {
+    let Some(mut current) = runtime.admin_get(&ctx.plan_key)? else {
         return Ok(false);
     };
+    if stale_plan_read(&current, plan_id, attempt) {
+        // KV read before our own write landed; the CAS below needs the real generation.
+        let Some(again) = runtime.admin_get(&ctx.plan_key)? else {
+            return Ok(false);
+        };
+        current = again;
+    }
     if current.value["plan_id"].as_str() != Some(plan_id)
         || current.value["attempt"].as_u64() != Some(u64::from(attempt))
     {
@@ -2147,11 +2166,22 @@ fn commit<R: Runtime>(
         }
     };
     // Fence: a tick that outlived its lease must not commit over the tick that took it over.
-    let current = runtime.admin_get(&ctx.plan_key)?;
+    // A takeover bumps `attempt`; a record of this plan at a lower attempt is a read served
+    // before this execution's own write landed, and the watermark CAS still guards the commit.
+    let mut current = runtime.admin_get(&ctx.plan_key)?;
+    if current
+        .as_ref()
+        .is_some_and(|record| stale_plan_read(record, &plan.plan_id, plan.attempt))
+        && runtime.admin_remaining_calls() > ctx.reserve() + 1
+    {
+        // The deferral paths below CAS on this generation; give KV one more chance to be current.
+        current = runtime.admin_get(&ctx.plan_key)?;
+    }
     let held = current.as_ref().is_some_and(|record| {
         record.value["plan_id"].as_str() == Some(plan.plan_id.as_str())
-            && record.value["attempt"].as_u64() == Some(u64::from(plan.attempt))
             && record.value["abandoning"].is_null()
+            && (record.value["attempt"].as_u64() == Some(u64::from(plan.attempt))
+                || stale_plan_read(record, &plan.plan_id, plan.attempt))
     });
     if !held {
         ctx.report.busy = true;

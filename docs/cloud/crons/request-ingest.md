@@ -43,7 +43,7 @@ Ingest is split between a **coordinator**, which runs inside the tick and owns a
    - CAS the plan with `attempt = 1` and `lease_until = now + 90 s` (`LEASE_S`). A lost CAS reports `busy`.
 3. **Resume** (`resume`):
    - A live lease (`lease_until > now`) makes the tick `busy`, with no writes.
-   - Otherwise set `attempt + 1` and a new lease, then CAS.
+   - Otherwise set `attempt + 1` and a new lease, then CAS. The lease is 20 s (`COMMIT_LEASE_S`) when every shard already has a result, since only the commit is left; otherwise 90 s.
    - If every shard already has a result, commit with no dispatch, even under another schema: nothing is converted any more.
    - Otherwise, if the plan's schema differs from this release's, mark the plan `abandoning = "schema_changed"` instead of dispatching.
 4. **Dispatch** (`dispatch`): send pending shards (no result yet) in one `Runtime::worker_dispatch` batch to `POST /_internal/ingest`.
@@ -56,7 +56,7 @@ Ingest is split between a **coordinator**, which runs inside the tick and owns a
      - `schema_mismatch` → held for a later tick.
      - error, timeout, or HTTP failure → a failure, with a `platform_errors` row. After 3 failures (`MAX_SHARD_FAILURES`) the plan is marked `abandoning = "shard_failures"`.
 5. **Commit** (`commit`), once every shard has a result:
-   - Fence: re-read `ingest:plan` and require the same `plan_id` and `attempt` with no `abandoning`. A tick that outlived its lease reports `busy` and writes nothing.
+   - Fence: re-read `ingest:plan` and require the same `plan_id` and `attempt` with no `abandoning`. A tick that outlived its lease reports `busy` and writes nothing. A record of the same plan at a *lower* attempt is a stale read (KV answered from before this tick's own write; takeovers only raise the attempt): the tick re-reads once if it has budget and proceeds, since the watermark CAS still guards the commit. `save_fenced` re-reads on a stale answer the same way.
    - Add-CAS `ingest:deleteq:<plan_id>` = `{run_id, keys, sizes, inflight_keys, at}`. It lists converted raw keys and the shard manifests.
    - CAS `ingest:watermark` = `{key: last raw key, run_id: plan_id, at}`. This is the single commit point. If it fails, the tick reports the error or `busy`, emits no telemetry, and re-reads the watermark: the deleteq record is withdrawn only if the watermark does not name this plan (another tick that committed it owns the record). raw_delete never consumes the record of the current uncommitted plan, so a record left behind is harmless.
    - Segment results merge per raw key: the object is converted only if every segment converted, otherwise it is held with its first failing segment's reason. Rows already written by its converted segments stay committed.
@@ -169,6 +169,7 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 - `a_result_from_another_attempt_is_not_recorded`
 - `raw_delete_skips_the_queue_of_a_plan_whose_commit_failed`, `a_plan_whose_shards_all_have_results_commits_despite_a_schema_change`
 - `a_tick_that_lost_its_lease_does_not_commit`, `a_lost_watermark_race_keeps_the_winners_queue_and_writes_no_rows`
+- `a_watermark_conflict_at_commit_releases_the_lease_for_the_next_tick`, `a_stale_plan_read_at_the_commit_fence_does_not_park_the_plan_for_a_lease`
 - `an_invalid_manifest_falls_back_to_a_token_sweep`, `a_worker_past_its_lease_writes_nothing`
 - The earlier exactly-once, settle, corrupt-object, deletion and legacy-plan tests.
 
