@@ -534,6 +534,32 @@ fn read_live_source_pages_cover_old_and_legacy_sources_without_timestamp_pruning
 }
 
 #[test]
+fn read_live_source_page_lists_sources_in_batches_so_reads_get_the_call_budget() {
+    let rt = Rt::on_shield();
+    let since = (NOW_S * 1000) as i64;
+    for n in 0..24 {
+        rt.put_kv(
+            &format!("logq_global_{n:010}"),
+            json!({"ndjson": format!("{}\n", json!({"kind":"cron_runs","timestamp":since + n,"event_id":format!("{n}")}))}),
+        );
+    }
+    rt.gets.set(0);
+    let page = read_live(
+        &rt,
+        "global",
+        LogKind::CronRuns,
+        Some(since),
+        Some(MAX_PAGE),
+        Some("source-v1"),
+    )
+    .unwrap();
+    assert_eq!(page.rows.len(), 24, "{:?}", page.next_cursor);
+    assert!(page.next_cursor.is_none());
+    // One list call plus one read per source; listing one key at a time cost 48.
+    assert_eq!(rt.gets.get(), 25);
+}
+
+#[test]
 fn read_live_source_cursor_binds_query_and_rejects_changed_partial_source() {
     let rt = Rt::on_shield();
     let key = "logq_global_0000000001";

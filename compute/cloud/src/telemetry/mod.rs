@@ -711,10 +711,17 @@ struct LiveSourceCursor {
     since: Option<i64>,
     list: Option<String>,
     done: bool,
+    /// Listed outbox keys not yet read, in store order; one list call feeds many reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending: Vec<String>,
     key: Option<String>,
     offset: usize,
     hash: Option<String>,
 }
+
+/// Outbox keys fetched per list call while paging live sources. Listing one key per call spent
+/// half of a page's KV budget on listing; the keys ride in the cursor until they are read.
+const LIVE_LIST_PAGE: u32 = 50;
 
 fn read_live_sources(
     runtime: &impl Runtime,
@@ -735,6 +742,7 @@ fn read_live_sources(
             since,
             list: None,
             done: false,
+            pending: Vec::new(),
             key: None,
             offset: 0,
             hash: None,
@@ -751,6 +759,11 @@ fn read_live_sources(
             .key
             .as_ref()
             .is_some_and(|key| outbox_bucket(key, sid).is_none())
+        || state.pending.len() > LIVE_LIST_PAGE as usize
+        || state
+            .pending
+            .iter()
+            .any(|key| outbox_bucket(key, sid).is_none())
         || (state.key.is_none() && (state.offset != 0 || state.hash.is_some()))
         || (state.offset == 0) != state.hash.is_none()
     {
@@ -761,6 +774,9 @@ fn read_live_sources(
     let mut scanned_rows = 0;
     let mut calls = 0;
     loop {
+        if state.key.is_none() && !state.pending.is_empty() {
+            state.key = Some(state.pending.remove(0));
+        }
         if state.key.is_none() && state.done {
             return Ok(LivePage {
                 rows,
@@ -786,19 +802,21 @@ fn read_live_sources(
         }
         if state.key.is_none() {
             // Keep the backend's opaque cursor, not an assumed lexical start-after key.
-            let page = runtime.kv_list(OUTBOX_LIST_PREFIX, state.list.as_deref(), 1)?;
+            let page =
+                runtime.kv_list(OUTBOX_LIST_PREFIX, state.list.as_deref(), LIVE_LIST_PAGE)?;
             calls += 1;
-            if page.keys.len() > 1 || (page.next_cursor.is_some() && page.next_cursor == state.list)
+            if page.keys.len() > LIVE_LIST_PAGE as usize
+                || (page.next_cursor.is_some() && page.next_cursor == state.list)
             {
                 return Err("live_source_list_did_not_advance".into());
             }
             state.list = page.next_cursor;
             state.done = state.list.is_none();
-            state.key = page
+            state.pending = page
                 .keys
                 .into_iter()
-                .next()
-                .filter(|key| outbox_bucket(key, sid).is_some());
+                .filter(|key| outbox_bucket(key, sid).is_some())
+                .collect();
             continue;
         }
         let key = state.key.as_deref().ok_or_else(invalid)?;
