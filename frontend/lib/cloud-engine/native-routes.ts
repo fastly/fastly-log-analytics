@@ -62,6 +62,9 @@ export const NATIVE_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ["GET", "/api/logs/{kind}/live"],
   ["POST", "/api/telemetry/query"],
   ["GET", "/api/admin/versions"],
+  ["GET", "/api/views/{service_id}"],
+  ["POST", "/api/views/"],
+  ["DELETE", "/api/views/{view_id}"],
 ];
 
 export function isNativeCloudRoute(method: string, pathname: string): boolean {

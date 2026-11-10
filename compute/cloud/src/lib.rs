@@ -14,3 +14,4 @@ include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 pub mod site;
 pub mod state;
 pub mod telemetry;
+pub mod views;

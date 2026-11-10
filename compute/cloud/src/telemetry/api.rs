@@ -48,12 +48,14 @@ const ID_AFTER: &[&str] = &[
     "header",
     "dictionary_item",
     "config",
+    "views",
 ];
 
 /// Literal path segments of our own routes and of the Fastly API calls we make. Anything else
 /// is attacker-chosen and collapses to `:unknown`, which bounds path cardinality.
 const KNOWN_SEGMENTS: &[&str] = &[
     "api",
+    "views",
     "auth",
     "setup",
     "accept",

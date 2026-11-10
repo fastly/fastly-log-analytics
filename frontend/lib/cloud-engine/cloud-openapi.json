@@ -3677,10 +3677,132 @@
           }
         }
       }
+    },
+    "/api/views/{service_id}": {
+      "get": {
+        "operationId": "get__api_views_service_id",
+        "summary": "Saved filter views of the active service, shared by every signed-in user",
+        "parameters": [
+          { "name": "service_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 2000 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved views",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/SavedViewRecord" } }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/views/": {
+      "post": {
+        "operationId": "post__api_views",
+        "summary": "Create a saved view, or replace the one whose id the body names",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SavedView" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ViewSaveResponse" }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/views/{view_id}": {
+      "delete": {
+        "operationId": "delete__api_views_view_id",
+        "summary": "Delete a saved view of the active service",
+        "parameters": [
+          { "name": "view_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "service_id", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "SavedView": {
+        "type": "object",
+        "required": ["service_id", "name", "filters_json"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": ["string", "null"] },
+          "service_id": { "type": "string" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "filters_json": { "type": "string", "maxLength": 32768 },
+          "time_range_type": { "type": ["string", "null"] },
+          "start_time": { "type": ["string", "null"] },
+          "end_time": { "type": ["string", "null"] },
+          "page": { "type": ["string", "null"] },
+          "created_at": { "type": ["string", "null"] }
+        }
+      },
+      "SavedViewRecord": {
+        "type": "object",
+        "required": ["id", "service_id", "name", "filters_json"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "service_id": { "type": "string" },
+          "name": { "type": "string" },
+          "filters_json": { "type": "string" },
+          "time_range_type": { "type": ["string", "null"] },
+          "start_time": { "type": ["string", "null"] },
+          "end_time": { "type": ["string", "null"] },
+          "page": { "type": ["string", "null"] },
+          "created_at": { "type": ["string", "null"] }
+        }
+      },
+      "ViewSaveResponse": {
+        "type": "object",
+        "required": ["id", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      },
       "ProcessedFile": {
         "type": "object",
         "required": ["key", "start", "end", "size", "rows"],

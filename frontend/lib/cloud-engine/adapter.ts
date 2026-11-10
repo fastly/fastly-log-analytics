@@ -35,7 +35,7 @@ import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire
 import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
 import { isNativeCloudRoute } from "./native-routes";
-import { handleSavedViews } from "./saved-views";
+import { migrateLegacySavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
 import { cloudRumMutation } from "./rum-management";
 import { cloudLoggingSettings } from "./logging-settings";
@@ -529,7 +529,11 @@ async function handleCloudRequest(
   if (/^\/api\/admin\/(?:health-snapshot|metric-history(?:\/batch)?|bot-sources|system-jobs|pop-locations)$/.test(path)) {
     return unsupportedCloudEndpoint(request);
   }
-  if (path.startsWith("/api/views")) return (await handleSavedViews(request)) ?? unsupportedCloudEndpoint(request);
+  const listedViews = request.method === "GET" && path.match(/^\/api\/views\/([^/]+)\/?$/);
+  if (listedViews) {
+    await migrateLegacySavedViews(decodeURIComponent(listedViews[1]));
+    return null;
+  }
   if (request.method === "GET" && ["/api/log-fields/catalog", "/api/schema"].includes(path)) {
     const catalog = await withLoading("listing", () => loadCloudCatalog(request));
     if (catalog instanceof Response) return catalog;

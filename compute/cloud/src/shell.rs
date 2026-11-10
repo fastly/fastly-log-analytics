@@ -778,6 +778,17 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             }
             return Ok(response);
         }
+        if path == "/api/views" || path.starts_with("/api/views/") {
+            user.as_ref().ok_or(AuthError::Unauthorized)?;
+            if !matches!(request.method.as_str(), "GET" | "POST" | "DELETE") {
+                return Err(AuthError::NotFound);
+            }
+            let service = crate::admin::active_service(self.runtime).map_err(storage)?;
+            let Some(service) = service else {
+                return Ok(error(409, "No active service is provisioned."));
+            };
+            return crate::views::handle(self.runtime, &service.service_id, request);
+        }
         let admin_page = is_admin_page_path(path);
         if path.starts_with("/api/admin/") || path.starts_with("/api/provision/") || admin_page {
             if admin_page && matches!(request.method.as_str(), "GET" | "HEAD") && user.is_none() {

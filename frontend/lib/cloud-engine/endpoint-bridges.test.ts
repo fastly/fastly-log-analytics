@@ -98,53 +98,36 @@ describe("Cloud endpoint bridges", () => {
     expect(isNativeCloudRoute("POST", "/api/admin/services/fixture/unknown")).toBe(false);
   });
 
-  it("persists actual saved-view wire shapes, scoped by service, through both URL contracts", async () => {
-    const create = await handleCloudAnalyticalRequest(request("/api/views/", "POST", {
-      service_id: "fixture-a", name: "Errors", filters_json: '{"status":["500"]}', page: "/dashboard",
-    }));
-    expect(create?.status).toBe(201);
-    const saved = await create!.json();
-    expect(saved).toEqual({ id: expect.any(String), status: "success" });
-    const list = await handleCloudAnalyticalRequest(request("/api/views/fixture-a"));
-    expect(await list!.json()).toEqual([expect.objectContaining({ id: saved.id, name: "Errors", service_id: "fixture-a" })]);
-    expect(await (await handleCloudAnalyticalRequest(request("/api/views/fixture-b")))!.json()).toEqual([]);
-    expect((await handleCloudAnalyticalRequest(request(`/api/views/fixture-b/${saved.id}`, "DELETE")))?.status).toBe(404);
-    expect((await handleCloudAnalyticalRequest(request(`/api/views/fixture-a/${saved.id}`, "PUT", { name: "Updated" })))?.status).toBe(200);
-    expect((await handleCloudAnalyticalRequest(request(`/api/views/${saved.id}`, "DELETE", undefined, "fixture-a")))?.status).toBe(204);
-    expect(await (await handleCloudAnalyticalRequest(request("/api/views/fixture-a")))!.json()).toEqual([]);
+  it("passes saved views to the Compute origin after moving this browser's legacy local views there once", async () => {
+    localStorage.setItem("flp-saved-views-v2:fixture-a", JSON.stringify([
+      { id: "v1", service_id: "fixture-a", name: "Errors", filters_json: '{"status":["500"]}', page: "/dashboard" },
+      { id: "other", service_id: "fixture-b", name: "Not mine", filters_json: "{}" },
+      { id: "broken", service_id: "fixture-a", name: 42, filters_json: "{}" },
+    ]));
+    const fetcher = vi.fn(async () => Response.json({ id: "v1", status: "success" }, { status: 201 }));
+    vi.stubGlobal("fetch", fetcher);
+    expect(await handleCloudAnalyticalRequest(request("/api/views/fixture-a"))).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/views/");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toMatchObject({ id: "v1", service_id: "fixture-a", name: "Errors", page: "/dashboard" });
+    expect(localStorage.getItem("flp-saved-views-v2:fixture-a")).toBeNull();
+    expect(await handleCloudAnalyticalRequest(request("/api/views/fixture-a"))).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    for (const [path, method] of [["/api/views/", "POST"], ["/api/views/v1", "DELETE"]] as const) {
+      expect(await handleCloudAnalyticalRequest(request(path, method, method === "POST" ? { name: "x" } : undefined))).toBeNull();
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it("validates malformed view writes and preserves POST upsert and partial PUT semantics", async () => {
-    for (const body of [null, [], { name: 42, filters_json: "{}" }, { name: "View", filters_json: 42 },
-      { name: "View", filters_json: "{}", start_time: 42 }]) {
-      expect((await handleCloudAnalyticalRequest(request("/api/views/fixture-a", "POST", body)))?.status).toBe(422);
-    }
-    const create = await handleCloudAnalyticalRequest(request("/api/views/fixture-a", "POST", {
-      name: "Original", filters_json: "{}", page: "/dashboard",
-    }));
-    const { id } = await create!.json();
-    for (const body of [{ name: 42 }, { filters_json: [] }, { name: " " }]) {
-      expect((await handleCloudAnalyticalRequest(request(`/api/views/fixture-a/${id}`, "PUT", body)))?.status).toBe(422);
-    }
-    await handleCloudAnalyticalRequest(request(`/api/views/fixture-a/${id}`, "PUT", { name: "Renamed" }));
-    expect(await (await handleCloudAnalyticalRequest(request("/api/views/fixture-a")))!.json())
-      .toEqual([expect.objectContaining({ id, name: "Renamed", filters_json: "{}", page: "/dashboard" })]);
-    await handleCloudAnalyticalRequest(request("/api/views/fixture-a", "POST", {
-      id, name: "Replaced", filters_json: "[]",
-    }));
-    expect(await (await handleCloudAnalyticalRequest(request("/api/views/fixture-a")))!.json())
-      .toEqual([expect.objectContaining({ id, name: "Replaced", filters_json: "[]" })]);
-  });
-
-  it("accepts service-scoped POST and refuses unscoped writes and storage failures", async () => {
-    expect((await handleCloudAnalyticalRequest(request("/api/views/fixture-a", "POST", { name: "View", filters_json: "{}" })))?.status).toBe(201);
-    expect((await handleCloudAnalyticalRequest(request("/api/views/", "POST", { name: "View", filters_json: "{}" })))?.status).toBe(400);
-    expect((await handleCloudAnalyticalRequest(request("/api/views/fixture-a", "POST", { service_id: "fixture-b", name: "View", filters_json: "{}" })))?.status).toBe(400);
-    vi.stubGlobal("localStorage", {
-      getItem: () => null,
-      setItem: () => { throw new Error("quota"); },
-    });
-    expect((await handleCloudAnalyticalRequest(request("/api/views/fixture-a", "POST", { name: "View", filters_json: "{}" })))?.status).toBe(503);
+  it("keeps legacy local views when the origin refuses them for a reason other than validation", async () => {
+    localStorage.setItem("flp-saved-views-v2:fixture-a", JSON.stringify([
+      { id: "v1", service_id: "fixture-a", name: "Errors", filters_json: "{}" },
+    ]));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "down" }, { status: 503 })));
+    expect(await handleCloudAnalyticalRequest(request("/api/views/fixture-a"))).toBeNull();
+    expect(localStorage.getItem("flp-saved-views-v2:fixture-a")).not.toBeNull();
   });
 
   it("normalizes catalog SQL types and includes active custom fields without physical metrics", async () => {
