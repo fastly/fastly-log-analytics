@@ -35,6 +35,7 @@ import {
 
 function fixtureQuerySection(pathname) {
   const nested = {
+    "/rum": "rum-analytics",
     "/admin/session-scoring": "api./api/services/fixture-service/scoring/analytics",
     "/admin/rum": "api./api/services/fixture-service/rum/status",
     "/admin/share": "api./api/admin/share/status",
