@@ -20,6 +20,7 @@ import { useSSE } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
 import { cn } from "@/lib/utils";
 import type { ServiceConfig } from '@/types/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 interface DeleteDataDialogProps {
   service: ServiceConfig | null
@@ -191,6 +192,7 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
 
   if (!service) return null
 
+  const cloud = isCloudMode()
   const removeCdn = removeLogging
   const bucketDisabled = !removeLogging || !removeRum
   const effectiveRemoveBucket = bucketDisabled ? false : removeBucket
@@ -212,7 +214,7 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
   }
 
   const tokenRequired = (removeLogging || removeRum || removeCdn || effectiveRemoveBucket)
-  const hasSelectedAnyAction = removeLogging || removeRum || removeCache
+  const hasSelectedAnyAction = removeLogging || removeRum || (!cloud && removeCache)
   const canExecute = (!tokenRequired || apiToken.trim().length > 0) && hasSelectedAnyAction
 
   const handleExecute = () => {
@@ -331,13 +333,15 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                     <Switch id="rem-logging" checked={removeLogging} disabled={true} className="opacity-50" />
                   </div>
 
-                  <div className={cn("flex items-center justify-between group", !removeLogging && "opacity-50")}>
-                    <div className="space-y-0.5">
-                      <Label htmlFor="rem-cdn" className="text-sm font-medium">Delete CDN VCL proxy service</Label>
-                      <p className="text-[10px] text-muted-foreground">Permanently removes the secondary CDN service.</p>
+                  {!cloud && (
+                    <div className={cn("flex items-center justify-between group", !removeLogging && "opacity-50")}>
+                      <div className="space-y-0.5">
+                        <Label htmlFor="rem-cdn" className="text-sm font-medium">Delete CDN VCL proxy service</Label>
+                        <p className="text-[10px] text-muted-foreground">Permanently removes the secondary CDN service.</p>
+                      </div>
+                      <Switch id="rem-cdn" checked={removeLogging} disabled={true} className="opacity-50" />
                     </div>
-                    <Switch id="rem-cdn" checked={removeLogging} disabled={true} className="opacity-50" />
-                  </div>
+                  )}
 
                   <div className={cn("flex items-center justify-between group", !removeLogging && "opacity-50")}>
                     <div className="space-y-0.5">
@@ -368,13 +372,15 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                     <Switch id="rem-buck-new" checked={effectiveRemoveBucket} disabled={bucketDisabled} onCheckedChange={setRemoveBucket} />
                   </div>
 
-                  <div className="flex items-center justify-between group">
-                    <div className="space-y-0.5">
-                      <Label htmlFor="rem-cache-new" className="text-sm font-medium cursor-pointer">Purge local database and cache</Label>
-                      <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes ClickHouse table rows, FOS Archive Parquet manifests, and service metadata.</p>
+                  {!cloud && (
+                    <div className="flex items-center justify-between group">
+                      <div className="space-y-0.5">
+                        <Label htmlFor="rem-cache-new" className="text-sm font-medium cursor-pointer">Purge local database and cache</Label>
+                        <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes ClickHouse table rows, FOS Archive Parquet manifests, and service metadata.</p>
+                      </div>
+                      <Switch id="rem-cache-new" checked={removeCache} onCheckedChange={setRemoveCache} />
                     </div>
-                    <Switch id="rem-cache-new" checked={removeCache} onCheckedChange={setRemoveCache} />
-                  </div>
+                  )}
                 </div>
               </div>
             </div>

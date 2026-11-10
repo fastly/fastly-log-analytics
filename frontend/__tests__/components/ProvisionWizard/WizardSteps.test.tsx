@@ -1432,4 +1432,22 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     })
   })
 
+  test('TeardownDialog hides the CDN proxy and local-cache rows in Cloud, which has neither', () => {
+    setCloudModeRuntime(true)
+    try {
+      render(
+        <TeardownDialog
+          service={{ service_id: 'test-svc', name: 'Test Service', rum_enabled: true } as ServiceConfig}
+          open={true}
+          onOpenChange={vi.fn()}
+        />,
+      )
+      expect(screen.queryByText(/Delete CDN VCL proxy service/i)).toBeNull()
+      expect(screen.queryByText(/Purge local database and cache/i)).toBeNull()
+      expect(screen.getByText(/Delete Fastly logging endpoint/i)).toBeDefined()
+    } finally {
+      setCloudModeRuntime(false)
+    }
+  })
+
 })
