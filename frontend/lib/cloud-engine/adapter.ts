@@ -20,7 +20,7 @@ import {
   type InsightsRequest,
 } from "./insights";
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
-import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead } from "./scoring-reads";
+import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
 import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
@@ -429,7 +429,8 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     : /^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?)$/.test(url.pathname)
       ? securityScanColumns(params.filters)
     : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
-    : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters) : null;
+    : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters)
+    : /^\/api\/services\/[^/]+\/scoring\//.test(url.pathname) ? scoringScanColumns() : null;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {

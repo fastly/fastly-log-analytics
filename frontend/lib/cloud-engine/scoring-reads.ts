@@ -24,6 +24,16 @@ export const CLOUD_SCORING_SCAN_ROUTES = new Set([
   "latency-timeseries", "health",
 ]);
 
+/** Every column a scoring scan reads; optional edge_score* fields are skipped in files that lack them. */
+export const SCORING_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "edge", "edge_sid", "edge_score", "edge_score_l1", "edge_score_l2", "edge_score_reason",
+  "edge_cookie_compliance", "edge_score_rtt_us", "edge_score_exec_us", "ip", "ua", "url", "status", "country",
+] as const;
+
+export function scoringScanColumns(): string[] {
+  return [...SCORING_SCAN_COLUMNS];
+}
+
 function unavailable(reason: string) {
   return { supported: false as const, available: false as const, reason };
 }

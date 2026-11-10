@@ -8,6 +8,9 @@ import { handleValueRequest, valueScanColumns } from "./value";
 import { handleSessionsList, sessionsScanColumns } from "./sessions";
 import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
 import { cmcdScanColumns, handleCmcdRequest } from "./cmcd";
+import { queryCloudScoring, scoringScanColumns } from "./scoring-reads";
+import { bindCloudReadContext } from "./range-loader";
+import { SCORING_OPTIONAL_COLUMNS } from "./sessions";
 
 type Backend = Awaited<ReturnType<typeof createNodeBackend>>;
 type Variant = { name: string; columns: string[] | null; run: (read: DuckDBReadContext) => Promise<unknown> };
@@ -54,8 +57,12 @@ const DATA: Record<string, string> = {
   asset_type: cycle([null, "", "Font", null, null]),
 };
 
+// Scoring fields the table schema leaves optional; the Cloud view lists them once a file carries them.
+const OPTIONAL_FIELDS = Object.keys(SCORING_OPTIONAL_COLUMNS).filter((column) => !(column in FIELD_DUCKDB_TYPES));
+const FIELDS = [...ALL_TABLE_FIELDS, ...OPTIONAL_FIELDS];
+
 function columnValue(column: string): string {
-  const type = FIELD_DUCKDB_TYPES[column];
+  const type = FIELD_DUCKDB_TYPES[column] ?? SCORING_OPTIONAL_COLUMNS[column];
   const custom = DATA[column];
   if (custom) return `${custom}::${type}`;
   if (type === "VARCHAR") return `CASE WHEN i % 11 = 3 THEN NULL ELSE '${column}-' || (i % 7)::VARCHAR END`;
@@ -77,18 +84,18 @@ describe("Cloud route column projections", () => {
       return result.toArray().map((row) => Object.fromEntries(Object.entries({ ...row })
         .map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value])));
     },
-    getPresentColumns: async () => new Set(ALL_TABLE_FIELDS),
+    getPresentColumns: async () => new Set(FIELDS),
     getCustomColumnTypes: () => new Map(),
   } as unknown as DuckDBReadContext;
   const view = (columns: readonly string[]) =>
     backend.query(`CREATE OR REPLACE VIEW requests AS SELECT ${columns.map((c) => `"${c}"`).join(", ")} FROM source`);
-  const all = ["ts_ms", "timestamp", ...ALL_TABLE_FIELDS];
+  const all = ["ts_ms", "timestamp", ...FIELDS];
 
   beforeAll(async () => {
     backend = await createNodeBackend();
     await backend.query(`CREATE TABLE source AS SELECT ${START_MS}::BIGINT + i * 60000 AS ts_ms,
       epoch_ms(${START_MS}::BIGINT + i * 60000)::TIMESTAMPTZ AS "timestamp",
-      ${ALL_TABLE_FIELDS.map((column) => `${columnValue(column)} AS "${column}"`).join(", ")}
+      ${FIELDS.map((column) => `${columnValue(column)} AS "${column}"`).join(", ")}
       FROM range(${ROWS}) rows(i)`);
     await view(all);
   });
@@ -305,5 +312,26 @@ describe("Cloud route column projections", () => {
     expect(cmcdScanColumns({ host: { mode: "include", values: ["a.example"] } })).toContain("host");
     expect(cmcdScanColumns("host")).toBeNull();
     expect(cmcdScanColumns([{ field: "host" }])).toBeNull();
+  });
+
+  const scoring = (route: string, query = ""): Variant => ({
+    name: `/api/services/svc/scoring/${route}${query}`,
+    columns: scoringScanColumns(),
+    run: (context) => queryCloudScoring(bindCloudReadContext(new Request(
+      `http://localhost/api/services/svc/scoring/${route}?start_time=${RANGE.start_time}&end_time=${RANGE.end_time}${query}`,
+    ), context), route),
+  });
+
+  it("loads /api/services/{id}/scoring scans as exact projections", async () => {
+    expect(await scoring("analytics").run(read)).toMatchObject({
+      available: true, top_flagged: { rows: expect.arrayContaining([expect.objectContaining({ edge_score: expect.any(Number) })]) },
+      health: { scored_rows: expect.any(Number) },
+    });
+    await guard([
+      scoring("analytics"),
+      scoring("analytics", "&mask_ips=1"),
+      scoring("health"),
+      scoring("sessions/edge_sid-1/events"),
+    ]);
   });
 });
