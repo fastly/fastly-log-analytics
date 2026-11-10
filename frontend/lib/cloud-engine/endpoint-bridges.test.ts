@@ -6,6 +6,7 @@ import { NATIVE_ROUTES, isNativeCloudRoute } from "./native-routes";
 import { ensureCloudRange } from "./range-loader";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { sealSessionToken } from "./sessions";
+import { updateDashboardCacheIdentity } from "./dashboard/sources";
 import { cloudServiceStatus } from "./service-bridges";
 
 vi.mock("./range-loader", async (importOriginal) => ({
@@ -234,5 +235,89 @@ describe("Cloud endpoint bridges", () => {
     expect(response?.ok).toBe(true);
     expect(ensureCloudRange).toHaveBeenLastCalledWith(at, "2026-11-01T00:00:00.001Z",
       expect.any(AbortSignal), ["request"], { serviceId: "fixture-service", customFields: [] });
+  });
+});
+
+describe("Cloud RUM status and versions services lookup", () => {
+  const services = { services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.10.0" } }] };
+
+  function heldServices() {
+    const pending: Array<{ resolve: (response: Response) => void; signal?: AbortSignal | null }> = [];
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/services"
+      ? new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+        pending.push({ resolve, signal: init?.signal });
+      })
+      : Promise.resolve(Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" })));
+    vi.stubGlobal("fetch", fetcher);
+    const servicesCalls = () => fetcher.mock.calls.filter(([input]) => String(input) === "/api/services").length;
+    return { fetcher, pending, servicesCalls };
+  }
+
+  it("shares one in-flight services read between the page's concurrent status and versions requests", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const status = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    const versions = cloudServiceStatus(request("/api/services/fixture-a/rum/versions"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].resolve(Response.json(services));
+    expect(await (await status)!.json()).toMatchObject({ enabled: true, faro_version: "2.10.0" });
+    expect(await (await versions)!.json()).toMatchObject({ current: "2.10.0", update_available: true });
+    expect(servicesCalls()).toBe(1);
+  });
+
+  it("lets one caller abort without cancelling the shared read for the others", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const owner = new AbortController();
+    const first = cloudServiceStatus(new Request("http://localhost/api/services/fixture-a/rum/status", { signal: owner.signal }));
+    const second = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    owner.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    expect(pending[0].signal?.aborted).not.toBe(true);
+    pending[0].resolve(Response.json(services));
+    expect(await (await second)!.json()).toMatchObject({ enabled: true });
+    expect(servicesCalls()).toBe(1);
+  });
+
+  it("cancels the shared read once every caller has aborted, and does not keep it", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const owner = new AbortController();
+    const aborted = cloudServiceStatus(new Request("http://localhost/api/services/fixture-a/rum/status", { signal: owner.signal }));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    owner.abort();
+    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+    expect(pending[0].signal?.aborted).toBe(true);
+    const next = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1].resolve(Response.json(services));
+    expect((await next)!.status).toBe(200);
+    expect(servicesCalls()).toBe(2);
+  });
+
+  it("does not keep a failed read, so the next request asks again", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const first = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    const second = cloudServiceStatus(request("/api/services/fixture-a/rum/versions"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0].resolve(Response.json({ error: "busy" }, { status: 503 }));
+    expect((await first)!.status).toBe(503);
+    expect((await second)!.status).toBe(503);
+    const retry = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1].resolve(Response.json(services));
+    expect((await retry)!.status).toBe(200);
+    expect(servicesCalls()).toBe(2);
+  });
+
+  it("does not share a read across a change of signed-in identity", async () => {
+    const { pending, servicesCalls } = heldServices();
+    const before = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    updateDashboardCacheIdentity("other-user:admin");
+    const after = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending.forEach(({ resolve }) => resolve(Response.json(services)));
+    await Promise.all([before, after]);
+    expect(servicesCalls()).toBe(2);
   });
 });
