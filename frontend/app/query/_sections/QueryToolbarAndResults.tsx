@@ -23,6 +23,7 @@ import { formatCount, cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
 import type { QueryMode } from './QueryEditorSection'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 
 export type QueryResponse = components['schemas']['QueryResponse']
 export type PresetQuery = components['schemas']['PresetQuery']
@@ -247,7 +248,7 @@ export function QueryInitializingSkeleton({ controls }: { controls?: React.React
       >
         <Button disabled size="lg" data-testid="query-run-btn">
           <Database className="h-4 w-4 mr-2 animate-spin" />
-          Initializing ClickHouse analytical engine...
+          {IS_CLOUD_MODE ? 'Initializing DuckDB analytical engine...' : 'Initializing ClickHouse analytical engine...'}
         </Button>
       </PageHeader>
       {controls ?? <Skeleton className="h-9 w-full rounded-lg" />}
