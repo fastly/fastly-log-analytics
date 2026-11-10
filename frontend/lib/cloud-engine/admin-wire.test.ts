@@ -168,10 +168,53 @@ describe("Cloud administrative wire parity", () => {
     const results = await Promise.allSettled(reads);
     expect(results.slice(0, 3).map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
     expect(results[3].status).toBe("rejected");
-    expect(queryOpsLogs).toHaveBeenCalledTimes(1);
+    // The fixture rows are old, so every caller widens through the same three lookback tiers.
+    expect(queryOpsLogs).toHaveBeenCalledTimes(3);
     const later = await cloudAdminWire(request("/api/cron-runs?page=1&per_page=10"));
     expect(later!.ok).toBe(true);
+    expect(queryOpsLogs).toHaveBeenCalledTimes(6);
+  });
+
+  it("answers the header's last-sync probe from the last hour and maps log_discovery to the Cloud ingest stage", async () => {
+    cronEvidence();
+    const now = Date.now();
+    vi.mocked(queryOpsLogs).mockResolvedValue({
+      kind: "cron_runs", from: "", to: "",
+      rows: [
+        { timestamp: now - 20_000, event_id: "recent", run_id: "r1", cron_kind: "request_ingest",
+          service_id: "fixture-service", started_at: now - 20_000, duration_ms: 300, outcome: "done" },
+        { timestamp: now - 10_000, event_id: "delete", run_id: "r2", cron_kind: "raw_delete",
+          service_id: "fixture-service", started_at: now - 10_000, duration_ms: 10, outcome: "done" },
+      ],
+      oldestLiveMs: null, status: null,
+      stats: { listed: 1, read: 1, cached: 0, cdnHits: 0, skippedCovered: 0, ignoredCompact: 0, evicted: 0, liveRows: 0 },
+    });
+    const body = await (await cloudAdminWire(request(
+      "/api/cron-runs?task=log_discovery&per_page=1&page=1&skip_total=true")))!.json();
+    expect(body.entries).toHaveLength(1);
+    expect(body.entries[0]).toMatchObject({ task: "request_ingest", status: "success", duration_s: 0.3 });
+    expect(queryOpsLogs).toHaveBeenCalledTimes(1);
+    const [, range] = vi.mocked(queryOpsLogs).mock.calls[0];
+    expect(Date.parse(range.to) - Date.parse(range.from)).toBe(3600_000);
+    expect(body.history_from).toBe(range.from);
+  });
+
+  it("widens the default lookback only until the requested page is full", async () => {
+    cronEvidence();
+    const now = Date.now();
+    vi.mocked(queryOpsLogs).mockImplementation(async (_kind, range) => {
+      const span = Date.parse(range.to) - Date.parse(range.from);
+      const rows = span <= 3600_000 ? [] : [
+        { timestamp: now - 7200_000, event_id: "old", run_id: "r0", cron_kind: "request_ingest",
+          service_id: "fixture-service", started_at: now - 7200_000, duration_ms: 1, outcome: "done" },
+      ];
+      return { kind: "cron_runs", from: range.from, to: range.to, rows, oldestLiveMs: null, status: null,
+        stats: { listed: 1, read: 1, cached: 0, cdnHits: 0, skippedCovered: 0, ignoredCompact: 0, evicted: 0, liveRows: 0 } };
+    });
+    const body = await (await cloudAdminWire(request("/api/cron-runs?task=request_ingest&per_page=1")))!.json();
+    expect(body.entries).toHaveLength(1);
     expect(queryOpsLogs).toHaveBeenCalledTimes(2);
+    expect(Date.parse(body.history_to) - Date.parse(body.history_from)).toBe(86400_000);
   });
 
   it("maps native audit details and honors filtering before pagination", async () => {

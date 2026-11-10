@@ -84,65 +84,94 @@ async function cronHistory(key: string, range: { from: string; to: string }, sig
   }
 }
 
+// Self-hosted task names the shared UI asks for, and the Cloud stage that plays the same role.
+const TASK_ALIASES: Record<string, readonly string[]> = { log_discovery: ["request_ingest"] };
+
+// A default-range request reads recent history first and widens only while
+// the page it asked for is not yet full: the header's "last sync" badge and
+// the recent-runs strip want one or ten rows, not a week of ten-second ticks.
+const DEFAULT_LOOKBACKS_MS = [3600_000, 86400_000, 7 * 86400_000] as const;
+
+function matchesTask(row: Row, task: string | null): boolean {
+  if (!task) return true;
+  return row.task === task || (TASK_ALIASES[task] ?? []).includes(String(row.task));
+}
+
 async function cron(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const params = url.searchParams;
   const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
   const to = Date.parse(end);
-  const start = params.get("start") ?? params.get("start_time") ??
-    (Number.isFinite(to) ? new Date(to - 7 * 86400000).toISOString() : "");
-  const from = Date.parse(start);
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+  const explicitStart = params.get("start") ?? params.get("start_time");
+  const defaultRange = explicitStart === null && !params.has("end") && !params.has("end_time");
+  const lookbacks = explicitStart === null ? DEFAULT_LOOKBACKS_MS : [to - Date.parse(explicitStart)];
+  if (!Number.isFinite(to) || lookbacks.some((span) => !Number.isFinite(span) || span < 0)) {
     return Response.json({ detail: { error: "invalid_time_range" } }, { status: 422 });
   }
   const page = await nativePages(request, "/api/cron-runs", "runs");
   const service = params.get("service_id") ?? request.headers.get("x-service-id") ?? page.service_id;
   if (service && page.service_id !== service) throw new Error("Cloud cron service does not match the selected service");
-  const defaultRange = !params.has("start") && !params.has("start_time") && !params.has("end") && !params.has("end_time");
-  const evidence = await cronHistory(defaultRange ? "default" : `${start}|${end}`, { from: start, to: end }, request.signal);
-  request.signal.throwIfAborted();
-  if (evidence.liveTruncated) throw new Error("Cloud cron history is incomplete; choose a smaller range");
-  const stageRows = evidence.rows.filter((row) => typeof row.cron_kind === "string")
-    .map((row): Row => ({ ...row, task: row.cron_kind }));
   const coordinators = (page.runs as Row[]).map((row): Row => ({ ...row, task: "cloud_ingest_clock" }));
-  const entries = [...stageRows, ...coordinators]
-    .filter((row) => !service || row.service_id === service)
-    .map((row) => {
-      const started = typeof row.started_at === "number" ? row.started_at : Date.parse(String(row.started_at));
-      const duration = typeof row.duration_ms === "number" ? row.duration_ms : null;
-      return {
-        ...row,
-        task: String(row.task),
-        id: started * 1000 + id(`${row.task}:${row.run_id ?? row.event_id ?? row.id}`) % 1000,
-        started_at: new Date(started).toISOString(),
-        finished_at: row.finished_at ?? (duration === null ? null : new Date(started + duration).toISOString()),
-        duration_s: duration === null ? null : duration / 1000,
-        error_message: row.error ?? null,
-        files_downloaded: row.converted_files ?? row.converted_raw_files ?? null,
-        files_deleted_fos: row.deleted_files ?? row.deleted_raw_files ?? null,
-        rows_ingested: row.rows_written ?? null,
-        corrupt_rows: row.bad_lines ?? null,
-        status: row.error || row.outcome === "error" ? "error" : row.outcome === "done" ? "success" :
-          row.outcome === "partial" ? "partial_success" : "skipped",
-        summary: row.error ?? `${row.task}: ${row.outcome}`,
-        result_json: JSON.stringify(row),
-      };
-    }).filter((row) => Date.parse(row.started_at) >= from && Date.parse(row.started_at) <= to)
-    .sort((a, b) => b.id - a.id);
-  const history = { history_from: start, history_to: end };
-  if (url.pathname === "/api/cron-schedule") {
-    if (!Array.isArray(page.schedules)) throw new Error("Cloud native task schedules are unavailable");
-    const schedules = (page.schedules as Row[]).map((schedule) => {
-      const observed = entries.find((row) => row.task === schedule.task)?.started_at;
-      const recorded = typeof schedule.last_run_time === "string" ? schedule.last_run_time : null;
-      return { ...schedule, last_run_time: observed && (!recorded || Date.parse(observed) > Date.parse(recorded)) ? observed : recorded };
-    });
-    return Response.json({ schedules, ...history });
-  }
   const sinceId = params.has("since_id") ? Number(params.get("since_id")) : null;
-  const filtered = entries.filter((row) => (!params.get("task") || row.task === params.get("task")) &&
-    (!params.get("status") || row.status === params.get("status")) && (sinceId === null || row.id > sinceId));
-  return Response.json({ ...page, ...history, ...paginate(filtered, params) });
+  const perPage = positive(params, "per_page", 50, 1000);
+  const pageNumber = positive(params, "page", 1, 100000);
+  const isSchedule = url.pathname === "/api/cron-schedule";
+  const taskFilter = params.get("task");
+
+  for (const [index, span] of lookbacks.entries()) {
+    const start = explicitStart ?? new Date(to - span).toISOString();
+    const from = to - span;
+    const key = defaultRange ? `default:${span}` : `${start}|${end}`;
+    const evidence = await cronHistory(key, { from: start, to: end }, request.signal);
+    request.signal.throwIfAborted();
+    if (evidence.liveTruncated) throw new Error("Cloud cron history is incomplete; choose a smaller range");
+    const stageRows = evidence.rows.filter((row) => typeof row.cron_kind === "string")
+      .map((row): Row => ({ ...row, task: row.cron_kind }));
+    const entries = [...stageRows, ...coordinators]
+      .filter((row) => !service || row.service_id === service)
+      .map((row) => {
+        const started = typeof row.started_at === "number" ? row.started_at : Date.parse(String(row.started_at));
+        const duration = typeof row.duration_ms === "number" ? row.duration_ms : null;
+        return {
+          ...row,
+          task: String(row.task),
+          id: started * 1000 + id(`${row.task}:${row.run_id ?? row.event_id ?? row.id}`) % 1000,
+          started_at: new Date(started).toISOString(),
+          finished_at: row.finished_at ?? (duration === null ? null : new Date(started + duration).toISOString()),
+          duration_s: duration === null ? null : duration / 1000,
+          error_message: row.error ?? null,
+          files_downloaded: row.converted_files ?? row.converted_raw_files ?? null,
+          files_deleted_fos: row.deleted_files ?? row.deleted_raw_files ?? null,
+          rows_ingested: row.rows_written ?? null,
+          corrupt_rows: row.bad_lines ?? null,
+          status: row.error || row.outcome === "error" ? "error" : row.outcome === "done" ? "success" :
+            row.outcome === "partial" ? "partial_success" : "skipped",
+          summary: row.error ?? `${row.task}: ${row.outcome}`,
+          result_json: JSON.stringify(row),
+        };
+      }).filter((row) => Date.parse(row.started_at) >= from && Date.parse(row.started_at) <= to)
+      .sort((a, b) => b.id - a.id);
+    const widest = index === lookbacks.length - 1;
+    const history = { history_from: start, history_to: end };
+    if (isSchedule) {
+      if (!Array.isArray(page.schedules)) throw new Error("Cloud native task schedules are unavailable");
+      const schedules = (page.schedules as Row[]).map((schedule) => {
+        const observed = entries.find((row) => row.task === schedule.task)?.started_at;
+        const recorded = typeof schedule.last_run_time === "string" ? schedule.last_run_time : null;
+        return { ...schedule, last_run_time: observed && (!recorded || Date.parse(observed) > Date.parse(recorded)) ? observed : recorded };
+      });
+      if (widest || schedules.every((schedule) => typeof schedule.last_run_time === "string")) {
+        return Response.json({ schedules, ...history });
+      }
+      continue;
+    }
+    const filtered = entries.filter((row) => matchesTask(row, taskFilter) &&
+      (!params.get("status") || row.status === params.get("status")) && (sinceId === null || row.id > sinceId));
+    if (widest || sinceId !== null || filtered.length >= pageNumber * perPage) {
+      return Response.json({ ...page, ...history, ...paginate(filtered, params) });
+    }
+  }
+  throw new Error("Cloud cron history lookback exhausted");
 }
 
 async function usage(request: Request): Promise<Response> {
