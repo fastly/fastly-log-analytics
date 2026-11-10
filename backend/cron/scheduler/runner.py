@@ -6,6 +6,7 @@ import logging
 import os
 from datetime import UTC
 
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.cron.scheduler.lifecycle import (
     _resolve_rum_sync_interval,
     _service_has_alerts,
@@ -193,7 +194,7 @@ class Scheduler:
             sync_cfg = prov.get("cron_sync", {})
             if not sync_cfg.get("enabled", True):
                 continue
-            log_period = int(cfg.get("log_period", 60))
+            log_period = int(cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS))
             if sync_cfg.get("interval_mins"):
                 interval_seconds = max(5, int(sync_cfg["interval_mins"]) * 60)
             elif sync_cfg.get("interval_seconds"):

@@ -16,6 +16,7 @@ from backend.core.clickhouse import get_clickhouse_client
 from backend.core.fastly.client import FASTLY_LOG_FIELDS, api_key_or_mock
 from backend.core.fos_client import _get_fos_client
 from backend.core.request_context import get_source
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.high_scale._common import visible_publication_fence_sql
 from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.admin import (
@@ -138,7 +139,7 @@ def _compute_prefill_rates(
             try:
                 from backend.provision import parse_period
 
-                period_val = cfg.get("log_period", prov.get("log_period", 60))
+                period_val = cfg.get("log_period", prov.get("log_period", DEFAULT_LOG_PERIOD_SECONDS))
                 period_secs = period_val if isinstance(period_val, int) else parse_period(str(period_val))
                 result["log_period_seconds"] = period_secs
             except Exception:

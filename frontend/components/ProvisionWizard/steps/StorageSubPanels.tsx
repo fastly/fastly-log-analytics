@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -239,7 +240,7 @@ export function LoggingSetupSection({ config, update }: StorageSectionProps) {
                 label="Log Period"
                 info="How often Fastly will write log files to the bucket. A shorter period means more real-time data but creates more files."
               />
-              <Select value={String(config.log_period)} onValueChange={(v) => update("log_period", Number(v) || 10)}>
+              <Select value={String(config.log_period)} onValueChange={(v) => update("log_period", Number(v) || SERVICE_DEFAULTS.logPeriodSeconds)}>
                 <SelectTrigger className="h-9">
                   <SelectValue>{(val) => PERIOD_LABELS[String(val)] || val}</SelectValue>
                 </SelectTrigger>

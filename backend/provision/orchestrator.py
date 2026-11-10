@@ -8,6 +8,7 @@ import shutil
 from backend.core import log_fields as lf
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.fastly.client import is_mock_mode, region_endpoint
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.provision.cli import ok, run_with_events, step, warn
 from backend.provision.cmcd_fields import (
     _CMCD_CUSTOM_FIELDS as _CMCD_CUSTOM_FIELDS,
@@ -281,7 +282,7 @@ def write_service_config(state: dict):
             cfg["log_period"] = state["log_period"]
         elif "log_period" in state.get("provisioning", {}):
             cfg["log_period"] = state["provisioning"]["log_period"]
-        log_period_secs = int(cfg.get("log_period", 120))
+        log_period_secs = int(cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS))
         sync_interval_seconds = max(5, log_period_secs)
         _rate_limiting = state.get("rate_limiting")
         if _rate_limiting is None:

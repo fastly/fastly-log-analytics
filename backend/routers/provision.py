@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from backend.core.fastly.client import validate_rum_custom_condition
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.models.admin import ProvisionService
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
@@ -702,7 +703,7 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "sample_rate": body.get("sample_rate", "100"),
         "edge_only": body.get("edge_only", True),
         "custom_condition": body.get("custom_condition", ""),
-        "log_period": body.get("log_period", 60),
+        "log_period": body.get("log_period", DEFAULT_LOG_PERIOD_SECONDS),
         "cdn_service_name": body.get("cdn_service_name"),
         "cdn_url": body.get("cdn_url"),
         "cdn_shield": body.get("cdn_shield", "none"),

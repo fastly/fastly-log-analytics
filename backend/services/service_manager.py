@@ -8,6 +8,7 @@ from typing import Any
 import backend.utils.dir_size as _dir_size_mod
 from backend import config as svcconfig
 from backend.core import fos_client as _db
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.dir_size import (
@@ -90,7 +91,7 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "service_id": sid,
                 "name": name,
                 "storage_mode": cfg.get("storage_mode", "cloud"),
-                "log_period": cfg.get("log_period", 60),
+                "log_period": cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS),
                 "fos_bucket": cfg.get("fos_bucket", ""),
                 "fos_region": cfg.get("fos_region", ""),
                 "cdn_url": src_dict.get("cdn_url", ""),

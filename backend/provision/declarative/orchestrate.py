@@ -14,6 +14,7 @@ from typing import Any
 
 from backend.core.fastly.client import fastly, find_service_by_name
 from backend.core.fastly.client import find_service_by_name as _orig_find_service_by_name
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.provision.declarative.fastly_ops import (
     _activate_draft,
     _apply_diff,
@@ -505,7 +506,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
     if source_ver is None:
         return FeatureState(
             service_id=service_id,
-            log_period=60,
+            log_period=DEFAULT_LOG_PERIOD_SECONDS,
             sample_rate=100,
             edge_only=False,
             custom_condition="",
@@ -529,7 +530,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
                     scoring_enabled = True
         except Exception:
             pass
-    log_period = 60
+    log_period = DEFAULT_LOG_PERIOD_SECONDS
     rum_log_period = None
     for endpoint in endpoints:
         if (

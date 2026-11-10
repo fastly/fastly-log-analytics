@@ -28,6 +28,7 @@ from backend.core.fos_client import (
     get_source_for_service,
     reconcile_fastly_stats,
 )
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.cron.jobs import _common
 from backend.cron.jobs._common import (
     _INGEST_ERROR_OUTCOME_KEYS,  # noqa: F401
@@ -125,7 +126,7 @@ def _is_batch_due(service_id: str, cfg: dict[str, Any] | None = None) -> bool:
     if latest_dt is None:
         return False
     age_s = (datetime.now(UTC) - latest_dt).total_seconds()
-    log_period = max(5, int((cfg or {}).get("log_period", 10) or 10))
+    log_period = max(5, int((cfg or {}).get("log_period", DEFAULT_LOG_PERIOD_SECONDS) or DEFAULT_LOG_PERIOD_SECONDS))
     return bool(max(6.0, log_period - 3.0) <= age_s <= max(35.0, log_period * 3.5))
 
 

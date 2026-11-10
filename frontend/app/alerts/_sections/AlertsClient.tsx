@@ -38,6 +38,7 @@ import {
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { showToast } from '@/lib/utils'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
 import type { VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
@@ -96,7 +97,7 @@ export default function AlertsClient() {
     enabled: !!activeServiceId && !isAnalyst && logSettingsIdle,
     staleTime: 5 * 60_000,
   })
-  const logPeriodSeconds = loggingSettings?.period || 30
+  const logPeriodSeconds = loggingSettings?.period || SERVICE_DEFAULTS.logPeriodSeconds
 
   const {
     data: alertsRes,

@@ -23,6 +23,8 @@ from typing import Any
 import typer
 from rich.console import Console
 
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
+
 # ── Rich Consoles & ANSI colour helpers (folded from utils.py) ───────────────
 _stdout = Console(highlight=False, markup=False, soft_wrap=True)
 _stderr = Console(stderr=True, highlight=False, markup=False, soft_wrap=True)
@@ -564,7 +566,9 @@ def handle_update_logs(args):
         "endpoint_name": args.endpoint_name or prov_cfg.get("endpoint_name", "Fastly Object Storage Logs"),
         "sample_rate": args.sample_rate or prov_cfg.get("sample_rate", 100),
         "edge_only": args.edge_only if args.edge_only is not None else prov_cfg.get("edge_only", False),
-        "log_period": parse_period(args.period) if args.period else prov_cfg.get("log_period", 60),
+        "log_period": parse_period(args.period)
+        if args.period
+        else prov_cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS),
         "log_fields": new_lf_config,
         "update_format": True,
     }

@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.models.common import (
     CmcdSettingsResponse,
     LogFieldsResponse,
@@ -241,7 +242,7 @@ def api_service_update_logging_settings(
     require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
     prov = cfg.setdefault("provisioning", {})
-    old_period = int(cfg.get("log_period", 60))
+    old_period = int(cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS))
     old_sample_rate = int(prov.get("sample_rate", 100))
     old_prefix = ""
     old_edge_only = prov.get("edge_only", False)

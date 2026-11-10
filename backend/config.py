@@ -48,6 +48,7 @@ from filelock import Timeout as _FileLockTimeout
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.utils.bounded_cache import BoundedLRUCache
 from backend.utils.telemetry import atomic_write_json
 
@@ -618,7 +619,7 @@ class _SourceConfigModel(BaseModel):
     cdn_service_id: Any = ""
     logging_service_id: Any = Field("", validation_alias="service_id")
     storage_mode: Any = "cloud"
-    log_period: int = 60
+    log_period: int = DEFAULT_LOG_PERIOD_SECONDS
     log_fields: Annotated[dict[str, Any], BeforeValidator(lambda v: dict(v) if v else {})] = Field(default_factory=dict)
     provisioning: dict[str, Any] = Field(default_factory=dict)
     rum_enabled: bool = False

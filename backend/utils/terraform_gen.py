@@ -19,6 +19,7 @@ def _dump(obj: dict) -> str:
 
 from backend.config import is_rum_enabled  # noqa: E402
 from backend.core.fastly.client import load_vcl  # noqa: E402
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 
 
 def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
@@ -29,9 +30,9 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     bucket = cfg.get("fos_bucket_name", "your-bucket-name")
     prefix = cfg.get("fos_prefix", "").strip("/")
     try:
-        period = int(cfg.get("log_period", 3600))
+        period = int(cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS))
     except (TypeError, ValueError):
-        period = 3600
+        period = DEFAULT_LOG_PERIOD_SECONDS
     try:
         rum_period_val = cfg.get("rum_log_period") or (cfg.get("rum") or {}).get("log_period")
         rum_period = int(rum_period_val) if rum_period_val is not None else None
