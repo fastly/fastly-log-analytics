@@ -3106,11 +3106,20 @@ export async function main(argv = process.argv) {
   }
 }
 
-const isDirectExecution =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+// Node resolves symlinks in the module URL but not in argv[1], so compare real paths.
+export function isMainModule(argv1, moduleUrl) {
+  if (!argv1) return false;
+  const real = (file) => {
+    try {
+      return fs.realpathSync(file);
+    } catch {
+      return path.resolve(file);
+    }
+  };
+  return real(argv1) === real(fileURLToPath(moduleUrl));
+}
 
-if (isDirectExecution) {
+if (isMainModule(process.argv[1], import.meta.url)) {
   main().catch((err) => {
     console.error(
       JSON.stringify({

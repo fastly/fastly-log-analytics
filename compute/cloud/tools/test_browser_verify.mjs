@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import cloudReadiness from "../../../scripts/lib/cloud_readiness.cjs";
@@ -17,6 +19,7 @@ import {
   DASHBOARD_PRESETS,
   DEFAULT_BENCHMARK_RANGES,
   formatBenchmarkCaseEntry,
+  isMainModule,
   EXTENDED_PRESETS,
   FILTER_BAR_ROUTE_PREFIXES,
   filteredSweepQuery,
@@ -1389,3 +1392,20 @@ for (const [label, options] of [
     });
   });
 }
+
+test("a symlinked script path still runs main, so it never exits 0 without a report", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bv-main-"));
+  try {
+    const real = path.join(dir, "real.mjs");
+    const link = path.join(dir, "link.mjs");
+    fs.writeFileSync(real, "");
+    fs.symlinkSync(real, link);
+    const url = pathToFileURL(fs.realpathSync(real)).href;
+    assert.equal(isMainModule(link, url), true);
+    assert.equal(isMainModule(real, url), true);
+    assert.equal(isMainModule(path.join(dir, "other.mjs"), url), false);
+    assert.equal(isMainModule(undefined, url), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
