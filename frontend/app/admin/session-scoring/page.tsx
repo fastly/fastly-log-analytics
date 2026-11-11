@@ -218,7 +218,11 @@ function SessionScoringPageContent() {
   }, [configComposite.data, configComposite.dataUpdatedAt, seedConfigSubQueries])
 
   const statusLoading = !effectiveServiceId ? servicesLoading : configComposite.isLoading
-  const overviewLoading = !effectiveServiceId ? servicesLoading : analyticsComposite.isLoading
+  // Overview cards (threshold, exclude-regex, enforce code) read config keys too,
+  // so mounting them before the config composite seeds those keys refetches each.
+  const overviewLoading = !effectiveServiceId
+    ? servicesLoading
+    : analyticsComposite.isLoading || configComposite.isLoading
   const isStatusRefreshing = configComposite.isFetching && !statusLoading
   const isOverviewRefreshing = analyticsComposite.isFetching && !overviewLoading
   const isRefreshing = isStatusRefreshing || isOverviewRefreshing

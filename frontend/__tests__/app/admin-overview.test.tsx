@@ -1418,6 +1418,38 @@ describe('admin/session-scoring page', () => {
     })
   })
 
+  test('overview cards wait for the config composite instead of fetching its pieces themselves', async () => {
+    mockScoringSubcomponents = false
+    const paths: string[] = []
+    const onRequest = ({ request }: { request: Request }) => paths.push(new URL(request.url).pathname)
+    server.events.on('request:start', onRequest)
+    let releaseConfig!: () => void
+    const configGate = new Promise<void>((resolve) => { releaseConfig = resolve })
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/analytics`, () => HttpResponse.json(analyticsStub)),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/config`, async () => {
+        await configGate
+        return HttpResponse.json({
+          status: { enabled: false }, threshold: { threshold: 75 }, exclude_regex: { current: '', is_default: true, default: '', effective: '' },
+          enforce_status_code: { current: 429, effective: 429, is_default: true, default: 429 },
+        })
+      }),
+    )
+    try {
+      // Production gcTime: seeded keys must survive until the cards mount.
+      renderWithQuery(<SessionScoringPage />, { queryOptions: { queries: { gcTime: 5 * 60_000 } } })
+      await waitFor(() => expect(paths).toContain('/api/services/svc-default/scoring/analytics'))
+      await new Promise((r) => setTimeout(r, 50))
+      releaseConfig()
+      await screen.findByTestId('admin-session-scoring-status-card')
+      await new Promise((r) => setTimeout(r, 50))
+      const pieces = ['status', 'threshold', 'exclude-regex', 'enforce-status-code'].map((p) => `/api/services/svc-default/scoring/${p}`)
+      expect(paths.filter((p) => pieces.includes(p))).toEqual([])
+    } finally {
+      server.events.removeListener('request:start', onRequest)
+    }
+  })
+
   test('falls back to /api/services when activeServiceId is initially empty or "all"', async () => {
     useServiceStore.setState({ activeServiceId: 'all', isInitialized: false })
     const configHits: string[] = []
