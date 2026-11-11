@@ -173,10 +173,15 @@ struct Valid {
     file: CompactFile,
     /// Listed windows this compact covers.
     sources: Vec<Window>,
+    /// Listed compacts of its hour folder this one was merged from.
+    replaced: Vec<String>,
 }
 
 struct Analysis {
     valid: Vec<Valid>,
+    /// Valid compacts another listed compact of their hour folder was merged from. They still
+    /// hide their own windows but are not read.
+    superseded: BTreeSet<String>,
     ignored: Vec<String>,
     covered: Vec<Window>,
     uncovered: Vec<Window>,
@@ -202,6 +207,7 @@ fn analyze(objects: &[Object]) -> Analysis {
     }
     let mut analysis = Analysis {
         valid: Vec::new(),
+        superseded: BTreeSet::new(),
         ignored: Vec::new(),
         covered: Vec::new(),
         uncovered: Vec::new(),
@@ -240,7 +246,35 @@ fn analyze(objects: &[Object]) -> Analysis {
                 analysis.covered.push(window.clone());
             }
         }
-        analysis.valid.push(Valid { file, sources });
+        analysis.valid.push(Valid {
+            file,
+            sources,
+            replaced: Vec::new(),
+        });
+    }
+    let replaced: Vec<Vec<String>> = analysis
+        .valid
+        .iter()
+        .map(|merged| {
+            let (Some(own), Some(tags)) = (hour_folder(&merged.file.key), &merged.file.tags) else {
+                return Vec::new();
+            };
+            analysis
+                .valid
+                .iter()
+                .map(|other| &other.file.key)
+                .filter(|key| {
+                    **key != merged.file.key
+                        && hour_folder(key) == Some(own)
+                        && tags.contains(&tag(key))
+                })
+                .cloned()
+                .collect()
+        })
+        .collect();
+    for (merged, replaced) in analysis.valid.iter_mut().zip(replaced) {
+        analysis.superseded.extend(replaced.iter().cloned());
+        merged.replaced = replaced;
     }
     for window in windows.into_values().flatten() {
         if !taken.contains(&window.key) {
@@ -263,25 +297,44 @@ pub fn classify(keys: &[String]) -> Coverage {
         })
         .collect();
     let analysis = analyze(&objects);
+    let (superseded, valid): (Vec<String>, Vec<String>) = analysis
+        .valid
+        .into_iter()
+        .map(|v| v.file.key)
+        .partition(|key| analysis.superseded.contains(key));
+    let mut covered: Vec<String> = analysis.covered.into_iter().map(|w| w.key).collect();
+    covered.extend(superseded);
+    covered.sort();
     Coverage {
-        valid: analysis.valid.into_iter().map(|v| v.file.key).collect(),
+        valid,
         ignored: analysis.ignored,
-        covered: analysis.covered.into_iter().map(|w| w.key).collect(),
+        covered,
         read: analysis.uncovered.into_iter().map(|w| w.key).collect(),
     }
 }
 
-/// Each valid compact among `objects` with the listed windows it covers, and the listed windows
-/// no valid compact covers.
+/// Each valid compact among `objects` (superseded ones included) with the listed windows and
+/// compacts it covers, and the listed windows no valid compact covers.
 pub fn covering(objects: &[Object]) -> (Vec<(String, Vec<String>)>, Vec<String>) {
     let analysis = analyze(objects);
     let valid = analysis
         .valid
         .into_iter()
-        .map(|v| (v.file.key, v.sources.into_iter().map(|w| w.key).collect()))
+        .map(|v| {
+            let mut keys: Vec<String> = v.sources.into_iter().map(|w| w.key).collect();
+            keys.extend(v.replaced);
+            (v.file.key, keys)
+        })
         .collect();
     let uncovered = analysis.uncovered.into_iter().map(|w| w.key).collect();
     (valid, uncovered)
+}
+
+/// Whether `key`'s file name is among the sources `compact_key`'s tags record.
+pub fn names_source(compact_key: &str, key: &str) -> bool {
+    parse_compact(compact_key)
+        .and_then(|file| file.tags)
+        .is_some_and(|tags| tags.contains(&tag(key)))
 }
 
 /// What a `compact=` file name records: the first and last source window start (`a`, `b`, in
@@ -498,7 +551,7 @@ fn compact_day<R: Runtime>(
             if !queue.keys.is_empty() {
                 state.pending.insert(id.clone());
             }
-            for Valid { file, sources } in &analysis.valid {
+            for Valid { file, sources, .. } in &analysis.valid {
                 if sources.is_empty()
                     || unverified.contains(&file.key)
                     || sources.iter().all(|w| queue.keys.contains(&w.key))
@@ -875,5 +928,61 @@ mod tests {
         let coverage = classify(&[own.clone(), stray.clone(), w8.clone(), w9.clone()]);
         assert_eq!(coverage.covered, vec![w8]);
         assert_eq!(coverage.read, vec![w9]);
+    }
+
+    #[test]
+    fn an_hour_folder_compact_of_compacts_hides_them_and_they_still_hide_their_windows() {
+        let hour = "r/year=2027/month=01/day=15/hour=08/";
+        let window = |start: u64| format!("{hour}window={start}-{}-x-n1.parquet", start + 60);
+        let (w1, w2, w3) = (window(100), window(160), window(220));
+        let first = compact_key(hour, 100, 220, &[w1.clone(), w2.clone()], 2);
+        let second = compact_key(hour, 220, 280, std::slice::from_ref(&w3), 1);
+        let merged = compact_key(hour, 100, 280, &[first.clone(), second.clone()], 3);
+        let all = [&w1, &w2, &w3, &first, &second, &merged].map(|key| key.to_owned());
+        assert_eq!(visible(&all, &[]), BTreeSet::from([merged.clone()]));
+        // Merged from an earlier page, it still hides the compacts it replaced.
+        assert_eq!(
+            visible(&[w1.clone(), first.clone()], std::slice::from_ref(&merged)),
+            BTreeSet::new()
+        );
+        let objects: Vec<Object> = all
+            .iter()
+            .map(|key| Object {
+                key: key.clone(),
+                size: 0,
+                last_modified: None,
+            })
+            .collect();
+        let (valid, uncovered) = covering(&objects);
+        assert!(uncovered.is_empty());
+        let covers = |key: &String| {
+            let mut keys = valid.iter().find(|(c, _)| c == key).unwrap().1.clone();
+            keys.sort();
+            keys
+        };
+        assert_eq!(covers(&first), vec![w1.clone(), w2.clone()]);
+        assert_eq!(covers(&second), vec![w3.clone()]);
+        let mut replaced = vec![first.clone(), second.clone()];
+        replaced.sort();
+        assert_eq!(covers(&merged), replaced);
+        // Day-folder (operational) compacts keep the old rule: compacts never hide compacts.
+        let day = "r/year=2027/month=01/day=15/";
+        let d1 = compact_key(day, 100, 100, std::slice::from_ref(&w1), 1);
+        let d2 = compact_key(day, 100, 100, std::slice::from_ref(&d1), 1);
+        assert_eq!(
+            visible(&[d1.clone(), d2.clone()], &[]),
+            BTreeSet::from([d1, d2])
+        );
+    }
+
+    #[test]
+    fn names_source_matches_a_compacts_tags() {
+        let hour = "r/year=2027/month=01/day=15/hour=08/";
+        let w1 = format!("{hour}window=100-160-x-n1.parquet");
+        let w2 = format!("{hour}window=160-220-x-n1.parquet");
+        let key = compact_key(hour, 100, 160, std::slice::from_ref(&w1), 1);
+        assert!(names_source(&key, &w1));
+        assert!(!names_source(&key, &w2));
+        assert!(!names_source(&w1, &w1));
     }
 }
