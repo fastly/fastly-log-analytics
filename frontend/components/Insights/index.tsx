@@ -185,6 +185,9 @@ function InsightsBody({
     (entry) => 'reason' in entry && entry.reason === 'cloud_detector_unsupported',
   ) ?? []
   const missingFieldCount = (availability?.unavailable?.length ?? 0) - unsupportedInsights.length
+  // Cloud shortens the baseline when window + baseline outgrow the browser scan budget.
+  const appliedBaselineHours = data?.baseline_hours
+  const baselineShortened = appliedBaselineHours !== undefined && appliedBaselineHours < parseFloat(baselineHours)
 
   // Group both real cards and skeleton entries by section, in the same fixed
   // order, so the loading tab bar mirrors the loaded tab bar (CLS). Skeleton
@@ -330,6 +333,17 @@ function InsightsBody({
       </div>
 
       <div className="min-h-[68px]">
+        {baselineShortened && (
+          <Alert role="status" className="border-amber-500/30 bg-amber-500/5 mb-2">
+            <Info className="h-4 w-4 text-amber-500 shrink-0" />
+            <AlertTitle className="text-amber-600 dark:text-amber-400 font-medium">
+              Baseline shortened to {appliedBaselineHours}h
+            </AlertTitle>
+            <AlertDescription className="text-xs text-muted-foreground mt-1">
+              The {baselineHours}h baseline plus the {windowHours}h window exceeded the browser scan budget, so the comparison uses the last {appliedBaselineHours}h instead. Pick a shorter window or baseline to compare against more history.
+            </AlertDescription>
+          </Alert>
+        )}
         {availability?.unavailable && availability.unavailable.length > 0 && (
           // Informational, not a failure: Cloud always lists its unimplemented detectors here.
           <Alert role="status" className="border-amber-500/30 bg-amber-500/5">

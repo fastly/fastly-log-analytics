@@ -245,13 +245,44 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over budget"));
       expect((await handleCloudAnalyticalRequest(request({ "x-flp-cloud-prefetch": "1" })))?.status).toBe(413);
       expect(states).toEqual([]);
-      vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over budget"));
+      vi.mocked(ensureCloudRange).mockRejectedValue(new CloudBudgetError("over budget"));
       expect((await handleCloudAnalyticalRequest(request({})))?.status).toBe(413);
       expect(states).toEqual(["pending", "error"]);
     } finally {
+      vi.mocked(ensureCloudRange).mockReset();
+      vi.mocked(ensureCloudRange).mockImplementation(async () => getDuckDBEngine().readContext());
       window.removeEventListener("fla:cloud-query", listener);
       setCloudModeRuntime(false);
     }
+  });
+
+  it("shortens an over-budget Insights baseline step by step and reports the baseline it applied", async () => {
+    const budget = new CloudBudgetError("over budget");
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(ensureCloudRange).mockRejectedValueOnce(budget).mockRejectedValueOnce(budget);
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 720, filters: {} }),
+    }));
+    expect(res?.status).toBe(200);
+    const body = await res!.json() as { baseline_hours: number; window_hours: number };
+    expect(body.baseline_hours).toBe(24);
+    expect(body.window_hours).toBe(24);
+    const starts = vi.mocked(ensureCloudRange).mock.calls.map(([start]) => Date.parse(start));
+    expect(starts).toHaveLength(3);
+    expect(starts[0]).toBeLessThan(starts[1]);
+    expect(starts[1]).toBeLessThan(starts[2]);
+  });
+
+  it("does not shorten other over-budget scans, which have no baseline to give up", async () => {
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over budget"));
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights/cache-collapse-detail", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "/a", window_size_hrs: 24, baseline_hours: 168 }),
+    }));
+    expect(res?.status).toBe(413);
+    expect(vi.mocked(ensureCloudRange)).toHaveBeenCalledTimes(1);
   });
 
   it("loads Insights scans as column projections, with a smaller own budget for prefetches", async () => {

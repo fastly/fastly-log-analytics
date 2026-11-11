@@ -361,6 +361,37 @@ function isLocalScan(path: string, method: string): boolean {
     /^\/api\/services\/[^/]+\/rum\/(?:analytics|live-events|beacon-health)$/.test(path);
 }
 
+/** Baselines the Insights page offers, longest first. */
+const INSIGHT_BASELINE_LADDER_HOURS = [720, 168, 24, 1];
+
+/**
+ * An Insights scan covers the window plus its baseline, so a week of busy
+ * traffic can outgrow the browser budget. Rather than fail the page, give up
+ * baseline one step at a time; the envelope's `baseline_hours` reports what
+ * was applied. Speculative prefetches keep failing fast within their own budget.
+ */
+async function prepareInsightsScan(request: Request): Promise<Request> {
+  if (request.method !== "POST" || new URL(request.url).pathname !== "/api/insights" ||
+      request.headers.get("x-flp-cloud-prefetch") === "1") {
+    return prepareCloudScan(request);
+  }
+  let current = request;
+  for (;;) {
+    try {
+      return await prepareCloudScan(current);
+    } catch (error) {
+      if (!(error instanceof CloudBudgetError)) throw error;
+      const body = await current.clone().json() as Record<string, unknown>;
+      const shorter = INSIGHT_BASELINE_LADDER_HOURS.find((hours) => hours < Number(body.baseline_hours ?? 168));
+      if (shorter === undefined) throw error;
+      current = new Request(current.url, {
+        method: current.method, headers: current.headers, signal: current.signal,
+        body: JSON.stringify({ ...body, baseline_hours: shorter }),
+      });
+    }
+  }
+}
+
 async function prepareCloudScan(request: Request): Promise<Request> {
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
@@ -583,7 +614,7 @@ async function handleCloudRequest(
       let read: DuckDBReadContext | undefined;
       try {
         request.signal.throwIfAborted();
-        const prepared = await prepareCloudScan(request);
+        const prepared = await prepareInsightsScan(request);
         read = cloudReadContext(prepared);
         const response = /\/scoring\//.test(path)
           ? await cloudScoringRead(prepared) : await dispatchCloudRequest(prepared, origin, cloudReadContext(prepared));
