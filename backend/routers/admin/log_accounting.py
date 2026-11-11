@@ -33,6 +33,9 @@ _FASTLY_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds
 _CLICKHOUSE_COUNTS_TTL = 45.0
 _CLICKHOUSE_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_CLICKHOUSE_COUNTS_TTL)
 
+_LOCAL_COUNTS_TTL = 45.0
+_LOCAL_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOCAL_COUNTS_TTL)
+
 
 def _fetch_fastly_request_counts(
     logging_svc_id: str, api_key: str, from_ts: int, to_ts: int, by: str, edge_only: bool = False
@@ -199,11 +202,24 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
         high_scale_control = PostgresControlPlane()
 
     def _local_counts() -> dict[str, tuple[int, int]]:
-        if high_scale_control is not None:
-            return high_scale_control.request_flush_accounting(service_id, start, end_clamp, width)
-        return metadata_db.get_log_accounting_counts(
-            service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
+        cache_key = (
+            service_id,
+            high_scale_control is not None,
+            int(start.timestamp()),
+            int(end_clamp.timestamp()),
+            width,
         )
+        cached: dict[str, tuple[int, int]] | None = _LOCAL_COUNTS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        if high_scale_control is not None:
+            out = high_scale_control.request_flush_accounting(service_id, start, end_clamp, width)
+        else:
+            out = metadata_db.get_log_accounting_counts(
+                service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
+            )
+        _LOCAL_COUNTS_CACHE[cache_key] = out
+        return out
 
     def _latest_ingest() -> str | None:
         if high_scale_control is not None:
@@ -374,3 +390,4 @@ def api_log_accounting(
 
 _CacheRegistry.register("routers.admin.log_accounting._FASTLY_COUNTS_CACHE", _FASTLY_COUNTS_CACHE)
 _CacheRegistry.register("routers.admin.log_accounting._CLICKHOUSE_COUNTS_CACHE", _CLICKHOUSE_COUNTS_CACHE)
+_CacheRegistry.register("routers.admin.log_accounting._LOCAL_COUNTS_CACHE", _LOCAL_COUNTS_CACHE)

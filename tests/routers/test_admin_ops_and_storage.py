@@ -974,9 +974,11 @@ def _clear_log_accounting_ttl_caches():
 
     _la._FASTLY_COUNTS_CACHE.clear()
     _la._CLICKHOUSE_COUNTS_CACHE.clear()
+    _la._LOCAL_COUNTS_CACHE.clear()
     yield
     _la._FASTLY_COUNTS_CACHE.clear()
     _la._CLICKHOUSE_COUNTS_CACHE.clear()
+    _la._LOCAL_COUNTS_CACHE.clear()
 
 
 @pytest.fixture
@@ -1086,6 +1088,11 @@ def test_log_accounting_reads_high_scale_file_counts_and_catchup_from_the_source
         patch("backend.high_scale.postgres_control.PostgresControlPlane.latest_request_ingest", latest, create=True),
     ):
         result = _la.compute_log_accounting(src, hours=4, by="hour")
+        _la.compute_log_accounting(src, hours=4, by="hour")
+        assert flush_counts.call_count == 1, "a repeat load inside the TTL reuses the ledger counts"
+        _la.compute_log_accounting(src, hours=6, by="hour")
+        assert flush_counts.call_count == 2, "a different window is its own cache entry"
+        _la._LOCAL_COUNTS_CACHE.clear()
         flush_counts.side_effect = RuntimeError("postgres unavailable")
         with pytest.raises(RuntimeError, match="postgres unavailable"):
             _la.compute_log_accounting(src, hours=4, by="hour")
