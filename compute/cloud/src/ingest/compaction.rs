@@ -79,6 +79,10 @@ const HANDOFF_MARGIN_S: u64 = 5;
 const HANDOFF_MIN_WALL_S: u64 = 5;
 const MAX_DELETES: usize = 1000;
 const MAX_STATE_BYTES: usize = 512 * 1024;
+/// Fresh reads a read-back makes at most while the KV API still shows the value its write
+/// replaced, and the pause before each read past the first two.
+const READ_BACK_READS: u32 = 4;
+const READ_BACK_WAIT_MS: u64 = 400;
 
 /// The window files a pass merges. Each has its own state record, so a lease or job held on one
 /// never stalls another.
@@ -341,6 +345,9 @@ struct Run<'s, 'a, R: Runtime> {
     generation: Option<String>,
     /// The state this pass last wrote, to recognise its own write behind a lagging read.
     saved: Option<Value>,
+    /// The value `saved` replaced (at first, the value the pass read), which a lagging read
+    /// still shows; any other value is another writer's.
+    replaced: Option<Value>,
     report: Report,
     changed: bool,
     bump: bool,
@@ -478,6 +485,7 @@ pub fn compact_pass<R: Runtime>(
         tail,
         now,
         state,
+        replaced: record.as_ref().map(|r| without_written_ms(r.value.clone())),
         generation: record.map(|r| r.generation),
         saved: None,
         report: Report::default(),
@@ -689,6 +697,13 @@ fn uncommitted_rum_plan<R: Runtime>(runtime: &R) -> Result<Option<String>, Strin
         .admin_get(&watermark_key(stream))?
         .and_then(|record| record.value["run_id"].as_str().map(str::to_owned));
     Ok((committed.as_deref() != Some(id.as_str())).then(|| format!("{id}s")))
+}
+
+fn without_written_ms(mut value: Value) -> Value {
+    if let Some(map) = value.as_object_mut() {
+        map.remove("_kv_written_ms");
+    }
+    value
 }
 
 fn commit_watermark<R: Runtime>(
@@ -918,32 +933,40 @@ impl<R: Runtime> Run<'_, '_, R> {
                 return Err("compact_state_conflict".into());
             }
         }
-        self.saved = Some(value.clone());
+        self.replaced = self.saved.replace(value.clone()).or(self.replaced.take());
         if read_back {
             self.read_back(value)?;
         }
         Ok(())
     }
 
-    /// Reads the state until it shows `expected` (twice at most), taking the generation read.
+    /// Reads the state until it shows `expected` (twice), taking the generation read. A read that
+    /// still shows the value `expected` replaced means the KV API lags the write, which can last
+    /// past a second, so reading goes on after a pause, up to [`READ_BACK_READS`] reads while
+    /// the commit reserve stays affordable.
     fn read_back(&mut self, expected: &Value) -> Result<bool, String> {
         let runtime = self.store.runtime;
         let token = runtime
             .secret(&self.store.service.fastly_token_ref)?
             .filter(|token| !token.is_empty())
             .ok_or("fastly_token_missing")?;
-        for _ in 0..2 {
+        let mut lagging = false;
+        for read in 0..READ_BACK_READS {
+            if read >= 2 {
+                if !lagging || !self.affordable(1) {
+                    break;
+                }
+                runtime.admin_wait(READ_BACK_WAIT_MS);
+            }
             let record = read_fresh(runtime, self.dataset.state_key(), &token)?;
             self.generation = record.as_ref().map(|r| r.generation.clone());
-            let Some(mut value) = record.map(|r| r.value) else {
+            let Some(value) = record.map(|r| without_written_ms(r.value)) else {
                 return Ok(false);
             };
-            if let Some(map) = value.as_object_mut() {
-                map.remove("_kv_written_ms");
-            }
             if &value == expected {
                 return Ok(true);
             }
+            lagging = self.replaced.as_ref() == Some(&value);
         }
         Ok(false)
     }

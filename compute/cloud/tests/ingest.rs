@@ -52,7 +52,11 @@ struct Fake {
     stale_compact_state: RefCell<Option<Record>>,
     /// Each compaction state write leaves the next fresh read showing the record it replaced.
     lag_compact_reads: Cell<bool>,
+    /// How many fresh reads after the next compaction state write still show the value it
+    /// replaced; later writes lag one read.
+    lagging_compact_reads: Cell<u32>,
     lagging_compact_state: RefCell<Option<Record>>,
+    lagging_left: Cell<u32>,
     /// The injected compaction state conflict writes another writer's value, not the same one.
     foreign_compact_conflict: Cell<bool>,
     fail_fresh_compact_state: Cell<bool>,
@@ -188,7 +192,9 @@ impl Fake {
             compact_conflict_after: Cell::new(None),
             stale_compact_state: Default::default(),
             lag_compact_reads: Cell::new(false),
+            lagging_compact_reads: Cell::new(1),
             lagging_compact_state: Default::default(),
+            lagging_left: Cell::new(0),
             foreign_compact_conflict: Cell::new(false),
             fail_fresh_compact_state: Cell::new(false),
             fresh_compact_state_glitches: Default::default(),
@@ -500,6 +506,7 @@ impl Runtime for Fake {
                 generation: g.to_string(),
                 value: v.clone(),
             });
+            self.lagging_left.set(self.lagging_compact_reads.replace(1));
         }
         if key == ingest::PLAN_KEY && self.stale_plan_reads.get() > 0 {
             self.stale_plan_reads.set(self.stale_plan_reads.get() - 1);
@@ -525,7 +532,13 @@ impl Runtime for Fake {
             if let Some(error) = self.fresh_compact_state_glitches.borrow_mut().pop_front() {
                 return Err(error);
             }
-            if let Some(record) = self.lagging_compact_state.borrow_mut().take() {
+            let lagging = self.lagging_compact_state.borrow().clone();
+            if let Some(record) = lagging {
+                let left = self.lagging_left.get().saturating_sub(1);
+                self.lagging_left.set(left);
+                if left == 0 {
+                    self.lagging_compact_state.borrow_mut().take();
+                }
                 return Ok(Some(record));
             }
             return Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
@@ -11778,6 +11791,10 @@ mod request_compaction {
             compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 0).unwrap_err();
         assert_eq!(error, "compact_state_conflict");
         assert_eq!(fake.kv.borrow()[compaction::STATE_KEY].0, 3);
+        assert!(
+            fake.waits.borrow().is_empty(),
+            "another writer's value is not waited on"
+        );
     }
 
     #[test]
@@ -11790,6 +11807,29 @@ mod request_compaction {
         assert_eq!(report.sources, 2);
         let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
         assert_eq!(state["lease_until"], 0, "the pass released its lease");
+    }
+
+    /// Once the backlog drains a pass takes about a second, so its next write follows its
+    /// lease write before the KV API shows the lease write; the pass waits that lag out.
+    #[test]
+    fn a_pass_own_state_write_lagging_for_several_reads_is_not_a_conflict() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 2);
+        fake.kv.borrow_mut().insert(
+            compaction::STATE_KEY.into(),
+            (
+                1,
+                serde_json::to_value(compaction::State::default()).unwrap(),
+            ),
+        );
+        fake.lag_compact_reads.set(true);
+        fake.lagging_compact_reads.set(5);
+        let report = finish(&fake, TARGET);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.sources, 2);
+        let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        assert_eq!(state["lease_until"], 0, "the pass released its lease");
+        assert!(!fake.waits.borrow().is_empty(), "the lag is waited out");
     }
 
     #[test]
