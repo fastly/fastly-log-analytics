@@ -193,6 +193,8 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	reverse_proxy @api 127.0.0.1:8000 {
 		flush_interval -1
 		transport http {
+			# Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+			keepalive 4s
 			response_header_timeout 180s
 			read_timeout 180s
 		}
@@ -201,7 +203,11 @@ Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 	# Everything else → Next.js frontend.
 	# No flush_interval here: -1 forces a syscall per write, which fragments
 	# HTML/JS/CSS bundles into many small TCP segments. SSE lives on /api/* above.
-	reverse_proxy 127.0.0.1:3000
+	reverse_proxy 127.0.0.1:3000 {
+		transport http {
+			keepalive 4s
+		}
+	}
 
 	# Handle 502/503 errors during server reboots with a beautiful, auto-refreshing page
 	handle_errors {

@@ -44,13 +44,19 @@
         transport http {
             # Generous 180s upstream timeouts for long-window (30d) ClickHouse
             # analytical queries under concurrent synthetic load.
+            # Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+            keepalive 4s
             response_header_timeout 180s
             read_timeout 180s
         }
     }
 
     # Everything else → Next.js frontend.
-    reverse_proxy frontend:3000
+    reverse_proxy frontend:3000 {
+        transport http {
+            keepalive 4s
+        }
+    }
 
     import redacted_log
 }

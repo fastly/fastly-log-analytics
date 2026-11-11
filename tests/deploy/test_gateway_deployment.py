@@ -2251,3 +2251,47 @@ def test_registry_native_platform_failure_leaves_overlay_and_proof_untouched(
         main([str(path), commit, str(overlay), str(output)])
     assert overlay.read_text() == original
     assert not output.exists()
+
+
+APP_PROXY_CONFIGS = (
+    "Caddyfile",
+    "caddy/Caddyfile.local",
+    "caddy/Caddyfile.multipod",
+    "caddy/local-public-https.caddy",
+    "deploy/chart/admin-gateway/files/Caddyfile",
+    "deploy/chart/fastly-log-analytics/templates/public-gateway.yaml",
+)
+
+
+def _app_reverse_proxies(text: str) -> list[tuple[str, str]]:
+    """Each reverse_proxy to the app's backend (:8000) or frontend (:3000), with its block."""
+    lines = text.splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("reverse_proxy") or not re.search(r":(8000|3000)\b", stripped):
+            continue
+        block = []
+        if stripped.endswith("{"):
+            depth = 1
+            for body in lines[i + 1 :]:
+                depth += body.count("{") - body.count("}")
+                if depth <= 0:
+                    break
+                block.append(body.strip())
+        found.append((stripped, "\n".join(block)))
+    return found
+
+
+@pytest.mark.parametrize("relative", APP_PROXY_CONFIGS)
+def test_app_upstream_idle_connections_close_before_the_app_closes_them(relative):
+    # uvicorn and `next start` close idle keep-alive connections after 5 s while Caddy
+    # keeps them for 2 min by default. Caddy then reuses a socket the app already closed
+    # ("use of closed network connection") and, not retrying a POST, answers 502.
+    text = (Path(__file__).resolve().parents[2] / relative).read_text()
+    proxies = _app_reverse_proxies(text)
+    assert proxies, f"{relative}: no app reverse_proxy found"
+    for directive, block in proxies:
+        match = re.search(r"^keepalive\s+(\d+)s$", block, re.MULTILINE)
+        assert match, f"{relative}: {directive!r} has no upstream keepalive below the app's 5 s idle timeout"
+        assert int(match.group(1)) < 5, f"{relative}: {directive!r} keepalive {match.group(1)}s is not below 5 s"

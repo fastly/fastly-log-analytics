@@ -21,11 +21,17 @@ https://:443 {
 			reverse_proxy @api 127.0.0.1:8000 {
 				flush_interval -1
 				transport http {
+					# Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+					keepalive 4s
 					response_header_timeout 180s
 					read_timeout 180s
 				}
 			}
-			reverse_proxy 127.0.0.1:3000
+			reverse_proxy 127.0.0.1:3000 {
+				transport http {
+					keepalive 4s
+				}
+			}
 		}
 	}
 	handle {

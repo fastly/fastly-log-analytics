@@ -27,11 +27,17 @@ data:
         reverse_proxy @api {{ include "fastly-log-analytics.fullname" . }}-backend:8000 {
           flush_interval -1
           transport http {
+            # Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+            keepalive 4s
             response_header_timeout 180s
             read_timeout 180s
           }
         }
-        reverse_proxy {{ include "fastly-log-analytics.fullname" . }}-frontend:3000
+        reverse_proxy {{ include "fastly-log-analytics.fullname" . }}-frontend:3000 {
+          transport http {
+            keepalive 4s
+          }
+        }
       }
     }
 ---

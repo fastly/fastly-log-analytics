@@ -58,11 +58,17 @@ https://:{$ADMIN_GATEWAY_PORT:8443} {
 			reverse_proxy @api {$ADMIN_GATEWAY_BACKEND:127.0.0.1:8000} {
 				flush_interval -1
 				transport http {
+					# Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+					keepalive 4s
 					response_header_timeout 180s
 					read_timeout 180s
 				}
 			}
-			reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000}
+			reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000} {
+				transport http {
+					keepalive 4s
+				}
+			}
 		}
 	}
 	# Any other Host: close without proxying or injecting the credential.
