@@ -718,9 +718,10 @@ pub(super) struct MaintOutcome {
 }
 
 pub(super) struct CompactOutcome {
-    pub(super) row: Option<StageRow>,
+    /// The request then the RUM compaction row, for those that ran.
+    pub(super) rows: Vec<StageRow>,
     pub(super) worker_executions_metrics: Vec<telemetry::execution::WorkerExecutionMetrics>,
-    /// Request compaction ran and has more to do.
+    /// Request or RUM compaction ran and has more to do.
     pub(super) compact_pending: bool,
 }
 
@@ -806,9 +807,10 @@ pub(super) fn maintenance_stage(
     outcome
 }
 
-/// The request compaction execution: its own job, dispatched beside the ingest fan-out on its
-/// own cadence, with the whole stage wall time for chained worker passes. Writes its cron_runs
-/// row when it did anything.
+/// The compaction execution: its own job, dispatched beside the ingest fan-out on its own
+/// cadence, with the whole stage wall time for chained worker passes. Request compaction runs
+/// first, holding back [`RUM_COMPACT_RESERVE`] when a RUM table is due, then RUM compaction.
+/// Writes a cron_runs row for each that did anything.
 pub(super) fn compact_execution(runtime: &impl Runtime, tick: &TickContext<'_>) -> CompactOutcome {
     let buffer = LogBuffer::new(
         &tick.service.service_id,
@@ -823,22 +825,39 @@ pub(super) fn compact_execution(runtime: &impl Runtime, tick: &TickContext<'_>) 
         vcpu_start: 0,
     };
     let mut outcome = CompactOutcome {
-        row: None,
+        rows: Vec::new(),
         worker_executions_metrics: Vec::new(),
         compact_pending: false,
     };
     if reset::fencing(tick.service) || !store.within_wall() {
         return outcome;
     }
+    let rum_due = rum_compact_due(&store);
+    let reserve = if rum_due.is_empty() {
+        Duration::ZERO
+    } else {
+        RUM_COMPACT_RESERVE
+    };
     let row = request_compact_stage(
         &store,
         &buffer,
         tick.run_id,
         &mut outcome.worker_executions_metrics,
-        Duration::ZERO,
+        reserve,
     );
-    if let Some(row) = row {
-        outcome.compact_pending = compact_backlog(&row);
+    let rum_row = (!rum_due.is_empty() && store.within_wall())
+        .then(|| {
+            rum_compact_stage(
+                &store,
+                &buffer,
+                tick.run_id,
+                &mut outcome.worker_executions_metrics,
+                &rum_due,
+            )
+        })
+        .flatten();
+    for row in row.iter().chain(&rum_row) {
+        outcome.compact_pending |= compact_backlog(row);
         if row.outcome != "idle" {
             write_log(
                 runtime,
@@ -853,8 +872,8 @@ pub(super) fn compact_execution(runtime: &impl Runtime, tick: &TickContext<'_>) 
                 ),
             );
         }
-        outcome.row = Some(row);
     }
+    outcome.rows.extend(row.into_iter().chain(rum_row));
     if let Some(error) = telemetry::flush_request_buffer(runtime, &buffer).outbox_error {
         runtime.admin_event(json!({"event": "log.outbox_error", "error": error}));
     }
@@ -990,6 +1009,8 @@ fn compact_stage<R: Runtime>(
 /// own 32-call budget (`ingest::worker::WORKER_CALLS`). A 32-source compact uploads in about two
 /// and commits in the next, which writes the state once.
 const MAX_COMPACT_PASSES: u32 = 8;
+/// The wall time request compaction leaves for RUM compaction when a RUM table is due.
+const RUM_COMPACT_RESERVE: Duration = Duration::from_secs(15);
 /// A further pass starts only with this much of the stage's wall time left.
 const MIN_COMPACT_PASS_WALL: Duration = Duration::from_secs(5);
 /// How long past a pass's own wall budget the stage waits for its reply (the old 40 s/45 s gap).
@@ -1025,114 +1046,240 @@ fn request_compact_stage<R: Runtime>(
         return None;
     }
     caller(runtime, "cron:request_compact");
-    let mut row = StageRow::new("request_compact", runtime.now());
-    let span = VcpuSpan::start(runtime);
-    let began = Instant::now();
-    let before = runtime.admin_remaining_calls();
-    let mut worker_vcpu = 0;
-    let mut passes = 0u32;
-    let mut stopped = None;
-    let mut lease_generation = None;
-    let mut errors = Vec::new();
-    let mut failed = 0;
-    loop {
-        let left = crate::ingest::storage::WALL_STOP
-            .saturating_sub(runtime.admin_elapsed(store.started))
-            .saturating_sub(reserve);
-        if passes > 0
-            && (passes >= MAX_COMPACT_PASSES || left < MIN_COMPACT_PASS_WALL || !enough(runtime, 1))
-        {
-            break;
+    let mut chain = PassChain::new(runtime, "request_compact");
+    chain.run(
+        store,
+        buffer,
+        worker_metrics,
+        (reserve, MAX_COMPACT_PASSES),
+        None,
+        turn,
+    );
+    chain.finish(runtime)
+}
+
+/// The RUM tables whose compaction state asks for a pass, when the service compacts and RUM is
+/// on. Reads nothing otherwise.
+fn rum_compact_due<R: Runtime>(store: &Store<'_, R>) -> Vec<&'static str> {
+    let runtime = store.runtime;
+    let service = store.service;
+    if service.compaction.target_bytes().is_none()
+        || !service.rum.enabled
+        || service.data_reset.is_some()
+        || !enough(
+            runtime,
+            MIN_COMPACT_CALLS + compaction::RUM_TABLES.len() as u32,
+        )
+    {
+        return Vec::new();
+    }
+    let now = runtime.now();
+    compaction::RUM_TABLES
+        .into_iter()
+        .filter(|table| {
+            let key = compaction::Dataset::Rum(table).state_key();
+            runtime
+                .admin_get(key)
+                .is_ok_and(|record| compaction::rum_due(record.as_ref().map(|r| &r.value), now))
+        })
+        .collect()
+}
+
+/// Merges small RUM window files of each `due` table, chaining each table's passes in turn
+/// within the stage's remaining wall time and [`MAX_COMPACT_PASSES`] in all, of which each table
+/// but the last takes at most its even share.
+fn rum_compact_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    buffer: &LogBuffer,
+    turn: &str,
+    worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
+    due: &[&'static str],
+) -> Option<StageRow> {
+    let runtime = store.runtime;
+    let left =
+        crate::ingest::storage::WALL_STOP.saturating_sub(runtime.admin_elapsed(store.started));
+    if !enough(runtime, MIN_COMPACT_CALLS) || left < MIN_COMPACT_PASS_WALL {
+        return None;
+    }
+    caller(runtime, "cron:rum_compact");
+    let mut chain = PassChain::new(runtime, "rum_compact");
+    let mut pending = false;
+    let share = MAX_COMPACT_PASSES / due.len().max(1) as u32;
+    for (i, table) in due.iter().enumerate() {
+        let turn = format!("{turn}:{table}");
+        let limit = if i + 1 < due.len() {
+            chain.passes + share
+        } else {
+            MAX_COMPACT_PASSES
+        };
+        chain.run(
+            store,
+            buffer,
+            worker_metrics,
+            (Duration::ZERO, limit),
+            Some(table),
+            &turn,
+        );
+        pending |= chain.row.more_pending;
+    }
+    chain.row.more_pending = pending;
+    chain.finish(runtime)
+}
+
+/// A compaction row's chain of worker passes and what they reported.
+struct PassChain {
+    row: StageRow,
+    span: VcpuSpan,
+    began: Instant,
+    before: u32,
+    worker_vcpu: u64,
+    passes: u32,
+    stopped: Option<String>,
+    lease_generation: Option<String>,
+    errors: Vec<String>,
+    failed: u64,
+}
+
+impl PassChain {
+    fn new(runtime: &impl Runtime, kind: &'static str) -> Self {
+        Self {
+            row: StageRow::new(kind, runtime.now()),
+            span: VcpuSpan::start(runtime),
+            began: Instant::now(),
+            before: runtime.admin_remaining_calls(),
+            worker_vcpu: 0,
+            passes: 0,
+            stopped: None,
+            lease_generation: None,
+            errors: Vec::new(),
+            failed: 0,
         }
-        let wall = left.max(MIN_COMPACT_PASS_WALL);
-        passes += 1;
-        let requests = [(
-            crate::ingest::worker::PATH.to_owned(),
-            json!({
-                "maintenance": "request_compact",
+    }
+
+    /// Chains passes over the request dataset, or the RUM `table`, until one leaves nothing
+    /// pending, is blocked or fails, the stage is down to `reserve` of its wall time, or the
+    /// chain has made `limit` passes.
+    fn run<R: Runtime>(
+        &mut self,
+        store: &Store<'_, R>,
+        buffer: &LogBuffer,
+        worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
+        (reserve, limit): (Duration, u32),
+        table: Option<&str>,
+        turn: &str,
+    ) {
+        let runtime = store.runtime;
+        let maintenance = self.row.kind;
+        let mut pass = 0u32;
+        loop {
+            let left = crate::ingest::storage::WALL_STOP
+                .saturating_sub(runtime.admin_elapsed(store.started))
+                .saturating_sub(reserve);
+            if self.passes >= limit
+                || self.passes > 0
+                    && (self.passes >= MAX_COMPACT_PASSES
+                        || left < MIN_COMPACT_PASS_WALL
+                        || !enough(runtime, 1))
+            {
+                break;
+            }
+            let wall = left.max(MIN_COMPACT_PASS_WALL);
+            pass += 1;
+            self.passes += 1;
+            let mut body = json!({
+                "maintenance": maintenance,
                 "service": store.service,
                 "wall_ms": wall.as_millis() as u64,
                 "turn": turn,
-                "pass": passes,
-                "last": passes >= MAX_COMPACT_PASSES,
-            }),
-        )];
-        let reply = runtime
-            .worker_dispatch(&requests, wall + COMPACT_REPLY_MARGIN)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Err("compact_worker_reply_missing".into()));
-        worker_metrics.push(telemetry::execution::WorkerExecutionMetrics::from_reply(
-            "request_compact",
-            None,
-            reply.as_ref().ok(),
-        ));
-        let report = reply.and_then(|reply| {
-            worker_vcpu += reply["vcpu_ms"].as_u64().unwrap_or(0);
-            if let Some(rows) = reply["usage"].as_array() {
-                for value in rows {
-                    write_log(runtime, buffer, WritableLogKind::FosUsage, value.clone());
+                "pass": pass,
+                "last": self.passes >= limit.min(MAX_COMPACT_PASSES),
+            });
+            if let Some(table) = table {
+                body["table"] = table.into();
+            }
+            let requests = [(crate::ingest::worker::PATH.to_owned(), body)];
+            let reply = runtime
+                .worker_dispatch(&requests, wall + COMPACT_REPLY_MARGIN)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Err("compact_worker_reply_missing".into()));
+            worker_metrics.push(telemetry::execution::WorkerExecutionMetrics::from_reply(
+                maintenance,
+                None,
+                reply.as_ref().ok(),
+            ));
+            let report = reply.and_then(|reply| {
+                self.worker_vcpu += reply["vcpu_ms"].as_u64().unwrap_or(0);
+                if let Some(rows) = reply["usage"].as_array() {
+                    for value in rows {
+                        write_log(runtime, buffer, WritableLogKind::FosUsage, value.clone());
+                    }
                 }
-            }
-            if reply["status"] != "ok" {
-                return Err(reply["error"]
-                    .as_str()
-                    .unwrap_or("compact_worker_failed")
-                    .to_owned());
-            }
-            serde_json::from_value::<compaction::Report>(reply["report"].clone())
-                .map_err(|e| e.to_string())
-        });
-        let report = match report {
-            Ok(report) => report,
-            Err(error) => {
-                errors.push(error);
+                if reply["status"] != "ok" {
+                    return Err(reply["error"]
+                        .as_str()
+                        .unwrap_or("compact_worker_failed")
+                        .to_owned());
+                }
+                serde_json::from_value::<compaction::Report>(reply["report"].clone())
+                    .map_err(|e| e.to_string())
+            });
+            let report = match report {
+                Ok(report) => report,
+                Err(error) => {
+                    self.errors.push(error);
+                    break;
+                }
+            };
+            let row = &mut self.row;
+            row.listed += report.sources;
+            row.files += u64::from(report.compacts);
+            row.rows += report.rows;
+            row.bytes += report.bytes_written;
+            row.deleted += report.deleted;
+            self.failed += report.failed;
+            row.more_pending = report.more_pending;
+            // Call, wall, vCPU and heap stops end only that execution; a fresh pass resets them.
+            let blocked = matches!(
+                report.stopped.as_deref(),
+                Some("lease_held" | "lease_conflict")
+            );
+            self.stopped = report.stopped.or(self.stopped.take());
+            self.lease_generation = report.lease_generation.or(self.lease_generation.take());
+            let done = !report.more_pending || !report.errors.is_empty();
+            self.errors.extend(report.errors);
+            if done || blocked {
                 break;
             }
-        };
-        row.listed += report.sources;
-        row.files += u64::from(report.compacts);
-        row.rows += report.rows;
-        row.bytes += report.bytes_written;
-        row.deleted += report.deleted;
-        failed += report.failed;
-        row.more_pending = report.more_pending;
-        // Call, wall, vCPU and heap stops end only that execution; a fresh pass resets them.
-        let blocked = matches!(
-            report.stopped.as_deref(),
-            Some("lease_held" | "lease_conflict")
-        );
-        stopped = report.stopped.or(stopped);
-        lease_generation = report.lease_generation.or(lease_generation);
-        let done = !report.more_pending || !report.errors.is_empty();
-        errors.extend(report.errors);
-        if done || blocked {
-            break;
         }
     }
-    row.error = errors.first().cloned();
-    if passes > 0 {
-        // Each pass is its own worker execution: its vCPU belongs beside the row, as the
-        // ingest rows report it, not inside the admin execution's own `vcpu_ms`.
-        row.details = Some(json!({
-            "passes": passes,
-            "stopped": stopped,
-            "lease_generation": lease_generation,
-            "worker_vcpu_ms": worker_vcpu,
-        }));
+
+    fn finish(mut self, runtime: &impl Runtime) -> Option<StageRow> {
+        let row = &mut self.row;
+        row.error = self.errors.first().cloned();
+        if self.passes > 0 {
+            // Each pass is its own worker execution: its vCPU belongs beside the row, as the
+            // ingest rows report it, not inside the admin execution's own `vcpu_ms`.
+            row.details = Some(json!({
+                "passes": self.passes,
+                "stopped": self.stopped,
+                "lease_generation": self.lease_generation,
+                "worker_vcpu_ms": self.worker_vcpu,
+            }));
+        }
+        if row.files > 0 || row.deleted > 0 || self.failed > 0 {
+            row.outcome = if row.more_pending { "partial" } else { "done" };
+        } else if row.error.is_some() {
+            row.outcome = "error";
+        } else if row.more_pending {
+            row.outcome = "partial";
+        }
+        if row.outcome == "idle" {
+            return None;
+        }
+        finish_row(runtime, row, self.before, self.began, &self.span);
+        Some(self.row)
     }
-    if row.files > 0 || row.deleted > 0 || failed > 0 {
-        row.outcome = if row.more_pending { "partial" } else { "done" };
-    } else if row.error.is_some() {
-        row.outcome = "error";
-    } else if row.more_pending {
-        row.outcome = "partial";
-    }
-    if row.outcome == "idle" {
-        return None;
-    }
-    finish_row(runtime, &mut row, before, began, &span);
-    Some(row)
 }
 
 /// Merges closed hours' window summaries into hour bundles and closed days into day bundles.

@@ -11335,7 +11335,7 @@ mod request_compaction {
         panic!("resumable compaction failed to finish a bounded job");
     }
 
-    fn compacts(fake: &Fake) -> Vec<String> {
+    pub(super) fn compacts(fake: &Fake) -> Vec<String> {
         fake.keys(ROOT)
             .into_iter()
             .filter(|k| k.contains("/compact="))
@@ -11370,7 +11370,7 @@ mod request_compaction {
             .unwrap_or(0)
     }
 
-    fn seed(fake: &Fake, count: i64) -> Vec<String> {
+    pub(super) fn seed(fake: &Fake, count: i64) -> Vec<String> {
         (0..count)
             .map(|i| window(fake, HOUR + i * 60, &[&format!("a{i}"), &format!("b{i}")]))
             .collect()
@@ -12856,7 +12856,7 @@ mod request_compaction {
             .all(|key| fake.bucket.borrow().contains_key(key)));
     }
 
-    fn stage_turn(fake: &Fake, start: usize, compact_only: bool) -> Value {
+    pub(super) fn stage_turn(fake: &Fake, start: usize, compact_only: bool) -> Value {
         let body = json!({
             "service_id": SID,
             "run_id": "run-1",
@@ -13498,6 +13498,386 @@ mod request_compaction {
         }
         assert_eq!(compacts(&fake).len(), 3);
         assert!(fake.calls.get() <= BUDGET);
+    }
+}
+
+mod rum_compaction {
+    use super::*;
+    use fastly_log_analytics::ingest::compaction::{self, Dataset, Report, DELETE_GRACE_S};
+
+    const HOUR: i64 = BASE - BASE.rem_euclid(3600);
+    const NOW: i64 = HOUR + 4 * 3600;
+    const TARGET: u64 = 64 << 20;
+    const VITALS: &str = "client_vitals";
+    const ERRORS: &str = "client_errors";
+    const PLAN: &str = "abcdef012345";
+
+    fn root(table: &str) -> String {
+        format!("processed/rum/{table}/")
+    }
+
+    /// A `table` window file written by shard 0 of `plan`, one beacon row per value.
+    fn window_of(fake: &Fake, table: &str, start: i64, values: &[&str], plan: &str) -> String {
+        let lines: Vec<String> = values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let at = start + i as i64;
+                if table == ERRORS {
+                    let mut line: Value = serde_json::from_str(&rum_beacon(at, "", "")).unwrap();
+                    line["rum_error_message"] = (*value).into();
+                    line.to_string()
+                } else {
+                    rum_beacon(at, "LCP", value)
+                }
+            })
+            .collect();
+        let rows = ingest::rum::convert_object(&gz(&lines), 60, start, 1 << 20, SID).unwrap();
+        let batch = if table == ERRORS {
+            &rows.errors[&start]
+        } else {
+            &rows.windows[&start]
+        };
+        let bytes = ingest::convert::write_parquet(&[batch]).unwrap();
+        let key = ingest::processed_key(
+            &root(table),
+            start,
+            start + 60,
+            &format!("{plan}s0"),
+            values.len() as u64,
+        );
+        fake.bucket.borrow_mut().insert(key.clone(), bytes);
+        key
+    }
+
+    fn window(fake: &Fake, table: &str, start: i64, values: &[&str]) -> String {
+        window_of(fake, table, start, values, PLAN)
+    }
+
+    fn seed(fake: &Fake, table: &str, count: i64) -> Vec<String> {
+        (0..count)
+            .map(|i| window(fake, table, HOUR + i * 60, &["1", "2"]))
+            .collect()
+    }
+
+    fn run(fake: &Fake, table: &'static str) -> Report {
+        fake.new_request();
+        fake.vcpu.set(0);
+        let service = service();
+        compaction::compact_pass(
+            &store(fake, &service),
+            "ck",
+            TARGET,
+            0,
+            None,
+            Dataset::Rum(table),
+        )
+        .unwrap()
+    }
+
+    /// Runs passes until one leaves nothing pending, adding up their counts.
+    fn settle(fake: &Fake, table: &'static str) -> Report {
+        let mut total = Report::default();
+        for _ in 0..64 {
+            let report = run(fake, table);
+            total.compacts += report.compacts;
+            total.sources += report.sources;
+            total.rows += report.rows;
+            total.deleted += report.deleted;
+            if !report.more_pending {
+                return total;
+            }
+        }
+        panic!("RUM compaction did not settle");
+    }
+
+    fn compacts(fake: &Fake, table: &str) -> Vec<String> {
+        fake.keys(&root(table))
+            .into_iter()
+            .filter(|k| k.contains("/compact="))
+            .collect()
+    }
+
+    /// Every file `/api/files?dataset=rum` lists from `from` to `to`, with its rows.
+    fn listed(fake: &Fake, from: i64, to: i64) -> BTreeMap<String, u64> {
+        let query = format!("from={}&to={}&dataset=rum", iso_url(from), iso_url(to));
+        let mut out = BTreeMap::new();
+        let mut page = files_page(fake, &query).unwrap();
+        loop {
+            for file in page["files"].as_array().unwrap() {
+                let key = file["key"].as_str().unwrap().to_owned();
+                assert!(out.insert(key, file["rows"].as_u64().unwrap()).is_none());
+            }
+            if page["complete"] == true {
+                return out;
+            }
+            let cursor = page["next_cursor"].as_str().unwrap().to_owned();
+            page = files_page(fake, &format!("{query}&cursor={cursor}")).unwrap();
+        }
+    }
+
+    fn total(listed: &BTreeMap<String, u64>) -> u64 {
+        listed.values().sum()
+    }
+
+    fn parquet_rows(fake: &Fake, key: &str) -> i64 {
+        let bytes = fake.bucket.borrow()[key].clone();
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
+            .unwrap()
+            .metadata()
+            .file_metadata()
+            .num_rows()
+    }
+
+    /// Closed-hour RUM windows merge into a compact in their own hour folder (RUM has no
+    /// catalog), which `/api/files` lists in their place with the same rows. The windows stay
+    /// readable through the grace, and the RUM watermark is never touched.
+    #[test]
+    fn closed_hour_rum_windows_compact_in_their_hour_folder_and_list_once() {
+        let fake = Fake::new(NOW);
+        let vitals = seed(&fake, VITALS, 10);
+        let error = window(&fake, ERRORS, HOUR, &["boom"]);
+        assert_eq!(total(&listed(&fake, HOUR, HOUR + 3600)), 21);
+        let watermark = fake.kv.borrow().get(&ingest::watermark_key("rum")).cloned();
+        let report = settle(&fake, VITALS);
+        assert_eq!((report.compacts, report.sources, report.rows), (1, 10, 20));
+        let made = compacts(&fake, VITALS);
+        assert_eq!(made.len(), 1);
+        let folder = format!("{}{}", root(VITALS), ingest::hour_dir(HOUR));
+        assert!(
+            made[0].starts_with(&format!("{folder}compact=")),
+            "{made:?}"
+        );
+        assert_eq!(parquet_rows(&fake, &made[0]), 20);
+        let after = listed(&fake, HOUR, HOUR + 3600);
+        assert_eq!(
+            after.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([made[0].clone(), error])
+        );
+        assert_eq!(total(&after), 21);
+        assert!(vitals
+            .iter()
+            .all(|key| fake.bucket.borrow().contains_key(key)));
+        assert!(!fake.kv.borrow().contains_key(compaction::STATE_KEY));
+        assert_eq!(
+            fake.kv.borrow().get(&ingest::watermark_key("rum")).cloned(),
+            watermark
+        );
+        assert!(compacts(&fake, ERRORS).is_empty());
+        fake.now.set(fake.now.get() + DELETE_GRACE_S);
+        assert_eq!(settle(&fake, VITALS).deleted, 10);
+        assert!(vitals
+            .iter()
+            .all(|key| !fake.bucket.borrow().contains_key(key)));
+        assert_eq!(listed(&fake, HOUR, HOUR + 3600), after);
+    }
+
+    /// Each RUM table and the request dataset have their own state record, so a lease or job
+    /// held on one never stalls another.
+    #[test]
+    fn each_rum_table_and_requests_keep_their_own_compaction_state() {
+        let fake = Fake::new(NOW);
+        seed(&fake, VITALS, 4);
+        seed(&fake, ERRORS, 4);
+        let held = json!({"lease_until": u64::MAX});
+        for key in [compaction::STATE_KEY, Dataset::Rum(VITALS).state_key()] {
+            fake.kv
+                .borrow_mut()
+                .insert(key.to_owned(), (1, held.clone()));
+        }
+        assert_eq!(run(&fake, VITALS).stopped.as_deref(), Some("lease_held"));
+        let report = settle(&fake, ERRORS);
+        assert_eq!((report.compacts, report.sources), (1, 4));
+        assert_eq!(compacts(&fake, ERRORS).len(), 1);
+        assert!(compacts(&fake, VITALS).is_empty());
+        for key in [compaction::STATE_KEY, Dataset::Rum(VITALS).state_key()] {
+            assert_eq!(fake.kv.borrow()[key].1, held, "{key}");
+        }
+        assert!(fake
+            .kv
+            .borrow()
+            .contains_key(Dataset::Rum(ERRORS).state_key()));
+    }
+
+    /// An abandoned plan's cleanup sweeps the windows its run token names, so a window of the
+    /// uncommitted RUM plan, or one written within the minimum age (whose plan may not have
+    /// been seen yet), never joins a compact. Aged windows of an hour still open do.
+    #[test]
+    fn uncommitted_and_young_rum_windows_wait_while_aged_ones_of_the_open_hour_compact() {
+        let fake = Fake::new(NOW);
+        for i in 0..3 {
+            window(&fake, VITALS, HOUR + i * 60, &["1"]);
+        }
+        let uncommitted: Vec<String> = (3..6)
+            .map(|i| window_of(&fake, VITALS, HOUR + i * 60, &["1"], "fedcba987654"))
+            .collect();
+        fake.kv.borrow_mut().insert(
+            ingest::plan_key("rum"),
+            (1, json!({"plan_id": "fedcba987654"})),
+        );
+        fake.kv
+            .borrow_mut()
+            .insert(ingest::watermark_key("rum"), (1, json!({"run_id": PLAN})));
+        let open = NOW - 3600;
+        for i in 0..2 {
+            window(&fake, VITALS, open + i * 60, &["1"]);
+        }
+        let young: Vec<String> = (2..5)
+            .map(|i| {
+                let key = window(&fake, VITALS, open + i * 60, &["1"]);
+                fake.mtimes.borrow_mut().insert(key.clone(), NOW - 60);
+                key
+            })
+            .collect();
+        let report = settle(&fake, VITALS);
+        assert_eq!((report.compacts, report.sources), (2, 5));
+        let made = compacts(&fake, VITALS);
+        let mut expected: BTreeSet<String> = made.into_iter().collect();
+        expected.extend(uncommitted);
+        expected.extend(young);
+        let listed = listed(&fake, HOUR, NOW);
+        assert_eq!(listed.keys().cloned().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(total(&listed), 11);
+    }
+
+    /// A closed hour's compacts merge into one, which hides them. A compact is deleted only
+    /// once its own sources are, so no row is ever listed twice, even when a delete fails.
+    #[test]
+    fn a_closed_hours_rum_compacts_merge_and_outlive_their_sources() {
+        let fake = Fake::new(NOW);
+        let windows = seed(&fake, VITALS, 40);
+        let report = settle(&fake, VITALS);
+        assert_eq!(report.compacts, 3, "32 windows, then 8, then both compacts");
+        assert_eq!(compacts(&fake, VITALS).len(), 3);
+        let after = listed(&fake, HOUR, HOUR + 3600);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(total(&after), 80);
+        let merged = after.keys().next().unwrap().clone();
+        assert_eq!(parquet_rows(&fake, &merged), 80);
+        fake.fail_delete_keys
+            .borrow_mut()
+            .insert(windows[0].clone());
+        fake.now.set(fake.now.get() + DELETE_GRACE_S);
+        for _ in 0..2 {
+            run(&fake, VITALS);
+            assert_eq!(listed(&fake, HOUR, HOUR + 3600), after);
+            assert_eq!(compacts(&fake, VITALS).len(), 3);
+        }
+        fake.fail_delete_keys.borrow_mut().clear();
+        for _ in 0..2 {
+            run(&fake, VITALS);
+        }
+        assert_eq!(fake.keys(&root(VITALS)), vec![merged]);
+        assert_eq!(listed(&fake, HOUR, HOUR + 3600), after);
+    }
+
+    /// A compact whose state was lost after it was published is found by its tags: its
+    /// sources are queued again rather than compacted a second time.
+    #[test]
+    fn sources_of_a_rum_compact_whose_state_was_lost_are_queued_not_compacted_again() {
+        let fake = Fake::new(NOW);
+        seed(&fake, VITALS, 40);
+        settle(&fake, VITALS);
+        let made = compacts(&fake, VITALS);
+        let after = listed(&fake, HOUR, HOUR + 3600);
+        fake.kv
+            .borrow_mut()
+            .remove(Dataset::Rum(VITALS).state_key());
+        assert_eq!(settle(&fake, VITALS).compacts, 0);
+        assert_eq!(compacts(&fake, VITALS), made);
+        fake.now.set(fake.now.get() + DELETE_GRACE_S);
+        for _ in 0..2 {
+            run(&fake, VITALS);
+        }
+        assert_eq!(fake.keys(&root(VITALS)).len(), 1);
+        assert_eq!(listed(&fake, HOUR, HOUR + 3600), after);
+    }
+
+    /// A listing page that resumes inside an hour still applies that hour's compacts, which sort
+    /// before its windows, so the windows they cover never come back on a later page.
+    #[test]
+    fn a_rum_listing_resumed_inside_an_hour_still_hides_compacted_windows() {
+        let fake = Fake::new(NOW);
+        let windows: Vec<String> = (0..502)
+            .map(|i| {
+                let token = format!("{PLAN}s0");
+                ingest::processed_key(&root(VITALS), HOUR + i, HOUR + i + 60, &token, 1)
+            })
+            .collect();
+        for key in &windows {
+            fake.bucket.borrow_mut().insert(key.clone(), Vec::new());
+        }
+        let folder = format!("{}{}", root(VITALS), ingest::hour_dir(HOUR));
+        let covered = &windows[500..];
+        let compact = telemetry::compact::compact_key(
+            &folder,
+            (HOUR + 500) as u64,
+            (HOUR + 561) as u64,
+            covered,
+            2,
+        );
+        fake.bucket.borrow_mut().insert(compact.clone(), Vec::new());
+        let listed = listed(&fake, HOUR, HOUR + 3600);
+        assert_eq!(listed.len(), 501);
+        assert!(listed.contains_key(&compact));
+        assert!(!covered.iter().any(|key| listed.contains_key(key)));
+    }
+
+    fn compaction_service(fake: &Fake, rum: bool) {
+        tick_runtime(fake);
+        let mut svc = serde_json::to_value(service()).unwrap();
+        svc["compaction"] = json!({"mode": "size_target", "size_target_mb": 64});
+        if rum {
+            svc["rum"] = json!({"enabled": true, "endpoint_name": "rum", "log_period": 60});
+        }
+        fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
+    }
+
+    /// The compaction execution runs RUM passes after the request ones, in their own
+    /// `rum_compact` row, and reads no RUM compaction state while RUM is off.
+    #[test]
+    fn the_compaction_execution_compacts_rum_tables_when_rum_is_enabled() {
+        let fake = Fake::new(NOW);
+        compaction_service(&fake, false);
+        seed(&fake, VITALS, 4);
+        request_compaction::seed(&fake, 40);
+        let reply = request_compaction::stage_turn(&fake, 0, true);
+        assert!(!request_compaction::compacts(&fake).is_empty(), "{reply}");
+        assert!(compacts(&fake, VITALS).is_empty(), "{reply}");
+        let rum_state = |key: &String| key.starts_with("ingest:compact_state:rum");
+        assert!(!fake.kv_reads.borrow().iter().any(rum_state));
+        compaction_service(&fake, true);
+        seed(&fake, ERRORS, 4);
+        let reply = request_compaction::stage_turn(&fake, 0, true);
+        assert_eq!(compacts(&fake, VITALS).len(), 1, "{reply}");
+        assert_eq!(compacts(&fake, ERRORS).len(), 1, "{reply}");
+        let rows = rows(&fake, LogKind::CronRuns);
+        let row = rows
+            .iter()
+            .find(|row| row["cron_kind"] == "rum_compact")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(row["parquet_files_written"], 2, "{row}");
+    }
+
+    /// One table's backlog never takes every pass of an execution from the other due table.
+    #[test]
+    fn a_rum_tables_backlog_leaves_passes_for_the_other_table() {
+        let fake = Fake::new(NOW);
+        compaction_service(&fake, true);
+        for hour in 0..3 {
+            for i in 0..40 {
+                window(&fake, ERRORS, HOUR + hour * 3600 + i * 60, &["1"]);
+            }
+        }
+        seed(&fake, VITALS, 4);
+        let reply = request_compaction::stage_turn(&fake, 0, true);
+        assert!(!compacts(&fake, ERRORS).is_empty(), "{reply}");
+        assert_eq!(compacts(&fake, VITALS).len(), 1, "{reply}");
+        // Its share's last pass hands its lease to no further pass.
+        let state = fake.kv.borrow()["ingest:compact_state:rum:client_errors"]
+            .1
+            .clone();
+        assert!(state["handoff"].is_null(), "{state}");
     }
 }
 

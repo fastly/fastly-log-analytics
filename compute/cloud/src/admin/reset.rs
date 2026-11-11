@@ -402,6 +402,13 @@ fn plan_id(value: &Value) -> Option<&str> {
     crate::ingest::plan_id_of(value)
 }
 
+/// The request and RUM compaction state records.
+const COMPACT_STATE_KEYS: [&str; 3] = [
+    compaction::STATE_KEY,
+    compaction::RUM_STATE_KEYS[0],
+    compaction::RUM_STATE_KEYS[1],
+];
+
 /// Waits out the schedule, plan and compaction leases, then abandons uncommitted plans, open
 /// compaction uploads and catalog preparations. Every abandon is idempotent, so a step that
 /// stops on its budget resumes from KV on the next tick.
@@ -428,7 +435,7 @@ fn fence<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<bool, S
         push_message(job, now, "Fencing continues on the next tick.");
         Ok(false)
     };
-    if !affordable(STREAMS.len() as u32 + 1) {
+    if !affordable((STREAMS.len() + COMPACT_STATE_KEYS.len()) as u32) {
         return paused(job);
     }
     let mut plans = Vec::new();
@@ -437,11 +444,16 @@ fn fence<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<bool, S
             plans.push((stream, record.value));
         }
     }
-    let compact = runtime.admin_get(compaction::STATE_KEY)?;
+    let mut compacts = Vec::new();
+    for key in COMPACT_STATE_KEYS {
+        if let Some(record) = runtime.admin_get(key)? {
+            compacts.push((key, record.value));
+        }
+    }
     let held = plans
         .iter()
         .map(|(_, plan)| lease_until(plan))
-        .chain(compact.as_ref().map(|record| lease_until(&record.value)))
+        .chain(compacts.iter().map(|(_, value)| lease_until(value)))
         .filter(|until| *until > now)
         .max();
     if let Some(until) = held {
@@ -490,19 +502,18 @@ fn fence<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<bool, S
             ),
         );
     }
-    if let Some(record) = &compact {
-        let uploads: BTreeSet<(&str, &str)> =
-            [&record.value["upload"], &record.value["job"]["upload"]]
-                .into_iter()
-                .filter_map(|upload| Some((upload["key"].as_str()?, upload["id"].as_str()?)))
-                .collect();
+    for (state_key, value) in &compacts {
+        let uploads: BTreeSet<(&str, &str)> = [&value["upload"], &value["job"]["upload"]]
+            .into_iter()
+            .filter_map(|upload| Some((upload["key"].as_str()?, upload["id"].as_str()?)))
+            .collect();
         if !affordable(uploads.len() as u32 + 1) {
             return paused(job);
         }
         for (key, id) in &uploads {
             store.multipart_abort(key, id)?;
         }
-        runtime.kv_delete(compaction::STATE_KEY)?;
+        runtime.kv_delete(state_key)?;
         push_message(
             job,
             now,

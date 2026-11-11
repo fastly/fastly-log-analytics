@@ -4721,6 +4721,15 @@ fn fence_aborts_in_progress_compaction_upload_and_clears_preparing_records() {
             "queue": []
         }),
     );
+    seed(
+        &platform,
+        "ingest:compact_state:rum:client_vitals",
+        json!({
+            "lease_until": 0,
+            "job": {"upload": {"key": "processed/rum/client_vitals/open.parquet", "id": "u3"}},
+            "queue": []
+        }),
+    );
     for key in [
         "ingest:catalog_preparing",
         "ingest:catalog_replacement_preparing",
@@ -4733,8 +4742,12 @@ fn fence_aborts_in_progress_compaction_upload_and_clears_preparing_records() {
     let job = fence_tick(&platform);
     assert_eq!(job["status"], "resetting", "{job}");
     let log = FOS_LOG.with(|log| log.borrow().clone());
-    for (key, id) in [("stale", "u1"), ("open", "u2")] {
-        let key = format!("processed/request/{key}.parquet");
+    for (key, id) in [
+        ("request/stale", "u1"),
+        ("request/open", "u2"),
+        ("rum/client_vitals/open", "u3"),
+    ] {
+        let key = format!("processed/{key}.parquet");
         let query = format!("uploadId={id}");
         assert!(
             log.iter()
@@ -4745,6 +4758,7 @@ fn fence_aborts_in_progress_compaction_upload_and_clears_preparing_records() {
     let records = platform.adapter.records();
     for key in [
         "ingest:compact_state",
+        "ingest:compact_state:rum:client_vitals",
         "ingest:catalog_preparing",
         "ingest:catalog_replacement_preparing",
         "ingest:source_index_preparing",

@@ -292,8 +292,12 @@ pub fn handle_worker_ingest<R: Runtime>(runtime: &R, request: &http::Request) ->
         return super::source_index::handle_authorized_worker(runtime, request, started);
     }
     if request.path == PATH
-        && serde_json::from_slice::<Value>(&request.body)
-            .is_ok_and(|value| value["maintenance"] == "request_compact")
+        && serde_json::from_slice::<Value>(&request.body).is_ok_and(|value| {
+            matches!(
+                value["maintenance"].as_str(),
+                Some("request_compact" | "rum_compact")
+            )
+        })
     {
         return super::compaction::handle_authorized_worker(runtime, request, started);
     }

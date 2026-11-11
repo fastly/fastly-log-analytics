@@ -143,7 +143,7 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
         let outcome = logs::compact_execution(runtime, &tick);
         return reply(json!({
             "status": "ok",
-            "ran": outcome.row.is_some().then_some("request_compact"),
+            "ran": outcome.rows.first().map(|row| row.kind),
             "compact_pending": outcome.compact_pending,
             "worker_executions_metrics": outcome.worker_executions_metrics,
         }));

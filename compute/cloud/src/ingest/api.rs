@@ -612,7 +612,7 @@ fn hour_files<R: Runtime>(
         // A page resumed inside an hour has passed that hour's compacts, which sort first.
         let relist: Vec<String> = match pos.rsplit_once('/') {
             Some((folder, name))
-                if dataset == "request"
+                if matches!(dataset, "request" | "rum")
                     && !name.is_empty()
                     && block
                         .objects
@@ -660,7 +660,7 @@ fn hour_files<R: Runtime>(
                     }));
                 }
             } else if let Some(name) = telemetry::compact::parse_compact_name(&object.key) {
-                // A request compact spans its first source's start to its last source's end.
+                // A request or RUM compact spans its first source's start to its last source's end.
                 let (a, b) = (name.a as i64, name.b as i64);
                 if a < to && b > from {
                     files.push(json!({

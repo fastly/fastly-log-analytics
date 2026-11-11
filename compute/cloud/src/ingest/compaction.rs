@@ -1,4 +1,4 @@
-//! Size-aware compaction of request window files (the `compaction` service setting).
+//! Size-aware compaction of request and RUM window files (the `compaction` service setting).
 //!
 //! Eligible small `window=` files are merged, in key order, into `compact=` files of up to
 //! the size target inside the same hour folder. Column chunks are copied without decoding, one
@@ -7,15 +7,20 @@
 //! sources are deleted only after [`DELETE_GRACE_S`], once the watermark's `manifest_gen` bump has
 //! invalidated cached hour listings.
 //!
+//! RUM tables have no catalog: a pass lists each table folder itself, files the compact beside
+//! its sources, queues them as soon as the compact exists and deletes them after the same grace.
+//! A compact merged from compacts hides them by its name's tags, so each is deleted only after
+//! its own sources are.
+//!
 //! Source identities, multipart progress, rebased footer and buffered bytes are checkpointed.
 //! Neither a Parquet writer nor process memory needs to survive a request.
 
 pub mod checkpoint;
 
 use super::{
-    bump_manifest_gen, hour_dir, parse_processed, processed_prefix,
+    bump_manifest_gen, hour_dir, parse_processed, plan_id_of, plan_key, processed_prefix,
     storage::{Object, Store},
-    WATERMARK_KEY,
+    watermark_key, WATERMARK_KEY,
 };
 use crate::{shell::Runtime, telemetry::compact};
 use bytes::Bytes;
@@ -26,6 +31,17 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 pub const STATE_KEY: &str = "ingest:compact_state";
+pub const RUM_TABLES: [&str; 2] = [super::rum::ERRORS, super::rum::VITALS];
+/// The state record of each of [`RUM_TABLES`], in the same order.
+pub const RUM_STATE_KEYS: [&str; 2] = [
+    "ingest:compact_state:rum:client_errors",
+    "ingest:compact_state:rum:client_vitals",
+];
+/// How long a RUM table with nothing left to merge waits before it is listed again.
+pub const RUM_CHECK_S: u64 = 300;
+/// A finished RUM scan starts its next one this far back, so windows written late into an hour
+/// that was already merged still join it.
+const RUM_REVISIT_S: i64 = 2 * 3600;
 /// Sources stay readable this long after their compact is committed.
 pub const DELETE_GRACE_S: u64 = 660;
 /// A part is uploaded once this much output is buffered.
@@ -63,6 +79,59 @@ const HANDOFF_MARGIN_S: u64 = 5;
 const HANDOFF_MIN_WALL_S: u64 = 5;
 const MAX_DELETES: usize = 1000;
 const MAX_STATE_BYTES: usize = 512 * 1024;
+
+/// The window files a pass merges. Each has its own state record, so a lease or job held on one
+/// never stalls another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dataset {
+    Request,
+    /// One of [`RUM_TABLES`].
+    Rum(&'static str),
+}
+
+impl Dataset {
+    pub fn rum(table: &str) -> Option<Self> {
+        RUM_TABLES
+            .into_iter()
+            .find(|t| *t == table)
+            .map(Dataset::Rum)
+    }
+
+    pub fn state_key(self) -> &'static str {
+        match self {
+            Dataset::Request => STATE_KEY,
+            Dataset::Rum(table) => {
+                let at = RUM_TABLES.iter().position(|t| *t == table).unwrap_or(1);
+                RUM_STATE_KEYS[at]
+            }
+        }
+    }
+
+    fn root(self, service: &crate::admin::Service) -> String {
+        match self {
+            Dataset::Request => processed_prefix(service),
+            Dataset::Rum(table) => format!("{}processed/rum/{table}/", super::scope(service)),
+        }
+    }
+
+    fn caller(self) -> &'static str {
+        match self {
+            Dataset::Request => "worker:request_compact",
+            Dataset::Rum(_) => "worker:rum_compact",
+        }
+    }
+}
+
+/// Whether a RUM table's state (`None` when it has none yet) asks for a pass at `now`.
+pub fn rum_due(state: Option<&Value>, now: u64) -> bool {
+    let Some(value) = state else { return true };
+    serde_json::from_value::<State>(value.clone()).map_or(true, |state| {
+        state.job.is_some()
+            || state.upload.is_some()
+            || state.list_after.is_some()
+            || state.next_check <= now
+    })
+}
 
 pub(super) fn handle_authorized_worker<R: Runtime>(
     runtime: &R,
@@ -113,8 +182,15 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
         Ok(Some(key)) if !key.is_empty() => key,
         _ => return response(serde_json::json!({"status":"error","error":"cdn_key_unavailable"})),
     };
+    let dataset = match body["maintenance"].as_str() {
+        Some("rum_compact") => match body["table"].as_str().and_then(Dataset::rum) {
+            Some(dataset) => dataset,
+            None => return crate::http::Response::new(400, "Invalid table").private(),
+        },
+        _ => Dataset::Request,
+    };
     if let Some(usage) = runtime.usage_agg() {
-        usage.set_caller("worker:request_compact");
+        usage.set_caller(dataset.caller());
     }
     // A chained pass stops within the maintenance stage's remaining `wall_ms`: the storage helpers
     // stop at `WALL_STOP` after `started`, so backdating it shortens (never extends) the pass.
@@ -137,7 +213,7 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
         pass: pass as u32,
         last: body["last"].as_bool().unwrap_or(true),
     });
-    match request_compact_pass(&store, &cdn_key, target, 1, turn) {
+    match compact_pass(&store, &cdn_key, target, 1, turn, dataset) {
         Ok(report) => response(serde_json::json!({"status":"ok","report":report})),
         Err(error) => response(serde_json::json!({"status":"error","error":error})),
     }
@@ -178,6 +254,7 @@ pub struct Upload {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct State {
+    /// RUM: the hour a scan starting afresh lists from (all retained hours when unset).
     pub next_hour: Option<i64>,
     #[serde(default)]
     pub queue: Vec<Queued>,
@@ -190,6 +267,7 @@ pub struct State {
     pub job: Option<Job>,
     #[serde(default)]
     pub lease_until: u64,
+    /// RUM: where the scan in progress resumes its listing.
     #[serde(default)]
     pub list_after: Option<String>,
     #[serde(default)]
@@ -214,6 +292,9 @@ pub struct State {
     /// over the lease without writing it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// RUM: when the table next needs a pass (see [`rum_due`]).
+    #[serde(default)]
+    pub next_check: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +329,11 @@ struct SourceCopy {
 struct Run<'s, 'a, R: Runtime> {
     store: &'s Store<'a, R>,
     cdn_key: &'s str,
+    dataset: Dataset,
     root: String,
+    /// RUM: every key listed in the hour being merged, which a new compact's tags must not name
+    /// unless it is one of its sources.
+    hour_keys: Vec<String>,
     target: u64,
     tail: u32,
     now: u64,
@@ -284,23 +369,21 @@ pub struct Turn<'a> {
     pub last: bool,
 }
 
-/// [`request_compact`] as one of a maintenance turn's passes. A pass that leaves work for the
-/// turn's next pass hands it the lease in its final state write, so the next pass needn't write
-/// the state just to take the lease (a paced KV write, ~1 s live).
-/// Reads the state past the edge cache. The KV API now and then answers 200 with a body cut
-/// short; one more read clears that before the pass gives up.
+/// Reads `key` past the edge cache. The KV API now and then answers 200 with a body cut short;
+/// one more read clears that before the pass gives up.
 fn read_fresh<R: Runtime>(
     runtime: &R,
+    key: &str,
     token: &str,
 ) -> Result<Option<crate::admin::Record>, String> {
-    match runtime.admin_get_fresh(STATE_KEY, token) {
+    match runtime.admin_get_fresh(key, token) {
         Err(error)
             if matches!(
                 error.as_str(),
                 "backend_json_invalid" | "backend_body_unavailable"
             ) =>
         {
-            runtime.admin_get_fresh(STATE_KEY, token)
+            runtime.admin_get_fresh(key, token)
         }
         result => result,
     }
@@ -308,6 +391,7 @@ fn read_fresh<R: Runtime>(
 
 fn read_state<R: Runtime>(
     runtime: &R,
+    key: &str,
     token: &str,
 ) -> Result<(Option<crate::admin::Record>, State), String> {
     let parse = |record: &Option<crate::admin::Record>| {
@@ -317,15 +401,16 @@ fn read_state<R: Runtime>(
             .transpose()
             .map(Option::unwrap_or_default)
     };
-    let record = read_fresh(runtime, token)?;
+    let record = read_fresh(runtime, key, token)?;
     if let Ok(state) = parse(&record) {
         return Ok((record, state));
     }
-    let record = read_fresh(runtime, token)?;
+    let record = read_fresh(runtime, key, token)?;
     let state = parse(&record).map_err(|_| "compact_state_invalid".to_owned())?;
     Ok((record, state))
 }
 
+/// [`request_compact`] as one of a maintenance turn's passes.
 pub fn request_compact_pass<R: Runtime>(
     store: &Store<'_, R>,
     cdn_key: &str,
@@ -333,14 +418,46 @@ pub fn request_compact_pass<R: Runtime>(
     tail: u32,
     turn: Option<Turn<'_>>,
 ) -> Result<Report, String> {
+    compact_pass(store, cdn_key, target, tail, turn, Dataset::Request)
+}
+
+/// One bounded pass over `dataset`. A pass that leaves work for the turn's next pass hands it
+/// the lease in its final state write, so the next pass needn't write the state just to take the
+/// lease (a paced KV write, ~1 s live).
+pub fn compact_pass<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    target: u64,
+    tail: u32,
+    turn: Option<Turn<'_>>,
+    dataset: Dataset,
+) -> Result<Report, String> {
     let runtime = store.runtime;
     let now = runtime.now();
+    let rum = matches!(dataset, Dataset::Rum(_));
+    if let Dataset::Rum(table) = dataset {
+        if Dataset::rum(table).is_none() {
+            return Err("compact_dataset_invalid".into());
+        }
+        // Delete Data removes RUM files written before its reset; a compact of them written
+        // meanwhile would bring their rows back.
+        if store.service.data_reset.is_some() {
+            return Ok(Report {
+                stopped: Some("data_reset".into()),
+                ..Report::default()
+            });
+        }
+    }
     let token = runtime
         .secret(&store.service.fastly_token_ref)?
         .filter(|token| !token.is_empty())
         .ok_or("fastly_token_missing")?;
-    let (record, state) = read_state(runtime, &token)?;
-    let watermark = runtime.admin_get(WATERMARK_KEY)?;
+    let (record, state) = read_state(runtime, dataset.state_key(), &token)?;
+    let watermark = if rum {
+        None
+    } else {
+        runtime.admin_get(WATERMARK_KEY)?
+    };
     // [`VCPU_STOP_MS`] bounds the pass's own work. Live workers have spent 45-60 ms on startup
     // and these state reads by now, so counting from the execution start admits nothing.
     let store = &Store {
@@ -354,7 +471,9 @@ pub fn request_compact_pass<R: Runtime>(
     let mut run = Run {
         store,
         cdn_key,
-        root: processed_prefix(store.service),
+        dataset,
+        root: dataset.root(store.service),
+        hour_keys: Vec::new(),
         target,
         tail,
         now,
@@ -412,7 +531,12 @@ pub fn request_compact_pass<R: Runtime>(
     } else {
         pending = run.scan()?;
     }
-    if run.bump {
+    if run.bump && rum {
+        // RUM readers list the folder itself, so the compact is published once it exists.
+        run.state.queue.extend(pending);
+        run.finish_job();
+        run.changed = true;
+    } else if run.bump {
         let committed = match commit_watermark(store, watermark, &mut pending, tail + 2) {
             Ok(new) => {
                 if !new {
@@ -472,21 +596,14 @@ pub fn request_compact_pass<R: Runtime>(
             run.state.catalog_cursor = None;
             run.state.catalog_to = None;
         }
-        if committed && run.state.job.as_ref().is_some_and(|job| job.complete) {
-            if let Some(key) = run
-                .state
-                .job
-                .as_ref()
-                .and_then(|job| job.checkpoint.clone())
-            {
-                run.state.work_cleanup.push(key);
-            }
-            run.state.job = None;
+        if committed {
+            run.finish_job();
         }
         run.changed = true;
     }
     run.state.lease_until = 0;
-    if !run.bump
+    if !rum
+        && !run.bump
         && run.state.job.is_none()
         && run.state.catalog_to.is_none()
         && run.state.catalog_objects.is_empty()
@@ -508,6 +625,24 @@ pub fn request_compact_pass<R: Runtime>(
         }
     }
     run.report.more_pending |= run.report.compacts > 0;
+    if rum {
+        let busy = run.report.more_pending
+            || run.state.job.is_some()
+            || run.state.upload.is_some()
+            || run.state.list_after.is_some();
+        let grace_end = run
+            .state
+            .queue
+            .iter()
+            .map(|queued| queued.at.saturating_add(DELETE_GRACE_S))
+            .min()
+            .unwrap_or(u64::MAX);
+        run.state.next_check = if busy {
+            now
+        } else {
+            now.saturating_add(RUM_CHECK_S).min(grace_end)
+        };
+    }
     // The turn's next pass gets at most this pass's remaining wall time, so a handed-on lease
     // lapses soon after it, or soon after this pass if no next pass comes. Counted from this
     // pass's start instead, it could lapse mid-pass and let an overlapping turn take it.
@@ -532,6 +667,21 @@ pub fn request_compact_pass<R: Runtime>(
         run.write(&value, false)?;
     }
     Ok(run.report)
+}
+
+/// The `{plan_id}s` run-token prefix of the RUM plan the watermark has not committed, if any.
+fn uncommitted_rum_plan<R: Runtime>(runtime: &R) -> Result<Option<String>, String> {
+    let stream = super::rum::STREAM;
+    let Some(plan) = runtime.admin_get(&plan_key(stream))? else {
+        return Ok(None);
+    };
+    let Some(id) = plan_id_of(&plan.value).map(str::to_owned) else {
+        return Ok(None);
+    };
+    let committed = runtime
+        .admin_get(&watermark_key(stream))?
+        .and_then(|record| record.value["run_id"].as_str().map(str::to_owned));
+    Ok((committed.as_deref() != Some(id.as_str())).then(|| format!("{id}s")))
 }
 
 fn commit_watermark<R: Runtime>(
@@ -618,7 +768,15 @@ fn mtime(object: &Object) -> Option<u64> {
     u64::try_from(at.unix_timestamp()).ok()
 }
 
-/// The hour a request file's name places it in.
+/// The run token of a window file's name.
+fn file_name_run(key: &str) -> Option<&str> {
+    super::file_name(key)
+        .strip_prefix("window=")?
+        .split('-')
+        .nth(2)
+}
+
+/// The hour a window or compact file's name places it in.
 fn file_hour(key: &str) -> Option<i64> {
     let start = match parse_processed(key) {
         Some(name) => name.start,
@@ -740,11 +898,12 @@ impl<R: Runtime> Run<'_, '_, R> {
     /// write takes that generation and retries once. Any other value is another writer's.
     fn write(&mut self, value: &Value, read_back: bool) -> Result<(), String> {
         let runtime = self.store.runtime;
-        if !runtime.admin_cas(STATE_KEY, self.generation.as_deref(), value)? {
+        let key = self.dataset.state_key();
+        if !runtime.admin_cas(key, self.generation.as_deref(), value)? {
             let recovered = match self.saved.clone() {
                 Some(own) => {
                     self.read_back(&own)?
-                        && runtime.admin_cas(STATE_KEY, self.generation.as_deref(), value)?
+                        && runtime.admin_cas(key, self.generation.as_deref(), value)?
                 }
                 None => false,
             };
@@ -767,7 +926,7 @@ impl<R: Runtime> Run<'_, '_, R> {
             .filter(|token| !token.is_empty())
             .ok_or("fastly_token_missing")?;
         for _ in 0..2 {
-            let record = read_fresh(runtime, &token)?;
+            let record = read_fresh(runtime, self.dataset.state_key(), &token)?;
             self.generation = record.as_ref().map(|r| r.generation.clone());
             let Some(mut value) = record.map(|r| r.value) else {
                 return Ok(false);
@@ -794,6 +953,15 @@ impl<R: Runtime> Run<'_, '_, R> {
         self.remaining() >= self.tail + CHECKPOINT_CALLS + calls
     }
 
+    /// Clears a job whose compact is published, leaving its checkpoint to be cleaned up.
+    fn finish_job(&mut self) {
+        if self.state.job.as_ref().is_some_and(|job| job.complete) {
+            if let Some(key) = self.state.job.take().and_then(|job| job.checkpoint) {
+                self.state.work_cleanup.push(key);
+            }
+        }
+    }
+
     fn drain(&mut self) {
         for _ in 0..4 {
             let Some(key) = self.state.work_cleanup.last().cloned() else {
@@ -813,11 +981,18 @@ impl<R: Runtime> Run<'_, '_, R> {
                 }
             }
         }
+        // A RUM compact merged from compacts hides them, not their sources: each of them goes
+        // only once its own queued sources are gone.
+        let compacts: BTreeSet<&String> = match self.dataset {
+            Dataset::Rum(_) => self.state.queue.iter().map(|q| &q.compact).collect(),
+            Dataset::Request => BTreeSet::new(),
+        };
         let mut due = Vec::new();
         let mut keys = Vec::new();
         for (index, queued) in self.state.queue.iter().enumerate() {
             if queued.at + DELETE_GRACE_S <= self.now
                 && keys.len() + queued.keys.len() <= MAX_DELETES
+                && !queued.keys.iter().any(|key| compacts.contains(key))
             {
                 due.push(index);
                 keys.extend(queued.keys.iter().cloned());
@@ -876,8 +1051,11 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
     }
 
-    /// Only the pinned committed catalog may supply compaction inputs.
+    /// Only the pinned committed catalog may supply request compaction inputs.
     fn scan(&mut self) -> Result<Vec<Queued>, String> {
+        if let Dataset::Rum(_) = self.dataset {
+            return self.rum_scan();
+        }
         let mut pending = Vec::new();
         loop {
             if let Some(stop) = self.limit_stop(4) {
@@ -964,6 +1142,145 @@ impl<R: Runtime> Run<'_, '_, R> {
             }
         }
         Ok(pending)
+    }
+
+    /// Lists the RUM table folder from the scan's cursor and merges it hour by hour.
+    fn rum_scan(&mut self) -> Result<Vec<Queued>, String> {
+        let mut pending = Vec::new();
+        if let Some(stop) = self.limit_stop(6) {
+            self.report.more_pending = true;
+            self.report.stopped.get_or_insert_with(|| stop.into());
+            return Ok(pending);
+        }
+        let uncommitted = uncommitted_rum_plan(self.store.runtime)?;
+        loop {
+            if let Some(stop) = self.limit_stop(4) {
+                self.report.more_pending = true;
+                self.report.stopped.get_or_insert_with(|| stop.into());
+                return Ok(pending);
+            }
+            let start_after = self.state.list_after.clone().or_else(|| {
+                self.state
+                    .next_hour
+                    .map(|hour| format!("{}{}", self.root, hour_dir(hour)))
+            });
+            let page = self
+                .store
+                .list(&self.root, start_after.as_deref(), None, 1000, None)?;
+            let last = page.objects.last().map(|object| object.key.clone());
+            let mut objects = page.objects;
+            // A listing resumed inside an hour has passed that hour's compacts, which sort first.
+            if let Some((folder, _)) = start_after
+                .as_deref()
+                .filter(|after| !after.ends_with('/'))
+                .and_then(|after| after.rsplit_once('/'))
+            {
+                let compacts =
+                    self.store
+                        .list(&format!("{folder}/compact="), None, None, 1000, None)?;
+                objects.extend(compacts.objects);
+            }
+            let mut hours: std::collections::BTreeMap<i64, Vec<Object>> = Default::default();
+            for object in objects {
+                if let Some(hour) = file_hour(&object.key) {
+                    hours.entry(hour).or_default().push(object);
+                }
+            }
+            let next = match page.next_token {
+                None => None,
+                // The last hour may continue on the next page: list it again whole.
+                Some(_) if hours.len() > 1 => hours
+                    .pop_last()
+                    .map(|(hour, _)| format!("{}{}", self.root, hour_dir(hour))),
+                Some(_) => last,
+            };
+            let first = hours.keys().next().copied();
+            for (hour, objects) in hours {
+                if !self.rum_hour(hour, &objects, uncommitted.as_deref(), &mut pending)? {
+                    if Some(hour) != first {
+                        self.state.list_after = Some(format!("{}{}", self.root, hour_dir(hour)));
+                    }
+                    self.changed = true;
+                    self.report.more_pending = true;
+                    return Ok(pending);
+                }
+            }
+            self.changed = true;
+            if next.is_none() || next == start_after {
+                let now = self.now as i64;
+                let floor = now - now.rem_euclid(3600) - RUM_REVISIT_S;
+                self.state.list_after = None;
+                self.state.next_hour = Some(floor);
+                self.state
+                    .skip
+                    .retain(|key| file_hour(key).is_some_and(|hour| hour >= floor));
+                return Ok(pending);
+            }
+            self.state.list_after = next;
+        }
+    }
+
+    /// Re-queues the sources of a RUM hour's compacts whose queue record was lost, then merges
+    /// its windows that no compact covers, are old enough and belong to a committed plan, and
+    /// its compacts no other compact replaced. False when it stopped before finishing.
+    fn rum_hour(
+        &mut self,
+        hour: i64,
+        objects: &[Object],
+        uncommitted: Option<&str>,
+        pending: &mut Vec<Queued>,
+    ) -> Result<bool, String> {
+        let (valid, uncovered) = compact::covering(objects);
+        let queued: BTreeSet<String> = self
+            .state
+            .queue
+            .iter()
+            .chain(pending.iter())
+            .flat_map(|q| q.keys.iter())
+            .cloned()
+            .collect();
+        let mut superseded = BTreeSet::new();
+        for (compact_key, covered) in &valid {
+            superseded.extend(
+                covered
+                    .iter()
+                    .filter(|key| compact::parse_compact_name(key).is_some())
+                    .cloned(),
+            );
+            let lost: Vec<String> = covered
+                .iter()
+                .filter(|key| !queued.contains(*key))
+                .cloned()
+                .collect();
+            if !lost.is_empty() {
+                self.state.queue.push(Queued {
+                    compact: compact_key.clone(),
+                    keys: lost,
+                    at: self.now,
+                    ..Queued::default()
+                });
+                self.changed = true;
+            }
+        }
+        let uncovered: BTreeSet<String> = uncovered.into_iter().collect();
+        let candidates: Vec<Object> = objects
+            .iter()
+            .filter(|object| {
+                if parse_processed(&object.key).is_some() {
+                    let token = file_name_run(&object.key);
+                    uncovered.contains(&object.key)
+                        && mtime(object).is_some_and(|at| at.saturating_add(MIN_AGE_S) <= self.now)
+                        && uncommitted
+                            .is_none_or(|plan| !token.is_some_and(|t| t.starts_with(plan)))
+                } else {
+                    valid.iter().any(|(key, _)| *key == object.key)
+                        && !superseded.contains(&object.key)
+                }
+            })
+            .cloned()
+            .collect();
+        self.hour_keys = objects.iter().map(|object| object.key.clone()).collect();
+        self.hour(hour, &candidates, pending)
     }
 
     /// Repairs and merges one closed hour; false when it stopped before finishing.
@@ -1087,7 +1404,10 @@ impl<R: Runtime> Run<'_, '_, R> {
         let digest = hex::encode(Sha256::digest(
             serde_json::to_vec(&names).map_err(|e| e.to_string())?,
         ));
-        let output_prefix = format!("{prefix}catalog1/{digest}/");
+        let output_prefix = match self.dataset {
+            Dataset::Request => format!("{prefix}catalog1/{digest}/"),
+            Dataset::Rum(_) => prefix.to_owned(),
+        };
         let key = compact::compact_key(
             &output_prefix,
             group.iter().map(|c| c.start).min().unwrap_or(0) as u64,
@@ -1100,6 +1420,21 @@ impl<R: Runtime> Run<'_, '_, R> {
                 return self.merge(prefix, &group[..group.len() - 1], pending);
             }
             return Err("compact_key_admission".into());
+        }
+        // A RUM compact hides whatever its tags name, so they must name its sources and nothing
+        // else listed beside it.
+        if matches!(self.dataset, Dataset::Rum(_)) {
+            let collides = compact::parse_compact_name(&key).is_none()
+                || self
+                    .hour_keys
+                    .iter()
+                    .any(|other| !names.contains(other) && compact::names_source(&key, other));
+            if collides {
+                if group.len() > 2 {
+                    return self.merge(prefix, &group[..group.len() - 1], pending);
+                }
+                return Ok(Outcome::Consumed(1));
+            }
         }
         // The upload, the job's save and a first source read with its checkpoint.
         if !self.checkpointable(5) {
