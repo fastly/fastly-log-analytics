@@ -259,6 +259,8 @@ struct Run<'s, 'a, R: Runtime> {
     report: Report,
     changed: bool,
     bump: bool,
+    /// vCPU spent restoring a resumed job's checkpoint, exempt from [`VCPU_STOP_MS`].
+    restore_vcpu: u64,
 }
 
 /// One bounded compaction pass: abort a stale upload, delete sources past the grace, then merge
@@ -330,6 +332,7 @@ pub fn request_compact_pass<R: Runtime>(
         report: Report::default(),
         changed: false,
         bump: false,
+        restore_vcpu: 0,
     };
     // Only the final state write sets a handoff, so a stale read can't show one meant for this
     // pass: an earlier pass's handoff names an earlier pass.
@@ -818,7 +821,7 @@ impl<R: Runtime> Run<'_, '_, R> {
     fn exceeded(&self) -> Option<&'static str> {
         if !self.store.within_wall() {
             Some("wall_limit")
-        } else if self.store.vcpu_ms() >= VCPU_STOP_MS {
+        } else if self.store.vcpu_ms().saturating_sub(self.restore_vcpu) >= VCPU_STOP_MS {
             Some("vcpu_limit")
         } else if self
             .store
@@ -1284,8 +1287,13 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
         if !self.checkpointable(2) || !self.within_limits() {
             self.report.more_pending = true;
+            let stop = self.exceeded().unwrap_or("call_budget");
+            self.report.stopped.get_or_insert_with(|| stop.into());
             return Ok(());
         }
+        // Restoring is the fixed cost of resuming, like worker startup: a checkpoint of several
+        // MB can spend the whole stop on its own, and counted against it the job never finishes.
+        let restore_start = self.store.vcpu_ms();
         let mut writer = match job.checkpoint.as_deref() {
             Some(key) => {
                 let bytes = self.store.get_direct(
@@ -1306,6 +1314,7 @@ impl<R: Runtime> Run<'_, '_, R> {
             }
             None => None,
         };
+        self.restore_vcpu += self.store.vcpu_ms().saturating_sub(restore_start);
         let (mut bytes_read, mut rows_read) = (0u64, 0u64);
         let mut touched_groups = BTreeSet::new();
         let initial_next = job.next;
@@ -1442,6 +1451,10 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
         if !finishing {
             self.report.more_pending = true;
+            if job.next == job.sources.len() {
+                let stop = self.exceeded().unwrap_or("call_budget");
+                self.report.stopped.get_or_insert_with(|| stop.into());
+            }
             return Ok(());
         }
         let footer = writer.footer()?;

@@ -134,6 +134,9 @@ struct Fake {
     /// Open multipart uploads by id: the key and the parts received.
     uploads: RefCell<BTreeMap<String, Upload>>,
     upload_seq: Cell<u32>,
+    /// vCPU milliseconds a GET of a key containing the pattern spends, as reading and decoding
+    /// a multi-MB body does live.
+    get_vcpu: RefCell<Vec<(&'static str, u64)>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,8 +149,17 @@ enum WorkerFault {
 }
 
 impl Fake {
+    fn spend_get_vcpu(&self, key: &str) {
+        for (pattern, ms) in self.get_vcpu.borrow().iter() {
+            if key.contains(pattern) {
+                self.vcpu.set(self.vcpu.get() + ms);
+            }
+        }
+    }
+
     fn recorded_get(&self, key: &str) -> Option<Vec<u8>> {
         self.fos_gets.borrow_mut().push(key.to_owned());
+        self.spend_get_vcpu(key);
         self.bucket.borrow().get(key).cloned()
     }
 
@@ -227,6 +239,7 @@ impl Fake {
             put_md5s: Default::default(),
             uploads: RefCell::new(BTreeMap::new()),
             upload_seq: Cell::new(0),
+            get_vcpu: Default::default(),
         }
     }
     fn take_transient(&self, method: &str) -> Option<FosResponse> {
@@ -791,6 +804,7 @@ impl Runtime for Fake {
         if let Some(response) = self.take_transient("GET") {
             return Ok(response);
         }
+        self.spend_get_vcpu(key);
         self.source_bytes.set(
             self.source_bytes.get()
                 + self
@@ -11747,6 +11761,38 @@ mod request_compaction {
         }
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.compacts, 1, "stopped: {:?}", report.stopped);
+        assert_eq!(compacts(&fake).len(), 1);
+    }
+
+    /// Restoring a job's checkpoint (its buffered output and footer, several MB live) is the
+    /// fixed cost of resuming it. Counted against the pass's vCPU stop, it spent the whole
+    /// budget live, so a job whose sources were all read never finished: every pass restored
+    /// it, stopped before the upload and saved it again, and compaction stalled behind it.
+    #[test]
+    fn a_resumed_job_finishes_when_restoring_its_checkpoint_spends_the_vcpu_budget() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 2);
+        fake.vcpu_step.set(0);
+        fake.get_vcpu.borrow_mut().extend([
+            ("window=", 25),
+            ("_compact_work/", compaction::VCPU_STOP_MS + 5),
+        ]);
+        let first = run(&fake, TARGET);
+        assert_eq!(first.compacts, 0, "{first:?}");
+        assert!(first.more_pending);
+        assert_eq!(first.stopped.as_deref(), Some("vcpu_limit"), "{first:?}");
+        let job = fake.kv.borrow()[compaction::STATE_KEY].1["job"].clone();
+        assert_eq!(job["next"], 2, "{job}");
+        assert!(job["checkpoint"].is_string(), "{job}");
+        let mut report = Report::default();
+        for _ in 0..4 {
+            report = run(&fake, TARGET);
+            if report.compacts > 0 {
+                break;
+            }
+        }
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!((report.compacts, report.sources), (1, 2), "{report:?}");
         assert_eq!(compacts(&fake).len(), 1);
     }
 
