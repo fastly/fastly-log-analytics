@@ -130,6 +130,22 @@ def test_evaluate_cron_health_passes_and_detects_budget_violations() -> None:
     assert any("vcpu_ms" in e for e in bad["errors"])
 
 
+def test_evaluate_cron_health_allows_summary_bundle_tail_past_fold_stop() -> None:
+    required = {"summary_bundle"}
+    base = {
+        "cron_kind": "summary_bundle",
+        "status": "ok",
+        "error_count": 0,
+        "backend_requests_used": 12,
+        "cache_lookups": 4,
+    }
+    tail = evaluate_cron_health([{**base, "vcpu_ms": 723.0}], required)
+    assert tail["ok"] is True, tail["errors"]
+    runaway = evaluate_cron_health([{**base, "vcpu_ms": 910.0}], required)
+    assert runaway["ok"] is False
+    assert any("summary_bundle exceeded vcpu_ms" in e for e in runaway["errors"])
+
+
 def test_evaluate_cron_health_budgets_compaction_worker_vcpu_per_pass() -> None:
     required = {"request_compact"}
     base = {

@@ -67,12 +67,15 @@ DEFAULT_LT_REPO = Path.home() / "Projects" / "fastly-log-analytics-load-testing"
 SETTLE_WINDOW_S = 180  # UTC minute close (60s) + SETTLE_S (120s)
 DOWNLOAD_CONCURRENCY = 8
 
-# Compute vCPU budgets matching app/src/ingest/coordinator.rs (800ms),
-# app/src/ingest/worker.rs (800ms), and app/src/ingest/bundle.rs (700ms).
+# Compute vCPU budgets matching app/src/ingest/coordinator.rs (800ms) and
+# app/src/ingest/worker.rs (800ms). summary_bundle stops folding at 700ms
+# (app/src/ingest/bundle.rs VCPU_STOP_MS) and then serializes its tail within the
+# 1000ms allowance, so a busy tick legitimately finishes above 700ms; 900ms leaves
+# 100ms before the hard ceiling and still flags a runaway execution.
 DEFAULT_VCPU_BUDGET_MS = 800.0
 HARD_VCPU_CEILING_MS = 1000.0
 STAGE_VCPU_BUDGET_MS: dict[str, float] = {
-    "summary_bundle": 700.0,
+    "summary_bundle": 900.0,
     "request_ingest": 800.0,
     "rum_ingest": 800.0,
     "raw_delete": 800.0,
