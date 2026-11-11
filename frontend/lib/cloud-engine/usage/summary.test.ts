@@ -8,6 +8,7 @@ import {
   billedVcpuMsPerRequest,
   fetchUsageInput,
   fetchUsageSettings,
+  resetUsageSettingsCache,
   incurredCost,
   parseComputeBilling,
   perTenThousandToPerMillion,
@@ -17,6 +18,9 @@ import {
   summarizeUsage,
   telemetryCostUsd,
 } from "./summary";
+
+// Settled settings are reused for a short window; keep each test on its own fetch.
+afterEach(() => resetUsageSettingsCache());
 
 describe("rate conversion", () => {
   it("converts per-1k and per-10k rates to per-million exactly", () => {
@@ -497,6 +501,19 @@ describe("usage-logging settings sharing", () => {
     expect((fetcher.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(
       true,
     );
+  });
+
+  it("reuses settled settings for the page's later readers until a write resets them", async () => {
+    const fetcher = vi.fn(async () => Response.json(fixtureUsageInput.settings));
+    vi.stubGlobal("fetch", fetcher);
+    await fetchUsageSettings();
+    await expect(fetchUsageInput(7, identity, read)).resolves.toMatchObject({
+      settings: fixtureUsageInput.settings,
+    });
+    expect(settingsCalls(fetcher)).toHaveLength(1);
+    resetUsageSettingsCache();
+    await fetchUsageSettings();
+    expect(settingsCalls(fetcher)).toHaveLength(2);
   });
 
   it("rejects every reader on failure and fetches again on the next call", async () => {

@@ -9,14 +9,36 @@ const readLogs: UsageLogReader = async (...args) =>
 
 const sharedSettings = createSharedRequests<unknown>();
 
-/** Concurrent readers of the usage-logging settings share one request per user. */
-const readUsageLogging = (signal?: AbortSignal) =>
-  sharedSettings(
-    JSON.stringify([activeOpsUser()]),
+// A /usage load reads the settings from several sections one after another; reuse a
+// settled answer briefly, like the Cloud metadata lookups. Writes clear it.
+const SETTINGS_TTL_MS = 15_000;
+let settledSettings: { key: string; at: number; value: unknown } | null = null;
+let settingsResets = 0;
+
+export function resetUsageSettingsCache(): void {
+  settledSettings = null;
+  settingsResets += 1;
+}
+
+/** Readers of the usage-logging settings share one request per user. */
+const readUsageLogging = async (signal?: AbortSignal): Promise<unknown> => {
+  const key = JSON.stringify([activeOpsUser()]);
+  const cached = settledSettings;
+  if (cached?.key === key && Date.now() - cached.at < SETTINGS_TTL_MS) {
+    signal?.throwIfAborted();
+    return cached.value;
+  }
+  const resets = settingsResets;
+  const value = await sharedSettings(
+    key,
     (shared) =>
       adminRequest<unknown>("/api/admin/usage-logging", { signal: shared }),
     { signal },
   );
+  // A write that landed while this was in flight may have changed the answer.
+  if (resets === settingsResets) settledSettings = { key, at: Date.now(), value };
+  return value;
+};
 
 export type OpClass = "A" | "B" | "CDN_HIT";
 

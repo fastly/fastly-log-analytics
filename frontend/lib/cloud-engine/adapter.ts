@@ -76,6 +76,7 @@ import { bucketUsage } from "./usage/series";
 import {
   buildSevenLineCostTable,
   fetchUsageSettings,
+  resetUsageSettingsCache,
   fetchUsageSummary,
   reconcileSnapshot,
 } from "./usage/summary";
@@ -467,7 +468,10 @@ async function handleCloudRequest(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
-  if (!["GET", "HEAD"].includes(request.method) && !isLocalScan(path, request.method)) resetCloudMetadataCache();
+  if (!["GET", "HEAD"].includes(request.method) && !isLocalScan(path, request.method)) {
+    resetCloudMetadataCache();
+    resetUsageSettingsCache();
+  }
   const runJobStream = (jobId: string, signal: AbortSignal) => {
     const encoder = new TextEncoder();
     return new Response(new ReadableStream<Uint8Array>({
