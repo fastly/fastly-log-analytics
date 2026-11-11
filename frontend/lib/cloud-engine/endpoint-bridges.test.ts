@@ -40,6 +40,7 @@ describe("Cloud endpoint bridges", () => {
     expect(await (await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.json()).toEqual({
       available: ["2.13.0", "2.10.0"], current: "2.13.0", latest: "2.13.0", update_available: false,
     });
+    resetCloudMetadataCache();
     fetcher.mockImplementation(async (input: RequestInfo | URL) =>
       String(input) === "/api/services"
         ? Response.json({ services: [{ service_id: "fixture-a", rum: { enabled: true, faro_version: "2.10.0" } }] })
@@ -47,6 +48,7 @@ describe("Cloud endpoint bridges", () => {
     );
     expect(await (await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.json())
       .toMatchObject({ current: "2.10.0", latest: "2.13.0", update_available: true });
+    resetCloudMetadataCache();
     fetcher.mockImplementation(async () => Response.json({ error: "unauthorized" }, { status: 401 }));
     expect((await cloudServiceStatus(request("/api/services/fixture-a/rum/versions")))!.status).toBe(401);
   });
@@ -248,6 +250,22 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(servicesCalls()).toBe(1);
   });
 
+  it("reuses bootstrap's services lookup, so a cold /rum load reads services once", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role: "admin" } });
+      if (path === "/api/services") return Response.json(services);
+      return Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    expect((await handleCloudAnalyticalRequest(request("/api/bootstrap")))?.ok).toBe(true);
+    const status = await handleCloudAnalyticalRequest(request("/api/services/fixture-a/rum/status"));
+    expect(await status!.json()).toMatchObject({ enabled: true });
+    const versions = await handleCloudAnalyticalRequest(request("/api/services/fixture-a/rum/versions"));
+    expect(await versions!.json()).toMatchObject({ current: "2.10.0" });
+    expect(fetcher.mock.calls.filter(([input]) => String(input) === "/api/services")).toHaveLength(1);
+  });
+
   it("lets one caller abort without cancelling the shared read for the others", async () => {
     const { pending, servicesCalls } = heldServices();
     const owner = new AbortController();
@@ -262,19 +280,17 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(servicesCalls()).toBe(1);
   });
 
-  it("cancels the shared read once every caller has aborted, and does not keep it", async () => {
+  it("keeps the shared read for the page's next request after every caller has aborted", async () => {
     const { pending, servicesCalls } = heldServices();
     const owner = new AbortController();
     const aborted = cloudServiceStatus(new Request("http://localhost/api/services/fixture-a/rum/status", { signal: owner.signal }));
     await vi.waitFor(() => expect(pending).toHaveLength(1));
     owner.abort();
     await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
-    expect(pending[0].signal?.aborted).toBe(true);
     const next = cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
-    await vi.waitFor(() => expect(pending).toHaveLength(2));
-    pending[1].resolve(Response.json(services));
+    pending[0].resolve(Response.json(services));
     expect((await next)!.status).toBe(200);
-    expect(servicesCalls()).toBe(2);
+    expect(servicesCalls()).toBe(1);
   });
 
   it("does not keep a failed read, so the next request asks again", async () => {

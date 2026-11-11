@@ -37,6 +37,7 @@ import { parquetColumns, sampleStats } from "./schema";
 import { isNativeCloudRoute } from "./native-routes";
 import { migrateLegacySavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
+import { fetchCloudMetadata, resetCloudMetadataCache } from "./metadata-cache";
 import { cloudRumMutation } from "./rum-management";
 import { cloudLoggingSettings } from "./logging-settings";
 import { cloudDeleteData } from "./delete-data";
@@ -46,7 +47,6 @@ import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import { bindCloudReadContext, CloudBudgetError, cloudReadContext, ensureCloudRange } from "./range-loader";
-import { fetchRetrying } from "./fetch-retry";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
@@ -284,50 +284,6 @@ async function withLoading<T>(stage: LoadingStage, work: () => Promise<T>): Prom
     return result;
   } finally {
     loading.finish(success);
-  }
-}
-
-// Every Cloud scan needs the extents, catalog and services lookups, and a page
-// load runs many scans. Share one answer while it keeps being used within a short
-// window, so a long page load reads it once, but never past a hard cap; writes clear it.
-const METADATA_TTL_MS = 15_000;
-const METADATA_MAX_AGE_MS = 60_000;
-type MetadataSnapshot = { status: number; contentType: string | null; body: string };
-const metadataCache = new Map<string, { at: number; usedAt: number; value: Promise<MetadataSnapshot> }>();
-
-export function resetCloudMetadataCache(): void {
-  metadataCache.clear();
-}
-
-async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Response> {
-  signal.throwIfAborted();
-  const now = Date.now();
-  let entry = metadataCache.get(path);
-  if (entry && now - entry.usedAt <= METADATA_TTL_MS && now - entry.at < METADATA_MAX_AGE_MS) {
-    entry.usedAt = now;
-  } else {
-    const value = fetchRetrying(path).then(async (response) => ({
-      status: response.status, contentType: response.headers.get("content-type"), body: await response.text(),
-    }));
-    const created = { at: now, usedAt: now, value };
-    entry = created;
-    metadataCache.set(path, created);
-    const evict = () => { if (metadataCache.get(path) === created) metadataCache.delete(path); };
-    value.then((snapshot) => { if (snapshot.status < 200 || snapshot.status > 299) evict(); }, evict);
-  }
-  let onAbort!: () => void;
-  const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  try {
-    const snapshot = await Promise.race([entry.value, aborted]);
-    return new Response(snapshot.body, {
-      status: snapshot.status,
-      headers: snapshot.contentType ? { "content-type": snapshot.contentType } : undefined,
-    });
-  } finally {
-    signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -715,6 +671,9 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         request,
       );
     }
+    // Rotating the cache scope supersedes in-flight file discovery, so it settles before the page can start scans,
+    // and before the services read so the page's later lookups under this identity share it.
+    await setDashboardCacheIdentity(cloudCacheIdentity({ user }));
     const servicesRes = await fetchCloudMetadata("/api/services", request.signal);
     if (!servicesRes.ok) return servicesRes;
     const servicesJson = servicesRes?.ok
@@ -744,8 +703,6 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const activeServiceId = services.find((service) => service.service_id === requestedService)?.service_id ??
       services[0]?.service_id ?? null;
     const activeLogFieldIds = rawServices.find((service) => service.service_id === activeServiceId)?.log_fields?.selected_fields ?? [];
-    // Rotating the cache scope supersedes in-flight file discovery, so it settles before the page can start scans.
-    await setDashboardCacheIdentity(cloudCacheIdentity({ user }));
     return jsonResponse(
       {
         runtime_mode: "cloud",
@@ -2012,6 +1969,7 @@ export {
   estimateMonthlyUsage,
   parquetColumns,
   reconcileSnapshot,
+  resetCloudMetadataCache,
   sampleStats,
   setDashboardCacheIdentity,
 };
