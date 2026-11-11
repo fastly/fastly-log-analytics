@@ -8,8 +8,9 @@ import {
 import { beginCloudLoading } from "./loading-progress";
 
 const MAX_RANGE_FILES = 256;
-// RUM window files are a few KiB each and nothing compacts them yet, so a day lists far more of
-// them than the request table does; the byte budget, not the file count, bounds that scan.
+// RUM window files are a few KiB each and the open hour's stay loose until they age into a
+// compact, so a day lists more of them than the request table does; the byte budget, not the file
+// count, bounds that scan.
 const MAX_RUM_RANGE_FILES = 2048;
 const MAX_RANGE_BYTES = 64 * 1024 * 1024;
 const PREFETCH_CONCURRENCY = 6;

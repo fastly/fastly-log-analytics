@@ -8,7 +8,7 @@ The flush writes up to 288 window files per kind per day. Compaction cuts that f
 
 ## Why it exists
 
-Small files make browser reads slow and LIST-heavy. Request and RUM data follow master-plan D1 (no server rewrite; compaction happens in the browser). The operational-logging spec §4 makes ops files the one exception to D1.
+Small files make browser reads slow and LIST-heavy. Request and RUM window files are compacted separately, by the compaction job (`ingest/compaction.rs`, `cron_kind` `request_compact` and `rum_compact`), not by this stage.
 
 ## How it works
 
