@@ -1,4 +1,5 @@
 import { fnv1a32, keyWindowMs } from "../parquet-key";
+import { fetchRetrying } from "../fetch-retry";
 import { CARD_FIELDS } from "./summaries";
 import { isCdnHit } from "./cdn-cache";
 import type { FileRollup, FileSource } from "./engine";
@@ -745,7 +746,7 @@ export function browserSource(
             }),
         };
       const start = performance.now();
-      const response = await fetch(url.href, {
+      const response = await fetchRetrying(url.href, {
         credentials: "same-origin",
         cache: "no-store",
         signal,
@@ -817,7 +818,7 @@ export function browserSource(
           file.size,
           async () => {
             started = performance.now();
-            response = await fetch(url.href, {
+            response = await fetchRetrying(url.href, {
               credentials: "same-origin",
               cache: "no-store",
               signal,
@@ -888,7 +889,7 @@ export function browserSource(
         const pageLoadId = options?.getPageLoadId?.();
         const start =
           typeof performance !== "undefined" ? performance.now() : Date.now();
-        const response = await fetch(baseUrl + url, {
+        const response = await fetchRetrying(baseUrl + url, {
           credentials: "same-origin",
           ...(headers ? { headers } : {}),
           signal,
@@ -944,7 +945,7 @@ export function browserSource(
         ...(limits.foldFileTelemetry ? { "X-FLP-Fold-Telemetry": "1" } : {}),
       });
       const begin = performance.now();
-      const response = await fetch(`${baseUrl}${fileRequestPath(file.key)}`, {
+      const response = await fetchRetrying(`${baseUrl}${fileRequestPath(file.key)}`, {
         credentials: "same-origin",
         cache: "no-store",
         signal,
@@ -1055,7 +1056,7 @@ export function browserSource(
         typeof performance !== "undefined" ? performance.now() : Date.now();
       // CacheStorage is the only persistent copy; skip the HTTP cache, which
       // would otherwise keep a second one because /api/file is immutable.
-      const response = await fetch(url, {
+      const response = await fetchRetrying(url, {
         credentials: "same-origin",
         cache: "no-store",
         ...(headers ? { headers } : {}),

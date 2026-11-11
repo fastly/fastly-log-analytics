@@ -1,3 +1,4 @@
+import { isNetworkFailure } from "./fetch-retry";
 import { isCloudMode } from "./mode";
 
 let sequence = 0;
@@ -35,6 +36,7 @@ function failureReason(failure: unknown): string {
   if (failure instanceof Response) {
     return failure.status === 413 ? "HTTP 413: query exceeds the browser scan budget" : `HTTP ${failure.status}`;
   }
+  if (isNetworkFailure(failure)) return "NetworkError";
   const name = failure instanceof Error ? failure.name : "";
   return /^[A-Za-z]\w{0,63}$/.test(name) ? name : "Error";
 }

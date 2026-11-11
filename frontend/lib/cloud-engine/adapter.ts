@@ -46,6 +46,7 @@ import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import { bindCloudReadContext, CloudBudgetError, cloudReadContext, ensureCloudRange } from "./range-loader";
+import { fetchRetrying } from "./fetch-retry";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
@@ -305,7 +306,7 @@ async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Re
   if (entry && now - entry.usedAt <= METADATA_TTL_MS && now - entry.at < METADATA_MAX_AGE_MS) {
     entry.usedAt = now;
   } else {
-    const value = fetch(path).then(async (response) => ({
+    const value = fetchRetrying(path).then(async (response) => ({
       status: response.status, contentType: response.headers.get("content-type"), body: await response.text(),
     }));
     const created = { at: now, usedAt: now, value };

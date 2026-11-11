@@ -62,6 +62,21 @@ it("does not turn stale-view exceptions or canceled queries into successful read
   }
 });
 
+it("names a dropped connection a network error without exposing the failing URL", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new TypeError("Failed to fetch https://sentinel-private-host/api/file");
+    await expect(measureCloudQuery("api./api/insight-availability", async () => { throw error; })).rejects.toBe(error);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "error", error: "NetworkError" }]);
+    expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
 it("reports failed local API responses as errors without exposing response bodies", async () => {
   setCloudModeRuntime(true);
   const events: unknown[] = [];
