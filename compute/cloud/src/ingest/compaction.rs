@@ -573,19 +573,26 @@ pub fn compact_pass<R: Runtime>(
                 run.report.more_pending = true;
                 false
             }
+            // Ingest publishes to the same watermark several times a second, so losing both
+            // CAS attempts is contention: save the finished job and let the next pass commit it.
             Err(error) if error == "compact_watermark_conflict" => {
                 run.state.lease_until = 0;
                 run.state.handoff = None;
                 if run.changed && run.remaining() > run.tail {
-                    if let Ok(value) = serde_json::to_value(&run.state) {
-                        if serde_json::to_vec(&value)
-                            .is_ok_and(|bytes| bytes.len() <= MAX_STATE_BYTES)
-                        {
-                            let _ = run.write(&value, false);
-                        }
+                    let value = serde_json::to_value(&run.state).map_err(|e| e.to_string())?;
+                    if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len()
+                        > MAX_STATE_BYTES
+                    {
+                        return Err("compact_state_limit".into());
                     }
+                    run.write(&value, false)?;
                 }
-                return Err(error);
+                run.report.compacts = 0;
+                run.report.sources = 0;
+                run.report.rows = 0;
+                run.report.more_pending = true;
+                run.report.stopped = Some("watermark_conflict".into());
+                return Ok(run.report);
             }
             Err(error) => return Err(error),
         };

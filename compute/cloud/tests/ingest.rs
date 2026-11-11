@@ -12720,22 +12720,28 @@ mod request_compaction {
     }
 
     #[test]
-    fn watermark_conflict_after_merge_saves_completed_job_and_releases_lease_immediately() {
+    fn watermark_conflict_after_merge_defers_saves_completed_job_and_releases_lease_immediately() {
         let fake = Fake::new(NOW);
         seed(&fake, 3);
         fake.conflict_watermark.set(true);
         let service = service();
-        let mut failed = false;
+        let mut deferred = None;
         for _ in 0..32 {
             fake.new_request();
-            if let Err(err) = compaction::request_compact(&store(&fake, &service), "ck", TARGET, 0)
-            {
-                assert_eq!(err, "compact_watermark_conflict");
-                failed = true;
+            let report =
+                compaction::request_compact(&store(&fake, &service), "ck", TARGET, 0).unwrap();
+            if report.stopped.as_deref() == Some("watermark_conflict") {
+                deferred = Some(report);
                 break;
             }
         }
-        assert!(failed);
+        // Ingest publishes to the same watermark many times a second; losing the CAS race is
+        // contention the next pass resolves, not a failure.
+        let deferred = deferred.expect("a pass deferred on the watermark conflict");
+        assert!(deferred.more_pending);
+        assert!(deferred.errors.is_empty());
+        assert_eq!(deferred.compacts, 0);
+        assert_eq!(deferred.sources, 0);
         let raw_state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
         let saved: compaction::State = serde_json::from_value(raw_state.clone()).unwrap();
         assert_eq!(saved.lease_until, 0, "lease released on watermark conflict");
