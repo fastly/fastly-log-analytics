@@ -36,6 +36,9 @@ router = APIRouter()
 _SECRET_KEYS = frozenset({"aes_key_hex", "request_secret"})
 _scoring_svc_version_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
 _scoring_pragma_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
+# "Not ready" is kept briefly so one page load's status reads share a Fastly
+# probe, yet Fastly enabling the pragmas still shows up within the TTL.
+_scoring_pragma_missing_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
 
 
 def _safe_scoring_dict(scoring: dict | None) -> dict:
@@ -225,13 +228,17 @@ def scoring_status(service_id: str = Path(..., description="Logging service ID")
         if token:
             from backend.provision.fastly_api import service_has_scoring_pragmas
 
-            ready = _cached_fastly_probe(
-                _scoring_pragma_cache,
-                service_id,
-                lambda: service_has_scoring_pragmas(service_id, token),
-                "pragma check",
-                cache_if=lambda v: v is True,
-            )
+            ready = _scoring_pragma_missing_cache.get(service_id)
+            if ready is None:
+                ready = _cached_fastly_probe(
+                    _scoring_pragma_cache,
+                    service_id,
+                    lambda: service_has_scoring_pragmas(service_id, token),
+                    "pragma check",
+                    cache_if=lambda v: v is True,
+                )
+                if ready is False:
+                    _scoring_pragma_missing_cache[service_id] = False
             if ready is not None:
                 result["preflight_pragmas_ready"] = ready
         return result

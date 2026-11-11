@@ -43,10 +43,22 @@ _ADMIN_ONLY_COMPOSITE_KEYS = {"evaluation", "evaluation_per_reason"}
 @pytest.fixture
 def _clear_analytics_cache_between_tests(monkeypatch):
     monkeypatch.setattr("backend.provision.fastly_api.service_has_scoring_pragmas", lambda *a, **kw: True)
-    for cache in (_ss._analytics_cache, _ss._inflight, _ss._scoring_svc_version_cache, _ss._scoring_pragma_cache):
+    for cache in (
+        _ss._analytics_cache,
+        _ss._inflight,
+        _ss._scoring_svc_version_cache,
+        _ss._scoring_pragma_cache,
+        _ss._scoring_pragma_missing_cache,
+    ):
         cache.clear()
     yield
-    for cache in (_ss._analytics_cache, _ss._inflight, _ss._scoring_svc_version_cache, _ss._scoring_pragma_cache):
+    for cache in (
+        _ss._analytics_cache,
+        _ss._inflight,
+        _ss._scoring_svc_version_cache,
+        _ss._scoring_pragma_cache,
+        _ss._scoring_pragma_missing_cache,
+    ):
         cache.clear()
 
 
@@ -203,8 +215,11 @@ def test_status_surfaces_preflight_pragmas_ready_when_disabled_and_token_present
         r1 = client.get(f"/api/services/{LOG_SVC}/scoring/status")
         assert r1.status_code == 200 and r1.json()["enabled"] is False
         assert r1.json()["preflight_pragmas_ready"] is False
+        r1b = client.get(f"/api/services/{LOG_SVC}/scoring/config")
+        assert r1b.json()["status"]["preflight_pragmas_ready"] is False
         assert mock_probe.call_count == 1
 
+    _ss._scoring_pragma_missing_cache.clear()
     with patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=True) as mock_probe2:
         r2 = client.get(f"/api/services/{LOG_SVC}/scoring/status")
         r3 = client.get(f"/api/services/{LOG_SVC}/scoring/status")
