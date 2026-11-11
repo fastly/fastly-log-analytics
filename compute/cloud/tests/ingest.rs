@@ -1216,6 +1216,47 @@ fn rows(fake: &Fake, kind: LogKind) -> Vec<Value> {
         .rows
 }
 
+/// Cron rows wherever they are: flushed to ops files or still in the live outbox. A flush moves
+/// rows out of the live read, and closed outbox buckets flush within the interval floor.
+fn cron_runs(fake: &Fake) -> Vec<Value> {
+    let flushed: Vec<Vec<u8>> = fake
+        .bucket
+        .borrow()
+        .iter()
+        .filter(|(key, _)| key.contains("processed/ops/cron_runs/"))
+        .map(|(_, bytes)| bytes.clone())
+        .collect();
+    let mut out = Vec::new();
+    for batch in flushed.iter().flat_map(|bytes| batches(bytes)) {
+        let text = |name| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .clone()
+        };
+        let (kind, outcome) = (text("cron_kind"), text("outcome"));
+        let deleted = batch
+            .column_by_name("deleted_files")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .clone();
+        out.extend((0..batch.num_rows()).map(|i| {
+            json!({
+                "cron_kind": kind.value(i),
+                "outcome": outcome.value(i),
+                "deleted_files": (!deleted.is_null(i)).then(|| deleted.value(i)),
+            })
+        }));
+    }
+    out.extend(rows(fake, LogKind::CronRuns));
+    out
+}
+
 fn batches(bytes: &[u8]) -> Vec<RecordBatch> {
     ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))
         .unwrap()
@@ -3530,13 +3571,13 @@ fn idle_ticks_and_flush_probes_run_an_overdue_flush_sweep_and_reconcile_within_a
             .any(|k| k.contains("processed/ops/")),
         "the overdue flush committed ops files"
     );
-    let kinds = rows(&fake, LogKind::CronRuns)
+    let kinds = cron_runs(&fake)
         .iter()
         .map(|r| r["cron_kind"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert!(kinds.contains(&"storage_reconcile".to_owned()), "{kinds:?}");
     // With nothing expired the sweep still logs its run, so its six-hour cadence stays visible.
-    let sweeps: Vec<Value> = rows(&fake, LogKind::CronRuns)
+    let sweeps: Vec<Value> = cron_runs(&fake)
         .into_iter()
         .filter(|r| r["cron_kind"] == "retention_sweep")
         .collect();
@@ -12984,7 +13025,7 @@ mod request_compaction {
 
     /// A window file with enough wide string columns that a few of them fill a compact's footer.
     fn wide_window(fake: &Fake, start: i64) -> String {
-        let names = (0..200).map(|c| format!("c{c:03}")).collect::<Vec<_>>();
+        let names = (0..800).map(|c| format!("c{c:03}")).collect::<Vec<_>>();
         let schema = Arc::new(arrow_schema::Schema::new(
             names
                 .iter()
