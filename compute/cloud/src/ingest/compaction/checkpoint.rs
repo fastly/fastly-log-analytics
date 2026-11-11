@@ -2,7 +2,10 @@ use parquet::file::metadata::{
     FileMetaData, ParquetMetaData, ParquetMetaDataReader, ParquetMetaDataWriter, RowGroupMetaData,
 };
 
-pub const MAX_FOOTER_BYTES: usize = 256 * 1024;
+/// A compact's footer grows by one column-chunk entry per column per row group (about 6 KiB
+/// per 4096-row group of the request schema), so this bounds a compact's size well before its
+/// byte target: 1 MiB is roughly 170 groups, about 700k rows or 28 MiB of request logs.
+pub const MAX_FOOTER_BYTES: usize = 1024 * 1024;
 pub const MAX_ROW_GROUPS: usize = 512;
 /// Covers what an append can add outside its own row groups: the total row count's and the
 /// row-group list header's varints.

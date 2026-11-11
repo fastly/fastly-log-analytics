@@ -16,9 +16,10 @@ pub const CHECKPOINT_RESERVE: Duration = Duration::from_secs(2);
 pub const FASTLY_API_TIMEOUT: Duration = Duration::from_secs(30);
 pub const FOS_TIMEOUT: Duration = Duration::from_secs(60);
 pub const FOS_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
-/// One compaction checkpoint: 8 MiB part buffer + 16 MiB source + 256 KiB footer + header.
+/// One compaction checkpoint: 8 MiB part buffer + 16 MiB source + the footer limit + header.
 /// Bounding the read and its restored copy leaves room within the unchanged 128 MiB heap.
-pub const MAX_FOS_RESPONSE_LIMIT: usize = 24 * 1024 * 1024 + 256 * 1024 + 16;
+pub const MAX_FOS_RESPONSE_LIMIT: usize =
+    24 * 1024 * 1024 + crate::ingest::compaction::checkpoint::MAX_FOOTER_BYTES + 16;
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(60);
 pub const STATE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const REQUEST_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -863,7 +864,7 @@ mod tests {
 
     #[test]
     fn fos_response_reader_rejects_invalid_limits_without_reading() {
-        for limit in [24 * 1024 * 1024 + 256 * 1024 + 17, usize::MAX] {
+        for limit in [super::MAX_FOS_RESPONSE_LIMIT + 1, usize::MAX] {
             let mut body = io::repeat(b'x').take(1);
             let mut read = 0;
             assert_eq!(

@@ -10,7 +10,7 @@
 //! Source identities, multipart progress, rebased footer and buffered bytes are checkpointed.
 //! Neither a Parquet writer nor process memory needs to survive a request.
 
-mod checkpoint;
+pub mod checkpoint;
 
 use super::{
     bump_manifest_gen, hour_dir, parse_processed, processed_prefix,
