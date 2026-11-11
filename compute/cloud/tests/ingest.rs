@@ -11338,6 +11338,67 @@ mod request_compaction {
         compaction::request_compact(&store(fake, &service), "ck", target, 0).unwrap()
     }
 
+    #[test]
+    fn a_lagging_checkpoint_save_does_not_spend_the_final_state_write() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 60);
+        fake.lag_compact_reads.set(true);
+        let service = service();
+        for (step, conflict, lag) in [(0, true, 1), (107, false, 3), (129, false, 4)] {
+            fake.now.set(fake.now.get() + step);
+            fake.conflict_watermark.set(conflict);
+            fake.lagging_compact_reads.set(lag);
+            fake.new_request();
+            let report =
+                compaction::request_compact_pass(&store(&fake, &service), "ck", TARGET, 1, None)
+                    .unwrap();
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert!(fake.calls.get() < BUDGET);
+        }
+    }
+
+    /// Passes under random watermark contention and KV API lag stop within their calls instead
+    /// of failing: a write they can't confirm is left to the next pass.
+    #[test]
+    fn passes_under_kv_lag_and_contention_stay_within_their_calls() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut rnd = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        let service = service();
+        for trial in 0..96 {
+            let fake = Fake::new(NOW);
+            seed(&fake, [3, 8, 33, 60, 90][trial % 5]);
+            fake.lag_compact_reads.set(true);
+            for pass in 0..30 {
+                fake.conflict_watermark.set(rnd(3) == 0);
+                fake.lagging_compact_reads.set(rnd(6) as u32);
+                fake.new_request();
+                let report = compaction::request_compact_pass(
+                    &store(&fake, &service),
+                    "ck",
+                    TARGET,
+                    1,
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("trial {trial} pass {pass}: {error}"));
+                assert!(
+                    report.errors.is_empty(),
+                    "trial {trial} pass {pass}: {:?}",
+                    report.errors
+                );
+                assert!(
+                    fake.calls.get() < BUDGET,
+                    "trial {trial} pass {pass} spent its tail"
+                );
+                fake.now.set(fake.now.get() + 1 + rnd(400));
+            }
+        }
+    }
+
     fn finish(fake: &Fake, target: u64) -> Report {
         for _ in 0..64 {
             let report = run(fake, target);

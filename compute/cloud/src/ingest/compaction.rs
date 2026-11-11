@@ -83,6 +83,12 @@ const MAX_STATE_BYTES: usize = 512 * 1024;
 /// replaced, and the pause before each read past the first two.
 const READ_BACK_READS: u32 = 4;
 const READ_BACK_WAIT_MS: u64 = 400;
+/// What a read-back read can cost beyond the pass's tail: a fresh read that retries once, and the
+/// write it recovers.
+const READ_BACK_CALLS: u32 = 3;
+/// A state write the pass's calls could not confirm: nothing was written over another writer,
+/// and the next pass reads the state afresh.
+const STATE_BUDGET: &str = "compact_state_budget";
 
 /// The window files a pass merges. Each has its own state record, so a lease or job held on one
 /// never stalls another.
@@ -593,7 +599,10 @@ pub fn compact_pass<R: Runtime>(
                     {
                         return Err("compact_state_limit".into());
                     }
-                    run.write(&value, false)?;
+                    match run.write(&value, false) {
+                        Err(error) if error == STATE_BUDGET => {}
+                        result => result?,
+                    }
                 }
                 run.report.compacts = 0;
                 run.report.sources = 0;
@@ -679,7 +688,18 @@ pub fn compact_pass<R: Runtime>(
         if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > MAX_STATE_BYTES {
             return Err("compact_state_limit".into());
         }
-        run.write(&value, false)?;
+        let written = if run.remaining() > run.tail {
+            run.write(&value, false)
+        } else {
+            Err(STATE_BUDGET.into())
+        };
+        match written {
+            Err(error) if error == STATE_BUDGET => {
+                run.report.more_pending = true;
+                run.report.stopped = Some("call_budget".into());
+            }
+            result => result?,
+        }
     }
     Ok(run.report)
 }
@@ -935,7 +955,13 @@ impl<R: Runtime> Run<'_, '_, R> {
         }
         self.replaced = self.saved.replace(value.clone()).or(self.replaced.take());
         if read_back {
-            self.read_back(value)?;
+            // The write landed; a later write that finds its generation stale recovers it.
+            match self.read_back(value) {
+                Err(error) if error == STATE_BUDGET => {}
+                result => {
+                    result?;
+                }
+            }
         }
         Ok(())
     }
@@ -943,7 +969,8 @@ impl<R: Runtime> Run<'_, '_, R> {
     /// Reads the state until it shows `expected` (twice), taking the generation read. A read that
     /// still shows the value `expected` replaced means the KV API lags the write, which can last
     /// past a second, so reading goes on after a pause, up to [`READ_BACK_READS`] reads while
-    /// the commit reserve stays affordable.
+    /// the commit reserve stays affordable. A read the pass can't afford ends it with
+    /// [`STATE_BUDGET`].
     fn read_back(&mut self, expected: &Value) -> Result<bool, String> {
         let runtime = self.store.runtime;
         let token = runtime
@@ -957,6 +984,9 @@ impl<R: Runtime> Run<'_, '_, R> {
                     break;
                 }
                 runtime.admin_wait(READ_BACK_WAIT_MS);
+            }
+            if self.remaining() < self.tail + READ_BACK_CALLS {
+                return Err(STATE_BUDGET.into());
             }
             let record = read_fresh(runtime, self.dataset.state_key(), &token)?;
             self.generation = record.as_ref().map(|r| r.generation.clone());
@@ -1846,6 +1876,9 @@ impl<R: Runtime> Run<'_, '_, R> {
         if progressed {
             self.checkpoint_job(&mut job, &writer, finishing)?;
         }
+        // A save the KV API lags costs more than its share, so the completion is afforded again
+        // from what is actually left; spending past that leaves the final state write nothing.
+        let finishing = finishing && self.checkpointable(3);
         if !finishing {
             self.report.more_pending = true;
             if job.next == job.sources.len() {
