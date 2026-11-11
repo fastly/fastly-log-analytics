@@ -27,6 +27,7 @@ from celery import Celery
 from celery.signals import setup_logging, worker_process_init
 
 from backend.config import SSE_BACKPLANE
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -266,8 +267,23 @@ else:
 # ── Celery/APScheduler/ledger status snapshot & sampler (folded from celery_status.py) ──
 
 
+# Admin pages poll status every few seconds; the ledger totals are the slow part
+# (one metadata scan per service) and move slowly, so reuse them briefly.
+_LEDGER_SUMMARY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=1, ttl_seconds=30.0)
+CacheRegistry.register("celery_app._LEDGER_SUMMARY_CACHE", _LEDGER_SUMMARY_CACHE)
+
+
 def ingest_ledger_summary() -> dict[str, int]:
     """Aggregate ingest_ledger status counts across all configured services."""
+    cached: dict[str, int] | None = _LEDGER_SUMMARY_CACHE.get("ledger")
+    if cached is not None:
+        return dict(cached)
+    ledger = _read_ingest_ledger_summary()
+    _LEDGER_SUMMARY_CACHE["ledger"] = dict(ledger)
+    return ledger
+
+
+def _read_ingest_ledger_summary() -> dict[str, int]:
     ledger: dict[str, int] = {}
     try:
         from backend.config import list_configs

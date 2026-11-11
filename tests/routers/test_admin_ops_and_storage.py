@@ -134,6 +134,26 @@ def test_high_scale_celery_status_full_payload(client):
         assert data["ledger"] == {"discovered": 4, "claimed": 2, "committed": 200, "quarantined": 1, "dead_letter": 3}
 
 
+def test_ingest_ledger_summary_reuses_counts_between_admin_polls():
+    from backend.celery_app import ingest_ledger_summary
+    from backend.utils.bounded_cache import CacheRegistry
+
+    cur = MagicMock()
+    cur.fetchall.return_value = [("committed", 7)]
+    con = MagicMock()
+    con.cursor.return_value = cur
+    with _patches(
+        ("backend.config.list_configs", [{"service_id": "svc-a"}]),
+        ("backend.core.metadata.base.get_con", con),
+    ) as (_, get_con):
+        assert ingest_ledger_summary() == {"committed": 7}
+        assert ingest_ledger_summary() == {"committed": 7}
+        assert get_con.call_count == 1
+        CacheRegistry.clear_all()
+        ingest_ledger_summary()
+        assert get_con.call_count == 2
+
+
 def test_celery_status_idle_and_unreachable_broker_fallbacks(client):
     mock_i = MagicMock()
     mock_i.active.return_value = mock_i.stats.return_value = {}
