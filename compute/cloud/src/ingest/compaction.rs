@@ -287,6 +287,45 @@ pub struct Turn<'a> {
 /// [`request_compact`] as one of a maintenance turn's passes. A pass that leaves work for the
 /// turn's next pass hands it the lease in its final state write, so the next pass needn't write
 /// the state just to take the lease (a paced KV write, ~1 s live).
+/// Reads the state past the edge cache. The KV API now and then answers 200 with a body cut
+/// short; one more read clears that before the pass gives up.
+fn read_fresh<R: Runtime>(
+    runtime: &R,
+    token: &str,
+) -> Result<Option<crate::admin::Record>, String> {
+    match runtime.admin_get_fresh(STATE_KEY, token) {
+        Err(error)
+            if matches!(
+                error.as_str(),
+                "backend_json_invalid" | "backend_body_unavailable"
+            ) =>
+        {
+            runtime.admin_get_fresh(STATE_KEY, token)
+        }
+        result => result,
+    }
+}
+
+fn read_state<R: Runtime>(
+    runtime: &R,
+    token: &str,
+) -> Result<(Option<crate::admin::Record>, State), String> {
+    let parse = |record: &Option<crate::admin::Record>| {
+        record
+            .as_ref()
+            .map(|r| serde_json::from_value::<State>(r.value.clone()))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    let record = read_fresh(runtime, token)?;
+    if let Ok(state) = parse(&record) {
+        return Ok((record, state));
+    }
+    let record = read_fresh(runtime, token)?;
+    let state = parse(&record).map_err(|_| "compact_state_invalid".to_owned())?;
+    Ok((record, state))
+}
+
 pub fn request_compact_pass<R: Runtime>(
     store: &Store<'_, R>,
     cdn_key: &str,
@@ -300,15 +339,8 @@ pub fn request_compact_pass<R: Runtime>(
         .secret(&store.service.fastly_token_ref)?
         .filter(|token| !token.is_empty())
         .ok_or("fastly_token_missing")?;
-    let record = runtime.admin_get_fresh(STATE_KEY, &token)?;
+    let (record, state) = read_state(runtime, &token)?;
     let watermark = runtime.admin_get(WATERMARK_KEY)?;
-    let state: State = record
-        .as_ref()
-        .map(|r| {
-            serde_json::from_value(r.value.clone()).map_err(|_| "compact_state_invalid".to_owned())
-        })
-        .transpose()?
-        .unwrap_or_default();
     // [`VCPU_STOP_MS`] bounds the pass's own work. Live workers have spent 45-60 ms on startup
     // and these state reads by now, so counting from the execution start admits nothing.
     let store = &Store {
@@ -735,7 +767,7 @@ impl<R: Runtime> Run<'_, '_, R> {
             .filter(|token| !token.is_empty())
             .ok_or("fastly_token_missing")?;
         for _ in 0..2 {
-            let record = runtime.admin_get_fresh(STATE_KEY, &token)?;
+            let record = read_fresh(runtime, &token)?;
             self.generation = record.as_ref().map(|r| r.generation.clone());
             let Some(mut value) = record.map(|r| r.value) else {
                 return Ok(false);

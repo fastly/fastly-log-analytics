@@ -56,6 +56,8 @@ struct Fake {
     /// The injected compaction state conflict writes another writer's value, not the same one.
     foreign_compact_conflict: Cell<bool>,
     fail_fresh_compact_state: Cell<bool>,
+    /// Errors the next fresh compaction state reads return, one per read.
+    fresh_compact_state_glitches: RefCell<std::collections::VecDeque<String>>,
     /// Compaction state CAS attempts.
     compact_state_writes: Cell<u32>,
     cdn_gets: RefCell<Vec<String>>,
@@ -189,6 +191,7 @@ impl Fake {
             lagging_compact_state: Default::default(),
             foreign_compact_conflict: Cell::new(false),
             fail_fresh_compact_state: Cell::new(false),
+            fresh_compact_state_glitches: Default::default(),
             compact_state_writes: Cell::new(0),
             cdn_gets: Default::default(),
             fos_rounds: Default::default(),
@@ -518,6 +521,9 @@ impl Runtime for Fake {
             self.kv_reads.borrow_mut().push(key.into());
             if self.fail_fresh_compact_state.get() {
                 return Err("injected_fresh_compact_state_failure".into());
+            }
+            if let Some(error) = self.fresh_compact_state_glitches.borrow_mut().pop_front() {
+                return Err(error);
             }
             if let Some(record) = self.lagging_compact_state.borrow_mut().take() {
                 return Ok(Some(record));
@@ -11669,6 +11675,50 @@ mod request_compaction {
         assert!(!fake.kv.borrow().contains_key(compaction::STATE_KEY));
         assert_eq!(*fake.bucket.borrow(), before);
         assert!(fake.uploads.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_compaction_state_body_cut_short_once_is_read_again() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 24);
+        fake.fresh_compact_state_glitches
+            .borrow_mut()
+            .push_back("backend_json_invalid".into());
+        let report = finish(&fake, TARGET);
+        assert_eq!(report.sources, 24);
+        assert_eq!(compacts(&fake).len(), 1);
+    }
+
+    #[test]
+    fn a_compaction_state_body_unreadable_twice_fails_before_any_mutation() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 2);
+        let before = fake.bucket.borrow().clone();
+        for _ in 0..2 {
+            fake.fresh_compact_state_glitches
+                .borrow_mut()
+                .push_back("backend_body_unavailable".into());
+        }
+        fake.new_request();
+        let error =
+            compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 0).unwrap_err();
+        assert_eq!(error, "backend_body_unavailable");
+        assert!(!fake.kv.borrow().contains_key(compaction::STATE_KEY));
+        assert_eq!(*fake.bucket.borrow(), before);
+        assert!(fake.uploads.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_compaction_state_read_that_is_not_a_state_once_is_read_again() {
+        let fake = Fake::new(NOW);
+        seed(&fake, 24);
+        *fake.lagging_compact_state.borrow_mut() = Some(Record {
+            generation: "9".into(),
+            value: json!({"upload": 5}),
+        });
+        let report = finish(&fake, TARGET);
+        assert_eq!(report.sources, 24);
+        assert_eq!(compacts(&fake).len(), 1);
     }
 
     #[test]
