@@ -118,3 +118,11 @@ describe("Cloud scan metadata", () => {
     expect(counts["/api/log-extents"]).toBe(1);
   });
 });
+
+describe("Cloud bootstrap", () => {
+  it("reports NGWAF as not configured, so /security never draws the NGWAF row and then drops it", async () => {
+    vi.stubGlobal("fetch", metadataFetcher());
+    const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
+    expect(await response?.json()).toMatchObject({ ngwaf_configured: false });
+  });
+});

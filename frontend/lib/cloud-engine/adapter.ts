@@ -753,6 +753,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         services,
         active_service_id: activeServiceId,
         active_log_field_ids: activeLogFieldIds,
+        // Cloud has no NGWAF; saying so up front keeps /security from drawing the NGWAF row then removing it.
+        ngwaf_configured: false,
         settings: {
           needs_login: false,
           is_remote_analyst: isRemoteAnalyst,
