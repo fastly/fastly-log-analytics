@@ -1171,6 +1171,9 @@ async function readinessFailure(page) {
     stale: readiness?.observed && !readiness.ready && !readiness.pending && !readiness.errors ? 1 : 0,
     pending: readiness?.pending ?? 0,
     errors: readiness?.errors ?? 0,
+    pendingSections: Array.isArray(readiness?.pendingSections)
+      ? readiness.pendingSections.slice(0, 5).map((section) => cloudReadiness.redactFailure(section))
+      : [],
   };
 }
 

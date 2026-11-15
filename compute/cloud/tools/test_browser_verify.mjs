@@ -241,7 +241,9 @@ test("nested data routes await delayed namespaced results, reject delayed errors
             assert.equal(readiness?.route, "/admin/session-scoring");
             if (scenario === "timeout") {
               assert.match(error.message, /Timed out after 80ms/);
+              assert.match(error.message, /pending sections: api\.\/api\/services\/fixture-service\/scoring\/analytics/);
               assert.equal(readiness.pending, 1);
+              assert.deepEqual(readiness.pendingSections, ["api./api/services/fixture-service/scoring/analytics"]);
             } else {
               assert.match(error.message, /query failed/i);
               assert.match(error.message, /\/admin\/session-scoring/);

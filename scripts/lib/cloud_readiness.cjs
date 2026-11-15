@@ -68,8 +68,9 @@ function installCloudReadiness() {
         : analytical.some(query => query.state === 'success'));
       const failures = active.filter(query => query.state === 'error').slice(0, 5)
         .map(query => ({ section: query.section, error: query.error }));
+      const pendingSections = active.filter(query => query.state === 'pending').slice(0, 5).map(query => query.section);
       return { source: 'cloud-query', observed, ready: Boolean(ready), pending, errors,
-        complete, failures, totalRows: dashboard?.totalRows ?? null, worker: workerRoute === current() ? worker : null };
+        complete, failures, pendingSections, totalRows: dashboard?.totalRows ?? null, worker: workerRoute === current() ? worker : null };
     },
   };
 }
@@ -115,7 +116,9 @@ async function waitForSnapshot(page, snapshot, timeoutMs, label) {
   const timeoutError = () => {
     const count = value => (Number.isSafeInteger(value) ? value : 'unknown');
     const counts = last
-      ? `pending=${count(last.pending)} complete=${count(last.complete)} missing=${last.ready ? 0 : 1}`
+      ? `pending=${count(last.pending)} complete=${count(last.complete)} missing=${last.ready ? 0 : 1}${
+        Array.isArray(last.pendingSections) && last.pendingSections.length
+          ? ` pending sections: ${last.pendingSections.map(redactFailure).join(', ')}` : ''}`
       : 'no snapshot';
     return new Error(`Timed out after ${timeoutMs}ms waiting for current analytical results on ${routeLabel(page, label)} (${counts})`);
   };
