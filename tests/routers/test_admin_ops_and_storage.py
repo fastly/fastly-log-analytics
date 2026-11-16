@@ -154,6 +154,39 @@ def test_ingest_ledger_summary_reuses_counts_between_admin_polls():
         assert get_con.call_count == 2
 
 
+def test_celery_status_waits_for_worker_replies_slower_than_the_stats_probe():
+    """Live Elevation workers answer stats in ~0.25s but active/registered/scheduled
+    in ~0.3-0.8s, so a fixed 0.25s inspect timeout returned a worker with no tasks."""
+    from backend.celery_app import get_celery_status
+
+    worker = "celery@worker-1"
+    task = {"id": "t-1", "name": "backend.tasks.ingest.ingest_batch"}
+    replies = {"stats": (0.2, {}), "active": (0.8, [task]), "registered": (0.3, [task["name"]]), "scheduled": (0.3, [])}
+    waited: list[float] = []
+
+    def _inspect(timeout: float, limit: int | None = None):
+        def _broadcast(command: str):
+            latency, body = replies[command]
+            answered = timeout >= latency
+            waited.append(latency if answered and limit == 1 else timeout)
+            return {worker: body} if answered else None
+
+        return SimpleNamespace(**{c: (lambda c=c: _broadcast(c)) for c in replies})
+
+    with _patches(
+        ("backend.celery_app.app.control.inspect", {"side_effect": _inspect}),
+        ("backend.celery_app.celery_queue_depths", ({}, True)),
+        ("backend.celery_app.ingest_ledger_summary", {}),
+    ):
+        status = get_celery_status()
+
+    assert status["workers"]["count"] == 1
+    assert status["workers"]["active_tasks"] == {worker: [task]}
+    assert status["workers"]["registered"] == {worker: [task["name"]]}
+    assert status["workers"]["scheduled"] == {worker: []}
+    assert sum(waited) < 2.0
+
+
 def test_celery_status_idle_and_unreachable_broker_fallbacks(client):
     mock_i = MagicMock()
     mock_i.active.return_value = mock_i.stats.return_value = {}

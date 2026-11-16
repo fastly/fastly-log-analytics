@@ -362,6 +362,9 @@ def inprocess_active_runs_entries() -> list[dict[str, Any]]:
     return out
 
 
+_WORKER_REPLY_TIMEOUT_S = 2.0
+
+
 def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
     """Full status payload for the admin endpoint / SSE feeder."""
     queues, broker_reachable = celery_queue_depths()
@@ -376,9 +379,10 @@ def get_celery_status(timeout: float = 0.25) -> dict[str, Any]:
         workers_error = "Broker unreachable (Broker connection timeout)"
     else:
         try:
-            i = app.control.inspect(timeout=timeout)
-            stats = i.stats() or {}
+            stats = app.control.inspect(timeout=timeout).stats() or {}
             if stats:
+                # Workers answer these slower than stats (~0.3-0.8s live); return once each known worker replies.
+                i = app.control.inspect(timeout=max(timeout, _WORKER_REPLY_TIMEOUT_S), limit=len(stats))
                 active = i.active() or {}
                 registered = i.registered() or {}
                 scheduled = i.scheduled() or {}
