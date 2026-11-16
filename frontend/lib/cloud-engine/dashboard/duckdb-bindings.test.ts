@@ -495,6 +495,49 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("answers several files in one pass per schema with a separate result for each", async () => {
+    let queries = 0;
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: (sql, signal) => { queries++; return backend.query(sql, signal); } };
+    } });
+    const t = 1700000000000;
+    const rows = (i: number) => [
+      { timestamp: t + i * 60_000, status: 200, cache: "HIT", resp_bytes: i, country: "US", edge: i % 2 === 0 },
+      { timestamp: t + i * 60_000 + 1, status: 500, cache: "MISS", resp_bytes: 1, country: "DE", edge: true },
+      { timestamp: t + i * 60_000 + 2, status: 200, cache: "MISS", resp_bytes: 3, country: `C${i}`, edge: false },
+    ];
+    const files = [
+      ...[0, 1, 2].map((i) => ({ kind: "buffer" as const, bytes: parquetFixture(rows(i)) })),
+      { kind: "buffer" as const, bytes: parquetFixture(rows(3), ["edge"]) },
+      { kind: "buffer" as const, bytes: parquetFixture([{ timestamp: t, status: 404, cache: "HIT", resp_bytes: 1 }]) },
+    ];
+    const filters = [{ mode: "include" as const, field: "status", value: "200" }];
+    const fields = ["status", "country", "cache"];
+    const options = { edgeOnly: true, topK: null, allValuesFields: [] };
+    const bounds = (i: number) => (i === 2 ? [t + 120_001, t + 180_000] : [-Infinity, Infinity]);
+    await engine.prewarm();
+
+    const expected = [];
+    for (const [i, file] of files.entries()) {
+      const [from, to] = bounds(i);
+      const one = new Aggregator(from, to, fields);
+      await engine.queryParquetIntoAggregator(file, from, to, filters, one, options);
+      expected.push(one.result());
+    }
+    const targets = files.map(() => new Aggregator(-Infinity, Infinity, fields));
+    queries = 0;
+    await engine.queryParquetPerFile(
+      files.map((access, i) => ({ access, target: targets[i], fromMs: bounds(i)[0], toMs: bounds(i)[1] })),
+      filters,
+      options,
+    );
+    expect(targets.map((target) => target.result())).toEqual(expected);
+    expect(expected.map((result) => result.totalRequests)).toEqual([1, 0, 0, 2, 0]);
+    expect(queries).toBeLessThan(files.length * 3);
+    await engine.reset();
+  });
+
   it("retains the query error when selective-file cleanup also fails", async () => {
     let fail = false, queryFailures = 0;
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {

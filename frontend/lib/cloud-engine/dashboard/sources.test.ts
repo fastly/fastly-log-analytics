@@ -16,6 +16,7 @@ import {
   rollupCacheVersion,
   updateDashboardCacheIdentity,
 } from "./sources";
+import { FILTERED_CACHE_NAME } from "./filtered-cache";
 import {
   STORE_META_CACHE,
   readStoreError,
@@ -554,6 +555,42 @@ function fakeCacheStorage(names: Record<string, string[]>) {
   return { stores, cacheFor };
 }
 
+describe("browserSource filtered results", () => {
+  const result = {
+    data: {
+      minTs: 1,
+      maxTs: 2,
+      totalRequests: 2,
+      hasBytes: true,
+      buckets: [{ t: 0, requests: 2, bytes: 3, s4xx: 0, s5xx: 0, hits: 1, cacheRows: 2 }],
+      counts: { host: [["a.example", 2]] as [string, number][] },
+      nonNull: { host: 2 },
+    },
+    truncated: [],
+    rawRows: 5,
+    byteLength: 100,
+  };
+
+  it("persists across page loads and stays within one service", async () => {
+    fakeCacheStorage({});
+    const scope = { cacheScope: "session" };
+    const first = browserSource("https://app.example", { serviceId: "a" }, scope);
+    await first.writeFilteredResult!("file|query", result);
+    first.clearMemoryCache!();
+    const reload = browserSource("https://app.example", { serviceId: "a" }, scope);
+    expect(await reload.readFilteredResult!("file|query")).toEqual(result);
+    const other = browserSource("https://app.example", { serviceId: "b" }, scope);
+    expect(await other.readFilteredResult!("file|query")).toBeNull();
+  });
+
+  it("forgets in-memory results on clearMemoryCache and tolerates no Cache API", async () => {
+    const source = browserSource("https://app.example", undefined, { cacheScope: "s" });
+    await source.writeFilteredResult!("file|query", result);
+    source.clearMemoryCache!();
+    expect(await source.readFilteredResult!("file|query")).toBeNull();
+  });
+});
+
 describe("rollup cache versioning", () => {
   it("derives the version from the card fields and aggregation semantics", () => {
     const current = rollupCacheVersion(CARD_FIELDS, ROLLUP_SEMANTICS);
@@ -597,6 +634,7 @@ describe("clearRequestLogCaches", () => {
       [CACHE_NAME]: ["/api/file?key=a"],
       [ROLLUP_CACHE_NAME]: ["/__flp_rollup?key=a"],
       "flp-parquet-rollup-v1": ["/__flp_rollup?key=a"],
+      [FILTERED_CACHE_NAME]: ["/__flp_filtered?id=a"],
       "next-static": [],
     });
     await clearRequestLogCaches();

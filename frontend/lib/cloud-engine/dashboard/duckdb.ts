@@ -807,17 +807,104 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     options: AggregateQueryOptions = {},
     customFields: readonly CustomField[] = [],
   ): Promise<void> {
-    const { signal } = options;
     const accesses: readonly ParquetAccess[] = isParquetAccessList(files)
       ? files
       : [files];
+    const customTypes = customTypesOf(customFields);
+    await this.withParquetGroups(accesses, options, async (backend, groups) => {
+      // Small files pay a fixed cost per query, so files whose Parquet
+      // schemas match exactly share one pass: the union reads like each file.
+      for (const group of groups) {
+        const relation = parquetRelation(
+          group,
+          [{ names: group.names, fromMs, toMs }],
+          [...aggregator.fields, ...filters.map((filter) => filter.field)],
+          customTypes,
+        );
+        await this.queryRelation(
+          backend,
+          relation,
+          selectiveWhere(group, filters, options, customTypes),
+          group.typeByCol.has("resp_bytes"),
+          customTypes,
+          aggregator,
+          options,
+          !options.fieldSearch,
+        );
+      }
+    });
+  }
+
+  /**
+   * Like `queryParquetIntoAggregator`, but each file gets its own time bounds
+   * and its own result in `target`, while files with one schema still share a
+   * single pass. Values are bounded per file, as one-file queries would be.
+   */
+  async queryParquetPerFile(
+    files: readonly PerFileQuery[],
+    filters: readonly DashboardFilter[],
+    options: AggregateQueryOptions = {},
+    customFields: readonly CustomField[] = [],
+  ): Promise<void> {
+    if (options.fieldSearch) {
+      throw new Error("Per-file queries do not support field search");
+    }
+    const customTypes = customTypesOf(customFields);
+    const fields = [
+      ...new Set(files.flatMap((file) => file.target.fields)),
+    ];
+    await this.withParquetGroups(
+      files.map((file) => file.access),
+      options,
+      async (backend, groups, registered) => {
+        for (const group of groups) {
+          const parts = group.names.map((name) => {
+            const file = registered.indexOf(name);
+            return {
+              names: [name],
+              fromMs: files[file].fromMs,
+              toMs: files[file].toMs,
+              file,
+            };
+          });
+          const relation = parquetRelation(
+            group,
+            parts,
+            [...fields, ...filters.map((filter) => filter.field)],
+            customTypes,
+          );
+          const targets = new Map(
+            parts.map((part) => [part.file, files[part.file].target]),
+          );
+          await this.queryRelationPerFile(
+            backend,
+            relation,
+            selectiveWhere(group, filters, options, customTypes),
+            group.typeByCol.has("resp_bytes"),
+            customTypes,
+            targets,
+            options,
+          );
+        }
+      },
+    );
+  }
+
+  /** Registers the files, describes each schema group, and always drops them. */
+  private withParquetGroups(
+    accesses: readonly ParquetAccess[],
+    options: AggregateQueryOptions,
+    run: (
+      backend: DuckDBBackend,
+      groups: ParquetGroup[],
+      registered: readonly string[],
+    ) => Promise<void>,
+  ): Promise<void> {
+    const { signal } = options;
     return this.runRead(options.context, signal, async (backend) => {
       signal?.throwIfAborted();
       const registered: string[] = [];
       let failure: unknown;
-      const customTypes = new Map(
-        customFields.map((field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]]),
-      );
       try {
         for (const file of accesses) {
           const name = `selective_${this.nextVirtualFileId++}.parquet`;
@@ -833,80 +920,24 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           registered.push(name);
           signal?.throwIfAborted();
         }
-        // Small files pay a fixed cost per query, so files whose Parquet
-        // schemas match exactly share one pass: the union reads like each file.
-        for (const group of await parquetSchemaGroups(backend, registered, signal)) {
-          const parquet = `read_parquet([${group.map(sqlString).join(", ")}])`;
+        const groups: ParquetGroup[] = [];
+        for (const names of await parquetSchemaGroups(backend, registered, signal)) {
           const schema = await backend.query(
-            `DESCRIBE SELECT * FROM ${parquet}`,
+            `DESCRIBE SELECT * FROM read_parquet([${names.map(sqlString).join(", ")}])`,
             signal,
           );
-          const names =
+          const columnNames =
             (schema.getChild("column_name")?.toJSON() as string[]) ?? [];
           const types =
             (schema.getChild("column_type")?.toJSON() as string[]) ?? [];
           const typeByCol = new Map(
-            names.map((field, i) => [field, types[i].toUpperCase()]),
+            columnNames.map((field, i) => [field, types[i].toUpperCase()]),
           );
           const tsType = typeByCol.get("timestamp");
           if (!tsType) throw new Error("Parquet file has no timestamp column");
-          const tsExpr = tsType.startsWith("TIMESTAMP")
-            ? `epoch_ms("timestamp")::BIGINT`
-            : tsType.includes("CHAR")
-              ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
-              : `CAST("timestamp" AS BIGINT)`;
-          const needed = new Set([
-            "status",
-            "cache",
-            "resp_bytes",
-            "edge",
-            ...aggregator.fields,
-            ...filters.map((filter) => filter.field),
-          ]);
-          const columns = [...needed].flatMap((field) => {
-            const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field);
-            if (!type) return [];
-            const col = sqlIdent(field);
-            const cast = `CAST(${col} AS ${type})`;
-            return [
-              !typeByCol.has(field)
-                ? `NULL::${type} AS ${col}`
-                : type === "DOUBLE"
-                  ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
-                  : `${cast} AS ${col}`,
-            ];
-          });
-          // The native timestamp predicate can prune row groups; the millisecond
-          // predicate below remains authoritative for all timestamp encodings.
-          const nativeBounds =
-            tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE")
-              ? [
-                  ...(Number.isFinite(fromMs)
-                    ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
-                    : []),
-                  ...(Number.isFinite(toMs)
-                    ? [`"timestamp" < epoch_ms(${Math.ceil(toMs) + 1}::BIGINT)`]
-                    : []),
-                ]
-              : [];
-          const relation = `(SELECT ${tsExpr} AS ts_ms, ${columns.join(", ")} FROM ${parquet}${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""})`;
-          const where = [
-            "ts_ms IS NOT NULL",
-            ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
-            ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
-            `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && typeByCol.has("edge")), [], customTypes)})`,
-          ].join(" AND ");
-          await this.queryRelation(
-            backend,
-            relation,
-            where,
-            typeByCol.has("resp_bytes"),
-            customTypes,
-            aggregator,
-            options,
-            !options.fieldSearch,
-          );
+          groups.push({ names, typeByCol, tsType });
         }
+        await run(backend, groups, registered);
       } catch (error) {
         failure = error;
         throw error;
@@ -930,6 +961,139 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         }
       }
     });
+  }
+
+  /**
+   * `queryRelation` in bounded mode, grouped by the relation's file tag: each
+   * target receives exactly what a one-file query would have merged.
+   */
+  private async queryRelationPerFile(
+    backend: DuckDBBackend,
+    relation: string,
+    where: string,
+    hasBytes: boolean,
+    customTypes: CustomTypes,
+    targets: ReadonlyMap<number, Aggregator>,
+    options: AggregateQueryOptions,
+  ): Promise<void> {
+    const { signal } = options;
+    const fields = [
+      ...new Set([...targets.values()].flatMap((target) => target.fields)),
+    ].filter((f) => f in FIELD_DUCKDB_TYPES || customTypes.has(f));
+    const projection = [...new Set(["status", "cache", "resp_bytes", ...fields])]
+      .map((field) =>
+        (FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field)) === "DOUBLE"
+          ? `(${sqlIdent(field)} + 0.0) AS ${sqlIdent(field)}`
+          : sqlIdent(field),
+      )
+      .join(", ");
+    const base = `WITH base AS (SELECT ${FILE_COLUMN}, ts_ms, ${projection} FROM ${relation} WHERE ${where})`;
+    const bucketTable = await backend.query(
+      `${base} SELECT ${FILE_COLUMN} AS file, (floor(ts_ms / ${MINUTE_MS}) * ${MINUTE_MS})::BIGINT AS t, COUNT(*)::BIGINT AS requests, COALESCE(SUM("resp_bytes"), 0)::DOUBLE AS bytes, (COUNT(*) FILTER (WHERE "status" >= 500 AND "status" < 600))::BIGINT AS s5xx, (COUNT(*) FILTER (WHERE "status" >= 400 AND NOT ("status" >= 500 AND "status" < 600)))::BIGINT AS s4xx, COUNT("cache")::BIGINT AS cache_rows, (COUNT(*) FILTER (WHERE starts_with(upper("cache"), 'HIT')))::BIGINT AS hits, MIN(ts_ms)::BIGINT AS min_ts, MAX(ts_ms)::BIGINT AS max_ts FROM base GROUP BY 1, 2 ORDER BY 1, 2`,
+      signal,
+    );
+    signal?.throwIfAborted();
+    if (hasBytes) for (const target of targets.values()) target.hasBytes = true;
+    if (bucketTable.numRows === 0) return;
+
+    const column = (table: ArrowTableLike, name: string) =>
+      table.getChild(name)?.toJSON() ?? [];
+    const parts = new Map<number, PartialAggregates>();
+    const partOf = (file: number) => {
+      let part = parts.get(file);
+      if (!part) {
+        part = { totalRequests: 0, minTs: Infinity, maxTs: -Infinity, buckets: [], fields: {} };
+        parts.set(file, part);
+      }
+      return part;
+    };
+    const bf = column(bucketTable, "file");
+    const bt = column(bucketTable, "t");
+    const requests = column(bucketTable, "requests");
+    const bytes = column(bucketTable, "bytes");
+    const s4xx = column(bucketTable, "s4xx");
+    const s5xx = column(bucketTable, "s5xx");
+    const cacheRows = column(bucketTable, "cache_rows");
+    const hits = column(bucketTable, "hits");
+    const minCol = column(bucketTable, "min_ts");
+    const maxCol = column(bucketTable, "max_ts");
+    for (let i = 0; i < bucketTable.numRows; i++) {
+      const part = partOf(Number(bf[i]));
+      const bucket: MinuteBucket = {
+        t: Number(bt[i]),
+        requests: Number(requests[i]),
+        bytes: Number(bytes[i]),
+        s4xx: Number(s4xx[i]),
+        s5xx: Number(s5xx[i]),
+        hits: Number(hits[i]),
+        cacheRows: Number(cacheRows[i]),
+      };
+      part.buckets.push(bucket);
+      part.totalRequests += bucket.requests;
+      part.minTs = Math.min(part.minTs, Number(minCol[i]));
+      part.maxTs = Math.max(part.maxTs, Number(maxCol[i]));
+    }
+
+    if (fields.length > 0) {
+      const statsTable = await backend.query(
+        `${base} SELECT ${FILE_COLUMN} AS file, ${fields
+          .map(
+            (field, i) =>
+              `COUNT(${sqlIdent(field)})::BIGINT AS nn_${i}, COUNT(DISTINCT ${sqlIdent(field)})::BIGINT AS d_${i}`,
+          )
+          .join(", ")} FROM base GROUP BY 1`,
+        signal,
+      );
+      signal?.throwIfAborted();
+      const cols = fields.map(sqlIdent);
+      const fieldIdx = `CASE ${cols.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
+      const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
+      // The same per-field bounds as a one-file `queryRelation`.
+      const candidateLimit = Math.min(4096, Math.floor(150_000 / fields.length));
+      const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
+      const window = `PARTITION BY ${FILE_COLUMN}, field_idx ORDER BY cnt DESC`;
+      const valuesTable = await backend.query(
+        `${base} SELECT ${FILE_COLUMN} AS file, field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${FILE_COLUMN}, ${fieldIdx} AS field_idx, ${cols.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base GROUP BY GROUPING SETS (${cols.map((c) => `(${FILE_COLUMN}, ${c})`).join(", ")})) WHERE ${nonNull} QUALIFY row_number() OVER (${window}) <= ${candidateLimit} AND sum(${keyBytes}) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${Math.floor((32 * 1024 * 1024) / fields.length)}`,
+        signal,
+      );
+      signal?.throwIfAborted();
+
+      const sf = column(statsTable, "file");
+      for (let r = 0; r < statsTable.numRows; r++) {
+        const part = partOf(Number(sf[r]));
+        fields.forEach((field, i) => {
+          part.fields[field] = {
+            nonNull: Number(column(statsTable, `nn_${i}`)[r] ?? 0),
+            distinct: Number(column(statsTable, `d_${i}`)[r] ?? 0),
+            entries: [],
+            complete: false,
+          };
+        });
+      }
+      const vf = column(valuesTable, "file");
+      const idxCol = column(valuesTable, "field_idx");
+      const cntCol = column(valuesTable, "cnt");
+      const valueCols = fields.map((field) => column(valuesTable, field));
+      for (let r = 0; r < valuesTable.numRows; r++) {
+        const i = Number(idxCol[r]);
+        const value = toScalarValue(valueCols[i][r]);
+        if (value === null) continue;
+        parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
+      }
+      for (const part of parts.values()) {
+        for (const aggregate of Object.values(part.fields)) {
+          aggregate.complete = aggregate.entries.length === aggregate.distinct;
+          aggregate.approximate = !aggregate.complete;
+        }
+      }
+    }
+
+    for (const [file, part] of parts) {
+      const target = targets.get(file);
+      if (!target) continue;
+      target.mergeAggregates(part);
+      target.boundRankings();
+    }
   }
 
   private async queryRelation(
@@ -1080,6 +1244,97 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     } satisfies PartialAggregates);
     if (bounded) aggregator.boundRankings();
   }
+}
+
+/** One file of a `queryParquetPerFile` pass and the aggregator its rows land in. */
+export type PerFileQuery = {
+  access: ParquetAccess;
+  target: Aggregator;
+  fromMs: number;
+  toMs: number;
+};
+
+type ParquetGroup = {
+  names: string[];
+  typeByCol: Map<string, string>;
+  tsType: string;
+};
+
+const FILE_COLUMN = `"__flp_file"`;
+
+function customTypesOf(customFields: readonly CustomField[]): CustomTypes {
+  return new Map(
+    customFields.map((field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]]),
+  );
+}
+
+/**
+ * The typed columns a selective query reads from one schema group. Each part
+ * keeps its own time bounds; `file` tags its rows for per-file grouping.
+ */
+function parquetRelation(
+  group: ParquetGroup,
+  parts: readonly { names: readonly string[]; fromMs: number; toMs: number; file?: number }[],
+  fields: readonly string[],
+  customTypes: CustomTypes,
+): string {
+  const { typeByCol, tsType } = group;
+  const tsExpr = tsType.startsWith("TIMESTAMP")
+    ? `epoch_ms("timestamp")::BIGINT`
+    : tsType.includes("CHAR")
+      ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
+      : `CAST("timestamp" AS BIGINT)`;
+  const needed = new Set(["status", "cache", "resp_bytes", "edge", ...fields]);
+  const columns = [...needed].flatMap((field) => {
+    const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field);
+    if (!type) return [];
+    const col = sqlIdent(field);
+    const cast = `CAST(${col} AS ${type})`;
+    return [
+      !typeByCol.has(field)
+        ? `NULL::${type} AS ${col}`
+        : type === "DOUBLE"
+          ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
+          : `${cast} AS ${col}`,
+    ];
+  });
+  const native = tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE");
+  const selects = parts.map(({ names, fromMs, toMs, file }) => {
+    // The native timestamp predicate can prune row groups; the millisecond
+    // predicate remains authoritative for all timestamp encodings.
+    const nativeBounds = native
+      ? [
+          ...(Number.isFinite(fromMs)
+            ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
+            : []),
+          ...(Number.isFinite(toMs)
+            ? [`"timestamp" < epoch_ms(${Math.ceil(toMs) + 1}::BIGINT)`]
+            : []),
+        ]
+      : [];
+    const msBounds = [
+      ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
+      ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
+    ];
+    const tag = file === undefined ? "" : `${file} AS ${FILE_COLUMN}, `;
+    const select = `SELECT ${tag}${tsExpr} AS ts_ms, ${columns.join(", ")} FROM read_parquet([${names.map(sqlString).join(", ")}])${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""}`;
+    return msBounds.length
+      ? `SELECT * FROM (${select}) WHERE ${msBounds.join(" AND ")}`
+      : select;
+  });
+  return `(${selects.join(" UNION ALL ")})`;
+}
+
+function selectiveWhere(
+  group: ParquetGroup,
+  filters: readonly DashboardFilter[],
+  options: AggregateQueryOptions,
+  customTypes: CustomTypes,
+): string {
+  return [
+    "ts_ms IS NOT NULL",
+    `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && group.typeByCol.has("edge")), [], customTypes)})`,
+  ].join(" AND ");
 }
 
 function isParquetAccessList(

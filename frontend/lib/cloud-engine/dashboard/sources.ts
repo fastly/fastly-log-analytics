@@ -11,6 +11,7 @@ import {
   recordStoreError,
   storageEstimate,
 } from "./file-store";
+import { FILTERED_CACHE_NAME, FilteredResultCache } from "./filtered-cache";
 import type { Manifest } from "./manifest";
 import { MAX_MANIFEST_BYTES, ManifestRequestError } from "./catalog-manifest";
 import {
@@ -227,6 +228,7 @@ export async function clearRequestLogCaches(): Promise<void> {
     (name) =>
       name === CACHE_NAME ||
       name === STORE_META_CACHE ||
+      name === FILTERED_CACHE_NAME ||
       name.startsWith(ROLLUP_CACHE_PREFIX),
   );
 }
@@ -506,6 +508,19 @@ export function browserSource(
       file.etag ?? "",
       file.schema_version ?? "",
     ]);
+  const filteredCaches = new Map<string, FilteredResultCache>();
+  const filteredCache = (scope: string) => {
+    let cache = filteredCaches.get(scope);
+    if (!cache) {
+      cache = new FilteredResultCache({
+        baseUrl,
+        scope,
+        openCache: () => caches.open(FILTERED_CACHE_NAME),
+      });
+      filteredCaches.set(scope, cache);
+    }
+    return cache;
+  };
   // One write at a time, so each quota check sees the previous write's usage.
   let storeQueue: Promise<void> = Promise.resolve();
 
@@ -666,6 +681,10 @@ export function browserSource(
   const derivedCacheUrl = (key: string, identity: string) =>
     scopedCacheUrl(`${baseUrl}${fileRequestPath(key)}`, `derived:${identity}`);
 
+  const sourceScope = (options?: BrowserSourceOptions) =>
+    options?.serviceId
+      ? `${cacheScope ?? "browser"}:${options.serviceId}`
+      : cacheScope ?? "browser";
   const sourceWith = (options?: BrowserSourceOptions): BrowserFileSource => ({
     async readDerivedFile(key, identity) {
       const cache = await getFileCache();
@@ -714,9 +733,21 @@ export function browserSource(
       }), false);
       storeIndex.touch(key);
     },
-    cacheScope: options?.serviceId
-      ? `${cacheScope ?? "browser"}:${options.serviceId}`
-      : cacheScope ?? "browser",
+    cacheScope: sourceScope(options),
+    async readFilteredResult(id) {
+      try {
+        return await filteredCache(sourceScope(options)).read(id);
+      } catch {
+        return null;
+      }
+    },
+    async writeFilteredResult(id, result) {
+      try {
+        await filteredCache(sourceScope(options)).write(id, result);
+      } catch {
+        /* quota, private browsing or no Cache API: the result stays in memory */
+      }
+    },
     withOptions: (next) => sourceWith(next),
     async openParquet(file, signal, variant) {
       signal?.throwIfAborted();
@@ -1277,6 +1308,7 @@ export function browserSource(
       fileCachePromise = null;
       rollupCachePromise = null;
       storeIndex.reset();
+      for (const cache of filteredCaches.values()) cache.clearMemory();
     },
   });
   return sourceWith(defaultOptions);

@@ -20,6 +20,7 @@ import {
   type Matcher,
   type RowFilter,
 } from "./filters";
+import type { FilteredFileResult } from "./filtered-cache";
 import { Hll } from "./hll";
 import { readColumns } from "./parquet";
 import {
@@ -171,6 +172,15 @@ export type FileSource = {
     key: string,
     rollup: FileRollup,
     variant?: string,
+  ) => Promise<void>;
+  /**
+   * One file's whole-file aggregates under one filtered query. `id` names the
+   * file's immutable identity and the query (`filteredResultId`).
+   */
+  readFilteredResult?: (id: string) => Promise<FilteredFileResult | null>;
+  writeFilteredResult?: (
+    id: string,
+    result: FilteredFileResult,
   ) => Promise<void>;
   clearMemoryCache?: () => void;
   pruneCache?: (
@@ -749,6 +759,10 @@ export class Aggregator {
     return this.truncated.has(field);
   }
 
+  truncatedFields(): string[] {
+    return [...this.truncated];
+  }
+
   searchValues(
     field: string,
     query: string,
@@ -766,6 +780,54 @@ export class Aggregator {
     }
     return topEntries(filtered, limit);
   }
+}
+
+/** JSON with sorted object keys, so equal queries always give one id. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`,
+      )
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+const FILTERED_RESULT_FORMAT = 1;
+
+/**
+ * Names a whole-file filtered result: the file's immutable identity plus
+ * everything that shapes the answer (filters, edge mode, counted fields and
+ * every custom column type, the minute grid). Any change misses the cache.
+ */
+export function filteredResultId(
+  file: Pick<ManifestFile, "key" | "size" | "etag" | "schema_version">,
+  query: {
+    filters: readonly DashboardFilter[];
+    edgeOnly: boolean;
+    fields: readonly string[];
+    columns: readonly CustomField[];
+  },
+): string {
+  return canonicalJson([
+    FILTERED_RESULT_FORMAT,
+    file.key,
+    file.size,
+    file.etag ?? null,
+    file.schema_version ?? null,
+    {
+      filters: query.filters,
+      edgeOnly: query.edgeOnly,
+      fields: query.fields,
+      columns: query.columns.map((field) => [field.id, field.type]),
+      bucketMs: MINUTE_MS,
+    },
+  ]);
 }
 
 function isInteriorRollup(
@@ -1149,6 +1211,27 @@ async function collectAggregator(
   if (unknownFilter) {
     throw new Error(`Unknown dashboard filter field: ${unknownFilter.field}`);
   }
+  // Whole-file filtered results are cached per file, so a repeat view reads
+  // only files it has not seen; field search reads one column, so it doesn't.
+  const filteredCaching =
+    (hasFilters || edgeOnly) &&
+    topK !== null &&
+    searchQuery === undefined &&
+    fields.length === cardFields.length &&
+    Boolean(
+      source.openParquet &&
+        source.readFilteredResult &&
+        source.writeFilteredResult,
+    );
+  const filteredId = (file: ManifestFile) =>
+    filteredResultId(file, {
+      filters: options.filters ?? [],
+      edgeOnly,
+      fields,
+      columns: readFields,
+    });
+  const insideRange = (file: ManifestFile) =>
+    Date.parse(file.start) >= fromMs && Date.parse(file.end) <= toMs;
   // Rollups and summaries count only card fields; any other filter needs rows.
   const countedFilters = (options.filters ?? []).every((filter) =>
     cardFields.includes(filter.field),
@@ -1475,6 +1558,8 @@ async function collectAggregator(
     hadRollup: boolean;
     rollupMeta?: { rawRows: number; minTs: number; maxTs: number };
     summary?: SummaryUse;
+    /** Its cached filtered result has rows outside the range: query clipped. */
+    clipOnly?: boolean;
   };
   const pending: PendingFile[] = [];
   let toFetch = 0;
@@ -1488,6 +1573,27 @@ async function collectAggregator(
   };
   const classify = async (file: ManifestFile) => {
     const scopedKey = scopedKeyOf(file.key);
+    let clipOnly = false;
+    if (filteredCaching) {
+      const cached = await source.readFilteredResult!(filteredId(file)).catch(
+        (error: unknown) => {
+          if (signal?.aborted) throw error;
+          return null;
+        },
+      );
+      signal?.throwIfAborted();
+      if (cached && isInteriorRollup(cached.data, fromMs, toMs)) {
+        aggregator.mergeSummary({
+          rollup: cached.data,
+          truncated: cached.truncated,
+          ipSketch: null,
+        });
+        aggregator.boundRankings();
+        countCached(cached.rawRows, cached.byteLength);
+        return;
+      }
+      clipOnly = cached !== null;
+    }
     const cachedRollup = (await source.readRollup?.(file.key, variant)) ?? null;
     signal?.throwIfAborted();
     const activeRollup = cachedRollup
@@ -1527,6 +1633,7 @@ async function collectAggregator(
         file,
         scopedKey,
         hadRollup: false,
+        clipOnly,
         rollupMeta: cachedRollup
           ? {
               rawRows: cachedRollup.rawRows,
@@ -1558,7 +1665,12 @@ async function collectAggregator(
         return;
       }
     }
-    await addPending({ file, scopedKey, hadRollup: Boolean(cachedRollup) });
+    await addPending({
+      file,
+      scopedKey,
+      hadRollup: Boolean(cachedRollup),
+      clipOnly,
+    });
   };
   await runPool(summaryUses, (summary) =>
     addPending({
@@ -1703,21 +1815,40 @@ async function collectAggregator(
       },
       readFields,
     );
+  // Whole-file results for the filtered cache: each file into its own target.
+  const queryWholeFiles = (
+    batch: readonly { access: ParquetAccess; target: Aggregator }[],
+  ) =>
+    duckdb.queryParquetPerFile(
+      batch.map(({ access, target }) => ({
+        access,
+        target,
+        fromMs: -Infinity,
+        toMs: Infinity,
+      })),
+      options.filters ?? [],
+      { edgeOnly, topK: null, signal, context: lease.readContext() },
+      readFields,
+    );
   // DuckDB answers one query at a time and each pays a fixed cost, so files
-  // that arrive while it is busy share the next query into the aggregator.
+  // that arrive while it is busy share the next query. A `target` entry wants
+  // its own whole-file result; the rest merge clipped into the aggregator.
   const selectiveQueue: {
     access: ParquetAccess;
     size: number;
+    target?: Aggregator;
     settle: (error?: unknown) => void;
   }[] = [];
   let selectiveBusy = false;
   const drainSelective = () => {
     if (selectiveBusy || selectiveQueue.length === 0) return;
     selectiveBusy = true;
+    const perFile = Boolean(selectiveQueue[0].target);
     let count = 1;
     let bytes = selectiveQueue[0].size;
     while (
       count < Math.min(selectiveQueue.length, SELECTIVE_BATCH_FILES) &&
+      Boolean(selectiveQueue[count].target) === perFile &&
       bytes + selectiveQueue[count].size <= SELECTIVE_BATCH_BYTES
     ) {
       bytes += selectiveQueue[count++].size;
@@ -1726,7 +1857,16 @@ async function collectAggregator(
     // readContext() throws synchronously once the engine is poisoned or the
     // lease is released; the batch must still settle so its files release locks.
     Promise.resolve()
-      .then(() => querySelective(batch.map((queued) => queued.access), aggregator))
+      .then(() =>
+        perFile
+          ? queryWholeFiles(
+              batch.map(({ access, target }) => ({ access, target: target! })),
+            )
+          : querySelective(
+              batch.map((queued) => queued.access),
+              aggregator,
+            ),
+      )
       .then(
         () => batch.forEach((queued) => queued.settle()),
         (error: unknown) => batch.forEach((queued) => queued.settle(error ?? new Error("Cloud query failed"))),
@@ -1736,11 +1876,16 @@ async function collectAggregator(
         drainSelective();
       });
   };
-  const queueSelective = (access: ParquetAccess, size: number) =>
+  const queueSelective = (
+    access: ParquetAccess,
+    size: number,
+    target?: Aggregator,
+  ) =>
     new Promise<void>((resolve, reject) => {
       selectiveQueue.push({
         access,
         size: Number.isSafeInteger(size) && size > 0 ? size : 0,
+        target,
         settle: (error) => (error === undefined ? resolve() : reject(error)),
       });
       drainSelective();
@@ -1828,7 +1973,29 @@ async function collectAggregator(
         const target = completeRollup
           ? new Aggregator(fromMs, toMs, cardFields)
           : aggregator;
-        if (completeRollup) await querySelective([access], target);
+        const whole =
+          filteredCaching && !entry.clipOnly && insideRange(file)
+            ? new Aggregator(-Infinity, Infinity, fields)
+            : null;
+        let filtered: FilteredFileResult | null = null;
+        if (whole) {
+          await queueSelective(access, file.size, whole);
+          filtered = {
+            data: whole.toRollupData(),
+            truncated: whole.truncatedFields(),
+            rawRows: file.rows,
+            byteLength: file.size,
+          };
+        }
+        if (filtered && isInteriorRollup(filtered.data, fromMs, toMs)) {
+          aggregator.mergeSummary({
+            rollup: filtered.data,
+            truncated: filtered.truncated,
+            ipSketch: null,
+          });
+          aggregator.boundRankings();
+        } else if (completeRollup) await querySelective([access], target);
+        // Rows logged outside the file's window still need clipping.
         else await queueSelective(access, file.size);
         released = true;
         access.release?.();
@@ -1844,6 +2011,14 @@ async function collectAggregator(
           if (truncated.length === 0 && rollup.totalRequests === file.rows) {
             await source.writeRollup?.(file.key, rollup, variant);
           }
+        }
+        if (filtered) {
+          await source.writeFilteredResult!(filteredId(file), filtered).catch(
+            (error: unknown) => {
+              // The cache only saves work; the merged result is already exact.
+              console.warn("flp: filtered result cache write failed", error);
+            },
+          );
         }
         let aggregateEntries = aggregator.buckets.size;
         let aggregateBytes = aggregator.buckets.size * 96;
