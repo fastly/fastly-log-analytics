@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import inspect
+import json
 import logging
 import os
 import tempfile
@@ -71,7 +73,9 @@ from backend.high_scale.archive import (
     HighScaleBatch,
     PublicationResult,
     PublicationStatus,
+    _read_manifest_rows,
     build_batch_id_from_manifest_id,
+    event_digest,
     row_matches_serving_domain,
     write_batch_archive_checkpoint,
 )
@@ -97,6 +101,18 @@ class BatchIngestResult:
     quarantined_events: int
     sources_count: int
     derived_publication_complete: bool = True
+
+
+@dataclass(frozen=True)
+class ArchiveRetryResult:
+    acknowledged: int = 0
+    failed: int = 0
+    released_to_raw: int = 0
+
+
+_NGWAF_ENRICHMENT_KEY = "_ngwaf_enrichment"
+_PUBLICATION_RETRY_BACKOFF_SECONDS = 30.0
+_PUBLICATION_RETRY_MAX_BACKOFF_SECONDS = 3600.0
 
 
 class HighScaleControlPlane(Protocol):
@@ -197,6 +213,7 @@ class HighScaleIngestController:
         self._retention_seconds = retention_seconds
         self._deletion_grace_seconds = deletion_grace_seconds
         self._lease_seconds = lease_seconds
+        self._publication_retry_backoff: dict[str, tuple[float, int]] = {}
 
     def ingest_batch(
         self,
@@ -387,6 +404,10 @@ class HighScaleIngestController:
             source_batches = [(replace(src, domain=domain), rows) for src, rows in source_batches]
         elif len(source_batches) == 1 and source_batches[0][0].domain != domain:
             source_batches = [(replace(source_batches[0][0], domain=domain), source_batches[0][1])]
+        ngwaf_bots = _lookup_high_scale_ngwaf_bots(all_events) if domain == "request" else {}
+        if domain == "request":
+            for _, rows in source_batches:
+                _mark_ngwaf_enrichment(rows, ngwaf_bots)
         observed = (now or datetime.now(UTC)).astimezone(UTC)
         with tempfile.TemporaryDirectory(prefix="high-scale-archive-") as root:
             local_manifest = write_batch_archive_checkpoint(
@@ -423,47 +444,18 @@ class HighScaleIngestController:
         if current_owner.current_owner != "high_scale" or current_owner.owner_epoch != owner.owner_epoch:
             raise RuntimeError(f"high-scale owner epoch changed during ingest for {service_id}")
         if domain == "request":
-            _enrich_high_scale_ngwaf_bots(tuple(all_events))
-        serving_rows = tuple(e for e in all_events if row_matches_serving_domain(domain, e))
-        batch_id = build_batch_id_from_manifest_id(manifest.manifest_id)
-        if serving_rows:
-            publication = self._serving.publish(
-                HighScaleBatch(batch_id, service_id, domain, str(owner.owner_epoch), serving_rows)
-            )
-        else:
-            publication = PublicationResult(batch_id, PublicationStatus.VISIBLE, 0, False)
-        agg_ok, agg_err = self._publish_aggregates_batch(
-            service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events
-        )
-        cmcd_ok, cmcd_err = True, None
-        if domain == "request":
-            cmcd_ok, cmcd_err = self._publish_cmcd_projection(
-                service_id,
-                build_batch_id_from_manifest_id(f"{manifest.manifest_id}:cmcd"),
-                owner.owner_epoch,
-                all_events,
-            )
-        sibling = _RUM_SIBLING_DOMAIN.get(domain)
-        sibling_ok, sibling_err = True, None
-        if sibling is not None and sibling_events:
-            sibling_batch_id = build_batch_id_from_manifest_id(f"{manifest.manifest_id}:{sibling}")
-            try:
-                self._serving.publish(
-                    HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner.owner_epoch), tuple(sibling_events))
-                )
-            except Exception as exc:
-                logger.exception(
-                    "high-scale RUM sibling fact publication failed",
-                    extra={"service_id": service_id, "domain": sibling, "manifest_id": manifest.manifest_id},
-                )
-                sibling_ok, sibling_err = False, str(exc)
-            else:
-                sibling_ok, sibling_err = self._publish_aggregates_batch(
-                    service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events
-                )
-        derived_ok = agg_ok and cmcd_ok and sibling_ok
-        derived_err = agg_err or cmcd_err or sibling_err or "derived publication failed"
+            _apply_high_scale_ngwaf_bots(all_events, ngwaf_bots)
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
+        try:
+            publication, derived_ok, derived_err = self._publish_manifest_publications(
+                service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events, sibling_events
+            )
+        except Exception as exc:
+            if self._control is not None:
+                self._hold_sources_on_archive(
+                    service_id, object_keys, manifest.manifest_id, owner.owner_epoch, str(exc)
+                )
+            raise
         if self._control is not None:
             if derived_ok:
                 self._control.acknowledge_sources_batch(
@@ -475,12 +467,9 @@ class HighScaleIngestController:
                     domain=domain,
                     partition_id=partition_id,
                 )
-            elif hasattr(self._control, "fail_sources_batch"):
-                self._control.fail_sources_batch(
-                    service_id,
-                    object_keys,
-                    expected_owner_epoch=owner.owner_epoch,
-                    error=derived_err,
+            else:
+                self._hold_sources_on_archive(
+                    service_id, object_keys, manifest.manifest_id, owner.owner_epoch, derived_err
                 )
         else:
             for desc, _ in sources_payloads:
@@ -503,6 +492,218 @@ class HighScaleIngestController:
             len(sources_payloads),
             derived_publication_complete=derived_ok,
         )
+
+    def _publish_manifest_publications(
+        self,
+        service_id: str,
+        domain: str,
+        manifest_id: str,
+        owner_epoch: int,
+        events: Sequence[dict[str, Any]],
+        sibling_events: Sequence[dict[str, Any]],
+    ) -> tuple[PublicationResult, bool, str]:
+        """Publish a committed manifest's facts and derived projections under batch ids derived from the manifest.
+
+        A fact publication failure raises; derived failures are reported so the caller can hold the sources.
+        """
+        serving_rows = tuple(e for e in events if row_matches_serving_domain(domain, e))
+        batch_id = build_batch_id_from_manifest_id(manifest_id)
+        if serving_rows:
+            publication = self._serving.publish(
+                HighScaleBatch(batch_id, service_id, domain, str(owner_epoch), serving_rows)
+            )
+        else:
+            publication = PublicationResult(batch_id, PublicationStatus.VISIBLE, 0, False)
+        agg_ok, agg_err = self._publish_aggregates_batch(service_id, domain, manifest_id, owner_epoch, events)
+        cmcd_ok, cmcd_err = True, None
+        if domain == "request":
+            cmcd_ok, cmcd_err = self._publish_cmcd_projection(
+                service_id, build_batch_id_from_manifest_id(f"{manifest_id}:cmcd"), owner_epoch, events
+            )
+        sibling = _RUM_SIBLING_DOMAIN.get(domain)
+        sibling_ok, sibling_err = True, None
+        if sibling is not None and sibling_events:
+            sibling_batch_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sibling}")
+            try:
+                self._serving.publish(
+                    HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner_epoch), tuple(sibling_events))
+                )
+            except Exception as exc:
+                logger.exception(
+                    "high-scale RUM sibling fact publication failed",
+                    extra={"service_id": service_id, "domain": sibling, "manifest_id": manifest_id},
+                )
+                sibling_ok, sibling_err = False, str(exc)
+            else:
+                sibling_ok, sibling_err = self._publish_aggregates_batch(
+                    service_id, sibling, manifest_id, owner_epoch, sibling_events
+                )
+        derived_ok = agg_ok and cmcd_ok and sibling_ok
+        return publication, derived_ok, agg_err or cmcd_err or sibling_err or "derived publication failed"
+
+    def _hold_sources_on_archive(
+        self, service_id: str, object_keys: Sequence[str], manifest_id: str, owner_epoch: int, error: str
+    ) -> None:
+        control: Any = self._control
+        if hasattr(control, "bind_sources_to_archive_manifest"):
+            control.bind_sources_to_archive_manifest(
+                service_id, object_keys, manifest_id=manifest_id, expected_owner_epoch=owner_epoch, error=error
+            )
+        elif hasattr(control, "fail_sources_batch"):
+            control.fail_sources_batch(service_id, object_keys, expected_owner_epoch=owner_epoch, error=error)
+
+    def retry_archived_publications(
+        self, service_id: str, *, limit: int = 4, min_idle_seconds: float = 30.0
+    ) -> ArchiveRetryResult:
+        """Republish committed manifests whose publication failed, from the archive artifact, under their original ids."""
+        control: Any = self._control
+        if control is None or not hasattr(control, "claim_archived_publication_retries"):
+            return ArchiveRetryResult()
+        owner = control.owner(service_id)
+        if owner.current_owner != "high_scale":
+            return ArchiveRetryResult()
+        clock = time.monotonic()
+        for manifest_id, (not_before, _) in tuple(self._publication_retry_backoff.items()):
+            if not_before + _PUBLICATION_RETRY_MAX_BACKOFF_SECONDS < clock:
+                del self._publication_retry_backoff[manifest_id]
+        claims = control.claim_archived_publication_retries(
+            service_id,
+            self._worker_id,
+            expected_owner_epoch=owner.owner_epoch,
+            lease_seconds=self._lease_seconds,
+            min_idle_seconds=min_idle_seconds,
+            limit=limit,
+            exclude_manifest_ids=tuple(
+                mid for mid, (not_before, _) in self._publication_retry_backoff.items() if not_before > clock
+            ),
+        )
+        acknowledged = failed = released = 0
+        for claim in claims:
+            outcome = self._retry_archived_manifest(service_id, claim, owner.owner_epoch)
+            acknowledged += outcome == "acknowledged"
+            failed += outcome == "failed"
+            released += outcome == "released"
+        return ArchiveRetryResult(acknowledged, failed, released)
+
+    def _retry_archived_manifest(self, service_id: str, claim: Any, owner_epoch: int) -> str:
+        control: Any = self._control
+        manifest_id = claim.manifest_id
+        log_extra = {"service_id": service_id, "manifest_id": manifest_id, "sources": len(claim.object_keys)}
+        manifest = control.archive_manifest(manifest_id).manifest
+        try:
+            events, sibling_events = self._rebuild_archived_events(manifest)
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.error(
+                "high-scale archive publication retry cannot read archive; returning sources to raw ingest",
+                extra={**log_extra, "error": str(exc)},
+            )
+            control.unbind_archived_sources(
+                service_id,
+                manifest_id,
+                self._worker_id,
+                expected_owner_epoch=owner_epoch,
+                error=f"archive manifest {manifest_id} is not replayable: {exc}",
+            )
+            self._publication_retry_backoff.pop(manifest_id, None)
+            return "released"
+        except Exception as exc:
+            logger.exception("high-scale archive publication retry could not read archive", extra=log_extra)
+            failure = str(exc)
+        else:
+            try:
+                _, derived_ok, derived_err = self._publish_manifest_publications(
+                    service_id, manifest.domain, manifest_id, claim.publication_epoch, events, sibling_events
+                )
+            except Exception as exc:
+                logger.exception("high-scale archive publication retry failed", extra=log_extra)
+                failure = str(exc)
+            else:
+                if derived_ok:
+                    control.acknowledge_sources_batch(
+                        service_id,
+                        claim.object_keys,
+                        manifest_id=manifest_id,
+                        expected_owner_epoch=owner_epoch,
+                        domain=manifest.domain,
+                    )
+                    self._publication_retry_backoff.pop(manifest_id, None)
+                    logger.info("high-scale archive publication retry acknowledged sources", extra=log_extra)
+                    return "acknowledged"
+                failure = derived_err
+        control.release_archived_publication_retry(
+            service_id, manifest_id, self._worker_id, expected_owner_epoch=owner_epoch, error=failure
+        )
+        _, failures = self._publication_retry_backoff.get(manifest_id, (0.0, 0))
+        delay = min(_PUBLICATION_RETRY_BACKOFF_SECONDS * 2**failures, _PUBLICATION_RETRY_MAX_BACKOFF_SECONDS)
+        self._publication_retry_backoff[manifest_id] = (time.monotonic() + delay, failures + 1)
+        return "failed"
+
+    def _rebuild_archived_events(self, manifest: ArchiveManifest) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Re-decode the archived source lines so events match what the original ingest published.
+
+        The rebuilt archive rows must reproduce the manifest's canonical digest, which proves the events are the
+        ones the pending publications were built from; NGWAF enrichment is replayed from the archived marker.
+        """
+        rows = _read_manifest_rows(manifest, self._archive)
+        domain = manifest.domain
+        sibling = _RUM_SIBLING_DOMAIN.get(domain)
+        transform_version = manifest.artifact.transform_version
+        rebuilt_rows: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        sibling_events: list[dict[str, Any]] = []
+        markers: dict[tuple[str, int], str] = {}
+        for entry in manifest.sources:
+            lines: dict[int, bytes] = {}
+            for row in rows[entry.row_start : entry.row_start + entry.row_count]:
+                ordinal = int(row["line_ordinal"])
+                if row.get("_record_kind") == "dead_letter":
+                    lines[ordinal] = base64.b64decode(row["raw_line_base64"])
+                    continue
+                lines[ordinal] = str(row["raw_json"]).encode("utf-8")
+                if row.get(_NGWAF_ENRICHMENT_KEY) is not None:
+                    markers[(entry.key, ordinal)] = str(row[_NGWAF_ENRICHMENT_KEY])
+            payload = b"\n".join(lines.get(i, b"") for i in range(max(lines) + 1)) if lines else b""
+            source = ArchiveSourceObject(
+                manifest.service_id, domain, entry.key, entry.checksum, entry.size_bytes, entry.version
+            )
+            decoded = decode_source_object(source, payload, transform_version=transform_version, domain=domain)
+            for event in decoded.events:
+                row = dict(event, _record_kind="event")
+                marker = markers.get((entry.key, int(event["line_ordinal"])))
+                if marker is not None:
+                    row[_NGWAF_ENRICHMENT_KEY] = marker
+                rebuilt_rows.append(row)
+            rebuilt_rows.extend(
+                {
+                    "_record_kind": "dead_letter",
+                    "source_object_key": item.source_object_key,
+                    "line_ordinal": item.line_ordinal,
+                    "raw_line_base64": item.raw_line_base64,
+                    "reason": item.reason,
+                }
+                for item in decoded.dead_letters
+            )
+            events.extend(decoded.events)
+            if sibling is not None:
+                sibling_decoded = decode_source_object(
+                    replace(source, domain=sibling), payload, transform_version=transform_version, domain=sibling
+                )
+                sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
+        if event_digest(rebuilt_rows) != manifest.artifact.canonical_digest:
+            raise ValueError("re-decoded archive rows do not match the committed manifest digest")
+        if domain == "request":
+            unmarked: list[dict[str, Any]] = []
+            for event in events:
+                if not event.get("waf_req_id"):
+                    continue
+                marker = markers.get((str(event["source_object_key"]), int(event["line_ordinal"])))
+                if marker is None:
+                    unmarked.append(event)
+                elif bot := json.loads(marker):
+                    _apply_ngwaf_bot(event, *bot)
+            if unmarked:
+                _enrich_high_scale_ngwaf_bots(tuple(unmarked))
+        return events, sibling_events
 
     def _publish_aggregates_batch(
         self, service_id: str, domain: str, manifest_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
@@ -673,10 +874,10 @@ class HighScaleIngestController:
             state_index += 1
 
 
-def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
+def _lookup_high_scale_ngwaf_bots(events: Sequence[dict[str, Any]]) -> dict[str, tuple[Any, Any, Any]]:
     waf_req_ids = {str(e.get("waf_req_id")) for e in events if e.get("waf_req_id")}
     if not waf_req_ids:
-        return
+        return {}
     try:
         from backend.core.metadata import base as pg_connection
 
@@ -690,7 +891,7 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
             rows = cur.fetchall()
         finally:
             pconn.close()
-        bot_map = {
+        return {
             (r["waf_req_id"] if isinstance(r, dict) else r[0]): (
                 r["bot_name"] if isinstance(r, dict) else r[1],
                 r["category"] if isinstance(r, dict) else r[2],
@@ -698,20 +899,41 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
             )
             for r in rows
         }
-        for e in events:
-            wid = str(e.get("waf_req_id")) if e.get("waf_req_id") else None
-            if wid and wid in bot_map:
-                name, cat, wk = bot_map[wid]
-                e["_ngwaf_bot_name"] = e["ngwaf_bot"] = name
-                e["_ngwaf_bot_category"] = cat
-                e["_ngwaf_wellknown_bot_name"] = wk
-                e["ngwaf_bot_verification_state"] = "verified"
-                if cat:
-                    e["ngwaf_bot_category"] = cat
-                if wk:
-                    e["ngwaf_wellknown_bot"] = wk
     except Exception:
         logger.warning("high-scale NGWAF bot enrichment failed", exc_info=True)
+        return {}
+
+
+def _apply_ngwaf_bot(event: dict[str, Any], name: Any, cat: Any, wk: Any) -> None:
+    event["_ngwaf_bot_name"] = event["ngwaf_bot"] = name
+    event["_ngwaf_bot_category"] = cat
+    event["_ngwaf_wellknown_bot_name"] = wk
+    event["ngwaf_bot_verification_state"] = "verified"
+    if cat:
+        event["ngwaf_bot_category"] = cat
+    if wk:
+        event["ngwaf_wellknown_bot"] = wk
+
+
+def _apply_high_scale_ngwaf_bots(events: Sequence[dict[str, Any]], bot_map: dict[str, tuple[Any, Any, Any]]) -> None:
+    if not bot_map:
+        return
+    for e in events:
+        wid = str(e.get("waf_req_id")) if e.get("waf_req_id") else None
+        if wid and wid in bot_map:
+            _apply_ngwaf_bot(e, *bot_map[wid])
+
+
+def _mark_ngwaf_enrichment(archive_rows: Sequence[dict[str, Any]], bot_map: dict[str, tuple[Any, Any, Any]]) -> None:
+    """Record the bot lookup result in the archive so a publication retry reproduces the same enriched rows."""
+    for row in archive_rows:
+        if row.get("_record_kind") == "event" and row.get("waf_req_id"):
+            bot = bot_map.get(str(row["waf_req_id"]))
+            row[_NGWAF_ENRICHMENT_KEY] = json.dumps(list(bot) if bot is not None else [], separators=(",", ":"))
+
+
+def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
+    _apply_high_scale_ngwaf_bots(events, _lookup_high_scale_ngwaf_bots(events))
 
 
 # ── Worker & Orchestration (folded from worker.py & orchestration.py) ─────────
@@ -1020,6 +1242,9 @@ class HighScaleWorkerCoordinator:
         self._page_size = page_size
         self._lease_seconds = lease_seconds
         self._object_concurrency = object_concurrency
+
+    def retry_archived_publications(self, *, service_id: str, limit: int = 4) -> ArchiveRetryResult:
+        return self._controller.retry_archived_publications(service_id, limit=limit)
 
     def run_page(
         self,

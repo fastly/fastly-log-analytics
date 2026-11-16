@@ -72,6 +72,7 @@ from backend.high_scale.postgres_control.console_access import (
 )
 from backend.high_scale.postgres_control.control_plane import (
     SCHEMA_DDL,
+    ArchivedPublicationClaim,
     ArchiveManifestRecord,
     OwnerEpochRecord,
     PostgresControlPlane,
@@ -183,6 +184,7 @@ __all__ = [
     "SourceObjectRecord",
     "SourceClaim",
     "ArchiveManifestRecord",
+    "ArchivedPublicationClaim",
     "PostgresControlPlane",
     "_fetch_required",
     "_upsert_domain_cursor",

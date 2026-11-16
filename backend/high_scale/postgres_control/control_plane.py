@@ -249,6 +249,15 @@ class ArchiveManifestRecord:
     owner_epoch: int
 
 
+@dataclass(frozen=True)
+class ArchivedPublicationClaim:
+    """Sources bound to a committed archive manifest whose publications this worker now retries."""
+
+    manifest_id: str
+    object_keys: tuple[str, ...]
+    publication_epoch: int
+
+
 class PostgresControlPlane:
     """Postgres-backed control state with explicit transaction boundaries."""
 
@@ -1100,7 +1109,7 @@ class PostgresControlPlane:
             rows = connection.execute(
                 "SELECT o.* FROM high_scale_source_objects o "
                 "JOIN high_scale_archive_manifests m ON m.manifest_id = o.archive_manifest_id "
-                "WHERE o.service_id = %s AND o.status IN ('archived', 'acknowledged') "
+                "WHERE o.service_id = %s AND o.status = 'acknowledged' "
                 "AND m.state IN ('manifest_committed', 'deletion_eligible') "
                 "AND m.deletion_authorization_deadline <= statement_timestamp() "
                 "ORDER BY o.discovered_at LIMIT %s",
@@ -1317,6 +1326,155 @@ class PostgresControlPlane:
                     "WHERE service_id=%s AND object_key = ANY(%s) AND status='claimed' AND owner_epoch=%s",
                     (error, service_id, list(object_keys), expected_owner_epoch),
                 )
+
+    def bind_sources_to_archive_manifest(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        manifest_id: str,
+        expected_owner_epoch: int,
+        error: str,
+    ) -> None:
+        """Hold claimed sources on their committed archive so a failed publication retries from it, not from raw."""
+        _require_texts(service_id=service_id, manifest_id=manifest_id, error=error)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            state = self._archive_manifest(connection, manifest_id).state
+            if state not in {ArchiveState.MANIFEST_COMMITTED, ArchiveState.DELETION_ELIGIBLE}:
+                raise ValueError(f"archive manifest {manifest_id} is not committed: {state.value}")
+            if object_keys:
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET status='archived', archive_manifest_id=%s, owner=NULL, "
+                    "lease_until=NULL, last_error=%s, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) AND status='claimed' AND owner_epoch=%s",
+                    (manifest_id, error, service_id, list(object_keys), expected_owner_epoch),
+                )
+
+    def claim_archived_publication_retries(
+        self,
+        service_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        lease_seconds: float,
+        min_idle_seconds: float = 0.0,
+        limit: int = 1,
+        exclude_manifest_ids: Sequence[str] = (),
+    ) -> tuple[ArchivedPublicationClaim, ...]:
+        """Lease committed manifests whose bound sources still wait for their publications."""
+        _require_texts(service_id=service_id, worker_id=worker_id)
+        if expected_owner_epoch <= 0 or lease_seconds <= 0:
+            raise ValueError("owner epoch and lease duration must be positive")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if min_idle_seconds < 0:
+            raise ValueError("min_idle_seconds must be non-negative")
+        claims: list[ArchivedPublicationClaim] = []
+        with self.transaction() as connection:
+            self._fenced_owner(
+                connection,
+                service_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_owner="high_scale",
+                fence_name="publication-retry",
+            )
+            candidates = connection.execute(
+                "SELECT o.archive_manifest_id FROM high_scale_source_objects o "
+                "JOIN high_scale_archive_manifests m ON m.manifest_id = o.archive_manifest_id "
+                "WHERE o.service_id = %s AND o.status = 'archived' "
+                "AND m.state IN ('manifest_committed', 'deletion_eligible') "
+                "AND NOT (o.archive_manifest_id = ANY(%s)) "
+                "GROUP BY o.archive_manifest_id "
+                "HAVING bool_and(o.lease_until IS NULL OR o.lease_until <= clock_timestamp()) "
+                "AND MAX(o.updated_at) <= clock_timestamp() - make_interval(secs => %s) "
+                "ORDER BY MIN(o.updated_at), o.archive_manifest_id LIMIT %s",
+                (service_id, list(exclude_manifest_ids), min_idle_seconds, limit),
+            ).fetchall()
+            for (manifest_id,) in candidates:
+                rows = connection.execute(
+                    "SELECT object_key, owner_epoch, COALESCE(lease_until > clock_timestamp(), FALSE) "
+                    "FROM high_scale_source_objects WHERE service_id = %s AND archive_manifest_id = %s "
+                    "AND status = 'archived' ORDER BY object_key FOR UPDATE",
+                    (service_id, manifest_id),
+                ).fetchall()
+                if not rows or any(row[2] for row in rows):
+                    continue
+                keys = [str(row[0]) for row in rows]
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET owner=%s, "
+                    "lease_until=clock_timestamp() + make_interval(secs => %s) "
+                    "WHERE service_id=%s AND object_key = ANY(%s)",
+                    (worker_id, lease_seconds, service_id, keys),
+                )
+                claims.append(
+                    ArchivedPublicationClaim(
+                        str(manifest_id), tuple(keys), max(int(row[1] or expected_owner_epoch) for row in rows)
+                    )
+                )
+        return tuple(claims)
+
+    def release_archived_publication_retry(
+        self,
+        service_id: str,
+        manifest_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        error: str,
+    ) -> None:
+        """Drop a retry lease and keep the sources bound to their archive manifest for the next attempt."""
+        self._end_archived_publication_retry(
+            service_id,
+            manifest_id,
+            worker_id,
+            expected_owner_epoch=expected_owner_epoch,
+            error=error,
+            assignments="",
+        )
+
+    def unbind_archived_sources(
+        self,
+        service_id: str,
+        manifest_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        error: str,
+    ) -> None:
+        """Return bound sources to raw ingest when their archive manifest cannot be republished."""
+        self._end_archived_publication_retry(
+            service_id,
+            manifest_id,
+            worker_id,
+            expected_owner_epoch=expected_owner_epoch,
+            error=error,
+            assignments="status='discovered', archive_manifest_id=NULL, ",
+        )
+
+    def _end_archived_publication_retry(
+        self,
+        service_id: str,
+        manifest_id: str,
+        worker_id: str,
+        *,
+        expected_owner_epoch: int,
+        error: str,
+        assignments: str,
+    ) -> None:
+        _require_texts(service_id=service_id, manifest_id=manifest_id, worker_id=worker_id, error=error)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            connection.execute(
+                f"UPDATE high_scale_source_objects SET {assignments}owner=NULL, lease_until=NULL, last_error=%s, "
+                "updated_at=clock_timestamp() "
+                "WHERE service_id=%s AND archive_manifest_id=%s AND status='archived' AND owner=%s",
+                (error, service_id, manifest_id, worker_id),
+            )
 
     def authorize_source_delete(
         self,

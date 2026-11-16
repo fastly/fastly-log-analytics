@@ -208,7 +208,9 @@ class ArchiveManifestCatalog(Protocol):
     ) -> tuple[ArchiveManifest, ...]: ...
 
 
-_OPAQUE_ARCHIVE_KEYS = frozenset({"raw_json", "raw_line_base64", "raw_line", "_record_kind", "raw_payload"})
+_OPAQUE_ARCHIVE_KEYS = frozenset(
+    {"raw_json", "raw_line_base64", "raw_line", "_record_kind", "raw_payload", "_ngwaf_enrichment"}
+)
 
 
 def _sanitize_archive_row(row: Mapping[str, Any]) -> dict[str, Any]:
