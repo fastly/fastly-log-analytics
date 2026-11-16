@@ -221,7 +221,13 @@ def test_committed_manifest_index_build_is_skipped_while_another_pod_holds_the_b
         other_pod.execute("SELECT pg_advisory_lock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,))
         assert seed.control.ensure_committed_manifest_index() == "skipped"
         assert _committed_index(seed.control) is None
-    assert seed.control.ensure_committed_manifest_index() == "built"
+        # Closing returns before the server ends the session and frees its locks.
+        other_pod.execute("SELECT pg_advisory_unlock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,))
+    # Advisory locks are database-wide: other xdist workers' schema boots briefly take the same key.
+    deadline = time.monotonic() + 10
+    while (outcome := seed.control.ensure_committed_manifest_index()) == "skipped" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert outcome == "built"
     assert _committed_index(seed.control) == (True, False)
 
 
