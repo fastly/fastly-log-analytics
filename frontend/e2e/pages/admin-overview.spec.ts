@@ -649,9 +649,10 @@ test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () 
   })
 
   test('4. RUM Status card, Enable/Disable controls, and Faro SDK version state', async ({ page }) => {
+    const main = page.locator('#main')
     await page.goto('/admin/rum', { waitUntil: 'domcontentloaded' })
     await expect(page.getByTestId('admin-rum-status-line')).toBeVisible({ timeout: 30_000 })
-    expect((await page.getByTestId('admin-rum-status-badge').textContent()) ?? '').toMatch(/Beacon Pipeline (Active|Inactive)/)
+    expect((await main.getByTestId('admin-rum-status-badge').textContent()) ?? '').toMatch(/Beacon Pipeline (Active|Inactive)/)
     const isEnabled = ((await page.getByTestId('admin-rum-status-line').textContent()) ?? '').includes('Enabled')
     const enableBtn = page.getByTestId('admin-rum-enable-btn'), disableBtn = page.getByTestId('admin-rum-disable-btn')
     await expect(enableBtn).toBeVisible()
@@ -666,7 +667,7 @@ test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () 
     }
     await assertManualRefreshAttribution(page, {
       url: '/admin/rum', readyLocator: page.getByTestId('admin-rum-status-line'),
-      refreshLocator: page.getByTestId('admin-rum-refresh-btn'),
+      refreshLocator: main.getByTestId('admin-rum-refresh-btn'),
       requestFilter: (url) => /\/api\/services\/[^/]+\/rum\/status/.test(url),
     })
   })
