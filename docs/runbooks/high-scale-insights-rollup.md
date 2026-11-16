@@ -39,8 +39,12 @@ Results are identical to the raw-only queries. The gated real-ClickHouse tests p
 Both statements are `CREATE ... IF NOT EXISTS` in
 [`backend/high_scale/sql/request_schema.sql`](../../backend/high_scale/sql/request_schema.sql). They contain no
 `POPULATE`, `DROP` or `ALTER`, so they are safe to run from several pods at once. They are applied
-by `install_clickhouse_schema()`, which runs from `python -m backend.core.clickhouse`. The backend
-and worker deployments do not run it at start-up, so run it once per deploy in a backend pod.
+by `install_clickhouse_schema()` in `backend.high_scale.archive`. The backend and worker
+deployments do not run it at start-up, so run it once per deploy in a backend pod:
+
+```
+python -c "from backend.high_scale.archive import install_clickhouse_schema; install_clickhouse_schema()"
+```
 
 Until the table exists, the coverage read fails and Insights reads raw facts as before.
 
