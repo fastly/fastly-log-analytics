@@ -935,7 +935,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       const qc = createTestQueryClient()
       render(
         <DisableRumDialog
-          service={{ service_id: SVC_PANEL, name: 'Elevation Service', logging_enabled: false }}
+          service={{ service_id: SVC_PANEL, name: 'High-Scale Service', logging_enabled: false }}
           open
           onOpenChange={vi.fn()}
         />,
