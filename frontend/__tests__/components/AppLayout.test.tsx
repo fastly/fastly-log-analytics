@@ -181,6 +181,48 @@ test('keeps anonymous visitors on sign-in before the analyst role hydrates', asy
   expect(screen.queryByText('No services configured yet. Redirecting to the admin setup page.')).not.toBeInTheDocument()
 })
 
+describe('/how-it-works access', () => {
+  test('anonymous visitors read it without a sign-in redirect', () => {
+    vi.mocked(usePathname).mockReturnValue('/how-it-works')
+    const replace = vi.fn()
+    vi.mocked(useRouter).mockReturnValue({ ...useRouter(), replace })
+    vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+      data: partial<BootstrapData>({ services: [], settings: { needs_login: true } }),
+      isSuccess: true,
+      isLoading: false,
+    }))
+
+    renderWithQueryClient(<AppLayout><h1>How it works</h1></AppLayout>)
+    expect(screen.getByRole('heading', { level: 1, name: 'How it works' })).toBeInTheDocument()
+    expect(screen.queryByText('Sign in required. Redirecting to the sign-in page.')).not.toBeInTheDocument()
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  test('a signed-in install with no services yet still shows it instead of the setup redirect', () => {
+    vi.mocked(usePathname).mockReturnValue('/how-it-works')
+    const replace = vi.fn()
+    vi.mocked(useRouter).mockReturnValue({ ...useRouter(), replace })
+    vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+      data: partial<BootstrapData>({ services: [], settings: {} }),
+      isSuccess: true,
+      isLoading: false,
+    }))
+    act(() => { useServiceStore.setState({ activeServiceId: null, services: [] }) })
+
+    renderWithQueryClient(<AppLayout><h1>How it works</h1></AppLayout>)
+    expect(screen.getByRole('heading', { level: 1, name: 'How it works' })).toBeInTheDocument()
+    expect(replace).not.toHaveBeenCalledWith('/admin')
+  })
+
+  test('the sidebar links to it for analysts too', async () => {
+    const { useIsAnalyst } = await import('@/hooks/useBootstrap')
+    vi.mocked(useIsAnalyst).mockReturnValue(true)
+    renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)
+    expect(screen.getAllByRole('link', { name: /How it works/ })[0]).toHaveAttribute('href', expect.stringMatching(/^\/how-it-works/))
+    expect(screen.queryByRole('link', { name: /^Admin/ })).not.toBeInTheDocument()
+  })
+})
+
 describe('ReportShell', () => {
   beforeEach(() => {
     mockActiveServiceId = 'svc-1'

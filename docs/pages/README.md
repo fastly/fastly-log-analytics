@@ -25,6 +25,7 @@ One document per route. Each describes what the page shows, the backend endpoint
 | `/control-room` | [control-room.md](control-room.md) | Real-time metrics and recent errors |
 | `/high-scale/request-facts` | [high-scale-request-facts.md](high-scale-request-facts.md) | Paged request-fact explorer |
 | `/share-login` | [share-login.md](share-login.md) | Analyst sign-in and terms gate |
+| `/how-it-works` | [how-it-works.md](how-it-works.md) | Public explainer of the Cloud or High-Scale install |
 | `/admin` | [admin/overview.md](admin/overview.md) | Status cards, services, health, quarantine, settings |
 | `/admin/queries` | [admin/queries.md](admin/queries.md) | Live query monitor |
 | `/admin/queue` | [admin/queue.md](admin/queue.md) | Ingest ledger, worker queues, scheduler |

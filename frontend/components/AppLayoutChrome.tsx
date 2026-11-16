@@ -6,7 +6,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import {
   LayoutDashboard, Network, Users, Settings, Database, Search, Activity, Sparkles,
-  Timer, Shield, Bell, Server, Loader2, Radio, Play, TrendingUp, X, Eye, Moon, Sun, Monitor,
+  Timer, Shield, Bell, Server, Loader2, Radio, Play, TrendingUp, X, Eye, Moon, Sun, Monitor, BookOpen,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -191,7 +191,10 @@ export const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: IS_CLOUD_MODE },
 ]
 
-export const SYSTEM_NAVIGATION = [{ name: 'Admin', href: '/admin', icon: Settings }]
+export const SYSTEM_NAVIGATION = [
+  { name: 'Admin', href: '/admin', icon: Settings },
+  { name: 'How it works', href: '/how-it-works', icon: BookOpen },
+]
 export const IS_CLOUD_RUNTIME = IS_CLOUD_MODE
 
 export const CLOUD_PRUNED_NAV_HREFS = new Set<string>([
@@ -232,7 +235,7 @@ const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/security': 'Security', '/network': 'Network', '/streaming': 'Streaming', '/origin': 'Origin',
   '/performance': 'Performance', '/sessions': 'Sessions', '/insights': 'Insights', '/query': 'Query',
   '/charts': 'Charts', '/alerts': 'Alerts', '/logs': 'Data Management', '/usage': 'Usage and Cost',
-  '/admin': 'Admin', '/share-login': 'Sign in',
+  '/admin': 'Admin', '/share-login': 'Sign in', '/how-it-works': 'How it works',
 }
 
 function friendlyPageName(pathname: string): string {

@@ -150,18 +150,19 @@ export function AppLayout({
     if (isAnalyst) return item.analystVisible
     return true
   })
-  const visibleSystemNav = isAnalyst ? [] : SYSTEM_NAVIGATION
+  const visibleSystemNav = isAnalyst ? SYSTEM_NAVIGATION.filter(item => item.href !== '/admin') : SYSTEM_NAVIGATION
 
   const hasServices = isSuccess
     ? !!(bootstrapData?.services?.length)
     : services.length > 0 || !!activeServiceId || !!ssrActiveServiceId
 
   const needsLogin = bootstrapSettings?.needs_login === true
+  const isPublicPage = pathname.startsWith('/how-it-works')
   const analystBlocked =
     (isAnalyst && matchesPrefix(pathname, IS_CLOUD_MODE ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
     (!IS_CLOUD_MODE && (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
-  const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
-  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login')
+  const needsSignIn = needsLogin && !isPublicPage && !pathname.startsWith('/share-login')
+  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !isPublicPage && !pathname.startsWith('/admin') && !pathname.startsWith('/share-login')
 
   const redirectAnnouncement = isLoading
     ? ''
@@ -227,6 +228,10 @@ export function AppLayout({
             <main id="main" tabIndex={0} className="flex-1 outline-none">{children}</main>
             {serverFooter && !isAnalyst && serverFooter}
           </div>
+        ) : isPublicPage ? (
+          <div className="min-h-screen flex flex-col bg-background">
+            <main id="main" tabIndex={0} className="flex-1 p-4 md:p-6 outline-none">{children}</main>
+          </div>
         ) : null}
       </>
     )
@@ -237,7 +242,7 @@ export function AppLayout({
 
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
   const hideFilterBar =
-    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room']) ||
+    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room', '/how-it-works']) ||
     isQueryRawMode ||
     !hasServices
 
@@ -419,7 +424,7 @@ export function AppLayout({
                 <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
               {isLoading && !bootstrapData ? (
                 <CenteredSpinner label="Loading app configuration…" />
-              ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login']) ? (
+              ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login', '/how-it-works']) ? (
                 <>
                   <CenteredSpinner label="Setting up your workspace…" />
                   <ServiceUrlWriteback />
