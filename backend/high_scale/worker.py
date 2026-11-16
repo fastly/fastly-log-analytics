@@ -141,6 +141,8 @@ class HighScaleWorkerLoop:
         deletion_sweep_limit: int = 100,
         pages_per_tick: int | None = None,
         service_weights: Mapping[str, int] | None = None,
+        publication_retry_interval_seconds: float = 30.0,
+        publication_retry_limit: int = 4,
     ) -> None:
         if coordinators is not None:
             resolved_coordinators = coordinators
@@ -158,6 +160,8 @@ class HighScaleWorkerLoop:
             raise ValueError("at least one high-scale domain is required")
         if interval_seconds < 0:
             raise ValueError("worker interval must be non-negative")
+        if publication_retry_interval_seconds < 0 or publication_retry_limit <= 0:
+            raise ValueError("publication retry interval must be non-negative and its limit positive")
         self._coordinator = coordinator
         self._coordinators = resolved_coordinators
         self._service_ids = resolved_service_ids
@@ -174,6 +178,9 @@ class HighScaleWorkerLoop:
         self._deletion_thread: Thread | None = None
         self._last_deletion_sweep = 0.0
         self._last_system_cleanup = 0.0
+        self._publication_retry_interval_seconds = publication_retry_interval_seconds
+        self._publication_retry_limit = publication_retry_limit
+        self._last_publication_retry: float | None = None
         pair_list = tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains)
         self._selector = FairPageSelector(
             pair_list,
@@ -194,9 +201,27 @@ class HighScaleWorkerLoop:
                 results.append(WorkerPageResult(service_id, domain, None, exc))
             else:
                 results.append(WorkerPageResult(service_id, domain, page))
+        self._run_publication_retries()
         self._run_deletion_sweeps()
         self._run_system_cleanups()
         return tuple(results)
+
+    def _run_publication_retries(self) -> None:
+        now = time.monotonic()
+        if (
+            self._last_publication_retry is not None
+            and now - self._last_publication_retry < self._publication_retry_interval_seconds
+        ):
+            return
+        self._last_publication_retry = now
+        for service_id, coordinator in self._coordinators:
+            retry = getattr(coordinator, "retry_archived_publications", None)
+            if retry is None:
+                continue
+            try:
+                retry(service_id=service_id, limit=self._publication_retry_limit)
+            except Exception:
+                _worker_logger.exception("high-scale publication retry failed", extra={"service_id": service_id})
 
     def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
         return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
@@ -390,6 +415,8 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
         else:
             sweepers.append(None)
     pages_per_tick = int(os.getenv("HIGH_SCALE_PAGES_PER_TICK", "0") or "0") or None
+    publication_retry_interval = float(os.getenv("HIGH_SCALE_PUBLICATION_RETRY_INTERVAL_SECONDS", "30"))
+    publication_retry_limit = int(os.getenv("HIGH_SCALE_PUBLICATION_RETRY_LIMIT", "4"))
     return _MultiServiceWorkerLoop(
         coordinators=tuple(zip(service_ids, coordinators, strict=True)),
         deletion_sweepers=tuple(zip(service_ids, sweepers, strict=True)),
@@ -398,6 +425,8 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
         interval_seconds=interval_seconds,
         pages_per_tick=pages_per_tick,
         service_weights=_weights_from_env(),
+        publication_retry_interval_seconds=publication_retry_interval,
+        publication_retry_limit=publication_retry_limit,
     )
 
 

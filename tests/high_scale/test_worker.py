@@ -68,6 +68,36 @@ def test_worker_loop_stops_after_requested_iterations() -> None:
     assert coordinator.calls == [("svc", "request"), ("svc", "request")]
 
 
+@dataclass
+class _RetryingCoordinator(_Coordinator):
+    retries: list[tuple[str, int]] = field(default_factory=list)
+    fail: bool = False
+
+    def retry_archived_publications(self, *, service_id: str, limit: int) -> None:
+        self.retries.append((service_id, limit))
+        if self.fail:
+            raise RuntimeError("archive unavailable")
+
+
+def test_publication_retries_run_for_every_service_at_most_once_per_interval(caplog: pytest.LogCaptureFixture) -> None:
+    failing, healthy = _RetryingCoordinator([], fail=True), _RetryingCoordinator([])
+    loop = HighScaleWorkerLoop(
+        coordinators=(("svc-a", failing), ("svc-b", healthy)),  # type: ignore[arg-type]
+        domains=("request",),
+        interval_seconds=0,
+        publication_retry_interval_seconds=60,
+        publication_retry_limit=3,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        loop.run_once()
+        loop.run_once()
+
+    assert (failing.retries, healthy.retries) == ([("svc-a", 3)], [("svc-b", 3)])
+    assert healthy.calls == [("svc-b", "request")] * 2
+    assert "high-scale publication retry failed" in caplog.text
+
+
 class _BlockingSweeper:
     def __init__(self) -> None:
         self.started = Event()
