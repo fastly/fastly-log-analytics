@@ -99,6 +99,11 @@ VERBOSE ?= 0
 TARGET_MAX_GB ?= 20
 AR_wasm32_wasip1 ?= $(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 --print sysroot 2>/dev/null)/lib/rustlib/$(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 -vV 2>/dev/null | sed -n 's/^host: //p')/bin/llvm-ar
 export AR_wasm32_wasip1
+# zstd-sys builds freestanding for wasm32-wasip1 against its own wasm-shim headers.
+# Ubuntu clang otherwise searches the host glibc /usr/include for wasm targets and
+# fails; Apple clang has no such path, so this is a no-op on macOS.
+CFLAGS_wasm32_wasip1 ?= -nostdlibinc
+export CFLAGS_wasm32_wasip1
 
 cloud-sync-catalog:
 	PYTHONPATH=. uv run python compute/cloud/tools/generator_fixtures.py --write
