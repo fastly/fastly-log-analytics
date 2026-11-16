@@ -211,7 +211,7 @@ export function UsagePageContent({
   const estimatorRef = useRef<HTMLDivElement>(null)
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
 
-  const { data: prefillFull, isLoading: loadingPrefillFull } = useQuery({
+  const { data: prefillFull, isLoading: loadingPrefillFull, isError: prefillFullFailed } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
     queryFn: async ({ signal }) => {
       return unwrapClient(client.GET('/api/usage/prefill', { signal }))
@@ -241,7 +241,7 @@ export function UsagePageContent({
   const rateStorage = rateSettings?.storage_rate_per_gb_month ?? 0.02
 
   const prefillNote =
-    prefill && !loadingPrefill
+    prefill && !loadingPrefill && (prefillFull || prefillFullFailed)
       ? prefillFull?.requests_per_day == null || (prefill.edge_only && prefillFull?.edge_requests_per_day == null)
         ? 'Traffic measurements are unavailable; reference traffic assumptions are shown. Service configuration and rates are pre-filled where available.'
         : 'Calculator pre-filled from your current service configuration.'

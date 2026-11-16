@@ -352,6 +352,25 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByText('Compute (app + worker)')).not.toBeInTheDocument()
   })
 
+  test('High-Scale does not call traffic unavailable before the below-the-fold estimator loads its measurements', async () => {
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    try {
+      mockGet.mockImplementation(async (path: string) => {
+        if (path === '/api/usage/prefill/rates') return { data: makePrefill({ requests_per_day: null }) }
+        return undefined
+      })
+      renderWithQuery(<UsagePage />, { queryClient })
+      await screen.findByTestId('cost-calculator')
+      expect(mockGet).not.toHaveBeenCalledWith('/api/usage/prefill', expect.anything())
+      expect(screen.queryByText(/Traffic measurements are unavailable/)).not.toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flagged partial on a storage 5xx', async () => {
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/usage/current-storage') throw new Error('storage boom')
