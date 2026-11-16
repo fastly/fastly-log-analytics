@@ -72,9 +72,10 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     )
     await gotoHeading(page, '/dashboard', 'Dashboard')
     await expect(page.locator('text=Traffic over Time').or(page.locator('[data-empty-placeholder="true"]')).first()).toBeVisible({ timeout: 10_000 })
-    const placeholders = page.locator('main [data-empty-placeholder="true"]')
-    if ((await placeholders.count()) > 0) {
-      expect((await placeholders.allTextContents()).some((t) => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(t))).toBeTruthy()
+    // One read: placeholders can vanish between a count and a second read once the bundle lands.
+    const placeholderTexts = await page.locator('main [data-empty-placeholder="true"]').allTextContents()
+    if (placeholderTexts.length > 0) {
+      expect(placeholderTexts.some((t) => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(t))).toBeTruthy()
     }
     const bundleResponseData = await (await bundleResponsePromise).json()
     expect(bundleCalls).toBe(1)
