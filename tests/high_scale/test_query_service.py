@@ -2325,8 +2325,16 @@ def test_insights_fall_back_to_raw_facts_when_the_rollup_cannot_be_trusted(case:
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_insights_detector_telemetry_survives_async_and_worker_boundaries(fails: bool) -> None:
+def test_insights_detector_telemetry_survives_async_and_worker_boundaries(
+    fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import structlog
     from structlog.testing import capture_logs
+
+    from backend.core.request_telemetry import tracker
+
+    # backend.main caches loggers on first use, so a tracker logger an earlier test used would bypass capture_logs.
+    monkeypatch.setattr(tracker, "_logger", structlog.get_logger(tracker.__name__))
 
     class Client(_InsightsClient):
         def __init__(self) -> None:
