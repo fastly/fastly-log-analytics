@@ -178,11 +178,14 @@ test.describe('/admin/share — Admin Live Share Management Contract', () => {
   test.setTimeout(90_000)
 
   test('1. Route accessibility, ServerFooter identity, Live Share layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
+    // React can client-render the page while its streamed copy still sits in a hidden <div id="S:…"> outside #main.
+    const main = page.locator('#main')
     await assertAdminMount(page, '/admin/share', {
       rootTestId: 'admin-share-root', heading: 'Remote Dashboard Sharing', domContentLoaded: true, warmReload: true,
       testIds: ['back-to-admin-link', 'admin-share-refresh-btn', 'admin-share-control-reservation', 'admin-share-tabs', 'admin-share-panel-reservation'],
+      scope: main,
       minHeights: [['admin-share-control-reservation', 180], ['admin-share-panel-reservation', 240]],
-      warmLocators: [page.getByTestId('admin-share-root'), page.getByTestId('admin-share-control-panel')],
+      warmLocators: [main.getByTestId('admin-share-root'), main.getByTestId('admin-share-control-panel')],
     })
   })
 
@@ -326,11 +329,13 @@ test.describe('/admin/session-scoring — Admin Session Scoring Configuration Co
   test.setTimeout(90_000)
 
   test('1. Route accessibility, ServerFooter identity, Session Scoring layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
+    const main = page.locator('#main')
     await assertAdminMount(page, '/admin/session-scoring', {
       rootTestId: 'admin-session-scoring-root', heading: 'Session Scoring', domContentLoaded: true, warmReload: true,
       testIds: ['back-to-admin-link', 'admin-session-scoring-refresh-btn', 'admin-session-scoring-status-reservation', 'admin-session-scoring-tabs'],
+      scope: main,
       minHeights: [['admin-session-scoring-status-reservation', 200], ['admin-session-scoring-overview-reservation', 400]],
-      warmLocators: [page.getByTestId('admin-session-scoring-root'), page.getByTestId('admin-session-scoring-status-line')],
+      warmLocators: [main.getByTestId('admin-session-scoring-root'), main.getByTestId('admin-session-scoring-status-line')],
     })
   })
 
