@@ -165,13 +165,17 @@ sub corrupted_registry_cannot_select_an_arbitrary_origin {
 
 // @scope: hash
 sub reprovisioned_bucket_does_not_reuse_previous_object_cache {
+  declare local var.expected STRING;
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
+  set req.http.host = "front.example";
   set req.http.x-flp-fos-service = "AAAAAAAAAAAAAAAAAAAAAA";
   set req.http.x-flp-fos-bucket = "fos-first";
   set req.http.x-flp-fos-region = "us-east-1";
   testing.call_subroutine("vcl_hash");
-  assert.contains(req.hash, "fos-first");
-  assert.contains(req.hash, "us-east-1");
+  # falco (pinned in CI) folds each req.hash += into sha256(previous || value), so rebuild that chain.
+  set var.expected = digest.hash_sha256(digest.hash_sha256(digest.hash_sha256(digest.hash_sha256(
+    req.url) req.http.host) "fos-first") "us-east-1");
+  assert.equal(req.hash, var.expected);
 }
 
 
