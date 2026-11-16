@@ -1,4 +1,21 @@
 {{- if and .Values.autoscaling.enabled .Values.workers.enabled }}
+{{- if not (or .Values.secrets.existingSecret .Values.secrets.metadataDsn) }}
+{{- fail "autoscaling.enabled scales the ingest workers on the Postgres source backlog: set secrets.metadataDsn or secrets.existingSecret." }}
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-worker-backlog
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-worker
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  secretTargetRef:
+    - parameter: connection
+      name: {{ include "fastly-log-analytics.secretName" . }}
+      key: METADATA_DSN
+---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -13,26 +30,17 @@ spec:
   minReplicaCount: {{ .Values.autoscaling.minReplicas }}
   maxReplicaCount: {{ .Values.autoscaling.maxReplicas }}
   triggers:
-    # One trigger per real Celery queue (task_routes in backend/celery_app.py:
-    # backend.core.ingest.* → q.ingest, backend.cron.jobs.* → q.control,
-    # everything else → the default `celery` list). The redis scaler takes a
-    # host:port address, not a redis:// URL.
-    - type: redis
+    # Discovery registers new FOS log objects as `discovered` rows in the
+    # Postgres control plane and the workers claim them, so that count is the
+    # ingest backlog. Counted per service so the (service_id, status) index
+    # serves it instead of a scan of every ingested object.
+    - type: postgresql
+      authenticationRef:
+        name: {{ include "fastly-log-analytics.fullname" . }}-worker-backlog
       metadata:
-        address: "{{ .Values.broker.host }}:{{ .Values.broker.port }}"
-        databaseIndex: {{ .Values.broker.databaseIndex | quote }}
-        listName: q.ingest
-        listLength: "5"
-    - type: redis
-      metadata:
-        address: "{{ .Values.broker.host }}:{{ .Values.broker.port }}"
-        databaseIndex: {{ .Values.broker.databaseIndex | quote }}
-        listName: q.control
-        listLength: "5"
-    - type: redis
-      metadata:
-        address: "{{ .Values.broker.host }}:{{ .Values.broker.port }}"
-        databaseIndex: {{ .Values.broker.databaseIndex | quote }}
-        listName: celery
-        listLength: "5"
+        query: >-
+          SELECT COALESCE(SUM(backlog.n), 0) FROM high_scale_ownership o
+          CROSS JOIN LATERAL (SELECT COUNT(*) AS n FROM high_scale_source_objects s
+          WHERE s.service_id = o.service_id AND s.status = 'discovered') backlog
+        targetQueryValue: {{ .Values.autoscaling.workerBacklogPerReplica | quote }}
 {{- end }}

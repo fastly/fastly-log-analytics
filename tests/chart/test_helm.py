@@ -300,6 +300,64 @@ def test_worker_autoscaling_still_works():
     assert [doc for doc in docs if doc["kind"] == "ScaledObject"]
 
 
+def _worker_scaler(docs: list[dict]) -> tuple[dict, dict]:
+    scaled = next(doc for doc in docs if doc["kind"] == "ScaledObject")
+    (trigger,) = scaled["spec"]["triggers"]
+    auth = next(
+        doc
+        for doc in docs
+        if doc["kind"] == "TriggerAuthentication" and doc["metadata"]["name"] == trigger["authenticationRef"]["name"]
+    )
+    return trigger, auth
+
+
+def test_worker_autoscaling_reads_the_source_backlog_the_worker_drains():
+    """The ingest worker claims `discovered` rows from the Postgres control plane; it
+    never reads a Redis list, so a list trigger pins it at minReplicas forever."""
+    from backend.high_scale.ingest_controller.coordinator import SourceObjectDescriptor
+    from backend.high_scale.postgres_control import PostgresControlPlane
+
+    trigger, auth = _worker_scaler(_render(*STANDARD, "autoscaling.enabled=true"))
+    assert trigger["type"] == "postgresql"
+    assert auth["spec"]["secretTargetRef"] == [
+        {"parameter": "connection", "name": "test-release-fastly-log-analytics-secrets", "key": "METADATA_DSN"}
+    ]
+
+    control = PostgresControlPlane()
+    control.create_schema()
+    services = ("svc-keda-a", "svc-keda-b")
+    try:
+        for sid, count in zip(services, (3, 2), strict=True):
+            owner = control.initialize_owner(sid, owner="high_scale", source_cursor="__initial__")
+            control.discover_sources_batch(
+                sid,
+                "request",
+                [SourceObjectDescriptor(f"raw/request/{sid}/{i}.gz", f"c{i}", 1) for i in range(count)],
+                expected_owner=owner.current_owner,
+                expected_owner_epoch=owner.owner_epoch,
+            )
+        with control.transaction() as connection:
+            connection.execute(
+                "UPDATE high_scale_source_objects SET status='acknowledged' WHERE object_key = %s",
+                ("raw/request/svc-keda-a/0.gz",),
+            )
+            (backlog,) = connection.execute(trigger["metadata"]["query"]).fetchone()
+        assert backlog == 4
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = ANY(%s)", (list(services),))
+            connection.execute("DELETE FROM high_scale_ownership WHERE service_id = ANY(%s)", (list(services),))
+
+
+def test_worker_autoscaling_follows_an_existing_secret():
+    trigger, auth = _worker_scaler(_render("secrets.existingSecret=fla-connections", "autoscaling.enabled=true"))
+    assert auth["spec"]["secretTargetRef"][0]["name"] == "fla-connections"
+
+
+def test_worker_autoscaling_without_a_metadata_dsn_fails_at_template_time():
+    assert "secrets.metadataDsn" in _render_error("autoscaling.enabled=true")
+
+
 def test_no_worker_scaledobject_without_a_worker_fleet():
     """When workers.enabled=false there is no worker Deployment, so a ScaledObject would
     target a workload that does not exist."""

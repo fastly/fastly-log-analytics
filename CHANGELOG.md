@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Unified ClickHouse + PostgreSQL 16 + FOS Archive Parquet architecture** — ClickHouse serves all analytical queries across every deployment footprint (from single-worker Docker Compose on a laptop up to 1,000,000 RPS on Kubernetes), PostgreSQL 16 stores all operational metadata and ingest control-plane state, and stateless ingest workers write canonical Archive Parquet batches to Fastly Object Storage (`{prefix}/archive/`).
 - **Removed legacy mode flags and catalog fields** — removed single-mode compatibility shims, legacy catalog/pool status fields, and obsolete custom-field `sql_type` aliases across backend models, frontend components, Helm templates, Docker Compose manifests, and operational scripts.
+- **KEDA scales ingest workers on the real backlog** — with `autoscaling.enabled`, the worker ScaledObject now uses a PostgreSQL trigger on the count of `discovered` rows in `high_scale_source_objects` (target `autoscaling.workerBacklogPerReplica`, default 100) instead of three Celery Redis lists that nothing filled, so workers never scaled above `minReplicas`. It needs `secrets.metadataDsn` or `secrets.existingSecret` (a `METADATA_DSN` key) whose host resolves from KEDA's namespace; the unused `broker` values block is removed.
 
 ## [3.0.0-rc1] - 2026-11-02
 

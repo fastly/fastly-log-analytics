@@ -72,11 +72,18 @@ resources:
     memory: 8Gi
 
 # Scales the ingest workers (KEDA ScaledObject) and the stateless frontend.
+# Workers scale on the count of discovered-but-unclaimed source objects in the
+# Postgres control plane, which KEDA reads with METADATA_DSN from the chart's
+# Secret (so it needs secrets.metadataDsn or secrets.existingSecret, and the
+# DSN host must resolve from the KEDA operator's namespace).
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 10
   targetCPUUtilizationPercentage: 80
+  # Backlog one worker is expected to drain; defaults to one source page
+  # (HIGH_SCALE_PAGE_SIZE).
+  workerBacklogPerReplica: "100"
 
 # Shared app state (configs + data). ReadWriteOnce: every pod that
 # mounts it is pinned to the same node.
@@ -132,14 +139,6 @@ config:
   clickhouseUser: "fla"
   clickhouseSecure: "false"
   hotS3Endpoint: ""
-
-# Broker endpoint used by the KEDA redis scaler (host/port form — the scaler
-# does not take a redis:// URL). Only read when autoscaling.enabled.
-# Keep in sync with secrets.celeryBrokerUrl.
-broker:
-  host: valkey-master
-  port: 6379
-  databaseIndex: "0"
 
 # Connection strings are wired into pods via a Secret, never as plain env in
 # the pod spec. For production, pre-create a Secret with keys
