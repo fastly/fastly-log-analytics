@@ -17,6 +17,12 @@ export function captureCloudQueryContext(): CloudQueryContext | undefined {
   return canObserve() ? context() : undefined;
 }
 
+/** Lets a stalled readiness wait report which loading stage the page was left in. */
+export function publishCloudLoading(detail: { stage: string | null; jobs: number; progress: object | null }): void {
+  if (!canObserve()) return;
+  globalThis.dispatchEvent(new CustomEvent("fla:cloud-loading", { detail }));
+}
+
 export function publishCloudService(serviceId: string | null): void {
   if (!canObserve()) return;
   globalThis.dispatchEvent(new CustomEvent("fla:cloud-service", { detail: { serviceId } }));

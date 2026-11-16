@@ -4,6 +4,7 @@ function installCloudReadiness() {
   let worker = null;
   let workerRoute = null;
   let selectedService = null;
+  let loading = null;
   const key = (route, search, serviceId) => {
     const params = new URLSearchParams(search);
     return JSON.stringify([route, serviceId ?? null, params.get('range') || '24h', params.get('start_time'),
@@ -31,6 +32,18 @@ function installCloudReadiness() {
     queries.set(identity, { id: detail.id, route, section: detail.section, state: detail.state,
       totalRows: rows(detail.totalRows) ? detail.totalRows : null,
       error: detail.state === 'error' ? message(detail.error) ?? (rows(detail.status) ? `HTTP ${detail.status}` : null) : null });
+  });
+  window.addEventListener('fla:cloud-loading', ({ detail }) => {
+    if (!detail || !(detail.stage === null || ['session', 'range', 'listing', 'files'].includes(detail.stage))
+      || !rows(detail.jobs)) return;
+    let progress = null;
+    if (detail.progress && typeof detail.progress === 'object') {
+      progress = { phase: ['cache', 'files', 'aggregate'].includes(detail.progress.phase) ? detail.progress.phase : null };
+      for (const field of ['cached', 'toFetch', 'toDecode', 'done', 'downloadedBytes', 'cachedBytes']) {
+        progress[field] = rows(detail.progress[field]) ? detail.progress[field] : null;
+      }
+    }
+    loading = { stage: detail.stage, jobs: detail.jobs, progress, at: Date.now() };
   });
   window.addEventListener('fla:cloud-worker', ({ detail }) => {
     if (!detail || key(detail.route, detail.search, detail.serviceId) !== current()) return;
@@ -70,7 +83,8 @@ function installCloudReadiness() {
         .map(query => ({ section: query.section, error: query.error }));
       const pendingSections = active.filter(query => query.state === 'pending').slice(0, 5).map(query => query.section);
       return { source: 'cloud-query', observed, ready: Boolean(ready), pending, errors,
-        complete, failures, pendingSections, totalRows: dashboard?.totalRows ?? null, worker: workerRoute === current() ? worker : null };
+        complete, failures, pendingSections, totalRows: dashboard?.totalRows ?? null, worker: workerRoute === current() ? worker : null,
+        loading: loading && { stage: loading.stage, jobs: loading.jobs, progress: loading.progress, ageMs: Date.now() - loading.at } };
     },
   };
 }

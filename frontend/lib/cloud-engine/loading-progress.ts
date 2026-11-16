@@ -1,4 +1,5 @@
 import type { RunProgress } from "./dashboard/engine";
+import { publishCloudLoading } from "./readiness";
 
 export type LoadingStage = "session" | "range" | "listing" | "files";
 export type LoadingState = {
@@ -38,6 +39,7 @@ function publish(): void {
     };
   }
   listeners.forEach((listener) => listener());
+  publishCloudLoading({ stage: snapshot?.stage ?? null, jobs: active.length, progress: snapshot?.progress ?? null });
 }
 
 export const cloudLoadingStore = {

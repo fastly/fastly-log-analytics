@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { beginCloudLoading, cloudLoadingStore } from "./loading-progress";
+import { setCloudModeRuntime } from "./mode";
 
 const progress = {
   phase: "files" as const, cached: 1, toFetch: 3, toDecode: 1, done: 2,
@@ -59,5 +60,25 @@ describe("cloud loading progress", () => {
     refresh.finish();
     expect(cloudLoadingStore.getSnapshot()?.stage).toBe("session");
     nextSession.finish(false);
+  });
+
+  it("publishes each loading change for readiness diagnostics in Cloud mode", () => {
+    setCloudModeRuntime(true);
+    const events: unknown[] = [];
+    const listener = (event: Event) => events.push((event as CustomEvent).detail);
+    window.addEventListener("fla:cloud-loading", listener);
+    try {
+      const job = beginCloudLoading("files");
+      job.update({ progress });
+      job.finish();
+      expect(events).toEqual([
+        { stage: "files", jobs: 1, progress: null },
+        { stage: "files", jobs: 1, progress: expect.objectContaining({ phase: "files", done: 2, toFetch: 3 }) },
+        { stage: null, jobs: 0, progress: null },
+      ]);
+    } finally {
+      window.removeEventListener("fla:cloud-loading", listener);
+      setCloudModeRuntime(false);
+    }
   });
 });

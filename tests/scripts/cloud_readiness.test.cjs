@@ -12,6 +12,7 @@ function documentState(search = '?range=1h') {
     state: () => JSON.parse(JSON.stringify(window.__flaCloudReadiness.snapshot())),
     location,
     selectService: serviceId => listeners['fla:cloud-service']?.({ detail: { serviceId } }),
+    loading: detail => listeners['fla:cloud-loading']({ detail }),
     worker: detail => listeners['fla:cloud-worker']({ detail: {
       route: '/dashboard', search, ...detail,
     } }),
@@ -76,6 +77,23 @@ test('a different filter result and an unfinished local API cannot certify a das
   assert.equal(doc.state().ready, false);
   doc.emit({ id: 3, section: 'api./api/dashboard/bundle', state: 'error' });
   assert.equal(doc.state().ready, false);
+});
+
+test('the snapshot names the latest loading stage and how long it has been unchanged', () => {
+  const doc = documentState();
+  assert.equal(doc.state().loading, null);
+  doc.loading({ stage: 'files', jobs: 1, progress: null });
+  assert.deepEqual({ ...doc.state().loading, ageMs: 0 }, { stage: 'files', jobs: 1, progress: null, ageMs: 0 });
+  assert.ok(doc.state().loading.ageMs >= 0);
+  doc.loading({ stage: 'files', jobs: 2, progress: { phase: 'files', done: 2, toFetch: 3, cached: 1, toDecode: 0,
+    downloadedBytes: 10, cachedBytes: 5, secret: 'x' } });
+  assert.deepEqual(doc.state().loading.progress, { phase: 'files', done: 2, toFetch: 3, cached: 1, toDecode: 0,
+    downloadedBytes: 10, cachedBytes: 5 });
+  doc.loading({ stage: 'bogus', jobs: -1, progress: 'x' });
+  assert.equal(doc.state().loading.stage, 'files');
+  doc.loading({ stage: null, jobs: 0, progress: null });
+  assert.equal(doc.state().loading.stage, null);
+  assert.equal(doc.state().loading.jobs, 0);
 });
 
 test('non-dashboard routes need their own successful analytical response, not bootstrap alone', () => {
