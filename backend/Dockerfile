@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.4
 
 # Reuse the gateway's pinned Go 1.27.3 toolchain rather than an older release binary.
-FROM caddy:2.11.7-builder@sha256:c4cd20eaa0b69112fd5d4f721ffc9671687e1d5d0b155c8620cf7546dbef94c0 AS falco-builder
+FROM caddy:2.11.9-builder@sha256:3fddbec729442a56b942d4c9eaef1df80893dbf2cf5b86701bfae6aad1408eeb AS falco-builder
 ARG FALCO_VERSION=2.3.0
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
 RUN wget -qO- "https://github.com/ysugimoto/falco/archive/refs/tags/v${FALCO_VERSION}.tar.gz" | tar -xz -C /tmp \
