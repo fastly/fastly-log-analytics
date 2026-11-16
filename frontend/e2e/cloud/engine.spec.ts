@@ -2,7 +2,7 @@ import { expect, test, type Route } from "@playwright/test";
 import { get as httpsGet } from "node:https";
 import { PACKAGE_VERSION } from "@duckdb/duckdb-wasm";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { parquetFixture } from "../../lib/cloud-engine/dashboard/test-fixtures";
+import { parquetFixture } from "../../lib/cloud-engine/dashboard/parquet-fixture";
 
 test("native Cloud runtime recovers after an abandoned Wasm download", async ({
   baseURL,
