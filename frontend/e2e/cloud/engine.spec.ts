@@ -109,6 +109,27 @@ test("Cloud origin buckets use UTC without timezone extensions", async ({
         return route.fulfill({ json: { enabled: false } });
       case "/api/cron-runs":
         return route.fulfill({ json: { configured: true, runs: [] } });
+      case "/api/sync-status":
+        return route.fulfill({
+          json: {
+            configured: true,
+            busy: false,
+            earliest_log_at: from,
+            latest_log_at: to,
+            local_rows: 1,
+            request: {
+              latest_log_at: to,
+              total_rows: 1,
+              total_rows_partial: false,
+              last_sync_at: to,
+            },
+            rum: null,
+            last_tick_at: to,
+            next_tick_at: null,
+            cron_runs: [],
+            audit_logs: [],
+          },
+        });
       default:
         unexpected.push(`${route.request().method()} ${path}`);
         return route.fulfill({
