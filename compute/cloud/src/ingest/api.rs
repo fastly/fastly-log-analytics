@@ -985,7 +985,7 @@ fn summary_semantics() -> Value {
         "ip_top_k": summary::IP_TOP_K,
         "other": "__other__ = field_totals.count - sum of kept all_fields counts; set when field_totals.truncated",
         "truncated_flag": "field_totals.truncated: values beyond top_k were dropped, so per-value counts and distinct counts are lower bounds",
-        "distinct": {"method": "hll", "precision": summary::HLL_P},
+        "distinct": {"method": "hll++ sparse", "precision": summary::HLL_P},
         "ip_sample_cap": summary::IP_SAMPLE_CAP,
         "sample_capped_flag": "sample_capped: ip_count_observed reached ip_sample_cap",
     })

@@ -5,6 +5,7 @@ use arrow_array::{
 use bytes::Bytes;
 use fastly_log_analytics::ingest::{
     convert,
+    hist::Hist,
     summary::{self, Hll},
 };
 use md5::{Digest, Md5};
@@ -659,41 +660,527 @@ fn rows_without_a_timestamp_are_left_out() {
     assert_eq!(bundle(&out, "sessions").len(), 1);
 }
 
-#[test]
-fn hll_matches_fla_hll_byte_for_byte() {
-    // Vectors from fla v3 backend/utils/hll.py at 2c75f058 (p=8, md5 hash).
-    let mut one = Hll::default();
-    one.add_hash(summary::hll_hash("192.0.2.1"));
-    let bytes = one.to_bytes();
-    assert_eq!(bytes.len(), 258);
-    assert_eq!(&bytes[..2], &[1, 8]);
-    let set: Vec<(usize, u8)> = bytes[2..]
+/// Rows for the v3 rows: network, latency, bot, header and asset columns, with nulls and
+/// out-of-range values.
+fn fixture_v3(offset_ms: i64, n: i64) -> Vec<Value> {
+    (0..n)
+        .map(|i| {
+            let k = i as usize;
+            let mut row = json!({
+                "timestamp": iso(BASE * 1000 + offset_ms + i * 977 % (WINDOW * 1000)),
+                "status": ([200, 503, 500, 599, 600, 404, 200][k % 7]),
+                "cache": (["HIT", "miss", "PASS", "HIT-STALE"][k % 4]),
+                "resp_bytes": 100 + i * 3,
+                "elapsed": ([40, 5_000, 120_000, 70_000_000][k % 4] + i),
+                "rid": format!("req-{offset_ms}-{i}"),
+                "url": (["/app.js", "/s.css?v=1", "/f.woff2", "/index.html", "/x.JS"][k % 5]),
+                "req_header_bytes": ([100, 256, 257, 5000, 40_000][k % 5]),
+            });
+            if !k.is_multiple_of(5) {
+                row["proto"] = ["HTTP/2", "HTTP/1.1", "HTTP/3", "HTTP/2"][k % 4].into();
+            }
+            if !k.is_multiple_of(6) {
+                row["country"] = ["US", "DE", "JP"][k % 3].into();
+            }
+            if !k.is_multiple_of(4) {
+                row["city"] = ["Ashburn", "Berlin"][k % 2].into();
+                row["lat"] = (10.0 + (k % 3) as f64).into();
+                row["lon"] = (-5.0 - (k % 2) as f64).into();
+            }
+            if !k.is_multiple_of(7) {
+                row["asn"] = [13335, 15169, 16509][k % 3].into();
+            }
+            if !k.is_multiple_of(3) {
+                row["tcp_rtt"] = (1_000 + (k % 50) * 900).into();
+                row["rtt_var"] = (100 + k % 9).into();
+            }
+            if !k.is_multiple_of(8) {
+                row["ploss"] = ((k % 10) as f64 / 100.0).into();
+            }
+            if !k.is_multiple_of(13) {
+                row["ttfb"] = (0.000_05 + 0.003 * (k % 17) as f64).into();
+            }
+            if k.is_multiple_of(2) {
+                row["ottfb"] = (2_000 + i * 11).into();
+            }
+            if k.is_multiple_of(3) {
+                row["ottlb"] = (4_000 + i * 13).into();
+            }
+            if k.is_multiple_of(9) {
+                row["resp_header_content_encoding"] = "GZIP".into();
+            }
+            row["waf_sig"] = [
+                "VERIFIED-BOT.googlebot",
+                "verified-bot.bingbot",
+                "x",
+                "VERIFIED-BOT.googlebot,y",
+            ][k % 4]
+                .into();
+            row
+        })
+        .collect()
+}
+
+fn meta(bytes: &[u8], key: &str) -> Option<String> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes)).unwrap();
+    builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()?
         .iter()
-        .enumerate()
-        .filter(|(_, r)| **r != 0)
-        .map(|(i, r)| (i, *r))
+        .find(|kv| kv.key == key)
+        .and_then(|kv| kv.value.clone())
+}
+
+fn hist_cell(row: &Map<String, Value>, col: &str) -> Option<Hist> {
+    row.get(col)
+        .map(|v| Hist::from_bytes(&hex::decode(v.as_str().unwrap()).unwrap()).unwrap())
+}
+
+fn hist_of(values: impl IntoIterator<Item = i64>) -> Option<Hist> {
+    let mut h = Hist::default();
+    values.into_iter().for_each(|v| h.add(v));
+    (!h.is_empty()).then_some(h)
+}
+
+fn fnv(s: &str) -> i64 {
+    let h = s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    (h >> 1) as i64
+}
+
+fn ttfb_us(r: &Value) -> Option<i64> {
+    f(r, "ttfb").map(|t| (t * 1e6).round() as i64)
+}
+
+/// The /network keys and sums for one group of rows.
+fn check_net_group(row: &Map<String, Value>, group: &[&Value], what: &str) {
+    let n = |pred: &dyn Fn(&Value) -> bool| group.iter().filter(|r| pred(r)).count() as i64;
+    assert_eq!(row["requests"], group.len() as i64, "{what}");
+    assert_eq!(
+        row["status_5xx"],
+        n(&|r| i(r, "status").is_some_and(|s| (500..=599).contains(&s))),
+        "{what}"
+    );
+    assert_eq!(
+        row["rtt_sum"],
+        group.iter().filter_map(|r| i(r, "tcp_rtt")).sum::<i64>(),
+        "{what}"
+    );
+    assert_eq!(
+        row["rtt_count"],
+        n(&|r| i(r, "tcp_rtt").is_some()),
+        "{what}"
+    );
+    close(
+        &row["ploss_sum"],
+        group.iter().filter_map(|r| f(r, "ploss")).sum(),
+    );
+    assert_eq!(
+        row["ploss_count"],
+        n(&|r| f(r, "ploss").is_some()),
+        "{what}"
+    );
+    assert_eq!(
+        hist_cell(row, "ttfb_hist"),
+        hist_of(group.iter().filter_map(|r| ttfb_us(r))),
+        "{what}"
+    );
+    assert_eq!(
+        hist_cell(row, "rtt_hist"),
+        hist_of(group.iter().filter_map(|r| i(r, "tcp_rtt"))),
+        "{what}"
+    );
+    assert_eq!(
+        hist_cell(row, "ottfb_hist"),
+        hist_of(group.iter().filter_map(|r| i(r, "ottfb"))),
+        "{what}"
+    );
+    assert_eq!(
+        hist_cell(row, "ottlb_hist"),
+        hist_of(group.iter().filter_map(|r| i(r, "ottlb"))),
+        "{what}"
+    );
+}
+
+fn net_key(r: &Value, dim: &str) -> String {
+    let or = |k: &str, d: &str| s(r, k).unwrap_or(d).to_owned();
+    match dim {
+        "proto" => or("proto", "Other"),
+        "country" => or("country", "Unknown"),
+        "asn" => i(r, "asn").unwrap_or(0).to_string(),
+        "city" => {
+            serde_json::to_string(&[or("country", "Unknown"), or("city", "Unknown")]).unwrap()
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn v3_rows_match_a_brute_force_computation_over_the_rows() {
+    let rows = fixture_v3(0, 700);
+    let b = batch(&rows);
+    let bytes = summary::write_summary(&[&b], BASE).unwrap();
+    assert_eq!(meta(&bytes, "flp_summary").as_deref(), Some("3"));
+    let out = read(&bytes);
+
+    // overview carries all five latency histograms.
+    let ov = bundle(&out, "overview")[0];
+    assert_eq!(
+        hist_cell(ov, "ttfb_hist"),
+        hist_of(rows.iter().filter_map(ttfb_us))
+    );
+    assert_eq!(
+        hist_cell(ov, "elapsed_hist"),
+        hist_of(rows.iter().filter_map(|r| i(r, "elapsed")))
+    );
+    let elapsed = hist_cell(ov, "elapsed_hist").unwrap();
+    assert!(elapsed.under > 0 && elapsed.over > 0);
+
+    // dims: the /network keys (null is Unknown, 0 or Other), coalesced RTT and loss, 5xx.
+    let dims = bundle(&out, "dims");
+    let totals = bundle(&out, "dim_totals");
+    for dim in ["proto", "country", "asn", "city"] {
+        let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+        for r in &rows {
+            groups.entry(net_key(r, dim)).or_default().push(r);
+        }
+        let got: Vec<_> = dims.iter().filter(|r| r["field"] == dim).collect();
+        assert_eq!(got.len(), groups.len(), "{dim}");
+        for row in got {
+            let value = row["value"].as_str().unwrap();
+            check_net_group(row, &groups[value], &format!("{dim}={value}"));
+            assert_eq!(
+                row["rttvar_count"],
+                groups[value]
+                    .iter()
+                    .filter(|r| i(r, "rtt_var").is_some())
+                    .count() as i64
+            );
+            assert_eq!(row["retrans_count"], 0);
+            assert!(row.get("cwnd_count").is_none_or(|c| c == 0));
+            if dim == "city" {
+                let geo: Vec<_> = groups[value]
+                    .iter()
+                    .filter_map(|r| Some((f(r, "lat")?, f(r, "lon")?)))
+                    .collect();
+                assert_eq!(row["geo_count"], geo.len() as i64);
+                close(&row["lat_sum"], geo.iter().map(|g| g.0).sum());
+                close(&row["lon_sum"], geo.iter().map(|g| g.1).sum());
+            }
+        }
+        let total = totals
+            .iter()
+            .find(|r| r["value"] == "dims" && r["field"] == dim)
+            .unwrap();
+        assert_eq!(total["requests"], rows.len() as i64);
+        assert_eq!(total["truncated"], false);
+    }
+    assert!(dims
+        .iter()
+        .any(|r| r["field"] == "city" && r["value"] == r#"["Unknown","Unknown"]"#));
+
+    // series5: overall, proto and ASN per five minutes.
+    let series = bundle(&out, "series5");
+    let overall: Vec<_> = series.iter().filter(|r| r["field"] == "overall").collect();
+    assert_eq!(overall.len(), 1);
+    assert_eq!(overall[0]["bucket"], BASE * 1000);
+    let all: Vec<&Value> = rows.iter().collect();
+    check_net_group(overall[0], &all, "overall");
+    assert_eq!(
+        hist_cell(overall[0], "elapsed_hist"),
+        hist_of(rows.iter().filter_map(|r| i(r, "elapsed")))
+    );
+    for dim in ["proto", "asn"] {
+        let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+        for r in &rows {
+            groups.entry(net_key(r, dim)).or_default().push(r);
+        }
+        let got: Vec<_> = series.iter().filter(|r| r["field"] == dim).collect();
+        assert_eq!(got.len(), groups.len(), "{dim}");
+        for row in got {
+            let value = row["value"].as_str().unwrap();
+            check_net_group(row, &groups[value], &format!("series5 {dim}={value}"));
+        }
+    }
+
+    // bins: request header sizes and verified bots per five minutes.
+    let bins = bundle(&out, "bins");
+    let mut want: BTreeMap<(String, String), i64> = BTreeMap::new();
+    for r in &rows {
+        let h = i(r, "req_header_bytes").unwrap();
+        let label = match h {
+            ..=256 => "0-256B",
+            257..=1024 => "256B-1KB",
+            1025..=4096 => "1KB-4KB",
+            4097..=8192 => "4KB-8KB",
+            8193..=32768 => "8KB-32KB",
+            _ => ">32KB",
+        };
+        *want
+            .entry(("req_header_size".into(), label.into()))
+            .or_default() += 1;
+        let sig = s(r, "waf_sig").unwrap();
+        if sig.to_uppercase().contains("VERIFIED-BOT.") {
+            *want
+                .entry(("verified_bot".into(), sig.replace("VERIFIED-BOT.", "")))
+                .or_default() += 1;
+        }
+    }
+    let got: BTreeMap<(String, String), i64> = bins
+        .iter()
+        .map(|r| {
+            assert_eq!(r["bucket"], BASE * 1000);
+            (
+                (
+                    r["field"].as_str().unwrap().to_owned(),
+                    r["value"].as_str().unwrap().to_owned(),
+                ),
+                r["requests"].as_i64().unwrap(),
+            )
+        })
         .collect();
-    assert_eq!(set, [(98, 2)]);
+    assert_eq!(got, want);
+    assert!(got.contains_key(&("verified_bot".into(), "verified-bot.bingbot".into())));
+
+    // assets: derived type, upper cache, lower encoding, the /assets sums.
+    let mut want: BTreeMap<String, (i64, i64, f64)> = BTreeMap::new();
+    for r in &rows {
+        let url = s(r, "url").unwrap().to_lowercase();
+        let kind = if url.ends_with(".js") {
+            "JavaScript"
+        } else if url.ends_with(".css") {
+            "CSS"
+        } else if url.contains(".woff") {
+            "Font"
+        } else {
+            "Other"
+        };
+        let key = serde_json::to_string(&[
+            kind.to_owned(),
+            s(r, "cache").unwrap().to_uppercase(),
+            s(r, "resp_header_content_encoding")
+                .unwrap_or("unknown")
+                .to_lowercase(),
+        ])
+        .unwrap();
+        let ttfb_ms = f(r, "ttfb").map_or(f(r, "elapsed").unwrap() / 1000.0, |t| t * 1000.0);
+        let e = want.entry(key).or_default();
+        e.0 += 1;
+        e.1 += i(r, "resp_bytes").unwrap();
+        e.2 += ttfb_ms;
+    }
+    let assets = bundle(&out, "assets");
+    assert_eq!(assets.len(), want.len());
+    for row in assets {
+        let (n, b, t) = want[row["value"].as_str().unwrap()];
+        assert_eq!(row["requests"], n);
+        assert_eq!(row["resp_bytes_sum"], b);
+        close(&row["ttfb_sum"], t);
+        assert_eq!(row["origin_requests"], 0);
+    }
+
+    // sample: the 300 rows with a TTFB whose request id hashes lowest.
+    let mut keyed: Vec<(i64, &Value)> = rows
+        .iter()
+        .filter(|r| r.get("ttfb").is_some())
+        .map(|r| (fnv(s(r, "rid").unwrap()), r))
+        .collect();
+    keyed.sort_by_key(|k| k.0);
+    keyed.truncate(summary::SAMPLE_K);
+    let sample = bundle(&out, "sample");
+    assert_eq!(sample.len(), summary::SAMPLE_K);
+    for (row, (key, r)) in sample.iter().zip(&keyed) {
+        assert_eq!(row["sample_key"], *key);
+        assert_eq!(row["bucket"], ts_ms(r));
+        assert_eq!(row["value"], s(r, "cache").unwrap());
+        close(&row["ttfb_sum"], f(r, "ttfb").unwrap());
+        assert_eq!(row["elapsed_us"], i(r, "elapsed").unwrap());
+        assert_eq!(row.get("rtt_sum").and_then(Value::as_i64), i(r, "tcp_rtt"));
+    }
+}
+
+#[test]
+fn series5_keeps_the_top_asns_and_marks_the_cut() {
+    let k = summary::SERIES_ASN_K as i64;
+    let mut rows = Vec::new();
+    for asn in 1..=k + 10 {
+        for _ in 0..asn {
+            rows.push(json!({"timestamp": iso(BASE * 1000 + asn), "asn": asn}));
+        }
+    }
+    let b = batch(&rows);
+    let out = read(&summary::write_summary(&[&b], BASE).unwrap());
+    let asns: BTreeSet<i64> = bundle(&out, "series5")
+        .iter()
+        .filter(|r| r["field"] == "asn")
+        .map(|r| r["value"].as_str().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(asns, (11..=k + 10).collect());
+    let total = bundle(&out, "dim_totals")
+        .into_iter()
+        .find(|r| r["value"] == "series5" && r["field"] == "asn")
+        .unwrap();
+    assert_eq!(total["requests"], rows.len() as i64);
+    assert_eq!(total["truncated"], true);
+    assert_eq!(
+        bundle(&out, "dims")
+            .iter()
+            .filter(|r| r["field"] == "asn")
+            .count() as i64,
+        k + 10,
+        "dims keep DIM_K"
+    );
+}
+
+/// The rows of `bundle_name` keyed by `(field, value, bucket)`, without the bundle column.
+fn keyed(
+    out: &[Map<String, Value>],
+    bundle_name: &str,
+) -> BTreeMap<(String, String, i64), Map<String, Value>> {
+    bundle(out, bundle_name)
+        .into_iter()
+        .map(|r| {
+            let key = (
+                r.get("field")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                r.get("value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                r["bucket"].as_i64().unwrap(),
+            );
+            (key, r.clone())
+        })
+        .collect()
+}
+
+fn same_rows(a: &Map<String, Value>, b: &Map<String, Value>, what: &str) {
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "{what}"
+    );
+    for (k, v) in a {
+        match (v, &b[k]) {
+            (Value::Number(x), Value::Number(y)) if x.is_f64() || y.is_f64() => {
+                close(v, y.as_f64().unwrap());
+                let _ = x;
+            }
+            (x, y) => assert_eq!(x, y, "{what} {k}"),
+        }
+    }
+}
+
+#[test]
+fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
+    use fastly_log_analytics::ingest::bundle::{self as bundles, Unit};
+    let first = fixture_v3(0, 400);
+    let second = fixture_v3(WINDOW * 1000, 500);
+    let (b1, b2) = (batch(&first), batch(&second));
+    let whole = read(&summary::write_summary(&[&b1, &b2], BASE).unwrap());
+    let w1 = summary::write_summary(&[&b1], BASE).unwrap();
+    let w2 = summary::write_summary(&[&b2], BASE + WINDOW).unwrap();
+    let hour_bytes = bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap();
+    assert_eq!(meta(&hour_bytes, "flp_summary").as_deref(), Some("3"));
+    let hour = read(&hour_bytes);
+    for name in ["dims", "series5", "bins", "assets", "dim_totals"] {
+        let (a, b) = (keyed(&whole, name), keyed(&hour, name));
+        assert_eq!(
+            a.keys().collect::<Vec<_>>(),
+            b.keys().collect::<Vec<_>>(),
+            "{name}"
+        );
+        for (key, row) in &a {
+            same_rows(row, &b[key], &format!("{name} {key:?}"));
+        }
+    }
+    assert_eq!(
+        keyed(&hour, "series5")
+            .keys()
+            .filter(|k| k.0 == "overall")
+            .map(|k| k.2)
+            .collect::<Vec<_>>(),
+        [BASE * 1000, (BASE + WINDOW) * 1000]
+    );
+    let sample = |out: &[Map<String, Value>]| -> Vec<i64> {
+        bundle(out, "sample")
+            .iter()
+            .map(|r| r["sample_key"].as_i64().unwrap())
+            .collect()
+    };
+    assert_eq!(sample(&hour), sample(&whole));
+    assert_eq!(sample(&hour).len(), summary::SAMPLE_K);
+
+    // A day bundle keeps hour buckets for the timed rows.
+    let day = read(&bundles::merge(&[&hour_bytes], BASE, Unit::Day).unwrap());
+    let overall: Vec<_> = bundle(&day, "series5")
+        .into_iter()
+        .filter(|r| r["field"] == "overall")
+        .collect();
+    assert_eq!(overall.len(), 1);
+    assert_eq!(overall[0]["bucket"], BASE * 1000);
+    assert_eq!(overall[0]["requests"], 900);
+    let mut both = hist_cell(
+        &keyed(&hour, "series5")[&("overall".into(), String::new(), BASE * 1000)],
+        "ttfb_hist",
+    )
+    .unwrap();
+    both.merge(
+        &hist_cell(
+            &keyed(&hour, "series5")[&("overall".into(), String::new(), (BASE + WINDOW) * 1000)],
+            "ttfb_hist",
+        )
+        .unwrap(),
+    );
+    assert_eq!(hist_cell(overall[0], "ttfb_hist"), Some(both));
+    assert_eq!(sample(&day), sample(&hour));
+}
+
+#[test]
+fn hll_matches_the_reference_vectors() {
+    // Vectors from an independent Python HLL++ (p=12, sparse p'=25, fla's md5 hash and rank),
+    // shared with frontend/lib/cloud-engine/dashboard/hll.test.ts.
+    let sketch = |items: &mut dyn Iterator<Item = String>| {
+        let mut h = Hll::default();
+        items.for_each(|ip| h.add_hash(summary::hll_hash(&ip)));
+        h
+    };
+    let one = sketch(&mut std::iter::once("192.0.2.1".to_owned()));
+    assert_eq!(hex::encode(one.to_bytes()), "020c0001c5f6e48903");
     assert_eq!(one.count(), 1);
 
-    let mut many = Hll::default();
-    for i in 0..1000 {
-        many.add_hash(summary::hll_hash(&format!("10.0.{}.{}", i / 256, i % 256)));
-    }
-    let bytes = many.to_bytes();
-    assert_eq!(&bytes[..12], &[1, 8, 7, 3, 2, 7, 6, 2, 1, 2, 6, 6]);
+    let few = sketch(&mut (0..20).map(|i| format!("10.0.0.{i}")));
+    let bytes = few.to_bytes();
+    assert_eq!(bytes.len(), 85);
     assert_eq!(
         hex::encode(Md5::digest(&bytes)),
-        "f004a78139a91300de8fe67bc3f91ef6"
+        "39c35cb9e9b2f005a5373f90038ca841"
     );
-    assert_eq!(many.count(), 1060);
+    assert_eq!(few.count(), 20);
+
+    let many = sketch(&mut (0..2000).map(|i| format!("10.0.{}.{}", i / 256, i % 256)));
+    let bytes = many.to_bytes();
+    assert_eq!(bytes.len(), 3 + 4096);
+    assert_eq!(
+        &bytes[..12],
+        &hex::decode("020c01030000010101000200").unwrap()[..]
+    );
+    assert_eq!(
+        hex::encode(Md5::digest(&bytes)),
+        "1c52cca58c4d6b0afa94b13423e57317"
+    );
+    assert_eq!(many.count(), 1977);
 
     let mut merged = Hll::from_bytes(&one.to_bytes()).unwrap();
     merged.merge(&many);
     let mut both = many.clone();
     both.add_hash(summary::hll_hash("192.0.2.1"));
     assert_eq!(merged.to_bytes(), both.to_bytes());
-    assert!(Hll::from_bytes(&bytes[..257]).is_none());
+    assert!(Hll::from_bytes(&bytes[..4098]).is_none());
 }
 
 #[test]
@@ -729,8 +1216,9 @@ fn summaries_are_reproducible_and_zstd_compressed() {
     );
 }
 
-/// Writes `web/lib/dashboard/__fixtures__/summaries/`: raw window Parquet, their window
-/// summaries, hour and day bundles and `index.json`, for the dashboard's summary-vs-raw tests.
+/// Writes `frontend/lib/cloud-engine/dashboard/__fixtures__/summaries/`: raw window Parquet,
+/// their window summaries, hour and day bundles and `index.json`, for the dashboard's
+/// summary-vs-raw tests.
 /// Run with `cargo test --test summary -- --ignored write_dashboard_fixtures`.
 #[test]
 #[ignore = "regenerates the web dashboard fixtures"]
@@ -738,7 +1226,7 @@ fn write_dashboard_fixtures() {
     use fastly_log_analytics::ingest::bundle::{self, Unit};
     const FIXTURE_WINDOW: i64 = 900;
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("web/lib/dashboard/__fixtures__/summaries");
+        .join("../../frontend/lib/cloud-engine/dashboard/__fixtures__/summaries");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let rows: Vec<Value> = (0..1600i64)

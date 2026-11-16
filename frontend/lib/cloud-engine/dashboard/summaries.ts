@@ -209,8 +209,8 @@ export function customFieldsKey(
   return cards.map((card) => `${card.id}:${card.type}`).join(",");
 }
 
-/** `flp_summary` written by app/src/ingest/summary.rs `SUMMARY_VERSION`. */
-export const SUMMARY_VERSION = "2";
+/** `flp_summary` written by compute/cloud/src/ingest/summary.rs `SUMMARY_VERSION`. */
+export const SUMMARY_VERSION = "3";
 const MINUTE_MS = 60_000;
 
 const BOOLEAN_FIELDS = new Set(["edge", "is_ipv6", "waf"]);

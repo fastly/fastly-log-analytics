@@ -209,7 +209,10 @@ describe("summary readers", () => {
   it("restores each card field's raw type from the catalog", () => {
     const catalog = JSON.parse(
       readFileSync(
-        path.join(__dirname, "../../../../compute/cloud/src/logging/catalog.json"),
+        path.join(
+          __dirname,
+          "../../../../compute/cloud/src/logging/catalog.json",
+        ),
         "utf8",
       ),
     ) as { fields: { id: string; duckdb_type: string }[] };
@@ -319,10 +322,15 @@ describe("summary readers", () => {
     const day = await decodeSummary(BUFFERS[pick("day")[0].key], 0, 4e12);
     const hll = new Hll();
     for (const file of RAW) {
-      const { columns } = await readColumns(BUFFERS[file.key], ["ip"]);
-      for (const ip of Array.from(columns.get("ip") ?? [])) {
-        if (typeof ip === "string") hll.add(ip);
-      }
+      const { columns } = await readColumns(BUFFERS[file.key], [
+        "ip",
+        "timestamp",
+      ]);
+      const timestamps = Array.from(columns.get("timestamp") ?? []);
+      // A row without a timestamp is not a request, so its IP is not sketched.
+      Array.from(columns.get("ip") ?? []).forEach((ip, i) => {
+        if (typeof ip === "string" && timestamps[i] != null) hll.add(ip);
+      });
     }
     expect(day?.ipSketch?.toBytes()).toEqual(hll.toBytes());
   });
@@ -341,29 +349,35 @@ describe("summary readers", () => {
       ["field_totals", "cmcd_br", null, 6],
       ["all_fields", "cmcd_br", "3000", 6],
     ];
-    const summary = parquetWriteBuffer({
-      columnData: [
-        { name: "bundle", type: "STRING", data: rows.map((r) => r[0]) },
-        {
-          name: "bucket",
-          type: "TIMESTAMP",
-          data: rows.map(() => new Date(t)),
-        },
-        { name: "field", type: "STRING", data: rows.map((r) => r[1]) },
-        { name: "value", type: "STRING", data: rows.map((r) => r[2]) },
-        {
-          name: "count",
-          type: "INT64",
-          data: rows.map((r) => (r[0] === "time_series" ? null : BigInt(r[3]))),
-        },
-        {
-          name: "requests",
-          type: "INT64",
-          data: rows.map((r) => (r[0] === "time_series" ? BigInt(r[3]) : null)),
-        },
-      ],
-      kvMetadata: [{ key: "flp_summary", value: "2" }],
-    });
+    const write = (version: string) =>
+      parquetWriteBuffer({
+        columnData: [
+          { name: "bundle", type: "STRING", data: rows.map((r) => r[0]) },
+          {
+            name: "bucket",
+            type: "TIMESTAMP",
+            data: rows.map(() => new Date(t)),
+          },
+          { name: "field", type: "STRING", data: rows.map((r) => r[1]) },
+          { name: "value", type: "STRING", data: rows.map((r) => r[2]) },
+          {
+            name: "count",
+            type: "INT64",
+            data: rows.map((r) =>
+              r[0] === "time_series" ? null : BigInt(r[3]),
+            ),
+          },
+          {
+            name: "requests",
+            type: "INT64",
+            data: rows.map((r) =>
+              r[0] === "time_series" ? BigInt(r[3]) : null,
+            ),
+          },
+        ],
+        kvMetadata: [{ key: "flp_summary", value: version }],
+      });
+    const summary = write("3");
     const custom = [
       { id: "tenant", type: "string" },
       { id: "score", type: "number" },
@@ -387,6 +401,10 @@ describe("summary readers", () => {
         ...custom,
         { id: "region_tag", type: "string" },
       ]),
+    ).toBeNull();
+    // A v2 summary falls back to raw.
+    expect(
+      await decodeSummary(write("2"), t, t + 3_600_000, custom),
     ).toBeNull();
   });
 
@@ -552,7 +570,13 @@ describe("summary readers", () => {
       [page(RAW)],
       BUFFERS,
       { json: [], files: [] },
-      [{ files: pick("hour", (e) => !e.early), next_cursor: null, complete: false }],
+      [
+        {
+          files: pick("hour", (e) => !e.early),
+          next_cursor: null,
+          complete: false,
+        },
+      ],
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -568,7 +592,12 @@ describe("summary readers", () => {
     } finally {
       warn.mockRestore();
     }
-    const listed = await run(from, to, RAW, pick("hour", (e) => !e.early));
+    const listed = await run(
+      from,
+      to,
+      RAW,
+      pick("hour", (e) => !e.early),
+    );
     expect(listed.result.stats).toMatchObject({
       summaryListing: "listed",
       summaryFiles: 2,
@@ -827,9 +856,15 @@ describe("summary readers", () => {
 describe("custom cards", () => {
   it("drops system-managed and load-test fields", () => {
     const ids = customCards(
-      ["tenant", "cmcd_br", "edge_x", "rum_lcp", "lt_run_id", "lt_request_id", "fastly_req_id"].map(
-        (id) => ({ id, label: id, type: "string" as const }),
-      ),
+      [
+        "tenant",
+        "cmcd_br",
+        "edge_x",
+        "rum_lcp",
+        "lt_run_id",
+        "lt_request_id",
+        "fastly_req_id",
+      ].map((id) => ({ id, label: id, type: "string" as const })),
     ).map((card) => card.id);
     expect(ids).toEqual(["tenant"]);
   });

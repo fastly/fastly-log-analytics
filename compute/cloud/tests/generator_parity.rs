@@ -700,8 +700,10 @@ fn rum_validators_match_python_golden_vectors() {
     }
 }
 
+/// fla's hash and its exact small counts; the sketch bytes diverge on purpose (Cloud summary v3
+/// keeps sparse HLL++ at p=12, fla dense p=8 registers).
 #[test]
-fn hll_registers_match_python_golden_vectors() {
+fn hll_hash_and_count_match_python_golden_vectors() {
     use fastly_log_analytics::ingest::summary::{hll_hash, Hll};
 
     let cases = fixtures()["golden_vectors"]["hll"]
@@ -719,12 +721,6 @@ fn hll_registers_match_python_golden_vectors() {
             assert_eq!(actual_hash, expected_hash, "item={item}");
             hll.add_hash(actual_hash);
         }
-        assert_eq!(
-            hex::encode(hll.to_bytes()),
-            case["to_bytes_hex"].as_str().unwrap(),
-            "case={}",
-            case["name"]
-        );
         assert_eq!(
             hll.count(),
             case["count"].as_u64().unwrap(),
