@@ -22,6 +22,7 @@ import backend  # noqa: F401 - register module aliases
 from backend import config as svcconfig
 from backend.config import is_rum_enabled
 from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.high_scale import network as hs_network
 from backend.high_scale import performance as hs_performance
 from backend.high_scale import security as hs_security
@@ -1006,7 +1007,7 @@ def test_config_to_source_field_mappings():
     assert svcconfig.config_to_source(cfg_no_ep)["fos_native_endpoint"] == "eu-west-1.object.fastlystorage.app"
     src_lp = svcconfig.config_to_source(_cfg(log_period="120"))
     assert src_lp["log_period"] == 120 and isinstance(src_lp["log_period"], int)
-    assert svcconfig.config_to_source(_cfg())["log_period"] == 60
+    assert svcconfig.config_to_source(_cfg())["log_period"] == DEFAULT_LOG_PERIOD_SECONDS
     assert (
         svcconfig.config_to_source(_cfg(provisioning={"fos_key_id": "key-123", "endpoint_name": "FOS Logs"}))[
             "provisioning"
