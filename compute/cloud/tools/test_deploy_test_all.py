@@ -954,6 +954,61 @@ def test_step_2_reconcile_vcl_nested_service_and_generation() -> None:
         ]
 
 
+def _reconciled_service_handler(dry_run_changes: list[dict]):
+    calls: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else {}
+        calls.append((request.method, request.url.path, body))
+        if request.method == "GET" and request.url.path == "/api/admin/services/svc1":
+            return httpx.Response(
+                200,
+                json={
+                    "service": {
+                        "service_id": "svc1",
+                        "log_period": 60,
+                        "cmcd": {"enabled": False},
+                        "rum": {"enabled": False, "log_period": 60},
+                        "last_reconcile": {"outcome": "complete", "job_id": "old"},
+                        "last_activated_version": 59,
+                    },
+                    "generation": "gen-1",
+                    "job": None,
+                },
+            )
+        if request.method == "POST" and request.url.path == "/api/admin/services/svc1/reconcile":
+            job_id = "dry" if body.get("dry_run") else "real"
+            return httpx.Response(200, json={"job": {"id": job_id, "status": "pending"}})
+        if request.method == "POST" and request.url.path == "/api/admin/jobs/dry/step":
+            return httpx.Response(200, json={"job": {"id": "dry", "status": "complete", "changes": dry_run_changes}})
+        if request.method == "POST" and request.url.path == "/api/admin/jobs/real/step":
+            return httpx.Response(200, json={"job": {"id": "real", "status": "complete", "draft_version": 60}})
+        return httpx.Response(404)
+
+    return calls, handler
+
+
+def test_step_2_reconcile_vcl_reconciles_live_drift_when_app_state_matches() -> None:
+    calls, handler = _reconciled_service_handler(
+        [{"kind": "logging_s3", "name": "Fastly Object Storage Logs", "action": "update"}]
+    )
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test") as client:
+        res = step_2_reconcile_vcl(client, "svc1", 60)
+    assert res["trigger_mode"] == "reconcile_drift"
+    assert res["activated_version"] == 60
+    reconciles = [c[2] for c in calls if c[1] == "/api/admin/services/svc1/reconcile"]
+    assert [bool(r.get("dry_run")) for r in reconciles] == [True, False]
+
+
+def test_step_2_reconcile_vcl_skips_when_dry_run_finds_no_drift() -> None:
+    calls, handler = _reconciled_service_handler([])
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test") as client:
+        res = step_2_reconcile_vcl(client, "svc1", 60)
+    assert res["trigger_mode"] == "already_reconciled"
+    assert res["activated_version"] == 59
+    assert ("POST", "/api/admin/jobs/real/step") not in [c[:2] for c in calls]
+
+
 def test_step_2_reconcile_vcl_retries_transient_409_step_conflict() -> None:
     step_attempts = 0
 

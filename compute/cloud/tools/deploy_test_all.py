@@ -768,10 +768,13 @@ def _post_reconcile_with_retry(
     client: httpx.Client,
     service_id: str,
     generation: str | None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     is_mock = client.base_url.host == "example.test"
     for attempt in range(6):
         rec_payload: dict[str, Any] = {"activate": True}
+        if dry_run:
+            rec_payload["dry_run"] = True
         if generation:
             rec_payload["generation"] = generation
         rec_resp = client.post(
@@ -796,6 +799,21 @@ def _post_reconcile_with_retry(
         rec_resp.raise_for_status()
         return rec_resp.json()["job"]
     raise RuntimeError(f"Failed to start reconcile job for {service_id}")
+
+
+def _live_config_drift(client: httpx.Client, service_id: str, generation: str | None) -> bool:
+    """Whether a dry-run reconcile finds live Fastly config that differs from the app's settings.
+
+    App state alone can't show drift: the app may normalize a stored setting (e.g. a log period
+    below the Cloud minimum reads as 60) while the live endpoint still has the old value.
+    """
+    job = _post_reconcile_with_retry(client, service_id, generation, dry_run=True)
+    job, _ = _step_job_to_completion(client, job, allow_retry=True)
+    if _job_status(job) not in ("complete", "succeeded"):
+        raise RuntimeError(
+            f"Dry-run reconcile job {job.get('id')} did not succeed: status={_job_status(job)} error={job.get('error')}"
+        )
+    return bool(job.get("changes"))
 
 
 def step_2_reconcile_vcl(
@@ -866,6 +884,15 @@ def step_2_reconcile_vcl(
         job = resumed_job
         steps_taken = resumed_steps
         trigger_mode = "resumed_reconcile"
+    elif (
+        (svc.get("last_reconcile") or {}).get("outcome") == "complete"
+        and svc.get("last_activated_version")
+        and _live_config_drift(client, service_id, generation)
+    ):
+        print(f"[Step 2] Service {service_id} live Fastly config differs from the app's; reconciling...")
+        job = _post_reconcile_with_retry(client, service_id, generation)
+        trigger_mode = "reconcile_drift"
+        job, steps_taken = _step_job_to_completion(client, job, allow_retry=True)
     elif (svc.get("last_reconcile") or {}).get("outcome") == "complete" and svc.get("last_activated_version"):
         active_ver = int(svc["last_activated_version"])
         print(
