@@ -217,6 +217,10 @@ const FETCH_CONCURRENCY = 16;
 // One coalesced selective query registers every file it reads in DuckDB memory.
 const SELECTIVE_BATCH_FILES = 16;
 const SELECTIVE_BATCH_BYTES = 16 * 1024 * 1024;
+// Larger files keep DuckDB's HTTP ranges; whole reads hold their bytes from
+// fetch until their query settles, within an in-flight budget per run.
+const WHOLE_READ_MAX_BYTES = 64 * 1024 * 1024;
+const WHOLE_READ_INFLIGHT_BYTES = 64 * 1024 * 1024;
 
 export type SearchFieldOptions = {
   from: string;
@@ -1711,6 +1715,21 @@ async function collectAggregator(
       drainSelective();
     });
 
+  let wholeHeld = 0;
+  const wholeWaiters: (() => void)[] = [];
+  const acquireWhole = async (size: number) => {
+    while (wholeHeld > 0 && wholeHeld + size > WHOLE_READ_INFLIGHT_BYTES) {
+      await new Promise<void>((resolve) => wholeWaiters.push(resolve));
+      signal?.throwIfAborted();
+    }
+    wholeHeld += size;
+  };
+  const releaseWhole = (size: number) => {
+    if (size === 0) return;
+    wholeHeld -= size;
+    for (const wake of wholeWaiters.splice(0)) wake();
+  };
+
   await reserveMicroFiles(
     pending.filter((entry) => !entry.summary).map((entry) => entry.file),
   );
@@ -1738,6 +1757,7 @@ async function collectAggregator(
         }
       }
       let access = await source.openParquet(file, signal, variant);
+      let wholeBytes = 0;
       // DuckDB-wasm reads HTTP ranges with serial synchronous XHRs, about two
       // round trips per 32 KiB for a full-card scan; one whole fetch per file
       // runs in the pool instead. Field search reads one column, so it keeps ranges.
@@ -1746,12 +1766,18 @@ async function collectAggregator(
         searchQuery === undefined &&
         Number.isSafeInteger(file.size) &&
         file.size > 0 &&
-        file.size <= 8 * 1024 * 1024
+        file.size <= WHOLE_READ_MAX_BYTES
       ) {
         access.release?.();
-        const whole = await source.fetchFile(file.key, signal, {
-          transfer: true,
-        });
+        await acquireWhole(file.size);
+        wholeBytes = file.size;
+        let whole: Awaited<ReturnType<FileSource["fetchFile"]>>;
+        try {
+          whole = await source.fetchFile(file.key, signal, { transfer: true });
+        } catch (error) {
+          releaseWhole(wholeBytes);
+          throw error;
+        }
         if (!whole.cached) {
           downloaded = true;
           stats.bytes += whole.bytes.byteLength;
@@ -1775,6 +1801,8 @@ async function collectAggregator(
         else await queueSelective(access, file.size);
         released = true;
         access.release?.();
+        releaseWhole(wholeBytes);
+        wholeBytes = 0;
         if (completeRollup) {
           const rollup = target.toRollup(file.key, file.rows, file.size);
           const truncated = Object.entries(target.result().cards)
@@ -1809,6 +1837,7 @@ async function collectAggregator(
         }
       } finally {
         if (!released) access.release?.();
+        releaseWhole(wholeBytes);
       }
       finishFile();
       return;

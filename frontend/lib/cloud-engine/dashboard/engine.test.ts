@@ -619,6 +619,98 @@ describe("runDashboard", () => {
     }
   });
 
+  it("reads hour compacts above 8 MiB whole and keeps HTTP ranges only above the whole-read cap", async () => {
+    const MiB = 1024 * 1024;
+    const buffers = {
+      hour: await parquetFixture([row(10, { country: "US" })]),
+      huge: await parquetFixture([row(70, { country: "US" })]),
+    };
+    const sizes = { hour: 12 * MiB, huge: 80 * MiB };
+    const source = fixtureSource([{
+      files: [
+        { ...manifestEntry("hour", "2026-10-29T10:00:00Z", "2026-10-29T10:01:00Z", 1), size: sizes.hour },
+        { ...manifestEntry("huge", "2026-10-29T10:01:00Z", "2026-10-29T10:02:00Z", 1), size: sizes.huge },
+      ],
+      next_cursor: null,
+      complete: true,
+    }], buffers);
+    const fetchFile = vi.spyOn(source, "fetchFile");
+    const kinds: string[] = [];
+    const query = vi.spyOn(getDuckDBEngine(), "queryParquetIntoAggregator").mockImplementation(async (files) => {
+      kinds.push(...[files].flat().map((access) => access.kind));
+    });
+    try {
+      await runDashboard({
+        ...source,
+        openParquet: async (file) => ({
+          kind: "http",
+          url: `https://flp.example/api/file/${file.key}`,
+          cached: false,
+        }),
+      }, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:05:00Z",
+        filters: [{ mode: "include", field: "country", value: "US" }],
+        concurrency: 1,
+      });
+      expect(fetchFile.mock.calls.map(([key]) => key)).toEqual(["hour"]);
+      expect(kinds.sort()).toEqual(["buffer", "http"]);
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it("bounds the bytes of whole selective reads held between fetch and query", async () => {
+    const MiB = 1024 * 1024;
+    const keys = ["a", "b", "c", "d"] as const;
+    const buffers = Object.fromEntries(await Promise.all(keys.map(async (key, i) =>
+      [key, await parquetFixture([row(10 + i, { country: "US" })])] as const)));
+    const source = fixtureSource([{
+      files: keys.map((key, i) => ({
+        ...manifestEntry(key, `2026-10-29T10:0${i}:00Z`, `2026-10-29T10:0${i + 1}:00Z`, 1),
+        size: 40 * MiB,
+      })),
+      next_cursor: null,
+      complete: true,
+    }], buffers);
+    const keyOf = new Map<ArrayBuffer, string>();
+    const realFetch = source.fetchFile.bind(source);
+    let held = 0;
+    let maxHeld = 0;
+    const query = vi.spyOn(getDuckDBEngine(), "queryParquetIntoAggregator").mockImplementation(async (files) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      for (const access of [files].flat()) {
+        if (access.kind === "buffer" && keyOf.has(access.bytes)) held -= 40 * MiB;
+      }
+    });
+    try {
+      await runDashboard({
+        ...source,
+        fetchFile: async (key, signal, mode) => {
+          held += 40 * MiB;
+          maxHeld = Math.max(maxHeld, held);
+          const result = await realFetch(key, signal, mode);
+          keyOf.set(result.bytes, key);
+          return result;
+        },
+        openParquet: async (file) => ({
+          kind: "http",
+          url: `https://flp.example/api/file/${file.key}`,
+          cached: false,
+        }),
+      }, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:10:00Z",
+        filters: [{ mode: "include", field: "country", value: "US" }],
+      });
+      expect(keyOf.size).toBe(keys.length);
+      expect(held).toBe(0);
+      expect(maxHeld).toBeLessThanOrEqual(64 * MiB);
+    } finally {
+      query.mockRestore();
+    }
+  });
+
   it("coalesces filtered selective files that arrive while DuckDB is busy into one query", async () => {
     const keys = ["a", "b", "c", "d", "e", "f"] as const;
     const buffers = Object.fromEntries(await Promise.all(keys.map(async (key, i) =>
