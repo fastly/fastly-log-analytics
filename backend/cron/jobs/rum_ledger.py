@@ -1,4 +1,4 @@
-"""Celery/ledger-mode RUM and request ingest discovery & sweep cron jobs."""
+"""High-Scale RUM and request ingest discovery & ledger sweep cron jobs."""
 
 from __future__ import annotations
 
@@ -76,14 +76,6 @@ def discover_rum_prefix(
 
 def _sweep_high_scale_ledger(service_id: str, *, domain: str, run_id: int | None = None) -> dict[str, Any]:
     del run_id
-    broker_ok = True
-    if svcconfig.CELERY_BROKER_URL:
-        try:
-            from backend.celery_app import celery_queue_depths
-
-            _, broker_ok = celery_queue_depths()
-        except Exception:
-            broker_ok = False
     control = PostgresControlPlane()
     control.initialize_owner(service_id, owner="high_scale", source_cursor=INITIAL_SOURCE_CURSOR)
     expired = control.expired_claims(service_id, domain, limit=MAX_SOURCE_PAGE_SIZE)
@@ -99,7 +91,6 @@ def _sweep_high_scale_ledger(service_id: str, *, domain: str, run_id: int | None
         "redispatched": len(expired),
         "discovered": discovered,
         "dead_letter": dead_letter,
-        "broker_ok": broker_ok,
     }
 
 
@@ -230,8 +221,6 @@ def _run_ledger_sweep_impl(
 
         summary = sweep_fn(service_id, run_id=run.run_id)
         warnings = []
-        if not summary.get("broker_ok", True):
-            warnings.append("Celery broker/queue depth probe failed")
         if summary.get("dead_letter", 0) > 0:
             warnings.append(f"{summary['dead_letter']} dead-letter/quarantined {row_prefix}row(s)")
 
@@ -248,8 +237,8 @@ def _run_ledger_sweep_impl(
 
 @cron_task("ledger_sweep", job_name="ledger_sweep")
 def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
-    """Celery-mode crash net: reclaim stale ledger claims, re-dispatch stuck
-    rows, and diff a lookback FOS LIST against the ledger."""
+    """Crash net: reclaim stale ledger claims, re-dispatch stuck rows, and
+    diff a lookback FOS LIST against the ledger."""
     _run_ledger_sweep_impl(
         service_id, run_id, job_name="ledger_sweep", sweep_fn=sweep_ledger_once, label="ledger sweep"
     )
@@ -257,7 +246,7 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
 
 @cron_task("ledger_rum_sweep", job_name="ledger_rum_sweep")
 def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
-    """Celery-mode crash net for the RUM ledger pipeline."""
+    """Crash net for the RUM ledger pipeline."""
     _run_ledger_sweep_impl(
         service_id,
         run_id,

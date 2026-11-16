@@ -436,6 +436,26 @@ def test_audit_target_private_mtls_timeout_adds_vpn_hint(monkeypatch: pytest.Mon
     assert any("VPN/tunnel" in err and "10.0.0.10:8443" in err for err in res.errors)
 
 
+def test_audit_target_ignores_a_celery_block_from_an_older_backend(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snapshot = {"vcpus": 4, "celery": {"broker_reachable": True, "queue_depth": 0, "active_workers": 0}}
+
+    def fake_get(url: str, headers=None, timeout: float = 5.0) -> tuple[int, Any]:
+        if "/api/health?" in url:
+            return 200, {"status": "ok", "version": "3"}
+        return (200, snapshot) if "/api/admin/health-snapshot" in url else (404, {})
+
+    monkeypatch.setattr(audit, "http_get_json", fake_get)
+    monkeypatch.setattr(audit, "http_post_json", lambda url, payload=None, headers=None, timeout=5.0: (404, {}))
+    env = audit.EnvironmentConfig("hs", "High-Scale", "https://hs.example", "https://hs.example/dashboard", "svc-hs")
+    res = audit.audit_target(env, timeout=1.0)
+    assert res.reachable
+    assert not [m for m in res.errors + res.warnings if "celery" in m.lower()]
+    audit.print_audit_report([res])
+    assert "celery" not in capsys.readouterr().out.lower()
+
+
 # ── Merged from test_lib_helpers.py ──────────────────────────────────────────────────────
 
 

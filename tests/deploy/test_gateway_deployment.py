@@ -555,7 +555,7 @@ def test_private_helm_receivers_are_bounded_persistent_and_have_no_grafana() -> 
     assert all(doc["spec"].get("egress") == [] for doc in policies)
 
 
-def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_duplicate_env() -> None:
+def test_private_helm_wires_backend_and_real_high_scale_worker_without_duplicate_env() -> None:
     docs = _minimal_observability_chart(
         "--set",
         "secrets.existingSecret=fixture-secret",

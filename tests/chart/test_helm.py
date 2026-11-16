@@ -27,7 +27,7 @@ _PG = "postgresql://fla:pw@postgres:5432/fla"
 STANDARD = (f"secrets.metadataDsn={_PG}",)
 
 # The minimum an operator must supply to select the scaled Valkey SSE backplane topology.
-CELERY = (
+VALKEY = (
     "config.sseBackplane=valkey",
     f"secrets.metadataDsn={_PG}",
     "secrets.celeryBrokerUrl=redis://valkey-master:6379/0",
@@ -137,13 +137,13 @@ def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
 
 def test_no_rendered_pod_would_fail_the_app_boot_gate():
     _assert_boot_gate_would_pass(_render(*STANDARD))
-    _assert_boot_gate_would_pass(_render(*CELERY))
+    _assert_boot_gate_would_pass(_render(*VALKEY))
 
 
 # ── Template validation gates ────────────────────────────────────────────────
 
 
-def test_celery_without_broker_fails_at_template_time():
+def test_valkey_backplane_with_a_dsn_but_no_broker_fails_at_template_time():
     stderr = _render_error(
         "config.sseBackplane=valkey",
         f"secrets.metadataDsn={_PG}",
@@ -152,7 +152,7 @@ def test_celery_without_broker_fails_at_template_time():
     assert "secrets.celeryBrokerUrl" in stderr
 
 
-def test_celery_rejects_a_non_postgres_metadata_dsn():
+def test_rejects_a_non_postgres_metadata_dsn():
     stderr = _render_error(
         "secrets.metadataDsn=sqlite:///app/data/metadata.db",
     )
@@ -166,8 +166,8 @@ def test_valkey_backplane_without_a_broker_fails_at_template_time():
     assert "secrets.celeryBrokerUrl" in stderr
 
 
-def test_celery_mode_renders_the_full_ingest_fleet():
-    docs = _render(*CELERY)
+def test_valkey_backplane_renders_the_full_ingest_fleet():
+    docs = _render(*VALKEY)
     names = _deployments(docs)
 
     assert [name for name in names if "worker" in name], names
@@ -190,7 +190,7 @@ def test_celery_mode_renders_the_full_ingest_fleet():
 
 def test_backend_and_worker_share_clickhouse_and_otel_env():
     for observability, exporter in (("false", "prometheus"), ("true", "otlp")):
-        docs = _render(*CELERY, f"observability.enabled={observability}")
+        docs = _render(*VALKEY, f"observability.enabled={observability}")
         for component in ("backend", "worker"):
             env = _env(_deployment(docs, component))
             assert env["CLICKHOUSE_ENABLED"]["value"] == "true"
@@ -212,7 +212,7 @@ def test_operator_otlp_endpoints_render_for_high_scale_backend_and_worker():
     metrics = "metrics-endpoint-from-operator"
     traces = "traces-endpoint-from-operator"
     docs = _render(
-        *CELERY,
+        *VALKEY,
         "otel.exporter=otlp",
         f"otel.metricsEndpoint={metrics}",
         f"otel.tracesEndpoint={traces}",
@@ -225,11 +225,11 @@ def test_operator_otlp_endpoints_render_for_high_scale_backend_and_worker():
 
 
 def test_otlp_exporter_requires_both_operator_destinations():
-    error = _render_error(*CELERY, "otel.exporter=otlp")
+    error = _render_error(*VALKEY, "otel.exporter=otlp")
     assert "requires an operator-provided otel.metricsEndpoint" in error
 
     error = _render_error(
-        *CELERY,
+        *VALKEY,
         "otel.exporter=otlp",
         "otel.metricsEndpoint=metrics-endpoint-from-operator",
     )
@@ -278,10 +278,10 @@ def test_backend_stays_single_pod_when_autoscaling_and_replicacount_are_raised()
     assert backend["metadata"]["name"] not in _autoscaler_targets(docs)
 
 
-def test_backend_stays_single_pod_in_celery_mode_too():
+def test_backend_stays_single_pod_with_the_valkey_backplane_too():
     """Scaled mode is the topology an operator reaches for to scale out, so
     the replica pin has to hold there, not only under the defaults."""
-    docs = _render(*CELERY, "autoscaling.enabled=true", "replicaCount=5", "workers.replicaCount=4")
+    docs = _render(*VALKEY, "autoscaling.enabled=true", "replicaCount=5", "workers.replicaCount=4")
     backend = _deployment(docs, "backend")
 
     assert backend["spec"]["replicas"] == 1
@@ -293,7 +293,7 @@ def test_backend_stays_single_pod_in_celery_mode_too():
 def test_worker_autoscaling_still_works():
     """The flip side — pinning the backend must not disarm the tier that DOES
     scale horizontally (ADR-15/ADR-16 ingest fleet)."""
-    docs = _render(*CELERY, "autoscaling.enabled=true")
+    docs = _render(*VALKEY, "autoscaling.enabled=true")
     targets = _autoscaler_targets(docs)
 
     assert any("worker" in name for name in targets), targets

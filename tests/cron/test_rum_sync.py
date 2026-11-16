@@ -218,7 +218,7 @@ def test_rum_discovery_cron_records_warning_when_faro_reconcile_fails(monkeypatc
 def test_rum_ledger_sweep_records_success_and_warnings(monkeypatch, stub_rum_env):
     monkeypatch.setattr(
         "backend.cron.jobs.rum_ledger.sweep_rum_ledger_once",
-        lambda sid, **kw: {"reclaimed": 1, "redispatched": 1, "discovered": 3, "dead_letter": 0, "broker_ok": True},
+        lambda sid, **kw: {"reclaimed": 1, "redispatched": 1, "discovered": 3, "dead_letter": 0},
     )
     _run_rum_ledger_sweep.__wrapped__("svc-1")
     args, kwargs = stub_rum_env["log"].call_args
@@ -229,13 +229,12 @@ def test_rum_ledger_sweep_records_success_and_warnings(monkeypatch, stub_rum_env
     stub_rum_env["log"].reset_mock()
     monkeypatch.setattr(
         "backend.cron.jobs.rum_ledger.sweep_rum_ledger_once",
-        lambda sid, **kw: {"reclaimed": 0, "redispatched": 0, "discovered": 0, "dead_letter": 2, "broker_ok": False},
+        lambda sid, **kw: {"reclaimed": 0, "redispatched": 0, "discovered": 0, "dead_letter": 2},
     )
     _run_rum_ledger_sweep.__wrapped__("svc-1")
     args, kwargs = stub_rum_env["log"].call_args
     assert args[3] == "warning"
-    assert "2 dead-letter/quarantined RUM row(s)" in kwargs["summary"]
-    assert "Celery broker/queue depth probe failed" in kwargs["summary"]
+    assert kwargs["summary"].endswith("discovered=0 (2 dead-letter/quarantined RUM row(s))")
 
 
 def test_discover_rum_prefix_registers_discovered_objects(monkeypatch, stub_source):
@@ -257,7 +256,6 @@ def test_discover_rum_prefix_registers_discovered_objects(monkeypatch, stub_sour
 
 
 def test_sweep_rum_ledger_once_aggregates_control_plane_state(monkeypatch, stub_source):
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
     monkeypatch.setattr("backend.cron.jobs.rum_ledger._discover_high_scale_prefix", lambda sid, **kw: 4)
     fake_ctrl = MagicMock()
     fake_ctrl.expired_claims.return_value = ["c1", "c2"]
@@ -274,7 +272,6 @@ def test_sweep_rum_ledger_once_aggregates_control_plane_state(monkeypatch, stub_
         "redispatched": 2,
         "discovered": 4,
         "dead_letter": 3,
-        "broker_ok": True,
     }
 
 

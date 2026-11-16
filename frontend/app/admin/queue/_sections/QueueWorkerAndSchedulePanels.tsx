@@ -4,14 +4,11 @@ import React from 'react'
 import { formatLocalDateTime } from '@/lib/utils'
 import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableReadonly } from '@/components/DataTable'
-import { Badge } from '@/components/ui/badge'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import type { components } from '@/types/api.generated'
 
-export type ActiveTask = components['schemas']['CeleryActiveTask']
 export type InProcessScheduleEntry = components['schemas']['InProcessScheduleEntry']
 export type InProcessActiveRun = components['schemas']['InProcessActiveRun']
-export type QueueDepth = [name: string, count: number]
 
 export function makeCol<T>(
   id: string,
@@ -30,54 +27,6 @@ export function makeCol<T>(
     cell: ({ row }) => render(row.original),
   }
 }
-
-export const QUEUE_COLUMNS: ColumnDef<QueueDepth>[] = [
-  makeCol('queue', 'Queue Name', 320, (q) => q[0], (q) => (
-    <span className="font-mono text-sm">{q[0]}</span>
-  )),
-  makeCol('messages', 'Pending Messages', 160, (q) => q[1], (q) => (
-    <span className="text-sm font-medium">{q[1]}</span>
-  )),
-]
-
-export const TASK_COLUMNS: ColumnDef<ActiveTask>[] = [
-  makeCol(
-    'id',
-    'ID',
-    300,
-    (t) => t.id,
-    (t) => <span className="font-mono text-xs">{t.id}</span>,
-    false,
-  ),
-  makeCol(
-    'name',
-    'Name',
-    260,
-    (t) => t.name,
-    (t) => <span className="text-sm font-medium">{t.name}</span>,
-    false,
-  ),
-  makeCol(
-    'args',
-    'Args',
-    240,
-    (t) => JSON.stringify(t.args),
-    (t) => (
-      <span className="font-mono text-xs text-muted-foreground">
-        {JSON.stringify(t.args)}
-      </span>
-    ),
-    false,
-  ),
-  makeCol(
-    'start',
-    'Start Time',
-    200,
-    (t) => t.time_start,
-    (t) => <span className="text-xs">{formatLocalDateTime(t.time_start * 1000)}</span>,
-    false,
-  ),
-]
 
 export const INPROCESS_SCHEDULE_COLUMNS: ColumnDef<InProcessScheduleEntry>[] = [
   makeCol('name', 'Job ID', 320, (s) => s.name, (s) => (
@@ -135,78 +84,6 @@ export const INPROCESS_ACTIVE_COLUMNS: ColumnDef<InProcessActiveRun>[] = [
     false,
   ),
 ]
-
-export function QueueWorkersSection({
-  isLoading,
-  isStatusRefetching,
-  error,
-  workerCount,
-  activeWorkers,
-}: {
-  isLoading: boolean
-  isStatusRefetching: boolean
-  error: unknown
-  workerCount: number
-  activeWorkers: [string, ActiveTask[]][]
-}) {
-  return (
-    <div
-      data-testid="admin-queue-workers-reservation"
-      className="min-h-[200px] min-w-0 overflow-hidden [contain-intrinsic-size:auto_200px] [content-visibility:visible]"
-    >
-      <AnalyticsCard
-        key="celery-active-workers"
-        title={`Active Workers (${workerCount})`}
-        helpTitle="Active Workers"
-        className="min-h-[200px]"
-        isLoading={isLoading}
-        isFetching={isStatusRefetching}
-        loadingMessage="Inspecting Celery task broker..."
-        error={error as AnalyticsCardError | null}
-        helpContent={
-          <div className="space-y-4 text-sm">
-            <p>
-              Displays all currently running Celery worker nodes and the tasks they are
-              actively executing.
-            </p>
-            <p>
-              If a worker is listed but has no active tasks, it is idle and waiting for
-              messages from the queue.
-            </p>
-          </div>
-        }
-      >
-        {activeWorkers.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No active workers found.</p>
-        ) : (
-          <div className="space-y-6" data-testid="admin-queue-workers-list">
-            {activeWorkers.map(([workerName, tasks]) => (
-              <div key={workerName}>
-                <h4 className="font-mono text-sm font-semibold mb-2 flex items-center">
-                  {workerName}
-                  <Badge variant="outline" className="ml-2">
-                    {tasks.length} active task{tasks.length === 1 ? '' : 's'}
-                  </Badge>
-                </h4>
-                {tasks.length > 0 ? (
-                  <DataTableReadonly
-                    columns={TASK_COLUMNS}
-                    data={tasks}
-                    hideToolbar
-                    showPagination={false}
-                    tableCaption={`Active tasks on ${workerName}`}
-                  />
-                ) : (
-                  <p className="text-xs text-muted-foreground italic">Idle</p>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </AnalyticsCard>
-    </div>
-  )
-}
 
 export function InProcessSchedulesSection({
   isLoading,

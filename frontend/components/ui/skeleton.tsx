@@ -310,7 +310,7 @@ export function RouteSkeleton({ variant }: { variant: RouteSkeletonVariant }) {
     case 'admin-queue':
       return (
         <div className="space-y-6" data-testid="admin-queue-loading">
-          <SkeletonHeader title="Queue & Workers" description="Monitor Celery queue depths, active workers, and scheduled tasks.">
+          <SkeletonHeader title="Queue & Workers" description="Monitor in-process job schedules and the ingest ledger's dead-letter / quarantine state.">
             <Skeleton className="h-7 w-28" />
           </SkeletonHeader>
           <div
@@ -319,31 +319,16 @@ export function RouteSkeleton({ variant }: { variant: RouteSkeletonVariant }) {
           >
             <div className="flex items-center gap-3">
               <Skeleton className="h-5 w-28 rounded-full" />
-              <span className="text-xs text-muted-foreground">Inspecting Celery task broker...</span>
+              <span className="text-xs text-muted-foreground">Inspecting scheduler &amp; ingest status...</span>
             </div>
             <Skeleton className="h-8 w-24" />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[204px]">
-            {(['queue-depth', 'active-tasks'] as const).map((key) => (
-              <Card key={key} className="min-h-[204px]">
-                <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
-                  <Skeleton className="h-5 w-44" />
-                  <span className="text-xs text-muted-foreground">Loading queue telemetry...</span>
-                </CardHeader>
-                <CardContent><Skeleton className="h-8 w-16 mb-3" /><Skeleton className="h-20 w-full" /></CardContent>
-              </Card>
-            ))}
-          </div>
-          {(['depths', 'workers', 'ledger', 'schedules'] as const).map((sectionKey) => (
-            <div key={sectionKey} className={sectionKey === 'depths' ? 'min-h-[248px]' : sectionKey === 'ledger' ? 'min-h-[240px]' : 'min-h-[200px]'}>
-              <Card className={sectionKey === 'depths' ? 'min-h-[248px]' : sectionKey === 'ledger' ? 'min-h-[240px]' : 'min-h-[200px]'}>
+          {(['ledger', 'schedules'] as const).map((sectionKey) => (
+            <div key={sectionKey} className={sectionKey === 'ledger' ? 'min-h-[240px]' : 'min-h-[200px]'}>
+              <Card className={sectionKey === 'ledger' ? 'min-h-[240px]' : 'min-h-[200px]'}>
                 <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
                   <Skeleton className="h-5 w-48" />
-                  <span className="text-xs text-muted-foreground">
-                    {sectionKey === 'depths' || sectionKey === 'workers'
-                      ? 'Inspecting Celery task broker...'
-                      : 'Loading queue telemetry...'}
-                  </span>
+                  <span className="text-xs text-muted-foreground">Loading queue telemetry...</span>
                 </CardHeader>
                 <CardContent><Skeleton className="h-24 w-full" /></CardContent>
               </Card>

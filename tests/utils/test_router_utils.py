@@ -724,7 +724,7 @@ def test_channel_is_scoped_by_prefix_and_service():
 
 
 def test_publish_without_bound_loop_uses_sync_client():
-    """The bug this class exists to fix: in a Celery worker ``bind_loop`` is
+    """The bug this class exists to fix: in a worker process ``bind_loop`` is
     never called, and worker-originated cron/sync events were silently
     dropped. No loop bound MUST mean a real sync publish."""
     client = _fake_sync_client()

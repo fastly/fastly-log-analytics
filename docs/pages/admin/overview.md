@@ -11,7 +11,7 @@ Admin only. Analysts are blocked at the API (`/api/admin/`, `/api/provision/` ar
 ## UI
 
 - Header links to the other admin pages: Share Dashboard, Session Scoring, Live Queries, Trends, Queue, RUM, and ClickHouse. Hovering a link prefetches that page's data.
-- Operations cards: Live Queries, Ingest Gap (log accounting), Notable Slow Queries, Workers & Queues. Each links to its detail page and polls about every 10 seconds; the first paint is seeded from the bootstrap payload.
+- Operations cards: Live Queries, Ingest Gap (log accounting), Notable Slow Queries, Ingest Ledger. Each links to its detail page and polls about every 10 seconds; the first paint is seeded from the bootstrap payload.
 - Service Management table: name, ID, FOS bucket, cron sync status and settings, and per-service actions (credentials rotation, NGWAF workspace, delete data, teardown). Add Service opens the provisioning wizard (`token → service → storage → ngwaf → fields → execute`; see [`frontend/components/ProvisionWizard/`](../../../frontend/components/ProvisionWizard/)); Refresh Status refetches services and health.
 - System Health card (process, host, ClickHouse, and PostgreSQL vitals).
 - Quarantine section for unparseable log lines.

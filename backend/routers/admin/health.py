@@ -1,4 +1,4 @@
-"""System health snapshot, system-metrics sampler, VCL health, and Celery admin endpoints."""
+"""System health snapshot, system-metrics sampler, VCL health, and ingest status/ledger admin endpoints."""
 
 from __future__ import annotations
 
@@ -427,9 +427,6 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     except Exception:
         logger.warning("health snapshot: high-scale block failed", exc_info=True)
 
-    # ── Celery Metrics (Deprecated) ──────────
-    out["celery"] = None
-
     if use_cache:
         _HEALTH_SNAPSHOT_CACHE.set(cache_key, dict(out))
     return out
@@ -506,7 +503,7 @@ def update_debug_settings(body: DebugSettingsUpdateBody) -> DebugSettingsRespons
     dependencies=[Depends(require_admin)],
 )
 def api_celery_status() -> dict[str, Any]:
-    """Expose Celery queue depths, worker status, APScheduler schedule, and
+    """Expose the APScheduler schedule, active in-process runs, and the
     ingest-ledger summary."""
     use_cache = "PYTEST_CURRENT_TEST" not in os.environ
     raw: dict[str, Any] | None = _CELERY_STATUS_CACHE.get("status") if use_cache else None
@@ -543,8 +540,7 @@ def api_celery_ledger_list(
     dependencies=[Depends(require_admin)],
 )
 def api_celery_ledger_retry(body: IngestLedgerActionRequest) -> IngestLedgerActionResponse:
-    """Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered`` and
-    best-effort dispatch Celery convert batches."""
+    """Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered``."""
     _CELERY_STATUS_CACHE.clear()
     items = [item.model_dump() for item in body.items] if body.items else None
     return IngestLedgerActionResponse(

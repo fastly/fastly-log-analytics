@@ -915,6 +915,7 @@ _CacheRegistry.register("config._config_cache", _config_cache)
 _CacheRegistry.register("config._scalar_caches", _ConfigScalarCaches())
 
 # Cloud / Scalability Overrides (Phase 2+)
+# Valkey URL (SSE backplane, log flusher); the name predates the Celery worker's removal.
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
 HOT_S3_ENDPOINT = os.getenv("HOT_S3_ENDPOINT", "")
 HOT_S3_KEY = os.getenv("HOT_S3_KEY", "")

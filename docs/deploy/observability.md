@@ -170,8 +170,8 @@ existing chart. The two options are mutually exclusive. This reuses the same
 receiver templates/images and adds no Collector, new Kubernetes platform,
 Grafana dependency, exporter or public telemetry ingress.
 
-The minimal option configures the backend, Celery worker and enabled executable
-High-Scale subchart workloads with explicit direct-OTLP signal paths. It rejects
+The minimal option configures the backend and enabled executable High-Scale
+subchart workloads with explicit direct-OTLP signal paths. It rejects
 conflicting explicit exporter/endpoints. Receiver pods use the existing default
 500m CPU / 512 MiB limits, a 384 MiB heap target, non-root/read-only containers,
 24-hour retention, and separate ReadWriteOnce PVCs (Prometheus `1Gi`, Tempo

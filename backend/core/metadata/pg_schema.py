@@ -276,7 +276,7 @@ _SCHEMA = [
 # No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw
 # SQLite connection needing bootstrap, so the old SQLite-pool ``schema_fn``
 # has no caller left. Postgres schema bootstrap goes through
-# ``backend.core.metadata.pg_schema.ensure_pg_schema()`` (wired at API/Celery
+# ``backend.core.metadata.pg_schema.ensure_pg_schema()`` (wired at API
 # startup — see that module's docstring), which imports ``_SCHEMA`` above and
 # runs it through ``pg_schema._to_postgres()``. ``_SCHEMA`` itself MUST stay
 # SQLite-flavored and MUST NOT be deleted — it is the schema-of-record for

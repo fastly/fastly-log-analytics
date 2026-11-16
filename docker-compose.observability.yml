@@ -78,11 +78,6 @@ services:
       - DATA_SOURCE_NAME=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@postgres:5432/fla?sslmode=disable
     networks: [app-network]
 
-  celery-exporter:
-    image: danihodovic/celery-exporter:0.11.3
-    command: ["--broker-url=redis://valkey:6379/0"]
-    networks: [app-network]
-
   # The worker exports its own OTel signals (ingest/cron spans).
   worker:
     environment: *otel-env

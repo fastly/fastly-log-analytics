@@ -2938,7 +2938,7 @@ export interface paths {
         };
         /**
          * Api Celery Status
-         * @description Expose Celery queue depths, worker status, APScheduler schedule, and
+         * @description Expose the APScheduler schedule, active in-process runs, and the
          *     ingest-ledger summary.
          */
         get: operations["api_celery_status_api_admin_celery_status_get"];
@@ -2981,8 +2981,7 @@ export interface paths {
         put?: never;
         /**
          * Api Celery Ledger Retry
-         * @description Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered`` and
-         *     best-effort dispatch Celery convert batches.
+         * @description Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered``.
          */
         post: operations["api_celery_ledger_retry_api_admin_celery_ledger_retry_post"];
         delete?: never;
@@ -6378,34 +6377,11 @@ export interface components {
             query_id: number;
         };
         /**
-         * CeleryActiveTask
-         * @description One entry of Celery ``inspect().active()``; other inspect keys ride as extras.
-         */
-        CeleryActiveTask: {
-            /** Id */
-            id: string;
-            /** Name */
-            name: string;
-            /** Args */
-            args: unknown[];
-            /** Time Start */
-            time_start: number;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
          * CeleryStatusResponse
-         * @description ``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
-         *     summed across services, so both keep open string keys.
+         * @description ``ledger`` is ``{ingest_ledger.status: count}`` summed across services,
+         *     so it keeps open string keys.
          */
         CeleryStatusResponse: {
-            /** Broker Reachable */
-            broker_reachable?: boolean | null;
-            workers?: components["schemas"]["CeleryWorkers"] | null;
-            /** Queues */
-            queues?: {
-                [key: string]: number;
-            } | null;
             /** Ledger */
             ledger?: {
                 [key: string]: number;
@@ -6414,35 +6390,6 @@ export interface components {
             inprocess_schedules?: components["schemas"]["InProcessScheduleEntry"][] | null;
             /** Inprocess Active Runs */
             inprocess_active_runs?: components["schemas"]["InProcessActiveRun"][] | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
-         * CeleryWorkers
-         * @description ``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;
-         *     ``error`` is present only when the inspect call failed.
-         */
-        CeleryWorkers: {
-            /** Active Tasks */
-            active_tasks: {
-                [key: string]: components["schemas"]["CeleryActiveTask"][];
-            };
-            /** Stats */
-            stats: {
-                [key: string]: unknown;
-            };
-            /** Registered */
-            registered: {
-                [key: string]: string[];
-            };
-            /** Scheduled */
-            scheduled: {
-                [key: string]: unknown;
-            };
-            /** Count */
-            count: number;
-            /** Error */
-            error?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -8206,15 +8153,6 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
-        /** HealthCeleryStats */
-        HealthCeleryStats: {
-            /** Queue Depth */
-            queue_depth: number;
-            /** Active Workers */
-            active_workers: number;
-            /** Broker Reachable */
-            broker_reachable: boolean;
-        };
         /**
          * HealthConfigBackup
          * @description Freshness of the off-VM service-config backup (SRE-11 / ADR-13 §2.1).
@@ -8431,7 +8369,6 @@ export interface components {
             fos?: {
                 [key: string]: components["schemas"]["HealthFosProbe"];
             } | null;
-            celery?: components["schemas"]["HealthCeleryStats"] | null;
             high_scale?: components["schemas"]["HealthHighScale"] | null;
         };
         /** HighScale5xxInsightCard */
@@ -9279,11 +9216,6 @@ export interface components {
              * @default 0
              */
             affected: number;
-            /**
-             * Dispatched
-             * @default 0
-             */
-            dispatched: number;
         } & {
             [key: string]: unknown;
         };

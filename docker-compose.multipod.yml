@@ -2,7 +2,7 @@
 # LOCAL-DEV TOPOLOGY ONLY — do not point real traffic at this file.
 #
 # Every published port below binds 127.0.0.1 on purpose: the multipod stack is
-# a workstation topology for exercising the Celery/valkey split locally. To
+# a workstation topology for exercising the backend/worker/valkey split locally. To
 # expose it for real you must, at minimum:
 #   1. Put a TLS-terminating, authenticated ingress in front (see
 #      docker-compose.prod.yml + Caddyfile for the production pattern).

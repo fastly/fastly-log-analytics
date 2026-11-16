@@ -268,7 +268,7 @@ test('Loading skeleton and AdminPage render zero-CLS contain-intrinsic-size rese
   expect(container.querySelectorAll('[class*="contain-intrinsic-size"]').length).toBeGreaterThanOrEqual(6)
 })
 
-test('OperationsOverview renders live query, ingest gap, slow query, and worker status cards', async () => {
+test('OperationsOverview renders live query, ingest gap, slow query, and ingest ledger cards', async () => {
   server.use(
     http.get('/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { clickhouse: 2 }, recent_count: 15 })),
     http.get('/api/admin/log-accounting', () => HttpResponse.json({
@@ -277,14 +277,15 @@ test('OperationsOverview renders live query, ingest gap, slow query, and worker 
     })),
     http.get('/api/admin/slow-queries/count', () => HttpResponse.json({ count: 0, since_hours: 24, threshold_ms: 1000 })),
     http.get('/api/admin/celery/status', () => HttpResponse.json({
-      workers: { count: 4 }, queues: { 'q.ingest': 0, 'q.control': 0 }, ledger: { dead_letter: 0, quarantined: 0 },
+      ledger: { discovered: 7, claimed: 2, committed: 140, dead_letter: 0, quarantined: 0 }, inprocess_schedules: [], inprocess_active_runs: [],
     })),
   )
   renderWithQuery(<OperationsOverview />, { queryClient: createTestQueryClient({ queries: { staleTime: 0 } }) })
-  for (const label of ['Live Queries', 'Ingest Gap', 'Notable Slow Queries', 'Workers & Queues']) expect(screen.getByText(label)).toBeInTheDocument()
+  for (const label of ['Live Queries', 'Ingest Gap', 'Notable Slow Queries', 'Ingest Ledger']) expect(screen.getByText(label)).toBeInTheDocument()
   await waitFor(() => {
-    for (const txt of ['0%', 'healthy · 24h', '4 workers']) expect(screen.getByText(txt)).toBeInTheDocument()
+    for (const txt of ['0%', 'healthy · 24h', '7 discovered', '2 claimed · 140 committed']) expect(screen.getByText(txt)).toBeInTheDocument()
   })
+  expect(screen.queryByText(/workers/i)).not.toBeInTheDocument()
 })
 
 test('ServicesTable renders services, manual Refresh Status trigger, and Delete Data / Teardown menu order', async () => {
@@ -1009,50 +1010,32 @@ describe('AdminQueuePage (/admin/queue)', () => {
     const { unmount } = render(<QueueLoading />)
     expect(screen.getByTestId('admin-queue-loading')).toBeInTheDocument()
     expect(screen.getByTestId('admin-queue-toolbar-skeleton')).toBeInTheDocument()
-    expect(screen.getAllByText(/Inspecting Celery task broker/i).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/Celery|broker/i)).not.toBeInTheDocument()
     expect(screen.getAllByText(/Loading queue telemetry/i).length).toBeGreaterThan(0)
     unmount()
 
     clientGetSpy.mockImplementation(() => new Promise(() => {}))
     renderWithQuery(<AdminQueuePage />)
-    for (const id of [
-      'admin-queue-root', 'admin-queue-trends-reservation', 'admin-queue-depths-reservation',
-      'admin-queue-workers-reservation', 'admin-queue-ledger-reservation', 'admin-queue-schedules-reservation',
-    ]) {
+    for (const id of ['admin-queue-root', 'admin-queue-ledger-reservation', 'admin-queue-schedules-reservation']) {
       expect(screen.getByTestId(id)).toBeInTheDocument()
+    }
+    for (const id of ['admin-queue-trends-reservation', 'admin-queue-depths-reservation', 'admin-queue-workers-reservation']) {
+      expect(screen.queryByTestId(id)).not.toBeInTheDocument()
     }
     expect(screen.getByTestId('admin-queue-refresh-btn')).toBeDisabled()
   })
 
-  it('renders High-Scale queue depths, active workers, ingest ledger cards, in-process schedules, and supports manual Refresh', async () => {
+  it('renders ingest ledger cards and in-process schedules without Celery worker or queue panels, and supports manual Refresh', async () => {
     let statusCalls = 0
-    let batchCalls = 0
     const okRes = (data: unknown) => ({ data, response: { ok: true, status: 200 } })
 
     clientGetSpy.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {
         statusCalls += 1
         return okRes({
-          broker_reachable: true,
-          workers: {
-            count: 1,
-            active_tasks: { 'celery@worker-1': [{ id: 'task-uuid-101', name: 'backend.tasks.ingest.ingest_batch', args: ['svc-alpha', 25], time_start: 1700000000 }] },
-            stats: { 'celery@worker-1': {} },
-            registered: { 'celery@worker-1': ['backend.tasks.ingest.ingest_batch'] },
-            scheduled: { 'celery@worker-1': [] },
-          },
-          queues: { celery: 0, 'q.control': 2, 'q.ingest': 9 },
           inprocess_schedules: [{ name: 'log_discovery_svc-alpha', trigger: 'interval[0:00:10]', next_run_at: 1700000010 }],
+          inprocess_active_runs: [],
           ledger: { discovered: 5, claimed: 2, committed: 140, quarantined: 1, dead_letter: 0 },
-        })
-      }
-      if (path === '/api/admin/metric-history/batch') {
-        batchCalls += 1
-        return okRes({
-          series: {
-            celery_queue_depth: [{ ts: 1700000000, value: 4 }, { ts: 1700000060, value: 11 }],
-            celery_active_tasks: [{ ts: 1700000000, value: 1 }, { ts: 1700000060, value: 1 }],
-          },
         })
       }
       if (path === '/api/admin/celery/ledger') {
@@ -1069,73 +1052,31 @@ describe('AdminQueuePage (/admin/queue)', () => {
     })
 
     renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Reachable'))
-
-    expect(screen.getByTestId('admin-queue-depths-table')).toBeInTheDocument()
-    expect(screen.getByText('q.ingest')).toBeInTheDocument()
-    expect(screen.getByText('q.control')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-workers-list')).toBeInTheDocument()
-    expect(screen.getByText('celery@worker-1')).toBeInTheDocument()
-    expect(screen.getByText('task-uuid-101')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('admin-queue-ledger-discovered')).toHaveTextContent('5'))
     expect(screen.getByTestId('admin-queue-ledger-cards')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-ledger-discovered')).toHaveTextContent('5')
     expect(screen.getByTestId('admin-queue-ledger-committed')).toHaveTextContent('140')
     expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
     expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
+    expect(screen.queryByTestId('admin-queue-broker-badge')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Celery|Active Workers|Queue Depth/i)).not.toBeInTheDocument()
+    expect(clientGetSpy).not.toHaveBeenCalledWith('/api/admin/metric-history/batch', expect.anything())
 
     const refreshBtn = screen.getByTestId('admin-queue-refresh-btn')
     expect(refreshBtn).not.toBeDisabled()
     fireEvent.click(refreshBtn)
-    await waitFor(() => {
-      expect(statusCalls).toBeGreaterThanOrEqual(2)
-      expect(batchCalls).toBeGreaterThanOrEqual(2)
-    })
+    await waitFor(() => expect(statusCalls).toBeGreaterThanOrEqual(2))
   })
 
-  it('renders broker unreachable state and in-process scheduler telemetry', async () => {
+  it('renders empty ledger and empty in-process schedule states', async () => {
     const okRes = (data: unknown) => ({ data, response: { ok: true, status: 200 } })
-    const emptyWorkers = { count: 0, active_tasks: {}, stats: {}, registered: {}, scheduled: {}, error: 'Valkey unreachable' }
-
     clientGetSpy.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/celery/status') {
-        return okRes({ broker_reachable: false, workers: emptyWorkers, queues: {}, inprocess_schedules: [], ledger: {} })
-      }
-      if (path === '/api/admin/metric-history/batch') return okRes({ series: {} })
-      return okRes({})
-    })
-
-    const { unmount } = renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Unreachable'))
-    expect(screen.getByText(/No queues found or Celery broker is inactive/i)).toBeInTheDocument()
-    expect(screen.getByText(/No active workers found/i)).toBeInTheDocument()
-    expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument()
-    expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
-    unmount()
-
-    clientGetSpy.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/celery/status') {
-        return okRes({
-          broker_reachable: false,
-          workers: { ...emptyWorkers, error: 'Celery broker unreachable' },
-          queues: {},
-          inprocess_schedules: [
-            { name: 'log_discovery_svc-alpha', trigger: 'interval[0:00:10]', next_run_at: 1700000010 },
-            { name: 'commit_svc-alpha', trigger: 'interval[0:05:00]', next_run_at: 1700000300 },
-          ],
-          inprocess_active_runs: [{ run_id: 101, service_id: 'svc-alpha', task: 'sync', started_at: 1700000000 }],
-          ledger: { committed: 1250, quarantined: 2, dead_letter: 0 },
-        })
-      }
-      if (path === '/api/admin/metric-history/batch') return okRes({ series: {} })
+      if (path === '/api/admin/celery/status') return okRes({ inprocess_schedules: [], inprocess_active_runs: [], ledger: {} })
       return okRes({})
     })
 
     renderWithQuery(<AdminQueuePage />)
-    await waitFor(() => expect(screen.getByTestId('admin-queue-broker-badge')).toHaveTextContent('Broker Unreachable'))
-    expect(screen.getByTestId('admin-queue-depths-reservation')).toBeInTheDocument()
-    expect(screen.getByTestId('admin-queue-inprocess-schedules-table')).toBeInTheDocument()
-    expect(screen.getByText('log_discovery_svc-alpha')).toBeInTheDocument()
-    expect(screen.getByText('commit_svc-alpha')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText(/Ledger is empty/i)).toBeInTheDocument())
+    expect(screen.getByText(/No in-process schedules registered/i)).toBeInTheDocument()
   })
 
   it('displays dead-letter entries in the ledger inspector and handles Retry and Dismiss actions', async () => {
@@ -1144,10 +1085,8 @@ describe('AdminQueuePage (/admin/queue)', () => {
     clientGetSpy.mockImplementation(async (path: string) => {
       if (path === '/api/admin/celery/status') {
         return okRes({
-          broker_reachable: true,
-          workers: { count: 1, active_tasks: {}, stats: {}, registered: {}, scheduled: {} },
-          queues: { celery: 0, 'q.ingest': 0, 'q.control': 0 },
           inprocess_schedules: [],
+          inprocess_active_runs: [],
           ledger: { discovered: 0, claimed: 0, committed: 120, quarantined: 0, dead_letter: 3 },
         })
       }
@@ -1161,10 +1100,9 @@ describe('AdminQueuePage (/admin/queue)', () => {
           total: 1,
         })
       }
-      if (path === '/api/admin/metric-history/batch') return okRes({ series: {} })
       return okRes({})
     })
-    clientPostSpy.mockImplementation(async () => okRes({ ok: true, affected: 1, dispatched: 1 }))
+    clientPostSpy.mockImplementation(async () => okRes({ ok: true, affected: 1 }))
 
     renderWithQuery(<AdminQueuePage />)
     await waitFor(() => expect(screen.getByTestId('admin-queue-ledger-entries')).toBeInTheDocument())
@@ -1177,6 +1115,7 @@ describe('AdminQueuePage (/admin/queue)', () => {
       '/api/admin/celery/ledger/retry',
       expect.objectContaining({ body: { items: [{ service_id: 'svc-alpha', object_key: deadKey }] } }),
     ))
+    await waitFor(() => expect(screen.getByText('Requeued 1 file for ingest retry.')).toBeInTheDocument())
 
     fireEvent.click(screen.getByTestId('admin-queue-ledger-purge-all'))
     await waitFor(() => expect(clientPostSpy).toHaveBeenCalledWith(

@@ -112,8 +112,8 @@ adminGateway:
   image: ""
 
 config:
-  # "valkey" fans SSE events out across pods via the broker, so it
-  # needs secrets.celeryBrokerUrl. "local" is in-process.
+  # "valkey" fans SSE events out across pods via Valkey, so it needs
+  # secrets.celeryBrokerUrl (the Valkey URL). "local" is in-process.
   sseBackplane: local
   # Pin to the subnet your ingress/proxy pods actually egress from (pod CIDR
   # or the RFC1918 ranges below). The backend REFUSES TO BOOT on `*` — a
@@ -149,6 +149,7 @@ secrets:
   # Name of a pre-created Secret. When set, no Secret is templated and
   # celeryBrokerUrl/metadataDsn/clickhousePassword below are ignored.
   existingSecret: ""
+  # Valkey URL (SSE backplane, log flusher); the key name is historical.
   # e.g. redis://valkey-master:6379/0
   celeryBrokerUrl: ""
   # e.g. postgresql://fla:PASSWORD@postgres:5432/fla
@@ -203,9 +204,6 @@ observability:
       image: prometheuscommunity/postgres-exporter:v0.16.0
       # BYO Postgres DSN -- should point at the same instance as secrets.metadataDsn.
       dataSourceName: ""
-    celery:
-      image: danihodovic/celery-exporter:0.11.3
-      brokerUrl: "redis://valkey-master:6379/0"
 
 # Minimal private SDK receivers, independent of the legacy full observability
 # stack above. Services remain namespace-private; no Grafana, exporters,

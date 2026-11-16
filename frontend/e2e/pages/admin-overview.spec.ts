@@ -143,7 +143,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     await page.goto('/admin')
     await expect(page.locator('[data-testid="admin-operations-overview"]:visible')).toBeVisible({ timeout: 30_000 })
     await expect(page.getByRole('link', { name: /Live Queries/ }).first()).toBeVisible({ timeout: 10_000 })
-    for (const text of ['Ingest Gap', 'Notable Slow Queries', 'Workers & Queues', 'System Health']) {
+    for (const text of ['Ingest Gap', 'Notable Slow Queries', 'Ingest Ledger', 'System Health']) {
       await expect(page.getByText(text).first()).toBeVisible({ timeout: 15_000 })
     }
     await expect(page.locator('[data-testid="admin-services-section"]:visible')).toBeVisible({ timeout: 15_000 })
@@ -424,33 +424,20 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     await assertAdminMount(page, '/admin/queue', {
       rootTestId: 'admin-queue-root', heading: 'Queue & Workers', exactHeading: true, visibleTestIds: ['admin-queue-client'],
       footerPattern: /Admin View|Analyst View/i, warmLocators: [page.locator('[data-testid="admin-queue-root"]:visible')],
-      intrinsicIds: ['admin-queue-trends-reservation', 'admin-queue-depths-reservation', 'admin-queue-workers-reservation', 'admin-queue-ledger-reservation', 'admin-queue-schedules-reservation'],
+      intrinsicIds: ['admin-queue-ledger-reservation', 'admin-queue-schedules-reservation'],
     })
-    const [statusRes, batchRes] = await Promise.all([page.request.get('/api/admin/celery/status'), page.request.get('/api/admin/metric-history/batch?since=1h')])
-    expect(statusRes.status() === 200 && batchRes.status() === 200).toBe(true)
-    const [statusBody, batchBody] = await Promise.all([statusRes.json(), batchRes.json()])
-    expect(typeof statusBody.broker_reachable === 'boolean' && typeof statusBody.workers?.count === 'number' && typeof statusBody.queues === 'object').toBe(true)
-    expect(Array.isArray(statusBody.inprocess_schedules)).toBe(true)
+    const statusRes = await page.request.get('/api/admin/celery/status')
+    expect(statusRes.status()).toBe(200)
+    const statusBody = await statusRes.json()
+    expect(Object.keys(statusBody).filter((k) => !k.startsWith('_')).sort()).toEqual(['inprocess_active_runs', 'inprocess_schedules', 'ledger'])
+    expect(Array.isArray(statusBody.inprocess_schedules) && Array.isArray(statusBody.inprocess_active_runs)).toBe(true)
     for (const [, count] of Object.entries(statusBody.ledger as Record<string, unknown>)) expect(typeof count).toBe('number')
-    for (const [, points] of Object.entries(batchBody.series as Record<string, unknown>)) expect(Array.isArray(points)).toBe(true)
-    await assertAnalyst403(page, 'Queue', () => ['/api/admin/celery/status', '/api/admin/metric-history/batch?since=1h'])
+    await assertAnalyst403(page, 'Queue', () => ['/api/admin/celery/status'])
   })
 
   test('4. Queue sections, in-process schedules, and Ingest Ledger render cleanly', async ({ page }) => {
     await page.goto('/admin/queue')
     await expect(page.locator('[data-testid="admin-queue-root"]:visible')).toBeVisible({ timeout: 30_000 })
-    const brokerBadge = page.locator('[data-testid="admin-queue-broker-badge"]:visible')
-    await expect(brokerBadge).toBeVisible({ timeout: 15_000 })
-    const trendsCard = page.locator('[data-testid="admin-queue-trends-reservation"]:visible')
-    const depthsCard = page.locator('[data-testid="admin-queue-depths-reservation"]:visible')
-    const workersCard = page.locator('[data-testid="admin-queue-workers-reservation"]:visible')
-
-    await expect(brokerBadge).toContainText(/Broker Reachable|Broker Unreachable/i)
-    await expect(trendsCard).toContainText(/Total Queue Depth \(1h\)/i, { timeout: 15_000 })
-    await expect(trendsCard).toContainText(/Active Tasks \(1h\)/i, { timeout: 15_000 })
-    await expect(depthsCard).toContainText(/Queue Depths/i, { timeout: 15_000 })
-    await expect(depthsCard).toContainText(/Queue Name|No queues found or Celery (?:broker|mode) is inactive/i, { timeout: 15_000 })
-    await expect(workersCard).toContainText(/Active Workers \(\d+\)|Active In-Process Jobs \(\d+\)/i, { timeout: 15_000 })
     await expect(page.locator('[data-testid="admin-queue-schedules-reservation"]:visible')).toContainText(/In-Process Schedules \(\d+\)/i, { timeout: 15_000 })
     const ledgerSection = page.locator('[data-testid="admin-queue-ledger-reservation"]:visible')
     await expect(ledgerSection).toContainText(/Ingest Ledger Status/i, { timeout: 15_000 })
@@ -458,7 +445,7 @@ test.describe('Admin Task Queue & Ingest Ledger Page Contract (/admin/queue)', (
     await assertManualRefreshAttribution(page, {
       url: '/admin/queue', readyLocator: page.locator('[data-testid="admin-queue-root"]:visible'),
       refreshLocator: page.locator('[data-testid="admin-queue-refresh-btn"]:visible'),
-      requestFilter: (url) => url.includes('/api/admin/celery/status') || url.includes('/api/admin/metric-history/batch'),
+      requestFilter: (url) => url.includes('/api/admin/celery/status'),
     })
   })
 })

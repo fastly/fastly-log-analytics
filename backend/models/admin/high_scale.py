@@ -1,4 +1,4 @@
-"""High-Scale topology, ClickHouse status/replay, Celery/ingest ledger, and NGWAF/rDNS status models."""
+"""High-Scale topology, ClickHouse status/replay, admin status/ingest ledger, and NGWAF/rDNS status models."""
 
 from __future__ import annotations
 
@@ -251,27 +251,6 @@ class ClickHouseReplayErrorResponse(BaseResponse):
     detail: ErrorDetail
 
 
-class CeleryActiveTask(WireSafeModel):
-    """One entry of Celery ``inspect().active()``; other inspect keys ride as extras."""
-
-    id: str
-    name: str
-    args: list[Any]
-    time_start: int | float
-
-
-class CeleryWorkers(WireSafeModel):
-    """``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;
-    ``error`` is present only when the inspect call failed."""
-
-    active_tasks: dict[str, list[CeleryActiveTask]]
-    stats: JsonDict
-    registered: dict[str, list[str]]
-    scheduled: JsonDict
-    count: int
-    error: str | None = None
-
-
 class InProcessScheduleEntry(WireSafeModel):
     name: str
     trigger: str
@@ -286,12 +265,9 @@ class InProcessActiveRun(WireSafeModel):
 
 
 class CeleryStatusResponse(WireSafeModel):
-    """``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
-    summed across services, so both keep open string keys."""
+    """``ledger`` is ``{ingest_ledger.status: count}`` summed across services,
+    so it keeps open string keys."""
 
-    broker_reachable: bool | None = None
-    workers: CeleryWorkers | None = None
-    queues: dict[str, int] | None = None
     ledger: dict[str, int] | None = None
     inprocess_schedules: list[InProcessScheduleEntry] | None = None
     inprocess_active_runs: list[InProcessActiveRun] | None = None
@@ -339,7 +315,6 @@ class IngestLedgerActionRequest(WireSafeModel):
 class IngestLedgerActionResponse(WireSafeModel):
     ok: bool = True
     affected: int = 0
-    dispatched: int = 0
 
 
 class NgwafStatusResponse(WireSafeModel):

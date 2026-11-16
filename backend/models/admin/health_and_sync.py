@@ -109,12 +109,6 @@ class HealthFosProbe(BaseModel):
     error: str | None = None
 
 
-class HealthCeleryStats(BaseModel):
-    queue_depth: int
-    active_workers: int
-    broker_reachable: bool
-
-
 class HealthHighScaleDisk(BaseModel):
     """Latest serving-volume disk-guard evaluation (high-scale topology only)."""
 
@@ -176,8 +170,6 @@ class HealthSnapshotResponse(BaseModel):
     config_backup: HealthConfigBackup | None = None
     # SRE-13: per-service FOS reachability — only populated when probe_fos=1.
     fos: dict[str, HealthFosProbe] | None = None
-    # Scaling Phase 10: Celery metrics (queue depth and worker count)
-    celery: HealthCeleryStats | None = None
     # Serving-volume disk guard and topology profile.
     high_scale: HealthHighScale | None = None
 

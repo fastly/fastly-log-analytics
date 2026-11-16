@@ -280,7 +280,6 @@ def test_gap_heal_triggers_full_sweep_and_throttles_subsequent_runs(monkeypatch,
 
 
 def test_sweep_ledger_once_aggregates_request_domain(monkeypatch, stub_source):
-    monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "")
     monkeypatch.setattr("backend.cron.jobs.rum_ledger._discover_high_scale_prefix", lambda sid, **kw: 7)
     fake_ctrl = MagicMock()
     fake_ctrl.expired_claims.return_value = ["c1"]
@@ -297,14 +296,13 @@ def test_sweep_ledger_once_aggregates_request_domain(monkeypatch, stub_source):
         "redispatched": 1,
         "discovered": 7,
         "dead_letter": 2,
-        "broker_ok": True,
     }
 
 
 def test_run_ledger_sweep_records_summary(monkeypatch, stub_sync_env):
     monkeypatch.setattr(
         "backend.cron.jobs.rum_ledger.sweep_ledger_once",
-        lambda sid, **kw: {"reclaimed": 2, "redispatched": 2, "discovered": 5, "dead_letter": 0, "broker_ok": True},
+        lambda sid, **kw: {"reclaimed": 2, "redispatched": 2, "discovered": 5, "dead_letter": 0},
     )
     _run_ledger_sweep.__wrapped__("svc-1")
     args, kwargs = stub_sync_env["log"].call_args

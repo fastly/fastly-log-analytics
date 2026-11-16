@@ -284,18 +284,6 @@ export function SystemHealthCard() {
     hsDisk?.mode === 'warning' ? 'warn' :
     'default'
 
-  const celery = snap.celery ?? null
-  const queueDepth = celery?.queue_depth ?? null
-  const activeWorkers = celery?.active_workers ?? null
-  const brokerReachable = celery?.broker_reachable ?? true
-
-  const celeryTone: Tone =
-    celery == null ? 'unknown' :
-    !brokerReachable ? 'crit' :
-    queueDepth != null && queueDepth > 500 ? 'crit' :
-    queueDepth != null && queueDepth > 50 ? 'warn' :
-    'default'
-
   return (
     <AnalyticsCard
       title="System Health"
@@ -341,14 +329,6 @@ export function SystemHealthCard() {
           trendDomain={[0, 100]}
           formatTrendValue={(v) => `${v.toFixed(1)}%`}
         />
-        {celery != null && (
-          <Stat
-            label="Celery Queue"
-            value={!brokerReachable ? 'OFFLINE' : queueDepth == null ? '–' : `${queueDepth}`}
-            sub={!brokerReachable ? 'Broker Unreachable' : `${activeWorkers} Active Worker(s)`}
-            tone={celeryTone}
-          />
-        )}
         <Stat
           label="ClickHouse"
           value={hsDisk ? hsDisk.mode.toUpperCase() : 'ONLINE'}

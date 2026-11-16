@@ -62,16 +62,6 @@ def _patches(*specs):
         ]
 
 
-def _mock_redis(queues: dict[str, int]):
-    r = MagicMock()
-    r.scan_iter.side_effect = lambda match=None, count=None: (
-        iter([k for k in queues if k.startswith("q.")]) if match == "q.*" else iter([])
-    )
-    r.type.side_effect = lambda k: "list" if k in queues else "none"
-    r.llen.side_effect = lambda k: queues.get(k, 0)
-    return r
-
-
 def _assert_analyst_rbac_403(client, method: str, path: str, *, skip_http_for: tuple[str, ...] = ()) -> None:
     raw_path = path.split("?", 1)[0]
     assert _is_blocked_path(raw_path) is True, f"Expected {raw_path} to be blocked for Analyst Path B"
@@ -92,7 +82,6 @@ def _assert_analyst_rbac_403(client, method: str, path: str, *, skip_http_for: t
 
 
 def test_high_scale_celery_status_full_payload(client):
-    queues = {"q.ingest": 14, "q.control": 1, "celery": 3, "q.custom": 2}
     ledger_rows_by_svc = {
         "svc-a": [("discovered", 4), ("claimed", 2), ("committed", 120), ("quarantined", 1)],
         "svc-b": [("committed", 80), ("dead_letter", 3)],
@@ -109,28 +98,15 @@ def test_high_scale_celery_status_full_payload(client):
         con.cursor.return_value = cur
         return con
 
-    mock_i = MagicMock()
-    t_name = "backend.tasks.ingest.ingest_batch"
-    task = {"id": "task-uuid-1", "name": t_name, "args": ["svc-a", 12], "time_start": 1700000000.5}
-    workers = ("celery@worker-1", "celery@worker-2")
-    mock_i.active.return_value = {"celery@worker-1": [task], "celery@worker-2": []}
-    mock_i.stats.return_value = {w: {"pool": {"max-concurrency": 8}} for w in workers}
-    mock_i.registered.return_value = {w: [t_name] for w in workers}
-    mock_i.scheduled.return_value = {w: [] for w in workers}
     svcs = [{"service_id": "svc-a"}, {"service_id": "svc-b"}]
     with _patches(
-        ("backend.celery_app.app.control.inspect", mock_i),
-        ("backend.celery_app._get_redis", _mock_redis(queues)),
         ("backend.config.list_configs", svcs),
         ("backend.core.metadata.base.get_con", {"side_effect": _fake_get_con}),
     ):
         resp = client.get("/api/admin/celery/status", headers={"X-Service-Id": "svc-a"})
         assert resp.status_code == 200
         data = resp.json()
-        assert data["broker_reachable"] is True and data["workers"]["count"] == 2
-        assert data["workers"]["active_tasks"]["celery@worker-1"][0]["id"] == "task-uuid-1"
-        assert data["workers"]["active_tasks"]["celery@worker-2"] == []
-        assert data["queues"] == {"celery": 3, "q.control": 1, "q.custom": 2, "q.ingest": 14}
+        assert {k for k in data if not k.startswith("_")} == {"ledger", "inprocess_schedules", "inprocess_active_runs"}
         assert data["ledger"] == {"discovered": 4, "claimed": 2, "committed": 200, "quarantined": 1, "dead_letter": 3}
 
 
@@ -154,68 +130,6 @@ def test_ingest_ledger_summary_reuses_counts_between_admin_polls():
         assert get_con.call_count == 2
 
 
-def test_celery_status_waits_for_worker_replies_slower_than_the_stats_probe():
-    """Live High-Scale workers answer stats in ~0.25s but active/registered/scheduled
-    in ~0.3-0.8s, so a fixed 0.25s inspect timeout returned a worker with no tasks."""
-    from backend.celery_app import get_celery_status
-
-    worker = "celery@worker-1"
-    task = {"id": "t-1", "name": "backend.tasks.ingest.ingest_batch"}
-    replies = {"stats": (0.2, {}), "active": (0.8, [task]), "registered": (0.3, [task["name"]]), "scheduled": (0.3, [])}
-    waited: list[float] = []
-
-    def _inspect(timeout: float, limit: int | None = None):
-        def _broadcast(command: str):
-            latency, body = replies[command]
-            answered = timeout >= latency
-            waited.append(latency if answered and limit == 1 else timeout)
-            return {worker: body} if answered else None
-
-        return SimpleNamespace(**{c: (lambda c=c: _broadcast(c)) for c in replies})
-
-    with _patches(
-        ("backend.celery_app.app.control.inspect", {"side_effect": _inspect}),
-        ("backend.celery_app.celery_queue_depths", ({}, True)),
-        ("backend.celery_app.ingest_ledger_summary", {}),
-    ):
-        status = get_celery_status()
-
-    assert status["workers"]["count"] == 1
-    assert status["workers"]["active_tasks"] == {worker: [task]}
-    assert status["workers"]["registered"] == {worker: [task["name"]]}
-    assert status["workers"]["scheduled"] == {worker: []}
-    assert sum(waited) < 2.0
-
-
-def test_celery_status_idle_and_unreachable_broker_fallbacks(client):
-    mock_i = MagicMock()
-    mock_i.active.return_value = mock_i.stats.return_value = {}
-    mock_i.registered.return_value = mock_i.scheduled.return_value = {}
-    with _patches(
-        ("backend.celery_app.app.control.inspect", mock_i),
-        ("backend.celery_app._get_redis", _mock_redis({})),
-        ("backend.config.list_configs", []),
-    ):
-        resp = client.get("/api/admin/celery/status")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["broker_reachable"] is True and data["workers"]["count"] == 0
-        assert data["queues"] == {"celery": 0, "q.control": 0, "q.ingest": 0} and data["ledger"] == {}
-
-    broken_redis = MagicMock()
-    broken_redis.scan_iter.side_effect = ConnectionError("Valkey connection refused")
-    with _patches(
-        ("backend.celery_app.app.control.inspect", {"side_effect": RuntimeError("Broker connection timeout")}),
-        ("backend.celery_app._get_redis", broken_redis),
-        ("backend.config.list_configs", []),
-    ):
-        resp2 = client.get("/api/admin/celery/status")
-        assert resp2.status_code == 200
-        d2 = resp2.json()
-        assert d2["broker_reachable"] is False and d2["workers"]["count"] == 0
-        assert "Broker connection timeout" in d2["workers"]["error"] and d2["queues"] == {} and d2["ledger"] == {}
-
-
 def test_celery_status_inprocess_scheduler_and_metric_history(client):
     nxt = SimpleNamespace(timestamp=lambda: 1700000010.0)
     fake_job = SimpleNamespace(
@@ -223,9 +137,7 @@ def test_celery_status_inprocess_scheduler_and_metric_history(client):
     )
     fake_scheduler = SimpleNamespace(scheduler=SimpleNamespace(get_jobs=lambda: [fake_job]))
     active_entry = [{"run_id": 101, "service_id": "svc-a", "task": "sync", "started_at": 1700000000.0}]
-    err = ConnectionError("Celery broker not configured (CELERY_BROKER_URL is unset)")
     with _patches(
-        ("backend.celery_app._get_redis", {"side_effect": err}),
         ("backend.config.list_configs", [{"service_id": "svc-a"}]),
         ("backend.cron.scheduler.get_scheduler", fake_scheduler),
         ("backend.celery_app.inprocess_active_runs_entries", active_entry),
@@ -234,7 +146,6 @@ def test_celery_status_inprocess_scheduler_and_metric_history(client):
         resp = client.get("/api/admin/celery/status")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["broker_reachable"] is False
         sched_exp = [{"name": "log_discovery_svc-a", "trigger": "interval[0:00:10]", "next_run_at": 1700000010.0}]
         assert data["inprocess_schedules"] == sched_exp
         assert data["inprocess_active_runs"] == active_entry
@@ -305,7 +216,7 @@ def test_list_retry_and_purge_ingest_ledger_entries(client):
             )
             assert retry_resp.status_code == 200
             rd = retry_resp.json()
-            assert rd["ok"] is True and rd["affected"] == 1 and rd["dispatched"] == 0
+            assert rd["ok"] is True and rd["affected"] == 1 and "dispatched" not in rd
 
             after_retry = client.get("/api/admin/celery/ledger").json()
             assert after_retry["total"] == 1 and after_retry["items"][0]["status"] == "quarantined"

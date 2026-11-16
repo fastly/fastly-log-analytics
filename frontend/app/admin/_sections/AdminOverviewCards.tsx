@@ -83,7 +83,7 @@ export function OperationsOverview() {
   }
   return (
     <div className="grid grid-cols-1 md:grid-cols-4 gap-3 min-h-[108px] [contain-intrinsic-size:auto_108px]" data-testid="admin-operations-overview">
-      <LiveQueriesCard /><IngestHealthCard /><SlowQueriesTeaser /><CeleryStatusCard />
+      <LiveQueriesCard /><IngestHealthCard /><SlowQueriesTeaser /><IngestLedgerCard />
     </div>
   )
 }
@@ -189,7 +189,7 @@ function OverviewCard({ href, icon, title, primary, primaryTone, secondary, isSt
   )
 }
 
-function CeleryStatusCard() {
+function IngestLedgerCard() {
   const mounted = useMounted()
   const { data: queryData, isFetching, isLoading, isError } = useQuery({
     queryKey: queryKeys.admin.celeryStatus(),
@@ -197,20 +197,20 @@ function CeleryStatusCard() {
     retry: false, staleTime: POLL_MS, refetchInterval: POLL_MS,
   })
   const data = mounted ? queryData : undefined
-  const workers = data?.workers?.count ?? 0
-  const ingestQ = data?.queues?.['q.ingest'] ?? 0
-  const controlQ = data?.queues?.['q.control'] ?? 0
+  const discovered = data?.ledger?.discovered ?? 0
+  const claimed = data?.ledger?.claimed ?? 0
+  const committed = data?.ledger?.committed ?? 0
   const deadLetters = data?.ledger?.dead_letter ?? 0
   const quarantined = data?.ledger?.quarantined ?? 0
-  let primaryText = `${workers} workers`
-  let primaryTone: CardTone = workers > 0 ? 'default' : 'warning'
-  let secondaryText = `ingest: ${ingestQ} · control: ${controlQ}`
+  let primaryText = `${discovered} discovered`
+  let primaryTone: CardTone = 'default'
+  let secondaryText = `${claimed} claimed · ${committed} committed`
   if (deadLetters > 0) {
     primaryText = `${deadLetters} dead letters`; primaryTone = 'critical'
-    secondaryText = `${workers} workers · ingest: ${ingestQ}`
+    secondaryText = `${quarantined} quarantined · ${discovered} discovered`
   } else if (quarantined > 0) {
     primaryText = `${quarantined} quarantined`; primaryTone = 'attention'
-    secondaryText = `${workers} workers · ingest: ${ingestQ}`
+    secondaryText = `${discovered} discovered · ${claimed} claimed`
   }
-  return <OverviewCard href="/admin/queue" icon={<Activity className="h-4 w-4" />} title="Workers & Queues" primary={primaryText} primaryTone={primaryTone} secondary={secondaryText} isStale={isError && !!data} isRefreshing={isFetching && !isLoading} />
+  return <OverviewCard href="/admin/queue" icon={<Activity className="h-4 w-4" />} title="Ingest Ledger" primary={primaryText} primaryTone={primaryTone} secondary={secondaryText} isStale={isError && !!data} isRefreshing={isFetching && !isLoading} />
 }

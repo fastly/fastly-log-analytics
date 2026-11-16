@@ -29291,7 +29291,7 @@
           "admin"
         ],
         "summary": "Api Celery Status",
-        "description": "Expose Celery queue depths, worker status, APScheduler schedule, and\ningest-ledger summary.",
+        "description": "Expose the APScheduler schedule, active in-process runs, and the\ningest-ledger summary.",
         "operationId": "api_celery_status_api_admin_celery_status_get",
         "responses": {
           "200": {
@@ -29577,7 +29577,7 @@
           "admin"
         ],
         "summary": "Api Celery Ledger Retry",
-        "description": "Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered`` and\nbest-effort dispatch Celery convert batches.",
+        "description": "Reset ``dead_letter`` / ``quarantined`` ledger entries back to ``discovered``.",
         "operationId": "api_celery_ledger_retry_api_admin_celery_ledger_retry_post",
         "requestBody": {
           "content": {
@@ -50140,81 +50140,8 @@
         ],
         "title": "CancelResponse"
       },
-      "CeleryActiveTask": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "args": {
-            "items": {},
-            "type": "array",
-            "title": "Args"
-          },
-          "time_start": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "number"
-              }
-            ],
-            "title": "Time Start"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "args",
-          "time_start"
-        ],
-        "title": "CeleryActiveTask",
-        "description": "One entry of Celery ``inspect().active()``; other inspect keys ride as extras."
-      },
       "CeleryStatusResponse": {
         "properties": {
-          "broker_reachable": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Broker Reachable"
-          },
-          "workers": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CeleryWorkers"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "queues": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "type": "integer"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queues"
-          },
           "ledger": {
             "anyOf": [
               {
@@ -50261,67 +50188,7 @@
         "additionalProperties": true,
         "type": "object",
         "title": "CeleryStatusResponse",
-        "description": "``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``\nsummed across services, so both keep open string keys."
-      },
-      "CeleryWorkers": {
-        "properties": {
-          "active_tasks": {
-            "additionalProperties": {
-              "items": {
-                "$ref": "#/components/schemas/CeleryActiveTask"
-              },
-              "type": "array"
-            },
-            "type": "object",
-            "title": "Active Tasks"
-          },
-          "stats": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Stats"
-          },
-          "registered": {
-            "additionalProperties": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "type": "object",
-            "title": "Registered"
-          },
-          "scheduled": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Scheduled"
-          },
-          "count": {
-            "type": "integer",
-            "title": "Count"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "required": [
-          "active_tasks",
-          "stats",
-          "registered",
-          "scheduled",
-          "count"
-        ],
-        "title": "CeleryWorkers",
-        "description": "``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;\n``error`` is present only when the inspect call failed."
+        "description": "``ledger`` is ``{ingest_ledger.status: count}`` summed across services,\nso it keeps open string keys."
       },
       "CheckFosRequest": {
         "properties": {
@@ -55146,29 +55013,6 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
-      "HealthCeleryStats": {
-        "properties": {
-          "queue_depth": {
-            "type": "integer",
-            "title": "Queue Depth"
-          },
-          "active_workers": {
-            "type": "integer",
-            "title": "Active Workers"
-          },
-          "broker_reachable": {
-            "type": "boolean",
-            "title": "Broker Reachable"
-          }
-        },
-        "type": "object",
-        "required": [
-          "queue_depth",
-          "active_workers",
-          "broker_reachable"
-        ],
-        "title": "HealthCeleryStats"
-      },
       "HealthConfigBackup": {
         "properties": {
           "last_backup_at": {
@@ -55754,16 +55598,6 @@
               }
             ],
             "title": "Fos"
-          },
-          "celery": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/HealthCeleryStats"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "high_scale": {
             "anyOf": [
@@ -58388,11 +58222,6 @@
           "affected": {
             "type": "integer",
             "title": "Affected",
-            "default": 0
-          },
-          "dispatched": {
-            "type": "integer",
-            "title": "Dispatched",
             "default": 0
           }
         },

@@ -97,9 +97,6 @@ class AuditResult:
     scheduler_tick_age_s: float | None = None
     in_flight_runs: list[dict[str, Any]] = field(default_factory=list)
     recent_failures: list[dict[str, Any]] = field(default_factory=list)
-    celery_reachable: bool | None = None
-    celery_queue_depth: int | None = None
-    celery_workers: int | None = None
     request_latest_log_at: str | None = None
     request_latest_log_age_s: float | None = None
     request_total_rows: int | None = None
@@ -274,15 +271,6 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
                 err_msg = fail.get("error_message") or fail.get("summary") or fail.get("status") or "error"
                 res.warnings.append(f"Cron failure in {fail.get('task')}{age_str}: {err_msg}")
 
-        if isinstance(celery := hs_data.get("celery"), dict):
-            res.celery_reachable, res.celery_queue_depth, res.celery_workers = celery.get("broker_reachable"), celery.get("queue_depth"), celery.get("active_workers")
-            if res.celery_reachable is False:
-                res.errors.append("Celery broker unreachable!")
-            elif (res.celery_workers or 0) == 0:
-                res.errors.append("No active Celery workers online!")
-            elif (res.celery_queue_depth or 0) > 100:
-                res.warnings.append(f"High Celery queue backlog: {res.celery_queue_depth} tasks queued")
-
         if isinstance(fos := hs_data.get("fos"), dict):
             svc_fos = fos.get(active_sid) or {}
             res.fos_reachable, res.fos_error = svc_fos.get("reachable", False), svc_fos.get("error")
@@ -361,9 +349,6 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         print(storage_line)
 
         extra_parts: list[str] = []
-        if r.celery_reachable is not None:
-            c_color = GREEN if r.celery_reachable and (r.celery_workers or 0) > 0 else RED
-            extra_parts.append(f"Celery: {c_color}{r.celery_workers} workers, queue depth {r.celery_queue_depth}{RESET}")
         if r.clickhouse_health:
             ch_color = GREEN if r.clickhouse_health == "ok" else YELLOW
             extra_parts.append(f"ClickHouse: {ch_color}{r.clickhouse_health}{RESET} ({r.clickhouse_published} published, {r.clickhouse_pending} pending)")

@@ -417,9 +417,9 @@ def test_health_snapshot_returns_shape_with_known_collectors(client):
         "recent_cron_failures",
         "observability",
         "config_backup",
-        "celery",
     ):
         assert k in body
+    assert "celery" not in body
 
 
 @pytest.mark.parametrize(
@@ -437,10 +437,7 @@ def test_health_snapshot_collector_failures_degrade_gracefully(client, target, e
     assert body[field] == expected
 
 
-def test_health_snapshot_celery_and_disk_failures(client):
-    with patch("backend.celery_app.app.control.inspect", side_effect=RuntimeError("broker down")):
-        assert _get_health(client)["celery"] is None
-
+def test_health_snapshot_disk_failures(client):
     with patch("shutil.disk_usage", side_effect=OSError("missing mount")):
         body = _get_health(client)
     assert body["data_mount"] is None and body["root_disk"] is None

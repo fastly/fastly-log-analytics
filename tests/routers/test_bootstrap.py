@@ -1438,7 +1438,7 @@ def test_ngwaf_share_purge_calendar_and_telemetry_match_producer(client, monkeyp
         assert _body(client.get("/api/health?deep=1")) == {"status": "ok", "version": _APP_VERSION, "services": []}
 
 
-def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(client, monkeypatch):
+def test_admin_ingest_actions_beacons_status_and_control_room_match_producer(client, monkeypatch):
     started = {"ok": True, "message": "started", "run_id": 41}
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
         assert _body(client.post("/api/admin/ingest-logs")) == started
@@ -1458,25 +1458,11 @@ def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(cli
 
     for payload in (
         dict(
-            broker_reachable=True,
-            queues={"q.ingest": 3},
             ledger={"committed": 5},
             inprocess_schedules=[{"name": "job", "trigger": "interval[0:01:00]", "next_run_at": 1700000000.0}],
-            workers=dict(
-                active_tasks={"w1": [{"id": "t1", "name": "n", "args": [1], "time_start": 2.5, "worker_pid": 7}]},
-                stats={"w1": {"started": dt.datetime(2026, 1, 1, tzinfo=dt.UTC)}},
-                registered={"w1": ["a.b"]},
-                scheduled={},
-                count=1,
-            ),
+            inprocess_active_runs=[{"run_id": 7, "service_id": "svc-t", "task": "sync", "started_at": 2.5}],
         ),
-        dict(
-            broker_reachable=False,
-            queues={},
-            inprocess_schedules=[],
-            ledger={},
-            workers={"active_tasks": {}, "stats": {}, "registered": {}, "scheduled": {}, "count": 0, "error": "down"},
-        ),
+        dict(ledger={}, inprocess_schedules=[], inprocess_active_runs=[]),
     ):
         monkeypatch.setattr("backend.routers.admin.health.get_celery_status", lambda p=payload: p)
         assert _body(client.get("/api/admin/celery/status")) == _roundtrip(payload)
