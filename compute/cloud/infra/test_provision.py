@@ -1263,6 +1263,22 @@ def test_package_upload_uses_multipart_binary_without_token_arguments(package, m
     assert b'name="package"; filename="flp.tar.gz"' in request.content
 
 
+def test_package_upload_allows_longer_than_default_api_timeout(package, monkeypatch) -> None:
+    timeouts: dict[str, dict[str, float]] = {}
+
+    def accepted(request: httpx.Request) -> httpx.Response:
+        timeouts[request.method] = request.extensions["timeout"]
+        return httpx.Response(200, content=b'{"metadata":{"files_hash":"synthetic-files-hash"}}')
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(accepted))
+    api = provision.FastlyAPI("deploy-token")
+    api.upload_package("compute-id", 3, package)
+    api.request("GET", "/service/compute-id")
+    assert timeouts["PUT"]["write"] >= 300
+    assert timeouts["PUT"]["read"] >= 300
+    assert timeouts["GET"]["read"] == 90.0
+
+
 def test_deploy_waits_for_matching_front_sha_before_purging(package, inventory_path, monkeypatch) -> None:
     probe_calls: list[str] = []
     clock = [0.0]

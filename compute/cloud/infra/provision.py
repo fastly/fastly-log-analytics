@@ -60,6 +60,8 @@ DICTIONARIES = {
 }
 
 HTTP_TRANSPORT: httpx.BaseTransport | None = None
+# The ~25 MB package upload has taken over 90 s; Fastly ingests it slowly.
+PACKAGE_UPLOAD_TIMEOUT_S = 300.0
 
 
 def _http_client(*, timeout: float, transport: httpx.BaseTransport | None = None) -> httpx.Client:
@@ -124,16 +126,25 @@ class FastlyAPI:
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
                 "Expect": "100-continue",
             },
+            timeout=PACKAGE_UPLOAD_TIMEOUT_S,
         )
 
-    def _send(self, method: str, path: str, data: bytes | None, headers: dict[str, str]) -> Any:
+    def _send(
+        self,
+        method: str,
+        path: str,
+        data: bytes | None,
+        headers: dict[str, str],
+        *,
+        timeout: float = 90.0,
+    ) -> Any:
         started = time.monotonic()
         status: int | None = None
         received = 0
         url = API_BASE + path
 
         def _do_request() -> httpx.Response:
-            with _http_client(timeout=90.0, transport=self._transport) as client:
+            with _http_client(timeout=timeout, transport=self._transport) as client:
                 return client.request(method, url, content=data, headers=headers)
 
         try:
