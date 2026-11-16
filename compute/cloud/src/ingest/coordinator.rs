@@ -64,7 +64,7 @@ pub const LEASE_S: u64 = 90;
 /// Lease a resumed plan takes when every shard already has a result: the commit happens in
 /// this execution, so a tick that dies here only needs to keep the next tick out briefly.
 pub const COMMIT_LEASE_S: u64 = 20;
-pub const SHARD_MAX_GZ_BYTES: u64 = 8 * 1024 * 1024;
+pub const SHARD_MAX_ZSTD_BYTES: u64 = 8 * 1024 * 1024;
 /// No worker is dispatched once the tick has run this long.
 pub const DISPATCH_BY: Duration = Duration::from_secs(10);
 /// Workers that have not answered this long after tick start are given up on for this tick.
@@ -278,7 +278,7 @@ fn estimated_windows(keys: &[&str], raw_prefix: &str, window_s: i64, period_s: i
 }
 
 /// Greedy, key-ordered packing of `objects` into at most `width` shards. Each shard holds at
-/// most `SHARD_MAX_OBJECTS >> replans` objects and `SHARD_MAX_GZ_BYTES`, and its objects plus
+/// most `SHARD_MAX_OBJECTS >> replans` objects and `SHARD_MAX_ZSTD_BYTES`, and its objects plus
 /// expected windows fit one worker budget. Returns the shards; objects past them are left over.
 #[allow(clippy::too_many_arguments)]
 fn pack(
@@ -291,11 +291,11 @@ fn pack(
     balance: bool,
 ) -> Vec<Vec<(String, u64)>> {
     let cap = (SHARD_MAX_OBJECTS >> replans.min(8)).max(1);
-    let gz: u64 = objects.iter().map(|o| o.1).sum();
+    let zstd_bytes: u64 = objects.iter().map(|o| o.1).sum();
     let wanted = objects
         .len()
         .div_ceil(cap)
-        .max(gz.div_ceil(SHARD_MAX_GZ_BYTES) as usize)
+        .max(zstd_bytes.div_ceil(SHARD_MAX_ZSTD_BYTES) as usize)
         .clamp(1, width.max(1));
     let per = if balance {
         cap.min(objects.len().div_ceil(wanted)).max(1)
@@ -306,11 +306,11 @@ fn pack(
     let mut current: Vec<(String, u64)> = Vec::new();
     for object in objects {
         let fits = current.is_empty() || {
-            let gz: u64 = current.iter().map(|o| o.1).sum::<u64>() + object.1;
+            let zstd_bytes: u64 = current.iter().map(|o| o.1).sum::<u64>() + object.1;
             let mut keys: Vec<&str> = current.iter().map(|o| o.0.as_str()).collect();
             keys.push(&object.0);
             current.len() < per
-                && gz <= SHARD_MAX_GZ_BYTES
+                && zstd_bytes <= SHARD_MAX_ZSTD_BYTES
                 && estimated_windows(&keys, raw_prefix, window_s, period_s)
                     <= worker::window_room(keys.len())
         };
@@ -328,10 +328,12 @@ fn pack(
     shards
 }
 
-/// Segments a raw object of `gz` compressed bytes is cut into up front (0: converted whole).
-fn segment_count(gz: u64, segment_bytes: u64) -> u64 {
-    let estimate = gz.saturating_mul(ESTIMATED_RATIO);
-    if segment_bytes == 0 || gz > super::SEGMENT_READ_LIMIT as u64 || estimate <= 2 * segment_bytes
+/// Segments a raw object of `zstd_bytes` compressed bytes is cut into up front (0: converted whole).
+fn segment_count(zstd_bytes: u64, segment_bytes: u64) -> u64 {
+    let estimate = zstd_bytes.saturating_mul(ESTIMATED_RATIO);
+    if segment_bytes == 0
+        || zstd_bytes > super::SEGMENT_READ_LIMIT as u64
+        || estimate <= 2 * segment_bytes
     {
         return 0;
     }
@@ -463,8 +465,8 @@ fn layout(
     let mut shards: Vec<(Vec<String>, Option<convert::Segment>)> = Vec::new();
     let mut taken = 0;
     while taken < objects.len() && shards.len() < width {
-        let (key, gz) = &objects[taken];
-        let count = segment_count(*gz, segment_bytes);
+        let (key, zstd_bytes) = &objects[taken];
+        let count = segment_count(*zstd_bytes, segment_bytes);
         if count > 0 {
             shards.extend(cut(0, count, segment_bytes).map(|s| (vec![key.clone()], Some(s))));
             taken += 1;
