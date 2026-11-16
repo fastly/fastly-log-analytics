@@ -70,7 +70,7 @@ Tested on a Kubernetes deployment running a single ClickHouse replica (6 vCPU / 
 
 #### 6 worker pods (`500` → `30,000` RPS across `10 s`, `60 s`, and `300 s` periods)
 
-Each worker pod sustains **~2,175 rows/s** end-to-end (Fastly Object Storage download, gzip + JSON decode, canonical Parquet archive checkpoint + FOS upload, and 50,000-row micro-batched ClickHouse insert), giving a 6-pod cluster a steady-state ingest ceiling of **~13,050 rows/s**. When edge traffic exceeds the steady-state worker drain rate during a burst, Fastly Object Storage buffers the `.log.gz` objects cleanly until the workers catch up.
+Each worker pod sustains **~2,175 rows/s** end-to-end (Fastly Object Storage download, zstd + JSON decode, canonical Parquet archive checkpoint + FOS upload, and 50,000-row micro-batched ClickHouse insert), giving a 6-pod cluster a steady-state ingest ceiling of **~13,050 rows/s**. When edge traffic exceeds the steady-state worker drain rate during a burst, Fastly Object Storage buffers the `.log.zst` objects cleanly until the workers catch up.
 
 | Log rate | `10 s` period (`lag_p50` / `lag_p95`) | `60 s` period (`lag_p50` / `lag_p95`) | `300 s` period (`lag_p50` / `lag_p95`) | Warm page load p50 (Dash / Origin / Perf / Net / Sec) | Cold 24 h page load p50 (Dash / Origin / Perf) |
 |---|---|---|---|---|---|
@@ -102,7 +102,7 @@ Measured against the **102,484,916-row** ClickHouse dataset on a single 6 vCPU /
 
 - **Warm (30 s response cache hit):** **13–21 ms** for Dashboard (`57 ms` SSR HTML), Origin, Performance, Security (`42 ms` full waterfall), and Sessions (`62 ms`); **25 ms** (`170 ms` full 5-endpoint waterfall) for Network.
 - **Cold (uncached arbitrary 24 h window across 102.5M rows):** **219–407 ms** for Origin, **261–449 ms** for Dashboard, **490–491 ms** for Performance, **882–1,052 ms** for Sessions, **1,603–1,617 ms** for Security, and **2,178–2,358 ms** for Network (all 6 full-page waterfalls complete in **under 2.4 seconds**).
-- **Scaling out:** Ingest throughput scales linearly with worker replicas (~2,175–2,350 rows/s per worker pod). When scaling worker pods, keep `METADATA_PG_POOL_MAX=64` (the default) on the `backend` API deployment so its 40 FastAPI worker threads and APScheduler crons never wait on a metadata connection, and set `METADATA_PG_POOL_MAX=6` on stateless worker pods so horizontal worker scaling stays well inside PostgreSQL's `max_connections`.
+- **Scaling out:** Ingest throughput scales linearly with worker replicas (~2,175–2,350 rows/s per worker pod). When scaling worker pods, keep `METADATA_PG_POOL_MAX=64` (the default) on the `backend` API deployment so its 40 FastAPI worker threads and APScheduler crons never wait on a metadata connection, and set `METADATA_PG_POOL_MAX=6` on stateless worker pods so horizontal worker scaling stays well inside PostgreSQL's `max_connections`. Note that `deploy/chart/clickhouse/values.yaml` defaults ClickHouse to a 2 CPU / 4 GiB limit for light evaluation; heavy High-Scale clusters should allocate **6 vCPU / 8 GiB+ RAM** for ClickHouse as used in the benchmarks above.
 
 ### Storage sizing
 
@@ -138,11 +138,27 @@ Open **http://localhost** and follow the provisioning wizard. The wizard creates
 
 For manual install (no Docker), see [Manual Installation](#manual-installation). The non-Docker [`run.sh`](run.sh) path serves the app directly on **http://localhost:3000**.
 
+### Cloud Serverless (`compute/cloud`)
+
+To deploy the zero-origin Fastly Compute + FOS version instead of High-Scale:
+
+1. Bootstrap the Compute services, stores, and front VCL service (see [`compute/cloud/infra/README.md`](compute/cloud/infra/README.md)):
+   ```bash
+   uv run compute/cloud/infra/provision.py bootstrap --name <install> --apply
+   ```
+2. Build and deploy the Compute packages and front VCL from the repository root:
+   ```bash
+   make cloud-build
+   make cloud-deploy NAME=<install>
+   ```
+
+See [docs/deploy/README.md](docs/deploy/README.md#cloud-serverless-fastly-compute--fastly-object-storage) for Cloud architecture, cost, and cron references.
+
 ---
 
 ## How It Works
 
-The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the stateless ingest worker continuously discovers new `.gz` / `.zst` log files from the bucket, checkpoints canonical Parquet archive batches to Fastly Object Storage, and publishes verified batches into ClickHouse.
+The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the stateless ingest worker continuously discovers new `.zst` log files from the bucket, checkpoints canonical Parquet archive batches to Fastly Object Storage, and publishes verified batches into ClickHouse.
 
 ![Provisioning Process](docs/assets/provisioning.png)
 

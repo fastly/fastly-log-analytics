@@ -1,6 +1,6 @@
 # request_ingest
 
-Converts settled raw gzip NDJSON objects in `raw/request/` into immutable Parquet window files in `processed/request/`, exactly once. A coordinator in the tick plans the work and fans it out to bounded worker executions.
+Converts settled raw zstd NDJSON objects in `raw/request/` into immutable Parquet window files in `processed/request/`, exactly once. A coordinator in the tick plans the work and fans it out to bounded worker executions.
 
 ## Purpose
 
@@ -8,7 +8,7 @@ This is the pipeline's only data producer. Fastly S3 logging writes raw objects 
 
 ## Why it exists
 
-Fastly delivers logs only as raw gzip NDJSON. Analytics needs typed, windowed Parquet. Compute keeps nothing between requests, and one execution has only 32 backend calls, so a tick plans a batch, has peer worker executions convert it in shards, and records a durable commit point.
+Fastly delivers logs only as raw zstd NDJSON. Analytics needs typed, windowed Parquet. Compute keeps nothing between requests, and one execution has only 32 backend calls, so a tick plans a batch, has peer worker executions convert it in shards, and records a durable commit point.
 
 ## How it works
 

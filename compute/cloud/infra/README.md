@@ -3,7 +3,7 @@
 Run from the repository root. Planning needs no token and makes no requests:
 
 ```sh
-uv run app/infra/provision.py bootstrap --name flp
+uv run compute/cloud/infra/provision.py bootstrap --name flp
 ```
 
 `--name` defaults to `flp`. It namespaces the three services and physical stores.
@@ -15,11 +15,11 @@ Both Compute services use fixed resource-link aliases: `flp_config`,
 Only run this after approving resource creation in the target account:
 
 ```sh
-mkdir -p app/pkg
-uv run app/infra/provision.py bootstrap \
+mkdir -p compute/cloud/pkg
+uv run compute/cloud/infra/provision.py bootstrap \
   --name flp \
   --erl-service-id <existing-active-vcl-service-id> \
-  --inventory app/pkg/flp-resources.local.json \
+  --inventory compute/cloud/pkg/flp-resources.local.json \
   --apply
 ```
 
@@ -46,8 +46,7 @@ The CLI falco-lints the selected VCL variant, refuses existing same-name service
 or stores, checkpoints IDs without secrets, links stores to both Compute drafts,
 and creates static TLS backends and the front's dictionaries, routes and clock.
 It validates the front draft but **does not upload packages or activate anything**.
-Deploy through `make -C app deploy`, which owns frozen-source provenance, paired
-Compute activation and the `flp-html` purge.
+Deploy through `make cloud-build` and `make cloud-deploy NAME=<install>` from the repository root, which own frozen-source provenance, paired Compute activation and the `flp-html` purge.
 
 The default public origin is `https://<name>.global.ssl.fastly.net`.
 `--public-host`, `--compute-host` and `--worker-host` override the domains.
@@ -67,8 +66,8 @@ without that override stops before creation.
 Both names run the same operation:
 
 ```sh
-uv run app/infra/provision.py admin-setup-code --name flp --apply
-uv run app/infra/provision.py admin-reset --name flp --apply
+uv run compute/cloud/infra/provision.py admin-setup-code --name flp --apply
+uv run compute/cloud/infra/provision.py admin-reset --name flp --apply
 ```
 
 Use `--secret-store-id` instead of name discovery when needed. Without `--apply`,
@@ -78,15 +77,15 @@ it never resets users, sessions or other secrets.
 ## Update front VCL
 
 ```sh
-uv run app/infra/provision.py front \
-  --inventory app/pkg/flp-resources.local.json --apply
+uv run compute/cloud/infra/provision.py front \
+  --inventory compute/cloud/pkg/flp-resources.local.json --apply
 ```
 
 This prepares and validates an unactivated draft. The release wrapper can call
 `prepare_front(api, inventory_path)` directly, then activate after its package
 and provenance checks.
 
-The Makefile calls `deploy --name <name> --package pkg/flp.tar.gz` from `app/`.
+The root Makefile calls `deploy --name <name> --package pkg/flp.tar.gz` from `compute/cloud/`.
 It reads `pkg/provenance.json` and defaults to `pkg/<name>-resources.local.json`;
 `FLP_INVENTORY` or `--inventory` selects another inventory. It checks the package
 digest, the embedded build SHA and the committed app tree before uploads and
@@ -102,8 +101,8 @@ If activation succeeded but readiness or the final purge failed, finish only
 that step without uploading packages or activating versions again:
 
 ```sh
-uv run app/infra/provision.py purge-html \
-  --inventory app/pkg/flp-resources.local.json
+uv run compute/cloud/infra/provision.py purge-html \
+  --inventory compute/cloud/pkg/flp-resources.local.json
 ```
 
 This verifies the front's identity and deployed SHA before using the documented
@@ -113,11 +112,11 @@ error; it never becomes a successful release or an implicit full redeploy.
 ## Verify
 
 ```sh
-uv run --with pytest pytest -q app/infra
-uv run --with ruff ruff check app/infra
-uv run --with ruff ruff format --check app/infra
-falco lint -I app/vcl/front -I app/vcl/front/tests app/vcl/front/tests/main.vcl
-falco test -I app/vcl/front -I app/vcl/front/tests app/vcl/front/tests/main.vcl
+uv run --with pytest pytest -q compute/cloud/infra
+uv run --with ruff ruff check compute/cloud/infra
+uv run --with ruff ruff format --check compute/cloud/infra
+falco lint -I compute/cloud/vcl/front -I compute/cloud/vcl/front/tests compute/cloud/vcl/front/tests/main.vcl
+falco test -I compute/cloud/vcl/front -I compute/cloud/vcl/front/tests compute/cloud/vcl/front/tests/main.vcl
 ```
 
 Pytest also runs real falco tests against the stripped no-ERL variant. Falco
@@ -139,7 +138,7 @@ triggers once shielded). `flp-worker` never writes operational logs.
 Lint and test both VCL variants with the `falco lint` / `falco test` commands
 above (the no-ERL `tests-no-erl` variant is exercised by the pytest run).
 
-Recorded GET contracts are under `app/tests/fixtures/fastly-api/`. Each contains
+Recorded GET contracts are under `compute/cloud/tests/fixtures/fastly-api/`. Each contains
 its request, status, timestamp and redaction description. Token IDs/values and
 full generated VCL are never recorded. The write-adapter tests are explicitly
 synthetic: they are not recorded creation or upload responses. The `install-*`
@@ -148,7 +147,7 @@ links, static TLS backends, write-only dictionaries and the clock. The recorded
 error is a real 404; 409, 422 and 429 write-error contracts remain unverified,
 not fabricated.
 
-Run `FLP_LIVE=1 uv run --with pytest pytest -q app/infra/test_contracts.py` to
+Run `FLP_LIVE=1 uv run --with pytest pytest -q compute/cloud/infra/test_contracts.py` to
 re-fetch the recorded GETs and fail on status or schema drift. This needs the
 account token in the environment or the gitignored `.env`. It makes no writes.
 Set `FLP_INVENTORY` to the corresponding install inventory to also re-fetch its

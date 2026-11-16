@@ -140,7 +140,7 @@ Worked results (CPU 96 ms/1k lines, the default conversion plus summary units; 1
 | Setup | Direct (relay 0) | Relay 16 |
 |---|---|---|
 | Calculator defaults (296 B/line, 300 s period) | ≈ 9 / 7.9k req/s | ≈ 9 / 29.8k req/s |
-| 296 B/line, 10 s period | ≈ 258 / 9.5k req/s | ≈ 258 / 232k req/s |
+| 296 B/line, 10 s period *(historical; Cloud min is now 60 s)* | ≈ 258 / 9.5k req/s | ≈ 258 / 232k req/s |
 | 88 B/line, 60 s period | ≈ 43 / 23.7k req/s | ≈ 43 / 455k req/s |
 | 88 B/line, 300 s period | ≈ 9 / 26k req/s | ≈ 9 / 104k req/s |
 
