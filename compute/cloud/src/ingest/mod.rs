@@ -29,6 +29,8 @@ pub mod compaction;
 pub mod convert;
 pub mod coordinator;
 pub mod file_metadata;
+pub mod hist;
+pub mod hll;
 pub mod listing;
 pub mod retention;
 pub mod rum;
