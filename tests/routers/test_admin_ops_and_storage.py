@@ -155,7 +155,7 @@ def test_ingest_ledger_summary_reuses_counts_between_admin_polls():
 
 
 def test_celery_status_waits_for_worker_replies_slower_than_the_stats_probe():
-    """Live Elevation workers answer stats in ~0.25s but active/registered/scheduled
+    """Live High-Scale workers answer stats in ~0.25s but active/registered/scheduled
     in ~0.3-0.8s, so a fixed 0.25s inspect timeout returned a worker with no tasks."""
     from backend.celery_app import get_celery_status
 
