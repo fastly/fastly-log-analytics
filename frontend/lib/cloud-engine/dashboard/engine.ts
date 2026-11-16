@@ -1688,7 +1688,10 @@ async function collectAggregator(
       bytes += selectiveQueue[count++].size;
     }
     const batch = selectiveQueue.splice(0, count);
-    querySelective(batch.map((queued) => queued.access), aggregator)
+    // readContext() throws synchronously once the engine is poisoned or the
+    // lease is released; the batch must still settle so its files release locks.
+    Promise.resolve()
+      .then(() => querySelective(batch.map((queued) => queued.access), aggregator))
       .then(
         () => batch.forEach((queued) => queued.settle()),
         (error: unknown) => batch.forEach((queued) => queued.settle(error ?? new Error("Cloud query failed"))),

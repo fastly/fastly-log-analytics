@@ -650,6 +650,63 @@ describe("runDashboard", () => {
     }
   });
 
+  it("settles and releases queued selective files when a fatal batch failure poisons the read context", async () => {
+    const keys = ["a", "b", "c", "d", "e", "f"] as const;
+    const buffers = Object.fromEntries(await Promise.all(keys.map(async (key, i) =>
+      [key, await parquetFixture([row(10 + i, { country: "US" })])] as const)));
+    const source = fixtureSource([{
+      files: keys.map((key, i) => ({
+        ...manifestEntry(key, `2026-10-29T10:0${i}:00Z`, `2026-10-29T10:0${i + 1}:00Z`, 1),
+        size: buffers[key].byteLength,
+      })),
+      next_cursor: null,
+      complete: true,
+    }], buffers);
+    const engine = getDuckDBEngine();
+    const fatal = new Error("Out of Memory Error");
+    let poisoned = false;
+    const realLease = engine.lease.bind(engine);
+    const lease = vi.spyOn(engine, "lease").mockImplementation((fields) => {
+      const inner = realLease(fields);
+      return {
+        ...inner,
+        readContext: (...args: Parameters<typeof inner.readContext>) => {
+          if (poisoned) throw fatal;
+          return inner.readContext(...args);
+        },
+      };
+    });
+    const query = vi.spyOn(engine, "queryParquetIntoAggregator").mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      poisoned = true;
+      throw fatal;
+    });
+    let opened = 0;
+    let released = 0;
+    try {
+      await expect(runDashboard({
+        ...source,
+        openParquet: async (file) => {
+          opened += 1;
+          return {
+            kind: "buffer",
+            bytes: buffers[file.key as keyof typeof buffers],
+            release: () => { released += 1; },
+          };
+        },
+      }, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:10:00Z",
+        filters: [{ mode: "include", field: "country", value: "US" }],
+      })).rejects.toThrow("Out of Memory Error");
+      await vi.waitFor(() => expect(released).toBe(opened), { timeout: 1_000 });
+      expect(opened).toBeGreaterThan(1);
+    } finally {
+      query.mockRestore();
+      lease.mockRestore();
+    }
+  });
+
   it("counts boundary files whose bytes are local as decode work, not fetches", async () => {
     const buffers = {
       edge: await parquetFixture([row(10), row(250)]),
