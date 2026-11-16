@@ -1,5 +1,10 @@
 import { isCdnHit } from "./cdn-cache";
-import { getDuckDBEngine, type DuckDBLease, type ParquetAccess } from "./duckdb";
+import {
+  FIELD_DUCKDB_TYPES,
+  getDuckDBEngine,
+  type DuckDBLease,
+  type ParquetAccess,
+} from "./duckdb";
 import {
   fetchManifest,
   filesOverlapping,
@@ -209,7 +214,19 @@ export type EngineOptions = {
   wallNow?: () => number;
   /** Custom card fields counted next to `CARD_FIELDS`. */
   customFields?: readonly CustomField[];
+  /** Custom fields only filters name: read to filter, never counted as cards. */
+  filterFields?: readonly CustomField[];
 };
+
+/** Custom columns a run reads: its cards, then filter-only fields. */
+function columnFields(options: EngineOptions): CustomField[] {
+  const cards = options.customFields ?? [];
+  const ids = new Set(cards.map((field) => field.id));
+  return [
+    ...cards,
+    ...(options.filterFields ?? []).filter((field) => !ids.has(field.id)),
+  ];
+}
 
 // /api/file is latency-bound (~0.55 s per file whatever the width); live
 // probes halved wall time from 8 to 16 lanes, and 32 added little.
@@ -1123,6 +1140,19 @@ async function collectAggregator(
   const generation = lease.readContext();
   const cardFields = [...CARD_FIELDS, ...customFields.map((field) => field.id)];
   const variant = customFieldsKey(customFields);
+  const readFields = columnFields(options);
+  const unknownFilter = (options.filters ?? []).find(
+    (filter) =>
+      !Object.hasOwn(FIELD_DUCKDB_TYPES, filter.field) &&
+      !readFields.some((field) => field.id === filter.field),
+  );
+  if (unknownFilter) {
+    throw new Error(`Unknown dashboard filter field: ${unknownFilter.field}`);
+  }
+  // Rollups and summaries count only card fields; any other filter needs rows.
+  const countedFilters = (options.filters ?? []).every((filter) =>
+    cardFields.includes(filter.field),
+  );
   const manifest =
     options.manifest ??
     (await fetchManifest(source.fetchJson, from, to, signal));
@@ -1259,6 +1289,7 @@ async function collectAggregator(
     );
   } else if (
     (hasFilters || edgeOnly) &&
+    countedFilters &&
     canUseSummaries &&
     scopeListings &&
     scopeListings.size > 0
@@ -1465,7 +1496,7 @@ async function collectAggregator(
 
     if (hasFilters) {
       const filterList = options.filters ?? [];
-      if (cachedRollup) {
+      if (cachedRollup && countedFilters) {
         const matchClass = activeRollup
           ? classifyRollupAgainstFilters(activeRollup, filterList)
           : classifyRollupAgainstFilters(cachedRollup, filterList) === "none"
@@ -1670,7 +1701,7 @@ async function collectAggregator(
           ? undefined : { field: fields[0], query: searchQuery },
         context: lease.readContext(),
       },
-      customFields,
+      readFields,
     );
   // DuckDB answers one query at a time and each pays a fixed cost, so files
   // that arrive while it is busy share the next query into the aggregator.
@@ -1995,7 +2026,7 @@ export async function runDashboard(
   const generation = await duckdb.beginRequest();
   generation.assertCurrent();
   options.signal?.throwIfAborted();
-  const lease = duckdb.lease(options.customFields);
+  const lease = duckdb.lease(columnFields(options));
   const { aggregator, stats, started, now } = await collectAggregator(
     source,
     options,

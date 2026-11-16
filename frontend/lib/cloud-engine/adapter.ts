@@ -305,6 +305,26 @@ async function loadCloudCatalog(request: Request) {
   return cloudLogFieldsCatalog(catalog, service.log_fields);
 }
 
+/** Catalog types of the custom fields `ids` names; a 400 when one isn't in the catalog. */
+async function catalogCustomFields(
+  request: Request, ids: ReadonlySet<string>, unknownDetail: string,
+): Promise<CustomField[] | Response> {
+  if (!ids.size) return [];
+  const catalog = await loadCloudCatalog(request);
+  if (catalog instanceof Response) return catalog;
+  const fields: CustomField[] = (catalog.fields ?? [])
+    .filter((field) => field.is_custom && ids.has(field.id))
+    .map((field) => ({
+      id: field.id,
+      type: /BOOL/i.test(String(field.sql_type)) ? "boolean"
+        : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(field.sql_type)) ? "number" : "string",
+    }));
+  if ([...ids].some((id) => !fields.some((field) => field.id === id))) {
+    return jsonResponse({ detail: unknownDetail }, request, undefined, 400);
+  }
+  return fields;
+}
+
 let analyticalQueue = Promise.resolve();
 /** Needed-column bytes a speculative Insights prefetch may load. */
 const PREFETCH_PROJECTION_BYTES = 32 * 1024 * 1024;
@@ -1055,15 +1075,21 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       return jsonResponse({ detail: { error: "unsupported_chart_metric" } }, request, undefined, 400);
     }
     const filters = parseFiltersPayload(body.filters, body.custom_filters);
+    const customFields = customCards((body.fields ?? []).map((id) => ({
+      id, label: id, type: "string" as const,
+    })));
+    const filterFields = await catalogCustomFields(request, new Set(filters.map((filter) => filter.field)
+      .filter((id) => !Object.hasOwn(FIELD_DUCKDB_TYPES, id) && !customFields.some((field) => field.id === id))),
+    "Unknown field in Cloud dashboard filter");
+    if (filterFields instanceof Response) return filterFields;
 
     const result = await runInWorker(
       {
         from: new Date(fromMs).toISOString(),
         to: new Date(toMs).toISOString(),
         filters,
-        customFields: customCards((body.fields ?? []).map((id) => ({
-          id, label: id, type: "string" as const,
-        }))),
+        customFields,
+        filterFields,
       },
       request.signal,
     );
@@ -1268,21 +1294,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const fieldName = (body.fields?.[0] ?? body.field ?? "url") as CardField;
     const customIds = new Set([fieldName, ...filters.map((filter) => filter.field)]
       .filter((id) => !Object.hasOwn(FIELD_DUCKDB_TYPES, id)));
-    let customFields: CustomField[] = [];
-    if (customIds.size) {
-      const catalog = await loadCloudCatalog(request);
-      if (catalog instanceof Response) return catalog;
-      customFields = (catalog.fields ?? [])
-        .filter((field) => field.is_custom && customIds.has(field.id))
-        .map((field) => ({
-          id: field.id,
-          type: /BOOL/i.test(String(field.sql_type)) ? "boolean"
-            : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(field.sql_type)) ? "number" : "string",
-        }));
-      if ([...customIds].some((id) => !customFields.some((field) => field.id === id))) {
-        return jsonResponse({ detail: "Unknown field in Cloud field search" }, request, undefined, 400);
-      }
-    }
+    const customFields = await catalogCustomFields(request, customIds, "Unknown field in Cloud field search");
+    if (customFields instanceof Response) return customFields;
     if (Array.isArray(body.fields) && body.fields.length > 0) {
       const summaries = await searchFieldSummariesInWorker(
         fromIso,

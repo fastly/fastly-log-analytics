@@ -4,7 +4,9 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { handleCloudAnalyticalRequest } from "./adapter";
 import { runInWorker } from "./dashboard/client";
 import { getDuckDBEngine } from "./dashboard/duckdb";
-import type { DashboardResult } from "./dashboard/engine";
+import { runDashboard, type DashboardResult } from "./dashboard/engine";
+import { fixtureSource, manifestEntry } from "./dashboard/test-fixtures";
+import { resetCloudMetadataCache } from "./metadata-cache";
 
 vi.mock("./dashboard/client", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/client")>(),
@@ -49,6 +51,7 @@ const result: DashboardResult = {
 };
 
 beforeEach(() => {
+  resetCloudMetadataCache();
   vi.mocked(runInWorker).mockResolvedValue(result);
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 });
@@ -156,6 +159,10 @@ describe("Cloud dashboard response contract", () => {
     } finally {
       lease.release();
     }
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/log-fields/catalog"
+        ? Response.json({ fields: [{ id: "custom_weight", sql_type: "DOUBLE", is_custom: true }], groups: [] })
+        : new Response(null, { status: 204 })));
     const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/dashboard/aggregates", {
       method: "POST",
       body: JSON.stringify({ start_time: from, end_time: to, chart_metric: metric, chart_interval: "5 minutes", ...scope }),
@@ -188,4 +195,57 @@ describe("Cloud dashboard response contract", () => {
       });
     },
   );
+  it("applies a filter on a catalog custom field that is not a card, cold and after an unfiltered load", async () => {
+    const start = "2026-10-29T10:00:00Z";
+    const end = "2026-10-29T10:05:00Z";
+    const key = "pq/lt-run.parquet";
+    const bytes = parquetWriteBuffer({ columnData: [
+      { name: "timestamp", type: "TIMESTAMP", data: [0, 10, 20].map((s) => new Date(Date.parse(start) + s * 1000)) },
+      { name: "status", type: "INT32", data: [200, 200, 503] },
+      { name: "cache", type: "STRING", data: ["HIT", "MISS", "HIT"] },
+      { name: "country", type: "STRING", data: ["US", "US", "DE"] },
+      { name: "lt_run_id", type: "STRING", data: ["run-1", "run-1", null] },
+    ] });
+    const pages = [{
+      files: [{ ...manifestEntry(key, start, "2026-10-29T10:01:00Z", 3), size: bytes.byteLength }],
+      next_cursor: null, complete: true,
+    }];
+    let source = fixtureSource(pages, { [key]: bytes });
+    vi.mocked(runInWorker).mockImplementation(async (options: unknown) =>
+      runDashboard(source, options as Parameters<typeof runDashboard>[1]));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input) === "/api/services"
+        ? Response.json({ services: [{ service_id: "svc", log_fields: {
+          custom_fields: [{ name: "lt_run_id", sql_type: "VARCHAR" }],
+        } }] })
+        : String(input) === "/api/log-fields/catalog"
+          ? Response.json({ fields: [], groups: [] })
+          : new Response(null, { status: 204 })));
+    const bundle = async (filters?: Record<string, { mode: string; values: string[] }>) => {
+      const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/dashboard/bundle", {
+        method: "POST",
+        headers: { "x-service-id": "svc" },
+        body: JSON.stringify({ start_time: start, end_time: end, chart_interval: "1 minute", filters }),
+      }));
+      return { status: response!.status, body: await response!.json() };
+    };
+    const runFilter = (value: string) => ({ lt_run_id: { mode: "include", values: [value] } });
+
+    for (const [value, count] of [["nope-xyz", 0], ["run-1", 2]] as const) {
+      source = fixtureSource(pages, { [key]: bytes });
+      const cold = await bundle(runFilter(value));
+      expect(cold.body.summary.total_requests).toBe(count);
+      expect(cold.body.fields.lt_run_id).toBeUndefined();
+    }
+
+    source = fixtureSource(pages, { [key]: bytes });
+    expect((await bundle()).body.summary.total_requests).toBe(3);
+    expect((await bundle(runFilter("nope-xyz"))).body.summary.total_requests).toBe(0);
+    const warm = await bundle(runFilter("run-1"));
+    expect(warm.body.summary.total_requests).toBe(2);
+    expect(warm.body.fields.country.rows).toEqual([{ value: "US", count: 2, pct: 100 }]);
+
+    const unknown = await bundle({ not_in_catalog: { mode: "include", values: ["x"] } });
+    expect(unknown).toEqual({ status: 400, body: { detail: "Unknown field in Cloud dashboard filter" } });
+  });
 });

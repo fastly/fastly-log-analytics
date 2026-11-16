@@ -1382,6 +1382,105 @@ describe("dashboard filters", () => {
     expect(source.log.files).toEqual([key]);
   });
 
+  async function customFilterWindow(selective: boolean) {
+    const buffers: Record<string, ArrayBuffer> = {
+      f1: await parquetFixture([
+        row(10, { tenant: "acme", country: "US" }),
+        row(20, { tenant: "acme", country: "DE" }),
+        row(30, { tenant: "globex", country: "US" }),
+      ]),
+      f2: await parquetFixture([row(75, { tenant: "acme", country: "US" })]),
+    };
+    const entry = (key: string, start: string, end: string, rows: number) => ({
+      ...manifestEntry(key, start, end, rows),
+      size: buffers[key].byteLength,
+    });
+    const pages = [
+      {
+        files: [
+          entry("f1", "2026-10-29T10:00:00Z", "2026-10-29T10:01:00Z", 3),
+          entry("f2", "2026-10-29T10:01:00Z", "2026-10-29T10:02:00Z", 1),
+        ],
+        next_cursor: null,
+        complete: true,
+      },
+    ];
+    const newSource = () => {
+      const source = fixtureSource(pages, buffers);
+      return selective
+        ? {
+            ...source,
+            openParquet: async (file: { key: string }) => ({
+              kind: "buffer" as const,
+              bytes: buffers[file.key],
+              cached: false,
+            }),
+          }
+        : source;
+    };
+    const run = (
+      source: ReturnType<typeof newSource>,
+      filters: DashboardFilter[] = [],
+      filterFields = [{ id: "tenant", type: "string" as const }],
+    ) =>
+      runDashboard(source, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:05:00Z",
+        concurrency: 1,
+        filters,
+        filterFields,
+      });
+    return { newSource, run };
+  }
+  const paths = [
+    ["selective Parquet", true],
+    ["resident DuckDB", false],
+  ] as const;
+
+  it.each(paths)(
+    "applies a cold filter on a custom field that is not a card (%s)",
+    async (_path, selective) => {
+      const { newSource, run } = await customFilterWindow(selective);
+      for (const [value, count] of [["nope-xyz", 0], ["acme", 3]] as const) {
+        const cold = await run(newSource(), [f("include", "tenant", value)]);
+        expect(cold.totalRequests).toBe(count);
+        expect(cold.cards.tenant).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(paths)(
+    "applies a custom-field filter after an unfiltered run cached the window (%s)",
+    async (_path, selective) => {
+      const { newSource, run } = await customFilterWindow(selective);
+      const warm = newSource();
+      expect((await run(warm)).totalRequests).toBe(4);
+      // A built-in filter makes the window resident before the custom column is needed.
+      expect((await run(warm, [f("include", "country", "US")])).totalRequests).toBe(3);
+      expect((await run(warm, [f("include", "tenant", "nope-xyz")])).totalRequests).toBe(0);
+      const filtered = await run(warm, [f("include", "tenant", "acme")]);
+      expect(filtered.totalRequests).toBe(3);
+      expect(filtered.cards.tenant).toBeUndefined();
+      expect(filtered.cards.country.top).toEqual([
+        { value: "US", count: 2 },
+        { value: "DE", count: 1 },
+      ]);
+      expect(
+        (await run(warm, [f("exclude", "tenant", "acme")])).totalRequests,
+      ).toBe(1);
+    },
+  );
+
+  it.each(paths)(
+    "rejects a filter on a field it has no type for instead of ignoring it (%s)",
+    async (_path, selective) => {
+      const { newSource, run } = await customFilterWindow(selective);
+      await expect(
+        run(newSource(), [f("include", "tenant", "acme")], []),
+      ).rejects.toThrow("Unknown dashboard filter field: tenant");
+    },
+  );
+
   it("round-trips URL tokens and rejects unknown fields", () => {
     const filter = f("exclude", "ua", "a:b,c");
     expect(parseFilters([serializeFilter(filter), "+nope:x", "bad"])).toEqual([
