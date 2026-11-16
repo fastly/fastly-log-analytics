@@ -622,11 +622,13 @@ test.describe('/admin/rum — Admin RUM Ingestion & Configuration Contract', () 
   test.setTimeout(90_000)
 
   test('1. Route accessibility, ServerFooter identity, RUM layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
+    // React can client-render the page while its streamed copy still sits in a hidden <div id="S:…"> outside #main.
+    const main = page.locator('#main')
     await assertAdminMount(page, '/admin/rum', {
       rootTestId: 'admin-rum-root', heading: 'Real User Monitoring', domContentLoaded: true, warmReload: true,
-      testIds: ['back-to-admin-link', 'admin-rum-toolbar'],
+      testIds: ['back-to-admin-link', 'admin-rum-toolbar'], scope: main,
       minHeights: [['admin-rum-toolbar', 48], ['admin-rum-status-reservation', 200]],
-      warmLocators: [page.getByTestId('admin-rum-root'), page.getByTestId('admin-rum-status-line')],
+      warmLocators: [main.getByTestId('admin-rum-root'), main.getByTestId('admin-rum-status-line')],
     })
   })
 
