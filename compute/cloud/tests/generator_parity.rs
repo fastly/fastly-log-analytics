@@ -370,7 +370,7 @@ fn rum_generator_parity_covers_shared_and_rum_only_vcl_endpoints_and_tracker_js(
         "log_fields": {"groups":["A","B","C","D","E","F","G","H","I","J","K","L","M"],"custom_fields":[],"field_overrides":{},"field_limits":{}},
         "rum": {
             "enabled": true,
-            "log_period": 15,
+            "log_period": 120,
             "custom_condition": "req.http.Host == \"example.com\"",
             "faro_version": "2.10.0",
             "endpoint_name": "Fastly RUM Logs",
@@ -425,7 +425,7 @@ fn rum_generator_parity_covers_shared_and_rum_only_vcl_endpoints_and_tracker_js(
     assert_eq!(endpoints.as_array().unwrap().len(), 2);
     assert_eq!(endpoints[0]["name"], "Fastly Object Storage Logs");
     assert_eq!(endpoints[1]["name"], "Fastly RUM Logs");
-    assert_eq!(endpoints[1]["period"], 15);
+    assert_eq!(endpoints[1]["period"], 120);
     assert_eq!(
         endpoints[1]["path"],
         "raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
@@ -756,4 +756,21 @@ fn fingerprint_matches_python_golden_vectors() {
     let expected_fp =
         u64::from_str_radix(gv["bundle_fingerprint_hex"].as_str().unwrap(), 16).unwrap();
     assert_eq!(fingerprint(bundle_names), expected_fp);
+}
+
+#[test]
+fn cloud_endpoints_never_use_a_period_below_one_minute() {
+    let endpoints = logging::desired_logging_endpoints(&json!({})).unwrap();
+    assert_eq!(endpoints[0]["period"], 60);
+    let legacy = json!({
+        "log_period": 10,
+        "rum": {"enabled": true, "log_period": 10, "endpoint_name": "Fastly RUM Logs"}
+    });
+    let endpoints = logging::desired_logging_endpoints(&legacy).unwrap();
+    assert_eq!(endpoints.as_array().unwrap().len(), 2);
+    assert!(endpoints
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["period"] == 60));
 }

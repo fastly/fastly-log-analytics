@@ -1,7 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { client, unwrapClient, queryKeys, adminFetch } from '@/lib/api'
 import { downloadBlob } from '@/lib/utils'
-import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import { SERVICE_DEFAULTS, effectiveLogPeriod } from '@/lib/serviceDefaults'
 import type { Service } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import { WizardDraftHeaderSchema } from './wizardSchemas'
@@ -31,8 +31,8 @@ function buildTerraformPayload(token: string, selectedService: ProvisionService,
     sample_rate: String(config.sample_rate),
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
-    log_period: String(config.log_period),
-    rum_log_period: String(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds),
+    log_period: String(effectiveLogPeriod(config.log_period)),
+    rum_log_period: String(effectiveLogPeriod(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds)),
     cdn_service_name: config.cdn_service_name,
     cdn_prefix: config.cdn_prefix,
     cdn_shield: config.cdn_shield,
@@ -170,8 +170,8 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
     sample_rate: String(config.sample_rate),
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
-    log_period: String(config.log_period),
-    rum_log_period: String(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds),
+    log_period: String(effectiveLogPeriod(config.log_period)),
+    rum_log_period: String(effectiveLogPeriod(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds)),
     cdn_service_name: config.cdn_service_name,
     cdn_shield: config.cdn_shield,
     enable_cron_sync: config.enable_cron_sync,
@@ -252,7 +252,7 @@ export async function runAdminIngest(args: AdminIngestArgs) {
           sample_rate: String(config.sample_rate),
           edge_only: config.edge_only,
           custom_condition: config.custom_condition,
-          log_period: String(config.log_period),
+          log_period: String(effectiveLogPeriod(config.log_period)),
           cdn_service_id: selectedCdnService?.id || config.cdn_service_name,
           cdn_service_name: selectedCdnService?.name || config.cdn_service_name,
           cdn_url: config.cdn_url || (config.cdn_prefix ? `https://${config.cdn_prefix}.global.ssl.fastly.net` : ""),

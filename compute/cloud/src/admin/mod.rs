@@ -148,6 +148,9 @@ fn load_service_from(
     if matches!(service.wire_format.as_str(), "" | "json") {
         service.wire_format = "array".into();
     }
+    let min = crate::logging::MIN_LOG_PERIOD as u32;
+    service.log_period = service.log_period.max(min);
+    service.rum.log_period = service.rum.log_period.max(min);
     if service.owner != owner(context.runtime)? {
         return Err(Error::new(403, "service_not_owned"));
     }
@@ -636,6 +639,9 @@ fn validate_service(
     {
         return Err(Error::new(400, "invalid_logging_settings"));
     }
+    if i64::from(service.log_period) < crate::logging::MIN_LOG_PERIOD {
+        return Err(Error::new(400, "log_period_below_minimum"));
+    }
     if crate::ingest::object_windows(window_s, service.log_period)
         > crate::ingest::MAX_WINDOWS_PER_OBJECT as u64
     {
@@ -644,6 +650,9 @@ fn validate_service(
     if service.rum.enabled {
         crate::logging::rum::validate_config(&service.rum)
             .map_err(|_| Error::new(400, "invalid_rum_settings"))?;
+        if i64::from(service.rum.log_period) < crate::logging::MIN_LOG_PERIOD {
+            return Err(Error::new(400, "rum_log_period_below_minimum"));
+        }
         if crate::ingest::object_windows(window_s, service.rum.log_period)
             > crate::ingest::MAX_WINDOWS_PER_OBJECT as u64
         {

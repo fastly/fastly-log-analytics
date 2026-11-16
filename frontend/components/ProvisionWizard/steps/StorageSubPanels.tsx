@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import { allowedLogPeriods, effectiveLogPeriod } from '@/lib/serviceDefaults'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -162,12 +162,12 @@ export function renderRumPeriodField(
   return (
     <div className="space-y-1.5">
       <LabelWithInfo label="RUM Log Period" info={infoText} />
-      <Select value={String(rumLogPeriod || 300)} onValueChange={(v) => onChange(Number(v) || 300)}>
+      <Select value={String(effectiveLogPeriod(rumLogPeriod || 300))} onValueChange={(v) => onChange(Number(v) || 300)}>
         <SelectTrigger className={compact ? "h-8 text-xs" : "h-9"}>
           <SelectValue>{(val) => PERIOD_LABELS[String(val)] || val}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          {RUM_PERIOD_OPTIONS.map(([val, label]) => (
+          {RUM_PERIOD_OPTIONS.filter(([val]) => allowedLogPeriods([val]).length > 0).map(([val, label]) => (
             <SelectItem key={val} value={val} className={compact ? "text-xs" : undefined}>
               {label}
             </SelectItem>
@@ -240,12 +240,12 @@ export function LoggingSetupSection({ config, update }: StorageSectionProps) {
                 label="Log Period"
                 info="How often Fastly will write log files to the bucket. A shorter period means more real-time data but creates more files."
               />
-              <Select value={String(config.log_period)} onValueChange={(v) => update("log_period", Number(v) || SERVICE_DEFAULTS.logPeriodSeconds)}>
+              <Select value={String(effectiveLogPeriod(config.log_period))} onValueChange={(v) => update("log_period", effectiveLogPeriod(Number(v)))}>
                 <SelectTrigger className="h-9">
                   <SelectValue>{(val) => PERIOD_LABELS[String(val)] || val}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {["1", "5", "10", "20", "30", "60", "120", "300"].map((val) => (
+                  {allowedLogPeriods(["1", "5", "10", "20", "30", "60", "120", "300"]).map((val) => (
                     <SelectItem key={val} value={val}>
                       {PERIOD_LABELS[val]}
                     </SelectItem>

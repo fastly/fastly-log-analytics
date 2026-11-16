@@ -6,9 +6,11 @@ use std::sync::OnceLock;
 pub mod cmcd;
 pub mod rum;
 
-/// Log period (seconds) when the service state names none. Short periods keep ingest lag near
-/// the goal of period + 15 s; the ingest window stays at 60 s regardless.
-pub const DEFAULT_LOG_PERIOD: i64 = 10;
+/// Log period (seconds) when the service state names none.
+pub const DEFAULT_LOG_PERIOD: i64 = 60;
+/// Cloud floor for request and RUM log periods. Ingest settles each minute folder before reading
+/// it, so shorter periods add files and compaction work without making the dashboard fresher.
+pub const MIN_LOG_PERIOD: i64 = 60;
 
 pub(crate) fn templates() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
@@ -777,6 +779,7 @@ pub fn desired_logging_endpoints(state: &Value) -> Result<Value, String> {
         if !(1..=3600).contains(&period) {
             return Err("log_period must be in range [1, 3600]".into());
         }
+        let period = period.max(MIN_LOG_PERIOD);
         let mut request_log_fields = state["log_fields"].clone();
         if array_wire {
             if let Some(obj) = request_log_fields.as_object_mut() {
@@ -833,7 +836,7 @@ pub fn desired_logging_endpoints(state: &Value) -> Result<Value, String> {
             "name": rum.endpoint_name,
             "type": "s3",
             "path": "raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
-            "period": rum.log_period,
+            "period": rum.log_period.max(MIN_LOG_PERIOD as u32),
             "response_condition": "rum_log_condition",
             "format": rum_format,
             "placement": null,

@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useMemo } from 'react'
-import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
+import { SERVICE_DEFAULTS, effectiveLogPeriod } from '@/lib/serviceDefaults'
 import { useForm, useWatch, type PathValue } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -61,7 +61,7 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
       config: { groups: [], field_overrides: {} },
-      period: String(SERVICE_DEFAULTS.logPeriodSeconds), sampleRate: SERVICE_DEFAULTS.sampleRatePercent,
+      period: String(effectiveLogPeriod(undefined)), sampleRate: SERVICE_DEFAULTS.sampleRatePercent,
       edgeOnly: true, customCondition: '',
       cmcdEnabled: false, cmcdMode: 'query_string', cmcdVersion: 1,
     },
@@ -109,7 +109,7 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
       })
     }
     if (ls) {
-      setValue('period', String(ls.period || SERVICE_DEFAULTS.logPeriodSeconds))
+      setValue('period', String(effectiveLogPeriod(ls.period)))
       setValue('sampleRate', ls.sample_rate ?? SERVICE_DEFAULTS.sampleRatePercent)
       setValue('edgeOnly', ls.edge_only ?? true)
       setValue('customCondition', ls.custom_condition || '')

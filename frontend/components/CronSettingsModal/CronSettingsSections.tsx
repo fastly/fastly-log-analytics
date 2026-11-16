@@ -8,6 +8,7 @@ import { RetentionSelect } from '@/components/ui/confirm-dialog'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 export const SYNC_INTERVAL_OPTIONS = [
   { value: '1', label: 'Every 1 minute' },
@@ -191,7 +192,7 @@ export function LogSyncSection({
                     <Select value={rumLogPeriod} onValueChange={v => v && setRumLogPeriod(v)}>
                       <SelectTrigger id="rum-log-period" className="h-7 text-[11px]"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="10" className="text-[11px]">10 seconds (Ultra-Fast / High-Load)</SelectItem>
+                        {!isCloudMode() && <SelectItem value="10" className="text-[11px]">10 seconds (Ultra-Fast / High-Load)</SelectItem>}
                         <SelectItem value="60" className="text-[11px]">1 minute (Fastest)</SelectItem>
                         <SelectItem value="300" className="text-[11px]">5 minutes (Recommended)</SelectItem>
                         <SelectItem value="600" className="text-[11px]">10 minutes</SelectItem>

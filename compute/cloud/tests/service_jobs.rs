@@ -913,6 +913,70 @@ fn rum_log_period_longer_than_the_object_window_cap_is_rejected() {
 }
 
 #[test]
+fn cloud_log_periods_below_one_minute_are_rejected() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let service = platform.service();
+    let response = platform.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":service["generation"],"log_period":30}),
+    );
+    assert_eq!(response.status, 400);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"], "log_period_below_minimum");
+    let rum = json!({"enabled": true, "log_period": 10, "custom_condition": "",
+        "faro_version": "2.10.0", "endpoint_name": "Fastly RUM Logs",
+        "capture_vitals": true, "capture_performance": true, "capture_errors": true,
+        "capture_events": true});
+    let response = platform.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":service["generation"],"rum":rum}),
+    );
+    assert_eq!(response.status, 400);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"], "rum_log_period_below_minimum");
+    let fresh = Platform::new();
+    let response = fresh.call(
+        "POST",
+        "/api/admin/provision/execute",
+        json!({"token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-test-logs",
+            "fos_region":"us-east-1","log_period":10}),
+    );
+    assert_eq!(response.status, 400);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"], "log_period_below_minimum");
+}
+
+#[test]
+fn stored_sub_minute_periods_are_raised_to_one_minute_on_the_next_update() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let mut record = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
+    record.value["log_period"] = 10.into();
+    record.value["rum"]["log_period"] = 10.into();
+    assert!(platform
+        .adapter
+        .cas(
+            "svc:fixtureService",
+            Some(&record.generation),
+            &record.value
+        )
+        .unwrap());
+    let service = platform.service();
+    platform.json(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":service["generation"],"sample_rate":50}),
+    );
+    let current = platform.service();
+    assert_eq!(current["service"]["log_period"], 60);
+    assert_eq!(current["service"]["rum"]["log_period"], 60);
+    assert_eq!(current["service"]["sample_rate"], 50);
+}
+
+#[test]
 fn dry_run_and_validate_only_never_activate_and_preserve_unmanaged_configuration() {
     let platform = Platform::new();
     platform.adapter.seed_resource("fixtureService","snippet",json!({"name":"customer-snippet","type":"recv","priority":20,"content":"set req.http.Customer = \"kept\";"}));
@@ -3929,7 +3993,7 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
             "logging_enabled": true,
             "rum": {
                 "enabled": true,
-                "log_period": 15,
+                "log_period": 120,
                 "custom_condition": "req.http.Host == \"example.com\"",
                 "faro_version": "2.10.0",
                 "endpoint_name": "Fastly RUM Logs",
@@ -3945,7 +4009,7 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
     assert_eq!(current["service"]["status"], "active");
     assert_eq!(current["service"]["rum_enabled"], true);
     assert_eq!(current["service"]["rum"]["enabled"], true);
-    assert_eq!(current["service"]["rum"]["log_period"], 15);
+    assert_eq!(current["service"]["rum"]["log_period"], 120);
     assert_eq!(
         current["service"]["owned_endpoint_names"],
         json!(["Fastly Object Storage Logs", "Fastly RUM Logs"])
@@ -3958,7 +4022,7 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
         .any(|e| e["name"] == "Fastly Object Storage Logs"));
     assert!(endpoints
         .iter()
-        .any(|e| e["name"] == "Fastly RUM Logs" && e["period"] == 15));
+        .any(|e| e["name"] == "Fastly RUM Logs" && e["period"] == 120));
 
     let backends = platform.adapter.resources("fixtureService", "backend");
     assert_eq!(backends.len(), 1);
