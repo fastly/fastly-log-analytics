@@ -466,9 +466,12 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       const defaults = calculate(DEFAULTS)
       const archive = defaults.storageTiers.find(t => t.label === 'Archive Parquet')
       expect(archive?.gbMonths).toBeGreaterThan(0)
-      // Defaults: 1440 log files/day at ~0.33 objects per tick means one object per page, so 3 writes and 3 reads per file.
-      const filesPerMonth = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes * 30
-      expect(defaults.classBPerMonth).toBeCloseTo(filesPerMonth * 4, 6)
+      // Defaults: a 10 s period gives 8640 log files/day, 2 per 20 s archive tick, so each page batches 2 objects
+      // and costs 3 reads on top of one read per raw file.
+      const filesPerDay = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes
+      const pagesPerDay = Math.ceil(filesPerDay / Math.min(DEFAULTS.archiveBatchObjects, (filesPerDay * 20) / 86400))
+      expect(pagesPerDay).toBe(filesPerDay / 2)
+      expect(defaults.classBPerMonth).toBeCloseTo((filesPerDay + pagesPerDay * 3) * 30, 6)
       const busy = calculate({ ...DEFAULTS, logNodes: 60 })
       const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
       const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
