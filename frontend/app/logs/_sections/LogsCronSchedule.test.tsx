@@ -100,7 +100,7 @@ describe('Cloud cron schedule evidence', () => {
       </QueryClientProvider>,
     )
     await userEvent.click(screen.getAllByRole('combobox')[0])
-    expect(screen.getByRole('option', { name: 'Request Ingest' })).toBeInTheDocument()
+    expect(await screen.findByRole('option', { name: 'Request Ingest' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Telemetry Flush' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'Log Discovery' })).not.toBeInTheDocument()
   })
