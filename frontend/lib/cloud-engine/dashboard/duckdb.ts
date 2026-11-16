@@ -744,8 +744,13 @@ export const RUM_ERRORS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
 
 export class DuckDBAnalyticalEngine extends ParquetBindingStore {
   private nextVirtualFileId = 1;
+  /** Most value rows and key bytes one per-file values pass may return. */
+  private readonly valuesBudget: { rows: number; bytes: number };
 
-  constructor(options: { backendFactory?: () => Promise<DuckDBBackend> } = {}) {
+  constructor(options: {
+    backendFactory?: () => Promise<DuckDBBackend>;
+    valuesBudget?: { rows: number; bytes: number };
+  } = {}) {
     super({
       factory: options.backendFactory ?? (() => typeof process !== "undefined" && process.versions?.node
         ? createNodeBackend() : createBrowserBackend()),
@@ -754,6 +759,10 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       rows: arrowTableToRows,
       interpolate: interpolateSqlParams,
     });
+    this.valuesBudget = options.valuesBudget ?? {
+      rows: 150_000,
+      bytes: 32 * 1024 * 1024,
+    };
   }
 
   async memoryLimit(): Promise<string> {
@@ -1039,46 +1048,76 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         `${base} SELECT ${FILE_COLUMN} AS file, ${fields
           .map(
             (field, i) =>
-              `COUNT(${sqlIdent(field)})::BIGINT AS nn_${i}, COUNT(DISTINCT ${sqlIdent(field)})::BIGINT AS d_${i}`,
+              `COUNT(${sqlIdent(field)})::BIGINT AS nn_${i}, COUNT(DISTINCT ${sqlIdent(field)})::BIGINT AS d_${i}, MAX(length(CAST(${sqlIdent(field)} AS VARCHAR)))::BIGINT AS ml_${i}`,
           )
           .join(", ")} FROM base GROUP BY 1`,
         signal,
       );
       signal?.throwIfAborted();
-      const cols = fields.map(sqlIdent);
-      const fieldIdx = `CASE ${cols.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
-      const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
       // The same per-field bounds as a one-file `queryRelation`.
       const candidateLimit = Math.min(4096, Math.floor(150_000 / fields.length));
-      const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
-      const window = `PARTITION BY ${FILE_COLUMN}, field_idx ORDER BY cnt DESC`;
-      const valuesTable = await backend.query(
-        `${base} SELECT ${FILE_COLUMN} AS file, field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${FILE_COLUMN}, ${fieldIdx} AS field_idx, ${cols.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base GROUP BY GROUPING SETS (${cols.map((c) => `(${FILE_COLUMN}, ${c})`).join(", ")})) WHERE ${nonNull} QUALIFY row_number() OVER (${window}) <= ${candidateLimit} AND sum(${keyBytes}) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${Math.floor((32 * 1024 * 1024) / fields.length)}`,
-        signal,
-      );
-      signal?.throwIfAborted();
+      const fieldByteCap = Math.floor((32 * 1024 * 1024) / fields.length);
 
+      // Each file may return its own bounded values, so files share a values
+      // pass only while their worst case fits the browser's result budget.
+      const chunks: number[][] = [];
+      let chunkRows = 0;
+      let chunkBytes = 0;
       const sf = column(statsTable, "file");
       for (let r = 0; r < statsTable.numRows; r++) {
-        const part = partOf(Number(sf[r]));
+        const file = Number(sf[r]);
+        const part = partOf(file);
+        let rows = 0;
+        let bytes = 0;
         fields.forEach((field, i) => {
+          const distinct = Number(column(statsTable, `d_${i}`)[r] ?? 0);
+          const keyBytes = 48 + 4 * Number(column(statsTable, `ml_${i}`)[r] ?? 0);
+          const kept = Math.min(distinct, candidateLimit);
+          rows += kept;
+          bytes += Math.min(kept * keyBytes, fieldByteCap + keyBytes);
           part.fields[field] = {
             nonNull: Number(column(statsTable, `nn_${i}`)[r] ?? 0),
-            distinct: Number(column(statsTable, `d_${i}`)[r] ?? 0),
+            distinct,
             entries: [],
             complete: false,
           };
         });
+        if (
+          chunks.length === 0 ||
+          chunkRows + rows > this.valuesBudget.rows ||
+          chunkBytes + bytes > this.valuesBudget.bytes
+        ) {
+          chunks.push([]);
+          chunkRows = 0;
+          chunkBytes = 0;
+        }
+        chunks[chunks.length - 1].push(file);
+        chunkRows += rows;
+        chunkBytes += bytes;
       }
-      const vf = column(valuesTable, "file");
-      const idxCol = column(valuesTable, "field_idx");
-      const cntCol = column(valuesTable, "cnt");
-      const valueCols = fields.map((field) => column(valuesTable, field));
-      for (let r = 0; r < valuesTable.numRows; r++) {
-        const i = Number(idxCol[r]);
-        const value = toScalarValue(valueCols[i][r]);
-        if (value === null) continue;
-        parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
+
+      const cols = fields.map(sqlIdent);
+      const fieldIdx = `CASE ${cols.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
+      const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
+      const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
+      const window = `PARTITION BY ${FILE_COLUMN}, field_idx ORDER BY cnt DESC`;
+      for (const chunk of chunks) {
+        const only = chunks.length > 1 ? ` WHERE ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
+        const valuesTable = await backend.query(
+          `${base} SELECT ${FILE_COLUMN} AS file, field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${FILE_COLUMN}, ${fieldIdx} AS field_idx, ${cols.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base${only} GROUP BY GROUPING SETS (${cols.map((c) => `(${FILE_COLUMN}, ${c})`).join(", ")})) WHERE ${nonNull} QUALIFY row_number() OVER (${window}) <= ${candidateLimit} AND sum(${keyBytes}) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${fieldByteCap}`,
+          signal,
+        );
+        signal?.throwIfAborted();
+        const vf = column(valuesTable, "file");
+        const idxCol = column(valuesTable, "field_idx");
+        const cntCol = column(valuesTable, "cnt");
+        const valueCols = fields.map((field) => column(valuesTable, field));
+        for (let r = 0; r < valuesTable.numRows; r++) {
+          const i = Number(idxCol[r]);
+          const value = toScalarValue(valueCols[i][r]);
+          if (value === null) continue;
+          parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
+        }
       }
       for (const part of parts.values()) {
         for (const aggregate of Object.values(part.fields)) {

@@ -538,6 +538,48 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("splits the per-file values pass so no batch returns more than the browser result budget", async () => {
+    const valueRows: number[] = [];
+    const engine = new DuckDBAnalyticalEngine({
+      valuesBudget: { rows: 6, bytes: 1024 * 1024 },
+      backendFactory: async () => {
+        const backend = await createNodeBackend();
+        return { ...backend, query: async (sql, signal) => {
+          const table = await backend.query(sql, signal);
+          if (sql.includes("GROUPING SETS")) valueRows.push(table.numRows);
+          return table;
+        } };
+      },
+    });
+    const t = 1700000000000;
+    const files = [0, 1, 2, 3].map((i) => ({
+      kind: "buffer" as const,
+      bytes: parquetFixture([
+        { timestamp: t + i, status: 200, cache: "HIT", resp_bytes: 1, country: `A${i}` },
+        { timestamp: t + i + 1, status: 404, cache: "MISS", resp_bytes: 2, country: `B${i}` },
+      ]),
+    }));
+    const fields = ["status", "country", "cache"];
+    await engine.prewarm();
+    const expected = [];
+    for (const file of files) {
+      const one = new Aggregator(-Infinity, Infinity, fields);
+      await engine.queryParquetIntoAggregator(file, -Infinity, Infinity, [], one, { topK: null });
+      expected.push(one.result());
+    }
+    const targets = files.map(() => new Aggregator(-Infinity, Infinity, fields));
+    valueRows.length = 0;
+    await engine.queryParquetPerFile(
+      files.map((access, i) => ({ access, target: targets[i], fromMs: -Infinity, toMs: Infinity })),
+      [],
+      { topK: null },
+    );
+    expect(targets.map((target) => target.result())).toEqual(expected);
+    expect(valueRows.length).toBeGreaterThan(1);
+    expect(Math.max(...valueRows)).toBeLessThanOrEqual(6);
+    await engine.reset();
+  });
+
   it("retains the query error when selective-file cleanup also fails", async () => {
     let fail = false, queryFailures = 0;
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
