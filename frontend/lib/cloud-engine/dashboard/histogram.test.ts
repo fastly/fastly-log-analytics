@@ -20,6 +20,13 @@ describe("Histogram", () => {
     expect(h.quantile(0)).toBe(50);
     expect(h.quantile(1)).toBe(70_000_000);
     expect(hex(h.toBytes()!)).toBe(VECTOR);
+    // Rust clamps min and max to ±(2^52 - 1), so their zigzag fits a JS number.
+    const wild = "010101fdffffffffffff0ffeffffffffffff0f";
+    const w = Histogram.fromBytes(fromHex(wild))!;
+    expect([w.min, w.max]).toEqual([-(2 ** 52 - 1), 2 ** 52 - 1]);
+    expect(hex(w.toBytes()!)).toBe(wild);
+    // One past it would lose precision, so it is rejected.
+    expect(Histogram.fromBytes(fromHex("010101008080808080808010"))).toBeNull();
   });
 
   it("merges by adding counts and widening the range", () => {

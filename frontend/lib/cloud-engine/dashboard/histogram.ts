@@ -23,9 +23,11 @@ export const BOUNDS: readonly number[] = [
 
 function readVarint(blob: Uint8Array, at: { i: number }): number | null {
   let value = 0;
-  for (let scale = 1; at.i < blob.length && scale < 2 ** 63; scale *= 128) {
+  for (let scale = 1; at.i < blob.length; scale *= 128) {
     const b = blob[at.i++];
     value += (b & 0x7f) * scale;
+    // Past 2^53 a number loses precision; Rust keeps zigzag min/max below it.
+    if (value > Number.MAX_SAFE_INTEGER) return null;
     if ((b & 0x80) === 0) return value;
   }
   return null;

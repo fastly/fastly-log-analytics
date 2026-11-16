@@ -25,6 +25,8 @@ pub const BOUNDS: [i64; BUCKETS + 1] = [
 ];
 const UNDER: u8 = 254;
 const OVER: u8 = 255;
+/// `min`/`max` are clamped to `±LIMIT` so their zigzag fits a JS number exactly; slots are not.
+const LIMIT: i64 = (1 << 52) - 1;
 
 /// The bucket of `v`, or underflow/overflow.
 #[inline]
@@ -123,6 +125,7 @@ impl Hist {
     /// Adds `v`, whose [`slot`] the caller already knows.
     #[inline]
     pub fn add_slot(&mut self, v: i64, s: u8) {
+        let v = v.clamp(-LIMIT, LIMIT);
         self.min = self.min.min(v);
         self.max = self.max.max(v);
         self.add_count(s, 1);
@@ -347,6 +350,14 @@ mod tests {
         assert_eq!(h.quantile(0.5), Some((137f64 * 152.0).sqrt()));
         assert_eq!(h.quantile(0.0), Some(50.0));
         assert_eq!(h.quantile(1.0), Some(70_000_000.0));
+        // Saturated garbage keeps min and max within what a JS number holds exactly.
+        let mut wild = Hist::default();
+        wild.add(i64::MIN);
+        wild.add(i64::MAX);
+        assert_eq!(
+            hex::encode(wild.to_bytes().unwrap()),
+            "010101fdffffffffffff0ffeffffffffffff0f"
+        );
     }
 
     #[test]
