@@ -1432,9 +1432,12 @@ def _archive_row(
 def test_schema_and_operational_snapshot_and_db_errors() -> None:
     store, pool, connection = _fake_store()
     store.create_schema()
-    pool.connection.assert_called_once_with()
+    # The schema transaction commits first; the reaper index then builds on its own autocommit connection.
+    assert pool.connection.call_count == 2
     connection.transaction.assert_called_once_with()
-    ddl = connection.execute.call_args.args[0]
+    statements = [c.args[0] for c in connection.execute.call_args_list]
+    ddl = next(s for s in statements if "CREATE TABLE IF NOT EXISTS" in s)
+    assert statements.index(ddl) < statements.index("SELECT pg_try_advisory_lock(%s)")
     for tbl in (
         "high_scale_ownership",
         "high_scale_source_objects",
