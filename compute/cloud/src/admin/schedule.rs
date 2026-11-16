@@ -401,7 +401,9 @@ pub fn due(mirror: &Mirror, now: u64) -> Due {
 /// When the compaction job next runs: its catch-up time while it has a backlog, otherwise its
 /// interval after the last run.
 pub fn compact_at(jobs: &Jobs) -> u64 {
-    if jobs.compact.more_pending {
+    // Compaction rides along the ingest tick, which waits for it, so while ingest itself has a
+    // backlog the catch-up cadence would take ingest's budget; it waits its interval instead.
+    if jobs.compact.more_pending && !jobs.ingest.more_pending {
         jobs.compact.retry_after
     } else {
         jobs.compact
@@ -768,6 +770,25 @@ mod tests {
             stored.merge(&other);
             assert_eq!(stored.ingest, new.ingest);
         }
+    }
+
+    #[test]
+    fn compaction_catch_up_yields_to_an_ingest_backlog() {
+        let now = 1_800_000_000;
+        let mut jobs = Jobs {
+            compact: JobState {
+                last_run: Some(now),
+                more_pending: true,
+                retry_after: now + COMPACT_CATCHUP_S,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(compact_at(&jobs), now + COMPACT_CATCHUP_S);
+        jobs.ingest.more_pending = true;
+        assert_eq!(compact_at(&jobs), now + COMPACT_INTERVAL_S);
+        jobs.compact.more_pending = false;
+        assert_eq!(compact_at(&jobs), now + COMPACT_INTERVAL_S);
     }
 
     #[test]

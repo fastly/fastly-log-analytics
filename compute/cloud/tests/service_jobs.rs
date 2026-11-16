@@ -1980,8 +1980,26 @@ fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history
         .unwrap();
     assert!(compact["disabled_reason"].is_null(), "{compact}");
     assert_eq!(compact["last_run_time"], time(now - 10));
-    assert_eq!(compact["next_run_time"], time(now + 7));
+    assert_eq!(
+        compact["next_run_time"],
+        time(now - 10 + admin::schedule::COMPACT_INTERVAL_S)
+    );
     assert_eq!(compact["interval_s"], admin::schedule::COMPACT_INTERVAL_S);
+
+    let old = platform.adapter.get("cron:state").unwrap().unwrap();
+    let mut state = old.value;
+    state["jobs"]["ingest"]["more_pending"] = json!(false);
+    assert!(platform
+        .adapter
+        .cas("cron:state", Some(&old.generation), &state)
+        .unwrap());
+    let snapshot = admin::cron_audit_snapshot(&platform);
+    let compact = snapshot
+        .schedules
+        .iter()
+        .find(|row| row["task"] == "request_compact")
+        .unwrap();
+    assert_eq!(compact["next_run_time"], time(now + 7));
 }
 
 #[test]
