@@ -27,9 +27,10 @@
 //!
 //! v3 groups (`dims`, `series5`, `bins`, `assets`) sum per value, histograms add bucket-wise,
 //! and `series5`/`bins` buckets floor to 5 minutes (hour) or an hour (day). Folding keeps 4x
-//! candidates (`DIM_K`, `summary::SERIES_ASN_K`) by summed requests; a final bundle writes the
-//! unit's top K ([`SERIES_ASN_TOP_K`] for `series5` ASNs) and `dim_totals.truncated` marks a
-//! group field that lost values, whose counts are then lower bounds. `sample` keeps the
+//! candidates (`DIM_K`, `summary::SERIES_ASN_K`) by summed requests. An hour bundle writes all
+//! of them, because day bundles fold hour bundles; a day bundle writes its top [`DAY_TOP_K`]
+//! ([`SERIES_ASN_TOP_K`] for `series5` ASNs). `dim_totals.truncated` marks a group field that
+//! lost values, whose counts are then lower bounds. `sample` keeps the
 //! `summary::SAMPLE_K` rows with the smallest `sample_key`. A source of another summary version
 //! makes the bundle `mixed`, which readers treat as unknown.
 
@@ -57,7 +58,7 @@ use std::{
 pub const HOUR_TOP_K: usize = 500;
 /// Values kept per field in a day bundle (fla `DAY_BUNDLE_TOP_K`).
 pub const DAY_TOP_K: usize = 500;
-/// ASNs a final bundle writes per `series5` bucket set: the 30 a page shows by default.
+/// ASNs a day bundle writes per `series5` bucket set: the 30 a page shows by default.
 pub const SERIES_ASN_TOP_K: usize = 30;
 /// Sources folded per execution, which bounds heap and time per build step.
 pub const MAX_SOURCES: usize = 24;
@@ -500,12 +501,13 @@ impl Group {
         }
     }
 
-    /// Values a final bundle writes per field, at most the unit's `top_k`.
-    fn written(&self, field: &str, top_k: usize) -> usize {
-        if self.name == "series5" && field == "asn" {
-            SERIES_ASN_TOP_K
-        } else {
-            top_k
+    /// Values a final bundle writes per field: an hour keeps the folding candidates, since day
+    /// bundles fold hour bundles; a day writes the planned K.
+    fn written(&self, field: &str, unit: Unit) -> usize {
+        match unit {
+            Unit::Hour => self.keep(field),
+            Unit::Day if self.name == "series5" && field == "asn" => SERIES_ASN_TOP_K,
+            Unit::Day => DAY_TOP_K,
         }
     }
 }
@@ -1342,10 +1344,11 @@ impl Acc {
         })
     }
 
-    /// A final bundle (`top_k`) or a partial (`None`: the whole state, flags as folded).
-    fn write(&self, start: i64, top_k: Option<usize>, label: &str) -> Result<Vec<u8>, String> {
+    /// A final bundle of `unit` or a partial (`None`: the whole state, flags as folded).
+    fn write(&self, start: i64, unit: Option<Unit>, label: &str) -> Result<Vec<u8>, String> {
         let bucket = start * 1000;
-        let fin = top_k.is_some();
+        let fin = unit.is_some();
+        let top_k = unit.map(Unit::top_k);
         let mut out = Out::new();
         let row = |out: &mut Out, head: &[(C, V<'_>)], cols: &[(C, Op)], cells: &[Cell]| {
             let blobs: Vec<Option<Vec<u8>>> = cells
@@ -1492,7 +1495,7 @@ impl Acc {
             for field in ordered(fields.keys().collect(), group.fields) {
                 let acc = &fields[&field];
                 let mut ranked = acc.ranked();
-                let cut = top_k.map_or(ranked.len(), |k| group.written(&field, k));
+                let cut = unit.map_or(ranked.len(), |u| group.written(&field, u));
                 let truncated = acc.truncated || ranked.len() > cut;
                 ranked.truncate(cut);
                 out.push(&[
@@ -1574,7 +1577,7 @@ pub fn merge(sources: &[&[u8]], start: i64, unit: Unit) -> Result<Vec<u8>, Strin
         acc.fold(source.to_vec(), 1)?;
         acc.prune();
     }
-    acc.write(start, Some(unit.top_k()), unit.label())
+    acc.write(start, Some(unit), unit.label())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1874,7 +1877,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .filter(|_| done == sources.len() && !defer_final)
         {
             Some(final_key) => {
-                let body = acc.write(job.start, Some(job.unit.top_k()), job.unit.label())?;
+                let body = acc.write(job.start, Some(job.unit), job.unit.label())?;
                 (final_key.to_owned(), body, true)
             }
             None if done > resumed => {
@@ -2435,7 +2438,7 @@ mod tests {
             resumed.fold(partial, 2).unwrap();
             resumed.fold(windows[2].clone(), 1).unwrap();
             let fin = resumed
-                .write(1_800_000_000, Some(Unit::Hour.top_k()), "hour")
+                .write(1_800_000_000, Some(Unit::Hour), "hour")
                 .unwrap();
             let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
             let one_shot = merge(&refs, 1_800_000_000, Unit::Hour).unwrap();
@@ -2510,7 +2513,7 @@ mod tests {
                 resumed.prune();
             }
             let fin = resumed
-                .write(1_800_000_000, Some(unit.top_k()), unit.label())
+                .write(1_800_000_000, Some(unit), unit.label())
                 .unwrap();
             assert_eq!(fin, merge(&refs, 1_800_000_000, unit).unwrap());
             assert_eq!(flp_summary(&fin).as_deref(), Some("3"));
@@ -2533,41 +2536,48 @@ mod tests {
     }
 
     #[test]
-    fn a_final_bundle_writes_the_planned_k_and_flags_the_cut() {
+    fn hours_keep_the_candidate_margin_and_days_write_the_planned_k() {
         use arrow_array::{Array, BooleanArray, StringArray};
-        let windows: Vec<Vec<u8>> = (0..4).map(|i| rich_window(i * 300)).collect();
-        let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
-        let hour = merge(&refs, 1_800_000_000, Unit::Hour).unwrap();
-        let mut asns = BTreeSet::new();
-        let mut flagged = None;
-        for batch in ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(hour))
-            .unwrap()
-            .build()
-            .unwrap()
-        {
-            let batch = batch.unwrap();
-            let col = |name: &str| batch.column_by_name(name).unwrap().clone();
-            let (kind, field, value, cut) =
-                (col("bundle"), col("field"), col("value"), col("truncated"));
-            let kind = kind.as_any().downcast_ref::<StringArray>().unwrap();
-            let field = field.as_any().downcast_ref::<StringArray>().unwrap();
-            let value = value.as_any().downcast_ref::<StringArray>().unwrap();
-            let cut = cut.as_any().downcast_ref::<BooleanArray>().unwrap();
-            for i in 0..batch.num_rows() {
-                if field.is_null(i) || field.value(i) != "asn" {
-                    continue;
-                }
-                match kind.value(i) {
-                    "series5" => {
-                        asns.insert(value.value(i).to_owned());
+        // `series5` ASN values and whether the bundle flags that group's ASN field as cut.
+        let read = |bundle: &[u8]| {
+            let mut asns = BTreeSet::new();
+            let mut flagged = None;
+            for batch in
+                ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bundle.to_vec()))
+                    .unwrap()
+                    .build()
+                    .unwrap()
+            {
+                let batch = batch.unwrap();
+                let col = |name: &str| batch.column_by_name(name).unwrap().clone();
+                let (kind, field, value, cut) =
+                    (col("bundle"), col("field"), col("value"), col("truncated"));
+                let kind = kind.as_any().downcast_ref::<StringArray>().unwrap();
+                let field = field.as_any().downcast_ref::<StringArray>().unwrap();
+                let value = value.as_any().downcast_ref::<StringArray>().unwrap();
+                let cut = cut.as_any().downcast_ref::<BooleanArray>().unwrap();
+                for i in 0..batch.num_rows() {
+                    if field.is_null(i) || field.value(i) != "asn" {
+                        continue;
                     }
-                    "dim_totals" if value.value(i) == "series5" => flagged = Some(cut.value(i)),
-                    _ => {}
+                    match kind.value(i) {
+                        "series5" => {
+                            asns.insert(value.value(i).to_owned());
+                        }
+                        "dim_totals" if value.value(i) == "series5" => flagged = Some(cut.value(i)),
+                        _ => {}
+                    }
                 }
             }
-        }
-        assert_eq!(asns.len(), SERIES_ASN_TOP_K);
-        assert_eq!(flagged, Some(true));
+            (asns.len(), flagged)
+        };
+        let windows: Vec<Vec<u8>> = (0..4).map(|i| rich_window(i * 300)).collect();
+        let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
+        // A day folds hour bundles, so an hour must keep the 4x margin for the day's ranking.
+        let hour = merge(&refs, 1_800_000_000, Unit::Hour).unwrap();
+        assert_eq!(read(&hour), (summary::SERIES_ASN_K, Some(true)));
+        let day = merge(&[&hour], 1_800_000_000, Unit::Day).unwrap();
+        assert_eq!(read(&day), (SERIES_ASN_TOP_K, Some(true)));
     }
 
     /// Every resumed execution decodes the partial first and encodes it last, on top of the

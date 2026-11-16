@@ -32,7 +32,7 @@ pub const IP_TOP_K: usize = 500;
 pub const IP_SAMPLE_CAP: u64 = 5000;
 pub const SESSION_K: usize = 2000;
 pub const DIM_K: usize = 2000;
-/// ASNs kept per window and while folding a bundle in `series5`: 4x the 30 a bundle writes.
+/// ASNs kept in `series5` per window and hour bundle: 4x the 30 a day bundle writes.
 pub const SERIES_ASN_K: usize = 120;
 /// `sample` rows per window and bundle.
 pub const SAMPLE_K: usize = 300;

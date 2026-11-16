@@ -160,13 +160,16 @@ fn summary_window_and_bundle_cost() {
         day_merge.as_secs_f64() * 1000.0,
         day.len(),
     );
-    // The stage stops folding at VCPU_STOP_MS (700 ms of Wasm vCPU); a full batch of sources
-    // must fit with room for Wasm's slowdown and the write.
+    // The stage checks VCPU_STOP_MS (700 ms of Wasm vCPU) between sources. A full batch of
+    // windows should fit one execution with room for Wasm's slowdown and the write, and one hour
+    // bundle fold must fit the 300 ms left under Compute's 1,000 ms limit; a day whose 24 hours
+    // do not fit one execution resumes in the next.
     if !cfg!(debug_assertions) && per_window <= 800 {
         assert!(merge < Duration::from_millis(200), "hour merge {merge:?}");
+        let per_hour = day_merge / 24;
         assert!(
-            day_merge < Duration::from_millis(200),
-            "day merge {day_merge:?}"
+            per_hour < Duration::from_millis(30),
+            "day merge {per_hour:?} per hour"
         );
     }
 }
