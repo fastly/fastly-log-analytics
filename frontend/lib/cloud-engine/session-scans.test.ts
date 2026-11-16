@@ -190,4 +190,77 @@ describe("Cloud session scans against actual Parquet", () => {
       await engine.executeSql("SET memory_limit = '256MB'");
     }
   });
+
+  const dayEnd = new Date(from + 86_400_000).toISOString();
+  const steadyRow = (ts: number, key: number, i: number): Row => ({
+    ts, ip: `10.${key >> 16 & 255}.${key >> 8 & 255}.${key & 255}`, ja4: `t13d_${key % 2}`, cmcd_sid: null,
+    edge_sid: null, edge: i % 3 !== 0, asn: 64_500 + (key % 17), country: ["US", "DE", "BR"][key % 3],
+    status: i % 9 ? 200 : 404, resp_bytes: 1_000 + (i % 1_000), tcp_rtt: 10_000 + (key % 5_000), ua: `agent ${key % 40}`,
+    url: `/p/${(key * 7 + i) % 500}`,
+  });
+  const newestFirst = (sessions: ReturnType<typeof referenceSessions>) => [...sessions].sort((a, b) =>
+    cmp(b.session_start, a.session_start) || cmp(a.ip, b.ip) || cmp(String(a.ja4), String(b.ja4)));
+  const cmp = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+  const withoutToken = <T extends { session_token: string; is_streaming: boolean }>(sessions: T[]) =>
+    sessions.map(({ session_token: _token, is_streaming: _streaming, ...session }) => session);
+
+  it("lists the newest sessions of a busy day without sessionizing the whole range", async () => {
+    // A steady day: each minute 200 clients are active, each for 4 consecutive minutes.
+    const rows: Row[] = [];
+    for (let minute = 0; minute < 1_440; minute++) {
+      for (let j = 0; j < 200; j++) {
+        const key = (minute - (j % 4)) * 50 + Math.floor(j / 4);
+        if (key >= 0) rows.push(steadyRow(from + minute * 60_000 + (j * 571) % 60_000, key, rows.length));
+      }
+    }
+    await engine.syncWindow([{ key: "session-steady-day", bytes: writeRows(rows) }]);
+    const context = {
+      serviceId: "fixture-service", availableColumns: await engine.getPresentColumns(),
+      runSql: (sql: string) => engine.executeSql(sql),
+    };
+    // The whole day's client-minutes exceed this scaled-down limit, as a busy week exceeded the page's 256MB.
+    await engine.executeSql("SET memory_limit = '64MB'");
+    try {
+      const list = await handleSessionsList({ start_time: start, end_time: dayEnd, page: 1, limit: 100,
+        sort_by: "session_start", sort_dir: "desc", min_reqs_flag: 40, min_4xx_pct_flag: 25 }, context);
+      if (!("sessions" in list.body)) throw new Error(`Session scan failed: ${JSON.stringify(list.body)}`);
+      const expected = newestFirst(referenceSessions(rows)).slice(0, 100);
+      expect(withoutToken(list.body.sessions).map((session) => ({ ...session, median_rtt_ms: Number(session.median_rtt_ms) })))
+        .toEqual(expected.map((session) => ({ ...session, median_rtt_ms: Number(session.median_rtt_ms) })));
+    } finally {
+      await engine.executeSql("SET memory_limit = '256MB'");
+    }
+  });
+
+  it("reports newest sessions exactly when they began before the newest slice", async () => {
+    const rows: Row[] = [];
+    const add = (ip: string, offsets: number[]) => offsets.forEach((offset) => rows.push({ ...steadyRow(from + offset, 1, rows.length), ip }));
+    const hour = 3_600_000, min = 60_000;
+    // Requests every 10 minutes for the whole day: one session that began at the range start.
+    add("192.0.2.1", Array.from({ length: 144 }, (_, i) => i * 10 * min));
+    // Exactly 30 minutes apart is still one session; 1ms more starts a new one.
+    add("192.0.2.2", [24 * hour - 61 * min, 24 * hour - 31 * min, 24 * hour - min]);
+    add("192.0.2.3", [24 * hour - 61 * min - 1, 24 * hour - 31 * min, 24 * hour - min]);
+    // Quiet for hours, then active again just before the end.
+    add("192.0.2.4", [hour, 2 * hour, 24 * hour - 2 * min]);
+    // Sparse older sessions, so a page of 7 needs most of the day.
+    for (let i = 0; i < 12; i++) add(`198.51.100.${i}`, [i * 2 * hour + 5 * min, i * 2 * hour + 9 * min]);
+    await engine.syncWindow([{ key: "session-straddle", bytes: writeRows(rows) }]);
+    const context = {
+      serviceId: "fixture-service", availableColumns: await engine.getPresentColumns(),
+      runSql: (sql: string) => engine.executeSql(sql),
+    };
+    const reference = newestFirst(referenceSessions(rows));
+    for (const [limit, page] of [[3, 1], [7, 1], [7, 2], [7, 3], [100, 1]]) {
+      const list = await handleSessionsList({ start_time: start, end_time: dayEnd, page, limit,
+        sort_by: "session_start", sort_dir: "desc", min_reqs_flag: 40, min_4xx_pct_flag: 25 }, context);
+      if (!("sessions" in list.body)) throw new Error("Session scan failed");
+      expect(withoutToken(list.body.sessions), `limit ${limit} page ${page}`)
+        .toEqual(reference.slice((page - 1) * limit, page * limit));
+    }
+    const flagged = await handleSessionsList({ start_time: start, end_time: dayEnd, limit: 5, flagged_only: true,
+      sort_by: "session_start", sort_dir: "desc", min_reqs_flag: 40, min_4xx_pct_flag: 25 }, context);
+    if (!("sessions" in flagged.body)) throw new Error("Session scan failed");
+    expect(withoutToken(flagged.body.sessions)).toEqual(reference.filter((session) => session.flagged).slice(0, 5));
+  });
 });

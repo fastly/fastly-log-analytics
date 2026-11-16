@@ -14,6 +14,7 @@ export const SESSIONS_MAX_WINDOW_DAYS = 7;
 export const MAX_SESSIONS_WINDOW_DAYS = SESSIONS_MAX_WINDOW_DAYS;
 export const SESSIONS_DEFAULT_MIN_REQS_FLAG = 1000;
 export const SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG = 20.0;
+const SESSIONS_FIRST_SLICE_MS = 15 * 60_000;
 
 export const SESSIONS_SORTABLE_COLUMNS = new Set([
   "session_start",
@@ -175,6 +176,10 @@ export function sessionsScanColumns(filters: unknown): string[] | null {
 /**
  * Build the 30-minute inactivity-gap sessionization CTE pipeline (`INTERVAL 30 MINUTES` / 1800s):
  * `base` -> `clients` -> `minutes` -> `minute_sessions` -> `sessions_agg` -> `page` (-> `page_stats`).
+ *
+ * With `sliceFromMs`, only sessions that start at or after it are listed. Every such session is
+ * complete: its rows lie in [sliceFromMs, end), and the 30 minutes before the slice are read for
+ * the slice's clients only, so its start is known to follow a full inactivity gap.
  */
 export function buildSessionsCteSql(options: {
   tableName?: string;
@@ -191,6 +196,7 @@ export function buildSessionsCteSql(options: {
   offset?: number;
   filters?: SessionsListRequest["filters"];
   customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
+  sliceFromMs?: number;
 }): string {
   const tableName = requireSafeIdent(options.tableName ?? "requests", "tableName");
   const cols =
@@ -257,6 +263,12 @@ export function buildSessionsCteSql(options: {
   const offset = Math.max(0, Number(options.offset ?? 0));
 
   const postFilters: string[] = [];
+  const startMs = Date.parse(options.startTime);
+  const endMs = Date.parse(options.endTime);
+  const gapMs = SESSIONS_INACTIVITY_GAP_SECONDS * 1000;
+  const sliceFromMs = options.sliceFromMs != null && options.sliceFromMs > startMs
+    ? Math.trunc(options.sliceFromMs) : null;
+  if (sliceFromMs != null) postFilters.push(`start_t >= ${sliceFromMs}`);
   if (options.flaggedOnly) postFilters.push("flagged = TRUE");
   if (options.streamingOnly) postFilters.push("streaming_reqs > 0");
   const whereClause =
@@ -279,19 +291,31 @@ export function buildSessionsCteSql(options: {
     ...(sortCol === "unique_urls" ? [] : [{ expr: urlExpr, name: "unique_urls", needs: "url" }]),
   ];
   const pageStats = pageStatExprs.some(({ needs }) => cols.has(needs));
-  const gapMs = SESSIONS_INACTIVITY_GAP_SECONDS * 1000;
+  const baseSelect = `${msSql} AS t, "ip", ${ja4Select}${rawColumns.map((column) => `, ${column}`).join("")}`;
+  const rowsBetween = (fromMs: number, toMs: number) => `
+      SELECT ${baseSelect}
+      FROM ${tableName}
+      WHERE "ip" IS NOT NULL AND "ip" != ''
+        AND ${msSql} >= ${fromMs}
+        AND ${msSql} < ${toMs}
+        AND (${filterSql})`;
+  // An explicit semi-join streams the padding rows; a correlated EXISTS buffered them all.
+  const sliceSql = sliceFromMs == null ? "" : `
+    slice_clients AS MATERIALIZED (
+      SELECT DISTINCT "ip"${hasJa4 ? `, "ja4"` : ""}
+      FROM (${rowsBetween(sliceFromMs, endMs)})
+    ),`;
+  const baseSql = sliceFromMs == null ? rowsBetween(startMs, endMs) : `${rowsBetween(sliceFromMs, endMs)}
+      UNION ALL
+      SELECT p.*
+      FROM (${rowsBetween(Math.max(startMs, sliceFromMs - gapMs), sliceFromMs)}) p
+      SEMI JOIN slice_clients s ON s."ip" = p."ip"${hasJa4 ? ` AND s."ja4" IS NOT DISTINCT FROM p."ja4"` : ""}`;
 
   // DuckDB-WASM can't spill, and ordering every raw row by its string client key exhausted its
   // memory. Clients get a dense integer id, and since requests less than a minute apart can't
   // straddle a 30-minute gap, only per-client minutes are ordered to find session boundaries.
   return `
-    WITH base AS NOT MATERIALIZED (
-      SELECT ${msSql} AS t, "ip", ${ja4Select}${rawColumns.map((column) => `, ${column}`).join("")}
-      FROM ${tableName}
-      WHERE "ip" IS NOT NULL AND "ip" != ''
-        AND ${msSql} >= ${Date.parse(options.startTime)}
-        AND ${msSql} < ${Date.parse(options.endTime)}
-        AND (${filterSql})
+    WITH${sliceSql} base AS NOT MATERIALIZED (${baseSql}
     ),
     clients AS (
       SELECT "ip", "ja4", ROW_NUMBER() OVER () AS k
@@ -476,7 +500,7 @@ export async function handleSessionsList(
     ]);
 
   const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
-  const sql = buildSessionsCteSql({
+  const sqlFor = (sliceFromMs?: number) => buildSessionsCteSql({
     tableName: ctx.tableName ?? "requests",
     startTime: body.start_time,
     endTime: body.end_time,
@@ -491,9 +515,21 @@ export async function handleSessionsList(
     offset,
     filters: body.filters,
     customColumnTypes: ctx.customColumnTypes,
+    sliceFromMs,
   });
+  // The newest sessions only need the end of the range: widen a slice from the end until it holds
+  // the requested page, so memory follows recent traffic rather than the range.
+  let rawRows: Record<string, unknown>[] = [];
+  if (ctx.runSql && body.sort_by === "session_start" && body.sort_dir === "desc") {
+    for (let sliceMs = SESSIONS_FIRST_SLICE_MS; ; sliceMs *= 4) {
+      const sliceFromMs = endMs - sliceMs;
+      rawRows = await ctx.runSql(sqlFor(sliceFromMs > startMs ? sliceFromMs : undefined));
+      if (sliceFromMs <= startMs || rawRows.length >= limit) break;
+    }
+  } else if (ctx.runSql) {
+    rawRows = await ctx.runSql(sqlFor());
+  }
 
-  const rawRows = ctx.runSql ? await ctx.runSql(sql) : [];
   const sessions: SessionSummaryRow[] = rawRows.map((r) => {
     const rawIp = String(r.ip ?? "");
     const rawJa4 = r.ja4 != null ? String(r.ja4) : null;
