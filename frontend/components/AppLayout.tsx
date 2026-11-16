@@ -33,6 +33,7 @@ import {
   CLOUD_PRUNED_NAV_HREFS,
   CLOUD_PRUNED_ADMIN_HREFS,
   UrlServiceSync,
+  ServiceUrlWriteback,
   RouteFocus,
   RawQueryModeProbe,
   SidebarNavList,
@@ -406,9 +407,15 @@ export function AppLayout({
               {isLoading && !bootstrapData ? (
                 <CenteredSpinner label="Loading app configuration…" />
               ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login']) ? (
-                <CenteredSpinner label="Setting up your workspace…" />
+                <>
+                  <CenteredSpinner label="Setting up your workspace…" />
+                  <ServiceUrlWriteback />
+                </>
               ) : (
-                <React.Suspense fallback={null}>{children}</React.Suspense>
+                <React.Suspense fallback={null}>
+                  {children}
+                  <ServiceUrlWriteback />
+                </React.Suspense>
               )}
               {debugEnabled && <DebugPanel />}
               {serverFooter && !isAnalyst && serverFooter}

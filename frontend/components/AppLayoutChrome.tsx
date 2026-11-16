@@ -19,7 +19,7 @@ import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, Sele
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useTimezoneStore, useSessionRoleStore, useServiceStore } from '@/stores/filterStore'
-import { useMounted, useUrlServiceSync, useIsAnalyst } from '@/hooks/useBootstrap'
+import { useMounted, useUrlServiceToStore, useServiceUrlWriteback, useIsAnalyst } from '@/hooks/useBootstrap'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
@@ -218,7 +218,12 @@ export const CLOUD_PRUNED_ADMIN_HREFS = new Set<string>([
 ])
 
 export function UrlServiceSync() {
-  useUrlServiceSync()
+  useUrlServiceToStore()
+  return null
+}
+
+export function ServiceUrlWriteback() {
+  useServiceUrlWriteback()
   return null
 }
 

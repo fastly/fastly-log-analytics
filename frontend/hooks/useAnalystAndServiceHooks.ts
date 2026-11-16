@@ -14,12 +14,17 @@ import { useBootstrapCacheSelector } from './useBootstrap'
  * `?service=` query param.
  */
 export function useUrlServiceSync() {
+  useUrlServiceToStore()
+  useServiceUrlWriteback()
+}
+
+/** Selects the service a `?service=` URL names. */
+export function useUrlServiceToStore() {
   const activeServiceId = useServiceStore(state => state.activeServiceId)
   const services = useServiceStore(state => state.services)
   const isInitialized = useServiceStore(state => state.isInitialized)
   const setActiveServiceId = useServiceStore(state => state.setActiveServiceId)
-
-  const [urlService, setUrlService] = useQueryState('service', {
+  const [urlService] = useQueryState('service', {
     history: 'replace',
     shallow: true,
   })
@@ -30,6 +35,21 @@ export function useUrlServiceSync() {
     if (isInitialized && !services.some(s => s.id === urlService)) return
     setActiveServiceId(urlService)
   }, [urlService, activeServiceId, services, isInitialized, setActiveServiceId])
+}
+
+/**
+ * Writes the active service into `?service=`. Mount it inside the page's
+ * Suspense boundary: a URL update that reaches the boundary before it has
+ * hydrated makes React drop the server HTML and client-render the page.
+ */
+export function useServiceUrlWriteback() {
+  const activeServiceId = useServiceStore(state => state.activeServiceId)
+  const services = useServiceStore(state => state.services)
+  const isInitialized = useServiceStore(state => state.isInitialized)
+  const [urlService, setUrlService] = useQueryState('service', {
+    history: 'replace',
+    shallow: true,
+  })
 
   useEffect(() => {
     if (!isInitialized) return

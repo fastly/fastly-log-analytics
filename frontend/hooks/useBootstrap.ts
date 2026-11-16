@@ -23,6 +23,8 @@ import { cloudCacheIdentity } from '@/lib/cloud-engine/cache-identity'
 
 export {
   useUrlServiceSync,
+  useUrlServiceToStore,
+  useServiceUrlWriteback,
   useServiceSwitchReset,
   useIsAnalyst,
   useMaskIps,
