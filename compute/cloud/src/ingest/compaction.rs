@@ -937,10 +937,13 @@ impl<R: Runtime> Run<'_, '_, R> {
     /// generation, and a fresh read can still show the value this write replaced; a generation
     /// taken from that read would fail the pass's next write against its own state. So a write
     /// is read back until it shows, and a conflict whose current value is the pass's own last
-    /// write takes that generation and retries once. Any other value is another writer's.
+    /// write takes that generation and retries once. A lost CAS whose current value is this very
+    /// write landed anyway: a KV insert whose first attempt errors after landing is retried
+    /// against the generation it replaced. Any other value is another writer's.
     fn write(&mut self, value: &Value, read_back: bool) -> Result<(), String> {
         let runtime = self.store.runtime;
         let key = self.dataset.state_key();
+        let mut confirmed = false;
         if !runtime.admin_cas(key, self.generation.as_deref(), value)? {
             let recovered = match self.saved.clone() {
                 Some(own) => {
@@ -950,11 +953,19 @@ impl<R: Runtime> Run<'_, '_, R> {
                 None => false,
             };
             if !recovered {
-                return Err("compact_state_conflict".into());
+                let tried = self.generation.clone();
+                confirmed = match self.read_back(value) {
+                    Err(error) if error == STATE_BUDGET => false,
+                    result => result?,
+                };
+                if !confirmed {
+                    self.generation = tried;
+                    return Err("compact_state_conflict".into());
+                }
             }
         }
         self.replaced = self.saved.replace(value.clone()).or(self.replaced.take());
-        if read_back {
+        if read_back && !confirmed {
             // The write landed; a later write that finds its generation stale recovers it.
             match self.read_back(value) {
                 Err(error) if error == STATE_BUDGET => {}

@@ -59,6 +59,9 @@ struct Fake {
     lagging_left: Cell<u32>,
     /// The injected compaction state conflict writes another writer's value, not the same one.
     foreign_compact_conflict: Cell<bool>,
+    /// After this many more compaction state writes, one lands but reports a lost CAS, as when
+    /// a write whose first attempt errored after landing is retried against its old generation.
+    compact_write_lands_unreported: Cell<Option<u32>>,
     fail_fresh_compact_state: Cell<bool>,
     /// Errors the next fresh compaction state reads return, one per read.
     fresh_compact_state_glitches: RefCell<std::collections::VecDeque<String>>,
@@ -196,6 +199,7 @@ impl Fake {
             lagging_compact_state: Default::default(),
             lagging_left: Cell::new(0),
             foreign_compact_conflict: Cell::new(false),
+            compact_write_lands_unreported: Cell::new(None),
             fail_fresh_compact_state: Cell::new(false),
             fresh_compact_state_glitches: Default::default(),
             compact_state_writes: Cell::new(0),
@@ -516,6 +520,16 @@ impl Runtime for Fake {
             });
         }
         kv.insert(key.into(), (next, value.clone()));
+        if key == ingest::compaction::STATE_KEY {
+            match self.compact_write_lands_unreported.get() {
+                Some(0) => {
+                    self.compact_write_lands_unreported.set(None);
+                    return Ok(false);
+                }
+                Some(n) => self.compact_write_lands_unreported.set(Some(n - 1)),
+                None => {}
+            }
+        }
         Ok(true)
     }
     fn admin_get_fresh(&self, key: &str, token: &str) -> Result<Option<Record>, String> {
@@ -11856,6 +11870,38 @@ mod request_compaction {
             fake.waits.borrow().is_empty(),
             "another writer's value is not waited on"
         );
+    }
+
+    /// A state write can land and still report a lost CAS: the KV insert's first attempt
+    /// errors after landing and its retry fails the precondition against that write. The pass
+    /// finds its own value stored and goes on, whichever of its writes it was.
+    #[test]
+    fn a_state_write_that_landed_but_reported_a_conflict_is_not_a_conflict() {
+        for nth in 0..4 {
+            let fake = Fake::new(NOW);
+            seed(&fake, 2);
+            fake.kv.borrow_mut().insert(
+                compaction::STATE_KEY.into(),
+                (
+                    1,
+                    serde_json::to_value(compaction::State::default()).unwrap(),
+                ),
+            );
+            fake.compact_write_lands_unreported.set(Some(nth));
+            let report = finish(&fake, TARGET);
+            assert_eq!(
+                fake.compact_write_lands_unreported.get(),
+                None,
+                "write {nth} was injected"
+            );
+            assert!(report.errors.is_empty(), "write {nth}: {:?}", report.errors);
+            assert_eq!(report.sources, 2, "write {nth}: {report:?}");
+            let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+            assert_eq!(
+                state["lease_until"], 0,
+                "write {nth}: the pass released its lease"
+            );
+        }
     }
 
     #[test]
