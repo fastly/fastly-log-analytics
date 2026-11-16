@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { measureCloudQuery, publishCloudWorkerTelemetry } from "./readiness";
+import { measureCloudQuery } from "./readiness";
 import { setCloudModeRuntime } from "./mode";
 
 afterEach(() => setCloudModeRuntime(false));
@@ -109,18 +109,28 @@ it("names an over-budget scan without exposing its response body", async () => {
 });
 
 it("keeps High-Scale silent and allowlists worker statistics without SQL or tokens", async () => {
+  for (const name of ["NEXT_PUBLIC_DEPLOYMENT_MODE", "NEXT_PUBLIC_STATIC_EXPORT", "NEXT_PUBLIC_RUNTIME_MODE"]) {
+    vi.stubEnv(name, "");
+  }
+  // IS_CLOUD_MODE is fixed at import, and the Cloud CI job exports the Cloud flags.
+  vi.resetModules();
+  const mode = await import("./mode");
+  const readiness = await import("./readiness");
   const events: unknown[] = [];
   const listener = (event: Event) => events.push((event as CustomEvent).detail);
   window.addEventListener("fla:cloud-worker", listener);
   try {
-    await measureCloudQuery("dashboard.bundle", async () => ({ aggregates: { total_rows: 42 } }));
-    publishCloudWorkerTelemetry({ files_fetched: 3, sql: "sentinel-private-sql" });
+    expect(mode.IS_CLOUD_MODE).toBe(false);
+    await readiness.measureCloudQuery("dashboard.bundle", async () => ({ aggregates: { total_rows: 42 } }));
+    readiness.publishCloudWorkerTelemetry({ files_fetched: 3, sql: "sentinel-private-sql" });
     expect(events).toEqual([]);
-    setCloudModeRuntime(true);
-    publishCloudWorkerTelemetry({ files_fetched: 3, files_cached: 0, sql: "sentinel-private-sql" });
+    mode.setCloudModeRuntime(true);
+    readiness.publishCloudWorkerTelemetry({ files_fetched: 3, files_cached: 0, sql: "sentinel-private-sql" });
     expect(events).toMatchObject([{ filesFetched: 3, filesCached: 0 }]);
     expect(JSON.stringify(events)).not.toContain("sentinel");
   } finally {
+    mode.setCloudModeRuntime(false);
+    vi.unstubAllEnvs();
     window.removeEventListener("fla:cloud-worker", listener);
   }
 });
