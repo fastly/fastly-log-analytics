@@ -46,8 +46,10 @@ function buildUpstreamHeaders(request: Request, targetUrl: URL, bodyBuffer?: Buf
   const out: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     const lower = key.toLowerCase();
-    if (!HOP_BY_HOP_HEADERS.has(lower) && lower !== "host" && lower !== "content-length") out[key] = value;
+    if (!HOP_BY_HOP_HEADERS.has(lower) && lower !== "host" && lower !== "content-length" && lower !== "accept-encoding") out[key] = value;
   });
+  // Next strips Content-Encoding from route-handler responses, so a compressed upstream body would reach the browser undecoded.
+  out["accept-encoding"] = "identity";
   out["host"] = targetUrl.host;
   out["connection"] = "close";
   if (bodyBuffer && bodyBuffer.byteLength > 0) out["content-length"] = String(bodyBuffer.byteLength);

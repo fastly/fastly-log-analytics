@@ -613,6 +613,31 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
     }
   })
 
+  it('returns a decoded body even when the client accepts compression, since Next strips Content-Encoding from route-handler responses', async () => {
+    const { gzipSync } = await import('node:zlib')
+    let seenAcceptEncoding: string | undefined
+    const payload = { services: [{ service_id: 'svc-1' }] }
+    const server = await withUpstreamServer((req, res) => {
+      seenAcceptEncoding = req.headers['accept-encoding']
+      res.setHeader('Content-Type', 'application/json')
+      if (/\bgzip\b/.test(seenAcceptEncoding || '')) {
+        res.setHeader('Content-Encoding', 'gzip')
+        res.end(gzipSync(JSON.stringify(payload)))
+        return
+      }
+      res.end(JSON.stringify(payload))
+    })
+    try {
+      const res = await apiGet(new NextRequest('http://localhost:3002/api/bootstrap', { headers: { 'accept-encoding': 'gzip, deflate, br, zstd' } }))
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-encoding')).toBeNull()
+      expect(await res.json()).toEqual(payload)
+      expect(seenAcceptEncoding).toBe('identity')
+    } finally {
+      await server.close()
+    }
+  })
+
   it('retries idempotent GET once when upstream socket resets with ECONNRESET before headers', async () => {
     let attempts = 0
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
