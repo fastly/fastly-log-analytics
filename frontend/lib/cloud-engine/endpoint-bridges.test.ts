@@ -266,6 +266,46 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(fetcher.mock.calls.filter(([input]) => String(input) === "/api/services")).toHaveLength(1);
   });
 
+  it("gives analysts the header's latest/total badge, which admins read live from sync-status", async () => {
+    const badge = {
+      configured: true,
+      request: { latest_log_at: "2026-01-01T00:10:00Z", total_rows: 42, total_rows_partial: false, last_sync_at: "2026-01-01T00:11:00Z" },
+      rum: { latest_log_at: "2026-01-01T00:09:00Z", total_rows: 7, last_sync_at: "2026-01-01T00:11:00Z" },
+    };
+    let role = "analyst";
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role } });
+      if (path === "/api/services") return Response.json(services);
+      if (path === "/api/header-badge") return Response.json(badge);
+      return Response.json({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const analyst = await (await handleCloudAnalyticalRequest(request("/api/bootstrap")))!.json();
+    expect(analyst.header_badge).toEqual({ request: badge.request, rum: badge.rum });
+
+    role = "admin";
+    resetCloudMetadataCache();
+    fetcher.mockClear();
+    const admin = await (await handleCloudAnalyticalRequest(request("/api/bootstrap")))!.json();
+    expect(admin.header_badge).toBeUndefined();
+    expect(fetcher.mock.calls.map(([input]) => String(input))).not.toContain("/api/header-badge");
+  });
+
+  it("still boots an analyst when the header badge read fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role: "analyst-no-pii" } });
+      if (path === "/api/services") return Response.json(services);
+      return Response.json({ detail: "unavailable" }, { status: 503 });
+    }));
+    const response = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+    expect(response?.ok).toBe(true);
+    const body = await response!.json();
+    expect(body.user).toMatchObject({ role: "analyst-no-pii" });
+    expect(body.header_badge).toBeUndefined();
+  });
+
   it("lets one caller abort without cancelling the shared read for the others", async () => {
     const { pending, servicesCalls } = heldServices();
     const owner = new AbortController();

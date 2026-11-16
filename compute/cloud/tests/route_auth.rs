@@ -439,6 +439,7 @@ const ROUTES: &[(&str, &str, Class)] = &[
     ("GET", "/api/file", Class::NoPiiDenied),
     ("HEAD", "/api/file", Class::NoPiiDenied),
     ("POST", "/api/telemetry/query", Class::Session),
+    ("GET", "/api/header-badge", Class::Session),
     ("GET", "/api/sync-status", Class::Admin),
     ("GET", "/api/cron-runs", Class::Admin),
     ("POST", "/api/cron-runs/trigger", Class::Admin),
@@ -520,6 +521,7 @@ const DECLARED: &[(&str, Class)] = &[
     ("/api/ingest/events", Class::Session),
     ("/api/file", Class::NoPiiDenied),
     ("/api/telemetry/query", Class::Session),
+    ("/api/header-badge", Class::Session),
     ("/api/sync-status", Class::Admin),
     ("/api/cron-runs", Class::Admin),
     ("/api/cron-runs/trigger", Class::Admin),
@@ -1267,6 +1269,42 @@ fn status_reads_are_cached_per_service_and_never_reach_unauthorized_callers() {
         for session in ["analyst", "no_pii"] {
             assert_eq!(h.send("GET", path, session).status, 403, "{path} {session}");
         }
+    }
+}
+
+#[test]
+fn every_signed_in_role_reads_the_header_badge_without_cron_or_audit_history() {
+    let h = Harness::new();
+    let admin: Value =
+        serde_json::from_slice(&h.send("GET", "/api/sync-status", "admin").body).unwrap();
+    assert_eq!(admin["configured"], true);
+    assert!(admin["request"].is_object());
+    for session in ["analyst", "no_pii", "admin"] {
+        let response = h.send("GET", "/api/header-badge", session);
+        assert_eq!(response.status, 200, "{session}");
+        let badge: Value = serde_json::from_slice(&response.body).unwrap();
+        let mut keys = badge
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, ["configured", "request", "rum"], "{session}");
+        assert_eq!(badge["request"], admin["request"], "{session}");
+        assert_eq!(badge["rum"], admin["rum"], "{session}");
+    }
+    assert_eq!(
+        status_entries(&h),
+        2,
+        "the badge is cached beside sync-status"
+    );
+    for session in ["anonymous", "expired", "tampered"] {
+        assert_eq!(
+            h.send("GET", "/api/header-badge", session).status,
+            401,
+            "{session}"
+        );
     }
 }
 

@@ -76,6 +76,7 @@ const KNOWN_SEGMENTS: &[&str] = &[
     "ingest",
     "events",
     "sync-status",
+    "header-badge",
     "cron-runs",
     "trigger",
     "admin",

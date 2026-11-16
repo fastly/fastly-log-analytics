@@ -1982,6 +1982,36 @@
         ]
       }
     },
+    "/api/header-badge": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Header Badge",
+        "description": "Latest log time and row totals for the header, for every signed-in role. The analyst-safe slice of /api/sync-status, without cron or audit history.",
+        "operationId": "get__api_header_badge",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeaderBadgeResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cron-runs": {
       "get": {
         "operationId": "get__api_cron_runs",
@@ -5859,6 +5889,15 @@
           "details"
         ],
         "additionalProperties": false
+      },
+      "HeaderBadgeResponse": {
+        "type": "object",
+        "properties": {
+          "configured": { "type": "boolean" },
+          "request": { "type": ["object", "null"], "additionalProperties": true },
+          "rum": { "type": ["object", "null"], "additionalProperties": true }
+        },
+        "required": ["configured", "request", "rum"]
       },
       "CronRunsResponse": {
         "type": "object",

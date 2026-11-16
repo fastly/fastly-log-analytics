@@ -21,6 +21,7 @@ export const NATIVE_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ["POST", "/api/admin/log-fields/preview"],
   ["POST", "/api/admin/log-fields/custom/validate"],
   ["GET", "/api/sync-status"],
+  ["GET", "/api/header-badge"],
   ["GET", "/api/files"],
   ["GET,HEAD", "/api/file"],
   ["GET", "/api/ingest/events"],

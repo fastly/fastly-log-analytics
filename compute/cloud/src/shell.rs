@@ -917,9 +917,17 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             }
             return Ok(response);
         }
-        if request.method == "GET" && matches!(path, "/api/sync-status" | "/api/cron-runs") {
+        if request.method == "GET"
+            && matches!(
+                path,
+                "/api/sync-status" | "/api/cron-runs" | "/api/header-badge"
+            )
+        {
             let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            authorize_admin(user.role)?;
+            // The header badge is the analyst-safe slice of sync-status, without cron or audit history.
+            if path != "/api/header-badge" {
+                authorize_admin(user.role)?;
+            }
             let fresh = if path == "/api/sync-status" {
                 let query = request.path.split_once('?').map_or("", |(_, query)| query);
                 url::form_urlencoded::parse(query.as_bytes())
@@ -944,10 +952,17 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     }
                 }
             }
-            let payload = if path == "/api/sync-status" {
-                self.sync_status()
-            } else {
-                self.cron_runs()
+            let payload = match path {
+                "/api/sync-status" => self.sync_status(),
+                "/api/header-badge" => {
+                    let status = self.sync_status();
+                    json!({
+                        "configured": status["configured"],
+                        "request": status["request"],
+                        "rum": status["rum"],
+                    })
+                }
+                _ => self.cron_runs(),
             };
             if let (Some(key), Some(sid)) = (&cache_key, &sid) {
                 let body = payload.to_string().into_bytes();

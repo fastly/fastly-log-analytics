@@ -678,6 +678,18 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     // Rotating the cache scope supersedes in-flight file discovery, so it settles before the page can start scans,
     // and before the services read so the page's later lookups under this identity share it.
     await setDashboardCacheIdentity(cloudCacheIdentity({ user }));
+    const isRemoteAnalyst =
+      user.role === "analyst" || user.role === "analyst-no-pii";
+    // Analysts can't read the admin-only sync-status the header uses, so they get its analyst-safe slice here.
+    const headerBadge = isRemoteAnalyst
+      ? fetch("/api/header-badge", { credentials: "include", signal: request.signal })
+          .then(async (res) => {
+            if (!res.ok) return undefined;
+            const badge = (await res.json()) as { request?: unknown; rum?: unknown };
+            return { request: badge.request ?? null, rum: badge.rum ?? null };
+          })
+          .catch(() => undefined)
+      : undefined;
     const servicesRes = await fetchCloudMetadata("/api/services", request.signal);
     if (!servicesRes.ok) return servicesRes;
     const servicesJson = servicesRes?.ok
@@ -693,8 +705,6 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         })
       : { services: [] };
     const rawServices = servicesJson.services ?? [];
-    const isRemoteAnalyst =
-      user.role === "analyst" || user.role === "analyst-no-pii";
     const mappedServices = rawServices.map((s) => ({
       ...s,
       service_id: s.service_id,
@@ -714,6 +724,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         services,
         active_service_id: activeServiceId,
         active_log_field_ids: activeLogFieldIds,
+        header_badge: await headerBadge,
         // Cloud has no NGWAF; saying so up front keeps /security from drawing the NGWAF row then removing it.
         ngwaf_configured: false,
         settings: {
