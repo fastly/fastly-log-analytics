@@ -128,7 +128,7 @@ export function ArchitectureDiagram() {
             <DiagramNode
               icon={Globe}
               title="Your Fastly service"
-              detail="Streams gzip-compressed JSON request logs. RUM is an optional second stream."
+              detail="Streams JSON request logs, zstd-compressed by default. RUM is an optional second stream."
             />
             <Connector label="stream" />
             <DiagramNode

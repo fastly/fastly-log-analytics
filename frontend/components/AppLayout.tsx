@@ -229,8 +229,8 @@ export function AppLayout({
             {serverFooter && !isAnalyst && serverFooter}
           </div>
         ) : isPublicPage ? (
-          <div className="min-h-screen flex flex-col bg-background">
-            <main id="main" tabIndex={0} className="flex-1 p-4 md:p-6 outline-none">{children}</main>
+          <div className="h-screen flex flex-col bg-background">
+            <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">{children}</main>
           </div>
         ) : null}
       </>

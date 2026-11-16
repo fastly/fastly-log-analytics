@@ -51,7 +51,7 @@ const pipeline = [
     title: "Capture request logs",
     icon: Globe,
     description:
-      "Your Fastly service streams gzip-compressed JSON logs to Fastly Object Storage, once per log period of at least 60 seconds. One install logs one service in your own Fastly account. Enable RUM to bring browser events into the pipeline too.",
+      "Your Fastly service streams JSON logs, zstd-compressed by default, to Fastly Object Storage, once per log period of at least 60 seconds. One install logs one service in your own Fastly account. Enable RUM to bring browser events into the pipeline too.",
   },
   {
     title: "Convert to Parquet",
