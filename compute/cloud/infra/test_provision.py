@@ -902,7 +902,9 @@ def test_falco_executes_no_erl_variant_and_auth_failure_stripping() -> None:
             capture_output=True,
             check=True,
         )
-        assert "2 passed, 0 failed" in result.stdout + result.stderr
+        # falco colours its summary when CI=true, splitting the counts with ANSI codes.
+        output = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
+        assert "2 passed, 0 failed" in output
     finally:
         path.unlink(missing_ok=True)
 
