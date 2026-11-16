@@ -269,6 +269,7 @@ describe('formatCount, formatValue, calculateDelta, formatCountMaybe, formatAbbr
       ['requests', 1000, '1,000'], ['country', 'US', 'United States'], ['country', 'GB', 'United Kingdom'],
       ['city', 'new york', 'New York'], ['pop', 'jfk', 'JFK'], ['region', 'ca', 'CA'],
       ['proto', 3, '3'], ['tls', 1.3, '1.3'], ['proto', '2.0', '2'], ['tls', '1.3', '1.3'], ['proto', 'h2', 'h2'], ['tls', 'TLSv1.3', 'TLSv1.3'],
+      ['asn', 4812, 'AS4812'], ['asn', '4812', 'AS4812'], ['asn', 'AS4812', 'AS4812'], ['client_asn', 13335, 'AS13335'],
     ] as const) {
       expect(formatValue(col, val)).toBe(want)
     }
