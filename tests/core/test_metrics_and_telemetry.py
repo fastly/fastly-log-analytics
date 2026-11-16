@@ -1306,7 +1306,8 @@ def svc_id(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.config.DATA_DIR", tmp_path)
     monkeypatch.setattr("backend.core.metadata.base.DATA_DIR", tmp_path, raising=False)
     monkeypatch.setattr("backend.core.request_telemetry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 999999.0)
-    svc = "test-slow-queries-svc"
+    # Unique per test: xdist workers share one CI Postgres, so a fixed id lets parallel tests count each other's rows.
+    svc = f"test-slow-queries-{uuid.uuid4().hex[:12]}"
     con = _meta.get_con(svc)
     con.execute("DELETE FROM slow_queries WHERE service_id = ?", (svc,))
     con.commit()
@@ -1320,12 +1321,12 @@ def fresh_singleton_registry(monkeypatch):
     return new_reg
 
 
-def _row(*, qid: int, duration_ms: float, started: float | None = None, kind: str = "admin") -> dict:
+def _row(service_id: str, *, qid: int, duration_ms: float, started: float | None = None, kind: str = "admin") -> dict:
     started = started if started is not None else time.time()
     return {
         "query_id": qid,
         "db_type": "ClickHouse",
-        "service_id": "test-slow-queries-svc",
+        "service_id": service_id,
         "started_at_utc": started,
         "ended_at_utc": started + duration_ms / 1000.0,
         "duration_ms": duration_ms,
@@ -1343,9 +1344,9 @@ def _row(*, qid: int, duration_ms: float, started: float | None = None, kind: st
 @pytest.mark.usefixtures("_reset_singleton")
 def test_slow_queries_insert_list_filter_sort_and_count(svc_id):
     now = time.time()
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=120, started=now - 100, kind="admin"))
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=2000, started=now - 50, kind="admin"))
-    _meta.insert_slow_query(svc_id, _row(qid=3, duration_ms=600, started=now - 10, kind="cron"))
+    _meta.insert_slow_query(svc_id, _row(svc_id, qid=1, duration_ms=120, started=now - 100, kind="admin"))
+    _meta.insert_slow_query(svc_id, _row(svc_id, qid=2, duration_ms=2000, started=now - 50, kind="admin"))
+    _meta.insert_slow_query(svc_id, _row(svc_id, qid=3, duration_ms=600, started=now - 10, kind="cron"))
 
     all_rows = _meta.list_slow_queries(svc_id, since_utc=now - 200)
     assert [r["query_id"] for r in all_rows] == [3, 2, 1]
