@@ -417,24 +417,24 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     ),
     engine.executeSql<Record<string, unknown>>(
       `SELECT
-        COALESCE(geo_country, country, 'Unknown') AS country,
+        COALESCE(NULLIF(geo_country, ''), country) AS country,
         COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
         QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS median_throughput,
         CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate
       FROM requests
-      WHERE ${where}
+      WHERE ${where} AND COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) IS NOT NULL
       GROUP BY 1
-      ORDER BY rebuffer_events DESC, requests DESC
+      ORDER BY sessions DESC, country ASC
       LIMIT ${topN}`,
       [],
       params.signal,
     ),
     engine.executeSql<Record<string, unknown>>(
       `SELECT
-        COALESCE(client_asn, asn, 0)::BIGINT AS asn,
-        COALESCE(as_name, 'AS' || CAST(COALESCE(client_asn, asn, 0) AS VARCHAR)) AS as_name,
+        COALESCE(client_asn, asn)::BIGINT AS asn,
+        COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS as_name,
         COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
@@ -443,9 +443,9 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate,
         AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
       FROM requests
-      WHERE ${where}
+      WHERE ${where} AND COALESCE(client_asn, asn) IS NOT NULL
       GROUP BY 1, 2
-      ORDER BY rebuffer_events DESC, requests DESC
+      ORDER BY sessions DESC, asn ASC
       LIMIT ${topN}`,
       [],
       params.signal,
