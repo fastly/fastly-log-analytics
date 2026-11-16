@@ -4993,7 +4993,8 @@ fn reset_seeded() -> (Platform, admin::Service) {
         &platform,
         "ingest:rum:watermark",
         json!({"run_id": "rum-committed", "key": old(&rum), "at": 1, "passes": [[old(&rum), 1]],
-            "swept": [], "sweep": {"after": old(&rum), "at": 1}, "manifest_gen": 2}),
+            "swept": [], "sweep": {"after": old(&rum), "at": 1}, "manifest_gen": 2,
+            "rum_stats": {"latest_log": 1, "rows": 85491, "at": 1}}),
     );
     for key in [
         "ingest:plan",
@@ -5098,6 +5099,7 @@ fn reset_state_moves_cursor_and_floor_to_reset_minute() {
     assert_eq!(rum["passes"], json!([]));
     assert_eq!(rum["sweep"]["after"], rum_floor);
     assert_eq!(rum["run_id"], "rum-committed");
+    assert!(rum.get("rum_stats").is_none(), "{rum}");
     for key in [
         "ingest:plan",
         "ingest:rum:plan",

@@ -556,7 +556,12 @@ const RESET_LIST: u32 = 100;
 fn reset_cursor(prev: Option<&Value>, floor: &str, now: u64) -> Value {
     let mut value = prev.cloned().unwrap_or_else(|| json!({}));
     if let Some(object) = value.as_object_mut() {
-        for field in ["raw_sources", "raw_scan", "raw_scan_due"] {
+        for field in [
+            "raw_sources",
+            "raw_scan",
+            "raw_scan_due",
+            crate::ingest::RUM_STATS_FIELD,
+        ] {
             object.remove(field);
         }
     }
