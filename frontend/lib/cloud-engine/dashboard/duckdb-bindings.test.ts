@@ -453,6 +453,48 @@ describe("bounded complete Parquet bindings", () => {
     await engine.reset();
   });
 
+  it("answers several selective files in one pass per Parquet schema, as file by file would", async () => {
+    let queries = 0;
+    const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {
+      const backend = await createNodeBackend();
+      return { ...backend, query: (sql, signal) => { queries++; return backend.query(sql, signal); } };
+    } });
+    const t = 1700000000000;
+    const rows = (i: number) => [
+      { timestamp: t + i, status: 200, cache: "HIT", resp_bytes: i, country: "US", edge: i % 2 === 0 },
+      { timestamp: t + i + 1, status: 500, cache: "MISS", resp_bytes: 1, country: "DE", edge: true },
+      { timestamp: t + i + 2, status: 200, cache: "MISS", resp_bytes: 3, country: `C${i}`, edge: false },
+    ];
+    const same = [0, 1, 2].map((i) => ({ kind: "buffer" as const, bytes: parquetFixture(rows(i)) }));
+    const mixed = [
+      ...same,
+      { kind: "buffer" as const, bytes: parquetFixture(rows(3), ["edge"]) },
+      { kind: "buffer" as const, bytes: parquetWriteBuffer({ columnData: [
+        { name: "timestamp", type: "INT64", data: [BigInt(t + 4), BigInt(t + 5)] },
+        { name: "status", type: "INT32", data: [200, 200] },
+        { name: "country", type: "STRING", data: ["FR", "FR"] },
+      ] }) },
+    ];
+    const filters = [{ mode: "include" as const, field: "status", value: "200" }];
+    const fields = ["status", "country", "cache"];
+    const options = { edgeOnly: true, topK: null, allValuesFields: [] };
+    await engine.prewarm();
+
+    const oneByOne = new Aggregator(t, t + 60_000, fields);
+    for (const file of mixed) {
+      await engine.queryParquetIntoAggregator(file, t, t + 60_000, filters, oneByOne, options);
+    }
+    const together = new Aggregator(t, t + 60_000, fields);
+    await engine.queryParquetIntoAggregator(mixed, t, t + 60_000, filters, together, options);
+    expect(together.result()).toEqual(oneByOne.result());
+    expect(together.result().totalRequests).toBe(6);
+
+    queries = 0;
+    await engine.queryParquetIntoAggregator(same, t, t + 60_000, filters, new Aggregator(t, t + 60_000, fields), options);
+    expect(queries).toBeLessThan(same.length * 2);
+    await engine.reset();
+  });
+
   it("retains the query error when selective-file cleanup also fails", async () => {
     let fail = false, queryFailures = 0;
     const engine = new DuckDBAnalyticalEngine({ backendFactory: async () => {

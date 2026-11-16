@@ -799,7 +799,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
   }
 
   async queryParquetIntoAggregator(
-    file: ParquetAccess,
+    files: ParquetAccess | readonly ParquetAccess[],
     fromMs: number,
     toMs: number,
     filters: readonly DashboardFilter[],
@@ -808,110 +808,125 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     customFields: readonly CustomField[] = [],
   ): Promise<void> {
     const { signal } = options;
+    const accesses: readonly ParquetAccess[] = isParquetAccessList(files)
+      ? files
+      : [files];
     return this.runRead(options.context, signal, async (backend) => {
       signal?.throwIfAborted();
-      const name = `selective_${this.nextVirtualFileId++}.parquet`;
-      let registered = false;
+      const registered: string[] = [];
       let failure: unknown;
       const customTypes = new Map(
         customFields.map((field) => [field.id, CUSTOM_DUCKDB_TYPES[field.type]]),
       );
       try {
-        if (file.kind === "buffer") {
-          await backend.registerFileBuffer(name, new Uint8Array(file.bytes.slice(0)));
-        } else if (backend.registerParquet) {
-          await backend.registerParquet(name, file);
-        } else {
-          throw new Error(
-            "Remote Parquet reads require the browser DuckDB runtime",
+        for (const file of accesses) {
+          const name = `selective_${this.nextVirtualFileId++}.parquet`;
+          if (file.kind === "buffer") {
+            await backend.registerFileBuffer(name, new Uint8Array(file.bytes.slice(0)));
+          } else if (backend.registerParquet) {
+            await backend.registerParquet(name, file);
+          } else {
+            throw new Error(
+              "Remote Parquet reads require the browser DuckDB runtime",
+            );
+          }
+          registered.push(name);
+          signal?.throwIfAborted();
+        }
+        // Small files pay a fixed cost per query, so files whose Parquet
+        // schemas match exactly share one pass: the union reads like each file.
+        for (const group of await parquetSchemaGroups(backend, registered, signal)) {
+          const parquet = `read_parquet([${group.map(sqlString).join(", ")}])`;
+          const schema = await backend.query(
+            `DESCRIBE SELECT * FROM ${parquet}`,
+            signal,
+          );
+          const names =
+            (schema.getChild("column_name")?.toJSON() as string[]) ?? [];
+          const types =
+            (schema.getChild("column_type")?.toJSON() as string[]) ?? [];
+          const typeByCol = new Map(
+            names.map((field, i) => [field, types[i].toUpperCase()]),
+          );
+          const tsType = typeByCol.get("timestamp");
+          if (!tsType) throw new Error("Parquet file has no timestamp column");
+          const tsExpr = tsType.startsWith("TIMESTAMP")
+            ? `epoch_ms("timestamp")::BIGINT`
+            : tsType.includes("CHAR")
+              ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
+              : `CAST("timestamp" AS BIGINT)`;
+          const needed = new Set([
+            "status",
+            "cache",
+            "resp_bytes",
+            "edge",
+            ...aggregator.fields,
+            ...filters.map((filter) => filter.field),
+          ]);
+          const columns = [...needed].flatMap((field) => {
+            const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field);
+            if (!type) return [];
+            const col = sqlIdent(field);
+            const cast = `CAST(${col} AS ${type})`;
+            return [
+              !typeByCol.has(field)
+                ? `NULL::${type} AS ${col}`
+                : type === "DOUBLE"
+                  ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
+                  : `${cast} AS ${col}`,
+            ];
+          });
+          // The native timestamp predicate can prune row groups; the millisecond
+          // predicate below remains authoritative for all timestamp encodings.
+          const nativeBounds =
+            tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE")
+              ? [
+                  ...(Number.isFinite(fromMs)
+                    ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
+                    : []),
+                  ...(Number.isFinite(toMs)
+                    ? [`"timestamp" < epoch_ms(${Math.ceil(toMs) + 1}::BIGINT)`]
+                    : []),
+                ]
+              : [];
+          const relation = `(SELECT ${tsExpr} AS ts_ms, ${columns.join(", ")} FROM ${parquet}${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""})`;
+          const where = [
+            "ts_ms IS NOT NULL",
+            ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
+            ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
+            `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && typeByCol.has("edge")), [], customTypes)})`,
+          ].join(" AND ");
+          await this.queryRelation(
+            backend,
+            relation,
+            where,
+            typeByCol.has("resp_bytes"),
+            customTypes,
+            aggregator,
+            options,
+            !options.fieldSearch,
           );
         }
-        registered = true;
-        signal?.throwIfAborted();
-        const parquet = `read_parquet(${sqlString(name)})`;
-        const schema = await backend.query(
-          `DESCRIBE SELECT * FROM ${parquet}`,
-          signal,
-        );
-        const names =
-          (schema.getChild("column_name")?.toJSON() as string[]) ?? [];
-        const types =
-          (schema.getChild("column_type")?.toJSON() as string[]) ?? [];
-        const typeByCol = new Map(
-          names.map((field, i) => [field, types[i].toUpperCase()]),
-        );
-        const tsType = typeByCol.get("timestamp");
-        if (!tsType) throw new Error("Parquet file has no timestamp column");
-        const tsExpr = tsType.startsWith("TIMESTAMP")
-          ? `epoch_ms("timestamp")::BIGINT`
-          : tsType.includes("CHAR")
-            ? `epoch_ms(TRY_CAST("timestamp" AS TIMESTAMP))::BIGINT`
-            : `CAST("timestamp" AS BIGINT)`;
-        const needed = new Set([
-          "status",
-          "cache",
-          "resp_bytes",
-          "edge",
-          ...aggregator.fields,
-          ...filters.map((filter) => filter.field),
-        ]);
-        const columns = [...needed].flatMap((field) => {
-          const type = FIELD_DUCKDB_TYPES[field] ?? customTypes.get(field);
-          if (!type) return [];
-          const col = sqlIdent(field);
-          const cast = `CAST(${col} AS ${type})`;
-          return [
-            !typeByCol.has(field)
-              ? `NULL::${type} AS ${col}`
-              : type === "DOUBLE"
-                ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END AS ${col}`
-                : `${cast} AS ${col}`,
-          ];
-        });
-        // The native timestamp predicate can prune row groups; the millisecond
-        // predicate below remains authoritative for all timestamp encodings.
-        const nativeBounds =
-          tsType.startsWith("TIMESTAMP") && !tsType.includes("TIME ZONE")
-            ? [
-                ...(Number.isFinite(fromMs)
-                  ? [`"timestamp" >= epoch_ms(${Math.floor(fromMs) - 1}::BIGINT)`]
-                  : []),
-                ...(Number.isFinite(toMs)
-                  ? [`"timestamp" < epoch_ms(${Math.ceil(toMs) + 1}::BIGINT)`]
-                  : []),
-              ]
-            : [];
-        const relation = `(SELECT ${tsExpr} AS ts_ms, ${columns.join(", ")} FROM ${parquet}${nativeBounds.length ? ` WHERE ${nativeBounds.join(" AND ")}` : ""})`;
-        const where = [
-          "ts_ms IS NOT NULL",
-          ...(Number.isFinite(fromMs) ? [`ts_ms >= ${Math.floor(fromMs)}`] : []),
-          ...(Number.isFinite(toMs) ? [`ts_ms < ${Math.ceil(toMs)}`] : []),
-          `(${compileFiltersToSql(filters, Boolean(options.edgeOnly && typeByCol.has("edge")), [], customTypes)})`,
-        ].join(" AND ");
-        await this.queryRelation(
-          backend,
-          relation,
-          where,
-          typeByCol.has("resp_bytes"),
-          customTypes,
-          aggregator,
-          options,
-          !options.fieldSearch,
-        );
       } catch (error) {
         failure = error;
         throw error;
       } finally {
-        if (registered) {
+        let cleanupError: unknown;
+        let cleanupFailed = false;
+        for (const name of registered) {
           try {
             await backend.dropFile(name);
-          } catch (cleanupError) {
-            if (failure !== undefined && failure !== cleanupError) {
-              throw new AggregateError([failure, cleanupError],
-                `${failure instanceof Error ? failure.message : "Cloud query failed"}; ${cleanupError instanceof Error ? cleanupError.message : "DuckDB file cleanup failed"}`);
-            }
-            throw cleanupError;
+          } catch (error) {
+            if (!cleanupFailed) cleanupError = error;
+            cleanupFailed = true;
           }
+        }
+        if (cleanupFailed) {
+          if (failure !== undefined && failure !== cleanupError) {
+            throw new AggregateError([failure, cleanupError],
+              `${failure instanceof Error ? failure.message : "Cloud query failed"}; ${cleanupError instanceof Error ? cleanupError.message : "DuckDB file cleanup failed"}`);
+          }
+          throw cleanupError;
         }
       }
     });
@@ -1065,6 +1080,38 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     } satisfies PartialAggregates);
     if (bounded) aggregator.boundRankings();
   }
+}
+
+function isParquetAccessList(
+  files: ParquetAccess | readonly ParquetAccess[],
+): files is readonly ParquetAccess[] {
+  return Array.isArray(files);
+}
+
+/** Groups registered Parquet files whose schemas match exactly, in input order. */
+async function parquetSchemaGroups(
+  backend: DuckDBBackend,
+  names: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[][]> {
+  if (names.length <= 1) return names.length ? [[...names]] : [];
+  const table = await backend.query(
+    `SELECT file_name, concat_ws('|', name, CAST(type AS VARCHAR), CAST(repetition_type AS VARCHAR), CAST(converted_type AS VARCHAR), CAST(logical_type AS VARCHAR), CAST(num_children AS VARCHAR)) AS part FROM parquet_schema([${names.map(sqlString).join(", ")}])`,
+    signal,
+  );
+  signal?.throwIfAborted();
+  const files = (table.getChild("file_name")?.toJSON() as string[]) ?? [];
+  const parts = (table.getChild("part")?.toJSON() as string[]) ?? [];
+  const signatures = new Map<string, string[]>(names.map((name) => [name, []]));
+  files.forEach((file, i) => signatures.get(file)?.push(parts[i]));
+  const groups = new Map<string, string[]>();
+  for (const name of names) {
+    const signature = JSON.stringify(signatures.get(name));
+    const group = groups.get(signature);
+    if (group) group.push(name);
+    else groups.set(signature, [name]);
+  }
+  return [...groups.values()];
 }
 
 let singletonEngine: DuckDBAnalyticalEngine | null = null;

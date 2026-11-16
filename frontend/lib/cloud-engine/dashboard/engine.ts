@@ -1,5 +1,5 @@
 import { isCdnHit } from "./cdn-cache";
-import { getDuckDBEngine, type DuckDBLease } from "./duckdb";
+import { getDuckDBEngine, type DuckDBLease, type ParquetAccess } from "./duckdb";
 import {
   fetchManifest,
   filesOverlapping,
@@ -214,6 +214,9 @@ export type EngineOptions = {
 // /api/file is latency-bound (~0.55 s per file whatever the width); live
 // probes halved wall time from 8 to 16 lanes, and 32 added little.
 const FETCH_CONCURRENCY = 16;
+// One coalesced selective query registers every file it reads in DuckDB memory.
+const SELECTIVE_BATCH_FILES = 16;
+const SELECTIVE_BATCH_BYTES = 16 * 1024 * 1024;
 
 export type SearchFieldOptions = {
   from: string;
@@ -1644,6 +1647,67 @@ async function collectAggregator(
     finishFile();
   };
 
+  const querySelective = (
+    files: readonly ParquetAccess[],
+    target: Aggregator,
+  ) =>
+    duckdb.queryParquetIntoAggregator(
+      files,
+      fromMs,
+      toMs,
+      options.filters ?? [],
+      target,
+      {
+        edgeOnly,
+        topK: null,
+        allValuesFields: [ALL_VALUES_FIELD],
+        signal,
+        fieldSearch: searchQuery === undefined
+          ? undefined : { field: fields[0], query: searchQuery },
+        context: lease.readContext(),
+      },
+      customFields,
+    );
+  // DuckDB answers one query at a time and each pays a fixed cost, so files
+  // that arrive while it is busy share the next query into the aggregator.
+  const selectiveQueue: {
+    access: ParquetAccess;
+    size: number;
+    settle: (error?: unknown) => void;
+  }[] = [];
+  let selectiveBusy = false;
+  const drainSelective = () => {
+    if (selectiveBusy || selectiveQueue.length === 0) return;
+    selectiveBusy = true;
+    let count = 1;
+    let bytes = selectiveQueue[0].size;
+    while (
+      count < Math.min(selectiveQueue.length, SELECTIVE_BATCH_FILES) &&
+      bytes + selectiveQueue[count].size <= SELECTIVE_BATCH_BYTES
+    ) {
+      bytes += selectiveQueue[count++].size;
+    }
+    const batch = selectiveQueue.splice(0, count);
+    querySelective(batch.map((queued) => queued.access), aggregator)
+      .then(
+        () => batch.forEach((queued) => queued.settle()),
+        (error: unknown) => batch.forEach((queued) => queued.settle(error ?? new Error("Cloud query failed"))),
+      )
+      .finally(() => {
+        selectiveBusy = false;
+        drainSelective();
+      });
+  };
+  const queueSelective = (access: ParquetAccess, size: number) =>
+    new Promise<void>((resolve, reject) => {
+      selectiveQueue.push({
+        access,
+        size: Number.isSafeInteger(size) && size > 0 ? size : 0,
+        settle: (error) => (error === undefined ? resolve() : reject(error)),
+      });
+      drainSelective();
+    });
+
   await reserveMicroFiles(
     pending.filter((entry) => !entry.summary).map((entry) => entry.file),
   );
@@ -1704,23 +1768,8 @@ async function collectAggregator(
         const target = completeRollup
           ? new Aggregator(fromMs, toMs, cardFields)
           : aggregator;
-        await duckdb.queryParquetIntoAggregator(
-          access,
-          fromMs,
-          toMs,
-          options.filters ?? [],
-          target,
-          {
-            edgeOnly,
-            topK: null,
-            allValuesFields: [ALL_VALUES_FIELD],
-            signal,
-            fieldSearch: searchQuery === undefined
-              ? undefined : { field: fields[0], query: searchQuery },
-            context: lease.readContext(),
-          },
-          customFields,
-        );
+        if (completeRollup) await querySelective([access], target);
+        else await queueSelective(access, file.size);
         released = true;
         access.release?.();
         if (completeRollup) {

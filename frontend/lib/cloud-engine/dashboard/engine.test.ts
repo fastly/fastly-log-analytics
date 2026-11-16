@@ -612,8 +612,39 @@ describe("runDashboard", () => {
       );
       expect(result.totalRequests).toBe(2);
       expect(fetchFile.mock.calls.map(([key]) => key).sort()).toEqual(["a", "b"]);
-      expect(query.mock.calls.map(([access]) => access.kind)).toEqual(["buffer", "buffer"]);
+      expect(query.mock.calls.flatMap(([files]) => [files].flat().map((access) => access.kind))).toEqual(["buffer", "buffer"]);
       expect(result.stats).toMatchObject({ fetched: 2, cached: 0 });
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it("coalesces filtered selective files that arrive while DuckDB is busy into one query", async () => {
+    const keys = ["a", "b", "c", "d", "e", "f"] as const;
+    const buffers = Object.fromEntries(await Promise.all(keys.map(async (key, i) =>
+      [key, await parquetFixture([row(10 + i, { country: "US" }), row(20 + i, { country: "DE" })])] as const)));
+    const source = fixtureSource([{
+      files: keys.map((key, i) => ({
+        ...manifestEntry(key, `2026-10-29T10:0${i}:00Z`, `2026-10-29T10:0${i + 1}:00Z`, 2),
+        size: buffers[key].byteLength,
+      })),
+      next_cursor: null,
+      complete: true,
+    }], buffers);
+    const query = vi.spyOn(getDuckDBEngine(), "queryParquetIntoAggregator");
+    try {
+      const result = await runDashboard({
+        ...source,
+        openParquet: async (file) => ({ kind: "buffer", bytes: buffers[file.key as keyof typeof buffers] }),
+      }, {
+        from: "2026-10-29T10:00:00Z",
+        to: "2026-10-29T10:10:00Z",
+        filters: [{ mode: "include", field: "country", value: "US" }],
+      });
+      expect(result.totalRequests).toBe(keys.length);
+      expect(result.stats).toMatchObject({ fetched: keys.length });
+      expect(query.mock.calls.flatMap(([files]) => [files].flat())).toHaveLength(keys.length);
+      expect(query.mock.calls.length).toBeLessThan(keys.length);
     } finally {
       query.mockRestore();
     }
