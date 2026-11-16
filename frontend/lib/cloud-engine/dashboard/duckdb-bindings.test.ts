@@ -277,7 +277,10 @@ describe("bounded complete Parquet bindings", () => {
       { name: "metric_name", type: "STRING", data: ["CLS"] },
       { name: "metric_value", type: "DOUBLE", data: [0.5] },
     ] });
-    await engine.syncRumFiles([...vitals, { key: "rum/other.parquet", bytes: other }]);
+    const lease = engine.lease();
+    for (const file of [...vitals, { key: "rum/other.parquet", bytes: other }])
+      await lease.ingestFile(file.key, file.key, file.bytes, undefined, undefined, "vitals", { deferView: true });
+    await lease.publishView();
     const view = views.filter((sql) => sql.includes("client_vitals")).at(-1)!;
     // One branch for the 300 identical files, one for the differently shaped file, one empty errors branch.
     expect(view.split("read_parquet(").length - 1).toBe(2);
@@ -290,6 +293,7 @@ describe("bounded complete Parquet bindings", () => {
       { scoped_key: "rum/other.parquet", metric_value: 0.5 },
       { scoped_key: "rum/vitals-7.parquet", metric_value: 7 },
     ]);
+    lease.release();
     await engine.reset();
   });
 
