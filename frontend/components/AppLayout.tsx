@@ -54,6 +54,19 @@ const PLOTLY_PREWARM_PREFIXES = [
   '/insights', '/fastly-value', '/usage', '/streaming', '/control-room', '/sessions/stream',
 ] as const
 
+// Layout re-renders (bootstrap, service store, sidebar) must not reach a page
+// boundary that is still hydrating: React would discard the server HTML and
+// client-render the page behind the null fallback. The server-provided
+// children reference is stable, so memoizing bails those re-renders out.
+const PageBoundary = React.memo(function PageBoundary({ children }: { children: React.ReactNode }) {
+  return (
+    <React.Suspense fallback={null}>
+      {children}
+      <ServiceUrlWriteback />
+    </React.Suspense>
+  )
+})
+
 export function AppLayout({
   children, initialCollapsed = false, ssrActiveServiceId, ssrIsRumEnabled, serverFooter,
 }: {
@@ -412,10 +425,7 @@ export function AppLayout({
                   <ServiceUrlWriteback />
                 </>
               ) : (
-                <React.Suspense fallback={null}>
-                  {children}
-                  <ServiceUrlWriteback />
-                </React.Suspense>
+                <PageBoundary>{children}</PageBoundary>
               )}
               {debugEnabled && <DebugPanel />}
               {serverFooter && !isAnalyst && serverFooter}
