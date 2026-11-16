@@ -55,8 +55,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # commit; compute/scorer/pkg/ is gitignored and a hand-built tarball goes stale
 # or goes missing on any host that only does a git checkout. Local non-Docker
 # dev builds the same artifact with `make scorer-package`.
-# rust:1.90-slim-bookworm (rustup installs compute/rust-toolchain.toml 1.96.0)
-FROM rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9 AS scorer-builder
+# rust:1.100-slim-bookworm (rustup installs compute/rust-toolchain.toml 1.96.0)
+FROM rust:1.100-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS scorer-builder
 
 ARG TARGETARCH
 ARG FASTLY_CLI_VERSION=16.1.0

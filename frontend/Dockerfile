@@ -1,6 +1,6 @@
 # --- Build Stage ---
 # node:24-slim
-FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS builder
+FROM node:26-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
@@ -46,7 +46,7 @@ RUN --mount=type=cache,target=/app/.next/cache npx next build
 
 # --- Production Stage ---
 # node:24-slim
-FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS runner
+FROM node:26-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS runner
 
 RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
