@@ -747,6 +747,20 @@ def test_log_usage_calls_and_synthetic_updates_hourly_summary():
     ]
 
 
+def test_hourly_summary_upserts_rows_in_key_order_so_concurrent_flushes_cannot_deadlock():
+    # Pods flushing the same hot (service, hour, class, type) rows in different orders deadlocked in Postgres.
+    con = MagicMock()
+    summary_map = {
+        ("svc", "2026-05-01T10", "CDN", "download"): [1, 10],
+        ("svc", "2026-05-01T10", "B", "GET"): [2, 20],
+        ("svc", "2026-05-01T09", "A", "PUT"): [3, 30],
+        ("svc", "2026-05-01T10", "A", "PUT"): [4, 40],
+    }
+    usage_log._upsert_hourly_summary(con, summary_map, "now")
+    rows = con.executemany.call_args.args[1]
+    assert [r[:4] for r in rows] == sorted(summary_map)
+
+
 def test_reconcile_purge_and_clear_usage_log():
     sid = "svc_test_summary_3"
     usage_log.clear_usage_log(sid)

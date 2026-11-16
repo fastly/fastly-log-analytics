@@ -121,8 +121,9 @@ def _upsert_hourly_summary(
 ) -> None:
     if not summary_map:
         return
+    # Every writer locks the shared rows in key order, so concurrent flushes queue instead of deadlocking.
     summary_rows = [
-        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
+        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in sorted(summary_map.items())
     ]
     con.executemany(
         "INSERT INTO usage_log_hourly_summary "
