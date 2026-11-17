@@ -27,6 +27,7 @@ from backend.provision.declarative.models import (
     VCLSnippet,
 )
 from backend.provision.declarative.vcl_builder import (
+    _is_managed_endpoint,
     _is_managed_snippet,
     build_rum_log_condition,
     desired_backends,
@@ -605,7 +606,12 @@ def _apply_diff(
         fastly_integration.delete_snippet,
         skip_fn=lambda n: not _is_managed_snippet(n),
     )
-    _purge_outdated(diff.endpoints_to_remove, "logging endpoint", fastly_integration.delete_logging_endpoint)
+    _purge_outdated(
+        diff.endpoints_to_remove,
+        "logging endpoint",
+        fastly_integration.delete_logging_endpoint,
+        skip_fn=lambda n: not _is_managed_endpoint(n, desired_state),
+    )
     _purge_outdated(
         diff.backends_to_remove,
         "backend",

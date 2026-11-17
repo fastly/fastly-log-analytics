@@ -53,6 +53,7 @@ from backend.provision.declarative.models import (
 )
 from backend.provision.declarative.vcl_builder import (
     _format_field_names,
+    _is_managed_endpoint,
     _is_managed_snippet,
     desired_backends,
     desired_dictionaries,
@@ -137,7 +138,9 @@ def reconcile_vcl_state(
             if status_cb:
                 status_cb("⏳ Fetching active configuration from Fastly...")
             current_snippets = _fetch_snippets(service_id, token)
-            current_endpoints = _fetch_logging_endpoints(service_id, token)
+            current_endpoints = [
+                e for e in _fetch_logging_endpoints(service_id, token) if _is_managed_endpoint(e.name, desired_state)
+            ]
             current_backends = [b for b in _fetch_backends(service_id, token) if b.name in MANAGED_BACKEND_NAMES]
             current_dictionaries = [
                 d for d in _fetch_dictionaries(service_id, token) if d.name in MANAGED_DICTIONARY_NAMES

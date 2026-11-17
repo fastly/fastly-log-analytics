@@ -416,6 +416,18 @@ def desired_dictionaries(state: FeatureState) -> list[ServiceDictionary]:
     return [ServiceDictionary(name="fos_credentials", write_only=True, items=items)]
 
 
+_LEGACY_ENDPOINT_NAMES = frozenset(
+    {"Fastly Log Analytics", "Fastly Object Storage Logs", "Fastly RUM Logs", "Fastly RUM Object Storage Logs"}
+)
+
+
+def _is_managed_endpoint(name: str, state: FeatureState | None) -> bool:
+    # Exact names only: a customer's own endpoint or another install's endpoint on the same service must survive reconcile.
+    if name in _LEGACY_ENDPOINT_NAMES:
+        return True
+    return state is not None and name in (state.logging_endpoint_name, state.rum_endpoint_name)
+
+
 def _is_managed_snippet(name: str) -> bool:
     from backend.core.fastly.client import RUM_SNIPPET_NAMES
     from backend.provision.cmcd_fields import cmcd_snippet_names

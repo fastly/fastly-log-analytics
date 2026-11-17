@@ -1037,6 +1037,47 @@ class TestDictionaryFiltering:
             assert result.changes_applied is not None and result.changes_applied.get("dictionaries_removed", 0) == 0
 
 
+def _s3(name: str) -> LoggingEndpoint:
+    return LoggingEndpoint(
+        name=name,
+        endpoint_type="s3",
+        path="/elsewhere/",
+        period=300,
+        response_condition="",
+        format_string="{}",
+        placement=None,
+        response_object_name="",
+    )
+
+
+class TestEndpointOwnership:
+    def test_reconcile_leaves_foreign_endpoints_alone(self):
+        endpoints = [_s3("Customer Archive"), _s3("FLP Cloud Logs")]
+        with _reconcile_env(endpoints=endpoints) as m, _mock_cfg_file():
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert diff.endpoints_to_remove == []
+        assert [ep.name for ep in diff.endpoints_to_add + diff.endpoints_to_update] == ["Fastly Log Analytics"]
+
+    def test_reconcile_removes_own_endpoint_after_rename(self):
+        endpoints = [_s3("Fastly Log Analytics"), _s3("Fastly RUM Logs"), _s3("Customer Archive")]
+        with (
+            _reconcile_env(endpoints=endpoints) as m,
+            _mock_cfg_file(provisioning={"endpoint_name": "Request Logs"}, rum={"endpoint_name": "RUM Logs"}),
+        ):
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        diff = m["apply"].call_args.args[3]
+        assert sorted(diff.endpoints_to_remove) == ["Fastly Log Analytics", "Fastly RUM Logs"]
+        assert [ep.name for ep in diff.endpoints_to_add] == ["Request Logs"]
+
+    def test_apply_diff_never_deletes_a_foreign_endpoint(self):
+        diff = DiffResult(endpoints_to_remove=["Customer Archive", "Fastly Object Storage Logs"])
+        with patch("backend.provision.declarative.reconciler.fastly_integration") as fi_mock:
+            _apply_diff("srv_test", "token", 2, diff, desired_state=_state())
+        deleted = [c.args[2] for c in fi_mock.delete_logging_endpoint.call_args_list]
+        assert deleted == ["Fastly Object Storage Logs"]
+
+
 class TestBootstrapFeatureState:
     @patch("backend.provision.declarative.reconciler.fastly")
     @patch("backend.provision.declarative.reconciler.fastly_integration")
