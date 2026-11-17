@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from backend import config as app_config
 from backend.core.clickhouse import ClickHouseClient
+from backend.core.metadata.base import closing_pg_pool
 from backend.high_scale.archive import (
     ArchivePublication,
     ClickHouseBatchAdapter,
@@ -438,6 +439,11 @@ def _csv_env(name: str) -> tuple[str, ...]:
 
 
 def main() -> int:
+    with closing_pg_pool():
+        return _main()
+
+
+def _main() -> int:
     os.environ.setdefault("METADATA_PG_POOL_MAX", "8")
     if os.environ.get("OTEL_EXPORTER") == "prometheus":
         try:

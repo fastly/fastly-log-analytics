@@ -880,5 +880,12 @@ def cmd_list_fields():
     handle_list_fields(SimpleNamespace())
 
 
+def main() -> None:
+    from backend.core.metadata.base import closing_pg_pool
+
+    with closing_pg_pool():
+        app()
+
+
 if __name__ == "__main__":
-    app()
+    main()

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.core.clickhouse import maintain_clickhouse_system_tables
+from backend.core.metadata import pg_pool
 from backend.high_scale import worker
 from backend.high_scale.archive import HighScaleConfig, TopologyProfile, from_environment
 from backend.high_scale.ingest_controller import PageRun
@@ -18,6 +19,7 @@ from backend.high_scale.worker import (
     _MultiServiceWorkerLoop,
     _weights_from_env,
 )
+from tests._helpers.pg_pool_fakes import install_fake_pg_pool
 
 
 @dataclass
@@ -447,3 +449,27 @@ def test_weights_environment_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("HIGH_SCALE_SERVICE_WEIGHTS")
     assert _weights_from_env() == {}
+
+
+@pytest.mark.parametrize("run_fails", [False, True])
+def test_bounded_worker_run_closes_the_metadata_pool_it_opened(
+    monkeypatch: pytest.MonkeyPatch, run_fails: bool
+) -> None:
+    opened = install_fake_pg_pool(monkeypatch)
+
+    class _Loop:
+        def run(self, max_iterations: int | None = None) -> None:
+            pg_pool.get_pg_pool()
+            if run_fails:
+                raise RuntimeError("pg down")
+
+    monkeypatch.setattr(worker, "build_worker_from_environment", lambda **_: _Loop())
+    monkeypatch.setattr("sys.argv", ["worker", "--once"])
+
+    if run_fails:
+        with pytest.raises(RuntimeError, match="pg down"):
+            worker.main()
+    else:
+        assert worker.main() == 0
+    assert len(opened) == 1 and opened[0].closed
+    assert pg_pool._pool is None

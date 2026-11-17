@@ -36,6 +36,7 @@ from backend.core.metadata.ingest_log import (
 )
 from backend.core.metadata.usage_log import start_cron_run
 from backend.utils.date_utils import iso_z_now
+from tests._helpers.pg_pool_fakes import install_fake_pg_pool
 
 
 def test_start_cron_run_leases():
@@ -1752,6 +1753,23 @@ def test_get_pg_pool_passes_open_true_explicitly():
             assert captured_kwargs.get("open") is True
     finally:
         setattr(pg_pool_mod, "_pool", orig_pool)
+
+
+def test_close_pg_pool_returns_this_threads_connection_and_the_next_use_opens_a_fresh_pool(monkeypatch):
+    import weakref
+
+    import backend.core.metadata.pg_pool as pg_pool_mod
+
+    opened = install_fake_pg_pool(monkeypatch)
+    monkeypatch.setattr(pg_pool_mod, "_thread_local", threading.local())
+    monkeypatch.setattr(pg_pool_mod, "_checked_out", weakref.WeakSet())
+    first = pg_pool_mod.get_pg_thread_connection()
+
+    pg_pool_mod.close_pg_pool()
+
+    assert opened[0].closed and opened[0].returned == [first._conn]
+    second = pg_pool_mod.get_pg_thread_connection()
+    assert len(opened) == 2 and second._pool is opened[1] and second is not first
 
 
 def test_job_runs_terminal_pruning_preserves_active_leases():

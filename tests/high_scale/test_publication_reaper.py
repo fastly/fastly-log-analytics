@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from psycopg_pool import ConnectionPool
 
+from backend.core.metadata import pg_pool
 from backend.high_scale import publication_reaper
 from backend.high_scale.archive import (
     BatchManifest,
@@ -29,6 +30,7 @@ from backend.high_scale.postgres_control.control_plane import (
     SCHEMA_LOCK_KEY,
 )
 from backend.high_scale.publication_reaper import PublicationReaper, clickhouse_visible_receipts, publication_batch_id
+from tests._helpers.pg_pool_fakes import install_fake_pg_pool
 
 
 def _no_receipts(_service_id: str, _batch_uuids: frozenset[str]) -> set[str]:
@@ -572,3 +574,36 @@ def test_cli_is_a_dry_run_unless_apply_is_given(seed, monkeypatch, capsys) -> No
     assert publication_reaper.main(["--service-id", seed.sid, "--apply"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["applied"] == 1 and seed.status(pending) == "superseded"
+
+
+@pytest.mark.parametrize("reap_fails", [False, True])
+def test_cli_closes_the_metadata_pool_it_opened_so_the_process_exits_promptly(monkeypatch, capsys, reap_fails) -> None:
+    opened = install_fake_pg_pool(monkeypatch)
+    monkeypatch.setattr(publication_reaper, "_visible_receipts_from_environment", lambda: _no_receipts)
+
+    def reap(self, service_id, **_kwargs):
+        if reap_fails:
+            raise RuntimeError("pg down")
+        return publication_reaper.ReapResult((), {}, 0, 0, None)
+
+    monkeypatch.setattr(PublicationReaper, "reap", reap)
+
+    if reap_fails:
+        with pytest.raises(RuntimeError, match="pg down"):
+            publication_reaper.main(["--service-id", "svc"])
+    else:
+        assert publication_reaper.main(["--service-id", "svc"]) == 0
+    assert len(opened) == 1 and opened[0].closed
+    assert pg_pool._pool is None
+
+
+def test_cli_leaves_an_already_open_metadata_pool_open(monkeypatch, capsys) -> None:
+    install_fake_pg_pool(monkeypatch)
+    shared = pg_pool.get_pg_pool()
+    monkeypatch.setattr(publication_reaper, "_visible_receipts_from_environment", lambda: _no_receipts)
+    monkeypatch.setattr(
+        PublicationReaper, "reap", lambda self, service_id, **_: publication_reaper.ReapResult((), {}, 0, 0, None)
+    )
+
+    assert publication_reaper.main(["--service-id", "svc"]) == 0
+    assert pg_pool._pool is shared and not shared.closed

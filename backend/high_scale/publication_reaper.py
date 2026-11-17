@@ -262,6 +262,13 @@ def reaper_from_environment(control: Any, clickhouse: Any) -> PublicationReaper 
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from backend.core.metadata.base import closing_pg_pool
+
+    with closing_pg_pool():
+        return _main(argv)
+
+
+def _main(argv: Sequence[str] | None) -> int:
     from backend.high_scale.postgres_control import PostgresControlPlane
 
     parser = ArgumentParser(description="Supersede orphaned high-scale publication manifests (dry run by default)")
