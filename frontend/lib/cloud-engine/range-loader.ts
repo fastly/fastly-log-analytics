@@ -22,6 +22,15 @@ const requestReads = new WeakMap<Request, DuckDBReadContext>();
 /** A range the browser won't scan: retrying the same request fails the same way. */
 export class CloudBudgetError extends Error {}
 
+/**
+ * The Cloud file source the range loader reads through, scoped to a service
+ * when one is named; its cache scope follows the signed-in identity.
+ */
+export function cloudFileSource(serviceId?: string) {
+  const scoped = serviceId ? source.withOptions({ serviceId }) : source;
+  return { ...scoped, cacheScope: `${dashboardCacheScope()}:${serviceId ?? ""}` };
+}
+
 export function bindCloudReadContext(request: Request, context: DuckDBReadContext): Request {
   requestReads.set(request, context);
   return request;

@@ -22,6 +22,7 @@ import {
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
+import { networkFromRollup, networkRollupEligible } from "./network-rollup";
 import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import {
@@ -46,7 +47,9 @@ import { cloudProvisionExecute } from "./provision";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
-import { bindCloudReadContext, CloudBudgetError, cloudReadContext, ensureCloudRange } from "./range-loader";
+import {
+  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudReadContext, ensureCloudRange,
+} from "./range-loader";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
@@ -369,6 +372,37 @@ async function prepareInsightsScan(request: Request): Promise<Request> {
   }
 }
 
+/**
+ * Serves an unfiltered /network read from v3 summaries over the range and
+ * service the raw scan would use, so it neither waits for queued scans nor
+ * loads DuckDB. Null (or a summary failure) leaves the read to the raw scan.
+ */
+async function cloudNetworkRollup(request: Request, path: string): Promise<Response | null> {
+  const url = new URL(request.url);
+  const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : {};
+  const params = { ...Object.fromEntries(url.searchParams), ...body } as NetworkQueryParams & Record<string, unknown>;
+  if (!networkRollupEligible(path, params)) return null;
+  let end = String(params.end_time ?? params.end ?? "");
+  if (!end) {
+    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    if (!response.ok) return null;
+    end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+  }
+  const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
+  const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
+  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  try {
+    const answer = await networkFromRollup(path, {
+      ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
+    }, cloudFileSource(serviceId), request.signal);
+    return answer ? jsonResponse(answer, request) : null;
+  } catch (error) {
+    if (request.signal.aborted) throw error;
+    console.warn("flp: /network summaries failed; reading raw Parquet", error);
+    return null;
+  }
+}
+
 async function prepareCloudScan(request: Request): Promise<Request> {
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
@@ -583,6 +617,10 @@ async function handleCloudRequest(
       const chartInterval = body.chart_interval ?? body.interval;
       localScan ||= RAW_CHART_METRICS.has(body.chart_metric ?? body.metric ?? "requests") ||
         chartInterval === "1 second" || chartInterval === "1s";
+    }
+    if (localScan && (path === "/api/network-health" || path === "/api/network/pop-health")) {
+      const answer = await cloudNetworkRollup(request, path);
+      if (answer) return answer;
     }
     if (localScan) {
       const previous = analyticalQueue;

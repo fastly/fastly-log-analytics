@@ -14,10 +14,16 @@ import { VALUE_SCAN_COLUMNS } from "./value";
 import { ASSETS_SCAN_COLUMNS } from "./assets";
 import { SESSIONS_SCAN_COLUMNS } from "./sessions";
 import { setCloudModeRuntime } from "./mode";
+import { networkFromRollup } from "./network-rollup";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
   ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
+}));
+
+vi.mock("./network-rollup", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./network-rollup")>(),
+  networkFromRollup: vi.fn(async () => null),
 }));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
@@ -329,6 +335,65 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect((await options("/api/network-health", post({
       sections: ["summary"], filters: { host: { mode: "include", values: ["example.com"] } },
     })))?.projection?.columns).toEqual([...columns, "host"]);
+  });
+
+  it("answers unfiltered /network reads from summaries before any raw scan, over the scan's range and service", async () => {
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce({ served: "rollup" } as never);
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network-health", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ sections: ["summary", "heatmap"], bucket_seconds: 900 }),
+    }));
+    expect(await res!.json()).toEqual({ served: "rollup" });
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+    const [path, params, source] = vi.mocked(networkFromRollup).mock.calls[0];
+    expect(path).toBe("/api/network-health");
+    expect(params).toMatchObject({
+      sections: ["summary", "heatmap"], bucket_seconds: 900, service_id: "svc-1",
+      start_time: "2026-11-05T00:00:00.000Z", end_time: "2026-11-06T00:00:00Z",
+    });
+    expect(source.cacheScope).toContain("svc-1");
+
+    vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce({ served: "pops" } as never);
+    const pops = await handleCloudAnalyticalRequest(new Request(
+      "http://localhost/api/network/pop-health?start_time=2026-11-05T12:00:00Z&end_time=2026-11-05T18:00:00Z",
+    ));
+    expect(await pops!.json()).toEqual({ served: "pops" });
+    expect(vi.mocked(networkFromRollup).mock.calls[0][1])
+      .toMatchObject({ start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z" });
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the raw /network scan when summaries can't answer or fail, but not when aborted", async () => {
+    const health = (init: RequestInit = {}) => handleCloudAnalyticalRequest(new Request("http://localhost/api/network-health", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: ["summary"] }), ...init,
+    }));
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce(null);
+    expect((await health())!.status).toBe(200);
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(networkFromRollup).mockClear().mockRejectedValueOnce(new Error("truncated bundle"));
+    expect((await health())!.status).toBe(200);
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("reading raw Parquet"), expect.any(Error));
+
+    const controller = new AbortController();
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(networkFromRollup).mockClear().mockImplementationOnce(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    await expect(health({ signal: controller.signal })).rejects.toBeDefined();
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(networkFromRollup).mockClear();
+    await health({ body: JSON.stringify({ sections: ["summary"], filter_pop: "IAD" }) });
+    expect(networkFromRollup).not.toHaveBeenCalled();
   });
 
   it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
