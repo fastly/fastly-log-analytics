@@ -3039,10 +3039,10 @@ fn manual_run_manifest_records_when_the_run_finished() {
     let at = fastly_log_analytics::admin::rfc3339_from_secs;
     let duration_s = manifest["duration_ms"].as_u64().unwrap() / 1000;
     assert!(duration_s > 0, "{manifest}");
-    assert_eq!(manifest["started_at"], at(started as u64), "{manifest}");
+    assert_eq!(manifest["started_at"], at(started), "{manifest}");
     assert_eq!(
         manifest["finished_at"],
-        at(started as u64 + duration_s),
+        at(started + duration_s),
         "{manifest}"
     );
 }
