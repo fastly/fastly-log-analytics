@@ -1,5 +1,5 @@
 import { parquetMetadata } from "hyparquet";
-import { fnv1a64 } from "../parquet-key";
+import { fnv1a32, fnv1a64 } from "../parquet-key";
 import type { FileRollupData, MinuteBucket, Scalar } from "./engine";
 import { Hll } from "./hll";
 import type { ManifestFile } from "./manifest";
@@ -433,6 +433,107 @@ export function planCoarsestFirst(
       ...p4.summaries,
     ],
     raw: p4.raw,
+  };
+}
+
+/**
+ * Answers compacted raw files of an open hour from the window summaries the
+ * ingest worker wrote beside each window, so a page need not wait for the
+ * hour bundle. A compact whose name tags (sorted FNV-1a of its sources' file
+ * names, `telemetry/compact.rs` `compact_key`) all resolve to window summaries
+ * with matching rows is answered by exactly those summaries. Compacts merged
+ * from compacts name compacts that no longer exist, so an hour's remaining ones
+ * are answered together only when the hour is wholly in range and its unused
+ * window summaries hold exactly their rows. Several summaries answer one
+ * compact, so callers must treat the plan as all or nothing.
+ */
+export function planCompactsFromWindows(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): SummaryPlan {
+  type Window = { file: ManifestFile; rows: number; used: boolean };
+  const windowsByHour = new Map<string, Map<number, Window>>();
+  for (const file of summaryFiles) {
+    const match = WINDOW_SUMMARY.exec(file.key);
+    const rows = match && /-n(\d+)$/.exec(match[2]);
+    if (!match || !rows) continue;
+    const hour = windowsByHour.get(match[1]) ?? new Map<number, Window>();
+    hour.set(fnv1a32(`window=${match[2]}.parquet`), {
+      file,
+      rows: Number(rows[1]),
+      used: false,
+    });
+    windowsByHour.set(match[1], hour);
+  }
+  const partialHours = new Set<string>();
+  const merged = new Map<
+    string,
+    { file: ManifestFile; rows: number; sources: number }[]
+  >();
+  const summaries: SummaryUse[] = [];
+  const claimed = new Set<string>();
+  for (const file of rawFiles) {
+    const match = RAW_COMPACT.exec(file.key) ?? RAW_WINDOW.exec(file.key);
+    if (!match) continue;
+    const hourKey = `${match[1]}hour=${match[2]}/`;
+    if (Date.parse(file.start) < fromMs || Date.parse(file.end) > toMs) {
+      partialHours.add(hourKey);
+      continue;
+    }
+    const compact = RAW_COMPACT.exec(file.key);
+    if (!compact) continue;
+    const name = /^\d+-\d+-c(\d+)-n(\d+)-([0-9a-f]+)$/.exec(compact[3]);
+    const sources = Number(compact[4]);
+    const rows = Number(compact[5]);
+    const hour = windowsByHour.get(hourKey);
+    const tags =
+      name && name[3].length === sources * 8
+        ? Array.from({ length: sources }, (_, i) =>
+            parseInt(name[3].slice(i * 8, i * 8 + 8), 16),
+          )
+        : [];
+    const named = tags.map((tag) => hour?.get(tag));
+    if (
+      tags.length > 0 &&
+      named.every((w) => w && !w.used) &&
+      named.reduce((sum, w) => sum + w!.rows, 0) === rows
+    ) {
+      for (const w of named) {
+        w!.used = true;
+        summaries.push({ file: w!.file, covers: [file] });
+      }
+      claimed.add(file.key);
+    } else {
+      merged.set(hourKey, [
+        ...(merged.get(hourKey) ?? []),
+        { file, rows, sources },
+      ]);
+    }
+  }
+  for (const [hourKey, compacts] of merged) {
+    if (partialHours.has(hourKey)) continue;
+    const unused = [...(windowsByHour.get(hourKey)?.values() ?? [])].filter(
+      (w) => !w.used,
+    );
+    const rows = compacts.reduce((sum, c) => sum + c.rows, 0);
+    const sources = compacts.reduce((sum, c) => sum + c.sources, 0);
+    if (
+      unused.length >= sources &&
+      unused.reduce((sum, w) => sum + w.rows, 0) === rows
+    ) {
+      const covers = compacts.map((c) => c.file);
+      for (const w of unused) {
+        w.used = true;
+        summaries.push({ file: w.file, covers });
+      }
+      for (const c of compacts) claimed.add(c.file.key);
+    }
+  }
+  return {
+    summaries,
+    raw: rawFiles.filter((file) => !claimed.has(file.key)),
   };
 }
 

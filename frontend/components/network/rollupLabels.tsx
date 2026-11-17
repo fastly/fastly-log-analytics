@@ -21,7 +21,7 @@ export function RollupDataThrough({ meta }: { meta: NetworkRollupMeta }) {
     <div role="note" className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
       <Info className="h-3.5 w-3.5 shrink-0" />
       <span title={formatDate(meta.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}>
-        Data through {formatDate(meta.data_through, timezone, 'HH:mm')}; newer logs are not summarized yet.
+        Data through {formatDate(meta.data_through, timezone, 'HH:mm')}.
         Values marked ≈ are estimated from summaries and ≥ are lower bounds.
       </span>
     </div>

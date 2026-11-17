@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { Histogram } from "./histogram";
 import type { ManifestFile } from "./manifest";
 import { readColumns } from "./parquet";
+import { fnv1a32 } from "../parquet-key";
 import {
   decodeRollup,
   mergeRollups,
@@ -198,16 +199,82 @@ describe("planRollup", () => {
     expect(planRollup(RAW, summaries, T0, T0 + 2 * HOUR)).toBeNull();
   });
 
-  it("falls back to raw when the omitted tail is longer than allowed", () => {
-    const summaries = WINDOWS.filter((f) => at(f) < T0 + HOUR);
-    expect(planRollup(RAW, summaries, T0, T0 + 2 * HOUR)).not.toBeNull();
-    expect(
-      planRollup(RAW, summaries, T0, T0 + 2 * HOUR, 30 * 60_000),
-    ).toBeNull();
+  it("falls back to raw when the omitted tail is longer than one raw window", () => {
+    const summaries = WINDOWS.filter((f) => at(f) < T0 + HOUR + 30 * 60_000);
+    expect(planRollup(RAW, summaries, T0, T0 + 2 * HOUR)).toBeNull();
   });
 
   it("falls back to raw when nothing is covered", () => {
     expect(planRollup(RAW, [], T0, T0 + 2 * HOUR)).toBeNull();
+  });
+
+  // `compact={a}-{b}-c{n}-n{rows}-{tags}` names its sources by the sorted
+  // FNV-1a hashes of their file names (`telemetry/compact.rs` `compact_key`).
+  const fileName = (f: ManifestFile) => f.key.slice(f.key.lastIndexOf("/") + 1);
+  const compactOf = (sources: ManifestFile[]): ManifestFile => {
+    const dir = sources[0].key.replace(/(hour=\d{2}\/).*$/, "$1");
+    const tags = [...new Set(sources.map((f) => fnv1a32(fileName(f))))]
+      .sort((x, y) => x - y)
+      .map((t) => t.toString(16).padStart(8, "0"))
+      .join("");
+    const a = Math.min(...sources.map((f) => Date.parse(f.start) / 1000));
+    const b = Math.max(...sources.map((f) => Date.parse(f.end) / 1000));
+    const rows = sources.reduce((sum, f) => sum + (f.rows ?? 0), 0);
+    return {
+      key: `${dir}catalog1/${"0".repeat(64)}/compact=${a}-${b}-c${sources.length}-n${rows}-${tags}.parquet`,
+      start: new Date(a * 1000).toISOString(),
+      end: new Date(b * 1000).toISOString(),
+      rows,
+      size: 1,
+    };
+  };
+  const hour1Raw = RAW.filter((f) => at(f) >= T0 + HOUR);
+  const openHour = [...HOURS.filter((f) => at(f) === T0), ...WINDOWS];
+
+  it("answers a compacted open hour from the summaries of the windows the compact names", () => {
+    const compact = compactOf(hour1Raw.slice(0, 3));
+    const raw = [...RAW.filter((f) => at(f) < T0 + HOUR), compact, hour1Raw[3]];
+    const plan = planRollup(raw, openHour, T0, T0 + 2 * HOUR)!;
+    expect(plan).not.toBeNull();
+    expect(plan.dataThroughMs).toBe(T0 + 2 * HOUR);
+    const answering = plan.files
+      .filter((use) => use.covers.includes(compact))
+      .map((use) => use.file.key);
+    expect(answering.toSorted()).toEqual(
+      WINDOWS.filter(
+        (f) => at(f) >= T0 + HOUR && at(f) < T0 + HOUR + 45 * 60_000,
+      )
+        .map((f) => f.key)
+        .toSorted(),
+    );
+  });
+
+  it("answers compacts merged from compacts only when the hour's window summaries add up", () => {
+    const merged = compactOf([
+      compactOf(hour1Raw.slice(0, 2)),
+      compactOf(hour1Raw.slice(2, 4)),
+    ]);
+    const raw = [...RAW.filter((f) => at(f) < T0 + HOUR), merged];
+    const plan = planRollup(raw, openHour, T0, T0 + 2 * HOUR)!;
+    expect(plan).not.toBeNull();
+    expect(plan.dataThroughMs).toBe(T0 + 2 * HOUR);
+    expect(
+      plan.files.filter((use) => use.covers.includes(merged)),
+    ).toHaveLength(4);
+
+    const missing = openHour.filter(
+      (f) => at(f) !== T0 + HOUR + 15 * 60_000 || !WINDOWS.includes(f),
+    );
+    expect(planRollup(raw, missing, T0, T0 + 2 * HOUR)).toBeNull();
+  });
+
+  it("reads a compact raw when a window it names has no summary", () => {
+    const compact = compactOf(hour1Raw.slice(0, 3));
+    const raw = [...RAW.filter((f) => at(f) < T0 + HOUR), compact, hour1Raw[3]];
+    const missing = openHour.filter(
+      (f) => at(f) !== T0 + HOUR + 15 * 60_000 || !WINDOWS.includes(f),
+    );
+    expect(planRollup(raw, missing, T0, T0 + 2 * HOUR)).toBeNull();
   });
 });
 

@@ -95,6 +95,8 @@ describe('NetworkClient on Cloud', () => {
     renderWithQuery(<NetworkClient />, { withNuqs: true })
 
     expect(await screen.findByText(/Data through 09:45/)).toBeInTheDocument()
+    // Summaries reach the newest raw window, so the note claims no unsummarized backlog.
+    expect(screen.queryByText(/not summarized yet/)).not.toBeInTheDocument()
     expect(sections).toEqual(expect.arrayContaining([ROLLUP_SECTIONS, MAP_SECTIONS]))
     expect(await screen.findByText('1 cities')).toBeInTheDocument()
     expect(screen.getByText('≈87/100')).toBeInTheDocument()

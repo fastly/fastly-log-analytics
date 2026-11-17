@@ -14,8 +14,8 @@ import {
 
 /**
  * How a response answered from v3 summaries differs from the raw scan: it
- * covers only whole raw windows from `data_from` through `data_through` (newer
- * windows are not summarized yet), the `approximate` fields come from latency
+ * covers only whole raw windows from `data_from` through `data_through` (at most
+ * one newer window is omitted), the `approximate` fields come from latency
  * histograms, and the `lower_bound` fields or tables count only the values a
  * summary kept in its top K (or, for `cache_hit_rate`, only HIT and HIT-STALE).
  */

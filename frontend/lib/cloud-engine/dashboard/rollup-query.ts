@@ -5,6 +5,7 @@ import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
 import {
   SUMMARY_VERSION,
   planCoarsestFirst,
+  planCompactsFromWindows,
   type SummaryUse,
 } from "./summaries";
 
@@ -360,36 +361,51 @@ export type RollupPlan = {
 /**
  * Picks the summaries that answer [fromMs, toMs), or null when raw Parquet
  * must answer instead. A raw window that starts before the range is trimmed
- * (it is only partly inside); windows newer than every summary are an open
- * tail that is omitted when it spans at most `maxTailMs`. Any other window
- * without a summary is a gap, which a rollup would show as zero, so it is null.
+ * (it is only partly inside). Compacts of the open hour are answered by their
+ * windows' summaries. Plain windows newer than every summary are an open tail
+ * that is omitted only when it spans at most one of those windows (one log
+ * period, a window listed between the raw and summary listings). Any other
+ * file without a summary is a gap, which a rollup would show as zero, so it is
+ * null.
  */
 export function planRollup(
   rawFiles: readonly ManifestFile[],
   summaryFiles: readonly ManifestFile[],
   fromMs: number,
   toMs: number,
-  maxTailMs = HOUR_MS,
 ): RollupPlan | null {
   const raw = filesOverlapping([...rawFiles], fromMs, toMs);
-  const plan = planCoarsestFirst(raw, summaryFiles, fromMs, toMs);
+  const coarse = planCoarsestFirst(raw, summaryFiles, fromMs, toMs);
+  const used = new Set(coarse.summaries.map((use) => use.file.key));
+  const compacted = planCompactsFromWindows(
+    coarse.raw,
+    summaryFiles.filter((file) => !used.has(file.key)),
+    fromMs,
+    toMs,
+  );
+  const plan = {
+    summaries: [...coarse.summaries, ...compacted.summaries],
+    raw: compacted.raw,
+  };
   if (!plan.summaries.length) return null;
   const covered = plan.summaries.flatMap((use) => use.covers);
   const dataFromMs = Math.min(...covered.map((f) => Date.parse(f.start)));
   const dataThroughMs = Math.max(...covered.map((f) => Date.parse(f.end)));
   let tailEndMs = dataThroughMs;
+  let windowMs = 0;
   for (const file of plan.raw) {
     const start = Date.parse(file.start);
     const end = Date.parse(file.end);
     if (start < fromMs) {
       if (end > dataFromMs) return null;
-    } else if (start < dataThroughMs) {
+    } else if (start < dataThroughMs || !file.key.includes("/window=")) {
       return null;
     } else {
       tailEndMs = Math.max(tailEndMs, Math.min(end, toMs));
+      windowMs = Math.max(windowMs, end - start);
     }
   }
-  if (tailEndMs - dataThroughMs > maxTailMs) return null;
+  if (tailEndMs - dataThroughMs > windowMs) return null;
   return { files: plan.summaries, dataFromMs, dataThroughMs };
 }
 
