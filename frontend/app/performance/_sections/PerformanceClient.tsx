@@ -13,7 +13,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { ColumnVisibilityDropdown, DataTable } from '@/components/DataTable'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { boundMark, readRollupMeta, RollupDataThrough } from '@/components/network/rollupLabels'
+import { boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
 import { CHART_COLORS, type RangeWire } from '@/lib/utils'
@@ -169,7 +169,7 @@ function PerformanceBody({
 
   return (
     <>
-      {rollup && <div className="mb-4"><RollupDataThrough meta={rollup} /></div>}
+      <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} className="mb-4" />
       <div className="mb-6">
         <AnalyticsCard
           title="End-to-End Latency Waterfall (Average)"

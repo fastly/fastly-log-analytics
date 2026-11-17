@@ -3,7 +3,7 @@
 import React, { useState } from 'react'
 import dynamic from 'next/dynamic'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
-import { approxMark, readRollupMeta, RollupDataThrough } from '@/components/network/rollupLabels'
+import { approxMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { client, unwrapClient } from '@/lib/api'
 import type { components, PlotlyTrace } from '@/types/api'
@@ -243,7 +243,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
           </div>
         </div>
       )}
-      {rollup && <RollupDataThrough meta={rollup} />}
+      <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
       <NetworkMap
         data={mapData} isLoading={isMapLoadingInitial}
         error={mapFromCore ? coreQuery.error : mapQuery.error}

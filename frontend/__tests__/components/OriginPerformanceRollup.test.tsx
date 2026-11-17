@@ -89,7 +89,9 @@ describe('OriginClient on Cloud', () => {
     })
     renderWithQuery(<OriginClient />, { withNuqs: true })
 
-    expect(await screen.findByText(/Data through 09:45/)).toBeInTheDocument()
+    const slot = screen.getByTestId('rollup-data-through-slot')
+    expect(slot).toBeEmptyDOMElement()
+    expect(await within(slot).findByText(/Data through 09:45/)).toBeInTheDocument()
     const row = (await screen.findByText('203.0.113.1')).closest('tr')!
     expect(within(row).getByText('≥1,234')).toBeInTheDocument()
     expect(within(row).getByText('≈45.0ms')).toBeInTheDocument()
@@ -128,6 +130,7 @@ describe('OriginClient on Cloud', () => {
     expect(within(row).getByText('45.0ms')).toBeInTheDocument()
     expect(sections).toEqual([ORIGIN_SECTIONS])
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
 })
 
@@ -142,7 +145,9 @@ describe('PerformanceClient on Cloud', () => {
     })
     renderWithQuery(<PerformanceClient />, { withNuqs: true })
 
-    expect(await screen.findByText(/Data through 09:45/)).toBeInTheDocument()
+    const slot = screen.getByTestId('rollup-data-through-slot')
+    expect(slot).toBeEmptyDOMElement()
+    expect(await within(slot).findByText(/Data through 09:45/)).toBeInTheDocument()
     expect(await screen.findByText('Cache TTL Distribution (≥ counts)')).toBeInTheDocument()
     const plots = screen.getAllByTestId('plot').map((plot) => plot.textContent)
     expect(plots).toContain(JSON.stringify([['< 60s', '> 1d'], [9, 4]]))
@@ -162,5 +167,6 @@ describe('PerformanceClient on Cloud', () => {
     expect(await screen.findByText('Cache TTL Distribution')).toBeInTheDocument()
     expect(sections).toEqual([undefined])
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
 })

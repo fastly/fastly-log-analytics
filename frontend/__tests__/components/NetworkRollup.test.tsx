@@ -117,7 +117,49 @@ describe('NetworkClient on Cloud', () => {
     expect(sections.filter((s) => !s.includes('shielding_analysis')))
       .toEqual([[...ROLLUP_SECTIONS, 'cities', 'map_buckets']])
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
     expect(screen.getByText('1,234')).toBeInTheDocument()
+  })
+
+  it('reserves the data-through slot before the response and fills it in place', async () => {
+    setCloudModeRuntime(true)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    server.use(http.post(`${getApiBase()}/api/network-health`, async ({ request }) => {
+      const body = await request.json() as { sections: string[] }
+      if (body.sections.includes('cities')) return HttpResponse.json(coreResponse())
+      await gate
+      return HttpResponse.json(coreResponse(rollup([])))
+    }))
+    renderWithQuery(<NetworkClient />, { withNuqs: true })
+
+    const slot = screen.getByTestId('rollup-data-through-slot')
+    const reserved = slot.className
+    expect(reserved).toMatch(/min-h-/)
+    expect(slot).toBeEmptyDOMElement()
+
+    release()
+    await waitFor(() => expect(slot).toHaveTextContent(/Data through 09:45/))
+    expect(screen.getByTestId('rollup-data-through-slot')).toBe(slot)
+    expect(slot.className).toBe(reserved)
+  })
+
+  it('keeps the reserved slot empty when the summary-eligible read comes back raw', async () => {
+    setCloudModeRuntime(true)
+    recordNetworkHealth(coreResponse())
+    renderWithQuery(<NetworkClient />, { withNuqs: true })
+
+    expect(await screen.findByText('87/100')).toBeInTheDocument()
+    expect(screen.getByTestId('rollup-data-through-slot')).toBeEmptyDOMElement()
+    expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
+  })
+
+  it('reserves no slot outside Cloud', async () => {
+    recordNetworkHealth(coreResponse())
+    renderWithQuery(<NetworkClient />, { withNuqs: true })
+
+    expect(await screen.findByText('87/100')).toBeInTheDocument()
+    expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
 })
 

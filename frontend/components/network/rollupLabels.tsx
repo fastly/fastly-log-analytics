@@ -2,7 +2,7 @@
 
 import { Info } from 'lucide-react'
 import { useTimezone } from '@/hooks/usePersistentPreferences'
-import { formatDate } from '@/lib/utils'
+import { cn, formatDate } from '@/lib/utils'
 import type { NetworkRollupMeta } from '@/lib/cloud-engine/network-rollup'
 
 export type { NetworkRollupMeta }
@@ -24,6 +24,24 @@ export function RollupDataThrough({ meta }: { meta: NetworkRollupMeta }) {
         Data through {formatDate(meta.data_through, timezone, 'HH:mm')}.
         Values marked ≈ are estimated from summaries and ≥ are lower bounds.
       </span>
+    </div>
+  )
+}
+
+/**
+ * Holds the note's line(s) from first paint wherever the page can be answered
+ * from summaries, so the note landing (or a raw answer leaving it out) never
+ * moves the content below. Two lines until the note fits on one.
+ */
+export function RollupDataThroughSlot({ reserve, meta, className }: {
+  reserve: boolean
+  meta: NetworkRollupMeta | undefined
+  className?: string
+}) {
+  if (!reserve) return null
+  return (
+    <div data-testid="rollup-data-through-slot" className={cn('min-h-[2.875rem] lg:min-h-[1.875rem]', className)}>
+      {meta && <RollupDataThrough meta={meta} />}
     </div>
   )
 }
