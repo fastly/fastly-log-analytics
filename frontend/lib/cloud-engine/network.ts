@@ -286,11 +286,62 @@ export const NETWORK_SCAN_COLUMNS = [
   "client_tcpi_delta_retrans", "delivery_rate", "tcpi_delivery_rate",
 ] as const;
 
-/** The columns a projected /network load needs, or null when the filters can't name theirs. */
-export function networkScanColumns(filters: unknown): string[] | null {
-  if (filters == null || filters === "") return [...NETWORK_SCAN_COLUMNS];
-  if (typeof filters !== "object" || Array.isArray(filters)) return null;
-  return [...new Set([...NETWORK_SCAN_COLUMNS, ...Object.keys(filters)])];
+const RTT_COLUMNS = ["tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt"];
+const BYTES_COLUMNS = ["resp_bytes", "resp_body_size"];
+const COUNTRY_COLUMNS = ["country", "geo_country"];
+const ASN_COLUMNS = ["asn", "client_asn"];
+const POP_COLUMNS = ["pop", "fastly_pop"];
+
+/** The columns each raw /network scan reads, beyond the time and service ones every scan filters on. */
+const SCAN_COLUMNS = {
+  health: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "city", "geo_city", "lat", "lon", ...RTT_COLUMNS,
+    "ploss", "client_ploss", "status"],
+  shielding: ["edge", "rid", "prid", "pop", "ttfb", "ottfb"],
+  quality: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "proto", "protocol", ...POP_COLUMNS, "region", "geo_region",
+    ...RTT_COLUMNS, "client_cwnd", "client_tcpi_rttvar", "client_ploss", "rtt_var", "tcpi_rtt_var",
+    "client_tcpi_delta_retrans", "elapsed", "time_elapsed_usec", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", "cache", "cache_status"],
+  pop_health: [...POP_COLUMNS, "status", "cache", "cache_status", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", ...RTT_COLUMNS,
+    "client_ploss"],
+  transport: ["proto", "protocol", ...BYTES_COLUMNS, ...RTT_COLUMNS, "ploss", "client_ploss", "delivery_rate",
+    "tcpi_delivery_rate"],
+} as const;
+
+export type NetworkScan = keyof typeof SCAN_COLUMNS;
+
+/**
+ * The raw scans a /network read runs (see `handleNetworkRequest`), or null when
+ * its section list isn't one: then it may run any of them.
+ */
+export function networkScans(path: string, sections: unknown): NetworkScan[] | null {
+  if (sections != null && !(Array.isArray(sections) && sections.every((section) => typeof section === "string"))) return null;
+  const list = sections as readonly string[] | undefined;
+  const health = (bundle: boolean): NetworkScan[] => !list?.length ? ["health", "shielding", "pop_health"]
+    : wantCore(list) ? ["health", ...wantShielding(list) ? ["shielding" as const] : []]
+    : !bundle || wantShielding(list) ? ["shielding"] : [];
+  if (path === "/api/network-health") return health(false);
+  if (path === "/api/network-quality") return ["quality"];
+  if (path === "/api/network/pop-health") return ["pop_health"];
+  if (path !== "/api/network/bundle" || !list?.length) return ["health", "shielding", "quality", "pop_health", "transport"];
+  return [...health(true), ...(["quality", "pop_health", "transport"] as const).filter((scan) => list.includes(scan))];
+}
+
+/**
+ * The columns a projected /network load needs: its own scans' columns and the
+ * filtered ones. Null when the filters can't name theirs.
+ */
+export function networkScanColumns(path: string, params: Record<string, unknown>): string[] | null {
+  const { filters } = params;
+  if (filters != null && filters !== "" && (typeof filters !== "object" || Array.isArray(filters))) return null;
+  const scans = networkScans(path, params.sections);
+  const present = (value: unknown) => value != null && value !== "";
+  return [...new Set([
+    "timestamp", "ts_ms", "service_id",
+    ...(scans ? scans.flatMap((scan) => SCAN_COLUMNS[scan]) : NETWORK_SCAN_COLUMNS),
+    ...present(params.filter_country) ? COUNTRY_COLUMNS : [],
+    ...present(params.filter_asn) ? ASN_COLUMNS : [],
+    ...present(params.filter_pop) ? POP_COLUMNS : [],
+    ...filters && typeof filters === "object" ? Object.keys(filters) : [],
+  ])];
 }
 
 export function parseEpochMs(val: string | number | undefined): number | null {
@@ -954,7 +1005,7 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
   };
 }
 
-function networkBundle<H extends object | null, Q, P, T>(
+export function networkBundle<H extends object | null, Q, P, T>(
   network_health: H, network_quality: Q, pop_health: P, transport: T,
 ) {
   return {

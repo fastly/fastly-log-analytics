@@ -50,6 +50,7 @@ describe("answerFromRollup", () => {
   it.each([
     ["/api/network-health", health, source, networkFromRollup],
     ["/api/network/pop-health", range, source, networkFromRollup],
+    ["/api/network/bundle", { ...health, sections: ["summary", "pop_health"] }, source, networkFromRollup],
     ["/api/origin/aggregates", origin, originSource, originFromRollup],
     ["/api/performance/aggregates", performance, source, performanceFromRollup],
   ] as const)("answers %s as the section reader does, unchanged by structured cloning", async (path, params, make, direct) => {

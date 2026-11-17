@@ -8,6 +8,7 @@ import { handleValueRequest, valueScanColumns } from "./value";
 import { handleSessionsList, sessionsScanColumns } from "./sessions";
 import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
 import { cmcdScanColumns, handleCmcdRequest } from "./cmcd";
+import { handleNetworkRequest, NETWORK_SCAN_COLUMNS, networkScanColumns, type NetworkQueryParams } from "./network";
 import { queryCloudScoring, scoringScanColumns } from "./scoring-reads";
 import { bindCloudReadContext } from "./range-loader";
 import { SCORING_OPTIONAL_COLUMNS } from "./sessions";
@@ -329,6 +330,41 @@ describe("Cloud route column projections", () => {
     run: (context) => queryCloudScoring(bindCloudReadContext(new Request(
       `http://localhost/api/services/svc/scoring/${route}?start_time=${RANGE.start_time}&end_time=${RANGE.end_time}${query}`,
     ), context), route),
+  });
+
+  const network = (path: string, body: Record<string, unknown>): Variant => ({
+    name: `${path} ${JSON.stringify(body)}`,
+    columns: networkScanColumns(path, body),
+    run: (context) => handleNetworkRequest(path, { ...RANGE, ...body, engine: context } as NetworkQueryParams),
+  });
+
+  it("loads each /network scan as its sections' exact projection", async () => {
+    const page = { bucket_seconds: 3600, top_n: 30, map_asn: "all", service_id: "svc" };
+    const transport = { ...page, sections: ["transport"], region_country: "US" };
+    expect(await network("/api/network/bundle", transport).run(read)).toMatchObject({
+      transport: { has_transport_data: true, tcp_rtt_p50_ms: expect.any(Number), delivery_rate_mbps: expect.any(Number) },
+    });
+    await guard([
+      network("/api/network-health", { ...page, sections: ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"] }),
+      network("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" }),
+      network("/api/network-health", { ...page, sections: ["shielding_analysis"] }),
+      network("/api/network-health", { filter_country: "geo_country-1", filter_asn: 600, filter_pop: "IAD" }),
+      network("/api/network-quality", { region_country: "US", filters: { host: { mode: "include", values: ["a.example"] } } }),
+      network("/api/network/pop-health", {}),
+      network("/api/network/bundle", transport),
+      network("/api/network/bundle", { sections: ["quality", "pop_health", "transport"] }),
+      network("/api/network/bundle", {}),
+    ]);
+    // The page's transport card reads none of the heavy row-level or geo columns.
+    for (const heavy of ["rid", "prid", "city", "as_name", "lat", "region", "cache", "ttfb"]) {
+      expect(networkScanColumns("/api/network/bundle", transport), heavy).not.toContain(heavy);
+    }
+    expect(networkScanColumns("/api/network/bundle", { sections: ["transport"], filters: { host: ["a.example"] } }))
+      .toContain("host");
+    expect(networkScanColumns("/api/network/bundle", { filters: "host" })).toBeNull();
+    // An unparsed section list reads every /network column rather than guessing.
+    expect(networkScanColumns("/api/network/bundle", { sections: "transport" })?.toSorted())
+      .toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
   });
 
   it("loads /api/services/{id}/scoring scans as exact projections", async () => {

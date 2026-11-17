@@ -33,6 +33,12 @@ Routes in [`backend/routers/network.py`](../../backend/routers/network.py), mode
 
 ASN names come from the PostgreSQL `asn_names` table via `enrich_asn_labels`; unresolved ASNs display as `AS<number>`. The ClickHouse reader ([`backend/high_scale/network.py`](../../backend/high_scale/network.py)) reads visible `request_facts` directly for the service and window.
 
+## Cloud
+
+Cloud answers unfiltered reads from the v3 summaries when it can, without loading raw Parquet: the core health call (`/api/network-health` with only `summary`, `leaderboard`, `metro_leaderboard`, `heatmap` and `buckets`), `/api/network/pop-health`, and a `/api/network/bundle` that asks only for those health sections and `pop_health`. Quantiles and health scores from summaries are approximate; PoP cache hit rate is a lower bound. If the summaries can't answer, the read falls back to the raw scan.
+
+Everything else reads raw Parquet in local DuckDB: any filtered read, the map (`cities`, `map_buckets`), shielding, quality and the transport card. Summaries hold no delivery rate, so transport can't come from them. Each raw read loads only the columns its own sections use, plus filtered fields; the transport card reads about a quarter of the bytes the shared /network column list did. The 256-file and 64 MiB compressed scan limits still apply. Over them, the 413 says which scan and how much it needs, for example `Cloud /network transport over this time range needs 80.0 MiB of log data (columns: …) but the browser scan budget is 64.0 MiB; choose a shorter time range`.
+
 ## Tests
 
 - Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)

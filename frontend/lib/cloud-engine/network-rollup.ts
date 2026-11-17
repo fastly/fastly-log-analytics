@@ -5,6 +5,7 @@ import {
   deduplicateMetroLeaderboard,
   emptyNetworkHealth,
   emptyPopHealth,
+  networkBundle,
   parseEpochMs,
   roundTo,
   TCP_FIELDS,
@@ -264,11 +265,21 @@ export function popHealthFromRollup(result: RollupResult) {
   };
 }
 
+/**
+ * True when every requested /network/bundle section can come from summaries:
+ * the health core sections and the PoP table. Transport needs delivery rate,
+ * which summaries don't keep, and quality, the map and shielding need rows.
+ */
+function canServeBundleFromRollup(sections: readonly string[] | undefined): boolean {
+  return Boolean(sections?.length) && sections!.every((section) => HEALTH_SECTIONS.has(section) || section === "pop_health");
+}
+
 /** Whether summaries may answer this read at all, before any range or listing is resolved. */
 export function networkRollupEligible(path: string, params: NetworkQueryParams): boolean {
   if (params.filter_country || params.filter_pop ||
       params.filter_asn !== undefined && params.filter_asn !== "" ||
       Object.keys(params.filters ?? {}).length) return false;
+  if (path === "/api/network/bundle") return canServeBundleFromRollup(params.sections);
   return path === "/api/network-health" ? canServeHealthFromRollup(params.sections) : path === "/api/network/pop-health";
 }
 
@@ -292,5 +303,12 @@ export async function networkFromRollup(
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const result = await queryRollup(source, { fromMs, toMs, signal });
   if (!result) return null;
+  if (path === "/api/network/bundle") {
+    const sections = params.sections!;
+    const wantsHealth = sections.some((section) => HEALTH_SECTIONS.has(section));
+    const core = wantsHealth ? networkHealthFromRollup(result, params) : null;
+    if (wantsHealth && core === null) return null;
+    return networkBundle(core, null, sections.includes("pop_health") ? popHealthFromRollup(result) : null, null);
+  }
   return health ? networkHealthFromRollup(result, params) : popHealthFromRollup(result);
 }

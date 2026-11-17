@@ -9,7 +9,7 @@ import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
 import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 import { insightScanColumns } from "./insight-scans";
-import { NETWORK_SCAN_COLUMNS } from "./network";
+import { NETWORK_SCAN_COLUMNS, networkScanColumns } from "./network";
 import { VALUE_SCAN_COLUMNS } from "./value";
 import { ASSETS_SCAN_COLUMNS } from "./assets";
 import { SESSIONS_SCAN_COLUMNS } from "./sessions";
@@ -400,7 +400,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       .toEqual({ columns: securityScanColumns(undefined) });
   });
 
-  it("loads every /network scan as the same column projection, plus filtered fields", async () => {
+  it("loads each /network scan as its own sections' column projection, plus filtered fields", async () => {
     const options = async (path: string, init: RequestInit = {}) => {
       vi.mocked(ensureCloudRange).mockClear();
       const res = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, init));
@@ -410,15 +410,39 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const post = (body: Record<string, unknown>) => ({
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
     });
-    const columns = [...NETWORK_SCAN_COLUMNS];
+    const columns = (path: string, body: Record<string, unknown> = {}) => ({ columns: networkScanColumns(path, body) });
     expect((await options("/api/network-health", post({ sections: ["summary"] })))?.projection)
-      .toEqual({ columns });
-    expect((await options("/api/network-quality", post({})))?.projection).toEqual({ columns });
-    expect((await options("/api/network/bundle", post({ sections: ["transport"] })))?.projection).toEqual({ columns });
-    expect((await options("/api/network/pop-health"))?.projection).toEqual({ columns });
+      .toEqual(columns("/api/network-health", { sections: ["summary"] }));
+    expect((await options("/api/network-quality", post({})))?.projection).toEqual(columns("/api/network-quality"));
+    const transport = (await options("/api/network/bundle", post({ sections: ["transport"] })))?.projection;
+    expect(transport).toEqual(columns("/api/network/bundle", { sections: ["transport"] }));
+    expect(transport?.columns).toEqual(expect.arrayContaining(["tcp_rtt", "delivery_rate", "proto"]));
+    expect(transport?.columns).not.toContain("rid");
+    expect((await options("/api/network/pop-health"))?.projection).toEqual(columns("/api/network/pop-health"));
+    expect((await options("/api/network/bundle", post({})))?.projection?.columns?.toSorted())
+      .toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
     expect((await options("/api/network-health", post({
       sections: ["summary"], filters: { host: { mode: "include", values: ["example.com"] } },
-    })))?.projection?.columns).toEqual([...columns, "host"]);
+    })))?.projection?.columns).toEqual([...columns("/api/network-health", { sections: ["summary"] }).columns!, "host"]);
+  });
+
+  it("says which /network scan is over budget, the columns it reads and how to narrow it", async () => {
+    vi.mocked(ensureCloudRange).mockRejectedValueOnce(
+      new CloudBudgetError("over", { unit: "bytes", needed: 80 * 1024 * 1024, limit: 64 * 1024 * 1024 }));
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network/bundle", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: ["transport"], start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" }),
+    }));
+    expect(res?.status).toBe(413);
+    expect((await res!.json()).detail).toBe("Cloud /network transport over this time range needs 80.0 MiB of log data " +
+      `(columns: ${networkScanColumns("/api/network/bundle", { sections: ["transport"] })!.join(", ")}) ` +
+      "but the browser scan budget is 64.0 MiB; choose a shorter time range");
+    vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError("over", { unit: "files", needed: 300, limit: 256 }));
+    const files = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network-quality", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
+    }));
+    expect((await files!.json()).detail).toBe("Cloud /network quality over this time range needs 300 files of log data " +
+      "but the browser scan budget is 256 files; choose a shorter time range");
   });
 
   it("answers unfiltered /network reads from summaries before any raw scan, over the scan's range and service", async () => {
@@ -446,6 +470,15 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await pops!.json()).toEqual({ served: "pops" });
     expect(vi.mocked(networkFromRollup).mock.calls[0][1])
       .toMatchObject({ start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z" });
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce({ served: "bundle" } as never);
+    const bundle = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network/bundle", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: ["summary", "pop_health"] }),
+    }));
+    expect(await bundle!.json()).toEqual({ served: "bundle" });
+    expect(vi.mocked(networkFromRollup).mock.calls[0][0]).toBe("/api/network/bundle");
     expect(ensureCloudRange).not.toHaveBeenCalled();
   });
 

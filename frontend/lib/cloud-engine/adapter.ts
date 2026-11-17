@@ -23,7 +23,7 @@ import {
 } from "./insights";
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
-import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
+import { handleNetworkRequest, networkScanColumns, networkScans, type NetworkQueryParams } from "./network";
 import { networkRollupEligible } from "./network-rollup";
 import type { RollupResult } from "./dashboard/rollup-query";
 import { answerFromRollup } from "./rollup-answer";
@@ -492,6 +492,15 @@ function queryBudgetError(error: CloudBudgetError, columns: readonly string[] | 
     formatBudgetAmount(detail.unit, detail.limit)}; choose a shorter time range${detail.unit === "bytes" ? " or select fewer columns" : ""}`, detail);
 }
 
+function networkBudgetError(error: CloudBudgetError, scans: readonly string[] | null, columns: readonly string[] | null) {
+  const { detail } = error;
+  if (!detail) return error;
+  const reads = detail.unit === "files" ? `${formatBudgetAmount(detail.unit, detail.needed)} of log data`
+    : `${formatBudgetAmount(detail.unit, detail.needed)} of log data (${columns ? `columns: ${columns.join(", ")}` : "every column"})`;
+  return new CloudBudgetError(`Cloud /network ${scans?.join(", ").replaceAll("_", " ") ?? "scan"} over this time range needs ${
+    reads} but the browser scan budget is ${formatBudgetAmount(detail.unit, detail.limit)}; choose a shorter time range`, detail);
+}
+
 /**
  * Merges the v3 summaries for an /insights baseline over the range the raw
  * scan would use, so only the window needs raw Parquet. Null (or a summary
@@ -580,8 +589,8 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     url.pathname === "/api/insights/cache-collapse-detail";
   const filters = url.pathname === "/api/insights"
     ? parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined) : [];
-  const scanColumns = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname)
-    ? networkScanColumns(params.filters)
+  const network = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname);
+  const scanColumns = network ? networkScanColumns(url.pathname, params)
     : url.pathname.startsWith("/api/origin/") ? originScanColumns(url.pathname, params)
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
     : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters)
@@ -625,6 +634,9 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
         columns: insightScanColumns(filters),
       } } : {},
     } } : scanColumns ? { projection: { columns: scanColumns } } : {},
+  }).catch((error: unknown) => {
+    throw network && error instanceof CloudBudgetError
+      ? networkBudgetError(error, networkScans(url.pathname, params.sections), scanColumns) : error;
   });
   try {
     generation.assertCurrent();
@@ -776,7 +788,7 @@ async function handleCloudRequest(
       localScan ||= RAW_CHART_METRICS.has(body.chart_metric ?? body.metric ?? "requests") ||
         chartInterval === "1 second" || chartInterval === "1s";
     }
-    if (localScan && (path === "/api/network-health" || path === "/api/network/pop-health")) {
+    if (localScan && /^\/api\/network(?:-health|\/pop-health|\/bundle)$/.test(path)) {
       const answer = await cloudNetworkRollup(request, path);
       if (answer) return answer;
     }

@@ -170,14 +170,10 @@ const ROUTES: Route[] = [
     name: "/assets-shield", columns: assetsScanColumns({}),
     run: (read) => handleAssetsRequest("/api/assets/aggregates", { ...RANGE, filters: {}, engine: read }),
   },
-  {
-    name: "/network", columns: networkScanColumns({}),
-    run: async (read) => {
-      const out = [];
-      for (const [path, params] of NETWORK_PAGE) out.push(await handleNetworkRequest(path, { ...RANGE, ...params, engine: read } as never));
-      return out;
-    },
-  },
+  ...NETWORK_PAGE.map(([path, params]): Route => ({
+    name: `/network ${path} ${JSON.stringify(params.sections ?? [])}`, columns: networkScanColumns(path, params),
+    run: (read) => handleNetworkRequest(path, { ...RANGE, ...params, engine: read } as never),
+  })),
   {
     name: "/performance", columns: performanceScanColumns({}),
     run: async (read) => (await handlePerformanceRequest(new Request("http://localhost/api/performance/aggregates", {

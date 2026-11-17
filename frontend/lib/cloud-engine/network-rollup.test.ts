@@ -15,7 +15,7 @@ import {
   fixturePage,
 } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
-import { queryNetworkHealth, queryPopHealth } from "./network";
+import { handleNetworkRequest, queryNetworkHealth, queryPopHealth } from "./network";
 import {
   canServeHealthFromRollup,
   networkFromRollup,
@@ -52,6 +52,7 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
   const lease = engine.lease([]);
   let raw: Awaited<ReturnType<typeof queryNetworkHealth>>;
   let rawPops: Awaited<ReturnType<typeof queryPopHealth>>;
+  let rawBundle: Record<string, unknown>;
 
   beforeAll(async () => {
     for (const file of RAW) {
@@ -63,6 +64,7 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
     const params = { engine: lease.readContext(), start_time: T0, end_time: T1, bucket_seconds: 900, top_n: 30 };
     raw = await queryNetworkHealth({ ...params, sections: SECTIONS });
     rawPops = await queryPopHealth(params);
+    rawBundle = await handleNetworkRequest("/api/network/bundle", { ...params, sections: [...SECTIONS, "pop_health"] });
   }, 60_000);
 
   afterAll(async () => {
@@ -144,6 +146,32 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
       near(row.p95_ttfb_ms, Number(want.p95_ttfb_ms));
     }
     expect(pops.total_pops).toBe(rawPops.total_pops);
+  });
+
+  it("answers a health and PoP bundle like the raw bundle, from summaries alone", async () => {
+    const source = fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(WINDOWS)]);
+    const served = await networkFromRollup("/api/network/bundle", {
+      start_time: T0, end_time: T1, bucket_seconds: 900, top_n: 30, sections: [...SECTIONS, "pop_health"],
+    }, source) as Record<string, unknown>;
+    expect(source.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
+    const health = served.network_health as typeof raw;
+    const rawHealth = rawBundle.network_health as typeof raw;
+    expect(Object.keys(served).toSorted()).toEqual(Object.keys(rawBundle).toSorted());
+    expect([served.available, served.quality, served.transport, served.network_quality])
+      .toEqual([rawBundle.available, rawBundle.quality, rawBundle.transport, rawBundle.network_quality]);
+    // Summaries only report the TCP fields they count as missing.
+    expect(served.missing_tcp_fields).toEqual(health.missing_tcp_fields);
+    expect(rawBundle.missing_tcp_fields).toEqual(expect.arrayContaining(served.missing_tcp_fields as string[]));
+    expect(served.health).toBe(served.network_health);
+    expect([health.summary.total_requests, health.summary.avg_rtt_ms, health.summary.avg_ploss_pct])
+      .toEqual([rawHealth.summary.total_requests, rawHealth.summary.avg_rtt_ms, rawHealth.summary.avg_ploss_pct]);
+    near(health.summary.median_rtt_ms, rawHealth.summary.median_rtt_ms);
+    expect(health.by_asn.map((r) => [r.asn, r.reqs, r.error_pct]).toSorted())
+      .toEqual(rawHealth.by_asn.map((r) => [r.asn, r.reqs, r.error_pct]).toSorted());
+    const pops = served.pop_health as typeof rawPops;
+    const rawBundlePops = rawBundle.pop_health as typeof rawPops;
+    expect(pops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted())
+      .toEqual(rawBundlePops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted());
   });
 });
 
@@ -246,6 +274,14 @@ describe("networkFromRollup", () => {
       expect(s.log.json).toEqual([]);
     }
     expect(await networkFromRollup("/api/network-quality", health, source())).toBeNull();
+    // The transport card needs delivery rate, which summaries don't keep; quality needs per-row throughput.
+    for (const sections of [["transport"], ["quality"], ["summary", "transport"], ["map_buckets"], ["pop_health", "cities"], [], undefined]) {
+      const s = source();
+      expect(await networkFromRollup("/api/network/bundle", { ...health, sections }, s), String(sections)).toBeNull();
+      expect(s.log.json).toEqual([]);
+    }
+    expect(await networkFromRollup("/api/network/bundle", { ...health, sections: ["pop_health"], filter_pop: "IAD" }, source()))
+      .toBeNull();
     const stale = { ...BUFFERS, [WINDOWS[3].key]: BUFFERS[RAW[3].key] };
     expect(await networkFromRollup("/api/network-health", health, source(WINDOWS, stale))).toBeNull();
   });
