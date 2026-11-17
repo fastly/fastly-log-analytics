@@ -278,6 +278,21 @@ describe('Dashboard page & chart helpers', () => {
     await waitFor(() => expect(screen.getByText('Traffic over Time')).toBeInTheDocument())
   })
 
+  test('an unknown ?metric= deep link falls back to requests instead of sending an invalid chart_metric', async () => {
+    mockIsDataReady = true
+    mockGet.mockImplementation(async (url: string) => getOk(url.includes('/api/log-fields/catalog')
+      ? { fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} }
+      : { active_service_id: 'test-svc', services: [{ service_id: 'test-svc', name: 'Test' }] }))
+    mockPost.mockResolvedValue(postOk({ aggregates: { data: {}, time_series: [] }, data: {}, time_series: [] }))
+    const NuqsWrapper = withNuqsTestingAdapter({ searchParams: '?metric=bandwidth' })
+    renderWithQuery(<NuqsWrapper><DashboardClient /></NuqsWrapper>, { queryClient })
+    const chartMetrics = () => mockPost.mock.calls
+      .filter(([url]) => url === '/api/dashboard/bundle').map(([, options]) => options.body.chart_metric)
+    await waitFor(() => expect(chartMetrics().length).toBeGreaterThan(0))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
+    expect(new Set(chartMetrics())).toEqual(new Set(['requests']))
+  })
+
   test.each([
     { selected: ['status'], after: ['country', 'status'] },
     { selected: [], after: ['country'] },
