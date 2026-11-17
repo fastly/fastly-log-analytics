@@ -256,6 +256,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       QUANTILE_CONT(cmcd_bl, 0.95)::DOUBLE AS p95_buffer_ms,
       AVG(cmcd_br)::DOUBLE AS avg_encoded_bitrate,
       AVG(cmcd_tb)::DOUBLE AS avg_top_bitrate,
+      AVG(cmcd_br / cmcd_tb) FILTER (WHERE cmcd_tb > 0)::DOUBLE AS utilization_ratio,
       AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
       QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS p50_throughput,
       QUANTILE_CONT(cmcd_mtp, 0.95)::DOUBLE AS p95_throughput,
@@ -315,8 +316,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       timestamp: tsIso,
       avg_encoded_bitrate: roundTo(encBr, 1),
       avg_top_bitrate: roundTo(topBr, 1),
-      utilization_ratio:
-        topBr > 0 && b.avg_encoded_bitrate != null ? roundTo((encBr * 100) / topBr, 2) : null,
+      utilization_ratio: b.utilization_ratio == null ? null : roundTo(Number(b.utilization_ratio), 2),
     });
     throughput_ts.push({
       bucket: tsIso,

@@ -56,6 +56,19 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     }
   });
 
+  it("reports bitrate utilization as the mean br/tb fraction like High-Scale", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests (scoped_key, ts_ms, cmcd_sid, cmcd_br, cmcd_tb, cmcd_ot)
+        VALUES ('native', 1700000100000, 'a', 1000, 4000, 'v'),
+          ('native', 1700000101000, 'a', 3000, 3000, 'v')`);
+      const data = await queryCmcdAggregates({ engine, bucket_seconds: 300 });
+      expect(data.bitrate_ts[0].utilization_ratio).toBe(0.63);
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("classifies all 7 session duration buckets accurately", () => {
     expect(CMCD_SESSION_DURATION_BUCKETS).toEqual([
       "< 30s",
