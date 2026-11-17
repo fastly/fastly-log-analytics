@@ -14,6 +14,8 @@ import SecurityClient, {
   NetworkSection,
   ProxyWatchdogSection,
 } from '@/app/security/_sections/SecurityClient'
+import { botColumns, SECURITY_INFO, type WellknownBot } from '@/app/security/_sections/botsSectionConfig'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
 
@@ -469,6 +471,32 @@ describe('SecurityClient, BotsSection, HeaderAnomaliesSection, NetworkSection & 
       expect(
         screen.queryByText(/Requires Security: TLS Fingerprinting/),
       ).not.toBeInTheDocument()
+    })
+
+    it.each([
+      { cloud: false, pending: /Check back soon/, title: 'Pending rDNS lookup' },
+      {
+        cloud: true,
+        pending: /Not verified: Cloud can't run reverse-DNS checks in the browser/,
+        title: "Not verified: Cloud can't run reverse-DNS checks in the browser",
+      },
+    ])('describes pending bot verification for the install (cloud: $cloud)', ({ cloud, pending, title }) => {
+      setCloudModeRuntime(cloud)
+      try {
+        const pendingColumn = botColumns.find((c) => 'accessorKey' in c && c.accessorKey === 'pending_count')!
+        const cell = pendingColumn.cell as (ctx: { row: { original: WellknownBot } }) => React.ReactNode
+        render(
+          <>
+            {SECURITY_INFO.wellknown_bots.body}
+            {cell({ row: { original: partial<WellknownBot>({ pending_count: 3 }) } })}
+          </>,
+        )
+        expect(screen.getByText(pending)).toBeInTheDocument()
+        expect(screen.getByTitle(title)).toHaveTextContent('3')
+        if (cloud) expect(screen.queryByText(/Check back soon/)).not.toBeInTheDocument()
+      } finally {
+        setCloudModeRuntime(false)
+      }
     })
 
     it('passes populated rows through to DataTable for each section', () => {

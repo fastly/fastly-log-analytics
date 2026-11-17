@@ -18,6 +18,7 @@ import {
   Scale,
   Shield,
 } from 'lucide-react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
@@ -91,6 +92,15 @@ const makeInfo = (
   ),
 })
 
+// Cloud has no rDNS cache, so its pending counts never resolve.
+const CLOUD_PENDING_TEXT = "Not verified: Cloud can't run reverse-DNS checks in the browser"
+
+function PendingVerificationText() {
+  return isCloudMode()
+    ? `${CLOUD_PENDING_TEXT}.`
+    : 'The reverse DNS lookup is still pending in the background. Check back soon.'
+}
+
 export const SECURITY_INFO = {
   wellknown_bots: makeInfo(
     'Well-Known Bots',
@@ -118,7 +128,7 @@ export const SECURITY_INFO = {
         Clock,
         'text-yellow-500',
         'Pending',
-        'The reverse DNS lookup is still pending in the background. Check back soon.',
+        <PendingVerificationText key="pending" />,
       ],
     ],
   ),
@@ -324,7 +334,7 @@ export const botColumns: ColumnDef<WellknownBot>[] = [
     header: 'Pending',
     cell: ({ row }) =>
       row.original.pending_count > 0 ? (
-        <span className="flex items-center gap-1 text-yellow-500" title="Pending rDNS lookup">
+        <span className="flex items-center gap-1 text-yellow-500" title={isCloudMode() ? CLOUD_PENDING_TEXT : 'Pending rDNS lookup'}>
           <Clock className="h-3 w-3" />
           {formatCount(row.original.pending_count)}
         </span>
