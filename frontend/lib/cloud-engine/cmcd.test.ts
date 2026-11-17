@@ -69,6 +69,27 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     }
   });
 
+  it("averages bitrate, buffer and throughput over video segments only when object types exist", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, geo_country, client_asn, cmcd_sid, cmcd_cid, cmcd_br, cmcd_bl, cmcd_mtp, cmcd_bs, cmcd_ot)
+        VALUES ('native', 1700000100000, 'US', 15169, 'a', 'movie', 1000, 1000, 1000, false, 'v'),
+          ('native', 1700000101000, 'US', 15169, 'a', 'movie', 100, 9000, 100, false, 'a'),
+          ('native', 1700000102000, 'US', 15169, 'a', 'movie', 100, 9000, 100, false, 'm')`);
+      const data = await queryCmcdAggregates({ engine, bucket_seconds: 300 });
+      expect(data.overview).toMatchObject({ avg_bitrate: 1000, avg_buffer_length: 1000, median_throughput: 1000 });
+      expect(data.bitrate_ts[0]).toMatchObject({ avg_bitrate: 1000 });
+      expect(data.buffer_health_ts[0]).toMatchObject({ p50_buffer: 1000, p95_buffer: 1000 });
+      expect(data.throughput_ts[0]).toMatchObject({ p50: 1000, p95: 1000, p99: 1000 });
+      expect(data.top_content[0]).toMatchObject({ avg_bitrate: 1000, avg_buffer_length: 1000 });
+      expect(data.rebuffer_by_asn[0]).toMatchObject({ avg_bitrate: 1000, avg_buffer_length: 1000 });
+      expect(data.rebuffer_by_country[0]).toMatchObject({ median_throughput: 1000 });
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("classifies all 7 session duration buckets accurately", () => {
     expect(CMCD_SESSION_DURATION_BUCKETS).toEqual([
       "< 30s",

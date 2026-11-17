@@ -218,6 +218,10 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
       AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
       QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS median_throughput,
+      COUNT(NULLIF(cmcd_ot, '')) AS has_ot,
+      AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_bitrate,
+      AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_buffer,
+      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_median_throughput,
       MIN(ts_ms)::BIGINT AS min_ts,
       MAX(ts_ms)::BIGINT AS max_ts
     FROM requests
@@ -233,6 +237,9 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   }
 
   const activeSessions = Number(s.active_sessions ?? 0);
+  // Like High-Scale, quality measurements cover video segments once the window reports object types.
+  const hasOt = Number(s.has_ot) > 0;
+  const video = hasOt ? "cmcd_ot = 'v'" : "TRUE";
   const rebufferEvents = Number(s.rebuffer_events ?? 0);
   const rebufferRate =
     totalRequests > 0 ? roundTo((rebufferEvents * 100) / totalRequests, 2) : 0;
@@ -251,16 +258,16 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       COUNT(cmcd_bs) AS has_bs,
       COUNT(cmcd_su) AS has_su,
       AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
-      QUANTILE_CONT(cmcd_bl, 0.1)::DOUBLE AS p10_buffer_ms,
-      QUANTILE_CONT(cmcd_bl, 0.5)::DOUBLE AS p50_buffer_ms,
-      QUANTILE_CONT(cmcd_bl, 0.95)::DOUBLE AS p95_buffer_ms,
-      AVG(cmcd_br)::DOUBLE AS avg_encoded_bitrate,
-      AVG(cmcd_tb)::DOUBLE AS avg_top_bitrate,
-      AVG(cmcd_br / cmcd_tb) FILTER (WHERE cmcd_tb > 0)::DOUBLE AS utilization_ratio,
+      QUANTILE_CONT(cmcd_bl, 0.1) FILTER (WHERE ${video})::DOUBLE AS p10_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.5) FILTER (WHERE ${video})::DOUBLE AS p50_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.95) FILTER (WHERE ${video})::DOUBLE AS p95_buffer_ms,
+      AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_encoded_bitrate,
+      AVG(cmcd_tb) FILTER (WHERE ${video})::DOUBLE AS avg_top_bitrate,
+      AVG(cmcd_br / cmcd_tb) FILTER (WHERE ${video} AND cmcd_tb > 0)::DOUBLE AS utilization_ratio,
       AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
-      QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS p50_throughput,
-      QUANTILE_CONT(cmcd_mtp, 0.95)::DOUBLE AS p95_throughput,
-      QUANTILE_CONT(cmcd_mtp, 0.99)::DOUBLE AS p99_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS p50_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.95) FILTER (WHERE ${video})::DOUBLE AS p95_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.99) FILTER (WHERE ${video})::DOUBLE AS p99_throughput,
       (COUNT(*) FILTER (WHERE cmcd_su IS TRUE))::BIGINT AS startup_requests,
       AVG(cmcd_bl) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_buffer_ms,
       AVG(COALESCE(ttfb_ms, ttfb * 1000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0)) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_ttfb_ms
@@ -404,8 +411,8 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         COALESCE(cmcd_cid, url, 'Unknown') AS content_id,
         COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
-        AVG(cmcd_br)::DOUBLE AS avg_bitrate_kbps,
-        AVG(cmcd_bl)::DOUBLE AS avg_buffer_length,
+        AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate_kbps,
+        AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
         CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate
       FROM requests
       WHERE ${where}
@@ -421,7 +428,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
-        QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS median_throughput,
+        QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS median_throughput,
         CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate
       FROM requests
       WHERE ${where} AND COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) IS NOT NULL
@@ -438,8 +445,8 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
-        AVG(cmcd_br)::DOUBLE AS avg_bitrate,
-        AVG(cmcd_bl)::DOUBLE AS avg_buffer_length,
+        AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate,
+        AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
         CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate,
         AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
       FROM requests
@@ -470,9 +477,9 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       peak_viewers: peakViewers,
       avg_session_duration: durations.length ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length) : null,
       rebuffer_rate: Number(s.has_bs) && activeSessions ? roundTo(Number(s.rebuffer_sessions) * 100 / activeSessions, 2) : null,
-      avg_bitrate: nullable(s.avg_bitrate_kbps),
-      avg_buffer_length: nullable(s.avg_buffer_ms),
-      median_throughput: nullable(s.median_throughput),
+      avg_bitrate: nullable(hasOt ? s.video_avg_bitrate : s.avg_bitrate_kbps),
+      avg_buffer_length: nullable(hasOt ? s.video_avg_buffer : s.avg_buffer_ms),
+      median_throughput: nullable(hasOt ? s.video_median_throughput : s.median_throughput),
     },
     summary: {
       active_sessions: activeSessions,
