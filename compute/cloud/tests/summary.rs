@@ -1223,12 +1223,6 @@ fn summaries_are_reproducible_and_zstd_compressed() {
 #[test]
 #[ignore = "regenerates the web dashboard fixtures"]
 fn write_dashboard_fixtures() {
-    use fastly_log_analytics::ingest::bundle::{self, Unit};
-    const FIXTURE_WINDOW: i64 = 900;
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../frontend/lib/cloud-engine/dashboard/__fixtures__/summaries");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
     let rows: Vec<Value> = (0..1600i64)
         .map(|i| {
             let ms = BASE * 1000 + (i * 4_513) % (2 * 3600 * 1000);
@@ -1276,8 +1270,92 @@ fn write_dashboard_fixtures() {
             row
         })
         .collect();
+    write_summary_fixtures("dashboard/__fixtures__/summaries", &rows);
+}
+
+/// Writes `frontend/lib/cloud-engine/__fixtures__/network-summaries/`: rows carrying the
+/// /network columns (RTT, loss, geo, ASN, protocol, TTFB), with their summaries and bundles,
+/// for the /network rollup-vs-raw parity tests.
+/// Run with `cargo test --test summary -- --ignored write_network_fixtures`.
+#[test]
+#[ignore = "regenerates the web /network fixtures"]
+fn write_network_fixtures() {
+    const CITIES: [(&str, &str, &str, f64, f64); 6] = [
+        ("US", "Ashburn", "VA", 39.04, -77.49),
+        ("US", "Seattle", "WA", 47.61, -122.33),
+        ("DE", "Frankfurt", "HE", 50.11, 8.68),
+        ("JP", "Tokyo", "13", 35.68, 139.69),
+        ("BR", "Sao Paulo", "SP", -23.55, -46.63),
+        ("GB", "London", "ENG", 51.51, -0.13),
+    ];
+    let rows: Vec<Value> = (0..1600i64)
+        .map(|i| {
+            let ms = BASE * 1000 + (i * 4_513) % (2 * 3600 * 1000);
+            let k = i as usize;
+            let (country, city, region, lat, lon) = CITIES[k % 6];
+            let mut row = json!({
+                "timestamp": iso(ms),
+                "status": ([200, 200, 304, 404, 503, 500, 0, 302][k % 8]),
+                "cache": (["HIT", "MISS", "PASS", "HIT-STALE", "MISS"][k % 5]),
+                "resp_bytes": 100 + i * 7,
+                "pop": (["IAD", "LHR", "NRT", "FRA", "GRU"][(k / 3) % 5]),
+                "country": country,
+                "region": region,
+                "asn": ([13335, 15169, 16509, 7922, 3320, 2516][(k / 2) % 6]),
+                "proto": (["2", "3", "1.1"][k % 3]),
+                "ttfb": 0.000_5 * ((i * 13) % 400) as f64,
+                "tcp_rtt": 2_000 + (i * 37) % 40_000 + 9_000 * (k % 6) as i64,
+                "ploss": 0.002 * (i % 5) as f64,
+                "rtt_var": 500 + i % 700,
+                "retrans": i % 4,
+                "delivery_rate": 100_000 + i * 31,
+            });
+            // Nulls exercise each coalesce: unknown city and country, ASN 0, protocol
+            // default and absent RTT, loss and timestamp.
+            if i % 11 == 0 {
+                row["city"] = Value::Null;
+            } else {
+                row["city"] = city.into();
+                row["lat"] = lat.into();
+                row["lon"] = lon.into();
+            }
+            if i % 13 == 0 {
+                row["country"] = Value::Null;
+            }
+            if i % 19 == 0 {
+                row["asn"] = Value::Null;
+            }
+            if i % 23 == 0 {
+                row["proto"] = Value::Null;
+            }
+            if i % 7 == 0 {
+                row["tcp_rtt"] = Value::Null;
+            }
+            if i % 9 == 0 {
+                row["ploss"] = Value::Null;
+            }
+            if i % 401 == 7 {
+                row["timestamp"] = Value::Null;
+            }
+            row
+        })
+        .collect();
+    write_summary_fixtures("__fixtures__/network-summaries", &rows);
+}
+
+/// Writes `frontend/lib/cloud-engine/{rel}/`: 15-minute raw windows of `rows`, their window
+/// summaries, hour bundles (and each hour's bundle without its last window), the day bundle
+/// and `index.json`.
+fn write_summary_fixtures(rel: &str, rows: &[Value]) {
+    use fastly_log_analytics::ingest::bundle::{self, Unit};
+    const FIXTURE_WINDOW: i64 = 900;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../frontend/lib/cloud-engine")
+        .join(rel);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
     let mut text = Vec::new();
-    for row in &rows {
+    for row in rows {
         writeln!(text, "{row}").unwrap();
     }
     let gz = zstd::stream::encode_all(text.as_slice(), 1).unwrap();
