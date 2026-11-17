@@ -76,8 +76,9 @@ describe("summarizeUsage", () => {
       requests: 1,
       vcpuMs: 200,
     });
-    expect(summary.computeRequests).toBe(3 + 720);
-    expect(summary.computeVcpuMs).toBe(45 + 7_200);
+    // 3 API rows + 720 legacy ticks + 4 cron executions (285 ms).
+    expect(summary.computeRequests).toBe(3 + 720 + 4);
+    expect(summary.computeVcpuMs).toBe(45 + 7_200 + 285);
     expect(summary.kvOps).toBe(40_000);
   });
 
@@ -103,8 +104,8 @@ describe("summarizeUsage", () => {
       requests: 8,
       vcpuMs: 40,
     });
-    expect(folded.computeRequests).toBe(3 + 7 + 720);
-    expect(folded.computeVcpuMs).toBe(45 + 35 + 7_200);
+    expect(folded.computeRequests).toBe(3 + 7 + 720 + 4);
+    expect(folded.computeVcpuMs).toBe(45 + 35 + 7_200 + 285);
   });
 
   it("counts idle clock ticks carried on cron_runs rows as compute requests", () => {
@@ -123,8 +124,8 @@ describe("summarizeUsage", () => {
         cron_ticks: [],
       },
     });
-    expect(withIdle.computeRequests).toBe(3 + 119);
-    expect(withIdle.computeVcpuMs).toBe(45 + 238);
+    expect(withIdle.computeRequests).toBe(3 + 119 + 5);
+    expect(withIdle.computeVcpuMs).toBe(45 + 238 + 485);
   });
 
   it("counts each clock execution once and every worker execution it dispatched", () => {
@@ -177,6 +178,85 @@ describe("summarizeUsage", () => {
     expect(withWorkers.computeByCron).toEqual([
       { key: "request_compact", requests: 1, vcpuMs: 480 },
     ]);
+  });
+
+  const stageRow = (over: Partial<CronRunRow>): CronRunRow => ({
+    ...fixtureUsageInput.rows.cron_runs[2],
+    details_json: "{}",
+    idle_ticks: 0,
+    idle_vcpu_ms: 0,
+    worker_executions: 0,
+    ...over,
+  });
+  const sums = (s: ReturnType<typeof summarizeUsage>) => ({
+    requests: s.computeSegments!.reduce((sum, seg) => sum + seg.requests, 0),
+    vcpuMs: s.computeSegments!.reduce((sum, seg) => sum + seg.vcpuMs, 0),
+  });
+
+  it("counts a clock run's stage, worker and compaction-pass vCPU once per execution", () => {
+    // One clock tick (two tick stages, a maintenance stage and a compaction job on the worker
+    // service, 3 worker executions incl. both, 2 compaction passes) and one /_flush execution.
+    const run = (kind: string, over: Partial<CronRunRow> = {}) =>
+      stageRow({ cron_kind: kind, run_id: `cron-9-ab-${kind}`, trigger: "clock", ...over });
+    const summary = summarizeUsage({
+      ...fixtureUsageInput,
+      rows: {
+        ...fixtureUsageInput.rows,
+        api_telemetry: [],
+        cron_ticks: [],
+        cron_runs: [
+          run("request_ingest", {
+            vcpu_ms: 120,
+            worker_executions: 3,
+            idle_ticks: 10,
+            idle_vcpu_ms: 20,
+            details_json: JSON.stringify({ worker_vcpu_ms: 300, summary_vcpu_ms: 100 }),
+          }),
+          run("raw_delete", { vcpu_ms: 30 }),
+          run("retention_sweep", { vcpu_ms: 60 }),
+          run("request_compact", {
+            vcpu_ms: 40,
+            details_json: JSON.stringify({ passes: 2, worker_vcpu_ms: 90 }),
+          }),
+          stageRow({ cron_kind: "log_flush", run_id: "flush-9-cd-log_flush", trigger: "clock", vcpu_ms: 25 }),
+        ],
+      },
+    });
+    // Tick 1 + flush 1 + worker 3 + passes 2 + idle 10.
+    expect(summary.computeRequests).toBe(17);
+    // Tick 120 + 30, flush 25, worker 60 + 40 + 300 + 90, idle 20.
+    expect(summary.computeVcpuMs).toBe(685);
+    expect(sums(summary)).toEqual({ requests: 17, vcpuMs: 685 });
+  });
+
+  it("bills a manual run's own stages once, inside its API trigger request, plus its workers", () => {
+    const run = (kind: string, over: Partial<CronRunRow> = {}) =>
+      stageRow({ cron_kind: kind, run_id: `cron-7-ef-${kind}`, trigger: "manual", ...over });
+    const summary = summarizeUsage({
+      ...fixtureUsageInput,
+      settings: { ...fixtureUsageInput.settings, ...LIST_RATES },
+      rows: {
+        ...fixtureUsageInput.rows,
+        // The trigger request's vCPU covers every stage it ran in its own execution.
+        api_telemetry: [
+          { timestamp: FIXTURE_NOW, source: "compute_api", path: "/api/cron-runs/trigger", vcpu_ms: 200 },
+        ],
+        cron_ticks: [],
+        cron_runs: [
+          run("request_ingest", {
+            vcpu_ms: 150,
+            worker_executions: 2,
+            details_json: JSON.stringify({ worker_vcpu_ms: 80 }),
+          }),
+          run("retention_sweep", { vcpu_ms: 30 }),
+        ],
+      },
+    });
+    expect(summary.computeRequests).toBe(1 + 2);
+    expect(summary.computeVcpuMs).toBe(200 + 80 + 30);
+    expect(sums(summary)).toEqual({ requests: 3, vcpuMs: 310 });
+    // Trigger: 200 ms → 180 billed. Workers: 110 ms / 2 = 55 → 35 excess → 40 each.
+    expect(summary.computeBilledVcpuMs).toBe(180 + 2 * 40);
   });
 
   it("estimates storage as snapshot + PUT bytes - deleted bytes after the snapshot", () => {
@@ -986,7 +1066,7 @@ describe("incurredCost", () => {
       },
     });
     expect(summary.computeRequests).toBe(101);
-    expect(summary.computeVcpuMs).toBe(100);
+    expect(summary.computeVcpuMs).toBe(146);
     expect(summary.computeBilledVcpuMs).toBe(30);
     // Telemetry cost bills the 1 log_flush run + 30 ms excess CPU.
     expect(telemetryCostUsd(summary, settings)).toBeCloseTo(

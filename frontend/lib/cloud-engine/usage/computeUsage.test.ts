@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { computeUsage } from "./computeUsage";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { computeUsage, resetComputeBillingCache } from "./computeUsage";
 import { rollupComputeByDay, type ComputePoint } from "./computeSeries";
 import type { ComputeBilling } from "./summary";
 
@@ -44,13 +44,31 @@ const billing = (over: Partial<ComputeBilling> = {}): ComputeBilling => ({
 });
 
 describe("computeUsage", () => {
+  afterEach(() => resetComputeBillingCache());
+
+  it("shares one Stats read between the page's requests for the same range", async () => {
+    const fetchBilling = vi.fn(async () => billing());
+    const to = from + 3 * HOUR;
+
+    await Promise.all([
+      computeUsage({ from, to }, undefined, fetchBilling),
+      computeUsage({ from, to }, undefined, fetchBilling),
+    ]);
+    // An open-ended range ends a few ms later on the next request.
+    await computeUsage({ from: from + 5, to: to + 5 }, undefined, fetchBilling);
+    expect(fetchBilling).toHaveBeenCalledTimes(1);
+
+    await computeUsage({ from, to: to + HOUR }, undefined, fetchBilling);
+    expect(fetchBilling).toHaveBeenCalledTimes(2);
+  });
+
   it("reports Fastly's app and worker totals with one hourly point per covered hour", async () => {
     const fetchBilling = vi.fn(async () => billing());
     const to = from + 3 * HOUR;
 
     const result = await computeUsage({ from, to }, undefined, fetchBilling);
 
-    expect(fetchBilling).toHaveBeenCalledWith({ from, to }, undefined);
+    expect(fetchBilling).toHaveBeenCalledWith({ from, to }, expect.any(AbortSignal));
     expect(result).toEqual({
       source: "fastly",
       requests: 34,

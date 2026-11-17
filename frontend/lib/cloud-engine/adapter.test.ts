@@ -6,6 +6,7 @@ import { securityScanColumns, setSecurityEngineClient } from "./security";
 import { getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
+import { resetComputeBillingCache } from "./usage/computeUsage";
 import * as ops from "./telemetry/client";
 import { CloudBudgetError, ensureCloudRange } from "./range-loader";
 import { insightScanColumns } from "./insight-scans";
@@ -92,6 +93,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     setOriginSqlExecutor(null);
     setPerformanceEngineClient(null);
     setSecurityEngineClient(null);
+    resetComputeBillingCache();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -165,6 +167,64 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       requests: 5,
       vcpu_ms: 50,
       data: [{ time: "2026-11-10T00:00:00.000Z", app_requests: 3, worker_requests: 2 }],
+    });
+  });
+
+  describe("Incurred Cost lines on /api/usage/current-storage", () => {
+    const from = Date.parse("2026-11-10T00:00:00Z");
+    const stats = {
+      requests: 5, executionTimeMs: 50, billedTimeMs: 500, coveredFrom: from, coveredTo: from + 3_600_000,
+      computeBandwidthBytes: 0, cdnRequests: null, kvClassA: 7, kvClassB: 0, secrets: 3,
+      byRole: { app: { requests: 3, vcpuMs: 30 }, worker: { requests: 2, vcpuMs: 20 } },
+      computeByHour: [],
+    };
+    const load = async (path: string, rangeMs: number) => {
+      const params = new URLSearchParams({
+        start_time: new Date(from).toISOString(),
+        end_time: new Date(from + rangeMs).toISOString(),
+      });
+      const response = await handleCloudAnalyticalRequest(new Request(`http://localhost${path}?${params}`));
+      return response!.json();
+    };
+    const line = (body: { seven_line_table: Array<{ id: string }> }, id: string) =>
+      body.seven_line_table.find((l) => l.id === id);
+    beforeEach(() => {
+      const summary = usage.summarizeUsage(fixtureUsageInput);
+      vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+        ...summary, input: fixtureUsageInput, summary, lines: [], totalUsd: 0,
+      });
+      vi.spyOn(usage, "fetchUsageKind").mockResolvedValue([]);
+    });
+
+    it("prices Compute, KV and secrets from Fastly's Stats API, shared with the Compute charts' read", async () => {
+      const fetchBilling = vi.spyOn(usage, "fetchComputeBilling").mockResolvedValue(stats);
+
+      await load("/api/usage/compute", 2 * 3_600_000);
+      const body = await load("/api/usage/current-storage", 2 * 3_600_000);
+
+      expect(fetchBilling).toHaveBeenCalledTimes(1);
+      expect(line(body, "compute")).toMatchObject({ source: "fastly", detail: "5 reqs · 50 vCPU ms" });
+      expect(line(body, "kv")).toMatchObject({ source: "fastly" });
+      // 3 secrets over the 2-hour range, not a default 30 days.
+      expect(line(body, "secrets")).toMatchObject({ source: "fastly", detail: "3 secrets × 0.1 days" });
+    });
+
+    it("falls back to the logged lines when the Stats API fails", async () => {
+      vi.spyOn(usage, "fetchComputeBilling").mockRejectedValue(new Error("stats down"));
+
+      const body = await load("/api/usage/current-storage", 2 * 3_600_000);
+
+      expect(line(body, "compute")).toMatchObject({ source: "logged" });
+      expect(line(body, "kv")).toMatchObject({ source: "none" });
+    });
+
+    it("falls back to the logged lines without a Stats read for ranges over 31 days", async () => {
+      const fetchBilling = vi.spyOn(usage, "fetchComputeBilling").mockResolvedValue(stats);
+
+      const body = await load("/api/usage/current-storage", 32 * 86_400_000);
+
+      expect(fetchBilling).not.toHaveBeenCalled();
+      expect(line(body, "compute")).toMatchObject({ source: "logged" });
     });
   });
 

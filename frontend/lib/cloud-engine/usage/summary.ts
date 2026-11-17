@@ -103,7 +103,7 @@ export interface CronRunRow {
   /** Idle clock executions (and their vCPU) folded into this run since the job last ran. */
   idle_ticks?: number;
   idle_vcpu_ms?: number;
-  /** Shared by every stage row of one clock execution, including its worker stages. */
+  /** `<root>-<cron_kind>`: every stage row of one clock, flush or manual root shares `<root>`. */
   run_id?: string;
   trigger?: string;
   /** flp-worker executions the clock execution that wrote this row dispatched. */
@@ -331,16 +331,92 @@ function emptyTotals(): OpTotals {
   return { classA: 0, classB: 0, cdnHit: 0, usd: 0 };
 }
 
-/** Worker executions a run dispatched report their vCPU in its details, not in `vcpu_ms`. */
-function workerVcpuMs(run: CronRunRow): number {
+function detailNumber(run: CronRunRow, field: "worker_vcpu_ms" | "passes") {
   if (!run.details_json) return 0;
   try {
-    const parsed = JSON.parse(run.details_json) as { worker_vcpu_ms?: unknown };
-    const value = Number(parsed.worker_vcpu_ms ?? 0);
+    const parsed = JSON.parse(run.details_json) as Record<string, unknown>;
+    const value = Number(parsed[field] ?? 0);
     return Number.isFinite(value) && value > 0 ? value : 0;
   } catch {
     return 0;
   }
+}
+
+/** Worker executions a run dispatched report their vCPU in its details, not in `vcpu_ms`. */
+function workerVcpuMs(run: CronRunRow): number {
+  return detailNumber(run, "worker_vcpu_ms");
+}
+
+/** Stages that run in their own flp-worker execution, so their `vcpu_ms` is the worker's. */
+const WORKER_CRON_KINDS = new Set([
+  "retention_sweep",
+  "log_compact",
+  "delete_history",
+  "storage_reconcile",
+  "summary_bundle",
+  "request_compact",
+  "delete_data",
+  "rum_compact",
+]);
+
+/**
+ * Splits cron_runs rows into the Compute executions they stand for. Stage rows share their
+ * execution's root run id (`<root>-<cron_kind>`); a row without one is its own execution.
+ * A clock or `/_flush` root is one app-service execution carrying its tick stages; a manual
+ * root ran inside its API trigger request, whose api_telemetry row already holds that vCPU.
+ * Worker stages, the worker executions a root dispatched (`worker_executions`, the vCPU in
+ * `worker_vcpu_ms`) and compaction passes go to one worker segment per root.
+ */
+function cronExecutionSegments(
+  cron_runs: CronRunRow[],
+): ComputeExecutionSegment[] {
+  const roots = new Map<
+    string,
+    { manual: boolean; app: number; worker: ComputeExecutionSegment }
+  >();
+  cron_runs.forEach((run, i) => {
+    const suffix = `-${run.cron_kind}`;
+    const id = run.run_id
+      ? `id:${run.run_id.endsWith(suffix) ? run.run_id.slice(0, -suffix.length) : run.run_id}`
+      : `row:${i}`;
+    let root = roots.get(id);
+    if (!root) {
+      root = {
+        manual: run.trigger === "manual",
+        app: 0,
+        worker: { vcpuMs: 0, requests: 0 },
+      };
+      roots.set(id, root);
+    }
+    const vcpu = Number(run.vcpu_ms ?? 0);
+    if (run.run_id && WORKER_CRON_KINDS.has(run.cron_kind)) {
+      root.worker.vcpuMs += vcpu;
+    } else {
+      root.app += vcpu;
+    }
+    root.worker.vcpuMs += workerVcpuMs(run);
+    root.worker.requests +=
+      Number(run.worker_executions ?? 0) + detailNumber(run, "passes");
+  });
+  const segments: ComputeExecutionSegment[] = [];
+  for (const root of roots.values()) {
+    if (!root.manual) segments.push({ vcpuMs: root.app, requests: 1 });
+    const { vcpuMs, requests } = root.worker;
+    if (vcpuMs > 0 || requests > 0) {
+      segments.push({
+        vcpuMs,
+        requests: vcpuMs > 0 ? Math.max(1, requests) : requests,
+      });
+    }
+  }
+  for (const run of cron_runs) {
+    const idle = Number(run.idle_ticks ?? 0);
+    const idleVcpu = Number(run.idle_vcpu_ms ?? 0);
+    if (idle > 0 || idleVcpu > 0) {
+      segments.push({ vcpuMs: idleVcpu, requests: Math.max(1, idle) });
+    }
+  }
+  return segments;
 }
 
 function addOps(totals: OpTotals, row: FosUsageRow) {
@@ -857,8 +933,6 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
     string,
     Map<string, ComputeExecutionSegment>
   >();
-  const activeRunSegments = new Map<string, ComputeExecutionSegment>();
-  const clockRuns = new Set<string>();
   let cacheLookups = 0;
   let loggedKvOps = 0;
   let hasKvOps = false;
@@ -871,35 +945,8 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
   let anonymousRunIdx = 0;
   for (const run of cron_runs) {
     const runKey = run.run_id ? `id:${run.run_id}` : `row:${anonymousRunIdx++}`;
-    const newClockRun =
-      run.trigger === "clock" && run.run_id
-        ? !clockRuns.has(run.run_id)
-        : false;
-    // Manual runs already have an api_telemetry row for their trigger request.
-    if (run.trigger === "clock" && run.run_id) clockRuns.add(run.run_id);
-    const idle = Number(run.idle_ticks ?? 0);
-    const idleVcpu = Number(run.idle_vcpu_ms ?? 0);
     const workers = Number(run.worker_executions ?? 0);
     const runVcpu = Number(run.vcpu_ms ?? 0) + workerVcpuMs(run);
-    computeRequests += idle;
-    computeRequests += workers;
-    computeVcpuMs += idleVcpu;
-    if (idle > 0 || idleVcpu > 0) {
-      computeSegments.push({
-        vcpuMs: idleVcpu,
-        requests: Math.max(1, idle),
-      });
-    }
-    const existingActive = activeRunSegments.get(runKey);
-    if (existingActive) {
-      existingActive.vcpuMs += runVcpu;
-      existingActive.requests += (newClockRun ? 1 : 0) + workers;
-    } else {
-      activeRunSegments.set(runKey, {
-        vcpuMs: runVcpu,
-        requests: Math.max(1, (newClockRun ? 1 : 0) + workers),
-      });
-    }
     let kindSegments = cronRunSegments.get(run.cron_kind);
     if (!kindSegments) {
       kindSegments = new Map();
@@ -943,13 +990,11 @@ export function summarizeUsage(input: UsageInput): UsageSummary {
     const segs = [...(cronRunSegments.get(kind)?.values() ?? [])];
     attachGroupSegments(entry, segs, input.settings);
   }
-  for (const seg of activeRunSegments.values()) {
-    if (seg.vcpuMs > 0 || seg.requests > 0) {
-      computeSegments.push(seg);
-    }
+  for (const seg of cronExecutionSegments(cron_runs)) {
+    computeSegments.push(seg);
+    computeRequests += seg.requests;
+    computeVcpuMs += seg.vcpuMs;
   }
-
-  computeRequests += clockRuns.size;
   const computeBilledVcpuMs = computeSegments.reduce(
     (sum, s) =>
       sum +

@@ -84,7 +84,7 @@ import {
 import { queryOpsLogs } from "./telemetry/client";
 import type { OpsKind } from "./telemetry/kinds";
 import { evaluateCapacity } from "./usage/capacity";
-import { computeUsage } from "./usage/computeUsage";
+import { computeUsage, usageComputeBilling } from "./usage/computeUsage";
 import { estimateMonthlyUsage } from "./usage/estimate";
 import { fetchEstimatePrefill } from "./usage/estimatePrefill";
 import { LIST_RATES } from "./usage/rates";
@@ -1619,6 +1619,10 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       return jsonResponse(await computeUsage({ from: fromMs, to: toMs }, request.signal), request);
     }
 
+    // Shares the Compute charts' Stats API read; resolves to null (logged lines) on failure.
+    const costBilling = pathname === "/api/usage/current-storage"
+      ? usageComputeBilling({ from: fromMs, to: toMs }, request.signal)
+      : Promise.resolve(null);
     const usageRes = await fetchUsageSummary({
       from: fromMs,
       to: toMs,
@@ -1634,7 +1638,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         : toMs - fromMs <= 2 * 86_400_000 ? "hour" : "day",
     });
     const costLines = buildSevenLineCostTable({
-      hours: days * 24,
+      hours: (toMs - fromMs) / 3_600_000,
       settings: input.settings,
       billedGbHours: summary.storage.billedGbMonths * 720,
       classA: summary.totals.classA,
@@ -1644,7 +1648,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       loggedComputeRequests: summary.computeRequests,
       loggedComputeVcpuMs: summary.computeVcpuMs,
       loggedComputeSegments: summary.computeSegments,
-      billing: null,
+      billing: await costBilling,
     });
 
     if (pathname === "/api/usage/current-storage") {
