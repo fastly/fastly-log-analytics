@@ -13,7 +13,19 @@
 import { sqlEscape } from "@/lib/sqlBuilder";
 import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
-import { BOT_UA_CLASSIFY_LIMIT, classifyUserAgentCounts, type BotRow } from "./bots/classify";
+import {
+  BOT_UA_CLASSIFY_LIMIT,
+  classifyUserAgentCounts,
+  loadWellKnownBots,
+  matchWellKnownBots,
+  type BotRow,
+} from "./bots/classify";
+import {
+  summarizeBotEfficiencyRows,
+  summarizeWellKnownBotRows,
+  type BotEfficiencyRow,
+  type WellknownBotRow,
+} from "./bots/summarize";
 import { POP_COORDINATES, haversineKm } from "./origin";
 import { formatAsnLabel, type FilterSpec } from "./performance";
 import type { components } from "@/types/api";
@@ -81,29 +93,12 @@ export const SECURITY_ROLLUPS = {
   sec_verified_bots_ts: "sec_verified_bots_ts",
 } as const;
 
-/**
- * Embedded `well_known_bots` (`well-known-bots`) directory for client-side bot verification
- * and efficiency classification.
- */
-export interface WellKnownBotEntry {
-  id: string;
-  category: string;
-  patterns: readonly string[];
-  rdns_suffixes?: readonly string[];
-}
-
-export const well_known_bots: readonly WellKnownBotEntry[] = [
-  { id: "Googlebot", category: "Search Engine Crawler", patterns: ["googlebot", "google-inspectiontool"] },
-  { id: "Bingbot", category: "Search Engine Crawler", patterns: ["bingbot", "msnbot"] },
-  { id: "GPTBot", category: "AI Crawler", patterns: ["gptbot", "chatgpt-user", "oai-searchbot"] },
-  { id: "ClaudeBot", category: "AI Crawler", patterns: ["claudebot", "claude-web", "anthropic-ai"] },
-  { id: "PerplexityBot", category: "AI Crawler", patterns: ["perplexitybot", "perplexity-user"] },
-  { id: "Applebot", category: "Search Engine Crawler", patterns: ["applebot"] },
-  { id: "DuckDuckBot", category: "Search Engine Crawler", patterns: ["duckduckbot"] },
-  { id: "AhrefsBot", category: "SEO Crawler", patterns: ["ahrefsbot"] },
-  { id: "SemrushBot", category: "SEO Crawler", patterns: ["semrushbot"] },
-  { id: "Bytespider", category: "AI Crawler", patterns: ["bytespider"] },
-] as const;
+// Bounds of the well-known-bots scan, as in the High-Scale reader: candidate user
+// agents, known-bot user agents kept, and (ua, ip) pairs by request count.
+const WELLKNOWN_UA_CANDIDATES = 5000;
+const WELLKNOWN_UA_MATCHES = 500;
+const WELLKNOWN_PAIR_LIMIT = 10_000;
+const BOT_EFFICIENCY_UA_LIMIT = 2000;
 
 export interface SecurityAggregatesRequest {
   customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
@@ -164,30 +159,6 @@ export interface SecurityNgwafBotTsPoint {
   count: number;
 }
 
-export interface WellKnownBotSummaryItem {
-  id: string;
-  category: string;
-  requests: number;
-  unique_ips: number;
-  verified_ips: number;
-  spoofed_ips: number;
-  unverified_ips: number;
-  status: "Verified" | "Spoofed" | "Unverified";
-  sample_ips: Array<{ ip: string; status: string; rdns: string }>;
-}
-
-export interface BotEfficiencyItem {
-  bot_name: string;
-  company: string;
-  category: string;
-  crawl_requests: number;
-  crawl_bytes: number;
-  referral_visits: number;
-  crawl_to_referral_ratio: number | null;
-  req_pct: number;
-  bytes_pct: number;
-}
-
 type ApiSecurityAggregates = components["schemas"]["SecurityAggregatesResponse"];
 type ApiActiveClientItem = components["schemas"]["ActiveClientItem"];
 
@@ -229,8 +200,8 @@ export interface SecurityAggregatesResponse extends Partial<SecurityProxiesData>
   ngwaf_configured?: boolean;
   ngwaf_verified_bots?: SecurityNgwafBotItem[];
   ngwaf_verified_bots_ts?: SecurityNgwafBotTsPoint[];
-  wellknown_bots?: WellKnownBotSummaryItem[];
-  bot_efficiency?: BotEfficiencyItem[];
+  wellknown_bots?: WellknownBotRow[];
+  bot_efficiency?: BotEfficiencyRow[];
   bots?: BotRow[];
   ngwaf_bots?: Array<{ bot_name: string; bot_category: string | null; requests: number }>;
 }
@@ -519,6 +490,7 @@ export function buildSecurityTopIpsHeaderSql(
 export function buildSecurityTopUserAgentsSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
+  limit = BOT_UA_CLASSIFY_LIMIT,
 ): { sql: string; params: unknown[] } {
   const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
   const sql = `
@@ -529,7 +501,89 @@ export function buildSecurityTopUserAgentsSql(
       AND CAST(ua AS VARCHAR) != ''
     GROUP BY 1
     ORDER BY cnt DESC, ua ASC
-    LIMIT ${BOT_UA_CLASSIFY_LIMIT}
+    LIMIT ${limit}
+  `.trim();
+  return { sql, params };
+}
+
+/** The busiest (ua, ip) pairs among the given known-bot user agents. */
+export function buildSecurityWellKnownBotPairsSql(
+  req: SecurityAggregatesRequest,
+  botUserAgents: readonly string[],
+  availableColumns?: ReadonlySet<string>,
+): { sql: string; params: unknown[] } {
+  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const ipCol = securityIpExpr(availableColumns);
+  const inList = botUserAgents.map((ua) => `'${sqlEscape(ua)}'`).join(", ");
+  const sql = `
+    SELECT CAST(ua AS VARCHAR) AS ua, CAST(${ipCol} AS VARCHAR) AS ip, COUNT(*) AS cnt
+    FROM logs
+    WHERE (${whereSql})
+      AND CAST(ua AS VARCHAR) IN (${inList})
+      AND COALESCE(CAST(${ipCol} AS VARCHAR), '') != ''
+    GROUP BY 1, 2
+    ORDER BY cnt DESC, ua ASC, ip ASC
+    LIMIT ${WELLKNOWN_PAIR_LIMIT}
+  `.trim();
+  return { sql, params };
+}
+
+/**
+ * Bot efficiency inputs, as in the High-Scale reader: the top user agents by bytes
+ * with site totals, and unique referring IPs per referral stem from human traffic.
+ */
+export function buildSecurityBotEfficiencySql(
+  req: SecurityAggregatesRequest,
+  availableColumns: ReadonlySet<string>,
+): { sql: string; params: unknown[] } {
+  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const ipCol = securityIpExpr(availableColumns);
+  const bytes = availableColumns.has("resp_bytes") ? "TRY_CAST(resp_bytes AS BIGINT)" : "0";
+  const referer = availableColumns.has("referer") ? "COALESCE(CAST(referer AS VARCHAR), '')" : "''";
+  const sql = `
+    WITH ua_all AS (
+      SELECT COALESCE(CAST(ua AS VARCHAR), '') AS key, COUNT(*) AS cnt,
+             COALESCE(SUM(${bytes}), 0)::BIGINT AS resp_bytes,
+             (SUM(COUNT(*)) OVER ())::BIGINT AS site_cnt,
+             COALESCE(SUM(SUM(${bytes})) OVER (), 0)::BIGINT AS site_resp_bytes
+      FROM logs
+      WHERE (${whereSql})
+      GROUP BY 1
+    ),
+    ua_agg AS (
+      SELECT 'ua' AS kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes
+      FROM ua_all WHERE key != ''
+      ORDER BY resp_bytes DESC, cnt DESC, key ASC
+      LIMIT ${BOT_EFFICIENCY_UA_LIMIT}
+    ),
+    ref_rows AS (
+      SELECT CAST(${ipCol} AS VARCHAR) AS ip, lower(COALESCE(CAST(ua AS VARCHAR), '')) AS ua_l, ${referer} AS ref
+      FROM logs
+      WHERE (${whereSql})
+    ),
+    ref_extracted AS (
+      SELECT ip,
+             COALESCE(
+               NULLIF(
+                 CASE WHEN contains(ua_l, '-user') OR contains(ua_l, '-externalfetcher')
+                   THEN regexp_extract(ua_l, '([a-z0-9]+)-(?:user|externalfetcher)', 1) ELSE '' END,
+                 ''),
+               regexp_extract(lower(ref), 'https?://(?:www\\.)?([^/.:;\\s]+)', 1)) AS ref_stem
+      FROM ref_rows
+      WHERE COALESCE(ip, '') != ''
+        AND ((ref != '' AND ref != '-') OR contains(ua_l, '-user') OR contains(ua_l, '-externalfetcher'))
+        AND NOT regexp_matches(ua_l, '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
+    ),
+    ref_agg AS (
+      SELECT 'ref' AS kind, ref_stem AS key, COUNT(DISTINCT ip) AS cnt,
+             0::BIGINT AS resp_bytes, 0::BIGINT AS site_cnt, 0::BIGINT AS site_resp_bytes
+      FROM ref_extracted WHERE ref_stem != '' GROUP BY ref_stem
+    )
+    SELECT * FROM (
+      SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ua_agg
+      UNION ALL SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
+    )
+    ORDER BY kind DESC, resp_bytes DESC, cnt DESC, key ASC
   `.trim();
   return { sql, params };
 }
@@ -689,67 +743,6 @@ export function buildSecurityThreatIntelSql(
     LIMIT 50
   `.trim();
   return { sql, params };
-}
-
-export function matchWellKnownBot(ua: string): WellKnownBotEntry | null {
-  const lower = (ua || "").toLowerCase();
-  if (!lower) return null;
-  for (const bot of well_known_bots) {
-    if (bot.patterns.some((p) => lower.includes(p))) {
-      return bot;
-    }
-  }
-  return null;
-}
-
-export function summarizeWellKnownBotRows(
-  rows: ReadonlyArray<Record<string, unknown>>,
-): WellKnownBotSummaryItem[] {
-  const grouped = new Map<
-    string,
-    {
-      entry: WellKnownBotEntry;
-      requests: number;
-      ips: Set<string>;
-      sampleIps: Array<{ ip: string; status: string; rdns: string }>;
-    }
-  >();
-
-  for (const row of rows) {
-    const ua = String(row.ua ?? "");
-    const ip = String(row.ip ?? row.client_ip ?? "");
-    const cnt = Math.max(0, Math.trunc(toNum(row.cnt ?? row.count ?? row.requests, 0)));
-    if (!ua || cnt <= 0) continue;
-    const match = matchWellKnownBot(ua);
-    if (!match) continue;
-
-    let bucket = grouped.get(match.id);
-    if (!bucket) {
-      bucket = { entry: match, requests: 0, ips: new Set(), sampleIps: [] };
-      grouped.set(match.id, bucket);
-    }
-    bucket.requests += cnt;
-    if (ip && !bucket.ips.has(ip)) {
-      bucket.ips.add(ip);
-      if (bucket.sampleIps.length < 5) {
-        bucket.sampleIps.push({ ip, status: "Unverified", rdns: "N/A" });
-      }
-    }
-  }
-
-  return [...grouped.values()]
-    .map((b) => ({
-      id: b.entry.id,
-      category: b.entry.category,
-      requests: b.requests,
-      unique_ips: b.ips.size,
-      verified_ips: 0,
-      spoofed_ips: 0,
-      unverified_ips: b.ips.size,
-      status: "Unverified" as const,
-      sample_ips: b.sampleIps,
-    }))
-    .sort((a, b) => b.requests - a.requests);
 }
 
 export function evaluateImpossibleDistance(params: {
@@ -990,7 +983,7 @@ export function formatProxiesExportPayload(
 export const SECURITY_SCAN_COLUMNS = [
   "timestamp", "ts_ms", "ip", "client_ip", "tls_ciphers_sha", "req_header_bytes", "conn_requests", "is_ipv6",
   "p_type", "waf_sig", "ua", "asn", "rtt_min", "tcpi_min_rtt", "tcp_rtt", "tcpi_rtt", "lat", "lon", "pop",
-  "country", "city",
+  "country", "city", "referer", "resp_bytes",
 ] as const;
 
 /** The columns a projected /api/security/aggregates load needs, or null when the filters can't name theirs. */
@@ -1140,22 +1133,48 @@ export async function executeSecurityAggregates(
     response.ngwaf_verified_bots_ts = [];
   }
 
+  const hasUa = availableColumns.has("ua");
+  const hasIp = availableColumns.has("ip") || availableColumns.has("client_ip");
+
   if (sections.has("wellknown_bots")) {
-    tasks.push(
-      (async () => {
-        const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
-        const ipCol = securityIpExpr(availableColumns);
-        const rows = await client.query(
-          `SELECT CAST(ua AS VARCHAR) AS ua, CAST(${ipCol} AS VARCHAR) AS ip, COUNT(*) AS cnt FROM logs WHERE (${whereSql}) AND ua IS NOT NULL GROUP BY 1, 2 LIMIT 5000`,
-          params,
-        );
-        response.wellknown_bots = summarizeWellKnownBotRows(rows);
-      })(),
-    );
+    response.wellknown_bots = [];
+    if (hasUa && hasIp) {
+      tasks.push(
+        (async () => {
+          const top = buildSecurityTopUserAgentsSql(req, availableColumns, WELLKNOWN_UA_CANDIDATES);
+          const all = await loadWellKnownBots();
+          const botUas = (await client.query(top.sql, top.params))
+            .map((r) => String(r.ua ?? ""))
+            .filter((ua) => matchWellKnownBots(all, ua).length > 0)
+            .slice(0, WELLKNOWN_UA_MATCHES);
+          if (botUas.length === 0) return;
+          const { sql, params } = buildSecurityWellKnownBotPairsSql(req, botUas, availableColumns);
+          const rows = await client.query(sql, params);
+          response.wellknown_bots = await summarizeWellKnownBotRows(
+            rows.map((r) => [String(r.ua ?? ""), String(r.ip ?? ""), Math.trunc(toNum(r.cnt))] as const),
+          );
+        })(),
+      );
+    }
   }
 
   if (sections.has("bot_efficiency")) {
     response.bot_efficiency = [];
+    if (hasUa) {
+      tasks.push(
+        (async () => {
+          const { sql, params } = buildSecurityBotEfficiencySql(req, availableColumns);
+          const rows = await client.query(sql, params);
+          const tagged: [string, string, number, number][] = [];
+          const site = rows.find((r) => r.kind === "ua");
+          if (site) tagged.push(["site", "", Math.trunc(toNum(site.site_cnt)), Math.trunc(toNum(site.site_resp_bytes))]);
+          for (const r of rows) {
+            tagged.push([String(r.kind ?? ""), String(r.key ?? ""), Math.trunc(toNum(r.cnt)), Math.trunc(toNum(r.resp_bytes))]);
+          }
+          response.bot_efficiency = await summarizeBotEfficiencyRows(tagged);
+        })(),
+      );
+    }
   }
 
   if (sections.has("top_bots")) {

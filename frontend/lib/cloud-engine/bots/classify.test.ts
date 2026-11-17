@@ -69,9 +69,23 @@ describe("well-known bots browser copy", () => {
   it("matches backend/utils/well_known_bots_seed.json (rerun scripts/generate-well-known-bots.mjs)", () => {
     const seed = JSON.parse(
       readFileSync(path.join(__dirname, "../../../../backend/utils/well_known_bots_seed.json"), "utf8"),
-    ) as { id?: string; categories?: string[]; pattern?: { accepted?: string[] } }[];
-    const derived = seed.map((e) => [e.id ?? "unknown", e.categories?.[0] ?? "unknown", e.pattern?.accepted ?? []]);
-    expect(WELL_KNOWN_BOTS).toEqual(derived);
+    ) as {
+      id?: string;
+      categories?: string[];
+      pattern?: { accepted?: string[] };
+      verification?: { domains?: string[] };
+      aliases?: string[];
+    }[];
+    const derived = seed.map((e) => [
+      e.id ?? "unknown",
+      e.categories?.[0] ?? "unknown",
+      e.pattern?.accepted ?? [],
+      e.verification?.domains ?? [],
+      e.aliases ?? [],
+    ]);
+    // Referral stems are checked against the backend by tests/utils/test_well_known_bots_browser_copy.py.
+    expect(WELL_KNOWN_BOTS.map(([id, category, patterns, , domains, aliases]) => [id, category, patterns, domains, aliases]))
+      .toEqual(derived);
   });
 
   it("compiles every pattern as a JavaScript regular expression", () => {

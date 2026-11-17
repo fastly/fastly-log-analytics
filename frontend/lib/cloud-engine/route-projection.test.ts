@@ -55,6 +55,11 @@ const DATA: Record<string, string> = {
   tls_version: cycle([null, "TLSv1.3", ""]),
   tls: cycle(["TLSv1.2", null]),
   asset_type: cycle([null, "", "Font", null, null]),
+  ua: cycle([
+    "Mozilla/5.0 (compatible; Googlebot/2.1)", "ua-2", "curl/8.4.0", "Mozilla/5.0 Chrome/120",
+    "Mozilla/5.0 (compatible; ChatGPT-User/1.0)", null, "CCBot/2.0",
+  ]),
+  referer: cycle([null, "https://www.google.com/search", "-", "https://example.org/x", ""]),
 };
 
 // Scoring fields the table schema leaves optional; the Cloud view lists them once a file carries them.
@@ -262,11 +267,15 @@ describe("Cloud route column projections", () => {
       tls_fingerprints: expect.arrayContaining([expect.objectContaining({ request_count: expect.any(Number) })]),
       verified_bots_ts: expect.arrayContaining([expect.objectContaining({ bot_type: "Googlebot" })]),
       traffic_quality: expect.any(Array), proxy_dist: expect.any(Array),
+      wellknown_bots: expect.arrayContaining([expect.objectContaining({ id: "curl" })]),
+      bot_efficiency: expect.arrayContaining([expect.objectContaining({ bot_name: "Curl", referrals: 0 })]),
     });
     await guard([
       security({ filters: {} }),
       security({ filters: { status_1: { mode: "include", values: ["200"] } }, sections: ["proxies", "ipv6_adoption"] }),
       security({ filters: { host: ["a.example"] }, sections: ["tls_fingerprints", "top_ips_header", "wellknown_bots"], bucket_seconds: 60 }),
+      security({ filters: {}, sections: ["wellknown_bots"] }),
+      security({ filters: { status_1: { mode: "include", values: ["200"] } }, sections: ["bot_efficiency"] }),
     ]);
     expect(securityScanColumns({ status_1: { mode: "include", values: ["200"] }, filter_mode: "all" })).toContain("status");
     expect(securityScanColumns({ filter_mode: "all" })).not.toContain("filter_mode");

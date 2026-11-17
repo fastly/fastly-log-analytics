@@ -26,8 +26,6 @@ import {
   setSecurityEngineClient,
   shapeSecurityProxiesFromRawRows,
   shapeSecurityThreatIntelRows,
-  summarizeWellKnownBotRows,
-  well_known_bots,
   type SecurityAggregatesResponse,
 } from "./security";
 
@@ -92,7 +90,7 @@ describe("security cloud-engine module (F20)", () => {
         { ip: "192.0.2.1", max_header: 512 }, { ip: "192.0.2.2", max_header: 256 },
       ]);
       expect(data.tls_fingerprints[0]).toMatchObject({ ip_count: 2, request_count: 2 });
-      expect(data.wellknown_bots[0]).toMatchObject({ requests: 2, unique_ips: 2 });
+      expect(data.wellknown_bots[0]).toMatchObject({ id: "google-crawler", request_count: 2, pending_count: 2 });
       expect(data.active_clients[0]).toMatchObject({ ip: "192.0.2.1", risk_level: "High" });
     } finally {
       await engine.reset();
@@ -146,6 +144,112 @@ describe("security cloud-engine module (F20)", () => {
     } finally {
       await engine.reset();
     }
+  });
+
+  const securitySections = async (sections: string[]) => {
+    const response = await handleSecurityRequest(
+      new Request("https://example.test/api/security/aggregates", {
+        method: "POST",
+        body: JSON.stringify({ start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", sections }),
+      }),
+    );
+    return (await response!.json()) as SecurityAggregatesResponse;
+  };
+
+  // Expected rows come from backend summarize_wellknown_bot_rows and summarize_bot_efficiency_rows
+  // over the same requests, with no rDNS cache entries.
+  it("summarizes well-known bots and bot efficiency like High-Scale", async () => {
+    const engine = getDuckDBEngine();
+    const googlebot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+    const chrome = "Mozilla/5.0 (Macintosh) Chrome/130.0.0.0 Safari/537.36";
+    const rows: [string | null, string, string | null, number, number][] = [
+      [googlebot, "66.249.66.1", null, 1000, 3],
+      [googlebot, "66.249.66.2", null, 1000, 1],
+      ["CCBot/2.0 (https://commoncrawl.org/faq/)", "192.0.2.10", null, 500, 2],
+      ["curl/8.4.0", "192.0.2.20", null, 100, 4],
+      ["Mozilla/5.0 (compatible; ExampleSpider/1.0)", "192.0.2.30", null, 2000, 1],
+      [chrome, "198.51.100.1", "https://www.google.com/search?q=x", 300, 2],
+      [chrome, "198.51.100.2", "https://www.google.com/", 300, 1],
+      [chrome, "198.51.100.3", "https://example.org/page", 300, 1],
+      ["Mozilla/5.0 (compatible; ChatGPT-User/1.0)", "203.0.113.5", null, 50, 1],
+      [null, "198.51.100.9", null, 700, 1],
+    ];
+    const lit = (v: string | null) => (v === null ? "NULL" : `'${v}'`);
+    try {
+      for (const [ua, ip, referer, bytes, n] of rows) {
+        await engine.executeSql(`
+          INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, ip, referer, resp_bytes)
+          SELECT 'security-wellknown', 1700000000000, epoch_ms(1700000000000), ${lit(ua)}, '${ip}', ${lit(referer)}, ${bytes}
+          FROM range(${n})
+        `);
+      }
+      const data = await securitySections(["wellknown_bots", "bot_efficiency"]);
+      const pending = (id: string, name: string, category: string, n: number) => ({
+        id, name, category, request_count: n, verified_count: 0, impersonator_count: 0,
+        unverified_count: 0, pending_count: n, verification_coverage: 0,
+      });
+      const unverified = (id: string, name: string, category: string, n: number) => ({
+        ...pending(id, name, category, n), unverified_count: n, pending_count: 0,
+      });
+      expect(data.wellknown_bots).toEqual([
+        unverified("curl", "Curl", "tool", 4),
+        pending("google-crawler", "Google Crawler", "google", 4),
+        pending("commoncrawl-crawler", "Commoncrawl Crawler", "academic", 2),
+        pending("ccbot-crawler", "Ccbot Crawler", "archive", 2),
+        unverified("openai-crawler-user", "Openai Crawler User", "ai", 1),
+      ]);
+      const efficiency = (bot_name: string, category: string, request_count: number, resp_bytes: number,
+        bandwidth_pct: number, referrals: number) => ({
+        bot_name, category, request_count, resp_bytes, bandwidth_pct, referrals,
+        requests_per_referral: request_count / Math.max(referrals, 1),
+        bytes_per_referral: resp_bytes / Math.max(referrals, 1),
+      });
+      expect(data.bot_efficiency).toEqual([
+        efficiency("Google Crawler", "Google", 4, 4000, 42.78, 2),
+        efficiency("Examplespider", "General Bot", 1, 2000, 21.39, 1),
+        efficiency("Commoncrawl Crawler", "Academic", 2, 1000, 10.7, 0),
+        efficiency("Curl", "Tool", 4, 400, 4.28, 0),
+        efficiency("Openai Crawler User", "Ai", 1, 50, 0.53, 1),
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("keeps the busiest 10,000 known-bot user agent and IP pairs", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, ip)
+        SELECT 'security-wellknown', 1700000000000, epoch_ms(1700000000000), 'curl/8.4.0', '10.0.' || (i // 256) || '.' || (i % 256)
+        FROM range(10001) t(i)
+      `);
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, ip)
+        SELECT 'security-wellknown', 1700000000000, epoch_ms(1700000000000), 'Googlebot/2.1 (+http://www.google.com/bot.html)', '66.249.66.1'
+        FROM range(5)
+      `);
+      const data = await securitySections(["wellknown_bots"]);
+      expect(data.wellknown_bots?.map((b) => [b.id, b.request_count])).toEqual([
+        ["curl", 9999],
+        ["google-crawler", 5],
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("returns empty bot sections when the user agent is not logged", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    setSecurityEngineClient({ getAvailableColumns: vi.fn().mockResolvedValue(new Set(["ts_ms", "timestamp", "ip"])), query });
+    const response = await handleSecurityRequest(
+      new Request("https://example.test/api/security/aggregates", {
+        method: "POST",
+        body: JSON.stringify({ sections: ["wellknown_bots", "bot_efficiency"] }),
+      }),
+    );
+    expect(await response!.json()).toEqual({ wellknown_bots: [], bot_efficiency: [] });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("returns no top bots when the user agent is not logged", async () => {
@@ -283,18 +387,6 @@ describe("security cloud-engine module (F20)", () => {
     expect(buildSecurityVerifiedBotsTsSql(req, cols).sql).toContain("VERIFIED-BOT.");
     expect(buildSecurityProxiesSql(req, cols).sql).toContain("rtt_min");
     expect(buildSecurityThreatIntelSql(req, cols).sql).toContain("tls_fingerprint");
-  });
-
-  it("classifies well_known_bots from User-Agent rows", () => {
-    expect(well_known_bots.length).toBeGreaterThanOrEqual(8);
-    const summary = summarizeWellKnownBotRows([
-      { ua: "Mozilla/5.0 (compatible; Googlebot/2.1)", ip: "66.249.66.1", cnt: 50 },
-      { ua: "Mozilla/5.0 (compatible; GPTBot/1.0)", ip: "20.171.206.10", cnt: 30 },
-    ]);
-    expect(summary).toHaveLength(2);
-    expect(summary[0]?.id).toBe("Googlebot");
-    expect(summary[0]?.requests).toBe(50);
-    expect(summary[1]?.id).toBe("GPTBot");
   });
 
   it("evaluates impossible distance and shapes Watchdog proxies up to 100 active_clients", () => {
