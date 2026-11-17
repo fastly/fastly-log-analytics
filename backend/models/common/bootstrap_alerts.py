@@ -213,7 +213,7 @@ class BootstrapResponse(BaseResponse):
     custom_dashboard_cards: list[CustomCard] = Field(default_factory=list)
     active_log_field_ids: list[str] = Field(default_factory=list)
     ngwaf_configured: bool = False
-    # Cloud has no known-bot classifier; it sends False to hide the Fastly Bots card.
+    # False hides the Fastly Bots card on an install without a known-bot classifier.
     fastly_bots_available: bool = True
     # Saved views for the active service, folded in so the frontend can
     # render ViewSelector and rehydrate from URL view params without a

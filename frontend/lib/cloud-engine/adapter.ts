@@ -10,6 +10,7 @@ import { cloudCacheIdentity } from "./cache-identity";
 
 z.config({ jitless: true });
 import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
+import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
 import type { MinuteBucket } from "./dashboard/engine";
@@ -890,8 +891,9 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         header_badge: await headerBadge,
         // Cloud has no NGWAF; saying so up front keeps /security from drawing the NGWAF row then removing it.
         ngwaf_configured: false,
-        // Cloud has no known-bot classifier, so the Fastly Bots card would never fill.
-        fastly_bots_available: false,
+        // Cloud classifies the top user agents in the browser against the bundled
+        // well-known-bots seed; false hides the Fastly Bots card.
+        fastly_bots_available: true,
         settings: {
           needs_login: false,
           is_remote_analyst: isRemoteAnalyst,
@@ -1210,6 +1212,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       filters?: Record<string, { mode?: string; values?: string[] }>;
       custom_filters?: Record<string, { mode?: string; values?: string[] }>;
       fields?: string[];
+      sections?: string[];
     };
     const now = Date.now();
     const fromMs = body.start_time ? Date.parse(body.start_time) : now - 86_400_000;
@@ -1378,6 +1381,9 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         total_count: card.total ?? topRows.length,
       };
     }
+    const wantBots = !Array.isArray(body.sections) || body.sections.includes("bots");
+    const uaCounts = (result.cards?.ua?.ranked ?? [])
+      .map((row) => [String(row.value), row.count] as const);
 
     return jsonResponse(
       {
@@ -1395,6 +1401,9 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         },
         aggregates,
         fields,
+        ...(wantBots
+          ? { top_bots: { bots: await classifyUserAgentCounts(uaCounts, 10), ngwaf_bots: [] } }
+          : {}),
       },
       request,
       {

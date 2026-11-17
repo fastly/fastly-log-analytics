@@ -13,6 +13,7 @@
 import { sqlEscape } from "@/lib/sqlBuilder";
 import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
+import { BOT_UA_CLASSIFY_LIMIT, classifyUserAgentCounts, type BotRow } from "./bots/classify";
 import { POP_COORDINATES, haversineKm } from "./origin";
 import { formatAsnLabel, type FilterSpec } from "./performance";
 import type { components } from "@/types/api";
@@ -187,12 +188,6 @@ export interface BotEfficiencyItem {
   bytes_pct: number;
 }
 
-export interface SecurityTopBotItem {
-  name: string;
-  category: string;
-  requests: number;
-}
-
 type ApiSecurityAggregates = components["schemas"]["SecurityAggregatesResponse"];
 type ApiActiveClientItem = components["schemas"]["ActiveClientItem"];
 
@@ -236,7 +231,7 @@ export interface SecurityAggregatesResponse extends Partial<SecurityProxiesData>
   ngwaf_verified_bots_ts?: SecurityNgwafBotTsPoint[];
   wellknown_bots?: WellKnownBotSummaryItem[];
   bot_efficiency?: BotEfficiencyItem[];
-  bots?: SecurityTopBotItem[];
+  bots?: BotRow[];
   ngwaf_bots?: Array<{ bot_name: string; bot_category: string | null; requests: number }>;
 }
 
@@ -516,6 +511,25 @@ export function buildSecurityTopIpsHeaderSql(
     GROUP BY 1
     ORDER BY max_header DESC
     LIMIT 10
+  `.trim();
+  return { sql, params };
+}
+
+/** The user agents Elevation classifies into known bots: the top 2,000 by count. */
+export function buildSecurityTopUserAgentsSql(
+  req: SecurityAggregatesRequest,
+  availableColumns?: ReadonlySet<string>,
+): { sql: string; params: unknown[] } {
+  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const sql = `
+    SELECT CAST(ua AS VARCHAR) AS ua, COUNT(*) AS cnt
+    FROM logs
+    WHERE (${whereSql})
+      AND ua IS NOT NULL
+      AND CAST(ua AS VARCHAR) != ''
+    GROUP BY 1
+    ORDER BY cnt DESC, ua ASC
+    LIMIT ${BOT_UA_CLASSIFY_LIMIT}
   `.trim();
   return { sql, params };
 }
@@ -1147,6 +1161,18 @@ export async function executeSecurityAggregates(
   if (sections.has("top_bots")) {
     response.bots = [];
     response.ngwaf_bots = [];
+    if (availableColumns.has("ua")) {
+      tasks.push(
+        (async () => {
+          const { sql, params } = buildSecurityTopUserAgentsSql(req, availableColumns);
+          const rows = await client.query(sql, params);
+          response.bots = await classifyUserAgentCounts(
+            rows.map((r) => [String(r.ua ?? ""), Math.trunc(toNum(r.cnt))] as const),
+            10,
+          );
+        })(),
+      );
+    }
   }
 
   if (sections.has("proxies")) {

@@ -619,6 +619,8 @@ export type AggregateQueryOptions = {
   topK?: number | null;
   /** Fields that always need every value (e.g. the country map). */
   allValuesFields?: readonly string[];
+  /** Fields that keep more top values than `topK` (e.g. user agents for bots). */
+  rankedFields?: Readonly<Record<string, number>>;
   signal?: AbortSignal;
   /** Field search must match before ranking and cannot use approximate candidates. */
   fieldSearch?: { field: string; query: string };
@@ -1237,11 +1239,19 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         Math.floor(150_000 / fields.length),
       );
       const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
+      const rankLimit = (k: number) => Math.max(0, Math.floor(k));
+      const ranked = fields.flatMap((field, i) => {
+        const k = options.rankedFields?.[field];
+        return k !== undefined && k > (topK ?? 0) ? [`WHEN ${i} THEN ${rankLimit(k)}`] : [];
+      });
+      const topLimit = ranked.length > 0
+        ? `CASE field_idx ${ranked.join(" ")} ELSE ${rankLimit(topK ?? 0)} END`
+        : `${rankLimit(topK ?? 0)}`;
       const qualify = bounded
         ? ` QUALIFY row_number() OVER (PARTITION BY field_idx ORDER BY cnt DESC) <= ${candidateLimit} AND sum(${keyBytes}) OVER (PARTITION BY field_idx ORDER BY cnt DESC ROWS UNBOUNDED PRECEDING) <= ${Math.floor((32 * 1024 * 1024) / fields.length)}`
         : fullIdx.length === fields.length
           ? ""
-          : ` QUALIFY ${fullIdx.length > 0 ? `field_idx IN (${fullIdx.join(", ")}) OR ` : ""}rank() OVER (PARTITION BY field_idx ORDER BY cnt DESC) <= ${Math.max(0, Math.floor(topK ?? 0))}`;
+          : ` QUALIFY ${fullIdx.length > 0 ? `field_idx IN (${fullIdx.join(", ")}) OR ` : ""}rank() OVER (PARTITION BY field_idx ORDER BY cnt DESC) <= ${topLimit}`;
       const valuesTable = await backend.query(
         `${base} SELECT field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${fieldIdx} AS field_idx, ${cols.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base GROUP BY GROUPING SETS (${cols.map((c) => `(${c})`).join(", ")})) WHERE ${nonNull}${qualify}`,
         signal,

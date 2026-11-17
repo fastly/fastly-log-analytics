@@ -1,3 +1,4 @@
+import { BOT_UA_CLASSIFY_LIMIT } from "../bots/classify";
 import { isCdnHit } from "./cdn-cache";
 import {
   FIELD_DUCKDB_TYPES,
@@ -54,6 +55,8 @@ export type CardResult = {
   top: { value: Scalar; count: number }[];
   /** Every value, kept only for the country card that feeds the map. */
   all?: { value: Scalar; count: number }[];
+  /** The top values past `top`, kept only for user agents to classify bots. */
+  ranked?: { value: Scalar; count: number }[];
   /**
    * Some source summary kept only its top values for this field: `total` is
    * exact, but `top` counts are lower bounds and `distinct` is an estimate.
@@ -270,6 +273,10 @@ export const MINUTE_MS = 60_000;
 const TOP_N = 10;
 /** The country card keeps every value for the map. */
 const ALL_VALUES_FIELD = "country";
+/** Fields whose top values past `TOP_N` feed another card. */
+const RANKED_FIELDS: Readonly<Record<string, number>> = {
+  ua: BOT_UA_CLASSIFY_LIMIT,
+};
 const NUMERIC_COLLATOR = new Intl.Collator(undefined, { numeric: true });
 const BASE_COLUMNS = ["timestamp", "status", "cache", "resp_bytes"];
 /** Shorter ranges read raw Parquet, whose rollups answer them exactly. */
@@ -712,11 +719,14 @@ export class Aggregator {
     const cards: Record<string, CardResult> = {};
     for (const field of this.fields) {
       const summary = this.topSummaries.get(field);
+      const rankedLimit = RANKED_FIELDS[field];
       if (summary) {
+        const entries = new Map(summary.entries);
         cards[field] = {
           total: summary.nonNull,
           distinct: summary.distinct,
-          top: topEntries(new Map(summary.entries), TOP_N),
+          top: topEntries(entries, TOP_N),
+          ...(rankedLimit ? { ranked: topEntries(entries, rankedLimit) } : {}),
         };
         continue;
       }
@@ -746,6 +756,7 @@ export class Aggregator {
               all: [...counts].map(([value, count]) => ({ value, count })),
             }
           : {}),
+        ...(rankedLimit ? { ranked: topEntries(counts, rankedLimit) } : {}),
       };
     }
     return {
@@ -2147,6 +2158,7 @@ async function collectAggregator(
         edgeOnly,
         topK,
         allValuesFields: [ALL_VALUES_FIELD],
+        rankedFields: RANKED_FIELDS,
         signal,
         fieldSearch: searchQuery === undefined
           ? undefined : { field: fields[0], query: searchQuery },

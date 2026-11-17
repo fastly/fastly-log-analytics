@@ -326,7 +326,7 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(body.header_badge).toBeUndefined();
   });
 
-  it("boots the dashboard with the active service's logged fields and without the unbuilt Fastly Bots card", async () => {
+  it("boots the dashboard with the active service's logged fields and the Fastly Bots card", async () => {
     const listed = {
       services: [
         { service_id: "fixture-a", active_log_field_ids: ["status", "host"] },
@@ -345,7 +345,7 @@ describe("Cloud RUM status and versions services lookup", () => {
 
     const active = await boot("fixture-b");
     expect(active.active_log_field_ids).toEqual(["status", "pop", "tenant"]);
-    expect(active.fastly_bots_available).toBe(false);
+    expect(active.fastly_bots_available).toBe(true);
     expect(active.ngwaf_configured).toBe(false);
 
     resetCloudMetadataCache();

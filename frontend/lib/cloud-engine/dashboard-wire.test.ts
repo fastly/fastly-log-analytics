@@ -5,6 +5,7 @@ import { handleCloudAnalyticalRequest } from "./adapter";
 import { runInWorker } from "./dashboard/client";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { runDashboard, type DashboardResult } from "./dashboard/engine";
+import { fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
 import { fixtureSource, manifestEntry } from "./dashboard/test-fixtures";
 import { resetCloudMetadataCache } from "./metadata-cache";
 
@@ -195,6 +196,61 @@ describe("Cloud dashboard response contract", () => {
       });
     },
   );
+  it("classifies known bots from a summary's user agents into the bundle's top_bots", async () => {
+    const { buffers, files } = loadSummaryFixtures("network-summaries");
+    const [day] = files("day");
+    const uas: [string, number][] = [
+      ...Array.from({ length: 15 }, (_, i): [string, number] => [`Browser/${i}`, 100]),
+      ["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", 7],
+      ["Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", 5],
+      ["curl/8.4.0", 3],
+      ["Mozilla/5.0 (compatible; adidxbot/2.0; +http://www.bing.com/bingbot.htm)", 2],
+    ];
+    const total = uas.reduce((sum, [, n]) => sum + n, 0);
+    const rows: [string, string | null, string | null, number][] = [
+      ["time_series", null, null, total],
+      ["field_totals", "ua", null, total],
+      ...uas.map(([ua, n]): [string, string, string, number] => ["all_fields", "ua", ua, n]),
+    ];
+    const summary = parquetWriteBuffer({
+      columnData: [
+        { name: "bundle", type: "STRING", data: rows.map((r) => r[0]) },
+        { name: "bucket", type: "TIMESTAMP", data: rows.map(() => new Date("2027-01-15T08:00:00Z")) },
+        { name: "field", type: "STRING", data: rows.map((r) => r[1]) },
+        { name: "value", type: "STRING", data: rows.map((r) => r[2]) },
+        { name: "count", type: "INT64", data: rows.map((r) => (r[0] === "time_series" ? null : BigInt(r[3]))) },
+        { name: "requests", type: "INT64", data: rows.map((r) => (r[0] === "time_series" ? BigInt(r[3]) : null)) },
+      ],
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+    });
+    const source = fixtureSource([fixturePage(files("raw"))], { ...buffers, [day.key]: summary },
+      { json: [], files: [] }, [fixturePage([day])]);
+    vi.mocked(runInWorker).mockImplementation(async (options: unknown) =>
+      runDashboard(source, options as Parameters<typeof runDashboard>[1]));
+    const bundle = async (sections?: string[]) => {
+      const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/dashboard/bundle", {
+        method: "POST",
+        body: JSON.stringify({ start_time: day.start, end_time: day.end, chart_interval: "1 hour", sections }),
+      }));
+      return response!.json();
+    };
+
+    const body = await bundle(["core", "topten", "bots"]);
+    expect(source.log.files).toEqual([day.key]);
+    expect(body.aggregates.data.ua.top).toHaveLength(10);
+    expect(body.top_bots).toEqual({
+      bots: [
+        { id: "google-crawler", name: "Google Crawler", category: "google", request_count: 7 },
+        { id: "bing-crawler", name: "Bing Crawler", category: "microsoft", request_count: 7 },
+        { id: "curl", name: "Curl", category: "tool", request_count: 3 },
+        { id: "bing-ads", name: "Bing Ads", category: "microsoft", request_count: 2 },
+      ],
+      ngwaf_bots: [],
+    });
+    expect((await bundle()).top_bots.bots).toHaveLength(4);
+    expect(await bundle(["core", "topten"])).not.toHaveProperty("top_bots");
+  });
+
   it("applies a filter on a catalog custom field that is not a card, cold and after an unfiltered load", async () => {
     const start = "2026-10-29T10:00:00Z";
     const end = "2026-10-29T10:05:00Z";

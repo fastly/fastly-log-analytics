@@ -99,6 +99,65 @@ describe("security cloud-engine module (F20)", () => {
     }
   });
 
+  it("classifies top bots from the filtered range's user agents like Elevation", async () => {
+    const engine = getDuckDBEngine();
+    const rows: [string, string, number][] = [
+      ["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "US", 3],
+      ["Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", "US", 2],
+      ["Mozilla/5.0 (compatible; adidxbot/2.0; +http://www.bing.com/bingbot.htm)", "US", 1],
+      ["curl/8.4.0", "CA", 4],
+      ["Mozilla/5.0 (Macintosh) Chrome/130.0.0.0 Safari/537.36", "US", 5],
+      ["", "US", 2],
+    ];
+    try {
+      for (const [ua, country, n] of rows) {
+        for (let i = 0; i < n; i++) {
+          await engine.executeSql(`
+            INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, country)
+            VALUES ('security-bots', 1700000000000, epoch_ms(1700000000000), '${ua}', '${country}')
+          `);
+        }
+      }
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", ua, country)
+        VALUES ('security-bots', 1690000000000, epoch_ms(1690000000000), 'curl/8.4.0', 'US')
+      `);
+      const topBots = async (filters?: object) => {
+        const response = await handleSecurityRequest(
+          new Request("https://example.test/api/security/top-bots", {
+            method: "POST",
+            body: JSON.stringify({ start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", filters }),
+          }),
+        );
+        return response!.json();
+      };
+      expect(await topBots()).toEqual({
+        bots: [
+          { id: "curl", name: "Curl", category: "tool", request_count: 4 },
+          { id: "google-crawler", name: "Google Crawler", category: "google", request_count: 3 },
+          { id: "bing-crawler", name: "Bing Crawler", category: "microsoft", request_count: 3 },
+          { id: "bing-ads", name: "Bing Ads", category: "microsoft", request_count: 1 },
+        ],
+        ngwaf_bots: [],
+      });
+      expect((await topBots({ country: { mode: "include", values: ["CA"] } })).bots).toEqual([
+        { id: "curl", name: "Curl", category: "tool", request_count: 4 },
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("returns no top bots when the user agent is not logged", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    setSecurityEngineClient({ getAvailableColumns: vi.fn().mockResolvedValue(new Set(["ts_ms", "timestamp"])), query });
+    const response = await handleSecurityRequest(
+      new Request("https://example.test/api/security/top-bots?start_time=2023-11-14T22:00:00Z&end_time=2023-11-14T23:00:00Z"),
+    );
+    expect(await response!.json()).toEqual({ bots: [], ngwaf_bots: [] });
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("expands security sections including tls_fingerprints->fingerprint_coverage and ngwaf union", () => {
     const s1 = expandSecuritySections(["tls_fingerprints"]);
     expect(s1.has("tls_fingerprints")).toBe(true);

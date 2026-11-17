@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { Aggregator, runDashboard, searchFieldValues } from "./engine";
 import { getDuckDBEngine } from "./duckdb";
 import {
@@ -1332,6 +1333,34 @@ describe("dashboard filters", () => {
         rollup: expected,
       });
     }
+  });
+
+  it("keeps the filtered range's top user agents beyond the card's top 10 for bot classification", async () => {
+    const uas = [
+      ...Array.from({ length: 12 }, (_, i) => ({ ua: `Browser/${i}`, country: "US", n: 3 })),
+      { ua: "Mozilla/5.0 (compatible; Googlebot/2.1)", country: "US", n: 1 },
+      { ua: "curl/8.4.0", country: "CA", n: 9 },
+    ].flatMap(({ ua, country, n }) => Array.from({ length: n }, () => ({ ua, country })));
+    const bytes = parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: uas.map((_, i) => new Date(T0 + i * 1000)) },
+        { name: "status", type: "INT32", data: uas.map(() => 200) },
+        { name: "ua", type: "STRING", data: uas.map((r) => r.ua) },
+        { name: "country", type: "STRING", data: uas.map((r) => r.country) },
+      ],
+    });
+    const key = "pq/ua-ranked.parquet";
+    const result = await runDashboard(
+      fixtureSource(
+        [{ files: [manifestEntry(key, "2026-10-29T10:00:00Z", "2026-10-29T10:05:00Z", uas.length)], next_cursor: null, complete: true }],
+        { [key]: bytes },
+      ),
+      { from: "2026-10-29T10:00:00Z", to: "2026-10-29T10:05:00Z", filters: [f("include", "country", "US")] },
+    );
+    expect(result.cards.ua.top).toHaveLength(10);
+    expect(result.cards.ua.ranked).toHaveLength(13);
+    expect(result.cards.ua.ranked?.at(-1)).toEqual({ value: "Mozilla/5.0 (compatible; Googlebot/2.1)", count: 1 });
+    expect(result.cards.ua.ranked?.some((e) => e.value === "curl/8.4.0")).toBe(false);
   });
 
   it("executes repeated filtered queries in-memory via DuckDB-Wasm without re-fetching files", async () => {
