@@ -57,6 +57,8 @@ Runs are recorded in:
 
 Idle probes write nothing. `cron_ticks` is retired.
 
+A `partial` outcome is a stage that stopped at its execution budget (calls, wall time, vCPU, a held lease, or a request compaction state write the KV API had not yet shown, `stopped: state_lag`) with `more_pending`; the next turn continues it. The `/logs` Jobs tab shows it as Success with a "More queued" tag. Partial Success there means the run rejected lines (`bad_lines` > 0), and Error means the row carries an error.
+
 Field details are in [clock.md](clock.md).
 
 ## TODOs

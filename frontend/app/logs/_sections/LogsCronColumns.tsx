@@ -130,10 +130,28 @@ export function useCronColumns(): ColumnDef<CronRun>[] {
             )
           }
           if (val === 'success' && (!corrupt_rows || corrupt_rows === 0)) {
-            return (
+            const success = (
               <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">
                 Success
               </Badge>
+            )
+            if (row.original.more_pending !== true) return success
+            return (
+              <div className="flex items-center gap-1.5">
+                {success}
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Badge variant="outline" className="shadow-none px-1.5 py-0 text-[10px] text-muted-foreground" />
+                    }
+                  >
+                    More queued
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Stopped at its per-run budget with work left; continues on the next turn.</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
             )
           }
           if (val === 'partial_success' || (val === 'success' && (corrupt_rows ?? 0) > 0)) {

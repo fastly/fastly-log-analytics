@@ -57,6 +57,22 @@ describe('Cloud cron schedule evidence', () => {
     expect(screen.queryByText('No Alerts')).not.toBeInTheDocument()
   })
 
+  it('marks a Cloud stage that stopped at its budget as successful with more work queued', async () => {
+    function Status({ run }: { run: Record<string, unknown> }) {
+      const column = useCronColumns().find((item) => item.id === 'status')!
+      return <>{flexRender(column.cell, { row: { original: run } } as CellContext<CronRun, unknown>)}</>
+    }
+    const { rerender } = render(<Status run={{ task: 'request_compact', status: 'success', more_pending: true }} />)
+    expect(screen.getByText('Success')).toBeInTheDocument()
+    expect(screen.getByText('More queued')).toBeInTheDocument()
+    expect(screen.queryByText('Partial Success')).not.toBeInTheDocument()
+    await userEvent.hover(screen.getByText('More queued'))
+    expect(await screen.findByText(/continues on the next turn/)).toBeInTheDocument()
+    rerender(<Status run={{ task: 'request_ingest', status: 'partial_success', corrupt_rows: 2, more_pending: true }} />)
+    expect(screen.getByText('Partial Success')).toBeInTheDocument()
+    expect(screen.queryByText('More queued')).not.toBeInTheDocument()
+  })
+
   it('does not display zero when a failed Cloud stage has no counter evidence', () => {
     function MissingCounters() {
       const columns = useCronColumns()

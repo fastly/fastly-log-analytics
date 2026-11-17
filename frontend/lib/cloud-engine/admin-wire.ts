@@ -144,9 +144,13 @@ async function cron(request: Request): Promise<Response> {
           files_deleted_fos: row.deleted_files ?? row.deleted_raw_files ?? null,
           rows_ingested: row.rows_written ?? null,
           corrupt_rows: row.bad_lines ?? null,
-          status: row.error || row.outcome === "error" ? "error" : row.outcome === "done" ? "success" :
-            row.outcome === "partial" ? "partial_success" : "skipped",
-          summary: row.error ?? `${row.task}: ${row.outcome}`,
+          // `partial` is a stage stopping at its execution budget with work left for the next
+          // turn, not a partial failure; only rejected lines make a run a Partial Success.
+          status: row.error || row.outcome === "error" ? "error" :
+            row.outcome !== "done" && row.outcome !== "partial" ? "skipped" :
+            Number(row.bad_lines ?? 0) > 0 ? "partial_success" : "success",
+          summary: row.error ?? (row.outcome === "partial" ? `${row.task}: more work queued, continues next turn` :
+            `${row.task}: ${row.outcome}`),
           result_json: JSON.stringify(row),
         };
       }).filter((row) => Date.parse(row.started_at) >= from && Date.parse(row.started_at) <= to)

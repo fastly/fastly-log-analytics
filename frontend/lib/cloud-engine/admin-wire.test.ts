@@ -72,7 +72,7 @@ describe("Cloud administrative wire parity", () => {
         { timestamp: timestamp + 1000, event_id: "delete", run_id: "run-raw_delete", cron_kind: "raw_delete",
           service_id: "fixture-service", started_at: timestamp + 1000, duration_ms: 100, outcome: "error", error: "delete failed" },
         { timestamp: timestamp + 2000, event_id: "flush", run_id: "run-log_flush", cron_kind: "log_flush",
-          service_id: "fixture-service", started_at: timestamp + 2000, duration_ms: 50, outcome: "partial" },
+          service_id: "fixture-service", started_at: timestamp + 2000, duration_ms: 50, outcome: "partial", more_pending: true },
         { timestamp, event_id: "other-service", cron_kind: "rum_ingest", service_id: "other-service", outcome: "done" },
       ],
       oldestLiveMs: null, status: null,
@@ -93,9 +93,10 @@ describe("Cloud administrative wire parity", () => {
     cronEvidence();
     const runs = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}`)))!.json();
     expect(runs).toMatchObject({ total: 4, entries: [
-      { task: "log_flush", status: "partial_success", duration_s: 0.05 },
+      { task: "log_flush", status: "success", summary: "log_flush: more work queued, continues next turn",
+        duration_s: 0.05, more_pending: true },
       { task: "raw_delete", status: "error", summary: "delete failed", error_message: "delete failed" },
-      { task: "request_ingest", status: "success", duration_s: 0.2,
+      { task: "request_ingest", status: "partial_success", duration_s: 0.2,
         files_downloaded: 2, rows_ingested: 4, corrupt_rows: 1 },
       { task: "cloud_ingest_clock", status: "skipped" },
     ] });
@@ -125,6 +126,8 @@ describe("Cloud administrative wire parity", () => {
     const all = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}`)))!.json();
     const filtered = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&task=raw_delete&status=error&per_page=1`)))!.json();
     expect(filtered).toMatchObject({ total: 1, entries: [{ task: "raw_delete", status: "error" }] });
+    const partial = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&status=partial_success`)))!.json();
+    expect(partial).toMatchObject({ total: 1, entries: [{ task: "request_ingest", corrupt_rows: 1 }] });
     const newer = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&since_id=${all.entries[0].id}`)))!.json();
     expect(newer.entries).toEqual([]);
     const second = await (await cloudAdminWire(request(`/api/cron-runs?${cronRange}&page=2&per_page=1`)))!.json();
