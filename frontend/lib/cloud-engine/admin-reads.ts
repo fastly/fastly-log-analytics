@@ -1,5 +1,31 @@
 import { adminRequest, getLoggedTraffic, type QuarantineItem } from "./telemetry/admin";
 
+// High-Scale's sustained-loss rule (log_accounting.py): 2+ consecutive completed buckets at a 5%+ gap.
+const LOSS_THRESHOLD = 0.05;
+const MIN_RUN = 2;
+
+type Bucket = { ts: string; gap: number; gap_pct: number };
+
+function sustainedLoss(buckets: Bucket[]) {
+  let longest: Bucket[] = [];
+  let run: Bucket[] = [];
+  for (const bucket of [...buckets, null]) {
+    if (bucket && bucket.gap_pct >= LOSS_THRESHOLD) {
+      run.push(bucket);
+      continue;
+    }
+    if (run.length >= MIN_RUN && run.length > longest.length) longest = run;
+    run = [];
+  }
+  if (!longest.length) return null;
+  return {
+    started_at: longest[0].ts,
+    n_buckets: longest.length,
+    max_gap_pct: Math.max(...longest.map((bucket) => bucket.gap_pct)),
+    total_lost_lines: longest.reduce((total, bucket) => total + bucket.gap, 0),
+  };
+}
+
 export async function cloudLogAccounting(request: Request): Promise<Response> {
   const traffic = await getLoggedTraffic(request.signal);
   const hours = Math.min(720, Math.max(24, Number(new URL(request.url).searchParams.get("hours")) || 24));
@@ -33,7 +59,8 @@ export async function cloudLogAccounting(request: Request): Promise<Response> {
     totals: { fastly_requests: expected, our_rows: rows, gap,
       gap_pct: expected ? gap / expected : 0,
       worst_bucket_ts: worst?.ts ?? null, worst_bucket_gap_pct: worst?.gap_pct ?? null },
-    sustained_loss: null,
+    // Native days are complete UTC days, so every bucket counts.
+    sustained_loss: sustainedLoss(buckets),
     measurement_basis: "native_sample_adjusted_daily",
   });
 }

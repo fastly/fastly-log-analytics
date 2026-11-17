@@ -90,6 +90,25 @@ describe("Cloud endpoint bridges", () => {
       .toMatchObject({ by: "day", totals: { gap: 20, gap_pct: 0.2 } });
   });
 
+  it("raises a sustained-loss alert for the longest run of 2+ days at a 5% gap like High-Scale", async () => {
+    const day = (n: number, expected: number, ingested: number) =>
+      ({ day: n * 86400, expected_rows: expected, ingested_rows: ingested });
+    const fetcher = vi.fn(async () => Response.json({
+      from: 0, to: 7 * 86400,
+      days: [day(0, 100, 90), day(1, 100, 100), day(2, 100, 95), day(3, 100, 80), day(4, 100, 94), day(5, 100, 99), day(6, 100, 50)],
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    const body = await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting?hours=168")))!.json();
+    expect(body.sustained_loss).toEqual({
+      started_at: new Date(2 * 86400 * 1000).toISOString(), n_buckets: 3, max_gap_pct: 0.2, total_lost_lines: 31,
+    });
+    fetcher.mockImplementation(async () => Response.json({
+      from: 0, to: 3 * 86400, days: [day(0, 100, 90), day(1, 100, 100), day(2, 100, 90)],
+    }));
+    expect((await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting?hours=72")))!.json()).sustained_loss)
+      .toBeNull();
+  });
+
   it("keeps the exact native passthrough allowlist in parity with the Compute contract", () => {
     const declared = Object.entries(contract.paths).flatMap(([path, operations]) =>
       Object.keys(operations).filter((key) => key !== "parameters").map((method) => `${method.toUpperCase()} ${path}`),

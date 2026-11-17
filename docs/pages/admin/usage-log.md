@@ -20,7 +20,7 @@ Admin only (`require_admin` on every route; `/api/admin/` is analyst-blocked).
 
 The browser bridge reads native FOS operational records, applies the selected time and operation filters, and computes totals before pagination. CSV export uses the same real rows; purge starts the native history-deletion job. When detailed receipts are absent, measured cron counters provide an explicitly marked estimate using configured rates.
 
-Ingest accounting compares sample-adjusted request counts against processed rows for completed UTC days. Cloud offers daily periods, not hourly precision. Missing measurements produce an unavailable explanation, never a healthy zero-gap result.
+Ingest accounting compares sample-adjusted request counts against processed rows for completed UTC days. Cloud offers daily periods, not hourly precision. Missing measurements produce an unavailable explanation, never a healthy zero-gap result. The sustained-loss alert uses the High-Scale rule over those days: 2 or more consecutive days at or above a 5% gap.
 
 Data Management maps native paginated file trees, ingested files and clock history into the existing tables. Processed Parquet downloads use `/api/file`; raw evidence and ZIP-folder downloads are not offered. Its Metadata Storage tab shows native operational retention instead of PostgreSQL sizes or controls. Quarantine exposes real container records and native purge-all, but not unavailable per-line hashes, evidence downloads or numeric-ID removal.
 
