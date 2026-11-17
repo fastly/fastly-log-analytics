@@ -1105,6 +1105,40 @@ def test_step_job_gives_up_once_a_lease_outlives_the_wait(monkeypatch: pytest.Mo
     assert attempts[0] < 200
 
 
+def _failing_job_transport(failures: int) -> tuple[httpx.MockTransport, list[int]]:
+    retries = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/admin/jobs/job-5/retry":
+            retries[0] += 1
+            if retries[0] <= failures:
+                return httpx.Response(
+                    200, json={"job": {"id": "job-5", "status": "failed", "error": "state_unavailable"}}
+                )
+            return httpx.Response(200, json={"job": {"id": "job-5", "status": "complete"}})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler), retries
+
+
+def test_finish_existing_job_retries_a_transient_failure_until_it_completes() -> None:
+    transport, retries = _failing_job_transport(failures=2)
+    failed = {"id": "job-5", "status": "failed", "error": "state_unavailable"}
+    with httpx.Client(transport=transport, base_url="https://example.test") as client:
+        job, _ = deploy_test_all._finish_existing_job(client, failed)
+    assert job["status"] == "complete"
+    assert retries[0] == 3
+
+
+def test_finish_existing_job_names_the_job_when_it_stays_failed() -> None:
+    transport, retries = _failing_job_transport(failures=10_000)
+    failed = {"id": "job-5", "status": "failed", "error": "state_unavailable"}
+    with httpx.Client(transport=transport, base_url="https://example.test") as client:
+        with pytest.raises(RuntimeError, match="job-5.*state_unavailable"):
+            deploy_test_all._finish_existing_job(client, failed)
+    assert retries[0] == deploy_test_all.RESUME_RETRIES
+
+
 def _git(root: Path, *args: str) -> str:
     import subprocess
 

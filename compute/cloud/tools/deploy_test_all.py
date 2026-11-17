@@ -716,6 +716,7 @@ TRANSIENT_STEP_ERRORS = {
 LEASE_WAIT_ERRORS = {"job_leased", "service_locked"}
 JOB_LEASE_WAIT_S = 90.0
 LEASE_RETRY_INTERVAL_S = 1.0
+RESUME_RETRIES = 3
 
 
 def _admin_error_code(resp: httpx.Response) -> str | None:
@@ -782,6 +783,22 @@ def _step_job_to_completion(
         lease_wait_since = None
         steps_taken += 1
         job = step_resp.json()["job"]
+    return job, steps_taken
+
+
+def _finish_existing_job(client: httpx.Client, job: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Drive a leftover job to completion; it blocks every new reconcile until it does."""
+    steps_taken = 0
+    for _ in range(RESUME_RETRIES):
+        job, steps = _step_job_to_completion(client, job, allow_retry=True)
+        steps_taken += steps
+        if _job_status(job) != "failed" or job.get("error") not in TRANSIENT_STEP_ERRORS:
+            break
+    if _job_status(job) == "failed":
+        raise RuntimeError(
+            f"existing reconcile job {job.get('id')} is still failed ({job.get('error')}) "
+            f"after {RESUME_RETRIES} retries; it blocks new reconciles until retried"
+        )
     return job, steps_taken
 
 
@@ -857,7 +874,7 @@ def step_2_reconcile_vcl(
         "failed",
     ):
         print(f"[Step 2] Finishing existing job {existing_job.get('id')} (status={_job_status(existing_job)}) first...")
-        resumed_job, resumed_steps = _step_job_to_completion(client, existing_job, allow_retry=True)
+        resumed_job, resumed_steps = _finish_existing_job(client, existing_job)
         resp = client.get(f"/api/admin/services/{service_id}")
         resp.raise_for_status()
         body = resp.json()
