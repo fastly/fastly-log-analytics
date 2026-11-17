@@ -504,6 +504,18 @@ impl FixtureAdapter {
             .or_default()
             .insert(name, value);
     }
+    pub fn remove_resource(&self, sid: &str, resource: &str, name: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .versions
+            .get_mut(sid)?
+            .iter_mut()
+            .find(|v| v.active)?
+            .resources
+            .get_mut(resource)?
+            .remove(name)
+    }
     pub fn seed_object(&self, bucket: &str, key: &str) {
         self.state
             .lock()
@@ -651,9 +663,19 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
         }
         ("POST",["service",_,"purge",_])=>Ok((200,json!({"status":"ok"}))),
         (_,["service",sid,"version",number,tail @ ..])=> {
-            let resource=if tail.first()==Some(&"logging") {"logging/s3"} else {tail.first().copied().unwrap_or("")};
-            let offset=if resource=="logging/s3" {2} else {1};
+            let logging=tail.first()==Some(&"logging");
+            let resource=if logging {format!("logging/{}",tail.get(1).copied().unwrap_or(""))} else {tail.first().copied().unwrap_or("").to_owned()};
+            let resource=resource.as_str();
+            let offset=if logging {2} else {1};
             let name=tail.get(offset).copied();
+            if resource=="logging/fos" && matches!(method,"POST"|"PUT") {
+                // Like Fastly: only these fields are writable; the bucket-scoped key is minted server-side.
+                const WRITABLE:&[&str]=&["name","bucket_name","region","path","period","format","format_version","message_type","compression_codec","gzip_level","file_max_bytes","placement","response_condition","log_processing_region","public_key","timestamp_format"];
+                if body.as_object().is_none_or(|o|o.keys().any(|k|!WRITABLE.contains(&k.as_str()))) {
+                    return Ok((400,json!({"msg":"Bad request"})));
+                }
+            }
+            let minted=if resource=="logging/fos" && method=="POST" {state.sequence+=1;Some(format!("fixture-fos-endpoint-key-{}",state.sequence))} else {None};
             let version=version_mut(state,sid,number)?;
             let values=version.resources.entry(resource.into()).or_default();
             if method=="GET" {
@@ -675,6 +697,17 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                             other=>other.to_string(),
                         };
                         body["priority"]=priority.into();
+                    }
+                    // Like Fastly: the endpoint keeps its minted key, and numbers come back as strings.
+                    if resource=="logging/fos" {
+                        let existing=values.get(&name).cloned().unwrap_or_else(||json!({"timestamp_format":"%Y-%m-%dT%H:%M:%S.000"}));
+                        let object=body.as_object_mut().ok_or("fixture_invalid_body")?;
+                        object.retain(|_,v|!v.is_null());
+                        for key in ["period","format_version","gzip_level"] {
+                            if let Some(n)=object.get(key).and_then(Value::as_u64) {object.insert(key.into(),n.to_string().into());}
+                        }
+                        object.insert("access_key".into(),minted.map(Value::from).unwrap_or_else(||existing["access_key"].clone()));
+                        if !object.contains_key("timestamp_format") {object.insert("timestamp_format".into(),existing["timestamp_format"].clone());}
                     }
                     values.insert(name,body.clone());Ok((200,body))
                 }

@@ -4,7 +4,7 @@ Converts settled raw zstd NDJSON objects in `raw/request/` into immutable Parque
 
 ## Purpose
 
-This is the pipeline's only data producer. Fastly S3 logging writes raw objects to FOS, and this stage turns them into the window files that the browser queries.
+This is the pipeline's only data producer. Fastly's Object Storage logging endpoint (or the legacy S3 endpoint on older installs) writes raw objects to FOS, and this stage turns them into the window files that the browser queries.
 
 ## Why it exists
 

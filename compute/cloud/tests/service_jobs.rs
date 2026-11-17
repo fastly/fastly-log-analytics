@@ -794,11 +794,15 @@ fn provisioning_reconcile_and_teardown_are_durable_and_secret_free() {
     assert_eq!(job["status"], "complete");
     let service = platform.service();
     assert_eq!(service["service"]["status"], "active");
-    let endpoints = platform.adapter.resources("fixtureService", "logging/s3");
+    let endpoints = platform.adapter.resources("fixtureService", "logging/fos");
     assert_eq!(endpoints.len(), 1);
+    assert!(platform
+        .adapter
+        .resources("fixtureService", "logging/s3")
+        .is_empty());
     assert_eq!(endpoints[0]["compression_codec"], "zstd");
     assert!(endpoints[0].get("gzip_level").is_none());
-    assert_eq!(endpoints[0]["format_version"], 2);
+    assert_eq!(endpoints[0]["format_version"], "2");
     assert_eq!(endpoints[0]["message_type"], "blank");
     assert_eq!(
         endpoints[0]["path"],
@@ -1076,15 +1080,17 @@ fn partial_secret_pair_write_recovers_only_the_scoped_managed_key() {
     let resumed = platform.retry(&job);
     platform.drain(resumed);
     assert_eq!(platform.adapter.key_count(), 1);
-    let endpoint = &platform.adapter.resources("fixtureService", "logging/s3")[0];
+    let endpoint = &platform.adapter.resources("fixtureService", "logging/fos")[0];
     assert!(endpoint["access_key"]
         .as_str()
         .unwrap()
-        .starts_with("fixture-ak-"));
-    assert!(endpoint["secret_key"]
-        .as_str()
-        .unwrap()
-        .starts_with("fixture-sk-"));
+        .starts_with("fixture-fos-endpoint-key-"));
+    assert!(endpoint.get("secret_key").is_none());
+    let front = platform.adapter.dictionary_items("fixtureCredentials");
+    assert!(
+        front.values().any(|v| v.starts_with("fixture-sk-")),
+        "{front:?}"
+    );
 }
 
 #[test]
@@ -1318,7 +1324,7 @@ fn original_v3_execute_shape_is_supported_without_accepting_future_goal_settings
     assert_eq!(result["service"]["name"], "Fixture delivery service");
     platform.drain(result["job"].clone());
     assert_eq!(
-        platform.adapter.resources("fixtureService", "logging/s3")[0]["name"],
+        platform.adapter.resources("fixtureService", "logging/fos")[0]["name"],
         "Fastly Object Storage Logs"
     );
     assert_eq!(platform.call("POST","/api/provision/execute",json!({"token":"fixture-token","service_id":"fixtureOther","fos_bucket_name":"fos-other-logs","fos_region":"us-east-1","scoring_enabled":true})).status,400);
@@ -1483,7 +1489,7 @@ fn service_prefix_is_applied_and_teardown_deletes_only_that_prefix() {
             }));
     platform.drain(result["job"].clone());
     assert_eq!(
-        platform.adapter.resources("fixtureService", "logging/s3")[0]["path"],
+        platform.adapter.resources("fixtureService", "logging/fos")[0]["path"],
         "tenant/own/raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
     );
     let service = platform.service();
@@ -1544,11 +1550,11 @@ fn reconcile_step_confirms_a_stale_cached_service_record_instead_of_failing() {
 fn reconcile_forces_blank_message_type_on_the_request_endpoint() {
     let platform = Platform::new();
     platform.drain(platform.provision()["job"].clone());
-    let mut endpoint = platform.adapter.resources("fixtureService", "logging/s3")[0].clone();
+    let mut endpoint = platform.adapter.resources("fixtureService", "logging/fos")[0].clone();
     endpoint["message_type"] = json!("classic");
     platform
         .adapter
-        .seed_resource("fixtureService", "logging/s3", endpoint);
+        .seed_resource("fixtureService", "logging/fos", endpoint);
     let service = platform.service();
     let job = platform.json(
         "POST",
@@ -1560,9 +1566,143 @@ fn reconcile_forces_blank_message_type_on_the_request_endpoint() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|c| c["resource"] == "logging/s3" && c["action"] == "upsert"));
-    let endpoints = platform.adapter.resources("fixtureService", "logging/s3");
+        .any(|c| c["resource"] == "logging/fos" && c["action"] == "upsert"));
+    let endpoints = platform.adapter.resources("fixtureService", "logging/fos");
     assert_eq!(endpoints[0]["message_type"], "blank");
+}
+
+fn reconcile_changes(platform: &Platform) -> Vec<Value> {
+    let service = platform.service();
+    let job = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"]}),
+    );
+    platform.drain(job["job"].clone())["changes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn new_install_uses_the_native_fos_endpoint_and_sends_no_credentials() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    assert!(platform
+        .adapter
+        .resources("fixtureService", "logging/s3")
+        .is_empty());
+    let endpoints = platform.adapter.resources("fixtureService", "logging/fos");
+    assert_eq!(endpoints.len(), 1);
+    let endpoint = endpoints[0].as_object().unwrap();
+    let mut keys: Vec<_> = endpoint.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "access_key",
+            "bucket_name",
+            "compression_codec",
+            "format",
+            "format_version",
+            "message_type",
+            "name",
+            "path",
+            "period",
+            "region",
+            "response_condition",
+            "timestamp_format"
+        ]
+    );
+    assert_eq!(endpoint["name"], "Fastly Object Storage Logs");
+    assert_eq!(endpoint["bucket_name"], "fos-fixture-logs");
+    assert_eq!(endpoint["region"], "us-east-1");
+    assert_eq!(endpoint["response_condition"], "log_analytics_condition");
+    assert!(endpoint["access_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("fixture-fos-endpoint-key-"));
+    // Fastly echoes numbers as strings and adds its own fields; neither re-plans the endpoint.
+    assert!(reconcile_changes(&platform).is_empty());
+}
+
+#[test]
+fn legacy_s3_install_keeps_its_endpoint_and_never_gains_a_fos_duplicate() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let ours = platform
+        .adapter
+        .remove_resource(
+            "fixtureService",
+            "logging/fos",
+            "Fastly Object Storage Logs",
+        )
+        .unwrap();
+    let legacy = json!({
+        "name":ours["name"],"path":ours["path"],"period":60,"format":ours["format"],
+        "format_version":2,"compression_codec":"zstd","message_type":"classic",
+        "response_condition":ours["response_condition"],"placement":null,"response_object_name":"",
+        "bucket_name":"fos-fixture-logs","domain":"us-east-1.object.fastlystorage.app",
+        "access_key":"legacy-ak","secret_key":"legacy-sk"
+    });
+    platform
+        .adapter
+        .seed_resource("fixtureService", "logging/s3", legacy);
+    let changes = reconcile_changes(&platform);
+    assert!(changes
+        .iter()
+        .any(|c| c["resource"] == "logging/s3" && c["action"] == "upsert"));
+    assert!(changes.iter().all(|c| c["resource"] != "logging/fos"));
+    assert!(platform
+        .adapter
+        .resources("fixtureService", "logging/fos")
+        .is_empty());
+    let endpoints = platform.adapter.resources("fixtureService", "logging/s3");
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0]["message_type"], "blank");
+    assert_eq!(endpoints[0]["domain"], "us-east-1.object.fastlystorage.app");
+    assert!(endpoints[0]["access_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("fixture-ak-"));
+    assert!(reconcile_changes(&platform).is_empty());
+
+    let customer_s3 =
+        json!({"name":"customer-s3","path":"customer/","bucket_name":"customer-bucket"});
+    let customer_fos = json!({"name":"customer-fos","path":"customer/","bucket_name":"customer-bucket","region":"us-east-1"});
+    platform
+        .adapter
+        .seed_resource("fixtureService", "logging/s3", customer_s3.clone());
+    platform
+        .adapter
+        .seed_resource("fixtureService", "logging/fos", customer_fos.clone());
+    let current = platform.service();
+    let teardown=platform.json("POST","/api/provision/teardown",json!({"service_id":"fixtureService","confirm_service_id":"fixtureService","token":"fixture-token","generation":current["generation"]}));
+    platform.drain(teardown["job"].clone());
+    assert_eq!(platform.service()["service"]["status"], "torn_down");
+    assert_eq!(
+        platform.adapter.resources("fixtureService", "logging/s3"),
+        vec![customer_s3]
+    );
+    assert_eq!(
+        platform.adapter.resources("fixtureService", "logging/fos"),
+        vec![customer_fos]
+    );
+}
+
+#[test]
+fn preflight_rejects_a_managed_fos_endpoint_from_another_install() {
+    let platform = Platform::new();
+    platform.adapter.seed_resource(
+        "fixtureService",
+        "logging/fos",
+        json!({"name":"Fastly Object Storage Logs","bucket_name":"other-bucket","region":"us-east-1"}),
+    );
+    let response = platform.call("POST","/api/admin/provision/execute",json!({
+        "token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-fixture-logs","fos_region":"us-east-1"
+    }));
+    assert_eq!(response.status, 409);
+    assert!(String::from_utf8_lossy(&response.body).contains("service_managed_by_other_install"));
 }
 
 #[test]
@@ -1671,57 +1811,67 @@ fn s3_paths_use_sigv4_encoding_not_html_form_encoding() {
 
 #[test]
 fn endpoint_rename_removes_old_owned_name_and_never_adopts_customer_endpoint() {
-    let platform = Platform::new();
-    let start=platform.json("POST","/api/provision/execute",json!({"token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-fixture-logs","fos_region":"us-east-1","logging_endpoint_name":"our-old-logs"}));
-    platform.drain(start["job"].clone());
-    let current = platform.service();
-    let saved = platform.json(
-        "PATCH",
-        "/api/admin/services/fixtureService",
-        json!({"generation":current["generation"],"logging_endpoint_name":"our-new-logs"}),
-    );
-    let job = platform.json(
-        "POST",
-        "/api/admin/services/fixtureService/reconcile",
-        json!({"generation":saved["generation"]}),
-    );
-    platform.drain(job["job"].clone());
-    let endpoints = platform.adapter.resources("fixtureService", "logging/s3");
-    assert_eq!(endpoints.len(), 1);
-    assert_eq!(endpoints[0]["name"], "our-new-logs");
-    let customer =
-        json!({"name":"customer-audit","path":"customer/private/","bucket_name":"customer-bucket"});
-    platform
-        .adapter
-        .seed_resource("fixtureService", "logging/s3", customer.clone());
-    let current = platform.service();
-    let saved = platform.json(
-        "PATCH",
-        "/api/admin/services/fixtureService",
-        json!({"generation":current["generation"],"logging_endpoint_name":"customer-audit"}),
-    );
-    let job = platform.json(
-        "POST",
-        "/api/admin/services/fixtureService/reconcile",
-        json!({"generation":saved["generation"]}),
-    );
-    let failed = platform.json(
-        "POST",
-        &format!(
-            "/api/admin/jobs/{}/step",
-            job["job"]["id"].as_str().unwrap()
-        ),
-        json!({}),
-    );
-    assert_eq!(failed["job"]["status"], "failed");
-    assert!(failed.to_string().contains("resource_name_collision"));
-    let current = platform.service();
-    let teardown=platform.json("POST","/api/provision/teardown",json!({"service_id":"fixtureService","confirm_service_id":"fixtureService","token":"fixture-token","generation":current["generation"]}));
-    platform.drain(teardown["job"].clone());
-    assert_eq!(
-        platform.adapter.resources("fixtureService", "logging/s3"),
-        vec![customer]
-    );
+    for resource in ["logging/s3", "logging/fos"] {
+        let platform = Platform::new();
+        let start=platform.json("POST","/api/provision/execute",json!({"token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-fixture-logs","fos_region":"us-east-1","logging_endpoint_name":"our-old-logs"}));
+        platform.drain(start["job"].clone());
+        let current = platform.service();
+        let saved = platform.json(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({"generation":current["generation"],"logging_endpoint_name":"our-new-logs"}),
+        );
+        let job = platform.json(
+            "POST",
+            "/api/admin/services/fixtureService/reconcile",
+            json!({"generation":saved["generation"]}),
+        );
+        platform.drain(job["job"].clone());
+        let endpoints = platform.adapter.resources("fixtureService", "logging/fos");
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0]["name"], "our-new-logs");
+        let customer = json!({"name":"customer-audit","path":"customer/private/","bucket_name":"customer-bucket"});
+        platform
+            .adapter
+            .seed_resource("fixtureService", resource, customer.clone());
+        let current = platform.service();
+        let saved = platform.json(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({"generation":current["generation"],"logging_endpoint_name":"customer-audit"}),
+        );
+        let job = platform.json(
+            "POST",
+            "/api/admin/services/fixtureService/reconcile",
+            json!({"generation":saved["generation"]}),
+        );
+        let failed = platform.json(
+            "POST",
+            &format!(
+                "/api/admin/jobs/{}/step",
+                job["job"]["id"].as_str().unwrap()
+            ),
+            json!({}),
+        );
+        assert_eq!(failed["job"]["status"], "failed");
+        assert!(failed.to_string().contains("resource_name_collision"));
+        let current = platform.service();
+        let teardown=platform.json("POST","/api/provision/teardown",json!({"service_id":"fixtureService","confirm_service_id":"fixtureService","token":"fixture-token","generation":current["generation"]}));
+        platform.drain(teardown["job"].clone());
+        assert_eq!(
+            platform.adapter.resources("fixtureService", resource),
+            vec![customer]
+        );
+        let other = if resource == "logging/s3" {
+            "logging/fos"
+        } else {
+            "logging/s3"
+        };
+        assert!(platform
+            .adapter
+            .resources("fixtureService", other)
+            .is_empty());
+    }
 }
 
 #[test]
@@ -1960,7 +2110,7 @@ fn omitted_provision_fields_match_catalog_all_groups_without_cookie_session() {
         json!(["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"])
     );
     platform.drain(result["job"].clone());
-    let endpoint = &platform.adapter.resources("fixtureService", "logging/s3")[0];
+    let endpoint = &platform.adapter.resources("fixtureService", "logging/fos")[0];
     assert!(!endpoint["format"]
         .as_str()
         .unwrap()
@@ -1969,28 +2119,30 @@ fn omitted_provision_fields_match_catalog_all_groups_without_cookie_session() {
 
 #[test]
 fn teardown_does_not_claim_customer_endpoint_created_after_reservation() {
-    let platform = Platform::new();
-    platform.provision();
-    let customer = json!({"name":"Fastly Object Storage Logs","path":"customer/private/","bucket_name":"customer-bucket"});
-    platform
-        .adapter
-        .seed_resource("fixtureService", "logging/s3", customer.clone());
-    let service = platform.service();
-    let teardown=platform.json("POST","/api/provision/teardown",json!({"service_id":"fixtureService","confirm_service_id":"fixtureService","token":"fixture-token","generation":service["generation"]}));
-    let result = platform.json(
-        "POST",
-        &format!(
-            "/api/admin/jobs/{}/step",
-            teardown["job"]["id"].as_str().unwrap()
-        ),
-        json!({}),
-    );
-    assert_eq!(result["job"]["status"], "failed");
-    assert_eq!(result["job"]["error"], "managed_resources_not_owned");
-    assert_eq!(
-        platform.adapter.resources("fixtureService", "logging/s3"),
-        vec![customer]
-    );
+    for resource in ["logging/s3", "logging/fos"] {
+        let platform = Platform::new();
+        platform.provision();
+        let customer = json!({"name":"Fastly Object Storage Logs","path":"customer/private/","bucket_name":"customer-bucket"});
+        platform
+            .adapter
+            .seed_resource("fixtureService", resource, customer.clone());
+        let service = platform.service();
+        let teardown=platform.json("POST","/api/provision/teardown",json!({"service_id":"fixtureService","confirm_service_id":"fixtureService","token":"fixture-token","generation":service["generation"]}));
+        let result = platform.json(
+            "POST",
+            &format!(
+                "/api/admin/jobs/{}/step",
+                teardown["job"]["id"].as_str().unwrap()
+            ),
+            json!({}),
+        );
+        assert_eq!(result["job"]["status"], "failed", "{resource}");
+        assert_eq!(result["job"]["error"], "managed_resources_not_owned");
+        assert_eq!(
+            platform.adapter.resources("fixtureService", resource),
+            vec![customer]
+        );
+    }
 }
 
 #[test]
@@ -2724,7 +2876,7 @@ fn cmcd_provision_reconcile_disable_and_teardown_preserve_owned_typed_fields() {
     assert_eq!(
         platform
             .adapter
-            .resources("fixtureService", "logging/s3")
+            .resources("fixtureService", "logging/fos")
             .len(),
         1
     );
@@ -2763,7 +2915,7 @@ fn cmcd_provision_reconcile_disable_and_teardown_preserve_owned_typed_fields() {
         .unwrap()
         .iter()
         .all(|f| f["enabled"] == false && f["committed"] == true));
-    let endpoints = platform.adapter.resources("fixtureService", "logging/s3");
+    let endpoints = platform.adapter.resources("fixtureService", "logging/fos");
     assert!(!endpoints[0]["format"]
         .as_str()
         .unwrap()
@@ -3075,7 +3227,7 @@ fn teardown_preserves_customer_cmcd_snippet_added_after_installation() {
         );
         assert!(platform
             .adapter
-            .resources("fixtureService", "logging/s3")
+            .resources("fixtureService", "logging/fos")
             .is_empty());
     }
 }
@@ -3491,7 +3643,7 @@ fn response_condition_is_created_before_the_endpoint_that_references_it() {
             .position(|change| change["resource"] == resource)
             .unwrap()
     };
-    assert!(position("condition") < position("logging/s3"));
+    assert!(position("condition") < position("logging/fos"));
 }
 
 #[test]
@@ -4118,14 +4270,14 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
         json!(["Fastly Object Storage Logs", "Fastly RUM Logs"])
     );
 
-    let endpoints = platform.adapter.resources("fixtureService", "logging/s3");
+    let endpoints = platform.adapter.resources("fixtureService", "logging/fos");
     assert_eq!(endpoints.len(), 2);
     assert!(endpoints
         .iter()
         .any(|e| e["name"] == "Fastly Object Storage Logs"));
     assert!(endpoints
         .iter()
-        .any(|e| e["name"] == "Fastly RUM Logs" && e["period"] == 120));
+        .any(|e| e["name"] == "Fastly RUM Logs" && e["period"] == "120"));
 
     let backends = platform.adapter.resources("fixtureService", "backend");
     assert_eq!(backends.len(), 1);
@@ -4224,7 +4376,7 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
     let current = platform.service();
     assert_eq!(current["service"]["compression_codec"], "zstd");
     assert_eq!(current["service"]["wire_format"], "array");
-    for ep in platform.adapter.resources("fixtureService", "logging/s3") {
+    for ep in platform.adapter.resources("fixtureService", "logging/fos") {
         assert_eq!(ep["compression_codec"], "zstd", "{ep}");
         assert!(ep.get("gzip_level").is_none(), "{ep}");
         assert!(ep["format"].as_str().unwrap().starts_with('['), "{ep}");
@@ -4287,7 +4439,7 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
     )["job"]
         .clone();
     platform.drain(job);
-    for ep in platform.adapter.resources("fixtureService", "logging/s3") {
+    for ep in platform.adapter.resources("fixtureService", "logging/fos") {
         assert_eq!(ep["compression_codec"], "zstd", "{ep}");
         assert!(ep.get("gzip_level").is_none(), "{ep}");
         assert!(ep["format"].as_str().unwrap().starts_with('['), "{ep}");
@@ -4322,7 +4474,7 @@ fn rum_provision_reconcile_and_teardown_manage_backend_dictionary_fos_assets_and
         .is_empty());
     assert!(platform
         .adapter
-        .resources("fixtureService", "logging/s3")
+        .resources("fixtureService", "logging/fos")
         .is_empty());
     assert!(platform.adapter.object_keys("fos-fixture-logs").is_empty());
 }
@@ -6337,6 +6489,7 @@ fn other_install_resources(
     for resource in [
         "snippet",
         "logging/s3",
+        "logging/fos",
         "condition",
         "backend",
         "dictionary",
@@ -6468,11 +6621,11 @@ fn attach_alongside(other_has_rum: bool) {
         names
     };
     assert_eq!(names("snippet"), ["flp-owner-fixtureApp"]);
-    assert_eq!(names("logging/s3"), ["FLP Cloud Logs"]);
+    assert_eq!(names("logging/fos"), ["FLP Cloud Logs"]);
     assert_eq!(names("condition"), ["flp_cloud_log_condition"]);
     let endpoint = platform
         .adapter
-        .resources("fixtureService", "logging/s3")
+        .resources("fixtureService", "logging/fos")
         .into_iter()
         .find(|v| v["name"] == "FLP Cloud Logs")
         .unwrap();
@@ -6540,6 +6693,7 @@ fn attach_alongside(other_has_rum: bool) {
     for resource in [
         "snippet",
         "logging/s3",
+        "logging/fos",
         "condition",
         "backend",
         "dictionary",

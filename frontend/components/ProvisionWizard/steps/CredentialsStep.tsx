@@ -96,14 +96,22 @@ export function ModeStep({ s }: { s: WizardState }) {
 }
 
 export function TokenStep({ s }: { s: WizardState }) {
+  const cloud = isCloudMode()
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 space-y-6 text-center">
       <div className="space-y-2 max-w-md">
         <h3 className="text-xl font-semibold tracking-tight">Enter Fastly API Token</h3>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          We need a token with <code>superuser</code> permissions to create and configure your services. An{" "}
-          <code>engineer</code> token cannot create new services.
-        </p>
+        {cloud ? (
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            We need an <code>engineer</code> token with access to all services, or a <code>superuser</code> token,
+            to configure logging on your service and set up Fastly Object Storage.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            We need a token with <code>superuser</code> permissions to create and configure your services. An{" "}
+            <code>engineer</code> token cannot create new services.
+          </p>
+        )}
         <div className="pt-2">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-500 border border-amber-500/20 text-[10px] font-bold uppercase tracking-wider">
             <AlertCircle className="h-3 w-3 shrink-0" />

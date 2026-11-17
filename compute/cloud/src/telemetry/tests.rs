@@ -1202,6 +1202,10 @@ fn paths_are_normalized_without_query_and_with_ids_collapsed() {
             "/service/AbCdEf0123456789xyz/version/12/backend/my-origin",
             "/service/:id/version/:id/backend/:id",
         ),
+        (
+            "/service/AbCdEf0123456789xyz/version/12/logging/fos",
+            "/service/:id/version/:id/logging/fos",
+        ),
         ("/api/Zx9attacker/ABC?x=1", "/api/:unknown/:unknown"),
         ("/api/files/%2e%2e/etc", "/api/files/:unknown/:unknown"),
         ("/api/auth/session", "/api/auth/session"),

@@ -137,6 +137,7 @@ const KNOWN_SEGMENTS: &[&str] = &[
     "header",
     "logging",
     "s3",
+    "fos",
     "resources",
     "access-keys",
     "activate",

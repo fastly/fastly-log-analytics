@@ -4,6 +4,16 @@ Cloud provisions a Fastly VCL service through a job (`POST /api/provision/execut
 
 Cloud owns a resource when its name is in the service's owner marker snippet (`flp-owner-<id>`) or in Cloud's own service record. It never changes or deletes anything else.
 
+## Logging endpoint type
+
+New endpoints use Fastly's native Object Storage endpoint (`logging/fos`). Cloud sends the bucket name and region with the same path, period, format, `zstd` compression and `blank` message type as before. It sends no access key, secret key or domain: Fastly mints an access key limited to the bucket and keeps its secret. The output layout is unchanged, so ingest reads both endpoint types the same way.
+
+An install provisioned before this change has a Fastly S3 endpoint (`logging/s3`) signed with Cloud's own Object Storage key. Reconcile keeps managing an endpoint that already exists as `logging/s3` as S3. It never converts it, and never adds a `logging/fos` endpoint beside it, which would write every log line twice. Renaming the endpoint deletes the old name and creates the new one as `logging/fos`.
+
+Ownership checks, the preflight and teardown read both endpoint types and act only on Cloud's exact names. Teardown deletes the endpoint but not the key Fastly minted for it, since Fastly doesn't delete it either; revoke it under Object Storage access keys in the Fastly control panel if you no longer need it.
+
+Cloud still creates its own bucket-scoped Object Storage key: ingest, the RUM assets and the CDN front service use it. The provisioning token needs the Engineer role with access to all services, or Superuser; Fastly requires one of those to create a `logging/fos` endpoint.
+
 ## Capture modes
 
 `Provision.capture` picks how the service's request data is captured. The service record stores `capture` only when it is `attached`, and it can't be changed after provisioning; tear down and provision again to switch.
@@ -11,7 +21,7 @@ Cloud owns a resource when its name is in the service's owner marker snippet (`f
 | Mode | Cloud manages | Capture VCL |
 |---|---|---|
 | `managed` (default) | its marker, the capture snippets (`Fastly Log Analytics - vcl_recv` / `vcl_deliver`), the logging endpoint (default `Fastly Object Storage Logs`), `log_analytics_condition`, and when RUM is on the RUM snippets, backend and dictionary | Cloud's own |
-| `attached` | its marker, one `logging/s3` endpoint (default `FLP Cloud Logs`) and its response condition `flp_cloud_log_condition` | the other install's |
+| `attached` | its marker, one logging endpoint (default `FLP Cloud Logs`) and its response condition `flp_cloud_log_condition` | the other install's |
 
 In `attached` mode the endpoint's log format is the same one `managed` mode writes. It reads the `x-fos-edge-data:*` / `x-fos-origin-data:*` headers that the other install's capture VCL sets.
 

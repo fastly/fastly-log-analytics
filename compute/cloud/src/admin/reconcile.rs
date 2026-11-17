@@ -150,7 +150,7 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     }
     Ok(BTreeMap::from([
         ("snippet".into(), snippets),
-        ("logging/s3".into(), endpoints),
+        ("logging/fos".into(), endpoints),
         ("condition".into(), conditions),
         ("backend".into(), backends),
         ("dictionary".into(), dictionaries),
@@ -175,6 +175,18 @@ fn normalized(resource: &str, value: &Value) -> Value {
                 "name":value["name"],"path":value["path"],"period":number(&value["period"],60),"format":value["format"],
                 "response_condition":value["response_condition"],"format_version":number(&value["format_version"],2),
                 "bucket_name":value["bucket_name"],"domain":value["domain"],"message_type":value["message_type"],
+                "compression_codec":codec,
+            })
+        }
+        "logging/fos" => {
+            let codec = value["compression_codec"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("zstd");
+            json!({
+                "name":value["name"],"path":value["path"],"period":number(&value["period"],60),"format":value["format"],
+                "response_condition":value["response_condition"],"format_version":number(&value["format_version"],2),
+                "bucket_name":value["bucket_name"],"region":value["region"],"message_type":value["message_type"],
                 "compression_codec":codec,
             })
         }
@@ -227,6 +239,15 @@ fn resource_body(resource: &str, value: &Value, service: &Service) -> Value {
                 json!({"bucket_name":service.fos_bucket,"domain":service.fos_endpoint});
             let mut body = crate::logging::logging_endpoint_body(value, &connection);
             // NDJSON lines must reach FOS without a syslog-style prefix.
+            body["message_type"] = "blank".into();
+            body
+        }
+        "logging/fos" => {
+            let mut body = crate::logging::fos_logging_endpoint_body(
+                value,
+                &service.fos_bucket,
+                &service.fos_region,
+            );
             body["message_type"] = "blank".into();
             body
         }
@@ -324,7 +345,7 @@ fn discover(
     let mut target = desired(service)?;
     if job.kind == "teardown" {
         if job.options.remove_logging {
-            target.insert("logging/s3".into(), vec![]);
+            target.insert("logging/fos".into(), vec![]);
             target.insert("condition".into(), vec![]);
         }
         if job.options.remove_snippets {
@@ -334,7 +355,7 @@ fn discover(
         }
     }
     let mut current = BTreeMap::new();
-    for resource in ["snippet", "logging/s3", "condition"] {
+    for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
         let value = context.api(
             "GET",
             &format!(
@@ -432,10 +453,24 @@ fn discover(
         && !own_marker
         && current["logging/s3"]
             .iter()
+            .chain(&current["logging/fos"])
             .any(|v| v["name"].as_str().is_some_and(managed_name))
     {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
+    // An endpoint that already exists as legacy S3 stays S3, so the bucket never
+    // gets a second endpoint writing the same objects.
+    let legacy: BTreeSet<String> = current["logging/s3"]
+        .iter()
+        .filter_map(|v| v["name"].as_str().map(str::to_owned))
+        .collect();
+    let (kept, native): (Vec<Value>, Vec<Value>) = target
+        .remove("logging/fos")
+        .unwrap_or_default()
+        .into_iter()
+        .partition(|v| v["name"].as_str().is_some_and(|n| legacy.contains(n)));
+    target.insert("logging/s3".into(), kept);
+    target.insert("logging/fos".into(), native);
     let managed_names: BTreeSet<_> = target["snippet"]
         .iter()
         .filter_map(|s| s["name"].as_str().map(str::to_owned))
@@ -499,12 +534,13 @@ fn discover(
         &[
             "snippet",
             "logging/s3",
+            "logging/fos",
             "condition",
             "backend",
             "dictionary",
         ]
     } else {
-        &["snippet", "logging/s3", "condition"]
+        &["snippet", "logging/s3", "logging/fos", "condition"]
     };
     for &resource in resources {
         let wanted = &target[resource];
@@ -514,7 +550,7 @@ fn discover(
             let found = current[resource].iter().find(|v| v["name"] == name);
             if found.is_some()
                 && (!own_marker && !name.starts_with("flp-owner-")
-                    || resource == "logging/s3"
+                    || resource.starts_with("logging/")
                         && !service.owned_endpoint_names.iter().any(|v| v == name))
             {
                 return Err(Error::new(409, "resource_name_collision"));
@@ -531,7 +567,7 @@ fn discover(
         for value in &current[resource] {
             let name = required(value, "name")?;
             let owned = own_marker
-                && if resource == "logging/s3" {
+                && if resource.starts_with("logging/") {
                     service.owned_endpoint_names.iter().any(|v| v == name)
                         || job.previous_endpoint_names.iter().any(|v| v == name)
                 } else if resource == "condition" {
@@ -599,10 +635,10 @@ fn discover(
                 (_, "dictionary_item") if change.action != "delete" => 2,
                 (_, "backend") if change.action != "delete" => 3,
                 (_, "snippet") if change.action != "delete" => 4,
-                (_, "logging/s3") if change.action != "delete" => 5,
+                (_, "logging/s3" | "logging/fos") if change.action != "delete" => 5,
                 (_, "fos_object") if change.action != "delete" => 6,
                 ("delete", "snippet") => 7,
-                ("delete", "logging/s3") => 8,
+                ("delete", "logging/s3" | "logging/fos") => 8,
                 ("delete", "backend") => 9,
                 ("delete", "dictionary") => 10,
                 ("delete", "condition") => 11,
@@ -613,7 +649,7 @@ fn discover(
     } else {
         changes.sort_by_key(
             |change| match (change.action.as_str(), change.resource.as_str()) {
-                ("delete", "logging/s3") => 3,
+                ("delete", "logging/s3" | "logging/fos") => 3,
                 ("delete", "condition") => 4,
                 ("delete", _) => 5,
                 (_, "snippet") => 0,

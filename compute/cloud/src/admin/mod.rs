@@ -522,7 +522,7 @@ fn preflight(
     let attached = capture == Capture::Attached;
     let mut snippets = Vec::new();
     let mut conditions = Vec::new();
-    for resource in ["snippet", "logging/s3", "condition"] {
+    for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
         let current = context.api(
             "GET",
             &format!("/service/{sid}/version/{version}/{resource}"),

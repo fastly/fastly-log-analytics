@@ -28,6 +28,7 @@ import {
   ConnectStep,
 } from '@/components/ProvisionWizard/ProvisionWizard'
 import { RumVersionPicker, StorageStep } from '@/components/ProvisionWizard/steps/StorageStep'
+import { TokenStep } from '@/components/ProvisionWizard/steps/CredentialsStep'
 import {
   WIZARD_DRAFT_KEY, buildHandleModalClose, buildValidateOnSuccess, clearDraft, loadDraft,
   mergePersistedConfig, runAdminIngest, runCheckConfig, runCheckDomain,
@@ -282,6 +283,27 @@ describe('StorageStep — Cloud mode hides self-hosted-only sections', () => {
     renderWithQuery(<StorageStep s={storageState()} />)
     expect(screen.queryByText(/CDN Performance Front/i)).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Background Sync')).not.toBeInTheDocument()
+  })
+})
+
+describe('TokenStep — role copy matches the server role check', () => {
+  afterEach(() => setCloudModeRuntime(false))
+
+  const tokenState = () => makeFooterState({ step: 'token', token: '', setToken: vi.fn() } as Partial<WizardState>)
+  const roleCopy = () =>
+    screen.getByText((_, el) => el?.tagName === 'P' && (el.textContent ?? '').includes('engineer'))
+
+  it('self-hosted asks for a superuser token', () => {
+    render(<TokenStep s={tokenState()} />)
+    expect(roleCopy()).toHaveTextContent(/cannot create new services/)
+  })
+
+  it('Cloud accepts an engineer token with access to all services, or a superuser token', () => {
+    setCloudModeRuntime(true)
+    render(<TokenStep s={tokenState()} />)
+    const copy = roleCopy()
+    expect(copy).toHaveTextContent(/engineer token with access to all services, or a superuser token/)
+    expect(copy).not.toHaveTextContent(/cannot create new services/)
   })
 })
 

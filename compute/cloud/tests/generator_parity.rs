@@ -250,6 +250,31 @@ fn endpoint_body_retains_null_placement_and_omits_empty_optional_values() {
 }
 
 #[test]
+fn fos_endpoint_body_matches_the_s3_body_without_credentials_or_domain() {
+    let endpoints = logging::desired_logging_endpoints(
+        &json!({"log_period": 60, "log_fields": {}, "rum": {"enabled": true}}),
+    )
+    .unwrap();
+    assert_eq!(endpoints.as_array().unwrap().len(), 2);
+    for endpoint in endpoints.as_array().unwrap() {
+        let s3 = logging::logging_endpoint_body(
+            endpoint,
+            &json!({
+                "bucket_name": "example-bucket", "domain": "us-east-1.object.fastlystorage.app",
+                "access_key": "fixture-access", "secret_key": "fixture-secret"
+            }),
+        );
+        let fos = logging::fos_logging_endpoint_body(endpoint, "example-bucket", "us-east-1");
+        let mut expected = s3.as_object().unwrap().clone();
+        for key in ["domain", "access_key", "secret_key", "response_object_name"] {
+            expected.remove(key);
+        }
+        expected.insert("region".into(), "us-east-1".into());
+        assert_eq!(fos, Value::Object(expected), "{}", endpoint["name"]);
+    }
+}
+
+#[test]
 fn canonical_custom_field_types_use_v3_generation() {
     let canonical = json!({
         "name":"a_edge","vcl":"req.http.X-Count","parquet_type":"Int64",
