@@ -69,10 +69,11 @@ import {
   handleSessionsDetail,
   handleSessionsList,
   openSessionToken,
-  sessionsScanColumns,
+  sessionsListColumns,
   type SessionDetailRequest,
   type SessionsListRequest,
 } from "./sessions";
+import { sessionsLoadFrom, type SessionsRangeLoader } from "./sessions-window";
 import {
   deleteLogHistory,
   purgeQuarantine,
@@ -502,6 +503,8 @@ type QueryScan = {
   widen(): Promise<{ read: DuckDBReadContext; windowFrom: number | null }>;
 };
 const queryScans = new WeakMap<Request, QueryScan>();
+/** A prepared /api/sessions list: where its first read begins, and how to load more. */
+const sessionScans = new WeakMap<Request, { loadedFromMs: number; loadRange: SessionsRangeLoader }>();
 
 function queryBudgetError(error: CloudBudgetError, columns: readonly string[] | null): CloudBudgetError {
   const { detail } = error;
@@ -615,7 +618,7 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
     : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters, params.sections)
     : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters)
-    : url.pathname === "/api/sessions" ? sessionsScanColumns(params.filters)
+    : url.pathname === "/api/sessions" ? sessionsListColumns(params.filters, params.sort_by)
     : /^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?)$/.test(url.pathname)
       ? securityScanColumns(params.filters)
     : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
@@ -643,7 +646,15 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     throw error instanceof CloudBudgetError ? queryBudgetError(error, rum ? null : queryPlan?.columns ?? null) : error;
   });
   const firstQueryWindow = queryPlan?.newestFirst ? queryWindow(0) : null;
-  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
+  const loadSessions = (fromMs: number, toMs: number, columns: readonly string[] | null) => ensureCloudRange(
+    new Date(fromMs).toISOString(), new Date(toMs).toISOString(), request.signal, ["request"], {
+      serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+      ...columns ? { projection: { columns: [...columns] } } : {},
+    });
+  const sessionsFrom = url.pathname === "/api/sessions"
+    ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
+  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await ensureCloudRange(
+    sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters, detectors),
@@ -668,6 +679,13 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
         ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
       }) }), read);
       if (insightBaseline) insightBaselines.set(prepared, insightBaseline);
+      if (url.pathname === "/api/sessions") {
+        sessionScans.set(prepared, { loadedFromMs: sessionsFrom, loadRange: async (fromMs, toMs, columns) => {
+          const loaded = await loadSessions(fromMs, toMs, columns);
+          return { runSql: (sql) => loaded.executeSql<Record<string, unknown>>(sql, [], request.signal),
+            release: () => loaded.release?.(), presentColumns: () => loaded.getPresentColumns() };
+        } });
+      }
       if (queryPlan) {
         let step = 0;
         queryScans.set(prepared, {
@@ -1913,6 +1931,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         availableColumns: cols && cols.size > 0 ? cols : undefined,
         customColumnTypes: read?.getCustomColumnTypes(),
         runSql: (sql) => executeSql(sql, [], request.signal),
+        ...sessionScans.get(request),
       },
     );
     return jsonResponse(res.body, request, undefined, res.status);

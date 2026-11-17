@@ -434,6 +434,82 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     });
   });
 
+  describe("/api/sessions range loading", () => {
+    const end = Date.parse("2026-11-06T00:00:00Z");
+    const loads: { from: string; to: string; columns: readonly string[] | undefined; release: ReturnType<typeof vi.fn> }[] = [];
+    // The window from `from` holds `sessionsIn(hours)` sessions, newest first, one a minute apart.
+    const rangeOf = (sessionsIn: (hours: number) => number, columns: readonly string[] = SESSIONS_SCAN_COLUMNS) =>
+      vi.mocked(ensureCloudRange).mockImplementation(async (from, to, _signal, _kinds, options) => {
+        const release = vi.fn();
+        loads.push({ from: String(from), to: String(to), columns: options?.projection?.columns, release });
+        const count = Math.min(100, sessionsIn((end - Date.parse(String(from))) / 3_600_000));
+        return {
+          assertCurrent: () => {},
+          release,
+          getPresentColumns: async () => new Set(count ? ["timestamp", "ts_ms", ...columns] : []),
+          getCustomColumnTypes: () => new Map(),
+          executeSql: async (sql: string) => /page_keys/.test(sql)
+            ? [{ i: 0, ua: "curl/8", unique_urls: 3 }]
+            : Array.from({ length: count }, (_, i) => ({
+              ip: `192.0.2.${i}`, ja4: "t13d", session_start: end - (i + 1) * 60_000, session_end: end - i * 60_000,
+              req_count: 2, reqs_4xx: 0, reqs_5xx: 0, ua: null, unique_urls: 0,
+            })),
+        } as unknown as DuckDBReadContext;
+      });
+    const list = (body: Record<string, unknown> = {}) => handleCloudAnalyticalRequest(new Request("http://localhost/api/sessions", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z", page: 1, limit: 100,
+        sort_by: "session_start", sort_dir: "desc", ...body }),
+    }));
+    beforeEach(() => { loads.length = 0; });
+    afterEach(() => { vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext()); });
+
+    it("loads a 24h newest-first page 1 from the last 45 minutes without ua or url, then only the page's span", async () => {
+      rangeOf(() => 100);
+      const res = await list();
+      expect(res?.status).toBe(200);
+      const body = await res!.json() as { sessions: { ua: string | null; unique_urls: number }[] };
+      expect(body.sessions).toHaveLength(100);
+      expect(body.sessions[0]).toMatchObject({ ua: "curl/8", unique_urls: 3 });
+      expect(loads.map(({ from, to }) => [from, to])).toEqual([
+        ["2026-11-05T23:15:00.000Z", "2026-11-06T00:00:00Z"],
+        ["2026-11-05T22:20:00.000Z", "2026-11-06T00:00:00.001Z"],
+      ]);
+      expect(loads[0].columns).toEqual(SESSIONS_SCAN_COLUMNS.filter((column) => column !== "ua" && column !== "url"));
+      expect(loads[1].columns).toEqual(expect.arrayContaining(["ip", "ja4", "ua", "url"]));
+      expect(loads[1].columns).not.toContain("resp_bytes");
+      expect(loads.map((load) => load.release.mock.calls.length)).toEqual([1, 1]);
+    });
+
+    it("widens to older files until the page fills and releases every read", async () => {
+      rangeOf((hours) => hours <= 1 ? 0 : 100);
+      expect((await list())?.status).toBe(200);
+      expect(loads.map(({ from }) => from)).toEqual([
+        "2026-11-05T23:15:00.000Z", "2026-11-05T22:30:00.000Z", "2026-11-05T22:20:00.000Z",
+      ]);
+      expect(loads.map((load) => load.release.mock.calls.length)).toEqual([1, 1, 1]);
+    });
+
+    it("takes the response's column flags from the files a widened read found when the newest window had none", async () => {
+      rangeOf((hours) => hours <= 1 ? 0 : 100, SESSIONS_SCAN_COLUMNS.filter((column) => column !== "tcp_rtt"));
+      const body = await (await list())!.json() as { has_rtt: boolean; has_ja4: boolean };
+      expect(body).toMatchObject({ has_rtt: false, has_ja4: true });
+    });
+
+    it("answers a selective filter that widens past the scan budget with the budget's 413", async () => {
+      const message = "Cloud query range needs 80.0 MiB but the browser scan budget is 64.0 MiB; choose a shorter time range";
+      rangeOf((hours) => {
+        if (hours > 1) throw new CloudBudgetError(message, { unit: "bytes", needed: 80 * 1024 * 1024, limit: 64 * 1024 * 1024 });
+        return 0;
+      });
+      const res = await list({ flagged_only: true });
+      expect(res?.status).toBe(413);
+      expect(await res!.json()).toEqual({ detail: message });
+      expect(loads.map(({ from }) => from)).toEqual(["2026-11-05T23:15:00.000Z", "2026-11-05T22:30:00.000Z"]);
+      expect(loads[0].release).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("answers an over-budget range with a terminal 413 instead of a retryable failure", async () => {
     const message = "Cloud query range exceeds the browser scan budget; choose a smaller range";
     vi.mocked(ensureCloudRange).mockRejectedValueOnce(new CloudBudgetError(message));
@@ -896,9 +972,12 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await options("/api/performance", {})).toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS] });
     expect(await options("/api/performance/aggregates", { filters: [filters] })).toBeUndefined();
     const range = { start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" };
-    expect(await options("/api/sessions", range)).toEqual({ columns: [...SESSIONS_SCAN_COLUMNS] });
+    const listed = SESSIONS_SCAN_COLUMNS.filter((column) => column !== "ua" && column !== "url");
+    expect(await options("/api/sessions", range)).toEqual({ columns: listed });
     expect(await options("/api/sessions", { ...range, filters: { host: ["example.com"] } }))
-      .toEqual({ columns: [...SESSIONS_SCAN_COLUMNS, "host"] });
+      .toEqual({ columns: [...listed, "host"] });
+    expect(await options("/api/sessions", { ...range, sort_by: "unique_urls" }))
+      .toEqual({ columns: SESSIONS_SCAN_COLUMNS.filter((column) => column !== "ua") });
     expect(await options("/api/sessions", { ...range, filters: [filters] })).toBeUndefined();
   });
 

@@ -39,8 +39,18 @@ Router: `sessions_router` (prefix `/api/sessions`) in [`backend/routers/session_
 
 The ClickHouse reader ([`backend/high_scale/sessions.py`](../../backend/high_scale/sessions.py)) applies the shared filters, `sort_by`/`sort_dir`, real pagination and a real window `total`; `is_streaming` and `streaming_only` read the stored `cmcd` map.
 
+## Cloud
+
+Cloud sessionizes raw Parquet in local DuckDB ([`frontend/lib/cloud-engine/sessions.ts`](../../frontend/lib/cloud-engine/sessions.ts), [`sessions-window.ts`](../../frontend/lib/cloud-engine/sessions-window.ts)). The browser's DuckDB has 256 MB and can't spill, so the list never loads the whole range with every column.
+
+The default newest-first page loads only the files from the last 45 minutes: sessions that start in the last 15 minutes, plus the 30 minutes before them, because a session that starts at t follows 30 minutes of silence. If that slice holds fewer sessions than the page, the slice widens 4× (1 h, 4 h, …, then the whole range) and loads only the older files it needs, releasing the narrower read. Other sorts load the whole range. Either way the ranking pass skips `ua` and `url` (except `url` when sorting by unique URLs). A second pass then reads `ua` and `url` only from the files that the page's sessions overlap (at most 8 loads), and fills in the user agent and unique URLs for those sessions. Results equal a whole-range scan exactly. One client's sessions never overlap, so its rows inside a session's span are exactly that session's rows.
+
+On `session-scans.test.ts`'s day of 5-minute files (57,691 rows, 1.65 MiB of Parquet), page 1 reads 2,214 rows and 47 KiB instead of the whole day.
+
+A filter or `flagged_only` that matches few sessions can widen to the whole range. The 256-file and 64 MiB compressed scan limits still apply to every load, and going over them returns their 413 (`… choose a shorter time range`). `total` is the page's row count, not a window total.
+
 ## Tests
 
-- Frontend: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx)
+- Frontend: [`frontend/__tests__/app/usage-sessions-streaming.test.tsx`](../../frontend/__tests__/app/usage-sessions-streaming.test.tsx), Cloud: [`frontend/lib/cloud-engine/session-scans.test.ts`](../../frontend/lib/cloud-engine/session-scans.test.ts)
 - Backend: [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), [`tests/routers/test_session_scoring_router.py`](../../tests/routers/test_session_scoring_router.py)
 - E2E: `User Sessions Explorer Page Contract` in [`frontend/e2e/pages/core-analytics-pages.spec.ts`](../../frontend/e2e/pages/core-analytics-pages.spec.ts)

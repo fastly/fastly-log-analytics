@@ -8,13 +8,24 @@
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
 import { compileFiltersToSql, type DuckDBColumnType } from "./dashboard/duckdb";
+import {
+  buildSessionsEnrichSql,
+  SESSIONS_ENRICH_COLUMNS,
+  SESSIONS_FIRST_SLICE_MS,
+  SESSIONS_PAGE_ONLY_COLUMNS,
+  sessionsEnrichSpans,
+  sessionsNewestFirst,
+  sessionsSliceLoadFrom,
+  type SessionsPageKey,
+  type SessionsRangeLoader,
+  type SessionsRead,
+} from "./sessions-window";
 
 export const SESSIONS_INACTIVITY_GAP_SECONDS = 1800; // 30 * 60 seconds (INTERVAL 30 MINUTES)
 export const SESSIONS_MAX_WINDOW_DAYS = 7;
 export const MAX_SESSIONS_WINDOW_DAYS = SESSIONS_MAX_WINDOW_DAYS;
 export const SESSIONS_DEFAULT_MIN_REQS_FLAG = 1000;
 export const SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG = 20.0;
-const SESSIONS_FIRST_SLICE_MS = 15 * 60_000;
 
 export const SESSIONS_SORTABLE_COLUMNS = new Set([
   "session_start",
@@ -104,6 +115,10 @@ export interface CloudSessionsContext {
   availableColumns?: ReadonlySet<string>;
   rollupAvailable?: boolean;
   runSql?: (sql: string) => Promise<Record<string, unknown>[]>;
+  /** Where the rows `runSql` reads begin; older rows aren't loaded. */
+  loadedFromMs?: number;
+  /** Loads other spans or columns: the list then ranks without `ua`/`url` and reads them for the page only. */
+  loadRange?: SessionsRangeLoader;
 }
 
 export interface CloudHttpResult<T = unknown> {
@@ -160,7 +175,7 @@ export function openSessionToken(token: string): SessionTokenPayload | null {
   }
 }
 
-/** Every request column the /api/sessions list scan reads. */
+/** Every request column the /api/sessions list reads, over both passes. */
 export const SESSIONS_SCAN_COLUMNS = [
   "timestamp", "ts_ms", "ip", "ja4", "cmcd_sid", "edge_sid", "edge", "asn", "country", "status", "resp_bytes",
   "tcp_rtt", "ua", "url",
@@ -172,6 +187,22 @@ export function sessionsScanColumns(filters: unknown): string[] | null {
   if (typeof filters !== "object" || Array.isArray(filters)) return null;
   return [...new Set([...SESSIONS_SCAN_COLUMNS, ...Object.keys(filters)])];
 }
+
+/** The columns the ranking pass reads: `ua` only for the page, `url` too unless it ranks. */
+export function sessionsListColumns(filters: unknown, sortBy?: unknown): string[] | null {
+  return sessionsScanColumns(filters)?.filter((column) =>
+    column !== "ua" && (column !== "url" || sortBy === "unique_urls")) ?? null;
+}
+
+function sessionsFilterSql(filters: SessionsListRequest["filters"], customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>) {
+  return compileFiltersToSql(Object.entries(filters ?? {}).flatMap(([field, spec]) =>
+    (Array.isArray(spec) ? spec : spec.values ?? []).map((value) => ({
+      field, value, mode: !Array.isArray(spec) && spec.mode === "exclude" ? "exclude" as const : "include" as const,
+    })),
+  ), false, [], customColumnTypes);
+}
+
+const sessionsMsSql = (cols: ReadonlySet<string>) => cols.has("ts_ms") ? 'CAST("ts_ms" AS BIGINT)' : 'EPOCH_MS("timestamp")';
 
 /**
  * Build the 30-minute inactivity-gap sessionization CTE pipeline (`INTERVAL 30 MINUTES` / 1800s):
@@ -274,12 +305,8 @@ export function buildSessionsCteSql(options: {
   const whereClause =
     postFilters.length > 0 ? `WHERE ${postFilters.join(" AND ")}` : "";
 
-  const msSql = cols.has("ts_ms") ? 'CAST("ts_ms" AS BIGINT)' : 'EPOCH_MS("timestamp")';
-  const filterSql = compileFiltersToSql(Object.entries(options.filters ?? {}).flatMap(([field, spec]) =>
-    (Array.isArray(spec) ? spec : spec.values ?? []).map((value) => ({
-      field, value, mode: !Array.isArray(spec) && spec.mode === "exclude" ? "exclude" as const : "include" as const,
-    })),
-  ), false, [], options.customColumnTypes);
+  const msSql = sessionsMsSql(cols);
+  const filterSql = sessionsFilterSql(options.filters, options.customColumnTypes);
   const rawColumns = ["cmcd_sid", "edge_sid", "edge", "asn", "country", "status", "resp_bytes", "tcp_rtt", "ua", "url"]
     .filter((column) => cols.has(column)).map((column) => `"${column}"`);
   const order = `${sortCol} ${sortDir}, "ip", "ja4", session_start`;
@@ -430,6 +457,58 @@ export function buildSessionsRollupStitchSql(
   `;
 }
 
+/**
+ * Pass 2: each page session's smallest UA and distinct URL count (unless that ranked it), read from
+ * only the files its span overlaps, one merged span at a time.
+ */
+async function enrichSessionsPage(
+  rows: Record<string, unknown>[],
+  body: SessionsListRequest,
+  cols: ReadonlySet<string>,
+  ctx: CloudSessionsContext,
+  loadRange: SessionsRangeLoader,
+): Promise<Record<string, unknown>[]> {
+  const ua = cols.has("ua");
+  const urls = cols.has("url") && body.sort_by !== "unique_urls";
+  if (!rows.length || !ua && !urls) return rows;
+  const msOf = (value: unknown) =>
+    typeof value === "number" ? value : value instanceof Date ? value.getTime() : Date.parse(String(value));
+  const keys: SessionsPageKey[] = rows.map((row) => ({
+    ip: String(row.ip ?? ""),
+    ja4: row.ja4 == null ? null : String(row.ja4),
+    startMs: msOf(row.session_start),
+    endMs: msOf(row.session_end),
+  }));
+  const wanted = SESSIONS_ENRICH_COLUMNS.filter((column) =>
+    !(SESSIONS_PAGE_ONLY_COLUMNS as readonly string[]).includes(column) || (column === "ua" ? ua : urls));
+  const columns = sessionsScanColumns(body.filters) === null ? null
+    : [...new Set([...wanted, ...Object.keys(body.filters ?? {})])];
+  const stats = new Map<number, Record<string, unknown>>();
+  for (const span of sessionsEnrichSpans(keys)) {
+    const inSpan = keys.flatMap((key, i) => key.startMs >= span.startMs && key.endMs <= span.endMs ? [i] : []);
+    const read = await loadRange(span.startMs, span.endMs + 1, columns);
+    try {
+      const found = await read.runSql(buildSessionsEnrichSql({
+        tableName: ctx.tableName ?? "requests",
+        keys: inSpan.map((i) => keys[i]),
+        hasJa4: cols.has("ja4"),
+        msSql: sessionsMsSql(cols),
+        filterSql: sessionsFilterSql(body.filters, ctx.customColumnTypes),
+        ua,
+        urls,
+      }));
+      for (const row of found) stats.set(inSpan[Number(row.i)], row);
+    } finally {
+      read.release?.();
+    }
+  }
+  return rows.map((row, i) => ({
+    ...row,
+    ...ua ? { ua: stats.get(i)?.ua ?? null } : {},
+    ...urls ? { unique_urls: stats.get(i)?.unique_urls ?? 0 } : {},
+  }));
+}
+
 export async function handleSessionsList(
   body: SessionsListRequest,
   ctx: CloudSessionsContext = {},
@@ -481,7 +560,7 @@ export async function handleSessionsList(
   );
   const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
   const serviceId = body.service_id ?? ctx.serviceId ?? "default";
-  const cols =
+  let cols: ReadonlySet<string> =
     ctx.availableColumns ??
     new Set([
       "timestamp",
@@ -500,11 +579,15 @@ export async function handleSessionsList(
     ]);
 
   const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const loadRange = ctx.loadRange;
   const sqlFor = (sliceFromMs?: number) => buildSessionsCteSql({
     tableName: ctx.tableName ?? "requests",
     startTime: body.start_time,
     endTime: body.end_time,
-    availableColumns: cols,
+    // With a loader, `ua` and `url` (wide strings) are read only for the page's own sessions.
+    availableColumns: loadRange
+      ? new Set([...cols].filter((column) => column !== "ua" && (column !== "url" || body.sort_by === "unique_urls")))
+      : cols,
     minReqsFlag,
     min4xxPctFlag,
     flaggedOnly: body.flagged_only,
@@ -517,17 +600,41 @@ export async function handleSessionsList(
     customColumnTypes: ctx.customColumnTypes,
     sliceFromMs,
   });
-  // The newest sessions only need the end of the range: widen a slice from the end until it holds
-  // the requested page, so memory follows recent traffic rather than the range.
   let rawRows: Record<string, unknown>[] = [];
-  if (ctx.runSql && body.sort_by === "session_start" && body.sort_dir === "desc") {
-    for (let sliceMs = SESSIONS_FIRST_SLICE_MS; ; sliceMs *= 4) {
-      const sliceFromMs = endMs - sliceMs;
-      rawRows = await ctx.runSql(sqlFor(sliceFromMs > startMs ? sliceFromMs : undefined));
-      if (sliceFromMs <= startMs || rawRows.length >= limit) break;
+  const held: { read?: SessionsRead } = {};
+  try {
+    let runSql = ctx.runSql;
+    let loadedFromMs = ctx.loadedFromMs ?? startMs;
+    // Rows from `fromMs` must be loaded; a wider read replaces the narrower one.
+    const ensureFrom = async (fromMs: number) => {
+      if (!loadRange || fromMs >= loadedFromMs) return;
+      const next = await loadRange(fromMs, endMs, sessionsListColumns(body.filters, body.sort_by));
+      held.read?.release?.();
+      held.read = next;
+      runSql = next.runSql;
+      loadedFromMs = fromMs;
+      // A first read with no files can't say which columns the data has; a wider one can.
+      const present = ctx.availableColumns ? null : await next.presentColumns?.();
+      if (present?.size) cols = present;
+    };
+    // The newest sessions only need the end of the range: widen a slice from the end until it holds
+    // the requested page, so memory follows recent traffic rather than the range.
+    if (ctx.runSql && sessionsNewestFirst(body)) {
+      for (let sliceMs = SESSIONS_FIRST_SLICE_MS; ; sliceMs *= 4) {
+        const sliceFromMs = endMs - sliceMs;
+        await ensureFrom(sessionsSliceLoadFrom(sliceFromMs, startMs));
+        rawRows = await runSql!(sqlFor(sliceFromMs > startMs ? sliceFromMs : undefined));
+        if (sliceFromMs <= startMs || rawRows.length >= limit) break;
+      }
+    } else if (ctx.runSql) {
+      await ensureFrom(startMs);
+      rawRows = await runSql!(sqlFor());
     }
-  } else if (ctx.runSql) {
-    rawRows = await ctx.runSql(sqlFor());
+    held.read?.release?.();
+    held.read = undefined;
+    if (loadRange) rawRows = await enrichSessionsPage(rawRows, body, cols, ctx, loadRange);
+  } finally {
+    held.read?.release?.();
   }
 
   const sessions: SessionSummaryRow[] = rawRows.map((r) => {
