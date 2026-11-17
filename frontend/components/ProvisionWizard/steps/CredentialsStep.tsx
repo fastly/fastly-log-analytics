@@ -108,8 +108,8 @@ export function TokenStep({ s }: { s: WizardState }) {
           </p>
         ) : (
           <p className="text-sm text-muted-foreground leading-relaxed">
-            We need a token with <code>superuser</code> permissions to create and configure your services. An{" "}
-            <code>engineer</code> token cannot create new services.
+            We need an <code>engineer</code> token with access to all services, or a <code>superuser</code> token,
+            to create and configure your services.
           </p>
         )}
         <div className="pt-2">
