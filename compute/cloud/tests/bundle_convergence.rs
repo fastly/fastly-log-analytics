@@ -35,8 +35,9 @@ const CALL_MS: u64 = 3;
 const FOLD_MS: u64 = 30;
 const PARTIAL_FOLD_MS: u64 = 90;
 const ENCODE_MS: u64 = 250;
-/// The per-execution vCPU stop gate (`bundle::VCPU_STOP_MS`) plus one fold, encode, and call tail.
-const VCPU_BUDGET_MS: u64 = bundle::VCPU_STOP_MS + FOLD_MS + ENCODE_MS + 3 * CALL_MS;
+/// The deploy harness's `summary_bundle` vCPU budget (`STAGE_VCPU_BUDGET_MS` in
+/// `tools/deploy_test_all.py`): the stop gate plus one fold, encode and call tail must fit under it.
+const VCPU_BUDGET_MS: u64 = 900;
 
 #[derive(Default)]
 struct Fake {
@@ -380,7 +381,7 @@ fn precharged_resume_keeps_the_partial_and_finishes_exactly_across_slices() {
         bundle::Unit::Hour,
     )
     .unwrap();
-    let first = run_with_cpu(&fake, &svc, 550);
+    let first = run_with_cpu(&fake, &svc, 450);
     assert_eq!(first.partials, 1);
     let partials = fake.keys("partial=");
     assert_eq!(partials.len(), 1);
@@ -388,7 +389,7 @@ fn precharged_resume_keeps_the_partial_and_finishes_exactly_across_slices() {
     let gets = fake.gets.get();
     let puts = fake.puts.get();
 
-    let deferred = run_with_cpu(&fake, &svc, 650);
+    let deferred = run_with_cpu(&fake, &svc, 550);
     assert_eq!(deferred.stopped, Some("vcpu"));
     assert!(deferred.more_pending);
     assert_eq!(fake.gets.get(), gets + 1);
@@ -416,11 +417,11 @@ fn a_fully_covered_partial_defers_final_serialization_after_precharged_decode() 
     );
     fake.now.set(BASE + 2 * HOUR);
     watermark(&fake, fake.now.get());
-    let first = run_with_cpu(&fake, &svc, 640);
+    let first = run_with_cpu(&fake, &svc, 580);
     assert_eq!(first.partials, 1, "{first:?}");
     let partials = fake.keys("partial=");
     let puts = fake.puts.get();
-    let second = run_with_cpu(&fake, &svc, 650);
+    let second = run_with_cpu(&fake, &svc, 550);
     assert_eq!(second.stopped, Some("vcpu"));
     assert!(second.more_pending);
     assert_eq!(fake.puts.get(), puts);

@@ -82,10 +82,10 @@ const HOUR_S: i64 = 3600;
 const DAY_S: i64 = 86_400;
 /// Stop starting work this far into the execution; the Compute limit is 60 s.
 const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
-/// Stop folding once this much vCPU is spent in the execution.
-pub const VCPU_STOP_MS: u64 = 700;
-/// Leave 320ms of this installation's 1000ms CPU allowance for final serialization and the tail.
-pub const WRITE_VCPU_STOP_MS: u64 = 680;
+/// Stop folding once this much vCPU is spent; a v3 partial encode (~250ms) must still fit under 900ms.
+pub const VCPU_STOP_MS: u64 = 600;
+/// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
+pub const WRITE_VCPU_STOP_MS: u64 = 630;
 const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x02";
 
 /// `{scope}processed/summary_bundle/{table}/`, holding hour and day bundles.

@@ -9728,8 +9728,8 @@ mod summary_bundles {
         assert!(prime.more_pending);
         assert_eq!(prime.partials, 1);
         // The committed inventory and first fold are durable. The remaining seven folds
-        // cross the 680ms write cutoff without crossing the 700ms fold cutoff.
-        fake.vcpu_step.set(80);
+        // cross the 630ms write cutoff without crossing the 600ms fold cutoff first.
+        fake.vcpu_step.set(72);
         let first = run(&fake);
         assert!(first.more_pending);
         assert_eq!(first.partials, 1);
@@ -13600,8 +13600,8 @@ mod request_compaction {
 
     #[test]
     fn request_compaction_respects_cpu_wall_and_call_budgets_without_changing_other_stages() {
-        assert_eq!(ingest::bundle::VCPU_STOP_MS, 700);
-        assert_eq!(ingest::bundle::WRITE_VCPU_STOP_MS, 680);
+        assert_eq!(ingest::bundle::VCPU_STOP_MS, 600);
+        assert_eq!(ingest::bundle::WRITE_VCPU_STOP_MS, 630);
         assert_eq!(compaction::VCPU_STOP_MS, 40);
         assert_eq!(fastly_log_analytics::telemetry::compact::VCPU_STOP_MS, 700);
         assert_eq!(

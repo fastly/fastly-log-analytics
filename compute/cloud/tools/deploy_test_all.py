@@ -68,9 +68,9 @@ SETTLE_WINDOW_S = 180  # UTC minute close (60s) + SETTLE_S (120s)
 DOWNLOAD_CONCURRENCY = 8
 
 # Compute vCPU budgets matching app/src/ingest/coordinator.rs (800ms) and
-# app/src/ingest/worker.rs (800ms). summary_bundle stops folding at 700ms
+# app/src/ingest/worker.rs (800ms). summary_bundle stops folding at 600ms
 # (app/src/ingest/bundle.rs VCPU_STOP_MS) and then serializes its tail within the
-# 1000ms allowance, so a busy tick legitimately finishes above 700ms; 900ms leaves
+# 1000ms allowance, so a busy tick legitimately finishes above 600ms; 900ms leaves
 # 100ms before the hard ceiling and still flags a runaway execution.
 DEFAULT_VCPU_BUDGET_MS = 800.0
 HARD_VCPU_CEILING_MS = 1000.0
@@ -219,7 +219,7 @@ def evaluate_cron_health(
     required_stages: set[str],
     vcpu_budget_ms: float | None = None,
 ) -> dict[str, Any]:
-    """Validate measured cron_runs against 800ms tick / 700ms summary budgets; missing CPU is not a pass."""
+    """Validate measured cron_runs against 800ms tick / 900ms summary budgets; missing CPU is not a pass."""
     by_stage: dict[str, list[dict[str, Any]]] = {}
     errors: list[str] = []
     max_backend_calls = 0
