@@ -17,6 +17,7 @@ import { DisableRumDialog } from '@/components/Rum/RumLifecycleDialogs'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
+import { renderToString } from 'react-dom/server'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -548,6 +549,54 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         .map((q) => q.queryKey as unknown[])
         .find((k) => k[0] === 'rum-analytics')
       expect(key).toEqual(['rum-analytics', SVC, '24h', params?.get('anchor'), {}])
+    })
+
+    it('hydrates a cold 1h load without first fetching the default 24h window', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      useFilterStore.getState().resetAll()
+      const now = Date.now()
+      useFilterStore.getState().setRelativeRange('1h', new Date(now - 3_600_000).toISOString(), new Date(now).toISOString())
+      mockRumEndpoints()
+      const analyticsTokens: (string | null)[] = []
+      const liveEventSpans: number[] = []
+      server.use(
+        http.get('/api/services/:service_id/rum/analytics', ({ request }) => {
+          analyticsTokens.push(new URL(request.url).searchParams.get('range_token'))
+          return HttpResponse.json(analytics())
+        }),
+        http.get('/api/services/:service_id/rum/live-events', ({ request }) => {
+          const params = new URL(request.url).searchParams
+          liveEventSpans.push(Date.parse(params.get('end_time') ?? '') - Date.parse(params.get('start_time') ?? ''))
+          return HttpResponse.json([])
+        }),
+      )
+      const seededClient = () => {
+        const qc = createTestQueryClient()
+        qc.setQueryData(queryKeys.bootstrap(), { active_service_id: SVC })
+        return qc
+      }
+      const ui = <RumPageClient initialServiceId={SVC} />
+      const container = document.createElement('div')
+      const ServerWrapper = makeQueryWrapper(seededClient())
+      container.innerHTML = renderToString(<ServerWrapper>{ui}</ServerWrapper>)
+      document.body.appendChild(container)
+      const onRecoverableError = vi.fn()
+
+      try {
+        render(ui, { container, hydrate: true, onRecoverableError, wrapper: makeQueryWrapper(seededClient()) })
+        expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+        await waitFor(() => expect(liveEventSpans.length).toBeGreaterThanOrEqual(1))
+
+        expect(onRecoverableError).not.toHaveBeenCalled()
+        expect(analyticsTokens).toEqual(['1h'])
+        expect(liveEventSpans.every((span) => span === 3_600_000)).toBe(true)
+      } finally {
+        container.remove()
+      }
     })
 
     it('drops filter fields RUM has no column for so a status filter carried over from another page cannot 400 the report', async () => {

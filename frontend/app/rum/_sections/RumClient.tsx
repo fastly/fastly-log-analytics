@@ -6,7 +6,7 @@ import { BookOpen, Radio } from 'lucide-react'
 import { CardErrorState } from '@/components/AnalyticsCard'
 import { DashboardSkeleton, ReportLayout } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
-import { useIsAnalyst } from '@/hooks/useBootstrap'
+import { useIsAnalyst, useMounted } from '@/hooks/useBootstrap'
 import { useRumStatus } from '@/hooks/useDashboardCards'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { useTimezone } from '@/hooks/useSSE'
@@ -105,6 +105,10 @@ export function RumClient({
   const timezone = useTimezone()
   const filterPayload = useMemo(() => rumSupportedFilters(rawFilterPayload), [rawFilterPayload])
   const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId)
+  // Zustand serves its initial (default 24h) range while hydrating, so fetching before mount runs the
+  // heavy RUM queries for a window the URL-selected range immediately replaces (Trap #46).
+  const mounted = useMounted()
+  const queriesEnabled = mounted && !!serviceId && status?.enabled !== false
 
   const { data: analytics, isLoading, isError, refetch } = useAnalyticsReportQuery<RumAnalytics | null>({
     namespace: ['rum-analytics'],
@@ -124,7 +128,7 @@ export function RumClient({
       if (!res.ok) throw new Error(res.errorText || `RUM analytics failed (HTTP ${res.status})`)
       return recordOrNull(res.data)
     },
-    queryOptions: { enabled: !!serviceId && status?.enabled !== false, refetchInterval: false },
+    queryOptions: { enabled: queriesEnabled, refetchInterval: false },
   })
 
   const { data: liveEvents, isLoading: isLiveEventsLoading, isError: isLiveEventsError, refetch: refetchLiveEvents } = useQuery({
@@ -143,7 +147,7 @@ export function RumClient({
       if (!res.ok) throw new Error(res.errorText || `RUM live events failed (HTTP ${res.status})`)
       return arrayOrEmpty(res.data)
     },
-    enabled: !!serviceId && status?.enabled !== false,
+    enabled: queriesEnabled,
     refetchInterval: false,
   })
 
