@@ -711,14 +711,25 @@ TRANSIENT_STEP_ERRORS = {
 }
 
 
-def _is_transient_admin_error(resp: httpx.Response) -> bool:
-    if resp.status_code not in (409, 503):
-        return False
+# The app leases a job (and its service) for 60s per step; a step invocation that dies
+# mid-step holds that lease until it expires, so lease conflicts are waited out by time.
+LEASE_WAIT_ERRORS = {"job_leased", "service_locked"}
+JOB_LEASE_WAIT_S = 90.0
+LEASE_RETRY_INTERVAL_S = 1.0
+
+
+def _admin_error_code(resp: httpx.Response) -> str | None:
     try:
         payload = resp.json()
     except ValueError:
-        return True
-    err_code = str(payload.get("error") or payload.get("code") or payload.get("detail") or "")
+        return None
+    return str(payload.get("error") or payload.get("code") or payload.get("detail") or "")
+
+
+def _is_transient_admin_error(resp: httpx.Response) -> bool:
+    if resp.status_code not in (409, 503):
+        return False
+    err_code = _admin_error_code(resp)
     return not err_code or err_code in TRANSIENT_STEP_ERRORS
 
 
@@ -731,6 +742,7 @@ def _step_job_to_completion(
     job_id = job["id"]
     steps_taken = 0
     transient_retries = 0
+    lease_wait_since: float | None = None
     is_mock = client.base_url.host == "example.test"
     while (
         _job_status(job) not in ("complete", "succeeded")
@@ -747,10 +759,18 @@ def _step_job_to_completion(
         if action == "retry":
             allow_retry = False
         step_resp = client.post(f"/api/admin/jobs/{job_id}/{action}", json={})
-        if _is_transient_admin_error(step_resp) and transient_retries < 15:
-            transient_retries += 1
-            if not is_mock:
-                time.sleep(0.6)
+        lease_wait = step_resp.status_code == 409 and _admin_error_code(step_resp) in LEASE_WAIT_ERRORS
+        if lease_wait:
+            if lease_wait_since is None:
+                lease_wait_since = time.monotonic()
+            lease_wait = time.monotonic() - lease_wait_since < JOB_LEASE_WAIT_S
+        if lease_wait or (_is_transient_admin_error(step_resp) and transient_retries < 15):
+            if lease_wait:
+                time.sleep(LEASE_RETRY_INTERVAL_S)
+            else:
+                transient_retries += 1
+                if not is_mock:
+                    time.sleep(0.6)
             poll_resp = client.get(f"/api/admin/jobs/{job_id}")
             if poll_resp.status_code == 200:
                 polled_job = poll_resp.json().get("job")
@@ -759,6 +779,7 @@ def _step_job_to_completion(
             continue
         step_resp.raise_for_status()
         transient_retries = 0
+        lease_wait_since = None
         steps_taken += 1
         job = step_resp.json()["job"]
     return job, steps_taken

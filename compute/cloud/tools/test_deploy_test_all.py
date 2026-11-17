@@ -1064,6 +1064,47 @@ def test_step_2_reconcile_vcl_retries_transient_409_step_conflict() -> None:
         assert step_attempts == 2
 
 
+def _leased_job_transport(leased_attempts: int) -> tuple[httpx.MockTransport, list[int]]:
+    attempts = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/admin/jobs/job-4/step":
+            attempts[0] += 1
+            if attempts[0] <= leased_attempts:
+                return httpx.Response(409, json={"error": "job_leased"})
+            return httpx.Response(200, json={"job": {"id": "job-4", "status": "complete"}})
+        if request.method == "GET" and request.url.path == "/api/admin/jobs/job-4":
+            return httpx.Response(200, json={"job": {"id": "job-4", "status": "running", "step": "apply"}})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler), attempts
+
+
+def test_step_job_waits_out_a_lease_left_by_a_dead_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A step invocation that dies mid-step keeps its 60s lease; every retry until then is job_leased.
+    clock = [1000.0]
+    monkeypatch.setattr(deploy_test_all.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(deploy_test_all.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    transport, attempts = _leased_job_transport(leased_attempts=40)
+    with httpx.Client(transport=transport, base_url="https://example.test") as client:
+        job, steps = deploy_test_all._step_job_to_completion(client, {"id": "job-4", "status": "pending"})
+    assert job["status"] == "complete"
+    assert steps == 1
+    assert attempts[0] == 41
+
+
+def test_step_job_gives_up_once_a_lease_outlives_the_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(deploy_test_all.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(deploy_test_all.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    transport, attempts = _leased_job_transport(leased_attempts=10_000)
+    with httpx.Client(transport=transport, base_url="https://example.test") as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            deploy_test_all._step_job_to_completion(client, {"id": "job-4", "status": "pending"})
+    assert clock[0] - 1000.0 >= deploy_test_all.JOB_LEASE_WAIT_S
+    assert attempts[0] < 200
+
+
 def _git(root: Path, *args: str) -> str:
     import subprocess
 
