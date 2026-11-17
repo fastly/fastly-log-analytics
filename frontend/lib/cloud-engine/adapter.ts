@@ -715,11 +715,12 @@ async function handleCloudRequest(
       const previous = analyticalQueue;
       let release!: () => void;
       analyticalQueue = new Promise<void>((resolve) => { release = resolve; });
-      await previous;
+      // Registered before waiting so the panel stays mounted across back-to-back scans.
       const loading = beginCloudLoading("files");
       let success = false;
       let read: DuckDBReadContext | undefined;
       try {
+        await previous;
         request.signal.throwIfAborted();
         const prepared = await prepareInsightsScan(request);
         read = cloudReadContext(prepared);

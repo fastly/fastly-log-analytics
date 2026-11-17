@@ -207,6 +207,26 @@ describe("Cloud endpoint bridges", () => {
     expect(cloudLoadingStore.getSnapshot()).toBeNull();
   });
 
+  it("keeps the loading panel up while a queued scan waits for the one ahead of it", async () => {
+    const engine = getDuckDBEngine();
+    const context = { ...engine.readContext(), executeSql: vi.fn().mockResolvedValue([{ requests: 7 }]) };
+    let release!: () => void;
+    vi.mocked(ensureCloudRange)
+      .mockImplementationOnce(() => new Promise((done) => { release = () => done(context); }))
+      .mockResolvedValueOnce(context);
+    const body = { sql: "SELECT count(*) AS requests FROM logs", start_time: "2026-11-01T00:00:00Z", end_time: "2026-11-02T00:00:00Z" };
+    const first = handleCloudAnalyticalRequest(request("/api/query", "POST", body));
+    const second = handleCloudAnalyticalRequest(request("/api/query", "POST", body));
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const states: Array<number | null> = [];
+    const unsubscribe = cloudLoadingStore.subscribe(() => states.push(cloudLoadingStore.getSnapshot() ? 1 : null));
+    release();
+    await Promise.all([first, second]);
+    unsubscribe();
+    expect(states.slice(0, -1)).not.toContain(null);
+    expect(cloudLoadingStore.getSnapshot()).toBeNull();
+  });
+
   it("loads singleton session tokens with an inclusive last-event scan bound", async () => {
     const at = "2026-11-01T00:00:00.000Z";
     const token = sealSessionToken({ ip: "192.0.2.1", ja4: null, s: at, e: at, svc: "fixture-service" });
