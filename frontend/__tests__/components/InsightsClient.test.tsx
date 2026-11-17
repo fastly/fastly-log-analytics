@@ -237,6 +237,70 @@ describe('InsightsClient layout stability while evaluating', () => {
   })
 })
 
+describe('InsightsClient deferred baseline follow-up', () => {
+  const windowEnd = new Date(Date.now() - 3600_000).toISOString()
+  const first = envelope({
+    computed_at: new Date().toISOString(), window_end: windowEnd, deferred_detectors: ['slow'],
+    rollup: { data_from: new Date(Date.now() - 48 * 3600_000).toISOString(), data_through: windowEnd, approximate: [], lower_bound: [] },
+    insights: [card('fast', 'warning', 'Spike'), card('slow', 'info', 'Computing baseline…', true)],
+  })
+  type Body = { detectors?: string[]; end_time?: string; baseline_hours: number; window_size_hrs: number }
+
+  function serveFollowUp(followUp: () => Promise<Response>) {
+    const followUps: Array<{ body: Body; prefetch: string | null }> = []
+    server.use(
+      http.get(`${getApiBase()}/api/log-extents`, () =>
+        HttpResponse.json({ earliest_log_at: new Date(Date.now() - 72 * 3600_000).toISOString(), latest_log_at: new Date().toISOString() })),
+      http.post(`${getApiBase()}/api/insights`, async ({ request }) => {
+        const body = (await request.json()) as Body
+        if (!body.detectors) return HttpResponse.json(first)
+        followUps.push({ body, prefetch: request.headers.get('x-flp-cloud-prefetch') })
+        return followUp()
+      }),
+    )
+    return followUps
+  }
+
+  it('renders the summary-served cards first and fills the computing-baseline cards when the follow-up lands', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const followUps = serveFollowUp(async () => {
+      await gate
+      return HttpResponse.json(envelope({ window_end: windowEnd, insights: [card('slow', 'critical', 'Slow spike')] }))
+    })
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    await waitFor(() => expect(followUps).toHaveLength(1))
+    const grid = screen.getAllByTestId('insights-grid')[0]
+    expect(grid).toHaveTextContent('Spike')
+    expect(grid).toHaveTextContent('Computing baseline…')
+    expect(grid).not.toHaveTextContent('Slow spike')
+    expect(tabCount('all')).toBe('1')
+    expect(followUps[0].body).toMatchObject({ detectors: ['slow'], end_time: windowEnd, window_size_hrs: 24, baseline_hours: 24 })
+    expect(followUps[0].prefetch).toBeNull()
+
+    release()
+    await waitFor(() => expect(screen.getAllByTestId('insights-grid')[0]).toHaveTextContent('Slow spike'))
+    expect(screen.getAllByTestId('insights-grid')[0]).not.toHaveTextContent('Computing baseline…')
+    expect(tabCount('all')).toBe('2')
+    expect(followUps).toHaveLength(1)
+  })
+
+  it('shows the computing-baseline cards in their normal error state when the follow-up fails', async () => {
+    serveFollowUp(async () => HttpResponse.json({ detail: 'Local query failed' }, { status: 500 }))
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    await waitFor(() => expect(screen.getAllByTestId('insights-grid')[0]).toHaveTextContent(/Query failed: .*Local query failed/), { timeout: 5000 })
+    const grid = screen.getAllByTestId('insights-grid')[0]
+    expect(grid).toHaveTextContent('Title slow')
+    expect(grid).not.toHaveTextContent('Computing baseline…')
+    expect(grid).not.toHaveTextContent('Not evaluated')
+    expect(screen.queryByText(/Error loading insights/)).toBeNull()
+  })
+})
+
 describe('InsightsClient notices', () => {
   const unsupported = {
     id: 'botnet_grouping', title: 'Botnet Grouping', description: 'About botnets', category: 'security',
