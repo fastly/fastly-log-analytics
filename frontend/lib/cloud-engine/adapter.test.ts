@@ -3,7 +3,7 @@ import { handleCloudAnalyticalRequest } from "./adapter";
 import { ORIGIN_SCAN_COLUMNS, setOriginSqlExecutor } from "./origin";
 import { PERFORMANCE_SCAN_COLUMNS, setPerformanceEngineClient } from "./performance";
 import { securityScanColumns, setSecurityEngineClient } from "./security";
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import * as usage from "./usage/summary";
 import { fixtureUsageInput } from "./usage/fixtures";
 import * as ops from "./telemetry/client";
@@ -241,6 +241,71 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const json = await res!.json();
     expect(json).toHaveProperty("top_urls");
     expect(json).toHaveProperty("waterfall");
+  });
+
+  describe("/api/query range loading", () => {
+    const MiB = 1024 * 1024;
+    const windows: string[][] = [];
+    const reads: { release: ReturnType<typeof vi.fn> }[] = [];
+    const fakeRead = (rows: number) => {
+      const read = {
+        assertCurrent: () => {},
+        release: vi.fn(),
+        executeSql: async () => Array.from({ length: rows }, (_, i) => ({ status: 200, i })),
+      };
+      reads.push(read);
+      return read as unknown as DuckDBReadContext;
+    };
+    // The newest hour holds `recent` rows and four hours hold 100; anything over 6h is over budget.
+    const rangeOf = (recent: number) => vi.mocked(ensureCloudRange).mockImplementation(async (from, to) => {
+      windows.push([String(from), String(to)]);
+      const hours = (Date.parse(String(to)) - Date.parse(String(from))) / 3_600_000;
+      if (hours > 6) throw new CloudBudgetError("over", { unit: "bytes", needed: 129 * MiB, limit: 64 * MiB });
+      return fakeRead(hours <= 1.01 ? recent : 100);
+    });
+    const query = (sql: string) => handleCloudAnalyticalRequest(new Request("http://localhost/api/query", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sql, max_rows: 1000 }),
+    }));
+    beforeEach(() => { windows.length = 0; reads.length = 0; });
+
+    it("answers the default SELECT * LIMIT 100 over 24h from the newest hour within the budget", async () => {
+      rangeOf(100);
+      const res = await query("SELECT * FROM logs LIMIT 100");
+      expect(res?.status).toBe(200);
+      expect((await res!.json()).row_count).toBe(100);
+      expect(windows).toEqual([["2026-11-05T23:00:00.000Z", "2026-11-06T00:00:00.001Z"]]);
+    });
+
+    it("widens the newest window until the LIMIT is met and releases every read", async () => {
+      rangeOf(10);
+      const res = await query("SELECT *\nFROM logs\nWHERE status >= 500\nORDER BY timestamp DESC\nLIMIT 100");
+      expect(res?.status).toBe(200);
+      expect((await res!.json()).row_count).toBe(100);
+      expect(windows).toEqual([
+        ["2026-11-05T23:00:00.000Z", "2026-11-06T00:00:00.001Z"],
+        ["2026-11-05T20:00:00.000Z", "2026-11-06T00:00:00.001Z"],
+      ]);
+      expect(reads.map((read) => read.release.mock.calls.length)).toEqual([1, 1]);
+    });
+
+    it("projects an aggregate over the full range to the columns it reads", async () => {
+      vi.mocked(ensureCloudRange).mockImplementationOnce(async (from, to, _signal, _kinds, options) => {
+        windows.push([String(from), String(to), ...options?.projection?.columns ?? []]);
+        return fakeRead(2);
+      });
+      const res = await query("SELECT status, count(*) AS requests FROM logs GROUP BY status ORDER BY requests DESC");
+      expect(res?.status).toBe(200);
+      expect(windows).toEqual([["2026-11-05T00:00:00.000Z", "2026-11-06T00:00:00.001Z", "timestamp", "status"]]);
+    });
+
+    it("says what an over-budget query needs and how to narrow it", async () => {
+      vi.mocked(ensureCloudRange).mockRejectedValue(
+        new CloudBudgetError("over", { unit: "bytes", needed: 200 * MiB, limit: 64 * MiB }));
+      const res = await query("SELECT status, count(*) AS requests FROM logs GROUP BY status");
+      expect(res?.status).toBe(413);
+      expect((await res!.json()).detail).toBe("Cloud query over this time range needs 200.0 MiB of log data " +
+        "(columns: timestamp, status) but the browser scan budget is 64.0 MiB; choose a shorter time range or select fewer columns");
+    });
   });
 
   it("answers an over-budget range with a terminal 413 instead of a retryable failure", async () => {

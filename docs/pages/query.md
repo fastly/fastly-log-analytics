@@ -40,8 +40,9 @@ Validation ([`backend/core/sql_validator.py`](../../backend/core/sql_validator.p
 
 The selected service and time window travel alongside SQL as file-loading scope;
 explicit request bounds take precedence. Structured queries use half-open
-`[start, end)` bounds. Raw SQL keeps its own predicates: Cloud does not inject a
-time condition or rewrite the user's comparison operators. Discovery
+`[start, end)` bounds. Raw SQL keeps its own predicates: Cloud does not rewrite
+the user's comparison operators or inject a time condition, apart from the
+newest-window scope described below. Discovery
 conservatively includes the upper-endpoint file and rounds outward to native
 second precision; SQL still decides which loaded rows match.
 
@@ -50,6 +51,24 @@ full-width decoded copies. The selected service, file versions and loaded range
 stay bound to that read. Range replacement or backend recovery invalidates an old
 read instead of letting it query a newer or empty dataset. A failed query is not
 automatically replayed by the engine.
+
+Request queries load only the columns the SQL reads. Cloud finds them from the
+statement's names and confirms the set with DuckDB's binder against empty tables
+of the same schema, custom fields included. `SELECT *`, whole-row references and
+anything the check can't confirm load every column. Projected bytes are measured
+from Parquet footers and count against the same 256-file and 64 MiB limits.
+
+Row-limited queries load the newest hour of the range first and widen it four
+times per step, up to the full range, only while the result has fewer rows than
+the limit. This applies to a plain single-table `SELECT` with no ordering,
+grouping, aggregate, `DISTINCT`, window or join, and to the same shape ordered by
+`timestamp DESC`. For the ordered form Cloud reads every file overlapping the
+window and restricts the table to rows at or after the window start, so the
+newest rows match a full-range query. Other queries load the full range with
+projection. Client vitals and errors still load whole files.
+
+When the needed bytes or files still exceed the limit, the 413 response names the
+needed and allowed size and asks for a shorter range or fewer columns.
 
 ## Tests
 

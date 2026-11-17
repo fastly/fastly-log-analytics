@@ -35,6 +35,8 @@ import {
   executeCloudQuery,
   getQueryPresets,
   getQuerySchema,
+  planCloudQueryScan,
+  type CloudQueryScanPlan,
   type QueryRequest,
 } from "./query";
 import { handleRumRequest, UnsupportedRumFilterError, type RumQueryParams } from "./rum";
@@ -54,7 +56,7 @@ import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
 import { cloudAdminWire } from "./admin-wire";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import {
-  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudReadContext, ensureCloudRange,
+  bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudReadContext, ensureCloudRange, formatBudgetAmount,
 } from "./range-loader";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
@@ -465,6 +467,31 @@ async function cloudSectionRollup(request: Request, path: string, route: Section
 /** /insights baselines served from v3 summaries, by the prepared request. */
 const insightBaselines = new WeakMap<Request, RollupResult>();
 
+const QUERY_TABLES = ["logs", "requests", "client_vitals", "client_errors"];
+const QUERY_CUSTOM_TYPES = { string: "VARCHAR", number: "DOUBLE", boolean: "BOOLEAN" } as const;
+const QUERY_FIRST_WINDOW_MS = 3_600_000;
+
+/**
+ * A `/api/query` scan by the prepared request: its plan, the newest-window
+ * start its read covers (null for the whole range), and how to load the next
+ * wider window.
+ */
+type QueryScan = {
+  plan: CloudQueryScanPlan;
+  windowFrom: number | null;
+  widen(): Promise<{ read: DuckDBReadContext; windowFrom: number | null }>;
+};
+const queryScans = new WeakMap<Request, QueryScan>();
+
+function queryBudgetError(error: CloudBudgetError, columns: readonly string[] | null): CloudBudgetError {
+  const { detail } = error;
+  if (!detail) return error;
+  const reads = detail.unit === "files" ? `${formatBudgetAmount(detail.unit, detail.needed)} of log data`
+    : `${formatBudgetAmount(detail.unit, detail.needed)} of log data (${columns ? `columns: ${columns.join(", ")}` : "every column"})`;
+  return new CloudBudgetError(`Cloud query over this time range needs ${reads} but the browser scan budget is ${
+    formatBudgetAmount(detail.unit, detail.limit)}; choose a shorter time range${detail.unit === "bytes" ? " or select fewer columns" : ""}`, detail);
+}
+
 /**
  * Merges the v3 summaries for an /insights baseline over the range the raw
  * scan would use, so only the window needs raw Parquet. Null (or a summary
@@ -566,7 +593,28 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters)
     : /^\/api\/services\/[^/]+\/scoring\//.test(url.pathname) ? scoringScanColumns() : null;
   const detectors = Array.isArray(params.detectors) ? params.detectors as string[] : undefined;
-  const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
+  const queryPlan = url.pathname === "/api/query" ? await planCloudQueryScan(params as unknown as QueryRequest, {
+    tableName: rum ? String(dataset) : "requests",
+    allowedTables: QUERY_TABLES,
+    customColumns: Object.fromEntries(customFields.map((field) => [field.id, QUERY_CUSTOM_TYPES[field.type]])),
+    runSql: (sql) => generation.executeSql(sql, [], request.signal),
+    signal: request.signal,
+  }) : null;
+  generation.assertCurrent();
+  request.signal.throwIfAborted();
+  // Newest-first windows end at the range end: 1h, then 4x wider until the whole range.
+  const queryWindow = (step: number): string | null => {
+    const from = Math.floor((Date.parse(end) - QUERY_FIRST_WINDOW_MS * 4 ** step) / 1000) * 1000;
+    return from > Date.parse(scanStart) ? new Date(from).toISOString() : null;
+  };
+  const loadQuery = (from: string) => ensureCloudRange(from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
+    serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
+    ...queryPlan?.columns && !rum ? { projection: { columns: queryPlan.columns } } : {},
+  }).catch((error: unknown) => {
+    throw error instanceof CloudBudgetError ? queryBudgetError(error, rum ? null : queryPlan?.columns ?? null) : error;
+  });
+  const firstQueryWindow = queryPlan?.newestFirst ? queryWindow(0) : null;
+  const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
       columns: insightScanColumns(filters, detectors),
@@ -588,6 +636,17 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
         ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
       }) }), read);
       if (insightBaseline) insightBaselines.set(prepared, insightBaseline);
+      if (queryPlan) {
+        let step = 0;
+        queryScans.set(prepared, {
+          plan: queryPlan,
+          windowFrom: firstQueryWindow === null ? null : Date.parse(firstQueryWindow),
+          widen: async () => {
+            const from = queryWindow(++step);
+            return { read: await loadQuery(from ?? scanStart), windowFrom: from === null ? null : Date.parse(from) };
+          },
+        });
+      }
       return prepared;
     }
     if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
@@ -1875,16 +1934,37 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   if (pathname === "/api/query" && method === "POST") {
     const params = await parseRequestParams();
     const { maskIps, role } = resolveMaskIpsAndRole(params);
-    const res = await executeCloudQuery(params as unknown as QueryRequest, {
-      serviceId: String(params.service_id ?? "default"),
-      maskIps,
-      role,
-      allowedTables: ["logs", "requests", "client_vitals", "client_errors"],
-      tableName: params.dataset === "client_vitals" || params.dataset === "client_errors"
-        ? params.dataset : "requests",
-      runSql: (sql) => executeSql(sql, [], request.signal),
-    });
-    return jsonResponse(res.body, request, undefined, res.status);
+    const scan = queryScans.get(request);
+    const newest = scan?.plan.newestFirst;
+    const wider: DuckDBReadContext[] = [];
+    try {
+      let windowFrom = scan?.windowFrom ?? null;
+      for (;;) {
+        const windowRead = wider.at(-1);
+        const res = await executeCloudQuery(params as unknown as QueryRequest, {
+          serviceId: String(params.service_id ?? "default"),
+          maskIps,
+          role,
+          allowedTables: QUERY_TABLES,
+          tableName: params.dataset === "client_vitals" || params.dataset === "client_errors"
+            ? params.dataset : "requests",
+          runSql: (sql) => windowRead
+            ? windowRead.executeSql<Record<string, unknown>>(sql, [], request.signal) : executeSql(sql, [], request.signal),
+          // Every file holding a row at or after the window start is loaded, so those rows are exact.
+          ...newest?.ordered && windowFrom !== null ? { since: { table: newest.table, ms: windowFrom } } : {},
+        });
+        // A window answers once it fills the LIMIT or truncates; until then older rows may belong.
+        if (!scan || !newest || windowFrom === null || res.status !== 200 || !("data" in res.body) ||
+            res.body.truncated || newest.limit !== null && res.body.row_count >= newest.limit) {
+          return jsonResponse(res.body, request, undefined, res.status);
+        }
+        const next = await scan.widen();
+        wider.push(next.read);
+        windowFrom = next.windowFrom;
+      }
+    } finally {
+      for (const read of wider) read.release?.();
+    }
   }
 
   // Page 15: Insights (/api/insight-availability, /api/insights, /api/insights/cache-collapse-detail)

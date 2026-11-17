@@ -158,6 +158,33 @@ describe("Cloud first-page analytical range loading", () => {
     expect([...await engine.getPresentColumns()]).toEqual(resident);
   });
 
+  it("names the needed and allowed size when a projection is over budget", async () => {
+    const { fullBytes } = projectedFiles(3);
+    const error = await ensureCloudRange(from, to, signal, ["request"], projection(4096)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CloudBudgetError);
+    expect((error as CloudBudgetError).message).toMatch(/needs \d+\.\d MiB .*budget is \d+\.\d MiB; choose a shorter time range/);
+    expect((error as CloudBudgetError).detail).toEqual({ unit: "bytes", needed: expect.any(Number), limit: 4096 });
+    expect((error as CloudBudgetError).detail!.needed).toBeGreaterThan(4096);
+    expect((error as CloudBudgetError).detail!.needed).toBeLessThan(fullBytes);
+  });
+
+  it("loads only the columns an arbitrary SQL query reads", async () => {
+    const entries = Array.from({ length: 3 }, (_, i) => {
+      const bytes = wideFile(i);
+      return { ...file, key: `processed/request/q${i}.parquet`, bytes };
+    });
+    const fullBytes = entries.reduce((total, entry) => total + entry.bytes.byteLength, 0);
+    await analyticalFiles(entries);
+    const result = await analyticalPost("/api/query", {
+      sql: "SELECT status, count(*) AS requests FROM logs GROUP BY status ORDER BY status",
+      start_time: from, end_time: to, max_rows: 10,
+    });
+    expect(result.data).toEqual([{ status: 200, requests: 3 * 1371 }, { status: 503, requests: 3 * 229 }]);
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    const fetched = source.fetchRange.mock.calls.reduce((total, [, start, end]) => total + end - start, 0);
+    expect(fetched).toBeLessThan(fullBytes / 2);
+  });
+
   it("reuses persisted projections on the next page load without range reads, and footers for another projection", async () => {
     const { ranges, fullBytes, entries } = projectedFiles(4);
     (await ensureCloudRange(from, to, signal, ["request"], projection(fullBytes))).release?.();
@@ -360,6 +387,37 @@ describe("Cloud first-page analytical range loading", () => {
       start_time: recentFrom, end_time: recentTo,
     }, "ignored-service", from, to);
     expect((await analyticalPost("/api/query", explicit)).data).toEqual([{ count: 1 }]);
+  });
+
+  it("answers ORDER BY timestamp DESC LIMIT from the newest window, widening across overlapping files", async () => {
+    const day = "2026-11-05T", at = (time: string) => Date.parse(`${day}${time}Z`);
+    const row = (time: string, status: number) => ({ timestamp: at(time), status, cache: "HIT", resp_bytes: 1 });
+    const hour = (key: string, startTime: string, rows: ReturnType<typeof row>[]) => ({
+      ...file, key, start: `${day}${startTime}Z`, end: new Date(at(startTime) + 3_600_000).toISOString(),
+      bytes: parquetFixture(rows),
+    });
+    await analyticalFiles([
+      // A compacted day file overlaps every window; its 10:00 row must not leak into the newest one.
+      { ...file, key: "processed/request/day.parquet", start: `${day}00:00:00Z`, end: "2026-11-06T00:00:00Z",
+        bytes: parquetFixture([row("10:00:00", 1), row("23:30:00", 2)]) },
+      hour("processed/request/h23.parquet", "23:00:00", [row("23:10:00", 3), row("23:50:00", 4)]),
+      hour("processed/request/h20.parquet", "20:00:00", [row("20:30:00", 5)]),
+      hour("processed/request/h03.parquet", "03:00:00", [row("03:15:00", 6)]),
+    ]);
+    const fetchedKeys = () => new Set([
+      ...source.fetchFile.mock.calls.map(([key]) => key as string),
+      ...source.fetchRange.mock.calls.map(([entry]) => (entry as ManifestFile).key),
+    ]);
+    const query = async (limit: number) => (await analyticalPost("/api/query", {
+      sql: `SELECT status FROM logs ORDER BY timestamp DESC LIMIT ${limit}`,
+      start_time: `${day}00:00:00Z`, end_time: "2026-11-06T00:00:00Z", max_rows: 100,
+    })).data.map((r: { status: number }) => r.status);
+
+    expect(await query(3)).toEqual([4, 2, 3]);
+    expect(fetchedKeys()).not.toContain("processed/request/h20.parquet");
+    expect(await query(4)).toEqual([4, 2, 3, 5]);
+    expect(fetchedKeys()).not.toContain("processed/request/h03.parquet");
+    expect(await query(10)).toEqual([4, 2, 3, 5, 1, 6]);
   });
 
   it("downloads the Insights window once across the summary pass and its raw follow-up", async () => {

@@ -10,10 +10,18 @@ import {
   SQLValidationError,
   isSimpleSelectStatement,
   stripSqlComments,
+  tokenizeSql,
   validateSqlQuery,
   validateUserSql,
   validate_user_sql,
+  type SqlToken,
 } from "./sql-validator";
+import {
+  FIELD_DUCKDB_TYPES,
+  RUM_ERRORS_COLUMNS,
+  RUM_VITALS_COLUMNS,
+  type DuckDBColumnType,
+} from "./dashboard/duckdb";
 
 export {
   MAX_QUERY_ROWS,
@@ -75,6 +83,8 @@ export interface CloudQueryContext {
   allowedTables?: Iterable<string>;
   schemaColumns?: QuerySchemaColumn[];
   runSql?: (sql: string) => Promise<Record<string, unknown>[]>;
+  /** Restricts `table` to rows at or after `ms`: the newest window a scan loaded. */
+  since?: { table: string; ms: number };
 }
 
 export interface CloudHttpResult<T = unknown> {
@@ -420,6 +430,9 @@ export async function executeCloudQuery(
         : rewrittenSql;
 
   const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
+  const scope = ctx.since
+    ? `WITH ${quoteSqlIdent(ctx.since.table)} AS (SELECT * FROM main.${quoteSqlIdent(ctx.since.table)} WHERE ts_ms >= ${Math.floor(ctx.since.ms)}) `
+    : "";
 
   try {
     let fetchedRows: Record<string, unknown>[] = [];
@@ -427,12 +440,12 @@ export async function executeCloudQuery(
 
     if (ctx.runSql) {
       if (req.explain) {
-        const planRows = await ctx.runSql(`EXPLAIN ${rewrittenSql}`);
+        const planRows = await ctx.runSql(`EXPLAIN ${scope}${rewrittenSql}`);
         explainPlan = planRows
           .map((r) => Object.values(r).join(" "))
           .join("\n");
       }
-      fetchedRows = await ctx.runSql(execSql);
+      fetchedRows = await ctx.runSql(`${scope}${execSql}`);
     }
 
     const truncated = fetchedRows.length > maxRows;
@@ -451,7 +464,7 @@ export async function executeCloudQuery(
 
     const debugEntry = {
       engine: "DuckDB-Wasm",
-      sql: rewrittenSql,
+      sql: `${scope}${rewrittenSql}`,
       duration_ms: elapsedMs,
     };
 
@@ -484,4 +497,273 @@ export async function executeCloudQuery(
       },
     };
   }
+}
+
+export interface CloudQueryScanPlan {
+  /** Parquet columns the query reads; null loads every column. */
+  columns: string[] | null;
+  /**
+   * Set when the newest rows answer the query, so a recent window can load
+   * first. `ordered` queries need the window's rows only (`since`); `limit`
+   * is the explicit LIMIT, null when only `max_rows` bounds the result.
+   */
+  newestFirst: { table: string; ordered: boolean; limit: number | null } | null;
+}
+
+const QUERY_VIEW_BASE: Readonly<Record<string, string>> = {
+  scoped_key: "VARCHAR", ts_ms: "BIGINT", timestamp: "TIMESTAMPTZ",
+};
+const QUERY_BASE_TABLES = new Set(["logs", "requests", "client_vitals", "client_errors"]);
+// Words that can read columns not named in the SQL.
+const ALL_COLUMN_WORDS = new Set([
+  "columns", "pivot", "unpivot", "pivot_wider", "pivot_longer", "natural", "summarize", "describe", "show", "main",
+]);
+const NON_OPERAND_WORDS = new Set([
+  "select", "distinct", "all", "on", "by", "from", "where", "group", "order", "having", "limit", "exclude",
+  "replace", "rename", "union", "except", "intersect", "as", "and", "or", "not", "qualify", "window", "using",
+  "join", "like", "ilike", "in", "is", "between", "case", "when", "then", "else", "with", "filter",
+]);
+const FROM_LIST_STOP = new Set([
+  "where", "group", "order", "having", "limit", "offset", "qualify", "window", "join", "inner", "left", "right",
+  "full", "outer", "cross", "natural", "on", "using", "union", "except", "intersect", "sample", "tablesample",
+  "lateral", "positional", "asof", "anti", "semi", "pivot", "unpivot", "select", "as", "by", "from", "fetch",
+]);
+const NEWEST_FIRST_FORBIDDEN = new Set([
+  "group", "having", "qualify", "window", "over", "distinct", "union", "intersect", "except", "with", "recursive",
+  "join", "using", "sample", "tablesample", "offset", "pivot", "unpivot", "lateral", "filter", "natural",
+  "positional", "asof", "values", "unnest", "columns", "fetch", "summarize", "describe", "show",
+]);
+
+function quoteSqlIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+const isName = (token?: SqlToken) => token?.kind === "word" || token?.kind === "quoted_ident";
+
+function isOperandEnd(token?: SqlToken): boolean {
+  if (!token) return false;
+  if (token.kind === "string" || token.kind === "quoted_ident") return true;
+  if (token.kind === "word") return !NON_OPERAND_WORDS.has(token.lower);
+  return /^[0-9]/.test(token.value) || token.value === ")" || token.value === "]";
+}
+
+function isOperandStart(token?: SqlToken): boolean {
+  if (!token) return false;
+  if (token.kind === "string" || token.kind === "quoted_ident") return true;
+  if (token.kind === "word") return !NON_OPERAND_WORDS.has(token.lower);
+  return /^[0-9]/.test(token.value) || ["(", "-", "+"].includes(token.value);
+}
+
+function closingParen(tokens: readonly SqlToken[], open: number): number {
+  let depth = 0;
+  for (let i = open; i < tokens.length; i++) {
+    if (tokens[i].value === "(" && tokens[i].kind === "symbol") depth++;
+    if (tokens[i].value === ")" && tokens[i].kind === "symbol" && --depth === 0) return i;
+  }
+  return tokens.length;
+}
+
+/** A `*` that is not multiplication or `count(*)` expands to every column. */
+function hasWildcard(tokens: readonly SqlToken[]): boolean {
+  return tokens.some((token, i) => token.kind === "symbol" && token.value === "*" &&
+    !(tokens[i - 1]?.value === "(" && tokens[i + 1]?.value === ")" && tokens[i - 2]?.lower === "count") &&
+    !(isOperandEnd(tokens[i - 1]) && isOperandStart(tokens[i + 1])));
+}
+
+/**
+ * Whether a relation name is used as a value (a whole-row struct, as in
+ * `hash(r)`), which reads every column without naming any.
+ */
+function referencesWholeRow(tokens: readonly SqlToken[]): boolean {
+  const relations = new Set(QUERY_BASE_TABLES);
+  const allowed = new Set<number>();
+  const relationAliases = new Set<number>();
+  const defineAlias = (i: number) => {
+    relations.add(tokens[i].lower);
+    allowed.add(i);
+    relationAliases.add(i);
+    return tokens[i + 1]?.value === "(" ? closingParen(tokens, i + 1) + 1 : i + 1;
+  };
+  const cteBody = (i: number) => tokens[i]?.lower === "as" &&
+    (tokens[i + 1]?.value === "(" || tokens[i + 1]?.lower === "materialized" || tokens[i + 1]?.lower === "not");
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (isName(token) && cteBody(i + 1)) {
+      defineAlias(i);
+    } else if (isName(token) && tokens[i + 1]?.value === "(" && tokens[i - 1] &&
+        (tokens[i - 1].lower === "with" || tokens[i - 1].lower === "recursive" || tokens[i - 1].value === ",") &&
+        cteBody(closingParen(tokens, i + 1) + 1)) {
+      defineAlias(i);
+    }
+    if (token.kind !== "word" || (token.lower !== "from" && token.lower !== "join")) continue;
+    let j = i + 1;
+    while (j < tokens.length) {
+      if (tokens[j].value === "(") {
+        j = closingParen(tokens, j) + 1;
+      } else if (isName(tokens[j]) && !FROM_LIST_STOP.has(tokens[j].lower)) {
+        allowed.add(j++);
+        while (tokens[j]?.value === "." && isName(tokens[j + 1])) j += 2;
+        if (tokens[j]?.value === "(") j = closingParen(tokens, j) + 1;
+      } else {
+        break;
+      }
+      if (tokens[j]?.lower === "as" && isName(tokens[j + 1])) j = defineAlias(j + 1);
+      else if (isName(tokens[j]) && !FROM_LIST_STOP.has(tokens[j].lower)) j = defineAlias(j);
+      if (tokens[j]?.value !== ",") break;
+      j++;
+    }
+  }
+  const selectAliases = new Set(tokens.flatMap((token, i) =>
+    isName(token) && tokens[i - 1]?.lower === "as" && !relationAliases.has(i) ? [token.lower] : []));
+  return tokens.some((token, i) => isName(token) && relations.has(token.lower) && !allowed.has(i) &&
+    tokens[i + 1]?.value !== "." && tokens[i - 1]?.value !== "." &&
+    !(QUERY_BASE_TABLES.has(token.lower) && selectAliases.has(token.lower)));
+}
+
+/**
+ * The shape of a query the newest rows answer: one plain SELECT over one
+ * table, optionally `ORDER BY timestamp DESC`, with an optional final LIMIT.
+ */
+function newestFirstShape(
+  tokens: readonly SqlToken[],
+  targetTable: string,
+): { table: string; ordered: boolean; limit: number | null } | null {
+  if (tokens[0]?.lower !== "select") return null;
+  if (tokens.some((token) => token.kind === "word" && (NEWEST_FIRST_FORBIDDEN.has(token.lower) ||
+      token.lower === "select" && token !== tokens[0]) || token.kind === "symbol" && token.value === "#")) return null;
+  const depth: number[] = [];
+  let level = 0;
+  for (const token of tokens) {
+    if (token.kind === "symbol" && token.value === ")") level--;
+    depth.push(level);
+    if (token.kind === "symbol" && token.value === "(") level++;
+  }
+  const top = (i: number, word: string) => tokens[i]?.kind === "word" && tokens[i].lower === word && depth[i] === 0;
+  const froms = tokens.flatMap((_, i) => top(i, "from") ? [i] : []);
+  if (froms.length !== 1) return null;
+  const from = froms[0];
+  const source = tokens[from + 1];
+  if (!isName(source) || !QUERY_BASE_TABLES.has(source.lower) ||
+      tokens[from + 2]?.value === "(" || tokens[from + 2]?.value === ".") return null;
+  const qualifiers = new Set([source.lower]);
+  let i = from + 2;
+  if (tokens[i]?.lower === "as") i++;
+  if (isName(tokens[i]) && !["where", "order", "limit"].includes(tokens[i].lower)) qualifiers.add(tokens[i++].lower);
+  if (i < tokens.length && !top(i, "where") && !top(i, "order") && !top(i, "limit")) return null;
+  if (tokens.some((token, k) => k > from && depth[k] === 0 && token.kind === "symbol" && token.value === ",")) return null;
+  const limitAt = tokens.findIndex((_, k) => k > from && top(k, "limit"));
+  let end = tokens.length;
+  let limit: number | null = null;
+  if (limitAt >= 0) {
+    if (limitAt + 2 !== tokens.length || !/^\d+$/.test(tokens[limitAt + 1].value)) return null;
+    limit = Number(tokens[limitAt + 1].value);
+    end = limitAt;
+  }
+  const orderAt = tokens.findIndex((_, k) => k > from && top(k, "order"));
+  if (orderAt >= 0) {
+    let k = orderAt + 1;
+    if (tokens[k++]?.lower !== "by") return null;
+    if (isName(tokens[k]) && tokens[k + 1]?.value === ".") {
+      if (!qualifiers.has(tokens[k].lower)) return null;
+      k += 2;
+    }
+    if (!isName(tokens[k]) || tokens[k++].lower !== "timestamp" || tokens[k++]?.lower !== "desc") return null;
+    if (tokens[k]?.lower === "nulls" && tokens[k + 1]?.lower === "last") k += 2;
+    if (k !== end) return null;
+    // `ORDER BY timestamp` must name the table's column, not a select alias.
+    for (let s = 1; s < from; s++) {
+      if (isName(tokens[s]) && tokens[s].lower === "timestamp" &&
+          (tokens[s - 1].lower === "as" || isOperandEnd(tokens[s - 1]))) return null;
+    }
+  }
+  const table = source.lower === "logs" || source.lower === "requests" ? targetTable : source.lower;
+  return { table, ordered: orderAt >= 0, limit };
+}
+
+function shadowTables(schemas: Readonly<Record<string, Readonly<Record<string, string>>>>): string {
+  return `WITH ${Object.entries(schemas).map(([table, columns]) => `${quoteSqlIdent(table)} AS (SELECT ${
+    Object.entries(columns).map(([name, type]) => `NULL::${type} AS ${quoteSqlIdent(name)}`).join(", ")
+  } WHERE false)`).join(", ")} `;
+}
+
+/**
+ * Plans what `/api/query` must load: the columns the SQL reads (null when
+ * they can't be proven, e.g. `SELECT *`) and whether the newest rows answer
+ * it. DuckDB binds the query against empty tables of the catalog schema to
+ * confirm the token-derived columns are all it reads.
+ */
+export async function planCloudQueryScan(
+  req: QueryRequest,
+  ctx: {
+    tableName?: string;
+    allowedTables?: Iterable<string>;
+    customColumns?: Readonly<Record<string, DuckDBColumnType>>;
+    runSql: (sql: string) => Promise<Record<string, unknown>[]>;
+    signal?: AbortSignal;
+  },
+): Promise<CloudQueryScanPlan> {
+  const targetTable = ctx.tableName ?? "requests";
+  const rawSql = typeof req?.sql === "string" ? req.sql.trim() : "";
+  try {
+    if (!rawSql) throw new SQLValidationError("empty_sql", "No SQL provided");
+    validateUserSql(rawSql, ctx.allowedTables ?? ["logs", "requests"]);
+  } catch {
+    // The query is refused before it reads anything; the smallest load lets it say so.
+    return { columns: ["timestamp"], newestFirst: { table: targetTable, ordered: false, limit: null } };
+  }
+  const maxRows = Math.max(1, Math.min(Number(req.max_rows ?? 1000), MAX_QUERY_ROWS));
+  const { rewrittenSql, hasExplicitLimit } = rewriteCloudQuerySql(rawSql, targetTable, maxRows);
+  let tokens: SqlToken[];
+  try {
+    tokens = tokenizeSql(rewrittenSql);
+  } catch {
+    return { columns: null, newestFirst: null };
+  }
+  const requests: Record<string, string> = {
+    ...QUERY_VIEW_BASE,
+    ...FIELD_DUCKDB_TYPES,
+    ...Object.fromEntries(Object.entries(ctx.customColumns ?? {}).filter(([name]) => !(name in FIELD_DUCKDB_TYPES))),
+  };
+  const schemas = {
+    requests,
+    client_vitals: { ...QUERY_VIEW_BASE, ...RUM_VITALS_COLUMNS },
+    client_errors: { ...QUERY_VIEW_BASE, ...RUM_ERRORS_COLUMNS },
+  };
+  const wrapped = `(\n${rewrittenSql}\n) AS _fla_q`;
+  const attempt = async <T>(run: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await run();
+    } catch (error) {
+      if (ctx.signal?.aborted) throw error;
+      return null;
+    }
+  };
+
+  let columns: string[] | null = null;
+  if (targetTable === "requests" && (tokens[0]?.lower === "select" || tokens[0]?.lower === "with") &&
+      !tokens.some((token) => token.kind === "word" && ALL_COLUMN_WORDS.has(token.lower) ||
+        token.kind === "symbol" && token.value === "#") &&
+      !hasWildcard(tokens) && !referencesWholeRow(tokens)) {
+    const names = new Set(tokens.filter(isName).map((token) => token.lower));
+    const candidates = Object.keys(requests).filter((name) => !(name in QUERY_VIEW_BASE) && names.has(name.toLowerCase()));
+    const reduced = { ...schemas, requests: {
+      ...QUERY_VIEW_BASE, ...Object.fromEntries(candidates.map((name) => [name, requests[name]])),
+    } };
+    const describe = async (tables: typeof schemas) => JSON.stringify(
+      (await ctx.runSql(`DESCRIBE ${shadowTables(tables)}SELECT * FROM ${wrapped}`))
+        .map((row) => [row.column_name, row.column_type]),
+    );
+    const bound = await attempt(async () => await describe(schemas) === await describe(reduced));
+    if (bound) columns = ["timestamp", ...candidates];
+  }
+
+  // The appended default LIMIT is `max_rows`, which truncation already bounds.
+  const shape = newestFirstShape(hasExplicitLimit ? tokens : tokens.slice(0, -2), targetTable);
+  let newestFirst: CloudQueryScanPlan["newestFirst"] = null;
+  if (shape) {
+    // Aggregates answer a row even from no input; a plain SELECT does not.
+    const rows = await attempt(() => ctx.runSql(`${shadowTables(schemas)}SELECT count(*) AS n FROM ${wrapped}`));
+    if (rows && Number(rows[0]?.n) === 0) newestFirst = shape;
+  }
+  return { columns, newestFirst };
 }

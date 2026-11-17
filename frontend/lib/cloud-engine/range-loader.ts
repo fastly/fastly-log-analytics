@@ -19,8 +19,27 @@ const RANGE_CONCURRENCY = 16;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 
+/** What a refused range needed against its limit, in bytes or files. */
+export type CloudBudgetDetail = { unit: "bytes" | "files"; needed: number; limit: number };
+
 /** A range the browser won't scan: retrying the same request fails the same way. */
-export class CloudBudgetError extends Error {}
+export class CloudBudgetError extends Error {
+  readonly detail?: CloudBudgetDetail;
+
+  constructor(message: string, detail?: CloudBudgetDetail) {
+    super(message);
+    this.detail = detail;
+  }
+}
+
+export function formatBudgetAmount(unit: CloudBudgetDetail["unit"], amount: number): string {
+  return unit === "files" ? `${amount} files` : `${(amount / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function overBudget(detail: CloudBudgetDetail): CloudBudgetError {
+  return new CloudBudgetError(`Cloud query range needs ${formatBudgetAmount(detail.unit, detail.needed)} but the browser scan budget is ${
+    formatBudgetAmount(detail.unit, detail.limit)}; choose a shorter time range`, detail);
+}
 
 /**
  * The Cloud file source the range loader reads through, scoped to a service
@@ -114,9 +133,10 @@ export async function ensureCloudRange(
       }),
     );
     const fileLimit = datasets.every((dataset) => dataset === "rum") ? MAX_RUM_RANGE_FILES : MAX_RANGE_FILES;
-    if (files.length > fileLimit || !projection &&
-        files.reduce((total, file) => total + file.size, 0) > MAX_RANGE_BYTES) {
-      throw new CloudBudgetError("Cloud query range exceeds the browser scan budget; choose a smaller range");
+    if (files.length > fileLimit) throw overBudget({ unit: "files", needed: files.length, limit: fileLimit });
+    const wholeBytes = files.reduce((total, file) => total + file.size, 0);
+    if (!projection && wholeBytes > MAX_RANGE_BYTES) {
+      throw overBudget({ unit: "bytes", needed: wholeBytes, limit: MAX_RANGE_BYTES });
     }
     const downloads = new AbortController();
     const abortDownloads = () => downloads.abort(signal.reason);
@@ -166,9 +186,7 @@ export async function ensureCloudRange(
         signal.throwIfAborted();
         const needed = files.reduce((total, file) => total + (plans.get(file.scopedKey)?.projectedBytes
           ?? persisted.get(file.scopedKey)?.byteLength ?? engine.getFileMeta(file.scopedKey)?.byteLength ?? 0), 0);
-        if (needed > byteLimit) {
-          throw new CloudBudgetError("Cloud query range exceeds the browser scan budget; choose a smaller range");
-        }
+        if (needed > byteLimit) throw overBudget({ unit: "bytes", needed, limit: byteLimit });
       }
       const progress = { phase: "files" as const, cached: 0, toFetch: files.length,
         toDecode: 0, done: 0, downloadedBytes: 0, cachedBytes: 0 };

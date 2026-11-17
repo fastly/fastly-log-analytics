@@ -1,8 +1,11 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { getDuckDBEngine } from "./dashboard/duckdb";
 import {
   executeCloudQuery,
   getQueryPresets,
   getQuerySchema,
+  planCloudQueryScan,
   redactQueryRowsForPii,
   rewriteCloudQuerySql,
 } from "./query";
@@ -104,5 +107,79 @@ describe("cloud-engine query module", () => {
     expect(redactQueryRowsForPii(rows, true)).toEqual([
       { ip: "0.0.0.0", cmcd_sid: "[redacted]", status: 200 },
     ]);
+  });
+});
+
+describe("Cloud query scan planning", () => {
+  const plan = async (sql: string, customColumns = {}) => {
+    const read = await getDuckDBEngine().beginRequest();
+    return planCloudQueryScan({ sql, max_rows: 1000 }, {
+      tableName: "requests",
+      allowedTables: ["logs", "requests", "client_vitals", "client_errors"],
+      customColumns,
+      runSql: (query) => read.executeSql(query),
+    });
+  };
+
+  it("loads the newest window first for the default and builder queries", async () => {
+    expect(await plan("SELECT * FROM logs LIMIT 100")).toEqual({
+      columns: null, newestFirst: { table: "requests", ordered: false, limit: 100 },
+    });
+    expect(await plan("SELECT *\nFROM logs\nWHERE status >= 500\nORDER BY timestamp DESC\nLIMIT 100")).toEqual({
+      columns: null, newestFirst: { table: "requests", ordered: true, limit: 100 },
+    });
+    const picked = await plan("SELECT url, \"Status\" FROM logs r WHERE r.cache = 'MISS' ORDER BY r.timestamp DESC LIMIT 5");
+    expect(picked.newestFirst).toEqual({ table: "requests", ordered: true, limit: 5 });
+    expect(picked.columns?.sort()).toEqual(["cache", "status", "timestamp", "url"]);
+  });
+
+  it("scans the whole range, projected, for aggregates and other orders", async () => {
+    expect(await plan("SELECT status, count(*) AS requests FROM logs GROUP BY status ORDER BY requests DESC"))
+      .toEqual({ columns: ["timestamp", "status"], newestFirst: null });
+    for (const sql of [
+      "SELECT count(*) FROM logs LIMIT 1",
+      "SELECT url FROM logs ORDER BY status DESC LIMIT 5",
+      "SELECT url AS timestamp FROM logs ORDER BY timestamp DESC LIMIT 5",
+      "SELECT url \"timestamp\" FROM logs ORDER BY timestamp DESC LIMIT 5",
+      "SELECT DISTINCT url FROM logs LIMIT 5",
+      "SELECT url FROM logs LIMIT 5 OFFSET 10",
+    ]) expect((await plan(sql)).newestFirst, sql).toBeNull();
+    const custom = await plan("SELECT my_field, count(*) FROM logs GROUP BY 1", { my_field: "VARCHAR" });
+    expect(custom.columns?.sort()).toEqual(["my_field", "timestamp"]);
+    for (const preset of getQueryPresets("svc-1")) {
+      const { columns } = await plan(preset.sql);
+      if (preset.sql.includes("*") && !preset.sql.includes("count(*)") || /^SUMMARIZE/.test(preset.sql)) {
+        expect(columns, preset.name).toBeNull();
+      } else {
+        expect(columns, preset.name).not.toBeNull();
+        expect(columns!.length, preset.name).toBeLessThan(10);
+      }
+    }
+  });
+
+  it("falls back to every column when whole rows or unknown names are referenced", async () => {
+    for (const sql of [
+      "SELECT hash(r) FROM logs r LIMIT 5",
+      "SELECT r.* FROM logs r",
+      "SELECT count(*) FROM (SELECT DISTINCT * FROM logs)",
+      "SELECT count(*) FROM (SELECT * FROM logs) AS q WHERE q IS NOT NULL",
+      "SELECT md5(requests::VARCHAR) FROM requests",
+      "SELECT COLUMNS('stat.*') FROM logs",
+      "SELECT no_such_column FROM logs",
+    ]) expect((await plan(sql)).columns, sql).toBeNull();
+  });
+
+  it("restricts a newest-window query to rows at or after the window start", async () => {
+    const executed: string[] = [];
+    const read = await getDuckDBEngine().beginRequest();
+    const res = await executeCloudQuery(
+      { sql: "SELECT * FROM logs ORDER BY timestamp DESC LIMIT 3", max_rows: 10 },
+      { since: { table: "requests", ms: 1234 }, runSql: async (sql) => {
+        executed.push(sql);
+        return read.executeSql(sql);
+      } },
+    );
+    expect(res.status).toBe(200);
+    expect(executed[0]).toMatch(/^WITH "requests" AS \(SELECT \* FROM main\."requests" WHERE ts_ms >= 1234\) /);
   });
 });

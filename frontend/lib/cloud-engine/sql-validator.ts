@@ -318,13 +318,13 @@ export function stripSqlComments(sql: string): string {
   return out;
 }
 
-interface SqlToken {
+export interface SqlToken {
   kind: "word" | "string" | "quoted_ident" | "symbol";
   value: string;
   lower: string;
 }
 
-function tokenizeSql(sql: string): SqlToken[] {
+export function tokenizeSql(sql: string): SqlToken[] {
   const tokens: SqlToken[] = [];
   let i = 0;
   const n = sql.length;
