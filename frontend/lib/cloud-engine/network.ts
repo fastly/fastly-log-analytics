@@ -293,7 +293,7 @@ export function networkScanColumns(filters: unknown): string[] | null {
   return [...new Set([...NETWORK_SCAN_COLUMNS, ...Object.keys(filters)])];
 }
 
-function parseEpochMs(val: string | number | undefined): number | null {
+export function parseEpochMs(val: string | number | undefined): number | null {
   if (val === undefined || val === null || val === "") return null;
   if (typeof val === "number") {
     return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);

@@ -1,10 +1,11 @@
 import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
-import { rebucketSeries, sumAggs } from "./dashboard/rollup-query";
+import { queryRollup, rebucketSeries, sumAggs } from "./dashboard/rollup-query";
 import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
   emptyNetworkHealth,
   emptyPopHealth,
+  parseEpochMs,
   roundTo,
   TCP_FIELDS,
   type MetroRow,
@@ -261,4 +262,35 @@ export function popHealthFromRollup(result: RollupResult) {
     total_pops: pops.length,
     rollup: rollupMeta,
   };
+}
+
+/** Whether summaries may answer this read at all, before any range or listing is resolved. */
+export function networkRollupEligible(path: string, params: NetworkQueryParams): boolean {
+  if (params.filter_country || params.filter_pop ||
+      params.filter_asn !== undefined && params.filter_asn !== "" ||
+      Object.keys(params.filters ?? {}).length) return false;
+  return path === "/api/network-health" ? canServeHealthFromRollup(params.sections) : path === "/api/network/pop-health";
+}
+
+/**
+ * Answers a Cloud /network read from v3 summaries, or returns null when the raw
+ * scan must: any filter (summaries hold no dimension crossed with another, so
+ * even one PoP, country or ASN filter can't narrow the ASN, metro or PoP
+ * tables), a section that needs rows, a bucket finer than the summaries, or a
+ * range the summaries don't cover (see `queryRollup`).
+ */
+export async function networkFromRollup(
+  path: string,
+  params: NetworkQueryParams,
+  source: Parameters<typeof queryRollup>[0],
+  signal?: AbortSignal,
+) {
+  if (!networkRollupEligible(path, params)) return null;
+  const health = path === "/api/network-health";
+  const fromMs = parseEpochMs(params.start_time);
+  const toMs = parseEpochMs(params.end_time);
+  if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+  const result = await queryRollup(source, { fromMs, toMs, signal });
+  if (!result) return null;
+  return health ? networkHealthFromRollup(result, params) : popHealthFromRollup(result);
 }

@@ -12,10 +12,13 @@ import {
   FIXTURE_START,
   SUMMARY_FIXTURE_BUFFERS as BUFFERS,
   fixtureFiles,
+  fixturePage,
 } from "./dashboard/summary-fixtures";
+import { fixtureSource } from "./dashboard/test-fixtures";
 import { queryNetworkHealth, queryPopHealth } from "./network";
 import {
   canServeHealthFromRollup,
+  networkFromRollup,
   networkHealthFromRollup,
   popHealthFromRollup,
 } from "./network-rollup";
@@ -200,5 +203,50 @@ describe("canServeHealthFromRollup", () => {
     expect(canServeHealthFromRollup(["shielding_analysis"])).toBe(false);
     expect(canServeHealthFromRollup(undefined)).toBe(false);
     expect(canServeHealthFromRollup([])).toBe(false);
+  });
+});
+
+describe("networkFromRollup", () => {
+  const source = (summaries: ManifestFile[] = WINDOWS, buffers = BUFFERS) =>
+    fixtureSource([fixturePage(RAW)], buffers, { json: [], files: [] }, [fixturePage(summaries)]);
+  const health = { start_time: new Date(T0).toISOString(), end_time: new Date(T1).toISOString(), sections: SECTIONS };
+
+  it("answers unfiltered health and PoP reads from summaries without reading raw files", async () => {
+    const s = source();
+    const served = await networkFromRollup("/api/network-health", health, s) as { summary: { total_requests: number } };
+    const direct = networkHealthFromRollup(await rollupOf(WINDOWS), {})!;
+    expect(served.summary.total_requests).toBe(direct.summary.total_requests);
+    const pops = await networkFromRollup("/api/network/pop-health", { start_time: T0, end_time: T1 }, s);
+    expect(pops).toMatchObject({ total_pops: popHealthFromRollup(await rollupOf(WINDOWS)).total_pops });
+    expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
+  });
+
+  it("omits the open tail newer than the newest summary and says how far the data goes", async () => {
+    const served = await networkFromRollup("/api/network-health", health, source(WINDOWS.slice(0, 7))) as {
+      summary: { total_requests: number }; rollup: { data_through: string };
+    };
+    const covered = networkHealthFromRollup(await rollupOf(WINDOWS.slice(0, 7)), {})!;
+    expect(served.summary.total_requests).toBe(covered.summary.total_requests);
+    expect(served.summary.total_requests).toBeLessThan(networkHealthFromRollup(await rollupOf(WINDOWS), {})!.summary.total_requests);
+    expect(served.rollup.data_through).toBe(WINDOWS[6].end);
+  });
+
+  it("leaves filtered reads, raw-only sections and non-v3 windows to the raw scan", async () => {
+    for (const params of [
+      { ...health, filter_pop: "IAD" },
+      { ...health, filter_country: "US" },
+      { ...health, filter_asn: 64512 },
+      { ...health, filters: { proto: { values: ["2"], mode: "include" as const } } },
+      { ...health, sections: [...SECTIONS, "map_buckets"] },
+      { ...health, sections: undefined },
+      { ...health, end_time: "not a time" },
+    ]) {
+      const s = source();
+      expect(await networkFromRollup("/api/network-health", params, s), JSON.stringify(params)).toBeNull();
+      expect(s.log.json).toEqual([]);
+    }
+    expect(await networkFromRollup("/api/network-quality", health, source())).toBeNull();
+    const stale = { ...BUFFERS, [WINDOWS[3].key]: BUFFERS[RAW[3].key] };
+    expect(await networkFromRollup("/api/network-health", health, source(WINDOWS, stale))).toBeNull();
   });
 });
