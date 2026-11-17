@@ -2081,7 +2081,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     .get(hour)
                     .is_none_or(|(saved, _)| saved != reference)
                 {
-                    if !self.room(3) || !super::catalog::admitted(self.store) {
+                    if !self.room(3) || !super::catalog::bundles::admitted(self.store) {
                         return Ok(Step::Pending);
                     }
                     let coverage = super::catalog::bundles::load(self.store, reference)?;
@@ -2206,13 +2206,9 @@ pub fn summary_bundle<R: Runtime>(
         .unwrap_or_default();
     let original = state.clone();
     let now = ctx.now;
-    let watermark = runtime.admin_get(WATERMARK_KEY)?;
-    ctx.catalog = super::catalog::head(
-        watermark
-            .as_ref()
-            .map(|r| &r.value)
-            .unwrap_or(&serde_json::Value::Null),
-    )?;
+    // A bundle built last execution is published first, then the run goes on with the watermark
+    // read after that commit. Publishing is idempotent, so a run that ends before saving the
+    // state publishes the same coverage again next time.
     if let Some(publication) = state.publication.as_ref() {
         match super::catalog::bundles::publish(store, publication, reserve + 1) {
             Ok(true) => {
@@ -2235,15 +2231,27 @@ pub fn summary_bundle<R: Runtime>(
             }
             Err(error) => return Err(error),
         }
-        let _ = runtime.admin_cas(
-            STATE_KEY,
-            record.as_ref().map(|r| r.generation.as_str()),
-            &serde_json::to_value(&state).map_err(|_| "bundle_state_encode")?,
-        )?;
+    }
+    if !ctx.room(2) {
+        // Out of calls right after publishing: save that and resume next execution.
+        if state != original {
+            let _ = runtime.admin_cas(
+                STATE_KEY,
+                record.as_ref().map(|r| r.generation.as_str()),
+                &serde_json::to_value(&state).map_err(|_| "bundle_state_encode")?,
+            )?;
+        }
         ctx.report.more_pending = true;
         ctx.report.backend_calls = started_with.saturating_sub(runtime.admin_remaining_calls());
         return Ok(ctx.report);
     }
+    let watermark = runtime.admin_get(WATERMARK_KEY)?;
+    ctx.catalog = super::catalog::head(
+        watermark
+            .as_ref()
+            .map(|r| &r.value)
+            .unwrap_or(&serde_json::Value::Null),
+    )?;
     ctx.report.deleted += super::catalog::bundles::cleanup(store, watermark.as_ref(), reserve + 1)?;
     let swept_at = watermark
         .as_ref()

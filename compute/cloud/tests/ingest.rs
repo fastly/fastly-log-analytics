@@ -10054,6 +10054,40 @@ mod summary_bundles {
             .iter()
             .any(|k| k.contains("hour_bundle=08-c3-")));
     }
+
+    #[test]
+    fn summary_bundle_work_left_brings_the_next_maintenance_tick_forward() {
+        use fastly_log_analytics::admin::schedule;
+        let fake = Fake::new(BASE + 3 * HOUR);
+        tick_runtime(&fake);
+        watermark(&fake, BASE + 3 * HOUR);
+        // More windows than one execution folds.
+        seed_hour(&fake, BASE, 40);
+        fake.kv.borrow_mut().insert(
+            "retention:last_sweep".into(),
+            (1, json!({"at": BASE + 3 * HOUR, "complete": true})),
+        );
+        for _ in 0..16 {
+            fake.now.set(fake.now.get() + 120);
+            watermark(&fake, fake.now.get() as i64);
+            let before = fake.stage_runs.borrow().len();
+            run_tick(&fake);
+            if fake.stage_runs.borrow()[before..]
+                .iter()
+                .any(|reply| reply["ran"] == "summary_bundle")
+            {
+                let maint = fake.kv.borrow()["cron:state"].1["jobs"]["maint"].clone();
+                assert_eq!(maint["more_pending"], true, "{maint}");
+                assert_eq!(
+                    maint["retry_after"],
+                    fake.now.get() + schedule::MAINT_CATCHUP_S,
+                    "{maint}"
+                );
+                return;
+            }
+        }
+        panic!("the rotation never reached summary_bundle");
+    }
 }
 
 /// Native decode cost per decompressed MB, for comparing converter changes (wasm differs).

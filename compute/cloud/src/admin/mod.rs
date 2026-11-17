@@ -2377,6 +2377,7 @@ fn dispatch(
     let mut stages: Vec<StageRow> = Vec::new();
     // `None`: no stage was dispatched; `Some(None)`: the worker did not answer.
     let mut maint_reply: Option<Option<usize>> = None;
+    let mut maint_bundle_pending: Option<bool> = None;
     let maint_start = cron_state.maint_next % logs::MAINT_STAGES.len();
     let mut stage_rows = Vec::new();
     let stage_body = due
@@ -2427,6 +2428,7 @@ fn dispatch(
             stage::reply_next(reply)?,
             stage::reply_rows(reply),
             stage::reply_delete_pending(reply),
+            stage::reply_bundle_pending(reply),
         ))
     };
     let mut delete_pending = false;
@@ -2614,8 +2616,9 @@ fn dispatch(
                 inline_queues.push(pq);
             }
             // The stage worker may have run even when the ingest step failed.
-            if let Some((next, rows, pending)) = answered(&report.extra_results) {
+            if let Some((next, rows, pending, bundle_pending)) = answered(&report.extra_results) {
                 maint_reply = Some(Some(next));
+                maint_bundle_pending = bundle_pending;
                 stage_rows = rows;
                 delete_pending = pending;
             }
@@ -2697,8 +2700,9 @@ fn dispatch(
             observe_extras(&replies);
             compact_answered(&replies);
             backend_requests_used += extras.len() as u32;
-            if let Some((next, rows, pending)) = answered(&replies) {
+            if let Some((next, rows, pending, bundle_pending)) = answered(&replies) {
                 maint_reply = Some(Some(next));
+                maint_bundle_pending = bundle_pending;
                 stage_rows = rows;
                 delete_pending = pending;
             }
@@ -2720,8 +2724,9 @@ fn dispatch(
         if let Some((stage, reply)) = rum_stage {
             if let Some(replies) = reply {
                 compact_answered(&replies);
-                if let Some((next, rows, pending)) = answered(&replies) {
+                if let Some((next, rows, pending, bundle_pending)) = answered(&replies) {
                     maint_reply = Some(Some(next));
+                    maint_bundle_pending = bundle_pending;
                     stage_rows = rows;
                     delete_pending = pending;
                 }
@@ -2821,14 +2826,23 @@ fn dispatch(
     }
     if maint_reply.is_some() {
         let answered = matches!(maint_reply, Some(Some(_)));
-        // A Delete Data step that stopped only for its budget brings the next stage forward.
+        // A Delete Data step that stopped only for its budget brings the next stage forward at
+        // once; a summary_bundle with work left brings it forward to the catch-up cadence.
+        let delete_now = answered && delete_pending;
+        // Only a bundle catch-up leaves a retry time; a Delete Data re-tick leaves none.
+        let bundle_behind = jobs.maint.more_pending && jobs.maint.retry_after > 0;
+        let catching_up =
+            answered && schedule::maint_catching_up(bundle_behind, maint_bundle_pending);
         jobs.maint = job_state(
             now,
             if answered { "done" } else { "missed" },
-            answered && delete_pending,
+            delete_now || catching_up,
             0,
             &jobs.maint,
         );
+        if catching_up && !delete_now {
+            jobs.maint.retry_after = now + schedule::MAINT_CATCHUP_S;
+        }
     }
     if let Some(reply) = compact_reply {
         let pending = reply == Some(true);

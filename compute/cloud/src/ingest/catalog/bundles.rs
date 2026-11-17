@@ -24,6 +24,16 @@ pub struct Inventory {
     pub closed: bool,
 }
 
+/// Catalog reads and commits made by the `summary_bundle` stage. They stop at the stage's own
+/// fold stop ([`crate::ingest::bundle::VCPU_STOP_MS`]), which leaves room for an encode, rather
+/// than the ingest commit's [`super::VCPU_STOP_MS`]: stage executions often reach bundling past
+/// that, and a gate there left them doing nothing.
+pub fn admitted<R: Runtime>(store: &Store<'_, R>) -> bool {
+    store.within_wall()
+        && store.vcpu_ms() < crate::ingest::bundle::VCPU_STOP_MS
+        && store.runtime.heap_mib().is_none_or(|heap| heap < 96)
+}
+
 pub fn collect<R: Runtime>(
     store: &Store<'_, R>,
     inventory: &mut Inventory,

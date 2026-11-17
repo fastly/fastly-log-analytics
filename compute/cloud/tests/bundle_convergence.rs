@@ -1,14 +1,15 @@
 //! `summary_bundle` keeps up with the window summaries ingest writes at a 10 s log period with
 //! up to 48 summaries a minute (about 2,900 an hour), under a runtime that charges backend calls
 //! like Compute and vCPU like the live stage: a window fold, a partial decode and an encode cost
-//! tens to hundreds of milliseconds.
+//! tens to hundreds of milliseconds. The catalog test runs a day of a 60 s log period through
+//! catalog commits and the maintenance cadence, as the live service does.
 
 use fastly_log_analytics::{
     admin::{
         schedule::{self, JobState, Jobs, Mirror},
         FosRequest, FosResponse, Record, Service,
     },
-    ingest::{self, bundle, convert, summary},
+    ingest::{self, bundle, catalog, convert, summary, worker::Output},
     setup::SetupStores,
     shell::Runtime,
 };
@@ -38,6 +39,8 @@ const ENCODE_MS: u64 = 250;
 /// The deploy harness's `summary_bundle` vCPU budget (`STAGE_VCPU_BUDGET_MS` in
 /// `tools/deploy_test_all.py`): the stop gate plus one fold, encode and call tail must fit under it.
 const VCPU_BUDGET_MS: u64 = 900;
+/// A catalog block, day index or coverage read: a small JSON decode.
+const CATALOG_READ_MS: u64 = 2;
 
 #[derive(Default)]
 struct Fake {
@@ -211,8 +214,20 @@ impl Runtime for Fake {
                 self.lists.set(self.lists.get() + 1);
                 ok(200, self.list(request.query).into_bytes())
             }
+            "GET" => {
+                self.charge(CATALOG_READ_MS)?;
+                match self.bucket.borrow().get(request.key) {
+                    Some(body) => ok(200, body.clone()),
+                    None => ok(404, Vec::new()),
+                }
+            }
             "PUT" => {
-                self.charge(ENCODE_MS)?;
+                // Catalog JSON is cheap to serialize; parquet bundles and partials are encoded.
+                self.charge(if request.key.contains("/_catalog/") {
+                    0
+                } else {
+                    ENCODE_MS
+                })?;
                 self.puts.set(self.puts.get() + 1);
                 self.bucket
                     .borrow_mut()
@@ -234,6 +249,15 @@ impl Runtime for Fake {
             other => panic!("unexpected FOS {other} {}", request.key),
         }
     }
+    fn admin_fos_etag(
+        &self,
+        request: FosRequest<'_>,
+    ) -> Result<(FosResponse, Option<String>), String> {
+        use md5::{Digest, Md5};
+        let tag = format!("\"{}\"", hex::encode(Md5::digest(&request.body)));
+        self.admin_fos(request)
+            .map(|response| (response, Some(tag)))
+    }
     fn admin_cdn_get(
         &self,
         service_id: &str,
@@ -254,10 +278,14 @@ impl Runtime for Fake {
 }
 
 fn service() -> Service {
+    service_with_period(PERIOD_S)
+}
+
+fn service_with_period(log_period: i64) -> Service {
     serde_json::from_value(json!({
         "service_id": SID, "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
         "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
-        "log_period": PERIOD_S, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+        "log_period": log_period, "sample_rate": 1, "edge_only": false, "custom_condition": "",
         "fos_bucket": "fos-abcdefghijklmnopqrst12-logs", "fos_prefix": "", "fos_region": "us-east-1",
         "fos_endpoint": "x", "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
         "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
@@ -299,19 +327,35 @@ fn minute(fake: &Fake, start: i64, bodies: &[Vec<u8>]) {
     }
 }
 
-fn watermark(fake: &Fake, at: i64) {
+/// The raw object key of the minute holding `at`, as the ingest watermark names it.
+fn raw_key(at: i64) -> String {
     let t = time::OffsetDateTime::from_unix_timestamp(at - at % 60).unwrap();
-    let key = format!(
+    format!(
         "raw/request/year={:04}/month={:02}/day={:02}/hour={:02}/minute={:02}/zzz.zst",
         t.year(),
         t.month() as u8,
         t.day(),
         t.hour(),
         t.minute()
+    )
+}
+
+fn watermark(fake: &Fake, at: i64) {
+    fake.kv.borrow_mut().insert(
+        ingest::WATERMARK_KEY.into(),
+        (1, json!({ "key": raw_key(at) })),
     );
-    fake.kv
-        .borrow_mut()
-        .insert(ingest::WATERMARK_KEY.into(), (1, json!({ "key": key })));
+}
+
+fn store<'a>(fake: &'a Fake, svc: &'a Service) -> ingest::storage::Store<'a, Fake> {
+    ingest::storage::Store {
+        runtime: fake,
+        service: svc,
+        access_key: "ak".into(),
+        secret_key: "sk".into(),
+        started: Instant::now(),
+        vcpu_start: 0,
+    }
 }
 
 fn run(fake: &Fake, svc: &Service) -> bundle::BundleReport {
@@ -321,15 +365,7 @@ fn run(fake: &Fake, svc: &Service) -> bundle::BundleReport {
 fn run_with_cpu(fake: &Fake, svc: &Service, initial_cpu: u64) -> bundle::BundleReport {
     fake.new_execution();
     fake.vcpu.set(initial_cpu);
-    let store = ingest::storage::Store {
-        runtime: fake,
-        service: svc,
-        access_key: "ak".into(),
-        secret_key: "sk".into(),
-        started: Instant::now(),
-        vcpu_start: 0,
-    };
-    let report = bundle::summary_bundle(&store, "ck", RESERVE).unwrap();
+    let report = bundle::summary_bundle(&store(fake, svc), "ck", RESERVE).unwrap();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(
         fake.calls.get() + RESERVE <= BUDGET,
@@ -526,4 +562,172 @@ fn bundling_keeps_up_with_windows_arriving_at_the_live_rate() {
     // Each run folds a batch: about one write per 12 windows, never one per window.
     assert!(fake.puts.get() * 12 <= windows, "{} PUTs", fake.puts.get());
     assert!(busy / runs <= VCPU_BUDGET_MS, "{} ms a run", busy / runs);
+}
+
+/// A 60 s log period writes this many window summaries a minute, about 180 an hour as live.
+const LIVE_PLANS: u32 = 3;
+const LIVE_PERIOD_S: i64 = 60;
+/// vCPU a stage execution has spent before `summary_bundle` starts (worker start, the reset
+/// check, stages that passed the turn). Live, about half of the runs arrive past 150 ms.
+const STARTUP_MS: [u64; 4] = [60, 120, 170, 230];
+/// Other maintenance stages with work, taking their turns in the rotation (live, the bundle
+/// stage got about one maintenance execution in four).
+const BUSY_STAGES: u32 = 3;
+/// A closed hour's catalog bundle is published within this long after the hour ends. The hour
+/// only closes `CLOSE_SLACK_S` plus the log period and commit lag (about 12 minutes) after its end.
+const PUBLISHED_WITHIN_S: i64 = 30 * 60;
+
+/// Writes the window summaries of the minute at `start` and commits them, with one processed
+/// file each, to the catalog the way an ingest commit does, then moves the watermark to it.
+fn commit_minute(fake: &Fake, svc: &Service, start: i64, bodies: &[Vec<u8>]) {
+    let (mut files, mut summaries) = (Vec::new(), Vec::new());
+    for plan in 0..LIVE_PLANS {
+        let id = format!("p{plan}");
+        let key = summary::summary_key(WINDOWS, start, start + 60, &id, 4);
+        let body = bodies[(start / 60 + i64::from(plan)) as usize % bodies.len()].clone();
+        summaries.push(Output {
+            key: key.clone(),
+            rows: 4,
+            bytes: body.len() as u64,
+            ..Default::default()
+        });
+        fake.bucket.borrow_mut().insert(key, body);
+        files.push(Output {
+            key: ingest::processed_key("processed/request/", start, start + 60, &id, 4),
+            rows: 4,
+            bytes: 1000,
+            ..Default::default()
+        });
+    }
+    for _ in 0..50 {
+        fake.new_execution();
+        let record = fake.kv.borrow().get(ingest::WATERMARK_KEY).cloned();
+        let previous = record
+            .as_ref()
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| json!({}));
+        match catalog::prepare(
+            &store(fake, svc),
+            &previous,
+            "commit",
+            "schema",
+            &files,
+            &summaries,
+            &[],
+            &[],
+        ) {
+            Ok(mut value) => {
+                value["key"] = raw_key(start).into();
+                let generation = record.map_or(1, |(generation, _)| generation + 1);
+                fake.kv
+                    .borrow_mut()
+                    .insert(ingest::WATERMARK_KEY.into(), (generation, value));
+                return;
+            }
+            Err(error) if error == "catalog_prepare_pending" => {}
+            Err(error) => panic!("commit failed: {error}"),
+        }
+    }
+    panic!("commit made no progress");
+}
+
+fn catalog_head(fake: &Fake) -> catalog::Head {
+    fake.kv
+        .borrow()
+        .get(ingest::WATERMARK_KEY)
+        .map_or_else(catalog::Head::default, |(_, value)| {
+            catalog::head(value).unwrap()
+        })
+}
+
+/// The windows a published catalog hour bundle covers.
+fn covered(fake: &Fake, reference: &catalog::Reference) -> usize {
+    catalog::bundles::parse(&fake.bucket.borrow()[&reference.key])
+        .unwrap()
+        .windows
+        .len()
+}
+
+#[test]
+fn a_day_of_60s_windows_converges_to_catalog_hour_bundles() {
+    let fake = Fake::default();
+    let svc = service_with_period(LIVE_PERIOD_S);
+    let bodies = bodies();
+    let mut mirror = Mirror {
+        configured: true,
+        log_period_s: LIVE_PERIOD_S as u64,
+        jobs: Jobs::default(),
+        rum_log_period_s: 0,
+        compaction: false,
+    };
+    let (start, end) = (BASE, BASE + 24 * HOUR);
+    let mut written = start;
+    let (mut slots, mut runs, mut busy) = (0u32, 0usize, 0u64);
+    let mut published = BTreeMap::new();
+    let mut now = start;
+    while now < end + HOUR {
+        fake.now.set(now);
+        // Ingest commits a minute's windows about two log periods after the minute starts, and
+        // keeps going past the day so its last hour closes.
+        while written + 2 * LIVE_PERIOD_S <= now {
+            commit_minute(&fake, &svc, written, &bodies);
+            written += 60;
+        }
+        if schedule::due(&mirror, now as u64).maint {
+            // The rotation: the bundle stage's turn, then the other busy stages' turns.
+            let bundle_pending = (slots % (BUSY_STAGES + 1) == 0).then(|| {
+                let report = run_with_cpu(&fake, &svc, STARTUP_MS[runs % STARTUP_MS.len()]);
+                runs += 1;
+                busy += fake.vcpu.get();
+                report.more_pending
+            });
+            slots += 1;
+            // What the dispatcher records for the maintenance job after an answered execution.
+            let pending =
+                schedule::maint_catching_up(mirror.jobs.maint.more_pending, bundle_pending);
+            mirror.jobs.maint = JobState {
+                last_run: Some(now as u64),
+                more_pending: pending,
+                retry_after: if pending {
+                    now as u64 + schedule::MAINT_CATCHUP_S
+                } else {
+                    0
+                },
+                ..JobState::default()
+            };
+            for (hour, reference) in catalog_head(&fake).hour_bundles {
+                published.entry(hour).or_insert((now, reference));
+            }
+        }
+        now += 10;
+    }
+    let windows = 60 * LIVE_PLANS as usize;
+    let late: Vec<String> = (start..end)
+        .step_by(HOUR as usize)
+        .filter_map(|hour| match published.get(&hour) {
+            Some((at, reference))
+                if *at <= hour + HOUR + PUBLISHED_WITHIN_S
+                    && covered(&fake, reference) == windows =>
+            {
+                None
+            }
+            Some((at, reference)) => Some(format!(
+                "{}h: {} windows at +{}s",
+                (hour - start) / HOUR,
+                covered(&fake, reference),
+                at - hour - HOUR
+            )),
+            None => Some(format!("{}h: none", (hour - start) / HOUR)),
+        })
+        .collect();
+    assert!(late.is_empty(), "late after {runs} runs: {late:?}");
+    let head = catalog_head(&fake);
+    for hour in (start..end).step_by(HOUR as usize) {
+        assert_eq!(covered(&fake, &head.hour_bundles[&hour]), windows);
+    }
+    assert!(
+        busy / runs as u64 <= VCPU_BUDGET_MS,
+        "{} ms a run",
+        busy / runs as u64
+    );
 }

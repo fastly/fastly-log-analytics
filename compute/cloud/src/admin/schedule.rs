@@ -34,8 +34,18 @@ pub const INGEST_GRACE_S: u64 = 0;
 pub fn ingest_grace_s(_log_period_s: u64) -> u64 {
     INGEST_GRACE_S
 }
-/// One maintenance stage dispatch per this many seconds (the 120 s clock's old cadence).
+/// One maintenance stage dispatch per this many seconds (the 120 s clock's old cadence) ...
 pub const MAINT_INTERVAL_S: u64 = 120;
+/// ... or this many while `summary_bundle` has work left, so closed hours get their bundles
+/// within minutes instead of falling behind the windows ingest writes.
+pub const MAINT_CATCHUP_S: u64 = 30;
+
+/// Whether maintenance catches up after an answered stage execution: `summary_bundle`'s own
+/// answer when the rotation reached it, otherwise the previous one, so turns that other stages
+/// take keep the cadence.
+pub fn maint_catching_up(previous: bool, bundle_pending: Option<bool>) -> bool {
+    bundle_pending.unwrap_or(previous)
+}
 /// Request compaction runs on its own job, apart from the maintenance rotation: every
 /// `COMPACT_INTERVAL_S` when it has caught up, `COMPACT_CATCHUP_S` after a run that left work.
 pub const COMPACT_INTERVAL_S: u64 = 30;

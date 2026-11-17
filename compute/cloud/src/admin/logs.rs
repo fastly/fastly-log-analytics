@@ -717,6 +717,9 @@ pub(super) struct MaintOutcome {
     pub(super) worker_executions_metrics: Vec<telemetry::execution::WorkerExecutionMetrics>,
     /// Delete Data stopped only for this execution's budget, with more to delete now.
     pub(super) delete_pending: bool,
+    /// `summary_bundle`'s turn came and it left work (`Some(true)`) or none (`Some(false)`);
+    /// `None` when the rotation did not reach it.
+    pub(super) bundle_pending: Option<bool>,
 }
 
 pub(super) struct CompactOutcome {
@@ -757,6 +760,7 @@ pub(super) fn maintenance_stage(
         rows: Vec::new(),
         worker_executions_metrics: Vec::new(),
         delete_pending: false,
+        bundle_pending: None,
     };
     let fencing = reset::fencing(tick.service);
     if store.within_wall() {
@@ -772,6 +776,9 @@ pub(super) fn maintenance_stage(
             break;
         }
         if index == 5 || (index == 6 && reset_ran) || (fencing && matches!(index, 0 | 3 | 4)) {
+            if index == 4 {
+                outcome.bundle_pending = Some(false);
+            }
             continue;
         }
         let row = match index {
@@ -783,6 +790,9 @@ pub(super) fn maintenance_stage(
             6 => reset::reset_stage(&store),
             _ => unreachable!("MAINT_STAGES has seven entries; request_compact has its own job"),
         };
+        if index == 4 {
+            outcome.bundle_pending = Some(row.as_ref().is_some_and(compact_backlog));
+        }
         if let Some(row) = row {
             outcome.rows.push(row);
             outcome.ran = Some(index);
@@ -887,7 +897,8 @@ pub(super) fn compact_execution(runtime: &impl Runtime, tick: &TickContext<'_>) 
     outcome
 }
 
-/// A failed run retries on the regular cadence rather than the catch-up one.
+/// A failed run retries on the regular cadence rather than the catch-up one. Used for
+/// compaction and for `summary_bundle`.
 fn compact_backlog(row: &StageRow) -> bool {
     row.more_pending && row.outcome != "error"
 }

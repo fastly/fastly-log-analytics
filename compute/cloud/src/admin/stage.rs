@@ -73,6 +73,12 @@ pub fn reply_delete_pending(reply: &Value) -> bool {
     reply["delete_pending"].as_bool() == Some(true)
 }
 
+/// Whether the reply's `summary_bundle` left work (`Some(true)`), which brings the next
+/// maintenance tick forward; `None` when the rotation did not reach it.
+pub fn reply_bundle_pending(reply: &Value) -> Option<bool> {
+    reply["bundle_pending"].as_bool()
+}
+
 /// The FOS usage and API rows a stage reply carries back for the tick to write.
 pub fn reply_rows(reply: &Value) -> Vec<(telemetry::WritableLogKind, Value)> {
     reply["rows"]
@@ -160,6 +166,7 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
         "ran": outcome.ran.map(|index| MAINT_STAGES[index]),
         "next": outcome.next,
         "delete_pending": outcome.delete_pending,
+        "bundle_pending": outcome.bundle_pending,
         "worker_executions_metrics": outcome.worker_executions_metrics,
     }))
 }
