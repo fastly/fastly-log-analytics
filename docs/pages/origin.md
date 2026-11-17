@@ -37,6 +37,18 @@ Routes in [`backend/routers/origin.py`](../../backend/routers/origin.py), models
 
 The ClickHouse reader ([`backend/high_scale/origin.py`](../../backend/high_scale/origin.py)) serves unfiltered requests from the per-minute origin projections, which carry a mergeable log-histogram sketch per percentile metric; sketches are merged across the window with `quantilesExactWeightedArray`, so percentiles are computed over the union of requests (relative error bounded by `RELATIVE_ERROR`, about 1%), counts stay exact, and percentile sections set `_approx` with an `_approx_note`. Minutes written before the sketch columns existed report `null` percentiles until rebuilt ([reader-parity backfill runbook](../runbooks/high-scale-reader-parity-backfill.md)). Any active filter reads `request_facts` with exact quantiles (`_approx: false`).
 
+## Cloud
+
+Unfiltered, the page sends the sections v3 summaries can answer as their own request ([`rollup-sections.ts`](../../frontend/lib/cloud-engine/rollup-sections.ts), [`origin-rollup.ts`](../../frontend/lib/cloud-engine/origin-rollup.ts)); the rest scan raw Parquet with exact percentiles. Any section the summaries can't match sends that whole request to the raw scan.
+
+- `status_codes`: exact, from the per-field origin status counts. Raw when those counts were cut to a top K.
+- `ip_health`: counts and error shares exact, p50/p95 ≈ from the IP's OTTFB or client TTFB histogram. Raw when an IP mixes the two or has rows without an origin status. Requests are shown as "≥ N" when the IP list was cut to a top K.
+- `timeseries`: only for OTTLB on whole 5-minute buckets that tile a day, without a leg split. Miss counts exact, percentiles ≈.
+- Raw only. Each needs summary data the v3 format lacks:
+  - `summary`: an `elapsed − ottlb` histogram, an `obytes` histogram, and MISS/PASS counts and OTTFB/OTTLB histograms restricted to rows with an origin latency.
+  - `slow_urls`: a complete per-URL `COALESCE(ottfb, ttfb)` histogram.
+  - `path_breakdown`, `pop_latency` and the TTFB series: a `COALESCE(ottfb, ttfb)` histogram per edge flag, per POP and per 5-minute bucket. Summaries keep OTTFB and client TTFB apart.
+
 ## Tests
 
 - Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)

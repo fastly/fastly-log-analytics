@@ -91,6 +91,20 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
       }
     }
   });
+
+  it("matches raw origin status code counts and shares exactly from window summaries and day bundles", async () => {
+    const want = (await raw({ sections: ["status_codes"] })).status_codes;
+    expect(want.rows.length).toBeGreaterThan(2);
+    for (const [list, step] of [[WINDOWS, 300_000], [files("day"), HOUR]] as const) {
+      const got = originAggregatesFromRollup(await rollupOf([...list], step), body({ sections: ["status_codes"] }))!;
+      expect(got.status_codes.has_data).toBe(true);
+      expect(got.status_codes.rows.toSorted((a, b) => a.status - b.status))
+        .toEqual(want.rows.toSorted((a, b) => a.status - b.status));
+      const counts = got.status_codes.rows.map((r) => r.count);
+      expect(counts).toEqual(counts.toSorted((a, b) => b - a));
+      expect(got.rollup.approximate).toEqual([]);
+    }
+  });
 });
 
 describe("originAggregatesFromRollup", () => {
@@ -129,22 +143,48 @@ describe("originAggregatesFromRollup", () => {
     expect(originAggregatesFromRollup(day, body({ sections: ["ip_health"], bucket_minutes: 5 }))).not.toBeNull();
   });
 
+  it("folds origin statuses outside 100-599 into -1 and orders by count, then status", async () => {
+    const result = await rollupOf(WINDOWS);
+    const fields = new Map(result.rollup.fields);
+    fields.set("ost", new Map([["200", 5], ["0", 1], ["999", 2], ["302", 1], ["404", 1]]));
+    const out = originAggregatesFromRollup({ ...result, rollup: { ...result.rollup, fields } }, body({ sections: ["status_codes"] }))!;
+    expect(out.status_codes).toEqual({
+      has_data: true,
+      rows: [
+        { status: 200, count: 5, pct: 50 },
+        { status: -1, count: 3, pct: 30 },
+        { status: 302, count: 1, pct: 10 },
+        { status: 404, count: 1, pct: 10 },
+      ],
+    });
+  });
+
+  it("returns null when origin statuses were cut to a top K", async () => {
+    const result = await rollupOf(WINDOWS);
+    const cut: Rollup = { ...result.rollup, truncated: new Set(["all_fields/ost"]) };
+    expect(originAggregatesFromRollup({ ...result, rollup: cut }, body({ sections: ["ip_health", "status_codes"] }))).toBeNull();
+    expect(originAggregatesFromRollup({ ...result, rollup: cut }, body({ sections: ["ip_health"] }))).not.toBeNull();
+  });
+
   it("answers an empty rollup with empty sections", () => {
     const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set() };
-    const out = originAggregatesFromRollup({ rollup: empty, dataFromMs: T0, dataThroughMs: T1 }, body())!;
+    const out = originAggregatesFromRollup({ rollup: empty, dataFromMs: T0, dataThroughMs: T1 },
+      body({ sections: ["ip_health", "timeseries", "status_codes"] }))!;
     expect(out.has_data).toBe(false);
+    expect(out.status_codes).toEqual({ has_data: false, rows: [] });
     expect(out.ip_health).toEqual({ has_data: false, rows: [] });
     expect(out.timeseries).toEqual({ has_data: false, series: [] });
   });
 });
 
 describe("originRollupSections", () => {
-  it("offers origin IP health always and the series only for OTTLB on whole 5-minute steps", () => {
-    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 60 })).toEqual(["ip_health"]);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1 })).toEqual(["ip_health"]);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 60, splitByLeg: true })).toEqual(["ip_health"]);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 60 })).toEqual(["ip_health", "timeseries"]);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1440 })).toEqual(["ip_health", "timeseries"]);
+  it("offers origin IP health and status codes always and the series only for OTTLB on whole 5-minute steps", () => {
+    const always = ["ip_health", "status_codes"];
+    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 60 })).toEqual(always);
+    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1 })).toEqual(always);
+    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 60, splitByLeg: true })).toEqual(always);
+    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 60 })).toEqual([...always, "timeseries"]);
+    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1440 })).toEqual([...always, "timeseries"]);
   });
 });
 
@@ -152,10 +192,14 @@ describe("originFromRollup", () => {
   const source = (summaries: ManifestFile[] = WINDOWS) =>
     fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(summaries)]);
 
-  it("answers unfiltered origin IP health and OTTLB series from summaries without reading raw files", async () => {
+  it("answers unfiltered origin IP health, status codes and OTTLB series from summaries without reading raw files", async () => {
     const s = source();
-    const served = await originFromRollup("/api/origin/aggregates", body(), s) as OriginAggregatesResponse;
-    expect(served.ip_health).toEqual(originAggregatesFromRollup(await rollupOf(WINDOWS), body())!.ip_health);
+    const params = body({ sections: ["ip_health", "status_codes", "timeseries"] });
+    const served = await originFromRollup("/api/origin/aggregates", params, s) as OriginAggregatesResponse;
+    const direct = originAggregatesFromRollup(await rollupOf(WINDOWS), params)!;
+    expect(served.ip_health).toEqual(direct.ip_health);
+    expect(served.status_codes).toEqual(direct.status_codes);
+    expect(served.status_codes.has_data).toBe(true);
     expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
   });
 
@@ -165,6 +209,7 @@ describe("originFromRollup", () => {
       body({ custom_filters: { tier: { values: ["a"], mode: "include" } } }),
       body({ sections: ["ip_health", "summary"] }),
       body({ sections: ["pop_latency"] }),
+      body({ sections: ["status_codes", "slow_urls"] }),
       body({ sections: undefined }),
       body({ sections: [] }),
       body({ timeseries_metric: "ttfb" }),

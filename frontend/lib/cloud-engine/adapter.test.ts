@@ -521,12 +521,12 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     }));
     vi.mocked(ensureCloudRange).mockClear();
     vi.mocked(originFromRollup).mockClear().mockResolvedValueOnce({ served: "origin" } as never);
-    const origin = await post("/api/origin/aggregates", { sections: ["ip_health"], filters: {} });
+    const origin = await post("/api/origin/aggregates", { sections: ["ip_health", "status_codes"], filters: {} });
     expect(await origin!.json()).toEqual({ served: "origin" });
     const [path, params, source] = vi.mocked(originFromRollup).mock.calls[0];
     expect(path).toBe("/api/origin/aggregates");
     expect(params).toMatchObject({
-      sections: ["ip_health"], service_id: "svc-1",
+      sections: ["ip_health", "status_codes"], service_id: "svc-1",
       start_time: "2026-11-05T00:00:00.000Z", end_time: "2026-11-06T00:00:00Z",
     });
     expect(source.cacheScope).toContain("svc-1");

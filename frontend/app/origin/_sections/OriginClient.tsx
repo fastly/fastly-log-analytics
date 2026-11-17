@@ -157,7 +157,11 @@ function OriginReportContent({
     isLoading: tsSource.isLoading, isFetching: tsSource.isFetching, error: tsSource.error,
   }), [tsData, tsApprox, tsSource.isLoading, tsSource.isFetching, tsSource.error])
   const slowUrls = React.useMemo(() => ({ data: bundle.data?.slow_urls, isLoading, isFetching, error }), [bundle.data?.slow_urls, isLoading, isFetching, error])
-  const statusCodes = React.useMemo(() => ({ data: bundle.data?.status_codes, isLoading, isFetching, error }), [bundle.data?.status_codes, isLoading, isFetching, error])
+  const statusSource = rollupSections.includes('status_codes') ? rollupQuery : bundle
+  const statusCodes = React.useMemo(
+    () => ({ data: statusSource.data?.status_codes, isLoading: statusSource.isLoading, isFetching: statusSource.isFetching, error: statusSource.error }),
+    [statusSource.data?.status_codes, statusSource.isLoading, statusSource.isFetching, statusSource.error],
+  )
   const popLatency = React.useMemo(() => ({ data: bundle.data?.pop_latency, isLoading, isFetching, error }), [bundle.data?.pop_latency, isLoading, isFetching, error])
   const ipSource = rollupSections.includes('ip_health') ? rollupQuery : bundle
   const ipHealth = React.useMemo(

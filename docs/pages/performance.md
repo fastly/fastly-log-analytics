@@ -34,8 +34,13 @@ The ClickHouse reader ([`backend/high_scale/performance.py`](../../backend/high_
 
 ## Cloud
 
-Cloud runs these sections against normalized Parquet views in local DuckDB, not
-the dashboard's summary rollups. Cached compressed files stay reusable; loading
+Unfiltered, `ttl_dist` (exact counts, shown as "≥" when a bucket was cut to a top K) and `waterfall` (exact averages) come from v3 summaries ([`performance-rollup.ts`](../../frontend/lib/cloud-engine/performance-rollup.ts)), with a raw fallback. `top_urls`, `top_asns` and `scatter` stay raw:
+
+- `top_urls` needs a per-URL elapsed histogram with an exact elapsed sum.
+- `top_asns` needs a per-ASN elapsed histogram and elapsed sum over every ASN. Only the top `series5` ASNs carry an elapsed histogram, and none carry the sum the average needs.
+- `scatter` needs its sample taken by raw's `hash(timestamp|url)` order. The summary sample uses another key.
+
+The raw sections run against normalized Parquet views in local DuckDB. Cached compressed files stay reusable; loading
 does not copy every decoded column into a resident table. DuckDB can project the
 columns needed by each query and apply eligible Parquet pruning.
 Range loading reconciles the current manifest with resident

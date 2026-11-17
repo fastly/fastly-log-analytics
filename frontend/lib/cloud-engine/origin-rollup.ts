@@ -8,6 +8,7 @@ import {
   type OriginAggregatesResponse,
   type OriginIpHealthRow,
   type OriginIpHealthSection,
+  type OriginStatusCodesSection,
   type OriginTimeseriesPoint,
   type OriginTimeseriesSection,
 } from "./origin";
@@ -75,6 +76,27 @@ function ipHealth(result: RollupResult, limit: number): OriginIpHealthSection | 
   return { has_data: rows.length > 0, rows };
 }
 
+/**
+ * `buildOriginStatusCodesSql` from the `all_fields` origin status counts, which
+ * skip null statuses as raw does; null when they were cut to a top K.
+ */
+function statusCodes(result: RollupResult): OriginStatusCodesSection | null {
+  if (result.rollup.truncated.has("all_fields/ost")) return null;
+  const counts = new Map<number, number>();
+  for (const [value, count] of result.rollup.fields.get("ost") ?? []) {
+    const ost = Number(value);
+    if (value === "" || !Number.isFinite(ost) || count <= 0) continue;
+    const status = ost >= 100 && ost <= 599 ? ost : -1;
+    counts.set(status, (counts.get(status) ?? 0) + count);
+  }
+  let total = 0;
+  for (const count of counts.values()) total += count;
+  const rows = [...counts]
+    .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+    .map(([status, count]) => ({ status, count, pct: roundTo((count * 100) / total, 2) }));
+  return { has_data: rows.length > 0, rows };
+}
+
 /** The OTTLB series of `buildOriginTimeseriesSql` from the overall `series5` histograms. */
 function ottlbSeries(result: RollupResult, bucketMinutes: number, percentile: string): OriginTimeseriesSection | null {
   const rebucketed = rebucketSeries(result.rollup, "overall", bucketMinutes * 60_000);
@@ -102,10 +124,10 @@ export function originRollupEligible(path: string, body: OriginRollupBody): bool
 }
 
 /**
- * The requested /origin aggregates sections (origin IP health and the OTTLB
- * series) from merged summaries, shaped like `queryOriginAggregates`, or null
- * when a section can't match raw (see `ipHealth` and `rebucketSeries`). Counts
- * and error shares are exact; percentiles come from histograms.
+ * The requested /origin aggregates sections (origin IP health, status codes and
+ * the OTTLB series) from merged summaries, shaped like `queryOriginAggregates`,
+ * or null when a section can't match raw (see `ipHealth`, `statusCodes` and
+ * `rebucketSeries`). Counts and shares are exact; percentiles come from histograms.
  */
 export function originAggregatesFromRollup(
   result: RollupResult,
@@ -125,13 +147,18 @@ export function originAggregatesFromRollup(
       lowerBound.push("ip_health.requests");
     }
   }
+  if (sections.has("status_codes")) {
+    const section = statusCodes(result);
+    if (!section) return null;
+    out.status_codes = section;
+  }
   if (sections.has("timeseries")) {
     const section = ottlbSeries(result, body.bucket_minutes ?? 5, body.timeseries_percentile ?? "p95");
     if (!section) return null;
     out.timeseries = section;
     approximate.push("timeseries.value");
   }
-  out.has_data = out.ip_health.has_data || out.timeseries.has_data;
+  out.has_data = out.ip_health.has_data || out.status_codes.has_data || out.timeseries.has_data;
   return {
     ...out,
     rollup: {
