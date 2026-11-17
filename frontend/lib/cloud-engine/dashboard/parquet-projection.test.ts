@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { parquetMetadata } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
@@ -201,6 +202,44 @@ describe("column-projected Parquet", () => {
       .toBeLessThan(fetched(tight) + tight.length * RANGE_REQUEST_COST_BYTES);
     for (const chunk of plan.chunks)
       expect(plan.ranges.some((range) => range.start <= chunk.start && chunk.start + chunk.length <= range.end)).toBe(true);
+  });
+
+  it("keeps only the selected row groups and the file's key-value metadata", async () => {
+    const count = 3000;
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize: 1000,
+      kvMetadata: [{ key: "flp_summary", value: "3" }, { key: "flp_summary_layout", value: "{}" }],
+      columnData: [
+        { name: "a", type: "INT32", data: Array.from({ length: count }, (_, i) => i) },
+        { name: "wide", type: "STRING", data: Array.from({ length: count }, () => noise(200)) },
+        { name: "b", type: "STRING", data: Array.from({ length: count }, (_, i) => `b${i % 17}`) },
+        { name: "c", type: "INT32", data: Array.from({ length: count }, (_, i) => i * 2) },
+      ],
+    });
+    const source = ranged(bytes);
+    const footer = await readParquetFooter(bytes.byteLength, source.fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(3);
+    const plan = planParquetProjection(footer, new Set(["a", "b"]), (rowGroup) => rowGroup === 1);
+    expect(new Set(plan.chunks.map((chunk) => chunk.rowGroup))).toEqual(new Set([1]));
+    const group = footer.metadata.row_groups[1].columns;
+    const chunkBytes = [0, 2].reduce((sum, c) => sum + Number(group[c].meta_data!.total_compressed_size), 0);
+    expect(plan.neededBytes).toBe(chunkBytes);
+
+    const parts = await fetchProjectedRanges(plan, source.fetchRange);
+    // The wide chunk between `a` and `b` is far past the merge gap, so exactly the two chunks are read.
+    expect(plan.ranges).toHaveLength(2);
+    expect(parts.reduce((sum, part) => sum + part.byteLength, 0)).toBe(chunkBytes);
+
+    const projected = assembleProjectedParquet(plan, parts);
+    const metadata = parquetMetadata(projected);
+    expect(metadata.row_groups).toHaveLength(1);
+    expect(Number(metadata.num_rows)).toBe(1000);
+    expect(metadata.key_value_metadata).toEqual([
+      { key: "flp_summary", value: "3" }, { key: "flp_summary_layout", value: "{}" },
+    ]);
+    expect(await query({ "p.parquet": projected }, "SELECT a, b FROM read_parquet('p.parquet') ORDER BY a"))
+      .toEqual(Array.from({ length: 1000 }, (_, i) => ({ a: 1000 + i, b: `b${(1000 + i) % 17}` })));
   });
 
   it("rejects a footer whose chunk offsets fall outside the file", async () => {

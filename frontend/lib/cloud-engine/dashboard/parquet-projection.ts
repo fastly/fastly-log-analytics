@@ -33,6 +33,8 @@ type Chunk = { rowGroup: number; column: number; start: number; length: number }
 export type ParquetProjection = {
   footer: ParquetFooter;
   columns: ReadonlySet<string>;
+  /** Indexes of the original row groups the rebuilt file keeps, in file order. */
+  rowGroups: number[];
   /** Top-level column names of the original file. */
   presentColumns: string[];
   chunks: Chunk[];
@@ -94,11 +96,20 @@ const chunkStart = (meta: { data_page_offset: bigint; dictionary_page_offset?: b
   return dictionary >= 4 && dictionary < data ? dictionary : data;
 };
 
-export function planParquetProjection(footer: ParquetFooter, columns: ReadonlySet<string>): ParquetProjection {
+/**
+ * The column chunks of `columns` to fetch, in the row groups `keepRowGroup`
+ * accepts (every row group by default), coalesced into byte ranges.
+ */
+export function planParquetProjection(
+  footer: ParquetFooter,
+  columns: ReadonlySet<string>,
+  keepRowGroup: (rowGroup: number) => boolean = () => true,
+): ParquetProjection {
   const { metadata, footerLength, size } = footer;
   const dataEnd = size - footerLength - 8;
   const chunks: Chunk[] = [];
-  metadata.row_groups.forEach((group, rowGroup) => group.columns.forEach((chunk, column) => {
+  const rowGroups = metadata.row_groups.map((_, rowGroup) => rowGroup).filter((rowGroup) => keepRowGroup(rowGroup));
+  rowGroups.forEach((rowGroup) => metadata.row_groups[rowGroup].columns.forEach((chunk, column) => {
     const meta = chunk.meta_data;
     if (!meta || chunk.file_path) throw new Error("Parquet column chunk metadata is not inline");
     if (!columns.has(meta.path_in_schema[0])) return;
@@ -110,7 +121,7 @@ export function planParquetProjection(footer: ParquetFooter, columns: ReadonlySe
   const ranges = coalesceRanges([...chunks].sort((a, b) => a.start - b.start));
   const neededBytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   return {
-    footer, columns, chunks, ranges, neededBytes,
+    footer, columns, rowGroups, chunks, ranges, neededBytes,
     presentColumns: topLevel(metadata.schema).map((field) => field.name),
     projectedBytes: neededBytes + footerLength + 12,
   };
@@ -153,8 +164,9 @@ export async function fetchProjectedRanges(plan: ParquetProjection, fetchRange: 
 
 /**
  * A standalone Parquet file holding only the planned column chunks, byte for
- * byte, under a footer rewritten for their new offsets. Statistics, page
- * indexes and bloom filters are dropped because they point into the original.
+ * byte, under a footer rewritten for their new offsets, with the planned row
+ * groups and the original key-value metadata. Statistics, page indexes and
+ * bloom filters are dropped because they point into the original.
  */
 export function assembleProjectedParquet(plan: ParquetProjection, rangeBytes: readonly ArrayBuffer[]): ArrayBuffer {
   if (rangeBytes.length !== plan.ranges.length) throw new Error("Projected Parquet ranges are incomplete");
@@ -178,7 +190,8 @@ export function assembleProjectedParquet(plan: ParquetProjection, rangeBytes: re
   writer.appendUint32(MAGIC);
   const byGroup = new Map<number, Chunk[]>();
   for (const chunk of plan.chunks) byGroup.set(chunk.rowGroup, [...byGroup.get(chunk.rowGroup) ?? [], chunk]);
-  const rowGroups = metadata.row_groups.map((group, rowGroup) => {
+  const rowGroups = plan.rowGroups.map((rowGroup) => {
+    const group = metadata.row_groups[rowGroup];
     const kept = byGroup.get(rowGroup) ?? [];
     const groupOffset = writer.offset;
     const columns = kept.map((chunk) => {
@@ -222,8 +235,9 @@ export function assembleProjectedParquet(plan: ParquetProjection, rangeBytes: re
   writeMetadata(writer, {
     version: metadata.version,
     schema,
-    num_rows: metadata.num_rows,
+    num_rows: rowGroups.reduce((sum, group) => sum + group.num_rows, BigInt(0)),
     row_groups: rowGroups,
+    ...(metadata.key_value_metadata ? { key_value_metadata: metadata.key_value_metadata } : {}),
     ...(metadata.created_by ? { created_by: metadata.created_by } : {}),
     metadata_length: 0,
   });
