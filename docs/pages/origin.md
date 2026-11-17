@@ -39,5 +39,5 @@ The ClickHouse reader ([`backend/high_scale/origin.py`](../../backend/high_scale
 
 ## Tests
 
-- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_reader_parity.py`](../../tests/high_scale/test_reader_parity.py)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)
 - E2E: `Origin Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts)

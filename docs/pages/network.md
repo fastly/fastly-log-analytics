@@ -35,6 +35,6 @@ ASN names come from the PostgreSQL `asn_names` table via `enrich_asn_labels`; un
 
 ## Tests
 
-- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_reader_parity.py`](../../tests/high_scale/test_reader_parity.py)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)
 - Frontend: [`frontend/__tests__/components/Map/NetworkMap.test.tsx`](../../frontend/__tests__/components/Map/NetworkMap.test.tsx)
 - E2E: `Network Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts)

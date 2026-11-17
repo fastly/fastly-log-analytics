@@ -65,7 +65,7 @@ Each failure mode has a named procedure. Operators consult these instead of impr
 3. `~/restart.sh` to pull repo, rebuild containers, start backend healthy on the new instance.
 4. First request per service triggers iceberg_catalog auto-rebuild from FOS metadata.json.
 5. First sync cron tick repopulates metadata.db ingested_files via re-LIST of FOS.
-6. Rollup backfill runs via the [`POST /api/admin/backfill-bundle-rollups`](../../backend/routers/admin/compaction.py) endpoint (or the recompute cron); takes minutes-to-hours depending on per-service data volume.
+6. Rollup backfill runs via the `POST /api/admin/backfill-bundle-rollups` (removed) endpoint (or the recompute cron); takes minutes-to-hours depending on per-service data volume.
 7. Dashboard queries return data once first query rebuilds the DuckDB view.
 
 #### B. Service config corruption — restore from backup or re-provision

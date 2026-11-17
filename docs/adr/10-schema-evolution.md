@@ -6,8 +6,9 @@
 > [!NOTE]
 > **Architectural Amendments (v3.0):**
 > - **Metadata Storage ([ADR-22](22-postgres-only-metadata.md)):** Per-service SQLite metadata and `sqlite_migrations.py` (`PRAGMA user_version`) have been eliminated. Metadata schema evolution is defined in `backend/core/metadata/pg_schema.py` against unified PostgreSQL 16.
-> - **Table Schema ([ADR-21](21-high-scale-serving-architecture.md)):** Durable analytical serving runs on ClickHouse (`backend/high_scale/sql/clickhouse_schema.sql`) and canonical FOS Archive Parquet rather than PyIceberg or DuckLake schema alteration methods.
+> - **Table Schema ([ADR-21](21-high-scale-serving-architecture.md)):** Durable analytical serving runs on ClickHouse (`backend/high_scale/sql/*_schema.sql`, for example [`request_schema.sql`](../../backend/high_scale/sql/request_schema.sql)) and canonical FOS Archive Parquet rather than PyIceberg or DuckLake schema alteration methods.
 > - **Strict Invariants Preserved:** Additive-only schema changes and positional stability rules (`_FIELD_ORDER` and `WIRE_ORDER` in `field_registry.py` matching the Rust Scorer in `compute/scorer/`) remain active and mandatory.
+> - **Field order today:** `_FIELD_ORDER` (the DuckDB column order in `backend/core/storage/catalog.py`) was removed with that storage layer, and `WIRE_ORDER` was removed in v3.0.0-rc1. The wire order is now the order of [`LOG_FIELD_CATALOG`](../../backend/core/catalog.py) entries that have a VCL expression, which `REGISTRY` follows; `tests/core/test_field_registry.py::test_wire_order_matches_legacy_emission_order` checks it.
 
 ## 1. Context & Motivation
 
@@ -17,7 +18,7 @@ The codebase has working schema-evolution machinery across four layers:
 - **Custom log fields** per-service in service-config JSON, validated by `validate_custom_field` (VCL injection guards, type compat, name collisions).
 - **Iceberg table schema** derived dynamically from `LOG_FIELD_CATALOG + custom_fields` via `get_iceberg_schema()`; existing tables evolved via `update_schema().add_column()` in `_init_iceberg_table_locked`.
 - **Per-service metadata SQLite** versioned by `PRAGMA user_version`; migrations in `backend/core/sqlite_migrations.py` (removed) are idempotent + transactional.
-- **Long-running data backfills** (rollups, hour-bundling) via the backfill helpers in [`backend/core/rollups/`](../../backend/core/rollups/) (`backfill_rollups`, `backfill_missing_bundles`, `backfill_day_bundles`), run on demand through the [`POST /api/admin/backfill-bundle-rollups`](../../backend/routers/admin/compaction.py) endpoint or the recompute cron: non-transactional, idempotent (they re-derive from the Iceberg source, so re-running is always safe).
+- **Long-running data backfills** (rollups, hour-bundling) via the backfill helpers in `backend/core/rollups/` (removed) (`backfill_rollups`, `backfill_missing_bundles`, `backfill_day_bundles`), run on demand through the `POST /api/admin/backfill-bundle-rollups` (removed) endpoint or the recompute cron: non-transactional, idempotent (they re-derive from the Iceberg source, so re-running is always safe).
 
 The machinery exists. What's missing is the contract for **what gets to change**, **how**, and **what gets guaranteed afterwards**. The README claims "schema evolution handled gracefully" — this ADR is what that sentence promises.
 
@@ -31,11 +32,11 @@ Schema evolution is **additive-only by default** at every layer. Removals, renam
 
 | Surface | Source of truth | How to add | How to remove |
 |---|---|---|---|
-| **Built-in log field** | [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py) dict + [`_FIELD_ORDER`](../../backend/core/storage/_core.py) tuple | Append to dict, append to `_FIELD_ORDER` (NEVER insert mid-list — IDs are positional and pinned), append to `WIRE_ORDER` if security-relevant, run `tests/core/test_field_registry.py` parity tests | Mark `deprecated: True` in catalog; keep ID slot reserved; remove from `_FIELD_ORDER` only after 2 minor versions + Rust scorer drops the field |
+| **Built-in log field** | [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py) dict + `_FIELD_ORDER` tuple (removed) | Append to dict, append to `_FIELD_ORDER` (NEVER insert mid-list — IDs are positional and pinned), append to `WIRE_ORDER` if security-relevant, run `tests/core/test_field_registry.py` parity tests | Mark `deprecated: True` in catalog; keep ID slot reserved; remove from `_FIELD_ORDER` only after 2 minor versions + Rust scorer drops the field |
 | **Custom log field** (per-service) | Service config JSON `log_fields.custom_fields` array | POST to service-update endpoint with `validate_custom_field` checks; Iceberg adds column via `update_schema().add_column()` on next ingest | `disabled: True` in config keeps the slot reserved (ID enumeration stable); hard-removing means the next custom field gets a different ID for new services |
 | **Iceberg table** (per-service) | Derived from above; mutated via `_init_iceberg_table_locked` | Automatic on first ingest after field added | Iceberg supports `drop_column`; we do not call it. Disabled fields stay in the schema until the table is dropped + re-created. |
 | **Metadata SQLite** (per-service) | `backend/core/sqlite_migrations.py:MIGRATIONS` (removed) dict | Append `_migration_N` callable; bump `user_version`; transactional; idempotent | Migrations apply on open; loss of metadata.db is recovered by re-running all migrations against a fresh DB |
-| **Long-running data backfill** | backfill helpers in [`backend/core/rollups/`](../../backend/core/rollups/) | Add a `backfill_*` helper; non-transactional; must be idempotent; run on demand via [`POST /api/admin/backfill-bundle-rollups`](../../backend/routers/admin/compaction.py) or the recompute cron | No persistent tracking — backfills re-derive from the Iceberg source, so re-running from scratch is the recovery path |
+| **Long-running data backfill** | backfill helpers in `backend/core/rollups/` (removed) | Add a `backfill_*` helper; non-transactional; must be idempotent; run on demand via `POST /api/admin/backfill-bundle-rollups` (removed) or the recompute cron | No persistent tracking — backfills re-derive from the Iceberg source, so re-running from scratch is the recovery path |
 
 ### 2.2 Field-ID stability rules (Iceberg + Rust scorer)
 
@@ -43,7 +44,7 @@ These are the rules that break things silently when violated. Read them.
 
 1. **Built-in IDs are positional in `_FIELD_ORDER`.** Position N → ID N+1 (Iceberg field IDs are 1-indexed). Never insert; always append.
 2. **Custom IDs are derived from sorted custom-field names**, enumerated AFTER built-in IDs. Disabling a custom field reserves its slot so subsequent IDs don't shift. **Never remove a disabled custom field from the slot reservation** without a coordinated re-bind of all referencing data.
-3. **`WIRE_ORDER` in field_registry.py** is byte-identical to the order log lines emit fields. Reordering it without simultaneously updating `compute/scorer/` rust code breaks scorer parity silently — the scorer reads positionally and will mis-attribute every subsequent field. `tests/core/test_field_registry.py::test_wire_order_matches` is the gate; do not delete it.
+3. **`WIRE_ORDER` in field_registry.py** is byte-identical to the order log lines emit fields. Reordering it without simultaneously updating `compute/scorer/` rust code breaks scorer parity silently — the scorer reads positionally and will mis-attribute every subsequent field. `tests/core/test_field_registry.py::test_wire_order_matches_legacy_emission_order` is the gate; do not delete it.
 4. **`SECURITY_HOOK_CODES` in field_registry.py** drives which fields the scorer inspects for security signals. Adding a security-hook field is a coordinated PR: field-registry + scorer rust code + scorer fixture tests, all in one commit.
 
 ### 2.3 Backward-compat guarantees
@@ -58,7 +59,7 @@ For each surface, what existing-data callers can rely on:
 ### 2.4 The four-step workflow for adding a built-in log field
 
 1. **Dict entry** in [`LOG_FIELD_CATALOG`](../../backend/core/log_fields.py) — name, VCL expression, DuckDB type, group, optional `value_type` for enums.
-2. **Order pin**: append to [`_FIELD_ORDER`](../../backend/core/storage/_core.py), append to `WIRE_ORDER` if log-line-positional.
+2. **Order pin**: append to `_FIELD_ORDER` (removed), append to `WIRE_ORDER` if log-line-positional.
 3. **Tests**: `tests/core/test_field_registry.py` parity tests run automatically; if the field is security-relevant, also append to `SECURITY_HOOK_CODES` and update `tests/scoring/`.
 4. **Documentation**: brief comment in catalog (one line) explaining what the field captures, where it comes from in VCL, and whether it's sensitive (analyst-visible vs admin-only).
 
@@ -93,7 +94,7 @@ For custom fields: per-service, the operator sets `disabled: True` and the field
 | Custom field disabled then re-enabled with different type | The Iceberg column already exists with the old type; re-enable doesn't change it. Document this gotcha in the operator docs. If forced, hard-remove + add with new name. |
 | `read_json_auto(ignore_errors=True)` silently NULLs a type-mismatched field | Visible in `error_count` column for that ingested file. Recovery: investigate which field changed type at the producer side; re-ingest after fixing. |
 | Metadata SQLite migration fails mid-run | Transaction rolls back; `user_version` not bumped. Next open re-applies. If the migration is buggy: the same failure repeats — fix the migration and ship. |
-| Data backfill fails mid-run | No persistent tracking row — re-run the backfill (via [`POST /api/admin/backfill-bundle-rollups`](../../backend/routers/admin/compaction.py) or the recompute cron). Backfills are idempotent (they re-derive from the Iceberg source), so re-running from scratch is always safe. |
+| Data backfill fails mid-run | No persistent tracking row — re-run the backfill (via `POST /api/admin/backfill-bundle-rollups` (removed) or the recompute cron). Backfills are idempotent (they re-derive from the Iceberg source), so re-running from scratch is always safe. |
 | Iceberg `update_schema().add_column()` fails | `_init_iceberg_table_locked` raises; new ingest blocked until resolved. Usually means concurrent writer; retry on next tick. If persistent: read pyiceberg error, investigate manifest state. |
 
 ## 5. Verification

@@ -54,4 +54,4 @@ Requests are served by the ClickHouse reader ([`backend/high_scale/dashboard.py`
 
 - Frontend unit: [`frontend/__tests__/app/dashboard.test.tsx`](../../frontend/__tests__/app/dashboard.test.tsx)
 - E2E: `Dashboard Page Contract` in [`frontend/e2e/pages/dashboard.spec.ts`](../../frontend/e2e/pages/dashboard.spec.ts) (single bundle call, metric switching, compare query, click-to-filter, map, card/collapse persistence, NGWAF card gating)
-- Backend: [`tests/routers/test_dashboard_router.py`](../../tests/routers/test_dashboard_router.py), [`tests/high_scale/test_reader_parity.py`](../../tests/high_scale/test_reader_parity.py)
+- Backend: [`tests/routers/test_dashboard_router.py`](../../tests/routers/test_dashboard_router.py), [`tests/high_scale/test_query_service.py`](../../tests/high_scale/test_query_service.py)

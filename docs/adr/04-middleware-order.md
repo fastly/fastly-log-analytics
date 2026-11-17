@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Decided by:** Engineering retrospective
-**Supersedes:** the paragraph-long prose comments in [backend/main.py:434-501](../../backend/main.py#L434-L501)
+**Supersedes:** the paragraph-long prose comments then at `backend/main.py:434-501`
 
 ## Context
 
@@ -60,7 +60,9 @@ def assert_middleware_order(app: FastAPI) -> None:
 assert_middleware_order(app)
 ```
 
-The pytest snapshot (`tests/test_trust_topology.py` (test removed)) imports the app and compares `app.user_middleware` against the same tuple.
+The tuple and `assert_middleware_order` now live in [`backend/routers/root_system.py:63-83`](../../backend/routers/root_system.py#L63-L83), called from `configure_root_system` (line 369); `backend.main` re-exports them.
+
+The pytest snapshot (`test_middleware_order_declaration_matches_runtime` in [`tests/test_admin_certificates.py`](../../tests/test_admin_certificates.py)) imports the app and compares `app.user_middleware` against the same tuple.
 
 ## Trust topology — extended invariants
 
