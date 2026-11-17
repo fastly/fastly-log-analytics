@@ -63,7 +63,7 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
-function roundTo(val: number, decimals: number): number {
+export function roundTo(val: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round(val * factor) / factor;
 }

@@ -8,7 +8,9 @@ import {
   mergeRollups,
   planRollup,
   queryRollup,
+  rebucketSeries,
   type Rollup,
+  type RollupAgg,
 } from "./rollup-query";
 import {
   FIXTURE_START,
@@ -107,6 +109,31 @@ describe("decodeRollup and mergeRollups", () => {
     mergeRollups([a, a]);
     expect(a.dims.get("pop")!.values().next().value!.requests).toBe(before);
     expect(rttHist().count()).toBe(histBefore);
+  });
+});
+
+describe("rebucketSeries", () => {
+  it("sums steps into coarser buckets and refuses buckets finer than or misaligned with the step", async () => {
+    const windows = await decodeAll(WINDOWS);
+    const hourly = rebucketSeries(windows, "asn", HOUR)!;
+    for (const [asn, buckets] of windows.series.get("asn")!) {
+      const byHour = new Map<number, number>();
+      for (const [t, agg] of buckets) {
+        const h = Math.floor(t / HOUR) * HOUR;
+        byHour.set(h, (byHour.get(h) ?? 0) + agg.requests);
+      }
+      expect(
+        Object.fromEntries([...hourly.get(asn)!].map(([t, agg]) => [t, agg.requests])),
+        asn,
+      ).toEqual(Object.fromEntries(byHour));
+    }
+    const rttCount = (series: Map<string, Map<number, RollupAgg>>) =>
+      [...series.values()].flatMap((b) => [...b.values()]).reduce((n, agg) => n + (agg.hists.rtt?.count() ?? 0), 0);
+    expect(rttCount(hourly)).toBe(rttCount(windows.series.get("asn")!));
+    expect(rebucketSeries(windows, "asn", 60_000)).toBeNull();
+    expect(rebucketSeries(windows, "asn", 450_000)).toBeNull();
+    expect(rebucketSeries(await decodeAll(DAY, HOUR), "asn", 900_000)).toBeNull();
+    expect(rebucketSeries(windows, "missing", HOUR)).toEqual(new Map());
   });
 });
 

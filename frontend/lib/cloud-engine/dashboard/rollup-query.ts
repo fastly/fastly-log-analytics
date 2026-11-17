@@ -256,6 +256,38 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
   return out;
 }
 
+/**
+ * Sums one `series5` field into `bucketMs` buckets aligned to the epoch, as the
+ * raw queries' `floor(ts_ms / bucketMs)` does, or returns null when `bucketMs`
+ * is not a whole number of the rollup's steps (raw rows must answer then).
+ */
+export function rebucketSeries(
+  rollup: Rollup,
+  field: string,
+  bucketMs: number,
+): Map<string, Map<number, RollupAgg>> | null {
+  if (bucketMs % rollup.seriesStepMs !== 0) return null;
+  const out = new Map<string, Map<number, RollupAgg>>();
+  for (const [value, buckets] of rollup.series.get(field) ?? []) {
+    const target = new Map<number, RollupAgg>();
+    out.set(value, target);
+    for (const [t, agg] of buckets) {
+      const at = Math.floor(t / bucketMs) * bucketMs;
+      const into = target.get(at) ?? emptyAgg();
+      target.set(at, into);
+      addAgg(into, agg);
+    }
+  }
+  return out;
+}
+
+/** Sums aggregates into a new one (e.g. a whole series, or several dimension values). */
+export function sumAggs(aggs: Iterable<RollupAgg>): RollupAgg {
+  const out = emptyAgg();
+  for (const agg of aggs) addAgg(out, agg);
+  return out;
+}
+
 export type RollupPlan = {
   files: SummaryUse[];
   /** Start of the earliest raw window the summaries answer. */
