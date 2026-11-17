@@ -479,18 +479,36 @@ export const ASSETS_SCAN_COLUMNS = [
   "time_to_first_byte_ns", "time_elapsed_usec", "elapsed", "origin_Whole_ms", "origin_time_ms",
 ] as const;
 
-/** The columns a projected /api/assets/aggregates load needs, or null when the filters can't name theirs. */
-export function assetsScanColumns(filters: unknown): string[] | null {
-  if (filters == null || filters === "") return [...ASSETS_SCAN_COLUMNS];
+// The window, service and `derived_asset_type`/`norm_url` columns every section reads, then each section's own.
+const ASSETS_BASE_COLUMNS = ["timestamp", "ts_ms", "service_id", "asset_type", "content_type", "url", "path"] as const;
+const ENCODING_BYTES_COLUMNS = ["content_encoding", "resp_header_content_encoding", "resp_body_size", "resp_bytes"] as const;
+const ASSETS_SECTION_COLUMNS: Record<AssetsSection, readonly string[]> = {
+  summary: ASSETS_SCAN_COLUMNS.filter((column) => column !== "status" && column !== "ttl"),
+  large_uncompressed_assets: [...ENCODING_BYTES_COLUMNS, "status"],
+  low_ttl_assets: ["ttl", "cache_status", "cache"],
+};
+
+/**
+ * The columns a projected /api/assets/aggregates load needs, or null when the filters can't name theirs.
+ * Named `sections` read only their own columns; the Cloud view lists the rest as NULL.
+ */
+export function assetsScanColumns(filters: unknown, sections?: unknown): string[] | null {
+  const named = Array.isArray(sections) && sections.length &&
+    sections.every((section) => Object.hasOwn(ASSETS_SECTION_COLUMNS, section)) ? sections as AssetsSection[] : null;
+  const columns: string[] = named
+    ? [...ASSETS_BASE_COLUMNS, ...named.flatMap((section) => ASSETS_SECTION_COLUMNS[section])]
+    : [...ASSETS_SCAN_COLUMNS];
+  if (filters == null || filters === "") return [...new Set(columns)];
   if (typeof filters !== "object") return null;
-  if (!Array.isArray(filters)) return [...new Set([...ASSETS_SCAN_COLUMNS, ...Object.keys(filters)])];
+  if (!Array.isArray(filters)) return [...new Set([...columns, ...Object.keys(filters)])];
   const fields: string[] = [];
   for (const clause of filters as unknown[]) {
     if (!clause || typeof clause !== "object") return null;
     const column = (clause as { column?: unknown }).column;
-    if (typeof column === "string" && ALLOWED_FILTER_COLS.has(column)) fields.push(column);
+    // `buildAssetsWhere` reads a `cache_status` filter through `COALESCE(cache_status, cache, ...)`.
+    if (typeof column === "string" && ALLOWED_FILTER_COLS.has(column)) fields.push(column, ...column === "cache_status" ? ["cache"] : []);
   }
-  return [...new Set([...ASSETS_SCAN_COLUMNS, ...fields])];
+  return [...new Set([...columns, ...fields])];
 }
 
 export async function handleAssetsRequest(

@@ -612,7 +612,7 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
   const scanColumns = network ? networkScanColumns(url.pathname, params)
     : url.pathname.startsWith("/api/origin/") ? originScanColumns(url.pathname, params)
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
-    : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters)
+    : url.pathname === "/api/assets/aggregates" ? assetsScanColumns(params.filters, params.sections)
     : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters)
     : url.pathname === "/api/sessions" ? sessionsScanColumns(params.filters)
     : /^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?)$/.test(url.pathname)

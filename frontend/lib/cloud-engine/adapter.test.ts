@@ -859,6 +859,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await options("/api/origin/aggregates", { filters: [filters] })).toBeUndefined();
     expect(await options("/api/value/summary", { filters: "host" })).toBeUndefined();
     expect(await options("/api/assets/aggregates", { filters: 5 })).toBeUndefined();
+    const tables = await options("/api/assets/aggregates", { filters: {}, sections: ["large_uncompressed_assets", "low_ttl_assets"] });
+    expect(tables?.columns).toEqual(expect.arrayContaining(["url", "resp_bytes", "ttl", "cache"]));
+    expect(tables?.columns).not.toContain("ttfb");
     expect(await options("/api/performance/aggregates", { filters, sort_by: "p99" }))
       .toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS, "host"] });
     expect(await options("/api/performance", {})).toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS] });

@@ -1,8 +1,8 @@
 /**
  * @vitest-environment jsdom
  */
-import { renderWithQuery } from '@/__tests__/helpers/page-smoke'
-import { cleanup, screen, within } from '@testing-library/react'
+import { renderWithQuery, stubIntersectionObserver } from '@/__tests__/helpers/page-smoke'
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { server } from '@/__tests__/helpers/msw/handlers'
@@ -68,6 +68,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setCloudModeRuntime(false)
+  vi.unstubAllGlobals()
   useServiceStore.setState({ activeServiceId: null, isInitialized: false })
   cleanup()
 })
@@ -83,6 +84,25 @@ describe('AssetsClient on Cloud', () => {
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
     expect(sections).toEqual(expect.arrayContaining([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
     expect(sections).toHaveLength(2)
+  })
+
+  it('reads the raw URL hotspots only once their panel nears the viewport', async () => {
+    setCloudModeRuntime(true)
+    const observer = stubIntersectionObserver()
+    let answerTables: (body: unknown) => void = () => {}
+    const tables = new Promise((resolve) => { answerTables = resolve })
+    const sections = recordPosts('/api/assets/aggregates', (asked) => asked?.includes('summary') ? { ...assetsSummary, rollup: meta } : tables)
+    const { container } = renderWithQuery(<AssetsClient />, { withNuqs: true })
+
+    expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+    expect(sections).toEqual([['summary']])
+    expect(screen.getByText('Scanning uncompressed static assets...')).toBeInTheDocument()
+    expect(screen.queryByText('No uncompressed static assets detected! Nice work.')).not.toBeInTheDocument()
+    act(() => observer.fire(true))
+    await waitFor(() => expect(sections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
+    expect(container.querySelector('.opacity-60')).toBeNull()
+    answerTables({ large_uncompressed_assets: [], low_ttl_assets: [] })
+    expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
   })
 
   it('splits a cache-status filter too, but keeps one raw read for any other filter', async () => {

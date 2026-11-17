@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { AlertTriangle, Layers } from 'lucide-react'
+import { useInViewOnce } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 import { readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
@@ -93,12 +94,16 @@ export function AssetsReportContent({
     return unwrapClient(client.POST('/api/assets/aggregates', { signal, body }))
   }
 
+  // The URL tables always read raw rows, so in Cloud they wait until their panel nears the viewport.
+  const hotspotsRef = React.useRef<HTMLDivElement>(null)
+  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '600px' })
   const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
     namespace: ['assets', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
     range,
     keyParts: rollupFirst ? [ASSETS_RAW_SECTIONS] : [],
+    queryOptions: { enabled: !rollupFirst || hotspotsNear },
     queryFn: ({ rangeBody, signal }) => postAssets(rollupFirst ? ASSETS_RAW_SECTIONS : undefined, rangeBody, signal),
   })
 
@@ -113,7 +118,8 @@ export function AssetsReportContent({
 
   const summaryQuery = rollupFirst ? rollupQuery : bundle
   const isLoading = summaryQuery.isLoading
-  const isFetching = summaryQuery.isFetching || bundle.isFetching
+  // The URL tables show their own loading block, so only a refetch over shown rows dims the page.
+  const isFetching = summaryQuery.isFetching || (bundle.isFetching && bundle.data !== undefined)
   const error = summaryQuery.error ?? bundle.error
   const data = rollupFirst ? { ...bundle.data, ...rollupQuery.data } as AssetsAggregates : bundle.data
   const rollup = rollupFirst ? readRollupMeta(rollupQuery.data) : undefined
@@ -174,13 +180,15 @@ export function AssetsReportContent({
         onSelectHelp={setActiveHelp}
       />
 
-      <AssetsHotspotsSection
-        largeUncompressed={largeUncompressed}
-        lowTtl={lowTtl}
-        isLoading={bundle.isLoading}
-        urlFilterHrefPrefix={urlFilterHrefPrefix}
-        onSelectHelp={setActiveHelp}
-      />
+      <div ref={hotspotsRef}>
+        <AssetsHotspotsSection
+          largeUncompressed={largeUncompressed}
+          lowTtl={lowTtl}
+          isLoading={!bundle.data}
+          urlFilterHrefPrefix={urlFilterHrefPrefix}
+          onSelectHelp={setActiveHelp}
+        />
+      </div>
 
       <MissingAssetFieldsBanner missingFields={missingFields} activeServiceId={activeServiceId} />
 

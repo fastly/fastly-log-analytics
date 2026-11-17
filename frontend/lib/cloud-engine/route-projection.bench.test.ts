@@ -174,6 +174,13 @@ const ROUTES: Route[] = [
     name: "/assets-shield", columns: assetsScanColumns({}),
     run: (read) => handleAssetsRequest("/api/assets/aggregates", { ...RANGE, filters: {}, engine: read }),
   },
+  {
+    // What the page reads raw once summaries answer the rest and the URL tables near view.
+    name: "/assets-shield URL tables", columns: assetsScanColumns({}, ["large_uncompressed_assets", "low_ttl_assets"]),
+    run: (read) => handleAssetsRequest("/api/assets/aggregates", {
+      ...RANGE, filters: {}, sections: ["large_uncompressed_assets", "low_ttl_assets"], engine: read,
+    }),
+  },
   ...NETWORK_PAGE.map(([path, params]): Route => ({
     name: `/network ${path} ${JSON.stringify(params.sections ?? [])}`, columns: networkScanColumns(path, params),
     run: (read) => handleNetworkRequest(path, { ...RANGE, ...params, engine: read } as never),

@@ -201,7 +201,7 @@ describe("Cloud route column projections", () => {
 
   const assets = (body: Record<string, unknown>): Variant => ({
     name: `/api/assets/aggregates ${JSON.stringify(body)}`,
-    columns: assetsScanColumns(body.filters),
+    columns: assetsScanColumns(body.filters, body.sections),
     run: (context) => handleAssetsRequest("/api/assets/aggregates", { ...RANGE, ...body, engine: context }),
   });
 
@@ -213,6 +213,21 @@ describe("Cloud route column projections", () => {
       assets({ filters: { method: { mode: "include", values: ["method-1"] } } }),
       assets({ filters: [{ column: "geo_country", operator: "!=", value: "x" }, { column: "asset_type", operator: "=", value: "Image" }] }),
     ]);
+    // The raw URL tables read only their columns; the Cloud view lists the rest as NULL.
+    const tables = ["large_uncompressed_assets", "low_ttl_assets"];
+    await guard([
+      assets({ filters: {}, service_id: "svc", sections: tables }),
+      ...tables.map((section) => assets({ filters: {}, sections: [section] })),
+      assets({ filters: { cache: { mode: "exclude", values: ["PASS"] } }, sections: tables }),
+      assets({ filters: [{ column: "cache_status", operator: "=", value: "MISS" }], sections: ["large_uncompressed_assets"] }),
+      assets({ filters: {}, sections: ["summary"] }),
+    ], true);
+    const raw = assetsScanColumns({}, tables)!;
+    expect(raw).toEqual(expect.not.arrayContaining(["ttfb", "elapsed", "ttfb_ms", "origin_Whole_ms", "origin_time_ms"]));
+    expect(assetsScanColumns({}, ["low_ttl_assets"])).toEqual(expect.not.arrayContaining(["resp_bytes", "status"]));
+    expect(assetsScanColumns({}, ["large_uncompressed_assets"])).not.toContain("ttl");
+    expect(assetsScanColumns({}, ["nope"])).toEqual(assetsScanColumns({}));
+    expect(assetsScanColumns({}, [])).toEqual(assetsScanColumns({}));
     expect(assetsScanColumns([{ column: "ua", operator: "=", value: "x" }])).not.toContain("ua");
     expect(assetsScanColumns("host")).toBeNull();
     expect(assetsScanColumns([null])).toBeNull();
