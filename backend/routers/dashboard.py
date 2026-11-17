@@ -8,12 +8,11 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.high_scale import dashboard as hs_dashboard
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.models.analytics import (
     AggregatesRequest,
     AggregatesResponse,
@@ -29,6 +28,7 @@ from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import (
     make_section_expander,
     query_errors,
+    require_high_scale,
 )
 from backend.utils.telemetry import get_sqlite_queries
 
@@ -39,15 +39,6 @@ dashboard_router = router
 
 # No coupling — every dashboard section is independent.
 _expand_sections = make_section_expander(DashboardSectionName)
-
-
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
 
 
 def _resolve_aggregate_flags(
@@ -77,7 +68,7 @@ def dashboard_aggregates(
 ):
     start_time, end_time = ctx.resolve_window(req)
     _expand_sections(req.sections)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_dashboard.aggregates(high_scale_service, req, start_time, end_time)
 
 
@@ -90,7 +81,7 @@ async def dashboard_bundle(
     """Composite endpoint returning /api/dashboard/aggregates + /api/security/top-bots."""
     start_time, end_time = ctx.resolve_window(req)
     _expand_sections(req.sections)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return await asyncio.to_thread(hs_dashboard.bundle, high_scale_service, req, start_time, end_time)
 
 
@@ -131,7 +122,7 @@ def dashboard_raw_csv(
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
     csv_limit = min(max(1, int(req.limit)), 50000) if "limit" in req.model_fields_set and req.limit else 50000
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     df = hs_dashboard.raw_df(high_scale_service, req, start_time, end_time, limit=csv_limit)
 
     if df.empty:
@@ -171,5 +162,5 @@ def dashboard_field_values(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_dashboard.field_values(high_scale_service, req, start_time, end_time)

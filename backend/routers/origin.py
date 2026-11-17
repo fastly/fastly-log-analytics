@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.network import origin_shielding_analysis as hs_shielding_analysis
 from backend.high_scale.origin import (
     aggregates as high_scale_aggregates,
@@ -43,7 +42,7 @@ from backend.models.analytics import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories.utils.response_cache import cache_result
-from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.router_utils import make_section_expander, query_errors, require_high_scale
 
 router = APIRouter(prefix="/api/origin", tags=["origin"], responses=DEFAULT_ERROR_RESPONSES)
 origin_router = router
@@ -52,15 +51,6 @@ _TS_STATUS_PATH_TRIPLE: frozenset[str] = frozenset({"timeseries", "status_codes"
 _POP_IP_PAIR: frozenset[str] = frozenset({"pop_latency", "ip_health"})
 
 _expand_origin_sections = make_section_expander(OriginSectionName, union_groups=(_TS_STATUS_PATH_TRIPLE, _POP_IP_PAIR))
-
-
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
 
 
 @router.post("/aggregates", response_model=OriginAggregatesResponse)
@@ -72,7 +62,7 @@ async def origin_aggregates(
     """Composite of the seven origin cards."""
     start_time, end_time = ctx.resolve_window(req)
     sections = _expand_origin_sections(req.sections)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     res = await asyncio.to_thread(
         high_scale_aggregates, high_scale_service, req, start_time, end_time, sections=sections
     )
@@ -88,7 +78,7 @@ def origin_summary(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginSummaryResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "summary")
     )
@@ -101,7 +91,7 @@ def origin_timeseries(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginTimeseriesResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "timeseries")
     )
@@ -114,7 +104,7 @@ def origin_slow_urls(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginSlowUrlsResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "slow_urls")
     )
@@ -127,7 +117,7 @@ def origin_status_codes(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginStatusCodesResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "status_codes")
     )
@@ -140,7 +130,7 @@ def origin_path_breakdown(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginPathBreakdownResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "path_breakdown")
     )
@@ -153,7 +143,7 @@ def origin_pop_latency(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginPopLatencyResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "pop_latency")
     )
@@ -166,7 +156,7 @@ def origin_ip_health(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginIpHealthResponse.with_telemetry(
         **hs_origin_section(high_scale_service, req, start_time, end_time, "ip_health")
     )
@@ -179,7 +169,7 @@ def origin_shielding_analysis(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_shielding_analysis(high_scale_service, req, start_time, end_time)
 
 
@@ -190,5 +180,5 @@ def origin_drilldown(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return OriginDrilldownResponse.with_telemetry(**hs_origin_drilldown(high_scale_service, req, start_time, end_time))

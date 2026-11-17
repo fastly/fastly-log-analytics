@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 import tenacity
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
+from backend.core.catalog import _opt_int
 from backend.utils.runtime_modes import mock_mode_enabled
 
 logger = logging.getLogger(__name__)
@@ -994,15 +995,6 @@ def _count(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _opt_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 Count = Annotated[int, BeforeValidator(_count)]

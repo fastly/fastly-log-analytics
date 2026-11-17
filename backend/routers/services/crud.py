@@ -31,6 +31,7 @@ from backend.utils.router_utils import (
     raise_internal,
     stored_fastly_token,
 )
+from backend.utils.sse import sse_payload as _sse
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -43,14 +44,6 @@ _CacheRegistry.register("services.core._cron_schedule_cache", _cron_schedule_cac
 
 # Whitelisted fields safe to surface to a remote analyst on GET /api/services.
 _ANALYST_SAFE_SERVICE_FIELDS = frozenset({"service_id", "name", "is_active"})
-
-
-def _sse(type_: str, message: str | None = None, **extra: object) -> str:
-    payload: dict[str, object] = {"type": type_}
-    if message is not None:
-        payload["message"] = message
-    payload.update(extra)
-    return json.dumps(payload)
 
 
 def _trim_for_analyst(services: list[dict], allowed_ids: set[str]) -> list[dict]:

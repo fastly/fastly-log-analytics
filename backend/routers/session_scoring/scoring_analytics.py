@@ -25,7 +25,6 @@ from backend.core.request_context import (
     seal_session_token,
 )
 from backend.core.sql_validator import escape_sql_literal
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.models.analytics import (
     ScoringAnalyticsResponse,
     ScoringComplianceBreakdownResponse,
@@ -54,7 +53,7 @@ from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import make_error, not_found, query_errors
+from backend.utils.router_utils import make_error, not_found, query_errors, require_high_scale
 from backend.utils.telemetry import process_context_scope
 
 from .scoring_vcl import scoring_status
@@ -75,15 +74,6 @@ _SCORING_COLUMNS: frozenset[str] = frozenset(
         "edge_score_exec_us",
     }
 )
-
-
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
 
 
 def query_logs(service_id: str, sql: str, params: dict | tuple = ()) -> list[dict]:
@@ -1156,7 +1146,7 @@ def scoring_dashboard(
 
 def _dispatch_sessions_query(ctx: RequestContext, hs_fn, duck_fn=None) -> dict:
     del duck_fn
-    return hs_fn(_require_high_scale(ctx))
+    return hs_fn(require_high_scale(ctx))
 
 
 def _seal_session_rows(rows: list[dict], service_id: str) -> None:
@@ -1181,7 +1171,7 @@ def sessions_endpoint(req: SessionsRequest, ctx: RequestContext = Depends(build_
             start_time = start_time or (_now - timedelta(days=7)).isoformat()
         from backend.high_scale.sessions import sessions_endpoint as hs_sessions
 
-        result = hs_sessions(_require_high_scale(ctx), req, start_time, end_time)
+        result = hs_sessions(require_high_scale(ctx), req, start_time, end_time)
         _seal_session_rows(result.get("sessions", []), ctx.service_id)
         return SessionsResponse.with_telemetry(**result)
 
@@ -1215,7 +1205,7 @@ def sessions_detail(req: SessionDetailRequest, ctx: RequestContext = Depends(bui
             raise RuntimeError("clamp returned no bounds although both were supplied")
         from backend.high_scale.sessions import sessions_detail as hs_detail
 
-        res = hs_detail(_require_high_scale(ctx), req, start_time, end_time, ip, ja4)
+        res = hs_detail(require_high_scale(ctx), req, start_time, end_time, ip, ja4)
         return SessionDetailResponse.with_telemetry(**res)
 
 

@@ -156,6 +156,14 @@ def stream_sse_from_worker(
     return sse_response(_stream(), ping=ping)
 
 
+def sse_payload(type_: str, message: str | None = None, **extra: object) -> str:
+    payload: dict[str, object] = {"type": type_}
+    if message is not None:
+        payload["message"] = message
+    payload.update(extra)
+    return json.dumps(payload)
+
+
 def sse_response(stream: AsyncIterable[Any] | Iterator[Any], *, ping: int = 5) -> EventSourceResponse:
     """Wrap an SSE ``stream`` in an ``EventSourceResponse``."""
     return EventSourceResponse(stream, ping=ping, headers=SSE_PASSTHROUGH_HEADERS)

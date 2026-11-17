@@ -5,11 +5,10 @@ from __future__ import annotations
 import csv
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.security import (
     get_proxies_data as hs_proxies,
 )
@@ -30,6 +29,7 @@ from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import (
     make_section_expander,
     query_errors,
+    require_high_scale,
 )
 
 router = APIRouter(prefix="/api/security", tags=["network", "security"], responses=DEFAULT_ERROR_RESPONSES)
@@ -45,15 +45,6 @@ _expand_security_sections = make_section_expander(
 )
 
 
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
-
-
 @router.post("/aggregates", response_model=SecurityAggregatesResponse)
 @router.post("/bundle", response_model=SecurityAggregatesResponse)
 @query_errors()
@@ -65,7 +56,7 @@ def security_aggregates(
     start_time, end_time = ctx.resolve_window(req)
     sections = _expand_security_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     response.headers["Cache-Control"] = "private, max-age=30, stale-while-revalidate=120"
     return hs_aggregates(high_scale_service, req, start_time, end_time, sections=sections, mask_ips=mask_ips)
 
@@ -102,7 +93,7 @@ def export_proxies_csv(
 ):
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
     mask_ips = mask_ips_for(ctx.analyst_session)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     res_raw = hs_proxies(high_scale_service, None, resolved_start, resolved_end, mask_ips=mask_ips)
     res = res_raw.model_dump() if hasattr(res_raw, "model_dump") else res_raw
 
@@ -164,5 +155,5 @@ def get_security_threat_intel(
 ):
     """Correlate client TLS fingerprints with active WAF triggers and proxy flags."""
     resolved_start, resolved_end = ctx.clamp(start_time, end_time)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_threat_intel(high_scale_service, resolved_start, resolved_end)

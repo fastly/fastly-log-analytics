@@ -48,6 +48,7 @@ from backend.utils.router_utils import (
     require_json_content_type,
     require_service_id,
 )
+from backend.utils.sse import sse_payload as _sse
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -55,14 +56,6 @@ router = APIRouter(prefix="/api/provision", tags=["provision"], responses=DEFAUL
 provision_router = router
 
 _FASTLY_HTTP_ERROR_RE = re.compile(r"HTTP (\d+) ")
-
-
-def _sse(type_: str, message: str | None = None, **extra: object) -> str:
-    payload: dict[str, object] = {"type": type_}
-    if message is not None:
-        payload["message"] = message
-    payload.update(extra)
-    return json.dumps(payload)
 
 
 def _invalidate_service_credentials(service_id: str) -> None:

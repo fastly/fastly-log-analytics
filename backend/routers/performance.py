@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.ingest_controller import assets_aggregates as hs_assets_aggregates
 from backend.high_scale.performance import (
     performance_aggregates as hs_performance,
@@ -34,6 +33,7 @@ from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_s
 from backend.utils.router_utils import (
     make_section_expander,
     query_errors,
+    require_high_scale,
 )
 from backend.utils.router_utils import (
     resolve_fastly_token as _resolve_token,
@@ -56,15 +56,6 @@ _expand_cmcd_sections = make_section_expander(CmcdSectionName)
 _expand_value_sections = make_section_expander(ValueSectionName)
 
 
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
-
-
 @router.post("/performance/aggregates", tags=["performance"], response_model=PerformanceAggregatesResponse)
 @query_errors()
 def performance_aggregates(
@@ -73,7 +64,7 @@ def performance_aggregates(
 ):
     start_time, end_time = ctx.resolve_window(req)
     sections = _expand_performance_sections(req.sections)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_performance(high_scale_service, req, start_time, end_time, sections=sections)
 
 
@@ -83,7 +74,7 @@ def _assets_aggregates_impl(
 ) -> AssetsAggregatesResponse:
     with process_context_scope("assets:aggregates"):
         start_time, end_time = ctx.resolve_window(req)
-        high_scale_service = _require_high_scale(ctx)
+        high_scale_service = require_high_scale(ctx)
         return hs_assets_aggregates(high_scale_service, req, start_time, end_time)
 
 
@@ -123,7 +114,7 @@ def cmcd_aggregates(
     start_time, end_time = ctx.resolve_window(req)
     sections = _expand_cmcd_sections(req.sections)
     mask_ips = mask_ips_for(ctx.analyst_session)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     res = hs_cmcd(high_scale_service, req, start_time, end_time, sections, mask_ips)
     return CmcdAggregatesResponse.with_telemetry(**res)
 
@@ -136,7 +127,7 @@ def value_summary(
 ):
     start_time, end_time = ctx.resolve_window(req)
     sections = _expand_value_sections(req.sections)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_value_summary(high_scale_service, req, start_time, end_time, sections=sections)
 
 

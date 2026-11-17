@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Collection, Mapping
-from typing import Any, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from fastapi import HTTPException, Request
 
@@ -182,6 +182,10 @@ from backend.utils.sse import (
     stream_iac_reconcile,
     stream_sse_from_worker,
 )
+
+if TYPE_CHECKING:
+    from backend.core.request_context import RequestContext
+    from backend.high_scale.ingest_controller import HighScaleService
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +380,15 @@ def require_service_id(service_id: str | None) -> str:
     if not service_id:
         raise HTTPException(status_code=400, detail=make_error("service_id_required"))
     return service_id
+
+
+def require_high_scale(ctx: RequestContext) -> HighScaleService:
+    if ctx.high_scale is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "ClickHouse service is not available for this service"},
+        )
+    return ctx.high_scale
 
 
 # ── Section-selector validation ───────────────────────────────────────────────
@@ -647,6 +660,7 @@ __all__ = [
     "redact_error_text",
     "register_salt",
     "require_fastly_token",
+    "require_high_scale",
     "require_json_content_type",
     "require_owned_row",
     "require_service_id",

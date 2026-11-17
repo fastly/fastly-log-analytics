@@ -6,11 +6,10 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.network import (
     get_pop_health as hs_get_pop_health,
 )
@@ -35,7 +34,7 @@ from backend.models.analytics import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.router_utils import make_section_expander, query_errors
+from backend.utils.router_utils import make_section_expander, query_errors, require_high_scale
 from backend.utils.telemetry import process_context_scope
 from backend.utils.time_window import (
     invite_clamp_fingerprint,
@@ -54,15 +53,6 @@ CORE_SECTIONS: frozenset[str] = frozenset(
 SHIELDING_SECTIONS: frozenset[str] = frozenset({"shielding_analysis"})
 
 _expand_network_sections = make_section_expander(NetworkSectionName)
-
-
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
 
 
 def _resolve_network_window(
@@ -90,7 +80,7 @@ def network_health(
 ):
     start_time, end_time, _, _, _ = _resolve_network_window(req, ctx)
     _expand_network_sections(req.sections)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     resp = hs_network_health(high_scale_service, req, start_time, end_time)
     if (cached_json := getattr(resp, "_cached_json_dict", None)) is not None:
         return JSONResponse(content=cached_json)
@@ -104,7 +94,7 @@ def network_quality(
     ctx: RequestContext = Depends(build_request_context),
 ):
     start_time, end_time = ctx.resolve_window(req)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_network_quality(high_scale_service, req, start_time, end_time)
 
 
@@ -121,7 +111,7 @@ def get_pop_health(
     )
     clamped_start_dt = parse_iso_utc(clamped_start) if clamped_start else start_time
     clamped_end_dt = parse_iso_utc(clamped_end) if clamped_end else end_time
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_get_pop_health(high_scale_service, clamped_start_dt, clamped_end_dt)
 
 
@@ -133,7 +123,7 @@ def _network_bundle_impl(
         start_time, end_time, _, _, _ = _resolve_network_window(req, ctx)
         if req.sections:
             _expand_network_sections(req.sections)
-        high_scale_service = _require_high_scale(ctx)
+        high_scale_service = require_high_scale(ctx)
         bundle_resp = hs_network_bundle(high_scale_service, req, start_time, end_time)
         if (cached_json := getattr(bundle_resp, "_cached_json_dict", None)) is not None:
             return JSONResponse(content=cached_json)

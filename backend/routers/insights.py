@@ -6,11 +6,10 @@ import asyncio
 import threading
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.cron.jobs.insights_prewarmer import record_insights_request
-from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.insights import (
     cache_collapse_detail_endpoint as hs_detail,
 )
@@ -26,7 +25,7 @@ from backend.models.analytics import (
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.auth import mask_ips_for
 from backend.utils.remote_access import analyst_clamp_cache_key
-from backend.utils.router_utils import query_errors
+from backend.utils.router_utils import query_errors, require_high_scale
 
 router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RESPONSES)
 insights_router = router
@@ -34,15 +33,6 @@ insights_router = router
 # Per-service semaphore (capacity=1) serialises concurrent insights scans.
 _insights_sems: dict[str, asyncio.Semaphore] = {}
 _insights_sems_lock = threading.Lock()
-
-
-def _require_high_scale(ctx: RequestContext) -> HighScaleService:
-    if ctx.high_scale is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "ClickHouse service is not available for this service"},
-        )
-    return ctx.high_scale
 
 
 def _get_insights_sem(
@@ -92,7 +82,7 @@ async def insights_endpoint(
     clamp_start, clamp_end, mask_ips, clamp_cache_key = _analyst_lookback_clamp(
         ctx, req.baseline_hours, req.window_size_hrs
     )
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     force_refresh = req.force_refresh if ctx.analyst_session is None else False
     sem = _get_insights_sem(ctx.service_id, req.window_size_hrs, req.baseline_hours)
     async with sem:
@@ -116,5 +106,5 @@ def cache_collapse_detail_endpoint(
 ):
     record_insights_request(ctx.service_id)
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
-    high_scale_service = _require_high_scale(ctx)
+    high_scale_service = require_high_scale(ctx)
     return hs_detail(high_scale_service, req, clamp_start, clamp_end, mask_ips)
