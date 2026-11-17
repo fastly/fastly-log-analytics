@@ -12021,6 +12021,40 @@ mod request_compaction {
         assert!(!fake.waits.borrow().is_empty(), "the lag is waited out");
     }
 
+    /// The KV API can lag a pass's own write past every read-back. The write landed, so this is
+    /// no conflict: the pass stops with more pending, and once its lease lapses the next pass
+    /// finishes the work.
+    #[test]
+    fn a_pass_own_state_write_lagging_past_every_read_back_stops_with_more_pending() {
+        for sources in [0, 2] {
+            let fake = Fake::new(NOW);
+            seed(&fake, sources);
+            fake.kv.borrow_mut().insert(
+                compaction::STATE_KEY.into(),
+                (
+                    1,
+                    serde_json::to_value(compaction::State::default()).unwrap(),
+                ),
+            );
+            fake.lag_compact_reads.set(true);
+            fake.lagging_compact_reads.set(40);
+            fake.new_request();
+            let report = compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 0)
+                .unwrap_or_else(|error| panic!("{sources} sources: {error}"));
+            assert_eq!(report.stopped.as_deref(), Some("state_lag"), "{report:?}");
+            assert!(report.more_pending, "{sources} sources: {report:?}");
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            fake.lag_compact_reads.set(false);
+            fake.lagging_compact_state.borrow_mut().take();
+            fake.now.set(fake.now.get() + 71);
+            let report = finish(&fake, TARGET);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert_eq!(compacts(&fake).len(), usize::from(sources > 0));
+            let state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+            assert_eq!(state["lease_until"], 0, "the lease was released");
+        }
+    }
+
     #[test]
     fn adaptive_policy_compacts_current_hour_and_revisits_late_inputs() {
         let fake = Fake::new(HOUR + 1800);

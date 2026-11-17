@@ -89,6 +89,11 @@ const READ_BACK_CALLS: u32 = 3;
 /// A state write the pass's calls could not confirm: nothing was written over another writer,
 /// and the next pass reads the state afresh.
 const STATE_BUDGET: &str = "compact_state_budget";
+/// A state write that lost its CAS while every read still showed the value the pass's own last
+/// landed write replaced: the KV API lagging past the read-back, not another writer. Nothing was
+/// written over the landed state, so the pass stops with more pending and a later pass, once the
+/// landed lease lapses, redoes whatever this write would have recorded.
+const STATE_LAG: &str = "compact_state_lag";
 
 /// The window files a pass merges. Each has its own state record, so a lease or job held on one
 /// never stalls another.
@@ -354,6 +359,8 @@ struct Run<'s, 'a, R: Runtime> {
     /// The value `saved` replaced (at first, the value the pass read), which a lagging read
     /// still shows; any other value is another writer's.
     replaced: Option<Value>,
+    /// Whether the last read-back's last read still showed `replaced`.
+    lag_seen: bool,
     report: Report,
     changed: bool,
     bump: bool,
@@ -494,6 +501,7 @@ pub fn compact_pass<R: Runtime>(
         replaced: record.as_ref().map(|r| without_written_ms(r.value.clone())),
         generation: record.map(|r| r.generation),
         saved: None,
+        lag_seen: false,
         report: Report::default(),
         changed: false,
         bump: false,
@@ -540,10 +548,22 @@ pub fn compact_pass<R: Runtime>(
     // catalog files and publishes by watermark CAS, and the plan's commit re-reads the watermark
     // (or retries on `source_index_base_mismatch`), so both publications land.
     let mut pending = Vec::new();
-    if run.state.job.is_some() {
-        run.resume_job(&mut pending)?;
+    let scanned = if run.state.job.is_some() {
+        run.resume_job(&mut pending)
     } else {
-        pending = run.scan()?;
+        run.scan().map(|found| pending = found)
+    };
+    match scanned {
+        Err(error) if error == STATE_LAG => {
+            // Nothing this pass merged is published yet; the next pass resumes the landed job.
+            run.report.compacts = 0;
+            run.report.sources = 0;
+            run.report.rows = 0;
+            run.report.more_pending = true;
+            run.report.stopped = Some("state_lag".into());
+            return Ok(run.report);
+        }
+        result => result?,
     }
     if run.bump && rum {
         // RUM readers list the folder itself, so the compact is published once it exists.
@@ -600,7 +620,7 @@ pub fn compact_pass<R: Runtime>(
                         return Err("compact_state_limit".into());
                     }
                     match run.write(&value, false) {
-                        Err(error) if error == STATE_BUDGET => {}
+                        Err(error) if error == STATE_BUDGET || error == STATE_LAG => {}
                         result => result?,
                     }
                 }
@@ -697,6 +717,10 @@ pub fn compact_pass<R: Runtime>(
             Err(error) if error == STATE_BUDGET => {
                 run.report.more_pending = true;
                 run.report.stopped = Some("call_budget".into());
+            }
+            Err(error) if error == STATE_LAG => {
+                run.report.more_pending = true;
+                run.report.stopped = Some("state_lag".into());
             }
             result => result?,
         }
@@ -960,6 +984,9 @@ impl<R: Runtime> Run<'_, '_, R> {
                 };
                 if !confirmed {
                     self.generation = tried;
+                    if self.saved.is_some() && self.lag_seen {
+                        return Err(STATE_LAG.into());
+                    }
                     return Err("compact_state_conflict".into());
                 }
             }
@@ -989,6 +1016,7 @@ impl<R: Runtime> Run<'_, '_, R> {
             .filter(|token| !token.is_empty())
             .ok_or("fastly_token_missing")?;
         let mut lagging = false;
+        self.lag_seen = false;
         for read in 0..READ_BACK_READS {
             if read >= 2 {
                 if !lagging || !self.affordable(1) {
@@ -1008,6 +1036,7 @@ impl<R: Runtime> Run<'_, '_, R> {
                 return Ok(true);
             }
             lagging = self.replaced.as_ref() == Some(&value);
+            self.lag_seen = lagging;
         }
         Ok(false)
     }

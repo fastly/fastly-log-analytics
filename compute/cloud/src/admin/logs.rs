@@ -1260,7 +1260,7 @@ impl PassChain {
             // Call, wall, vCPU and heap stops end only that execution; a fresh pass resets them.
             let blocked = matches!(
                 report.stopped.as_deref(),
-                Some("lease_held" | "lease_conflict")
+                Some("lease_held" | "lease_conflict" | "state_lag")
             );
             self.stopped = report.stopped.or(self.stopped.take());
             self.lease_generation = report.lease_generation.or(self.lease_generation.take());
