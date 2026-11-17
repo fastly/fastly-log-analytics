@@ -15,6 +15,7 @@ import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type Duck
 import type { DashboardFilter } from "./dashboard/filters";
 import { POP_COORDINATES, haversineKm } from "./origin";
 import { formatAsnLabel, type FilterSpec } from "./performance";
+import type { components } from "@/types/api";
 
 export type SecuritySectionName =
   | "tls_fingerprints"
@@ -192,10 +193,12 @@ export interface SecurityTopBotItem {
   requests: number;
 }
 
-export interface SecurityActiveClientItem {
+type ApiSecurityAggregates = components["schemas"]["SecurityAggregatesResponse"];
+type ApiActiveClientItem = components["schemas"]["ActiveClientItem"];
+
+export interface SecurityActiveClientItem extends ApiActiveClientItem {
   ip: string;
-  asn: number | null;
-  isp: string;
+  asn_name: string;
   rtt_min_ms: number;
   tcp_rtt_ms: number | null;
   distance_km: number | null;
@@ -211,14 +214,13 @@ export interface SecurityActiveClientItem {
   city: string | null;
 }
 
-export interface SecurityProxiesData {
-  active_proxies_count: number;
-  total_requests_count: number;
-  distance_mismatches_count: number;
-  traffic_quality: Array<{ type: string; count: number }>;
-  suspicious_isps: Array<{ asn: number | null; isp: string; count: number }>;
+/** The Proxy Watchdog slice of the shared `SecurityAggregatesResponse` wire contract (Elevation's shape). */
+export type SecurityProxiesData = Pick<
+  ApiSecurityAggregates,
+  "active_proxies_count" | "tunnel_requests_count" | "distance_mismatches_count" | "traffic_quality" | "suspicious_isps"
+> & {
   active_clients: SecurityActiveClientItem[];
-}
+};
 
 export interface SecurityAggregatesResponse extends Partial<SecurityProxiesData> {
   tls_fingerprints?: SecurityFingerprintItem[];
@@ -849,8 +851,7 @@ export function shapeSecurityProxiesFromRawRows(
     if (rttMinUs !== null && Number.isFinite(rttMinUs) && (evalRes.impossibleDist || evalRes.isMed)) {
       clients.push({
         ip: maskIpValue(rawIp, maskIps),
-        asn,
-        isp: asn !== null ? formatAsnLabel(asn) : "Unknown ISP",
+        asn_name: asn !== null ? formatAsnLabel(asn) : "Unknown ISP",
         rtt_min_ms: roundTo(rttMinUs / 1000.0, 2),
         tcp_rtt_ms: tcpRttUs !== null && Number.isFinite(tcpRttUs) ? roundTo(tcpRttUs / 1000.0, 2) : null,
         distance_km: evalRes.distanceKm,
@@ -875,13 +876,15 @@ export function shapeSecurityProxiesFromRawRows(
     return (b.distance_km ?? -1) - (a.distance_km ?? -1);
   });
 
+  const qualityTotal = directCount + wifiCount + tunnelCount;
   const trafficQuality = [
-    { type: "Direct Connection", count: directCount },
-    { type: "WiFi / Mobile", count: wifiCount },
-    { type: "Active Tunnel / Proxy", count: tunnelCount },
+    { label: "Direct Connection", count: directCount },
+    { label: "WiFi / Mobile", count: wifiCount },
+    { label: "Active Tunnel / Proxy", count: tunnelCount },
   ]
     .filter((q) => q.count > 0)
-    .sort((a, b) => b.count - a.count);
+    .sort((a, b) => b.count - a.count)
+    .map(({ label, count }) => ({ label, value: roundTo((count / qualityTotal) * 100, 1) }));
 
   const suspiciousIsps = [...ispCounts.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -894,7 +897,7 @@ export function shapeSecurityProxiesFromRawRows(
 
   return {
     active_proxies_count: activeProxyIps.size,
-    total_requests_count: totalProxyRequests,
+    tunnel_requests_count: totalProxyRequests,
     distance_mismatches_count: mismatchIps.size,
     traffic_quality: trafficQuality,
     suspicious_isps: suspiciousIsps,

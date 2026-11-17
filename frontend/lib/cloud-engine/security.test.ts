@@ -286,6 +286,40 @@ describe("security cloud-engine module (F20)", () => {
     expect(ACTIVE_CLIENTS_LIMIT).toBe(100);
   });
 
+  it("shapes Watchdog proxies to the Elevation wire contract (label/value %, tunnel_requests_count, asn_name)", () => {
+    const direct = (ip: string) => ({ ip, asn: 15169, rtt_min: 20000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" });
+    const shaped = shapeSecurityProxiesFromRawRows(
+      [
+        { ip: "198.51.100.42", asn: 13335, rtt_min: 4000, tcp_rtt: 60000, lat: -33.8688, lon: 151.2093, pop: "SJC" },
+        { ip: "198.51.100.43", rtt_min: 3000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" },
+        { ip: "198.51.100.44", asn: 15169, rtt_min: 10000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" },
+        direct("198.51.100.45"),
+        direct("198.51.100.46"),
+        direct("198.51.100.47"),
+      ],
+      false,
+    );
+
+    expect(shaped.traffic_quality).toEqual([
+      { label: "Direct Connection", value: 50 },
+      { label: "WiFi / Mobile", value: 33.3 },
+      { label: "Active Tunnel / Proxy", value: 16.7 },
+    ]);
+    expect(shaped.traffic_quality.reduce((sum, row) => sum + row.value, 0)).toBeCloseTo(100, 1);
+    expect(shaped).toMatchObject({ tunnel_requests_count: 1 });
+    expect(shaped).not.toHaveProperty("total_requests_count");
+
+    expect(shaped.active_clients.map((c) => [c.ip, c.asn_name])).toEqual([
+      ["198.51.100.42", "AS13335 (Cloudflare, Inc.)"],
+      ["198.51.100.43", "Unknown ISP"],
+    ]);
+    for (const client of shaped.active_clients) {
+      expect(client).not.toHaveProperty("isp");
+      expect(client).not.toHaveProperty("asn");
+    }
+    expect(shaped.suspicious_isps).toEqual([{ asn: 13335, isp: "AS13335 (Cloudflare, Inc.)", count: 1 }]);
+  });
+
   it("formats fastly-acl CSV (ip,comment) and plain exports and masks IPs when requested", () => {
     expect(maskIpValue("198.51.100.42", true)).toBe("198.51.100.xxx");
     expect(maskIpValue("2001:db8:85a3::8a2e:370:7334", true)).toBe("2001:db8::xxxx");
