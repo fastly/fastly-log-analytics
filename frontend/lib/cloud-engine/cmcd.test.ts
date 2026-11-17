@@ -90,23 +90,29 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     }
   });
 
-  it("classifies all 7 session duration buckets accurately", () => {
-    expect(CMCD_SESSION_DURATION_BUCKETS).toEqual([
-      "< 30s",
-      "30s - 1m",
-      "1-5 min",
-      "5-15 min",
-      "15-30 min",
-      "30-60 min",
-      "> 1h",
-    ]);
-    expect(classifySessionDurationBucket(10)).toBe("< 30s");
-    expect(classifySessionDurationBucket(45)).toBe("30s - 1m");
-    expect(classifySessionDurationBucket(120)).toBe("1-5 min");
-    expect(classifySessionDurationBucket(600)).toBe("5-15 min");
-    expect(classifySessionDurationBucket(1200)).toBe("15-30 min");
-    expect(classifySessionDurationBucket(2400)).toBe("30-60 min");
-    expect(classifySessionDurationBucket(4000)).toBe("> 1h");
+  it("classifies session durations into the High-Scale buckets", () => {
+    expect(CMCD_SESSION_DURATION_BUCKETS).toEqual(["<30s", "30s–2m", "2–5m", "5–10m", "10–30m", "30m–1h", ">1h"]);
+    expect(classifySessionDurationBucket(10)).toBe("<30s");
+    expect(classifySessionDurationBucket(90)).toBe("30s–2m");
+    expect(classifySessionDurationBucket(120)).toBe("2–5m");
+    expect(classifySessionDurationBucket(400)).toBe("5–10m");
+    expect(classifySessionDurationBucket(1200)).toBe("10–30m");
+    expect(classifySessionDurationBucket(2400)).toBe("30m–1h");
+    expect(classifySessionDurationBucket(4000)).toBe(">1h");
+  });
+
+  it("emits only populated session duration buckets from first-to-last request time", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests (scoped_key, ts_ms, cmcd_sid, cmcd_d)
+        VALUES ('native', 1700000000000, 'a', 4000), ('native', 1700000020000, 'a', 15000),
+          ('native', 1700000000000, 'b', 4000), ('native', 1700000090000, 'b', 4000)`);
+      const data = await queryCmcdAggregates({ engine });
+      expect(data.session_duration_dist.map(({ duration_bucket, session_count }) => ({ duration_bucket, session_count })))
+        .toEqual([{ duration_bucket: "<30s", session_count: 1 }, { duration_bucket: "30s–2m", session_count: 1 }]);
+    } finally {
+      await engine.reset();
+    }
   });
 
   it("returns empty CMCD aggregates when no CMCD rows exist", async () => {
@@ -146,7 +152,7 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
       expect(res.rebuffer_by_asn).toHaveLength(2);
       expect(res.object_type_dist).toHaveLength(1);
       expect(res.streaming_format_dist).toHaveLength(2);
-      expect(res.session_duration_dist).toHaveLength(7);
+      expect(res.session_duration_dist).toHaveLength(1);
     }
     await engine.reset();
   });

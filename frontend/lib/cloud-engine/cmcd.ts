@@ -24,15 +24,7 @@ export const CMCD_COLUMNS = [
   "cmcd_dl",
 ] as const;
 
-export const CMCD_SESSION_DURATION_BUCKETS = [
-  "< 30s",
-  "30s - 1m",
-  "1-5 min",
-  "5-15 min",
-  "15-30 min",
-  "30-60 min",
-  "> 1h",
-] as const;
+export const CMCD_SESSION_DURATION_BUCKETS = ["<30s", "30s–2m", "2–5m", "5–10m", "10–30m", "30m–1h", ">1h"] as const;
 
 export const CMCD_TS_DEFAULTS = {
   sessions_ts: {
@@ -85,13 +77,13 @@ function roundTo(val: number, decimals: number): number {
 }
 
 export function classifySessionDurationBucket(durationSeconds: number): string {
-  if (durationSeconds < 30) return "< 30s";
-  if (durationSeconds < 60) return "30s - 1m";
-  if (durationSeconds < 300) return "1-5 min";
-  if (durationSeconds < 900) return "5-15 min";
-  if (durationSeconds < 1800) return "15-30 min";
-  if (durationSeconds < 3600) return "30-60 min";
-  return "> 1h";
+  if (durationSeconds < 30) return "<30s";
+  if (durationSeconds < 120) return "30s–2m";
+  if (durationSeconds < 300) return "2–5m";
+  if (durationSeconds < 600) return "5–10m";
+  if (durationSeconds < 1800) return "10–30m";
+  if (durationSeconds < 3600) return "30m–1h";
+  return ">1h";
 }
 
 export function emptyCmcdAggregates() {
@@ -125,13 +117,7 @@ export function emptyCmcdAggregates() {
     rebuffer_by_asn: [] as Record<string, unknown>[],
     object_type_dist: [] as Record<string, unknown>[],
     streaming_format_dist: [] as Record<string, unknown>[],
-    session_duration_dist: CMCD_SESSION_DURATION_BUCKETS.map((bucket) => ({
-      bucket,
-      sessions: 0,
-      pct: 0,
-      duration_bucket: bucket,
-      session_count: 0,
-    })),
+    session_duration_dist: [] as Record<string, unknown>[],
   };
 }
 
@@ -187,7 +173,7 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
 /** Every request column the /api/cmcd/aggregates scans read. */
 export const CMCD_SCAN_COLUMNS = [
   "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_cid", "cmcd_br", "cmcd_bl", "cmcd_bs", "cmcd_mtp", "cmcd_ot",
-  "cmcd_sf", "cmcd_st", "cmcd_tb", "cmcd_d", "cmcd_su", "url", "geo_country", "country", "client_asn", "asn",
+  "cmcd_sf", "cmcd_st", "cmcd_tb", "cmcd_su", "url", "geo_country", "country", "client_asn", "asn",
   "as_name", "ttfb_ms", "ttfb", "time_elapsed_usec", "elapsed",
 ] as const;
 
@@ -348,15 +334,13 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   // Session durations & session_duration_dist
   const sessionRows = await engine.executeSql<{
     sid: string;
-    dur_sec: number;
     first_ts: number;
     duration: number;
   }>(
     `SELECT
       cmcd_sid AS sid,
       MIN(ts_ms)::BIGINT AS first_ts,
-      (MAX(ts_ms) - MIN(ts_ms)) / 1000.0 AS duration,
-      GREATEST(0.0, (MAX(ts_ms) - MIN(ts_ms)) / 1000.0 + COALESCE(MAX(cmcd_d) / 1000.0, 0.0))::DOUBLE AS dur_sec
+      (MAX(ts_ms) - MIN(ts_ms)) / 1000.0 AS duration
     FROM requests
     WHERE ${where} AND cmcd_sid IS NOT NULL AND cmcd_sid != ''
     GROUP BY 1`,
@@ -370,7 +354,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   }
   let totalDurationSec = 0;
   for (const sr of sessionRows) {
-    const dur = Number(sr.dur_sec ?? 0);
+    const dur = Number(sr.duration ?? 0);
     totalDurationSec += dur;
     const label = classifySessionDurationBucket(dur);
     durationBucketCounts.set(label, (durationBucketCounts.get(label) ?? 0) + 1);
@@ -385,7 +369,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       new Date(Math.floor(Number(row.first_ts) / bucketMs) * bucketMs).toISOString() === point.bucket,
     ).length;
   }
-  const session_duration_dist = CMCD_SESSION_DURATION_BUCKETS.map((bucket) => {
+  const session_duration_dist = CMCD_SESSION_DURATION_BUCKETS.filter((bucket) => durationBucketCounts.get(bucket)).map((bucket) => {
     const count = durationBucketCounts.get(bucket) ?? 0;
     return {
       bucket,
