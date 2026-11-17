@@ -532,7 +532,7 @@ const GROUPS: [Group; 8] = [
         name: "series5",
         cols: SERIES_COLS,
         timed: true,
-        fields: &["overall", "proto", "asn", "origin", "city"],
+        fields: &["overall", "proto", "asn", "city", "origin"],
         gated: &["origin", "city"],
     },
     Group {

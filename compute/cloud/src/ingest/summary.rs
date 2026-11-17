@@ -2024,6 +2024,14 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
         }
     }
 
+    for (field, map) in [("url", by_url), ("asn", by_raw_asn)] {
+        let (kept, total, truncated) = top_untimed(map, |u| u.requests, DIM_K);
+        push_total(out, bucket, "urls", field, total, truncated);
+        for (value, u) in &kept {
+            u.push(out, bucket, field, value);
+        }
+    }
+
     push_total(out, bucket, "quality", "overall", quality.requests, false);
     quality.push(out, bucket, "overall", "");
     let regions: FastMap<Cow<str>, Quality> = quality_regions
@@ -2042,14 +2050,6 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
         push_total(out, bucket, "quality", field, total, truncated);
         for (value, q) in &kept {
             q.push(out, bucket, field, value);
-        }
-    }
-
-    for (field, map) in [("url", by_url), ("asn", by_raw_asn)] {
-        let (kept, total, truncated) = top_untimed(map, |u| u.requests, DIM_K);
-        push_total(out, bucket, "urls", field, total, truncated);
-        for (value, u) in &kept {
-            u.push(out, bucket, field, value);
         }
     }
 
