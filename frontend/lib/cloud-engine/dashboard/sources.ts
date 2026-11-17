@@ -966,7 +966,7 @@ export function browserSource(
           ]),
       },
     ),
-    async fetchRange(file, start, end, signal) {
+    async fetchRange(file, start, end, signal, priority) {
       if (!(Number.isSafeInteger(start) && Number.isSafeInteger(end) &&
           start >= 0 && end > start && (file.size <= 0 || end <= file.size)))
         throw new Error(`Range ${start}-${end} is outside ${file.key}`);
@@ -980,6 +980,7 @@ export function browserSource(
         credentials: "same-origin",
         cache: "no-store",
         signal,
+        ...(priority ? { priority } : {}),
         ...(headers ? { headers } : {}),
       });
       try {

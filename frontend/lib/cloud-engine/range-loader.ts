@@ -6,6 +6,7 @@ import {
   assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, type ParquetProjection,
 } from "./dashboard/parquet-projection";
 import { beginCloudLoading } from "./loading-progress";
+import { fetchLanes } from "./fetch-lanes";
 
 const MAX_RANGE_FILES = 256;
 // RUM window files are a few KiB each and the open hour's stay loose until they age into a
@@ -148,8 +149,10 @@ export async function ensureCloudRange(
       if (slots === 0) await new Promise<void>((resolve) => waiting.push(resolve));
       else slots--;
       try {
-        downloads.signal.throwIfAborted();
-        return await source.fetchRange(file, start, end, downloads.signal);
+        return await fetchLanes.run("raw", () => {
+          downloads.signal.throwIfAborted();
+          return source.fetchRange(file, start, end, downloads.signal, "low");
+        });
       } finally {
         const next = waiting.shift();
         if (next) next();

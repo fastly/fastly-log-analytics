@@ -70,6 +70,9 @@ describe("browserSource", () => {
     expect(new Headers(init!.headers).get("range")).toBe("bytes=10-12");
     expect(new Headers(init!.headers).get("x-service-id")).toBe("svc");
     expect(calls).toEqual([expect.objectContaining({ status: 206, bytes: 3, cache: "cdn" })]);
+    expect(init!.priority).toBeUndefined();
+    await source.fetchRange(file, 10, 13, undefined, "high");
+    expect(fetcher.mock.calls[1][1]!.priority).toBe("high");
 
     for (const [status, range, etag, bytes] of [
       [200, "bytes 10-12/100", "\"e1\"", 3],

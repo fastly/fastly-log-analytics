@@ -162,12 +162,16 @@ export type FileSource = {
     signal?: AbortSignal,
     mode?: { transfer?: boolean; identity?: string },
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
-  /** Bytes `[start, end)` of an immutable file, uncached. */
+  /**
+   * Bytes `[start, end)` of an immutable file, uncached. `priority` hints the
+   * browser to order it against reads in other realms (see `fetchLanes`).
+   */
   fetchRange?: (
     file: ManifestFile,
     start: number,
     end: number,
     signal?: AbortSignal,
+    priority?: RequestPriority,
   ) => Promise<ArrayBuffer>;
   /** Whether `fetchFile` can serve the bytes without a network request. */
   hasFile?: (key: string) => Promise<boolean>;

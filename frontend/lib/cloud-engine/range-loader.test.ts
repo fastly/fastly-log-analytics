@@ -183,6 +183,8 @@ describe("Cloud first-page analytical range loading", () => {
     expect(source.fetchFile).not.toHaveBeenCalled();
     const fetched = source.fetchRange.mock.calls.reduce((total, [, start, end]) => total + end - start, 0);
     expect(fetched).toBeLessThan(fullBytes / 2);
+    // Raw ranges yield to summary reads in other realms too.
+    expect(source.fetchRange.mock.calls.map((call) => call[4])).toEqual(source.fetchRange.mock.calls.map(() => "low"));
   });
 
   it("reuses persisted projections on the next page load without range reads, and footers for another projection", async () => {
