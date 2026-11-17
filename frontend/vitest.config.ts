@@ -44,7 +44,7 @@ export default defineConfig({
     css: false,
     deps: {
       optimizer: {
-        web: {
+        client: {
           include: [
             'plotly.js-dist-min',
             'plotly.js',
