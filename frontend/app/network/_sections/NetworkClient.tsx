@@ -3,6 +3,8 @@
 import React, { useState } from 'react'
 import dynamic from 'next/dynamic'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
+import { approxMark, readRollupMeta, RollupDataThrough } from '@/components/network/rollupLabels'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { client, unwrapClient } from '@/lib/api'
 import type { components, PlotlyTrace } from '@/types/api'
 import {
@@ -74,7 +76,8 @@ const NetworkMap = dynamic(() => import('@/components/Map/NetworkMap').then((mod
 
 type NetworkHealthResponse = components['schemas']['NetworkHealthResponse']
 type NetworkSections = NonNullable<components['schemas']['NetworkHealthRequest']['sections']>
-const NETWORK_CORE_SECTIONS: NetworkSections = ['summary', 'leaderboard', 'metro_leaderboard', 'heatmap', 'buckets', 'cities', 'map_buckets']
+const NETWORK_ROLLUP_SECTIONS: NetworkSections = ['summary', 'leaderboard', 'metro_leaderboard', 'heatmap', 'buckets']
+const NETWORK_CORE_SECTIONS: NetworkSections = [...NETWORK_ROLLUP_SECTIONS, 'cities', 'map_buckets']
 const NETWORK_MAP_SECTIONS: NetworkSections = ['buckets', 'cities', 'map_buckets']
 const NETWORK_SHIELDING_SECTIONS: NetworkSections = ['shielding_analysis']
 
@@ -115,6 +118,9 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   const { relativeRange, isAutoRange, anchor } = useReportPageState()
   const { isFieldActive } = useActiveLogFields()
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+  // Cloud answers these sections from summaries only when unfiltered; the map needs raw rows, so it is
+  // read apart rather than holding the summary-served core behind a raw scan.
+  const rollupFirst = isCloudMode() && Object.keys(filterPayload ?? {}).length === 0
 
   const windowKey = `${relativeRange ?? ''}|${startTime ?? ''}|${endTime ?? ''}`
   if (windowKey !== seenWindowKey) {
@@ -141,13 +147,13 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   const coreQuery = useAnalyticsReportQuery<NetworkHealthResponse>({
     namespace: ['network', 'health', 'core'], serviceId: activeServiceId, filterPayload, range,
     keyParts: [animBucketSeconds],
-    queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_CORE_SECTIONS, rangeToken, signal, 'all'),
+    queryFn: ({ rangeToken, signal }) => postNetworkHealth(rollupFirst ? NETWORK_ROLLUP_SECTIONS : NETWORK_CORE_SECTIONS, rangeToken, signal, 'all'),
   })
 
   const mapQuery = useAnalyticsReportQuery<NetworkHealthResponse>({
     namespace: ['network', 'health', 'map'], serviceId: activeServiceId, filterPayload, range,
     keyParts: [animBucketSeconds, mapAsn],
-    queryOptions: { enabled: mapAsn !== 'all' },
+    queryOptions: { enabled: rollupFirst || mapAsn !== 'all' },
     queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_MAP_SECTIONS, rangeToken, signal, mapAsn),
   })
 
@@ -164,10 +170,12 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   )
 
   const data = coreQuery.data
-  const mapData = (mapAsn === 'all' ? coreQuery.data : mapQuery.data) ?? coreQuery.data
+  const rollup = readRollupMeta(data)
+  const mapFromCore = mapAsn === 'all' && !rollupFirst
+  const mapData = mapFromCore ? coreQuery.data : (mapQuery.data ?? (rollupFirst ? undefined : coreQuery.data))
   const qualityData = qualityQuery.data
   const isCoreLoadingInitial = coreQuery.isLoading || (coreQuery.isFetching && !coreQuery.data)
-  const isMapLoadingInitial = !mapData && (mapAsn === 'all' ? isCoreLoadingInitial : mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data))
+  const isMapLoadingInitial = !mapData && (mapFromCore ? isCoreLoadingInitial : mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data))
   const isShieldingLoadingInitial = shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
   const isQualityLoadingInitial = qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data)
 
@@ -203,13 +211,14 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
     return { x: xBuckets, y: yLabels, z }
   }, [heatmapRows, heatmapBuckets])
 
+  const heatmapApprox = approxMark(rollup, 'health_score')
   const heatmapTrace = React.useMemo((): PlotlyTrace[] => (
     heatmapData ? [{
       type: 'heatmap', x: heatmapData.x, y: heatmapData.y, z: heatmapData.z,
       colorscale: 'RdYlGn', zmin: 0, zmax: 100, colorbar: { title: 'Score', thickness: 12 },
-      hovertemplate: '<b>%{y}</b><br>%{x}<br>Score: %{z}<extra></extra>',
+      hovertemplate: `<b>%{y}</b><br>%{x}<br>Score: ${heatmapApprox}%{z}<extra></extra>`,
     }] : []
-  ), [heatmapData])
+  ), [heatmapData, heatmapApprox])
 
   if (data?.available === false) {
     return (
@@ -234,15 +243,16 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
           </div>
         </div>
       )}
+      {rollup && <RollupDataThrough meta={rollup} />}
       <NetworkMap
         data={mapData} isLoading={isMapLoadingInitial}
-        error={mapAsn === 'all' ? coreQuery.error : mapQuery.error}
+        error={mapFromCore ? coreQuery.error : mapQuery.error}
         metric={metric} onMetricChange={setMetric}
         bucketSeconds={animBucketSeconds} onBucketChange={setAnimBucketSeconds}
         mapAsn={mapAsn} onAsnChange={setMapAsn} asnOptions={asnOptions}
       />
 
-      <NetworkKpiGrid summary={data?.summary} isCoreLoadingInitial={isCoreLoadingInitial} />
+      <NetworkKpiGrid summary={data?.summary} isCoreLoadingInitial={isCoreLoadingInitial} rollup={rollup} />
 
       <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />
 
