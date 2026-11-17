@@ -198,7 +198,9 @@ describe("Cloud endpoint bridges", () => {
     const response = await handleCloudAnalyticalRequest(request("/api/query", "POST", {
       sql: "SELECT count(*) AS requests FROM logs", start_time: "2026-11-01T00:00:00Z", end_time: "2026-11-02T00:00:00Z",
     }));
-    expect(ensureCloudRange).toHaveBeenCalledWith("2026-11-01T00:00:00Z", "2026-11-02T00:00:00.001Z", expect.any(AbortSignal), ["request"], { customFields: [], serviceId: undefined });
+    expect(ensureCloudRange).toHaveBeenCalledWith("2026-11-01T00:00:00Z", "2026-11-02T00:00:00.001Z", expect.any(AbortSignal), ["request"], {
+      customFields: [], serviceId: undefined, projection: { columns: ["timestamp"] },
+    });
     expect((await response!.json()).data).toEqual([{ requests: 7 }]);
     vi.mocked(ensureCloudRange).mockRejectedValueOnce(new Error("incomplete listing"));
     await expect(handleCloudAnalyticalRequest(request("/api/query", "POST", {
