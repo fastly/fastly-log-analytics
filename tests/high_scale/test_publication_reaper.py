@@ -428,6 +428,101 @@ def test_mark_superseded_never_overwrites_a_publication_that_became_visible(seed
     assert seed.status("raced") == "visible" and seed.status("stuck") == "superseded"
 
 
+def _unprovable_orphans(seed: _Seed) -> dict[str, str]:
+    """Pending publications the reaper cannot prove, keyed by why, plus a proven one and a recent one."""
+
+    def orphan(name: str, status: str, owner: str | None, *, age_hours: float) -> str:
+        seed.archive(name, "request", age_hours=age_hours)
+        seed.source(name, f"raw/{name}", status=status, owner_manifest=owner)
+        batch_id = publication_batch_id(name, "request", "request")
+        seed.publication(batch_id, "request", status="pending", age_hours=age_hours)
+        return batch_id
+
+    seed.archive("rep-pending", "request", state="source_deleted")
+    seed.publication(
+        publication_batch_id("rep-pending", "request", "request"), "request", status="pending", age_hours=0.5
+    )
+    return {
+        "lost": orphan("lost", "source_missing", None, age_hours=24 * 10),
+        "not_visible": orphan("not-visible", "acknowledged", "rep-pending", age_hours=24 * 10),
+        "recent_loss": orphan("recent-loss", "source_missing", None, age_hours=24 * 2),
+        "receipt": orphan("receipt", "source_missing", None, age_hours=24 * 10),
+        "proven": _superseded_retry(seed, "proven", "proven-rep")[0],
+    }
+
+
+def test_reaper_abandons_only_old_unprovable_publications_and_only_on_apply(seed) -> None:
+    rows = _unprovable_orphans(seed)
+    receipt_uuid = publication_batch_uuid(seed.sid, "request", "1", rows["receipt"])
+    reaper = PublicationReaper(control=seed.control, visible_receipts=lambda _s, uuids: {receipt_uuid} & set(uuids))
+
+    dry = reaper.reap(seed.sid, apply=False, abandon_after_seconds=7 * 86400)
+    assert set(dry.abandoned) == {rows["lost"], rows["not_visible"]} and dry.applied == 0
+    assert all(seed.status(b) == "pending" for b in dry.abandoned)
+
+    applied = reaper.reap(seed.sid, apply=True, abandon_after_seconds=7 * 86400)
+    assert applied.abandoned_applied == 2
+    assert seed.status(rows["lost"]) == "abandoned" and seed.status(rows["not_visible"]) == "abandoned"
+    assert seed.status(rows["recent_loss"]) == "pending" and seed.status(rows["receipt"]) == "pending"
+    assert seed.status(rows["proven"]) == "superseded"
+
+
+def test_reaper_never_abandons_without_an_explicit_age(seed) -> None:
+    rows = _unprovable_orphans(seed)
+    result = PublicationReaper(control=seed.control, visible_receipts=_no_receipts).reap(seed.sid, apply=True)
+    assert result.abandoned == () and seed.status(rows["lost"]) == "pending"
+
+
+def test_publish_refuses_an_abandoned_manifest() -> None:
+    store = InMemoryBatchManifestStore()
+    batch = HighScaleBatch("b1", "svc", "request", "1", ({"event_id": "e1"},))
+    store.put(BatchManifest("b1", "svc", "request", "1", batch.digest, 1, PublicationStatus.ABANDONED))
+    client = MagicMock()
+    with pytest.raises(SupersededPublication):
+        ClickHousePublication(store, client).publish(batch)
+    client.insert.assert_not_called()
+
+
+def test_abandoned_status_is_accepted_by_a_schema_that_only_knew_superseded(seed) -> None:
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "ALTER TABLE high_scale_publication_manifests DROP CONSTRAINT high_scale_publication_manifests_status_check"
+        )
+        connection.execute(
+            "ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT high_scale_publication_manifests_status_check "
+            "CHECK (status IN ('pending', 'visible', 'superseded'))"
+        )
+    seed.control.create_schema()
+    seed.publication("b-gone", "request", status="pending")
+    seed.publication("b-raced", "request", status="visible")
+    assert seed.control.mark_publications_abandoned(seed.sid, ("b-gone", "b-raced")) == 1
+    manifest = seed.control.get_batch_manifest("b-gone")
+    assert manifest is not None and manifest.status is PublicationStatus.ABANDONED
+    assert seed.status("b-raced") == "visible"
+    publications = {p["domain"]: p for p in seed.control.operational_snapshot(seed.sid)["publications"]}
+    assert publications["request"]["pending"] == 0
+
+
+def test_cli_abandons_old_unprovable_publications_only_with_apply(seed, monkeypatch, capsys) -> None:
+    rows = _unprovable_orphans(seed)
+    monkeypatch.setattr(publication_reaper, "_visible_receipts_from_environment", lambda: _no_receipts)
+    args = ["--service-id", seed.sid, "--abandon-older-than-days", "7"]
+
+    assert publication_reaper.main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["would_abandon"] == {"request": 3} and report["abandoned"] == 0
+    assert seed.status(rows["lost"]) == "pending"
+
+    assert publication_reaper.main([*args, "--apply"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["abandoned"] == 3 and report["applied"] == 1
+    assert {seed.status(rows[k]) for k in ("lost", "not_visible", "receipt")} == {"abandoned"}
+    assert seed.status(rows["recent_loss"]) == "pending"
+
+    with pytest.raises(SystemExit):
+        publication_reaper.main(["--service-id", seed.sid, "--abandon-older-than-days", "0"])
+
+
 def test_automatic_reaping_is_throttled_and_bounded_to_recent_orphans() -> None:
     clock = iter([1000.0, 1100.0, 1700.0])
     reaper = PublicationReaper(control=MagicMock(), visible_receipts=_no_receipts, clock=lambda: next(clock))
@@ -437,6 +532,7 @@ def test_automatic_reaping_is_throttled_and_bounded_to_recent_orphans() -> None:
     assert reaper.reap.call_count == 2
     kwargs = reaper.reap.call_args.kwargs
     assert kwargs["apply"] is True and kwargs["max_age_seconds"] == reaper.max_age_seconds > 0
+    assert kwargs.get("abandon_after_seconds") is None
 
 
 def test_deletion_sweeper_runs_the_publication_reaper_and_survives_its_failure() -> None:

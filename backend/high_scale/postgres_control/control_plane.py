@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
     batch_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL, generation TEXT NOT NULL,
     batch_digest TEXT NOT NULL, expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
     visible_rows BIGINT NOT NULL DEFAULT 0 CHECK (visible_rows >= 0),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'visible', 'superseded')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'visible', 'superseded', 'abandoned')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 DO $$
@@ -174,11 +174,11 @@ BEGIN
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'high_scale_publication_manifests'::regclass
           AND conname = 'high_scale_publication_manifests_status_check'
-          AND position('superseded' IN pg_get_constraintdef(oid)) > 0
+          AND position('abandoned' IN pg_get_constraintdef(oid)) > 0
     ) THEN
         ALTER TABLE high_scale_publication_manifests DROP CONSTRAINT IF EXISTS high_scale_publication_manifests_status_check;
         ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT high_scale_publication_manifests_status_check
-            CHECK (status IN ('pending', 'visible', 'superseded')) NOT VALID;
+            CHECK (status IN ('pending', 'visible', 'superseded', 'abandoned')) NOT VALID;
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS high_scale_publication_manifests_domain_status_idx
@@ -956,14 +956,21 @@ class PostgresControlPlane:
 
     def mark_publications_superseded(self, service_id: str, batch_ids: Sequence[str]) -> int:
         """Move still-pending publications to ``superseded``; never touches a row that became visible."""
+        return self._retire_pending_publications(service_id, batch_ids, "superseded")
+
+    def mark_publications_abandoned(self, service_id: str, batch_ids: Sequence[str]) -> int:
+        """Move still-pending publications to ``abandoned``; never touches a row that became visible."""
+        return self._retire_pending_publications(service_id, batch_ids, "abandoned")
+
+    def _retire_pending_publications(self, service_id: str, batch_ids: Sequence[str], status: str) -> int:
         _require_text(service_id, "service_id")
         if not batch_ids:
             return 0
         with self.transaction() as connection:
             cursor = connection.execute(
-                "UPDATE high_scale_publication_manifests SET status='superseded', updated_at=clock_timestamp() "
+                "UPDATE high_scale_publication_manifests SET status=%s, updated_at=clock_timestamp() "
                 "WHERE service_id=%s AND batch_id = ANY(%s) AND status='pending'",
-                (service_id, list(batch_ids)),
+                (status, service_id, list(batch_ids)),
             )
             return int(cursor.rowcount or 0)
 

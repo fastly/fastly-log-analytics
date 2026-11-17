@@ -9,6 +9,11 @@ superseded manifest so a late retry of the old batch can never double count.
 
 Run ``python -m backend.high_scale.publication_reaper --service-id SID`` for a dry run of the whole backlog; add
 ``--apply`` to write. The worker reaps only orphans younger than ``max_age_seconds`` on its own.
+
+``--abandon-older-than-days N`` also retires pending publications the reaper cannot prove (sources lost, or the
+replacement never became visible) once they are older than N days and ClickHouse shows no visible receipt for them.
+It marks them ``abandoned``: their rows never became visible and stay invisible, which accepts that data as lost. Only
+an operator does this; the worker never abandons.
 """
 
 from __future__ import annotations
@@ -66,6 +71,9 @@ class ReapResult:
     scanned: int
     cursor: tuple[datetime, str] | None
     by_domain: dict[str, int] = field(default_factory=dict)
+    abandoned: tuple[str, ...] = ()
+    abandoned_applied: int = 0
+    abandoned_by_domain: dict[str, int] = field(default_factory=dict)
 
 
 class PublicationReaper:
@@ -126,6 +134,7 @@ class PublicationReaper:
         max_age_seconds: float | None = None,
         limit: int = 500,
         after: tuple[datetime, str] | None = None,
+        abandon_after_seconds: float | None = None,
     ) -> ReapResult:
         orphans = self._control.committed_archive_manifests(
             service_id, min_age_seconds=grace_seconds, max_age_seconds=max_age_seconds, after=after, limit=limit
@@ -143,6 +152,7 @@ class PublicationReaper:
         states = self._control.publication_manifest_states(service_id, tuple(candidates))
         pending = {b: s for b, s in states.items() if s["status"] == "pending"}
         kept: Counter[str] = Counter()
+        unprovable: list[str] = []
 
         sources = self._control.archive_manifest_source_states(service_id, sorted({candidates[b] for b in pending}))
         replacements: dict[str, frozenset[str]] = {}
@@ -151,6 +161,7 @@ class PublicationReaper:
             owners = _republished_under(manifest_id, sources.get(manifest_id, ()))
             if owners is None:
                 kept["sources_not_republished"] += 1
+                unprovable.append(batch_id)
             elif pending[batch_id]["age_seconds"] < grace_seconds:
                 kept["recently_updated"] += 1
             else:
@@ -177,11 +188,18 @@ class PublicationReaper:
             # (or a replacement manifest that cannot be found) leaves the data unproven.
             if len(batches) != len(replacements[batch_id]) or not statuses or set(statuses) != {"visible"}:
                 kept["replacement_not_visible"] += 1
+                unprovable.append(batch_id)
             else:
                 proven.append(batch_id)
 
+        stale = (
+            [b for b in unprovable if pending[b]["age_seconds"] >= abandon_after_seconds]
+            if abandon_after_seconds is not None
+            else []
+        )
         uuids = {
-            publication_batch_uuid(service_id, pending[b]["domain"], pending[b]["generation"], b): b for b in proven
+            publication_batch_uuid(service_id, pending[b]["domain"], pending[b]["generation"], b): b
+            for b in (*proven, *stale)
         }
         visible = self._visible_receipts(service_id, frozenset(uuids))
         if visible:
@@ -190,10 +208,24 @@ class PublicationReaper:
                 "high-scale publications pending in Postgres but visible in ClickHouse; leaving them pending",
                 extra={"service_id": service_id, "batch_ids": sorted(uuids[u] for u in visible)},
             )
-        superseded = tuple(sorted(b for u, b in uuids.items() if u not in visible))
+        proven_set = set(proven)
+        superseded = tuple(sorted(b for u, b in uuids.items() if u not in visible and b in proven_set))
+        abandoned = tuple(sorted(b for u, b in uuids.items() if u not in visible and b not in proven_set))
         applied = self._control.mark_publications_superseded(service_id, superseded) if apply and superseded else 0
-        by_domain = dict(sorted(Counter(pending[b]["domain"] for b in superseded).items()))
-        return ReapResult(superseded, dict(kept), applied, len(orphans), cursor, by_domain)
+        abandoned_applied = (
+            self._control.mark_publications_abandoned(service_id, abandoned) if apply and abandoned else 0
+        )
+        return ReapResult(
+            superseded,
+            dict(kept),
+            applied,
+            len(orphans),
+            cursor,
+            dict(sorted(Counter(pending[b]["domain"] for b in superseded).items())),
+            abandoned,
+            abandoned_applied,
+            dict(sorted(Counter(pending[b]["domain"] for b in abandoned).items())),
+        )
 
 
 def _republished_under(manifest_id: str, sources: Sequence[tuple[str | None, str | None]]) -> frozenset[str] | None:
@@ -239,12 +271,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-age-seconds", type=float, default=None)
     parser.add_argument("--page-size", type=int, default=500)
     parser.add_argument("--max-pages", type=int, default=1000)
+    parser.add_argument(
+        "--abandon-older-than-days",
+        type=float,
+        default=None,
+        help="also mark unprovable pending publications older than this abandoned (accepts their data as lost)",
+    )
     args = parser.parse_args(argv)
+    if args.abandon_older_than_days is not None and args.abandon_older_than_days <= 0:
+        parser.error("--abandon-older-than-days must be positive")
+    abandon_after = None if args.abandon_older_than_days is None else args.abandon_older_than_days * 86400
 
     reaper = PublicationReaper(control=PostgresControlPlane(), visible_receipts=_visible_receipts_from_environment())
     by_domain: Counter[str] = Counter()
+    abandoned_by_domain: Counter[str] = Counter()
     kept: Counter[str] = Counter()
-    applied = scanned = pages = 0
+    applied = abandoned = scanned = pages = 0
     cursor: tuple[datetime, str] | None = None
     while pages < args.max_pages:
         result = reaper.reap(
@@ -254,9 +296,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_age_seconds=args.max_age_seconds,
             limit=args.page_size,
             after=cursor,
+            abandon_after_seconds=abandon_after,
         )
         pages += 1
         by_domain.update(result.by_domain)
+        abandoned_by_domain.update(result.abandoned_by_domain)
+        abandoned += result.abandoned_applied
         kept.update(result.kept)
         applied += result.applied
         scanned += result.scanned
@@ -271,6 +316,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "scanned_archive_manifests": scanned,
                 "would_supersede": dict(sorted(by_domain.items())),
                 "applied": applied,
+                "would_abandon": dict(sorted(abandoned_by_domain.items())),
+                "abandoned": abandoned,
                 "kept": dict(sorted(kept.items())),
                 "complete": cursor is None,
             },

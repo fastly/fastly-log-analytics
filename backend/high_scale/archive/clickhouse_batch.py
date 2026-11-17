@@ -377,6 +377,8 @@ class PublicationStatus(StrEnum):
     VISIBLE = "visible"
     # Postgres bookkeeping only: a failed attempt whose sources were later published under another batch.
     SUPERSEDED = "superseded"
+    # Postgres bookkeeping only: an operator retired a pending publication whose data can no longer be published.
+    ABANDONED = "abandoned"
 
 
 class SupersededPublication(RuntimeError):
@@ -709,7 +711,7 @@ class ClickHousePublication:
             self._manifests.put(manifest)
         else:
             self._validate_existing(manifest, batch)
-            if manifest.status is PublicationStatus.SUPERSEDED:
+            if manifest.status in (PublicationStatus.SUPERSEDED, PublicationStatus.ABANDONED):
                 raise SupersededPublication(batch.batch_id)
             if manifest.status is PublicationStatus.VISIBLE:
                 return PublicationResult(batch.batch_id, manifest.status, manifest.visible_rows, True)
