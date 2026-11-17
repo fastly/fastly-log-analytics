@@ -81,6 +81,29 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
     }
   });
 
+  it("ranks worst pages by error rate and averages web-vital load times like High-Scale", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      const busy = Array.from({ length: 10 }, (_, i) =>
+        `('rum', ${1700000000000 + i * 1000}, 'busy-${i}', 'LCP', 1000, '/busy')`).join(", ");
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, request_event_id, metric_name, metric_value, page_url)
+        VALUES ${busy}, ('rum', 1700000020000, 'broken-0', 'LCP', 3000, '/broken'),
+          ('rum', 1700000020000, 'broken-0', 'TTFB', 1000, '/broken')`);
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, ts_ms, request_event_id, error_message, page_url)
+        VALUES ('rum', 1700000030000, 'busy-e1', 'x', '/busy'),
+          ('rum', 1700000031000, 'busy-e2', 'x', '/busy'),
+          ('rum', 1700000032000, 'broken-e1', 'x', '/broken')`);
+      const pages = (await cloudRumAnalytics({ engine })).worst_pages;
+      expect(pages.map((page) => page.path)).toEqual(["/broken", "/busy"]);
+      expect(pages[0]).toMatchObject({ views: 1, avg_load_time: 2, error_rate: 50 });
+      expect(pages[1]).toMatchObject({ views: 10, avg_load_time: 1, error_rate: 16.67 });
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("keeps CWV wire distributions zero and percentiles null with no beacons", async () => {
     const engine = getDuckDBEngine();
     try {
