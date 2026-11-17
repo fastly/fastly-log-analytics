@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -16,6 +17,7 @@ import {
 import { cn } from '@/lib/utils'
 import type { WizardState } from '../types'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { ATTACH_ENDPOINT_NAME, attachUnavailableMessage } from '../attach'
 
 function errorCode(e: unknown): string | undefined {
   return e && typeof e === "object" && "code" in e
@@ -246,6 +248,45 @@ export function ServiceStep({ s }: { s: WizardState }) {
           )}
         </div>
       </div>
+      <AttachPanel s={s} />
+    </div>
+  )
+}
+
+function AttachPanel({ s }: { s: WizardState }) {
+  const offer = s.attachOffer
+  if (s.isCheckingAttach) {
+    return (
+      <div className="shrink-0 flex items-center gap-2 text-sm text-muted-foreground" role="status">
+        <Loader2 className="h-4 w-4 animate-spin" /> Another install manages this service. Checking whether Cloud can attach…
+      </div>
+    )
+  }
+  if (!offer || offer.serviceId !== s.selectedService?.id) return null
+  if (!offer.available) {
+    return (
+      <div className="shrink-0 flex items-start gap-2 p-3 border border-destructive/30 rounded-lg text-sm text-destructive" role="alert">
+        <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" /> {attachUnavailableMessage(offer.reason)}
+      </div>
+    )
+  }
+  return (
+    <div className="shrink-0 p-4 border rounded-lg bg-muted/10 space-y-3 text-sm" role="region" aria-label="Attach alongside the existing install">
+      <p className="font-semibold">Another install already manages this service&apos;s logging VCL.</p>
+      <p className="text-muted-foreground leading-relaxed">
+        Cloud can attach alongside it and reuse its capture VCL. Cloud adds only its own owner marker, the
+        logging endpoint &quot;{ATTACH_ENDPOINT_NAME}&quot; and its response condition, and leaves everything
+        else on the service alone. Request logs only: RUM and CMCD stay with the other install.
+      </p>
+      {offer.missingFields.length > 0 && (
+        <p className="text-muted-foreground">
+          The existing capture VCL does not set these fields, so they will be blank:{" "}
+          <span className="font-mono">{offer.missingFields.join(", ")}</span>
+        </p>
+      )}
+      <Button className="h-9 text-xs" onClick={s.acceptAttach}>
+        Attach alongside the existing install
+      </Button>
     </div>
   )
 }

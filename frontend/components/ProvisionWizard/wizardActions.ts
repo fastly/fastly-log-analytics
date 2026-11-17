@@ -188,6 +188,7 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
     faro_version: config.faro_version || null,
   }
   if (config.cdn_prefix) body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`
+  if (config.capture === "attached") body.capture = "attached"
   start("/api/provision/execute", body)
 }
 

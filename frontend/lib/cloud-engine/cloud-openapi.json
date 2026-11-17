@@ -143,6 +143,18 @@
                     "customer_id": { "type": "string" },
                     "service": {
                       "$ref": "#/components/schemas/ProvisionCandidate"
+                    },
+                    "capture": {
+                      "type": "object",
+                      "description": "Present when validating with capture attached",
+                      "required": ["mode", "missing_fields"],
+                      "properties": {
+                        "mode": { "type": "string", "enum": ["attached"] },
+                        "missing_fields": {
+                          "type": "array",
+                          "items": { "type": "string" }
+                        }
+                      }
                     }
                   }
                 }
@@ -4167,6 +4179,11 @@
         "properties": {
           "token": { "type": "string", "writeOnly": true },
           "service_id": { "type": "string" },
+          "capture": {
+            "type": "string",
+            "enum": ["managed", "attached"],
+            "default": "managed"
+          },
           "cmcd": { "$ref": "#/components/schemas/CmcdConfig" },
           "rum": { "$ref": "#/components/schemas/RumConfig" },
           "service_name": { "type": "string" },

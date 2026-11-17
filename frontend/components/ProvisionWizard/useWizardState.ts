@@ -53,6 +53,7 @@ import {
   subscribeDraft,
   validateMutationFn,
 } from './wizardActions'
+import { applyAttach, clearAttach, resolveAttachOffer, type AttachOffer } from './attach'
 
 export * from './types'
 export * from './wizardActions'
@@ -210,6 +211,8 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null)
   const [search, setSearch] = useState("")
   const [selectedService, setSelectedService] = useState<ProvisionService | null>(null)
+  const [attachOffer, setAttachOffer] = useState<AttachOffer | null>(null)
+  const [isCheckingAttach, setIsCheckingAttach] = useState(false)
   const [isDeploying, setIsDeploying] = useState(false)
   const [fosStatus, setFosStatus] = useState<FosStatus>("idle")
   const [fosError, setFosError] = useState("")
@@ -312,15 +315,35 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     if (token) setSubmittedToken(token)
   }
 
+  const validateOnSuccess = buildValidateOnSuccess({ token, setTokenInfo, setConfig, setStep, mode })
   const validateMutation = useMutation({
     mutationFn: validateMutationFn(token),
-    onSuccess: buildValidateOnSuccess({ token, setTokenInfo, setConfig, setStep, mode }),
+    onSuccess: (data) => {
+      setConfig(clearAttach)
+      validateOnSuccess(data)
+    },
+    onError: async (error, serviceId) => {
+      setIsCheckingAttach(true)
+      try {
+        setAttachOffer(await resolveAttachOffer(error, token, serviceId, config.log_fields))
+      } finally {
+        setIsCheckingAttach(false)
+      }
+    },
   })
 
   const handleServiceSelect = (service: ProvisionService) => {
     if (service.provisioned) return
     setSelectedService(service)
+    setAttachOffer(null)
     validateMutation.mutate(service.id)
+  }
+
+  const acceptAttach = () => {
+    if (!attachOffer?.available || attachOffer.serviceId !== selectedService?.id) return
+    validateOnSuccess(attachOffer.data)
+    setConfig(applyAttach)
+    setAttachOffer(null)
   }
 
   const handleCheckConfig = () =>
@@ -532,6 +555,9 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     handleTokenSubmit,
     validateMutation,
     handleServiceSelect,
+    attachOffer,
+    isCheckingAttach,
+    acceptAttach,
     handleCheckFos,
     checkDomain,
     domainStatus,

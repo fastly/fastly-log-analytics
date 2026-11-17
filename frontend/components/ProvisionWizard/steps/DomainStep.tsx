@@ -84,10 +84,13 @@ export function FeaturesStep({ s }: { s: WizardState }) {
         {FEATURE_OPTIONS.map((opt) => {
           const active = currentSelection === opt.id
           const Icon = opt.icon
+          const unavailable = config.capture === "attached" && opt.id !== "logging"
           return (
             <button
               key={opt.id}
               type="button"
+              disabled={unavailable}
+              title={unavailable ? "RUM stays with the install that manages this service's VCL" : undefined}
               onClick={() =>
                 setConfig((prev) => ({
                   ...prev,
@@ -98,6 +101,7 @@ export function FeaturesStep({ s }: { s: WizardState }) {
               className={cn(
                 "group relative flex flex-col items-center gap-5 p-6 border-2 rounded-2xl bg-background transition-all text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 active ? opt.activeClass : opt.hoverClass,
+                unavailable && "opacity-40 cursor-not-allowed",
               )}
             >
               <div

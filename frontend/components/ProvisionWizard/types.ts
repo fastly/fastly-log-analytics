@@ -5,6 +5,7 @@ import type { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Service } from '@/stores/filterStore'
 import type { SSELine, SSEStatus } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
+import type { AttachOffer } from './attach'
 
 export type ProvisionService = Schema<"ProvisionService">
 export type LogFieldsCatalog = Schema<"LogFieldsCatalogResponse">
@@ -37,6 +38,7 @@ export interface TokenInfo {
 }
 
 export interface ProvisionConfig {
+  capture: "managed" | "attached"
   endpoint_name: string
   fos_region: string
   fos_endpoint: string
@@ -70,6 +72,7 @@ export interface ProvisionConfig {
 }
 
 export const INITIAL_CONFIG: ProvisionConfig = {
+  capture: "managed",
   endpoint_name: "",
   fos_region: "us-east-1",
   fos_endpoint: "",
@@ -202,6 +205,9 @@ export interface WizardState {
   handleTokenSubmit: () => Promise<void>
   validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>
   handleServiceSelect: (service: ProvisionService) => void
+  attachOffer: AttachOffer | null
+  isCheckingAttach: boolean
+  acceptAttach: () => void
   handleCheckFos: (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) => Promise<void>
   checkDomain: (prefix: string) => Promise<void>
   domainStatus: DomainStatus

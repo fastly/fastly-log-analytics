@@ -214,6 +214,12 @@ export interface paths {
               valid: boolean;
               customer_id?: string;
               service: components["schemas"]["ProvisionCandidate"];
+              /** @description Present when validating with capture attached */
+              capture?: {
+                /** @enum {string} */
+                mode: "attached";
+                missing_fields: string[];
+              };
             };
           };
         };
@@ -1889,6 +1895,11 @@ export interface components {
     ProvisionInput: {
       token: string;
       service_id: string;
+      /**
+       * @default managed
+       * @enum {string}
+       */
+      capture?: "managed" | "attached";
       cmcd?: components["schemas"]["CmcdConfig"];
       rum?: components["schemas"]["RumConfig"];
       service_name?: string;

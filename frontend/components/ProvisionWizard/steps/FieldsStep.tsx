@@ -105,14 +105,16 @@ export function FieldsStep({ s }: { s: WizardState }) {
                       updateFieldLimit={s.updateFieldLimit}
                     />
                   ))}
-              <CmcdConfigSection
-                enabled={config.cmcd_enabled}
-                onEnabledChange={(v) => setConfig((prev) => ({ ...prev, cmcd_enabled: v }))}
-                mode={config.cmcd_mode}
-                onModeChange={(v) => setConfig((prev) => ({ ...prev, cmcd_mode: v }))}
-                version={config.cmcd_version}
-                onVersionChange={(v) => setConfig((prev) => ({ ...prev, cmcd_version: v }))}
-              />
+              {config.capture !== "attached" && (
+                <CmcdConfigSection
+                  enabled={config.cmcd_enabled}
+                  onEnabledChange={(v) => setConfig((prev) => ({ ...prev, cmcd_enabled: v }))}
+                  mode={config.cmcd_mode}
+                  onModeChange={(v) => setConfig((prev) => ({ ...prev, cmcd_mode: v }))}
+                  version={config.cmcd_version}
+                  onVersionChange={(v) => setConfig((prev) => ({ ...prev, cmcd_version: v }))}
+                />
+              )}
             </div>
           </div>
         )}
