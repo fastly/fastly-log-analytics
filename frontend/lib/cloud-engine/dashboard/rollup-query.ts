@@ -110,6 +110,7 @@ export type RollupSample = {
   tsMs: number;
   cache: string | null;
   ttfbS: number;
+  elapsedUs: number | null;
   rttUs: number | null;
 };
 
@@ -307,6 +308,7 @@ export async function decodeRollup(
     "count",
     "sample_key",
     "ttfb_sum",
+    "elapsed_us",
     ...sumNames,
     ...Object.values(WATERFALL_COLUMNS),
     ...Object.values(OVERVIEW_COLUMNS),
@@ -408,11 +410,13 @@ export async function decodeRollup(
         const key = col("sample_key")[i];
         if (t === null || ttfb == null || key == null) break;
         const rtt = col("rtt_sum")[i];
+        const elapsed = col("elapsed_us")[i];
         (rollup.samples ??= []).push({
           key: typeof key === "bigint" ? key : BigInt(Math.trunc(num(key))),
           tsMs: t,
           cache: typeof value[i] === "string" ? (value[i] as string) : null,
           ttfbS: num(ttfb),
+          elapsedUs: elapsed == null ? null : num(elapsed),
           rttUs: rtt == null ? null : num(rtt),
         });
         break;

@@ -5,7 +5,9 @@ import type { ManifestFile } from "./dashboard/manifest";
 import { decodeRollup, mergeRollups, type Rollup, type RollupResult } from "./dashboard/rollup-query";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
-import { executePerformanceAggregates, type PerfTopAsnItem, type PerfTopUrlItem } from "./performance";
+import {
+  executePerformanceAggregates, type PerfScatterItem, type PerfTopAsnItem, type PerfTopUrlItem,
+} from "./performance";
 import {
   performanceAggregatesFromRollup,
   performanceFromRollup,
@@ -107,6 +109,35 @@ describe("performance rollup vs raw DuckDB over the same rows", () => {
     }
     expect(got.top_asns!.map((r) => r.asn).toSorted()).toEqual(want.top_asns!.map((r) => r.asn).toSorted());
   });
+
+  const rawScatter = async (file: ManifestFile) => (await executePerformanceAggregates(
+    { start_time: file.start, end_time: file.end, sections: ["scatter"] }, lease.readContext(),
+  )).scatter!;
+  const points = (rows: PerfScatterItem[]) => rows.map((r) => JSON.stringify([r.origin, r.edge, r.cache])).toSorted();
+
+  it("samples the scatter from summary sample rows: every raw point of a window under the sample size", async () => {
+    for (const [i, file] of WINDOWS.entries()) {
+      const want = await rawScatter(RAW[i]);
+      expect(want.length).toBeGreaterThan(20);
+      expect(want.length).toBeLessThan(300);
+      const got = performanceAggregatesFromRollup(await rollupOf([file]), body({ sections: ["scatter"] }))!;
+      expect(got.rollup.approximate, file.key).toEqual(["scatter"]);
+      expect(got._approx, file.key).toBe(false);
+      expect(points(got.scatter!), file.key).toEqual(points(want));
+    }
+  });
+
+  it("keeps the same 300-row sample of the range from windows, hour and day bundles, all raw points", async () => {
+    const every = new Set(points((await Promise.all(RAW.map(rawScatter))).flat()));
+    const page = body({ sections: ["scatter"] });
+    const windows = performanceAggregatesFromRollup(await rollupOf(WINDOWS), page)!.scatter!;
+    expect(windows.length).toBeGreaterThan(200);
+    expect(windows.length).toBeLessThanOrEqual(300);
+    expect(points(windows).every((point) => every.has(point))).toBe(true);
+    for (const [list, step] of [[HOURS, 300_000], [files("day"), HOUR]] as const) {
+      expect(points(performanceAggregatesFromRollup(await rollupOf([...list], step), page)!.scatter!)).toEqual(points(windows));
+    }
+  });
 });
 
 describe("performanceAggregatesFromRollup", () => {
@@ -163,6 +194,8 @@ describe("performanceAggregatesFromRollup", () => {
     expect([tops!.top_urls, tops!.top_asns]).toEqual([[], []]);
     const ttlOnly = performanceAggregatesFromRollup(result, body({ sections: ["ttl_dist"] }));
     expect("waterfall" in ttlOnly!).toBe(false);
+    expect(performanceAggregatesFromRollup(result, body({ sections: ["scatter"] }))!.scatter).toEqual([]);
+    expect("scatter" in ttlOnly!).toBe(false);
   });
 });
 
@@ -175,19 +208,19 @@ describe("performanceFromRollup", () => {
     expect(served).toEqual(performanceAggregatesFromRollup(await rollupOf(WINDOWS), body()));
     expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
     expect(await performanceFromRollup("/api/performance", body(), source())).not.toBeNull();
-    const page = body({ sections: ["ttl_dist", "waterfall", ...TOPS], sort_by: "p95" });
+    const page = body({ sections: ["ttl_dist", "waterfall", ...TOPS, "scatter"], sort_by: "p95" });
     expect(await performanceFromRollup("/api/performance/aggregates", page, s))
       .toEqual(performanceAggregatesFromRollup(await rollupOf(WINDOWS), page));
     expect(await performanceFromRollup("/api/performance/aggregates", body({ filters: { pop: { values: [] } } }), source()))
       .not.toBeNull();
   });
 
-  it("leaves filtered reads, row sections, unnamed sections and other routes to the raw scan", async () => {
+  it("leaves filtered reads, unknown sections, unnamed sections and other routes to the raw scan", async () => {
     for (const params of [
       body({ filters: { pop: { values: ["IAD"], mode: "include" } } }),
       body({ filters: { pop: ["IAD"] } }),
-      body({ sections: ["waterfall", "scatter"] }),
-      body({ sections: ["top_urls", "scatter"] }),
+      body({ sections: ["waterfall", "nope"] }),
+      body({ filters: { pop: { values: ["IAD"], mode: "include" } }, sections: ["scatter"] }),
       body({ sections: undefined }),
       body({ sections: [] }),
       body({ start_time: undefined }),

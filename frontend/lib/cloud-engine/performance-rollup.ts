@@ -7,7 +7,9 @@ import {
   MIN_URL_REQUESTS,
   PERF_TOP_N,
   resolveSortColumn,
+  SCATTER_SAMPLE_SIZE,
   shapePerformanceAsnRows,
+  shapePerfScatterRows,
   shapePerfTopUrlRows,
   type PerformanceAggregatesResponse,
   type PerfTtlDistItem,
@@ -70,6 +72,25 @@ function latencyRanking(result: RollupResult, key: "url" | "asn", minRequests: n
     .slice(0, PERF_TOP_N);
 }
 
+/**
+ * `buildPerfScatterSql` from the `sample` rows: each summary keeps the rows
+ * with a TTFB with the smallest sample keys, so the smallest of their union
+ * are a uniform sample of the range. Raw orders by another hash, so the points
+ * differ, and dropping rows without an elapsed or with a negative edge time
+ * after sampling can leave fewer than raw's 300.
+ */
+function scatter(result: RollupResult) {
+  return shapePerfScatterRows((result.rollup.samples ?? [])
+    .toSorted((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : a.tsMs - b.tsMs)
+    .slice(0, SCATTER_SAMPLE_SIZE)
+    .flatMap((sample) => {
+      if (sample.elapsedUs === null) return [];
+      const origin = sample.ttfbS * 1000;
+      const edge = sample.elapsedUs / 1000 - origin;
+      return edge >= 0 ? [{ origin_ms: origin, edge_ms: edge, cache: sample.cache ?? "" }] : [];
+    }));
+}
+
 /** Whether summaries may answer this /performance read at all, before any range or listing is resolved. */
 export function performanceRollupEligible(path: string, body: PerformanceRollupBody): boolean {
   if (!/^\/api\/performance(?:\/aggregates)?\/*$/.test(path) || hasFilterValues(body.filters)) return false;
@@ -79,13 +100,14 @@ export function performanceRollupEligible(path: string, body: PerformanceRollupB
 }
 
 /**
- * The requested /performance waterfall averages, TTL buckets and URL and
- * network rankings from merged summaries, shaped like
+ * The requested /performance waterfall averages, TTL buckets, URL and network
+ * rankings and scatter sample from merged summaries, shaped like
  * `executePerformanceAggregates`. The waterfall and TTL buckets are exact: the
  * waterfall sums the same per-row components, and TTL counts every value
  * unless a summary cut TTLs to its top K, when the buckets are lower bounds.
  * Ranking percentiles are approximate, and their counts lower bounds when a
- * summary cut URLs or networks to its top K. Null when a summary predates the
+ * summary cut URLs or networks to its top K. The scatter is labelled
+ * approximate as a different sample from raw's. Null when a summary predates the
  * ranking rows.
  */
 export function performanceAggregatesFromRollup(
@@ -122,6 +144,10 @@ export function performanceAggregatesFromRollup(
     };
   }
   if (sections.has("ttl_dist")) out.ttl_dist = ttlDist(fields.get("ttl"));
+  if (sections.has("scatter")) {
+    out.scatter = scatter(result);
+    approximate.push("scatter");
+  }
   return {
     ...out,
     rollup: {
@@ -134,10 +160,10 @@ export function performanceAggregatesFromRollup(
 }
 
 /**
- * Answers an unfiltered Cloud /performance read of the waterfall, TTL and
- * ranking sections from v3 summaries, or returns null when the raw scan must:
- * a filter, the scatter sample, summaries without the ranking rows, or a
- * range the summaries don't cover (see `queryRollup`).
+ * Answers an unfiltered Cloud /performance read of the waterfall, TTL,
+ * ranking and scatter sections from v3 summaries, or returns null when the raw
+ * scan must: a filter, summaries without the ranking rows, or a range the
+ * summaries don't cover (see `queryRollup`).
  */
 export async function performanceFromRollup(
   path: string,

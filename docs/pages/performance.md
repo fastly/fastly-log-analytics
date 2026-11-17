@@ -34,10 +34,10 @@ The ClickHouse reader ([`backend/high_scale/performance.py`](../../backend/high_
 
 ## Cloud
 
-Unfiltered, `ttl_dist` (exact counts, shown as "≥" when a bucket was cut to a top K), `waterfall` (exact averages), `top_urls` and `top_asns` come from v3 summaries ([`performance-rollup.ts`](../../frontend/lib/cloud-engine/performance-rollup.ts)), with a raw fallback. The page reads them in one summary call and only `scatter` raw.
+Unfiltered, `ttl_dist` (exact counts, shown as "≥" when a bucket was cut to a top K), `waterfall` (exact averages), `top_urls`, `top_asns` and `scatter` come from v3 summaries ([`performance-rollup.ts`](../../frontend/lib/cloud-engine/performance-rollup.ts)), with a raw fallback. The page reads all five in one summary call and loads no raw Parquet; any filter keeps one raw read for every section.
 
 - `top_urls` and `top_asns` come from the summaries' `urls` rows, one per URL and per ASN with an elapsed histogram and an exact elapsed sum and count. Request counts and averages are exact, so sorting by average ranks like raw. p50, p95 and p99, and a ranking by them, come from the histogram, so the cards show Approximate. Each summary keeps its 2,000 busiest URLs and ASNs; when it cut some, the card title shows "≥ counts" and a rarely requested slow URL can be missing from the ranking. Summaries written before the `urls` rows existed can't answer the rankings.
-- `scatter` stays raw: it needs its sample taken by raw's `hash(timestamp|url)` order, and the summary sample uses another key.
+- `scatter` comes from the summaries' `sample` rows: each summary keeps the 300 rows with a TTFB that have the smallest sample key, so the 300 smallest across the range are a uniform sample of it, and the points drop rows without an elapsed or with a negative edge time like raw. Raw samples by `hash(timestamp|url)` instead, so the points differ from a raw read's (each is still a real request), and a range can show fewer than 300 points where raw shows 300. The card title says "≈ sample" when the scatter came from summaries.
 
 The raw sections run against normalized Parquet views in local DuckDB. Cached compressed files stay reusable; loading
 does not copy every decoded column into a resident table. DuckDB can project the

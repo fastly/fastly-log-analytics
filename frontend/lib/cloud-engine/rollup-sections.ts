@@ -40,10 +40,10 @@ export function originRollupSections(options: {
 
 /**
  * The /performance sections summaries can answer: the TTL histogram and the
- * waterfall averages exactly, and the URL and network rankings with estimated
- * percentiles.
+ * waterfall averages exactly, the URL and network rankings with estimated
+ * percentiles, and the scatter from the summaries' own row sample.
  */
-export const PERFORMANCE_ROLLUP_SECTIONS = ["ttl_dist", "waterfall", "top_urls", "top_asns"] as const;
+export const PERFORMANCE_ROLLUP_SECTIONS = ["ttl_dist", "waterfall", "top_urls", "top_asns", "scatter"] as const;
 
 /**
  * The /security sections summaries can answer: the constant NGWAF rows, TLS

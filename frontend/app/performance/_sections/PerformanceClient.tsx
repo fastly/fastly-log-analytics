@@ -13,7 +13,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { ColumnVisibilityDropdown, DataTable } from '@/components/DataTable'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { approxMark, boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
 import { CHART_COLORS, type RangeWire } from '@/lib/utils'
@@ -41,7 +41,6 @@ export {
 } from './PerformanceHelp'
 
 type PerformanceSection = NonNullable<components['schemas']['PerformanceRequest']['sections']>[number]
-const RAW_SECTIONS: PerformanceSection[] = ['scatter']
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
@@ -77,8 +76,7 @@ function PerformanceBody({
   onAsnVisChange,
 }: PerformanceBodyProps) {
   const [sortBy] = useQueryState('sort_by', parseAsStringLiteral(PERF_SORT_BY).withDefault('p99'))
-  // Cloud answers the waterfall, TTL buckets and rankings from summaries only when unfiltered; read them
-  // apart so they paint without waiting on the raw scan the scatter sample needs.
+  // Cloud answers every section from summaries only when unfiltered, so then the raw read never runs.
   const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   const postPerformance = (sections: PerformanceSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
@@ -99,8 +97,9 @@ function PerformanceBody({
     serviceId: activeServiceId,
     filterPayload,
     range,
-    keyParts: rollupFirst ? [RAW_SECTIONS] : [sortBy],
-    queryFn: ({ rangeBody, signal }) => postPerformance(rollupFirst ? RAW_SECTIONS : undefined, rangeBody, signal),
+    keyParts: [sortBy],
+    queryOptions: { enabled: !rollupFirst },
+    queryFn: ({ rangeBody, signal }) => postPerformance(undefined, rangeBody, signal),
   })
 
   const rollupQuery = useAnalyticsReportQuery({
@@ -113,7 +112,6 @@ function PerformanceBody({
     queryFn: ({ rangeBody, signal }) => postPerformance([...PERFORMANCE_ROLLUP_SECTIONS], rangeBody, signal),
   })
 
-  const coreData = performanceQuery.data
   const distQuery = rollupFirst ? rollupQuery : performanceQuery
   const distData = distQuery.data
   const rollup = rollupFirst ? readRollupMeta(distData) : undefined
@@ -131,7 +129,7 @@ function PerformanceBody({
     ]
   }, [ttlDist])
 
-  const scatterRows = coreData?.scatter
+  const scatterRows = distData?.scatter
   const scatterData = React.useMemo((): PlotlyTrace[] => {
     if (!scatterRows?.length) return []
     const isHit = (c: string | null | undefined) => c?.startsWith('HIT') === true
@@ -288,13 +286,13 @@ function PerformanceBody({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Origin vs Edge Processing (ms)"
+          title={approxMark(rollup, 'scatter') ? 'Origin vs Edge Processing (ms, ≈ sample)' : 'Origin vs Edge Processing (ms)'}
           icon={<Zap className="h-4 w-4" />}
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling origin vs edge latency..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={(coreData?.scatter?.length ?? 0) === 0}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={(scatterRows?.length ?? 0) === 0}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={<OriginVsEdgeHelp />}
