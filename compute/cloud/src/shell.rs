@@ -1820,13 +1820,14 @@ struct Empty {}
 /// Non-admin callers get only the fields the shell needs, never storage or
 /// Secret Store reference names.
 fn redact_services(mut response: Response) -> Response {
-    const KEEP: [&str; 6] = [
+    const KEEP: [&str; 7] = [
         "service_id",
         "name",
         "status",
         "logging_enabled",
         "created_at",
         "updated_at",
+        "active_log_field_ids",
     ];
     if response.status != 200 {
         return response;

@@ -5820,6 +5820,11 @@ export interface components {
              * @default false
              */
             ngwaf_configured: boolean;
+            /**
+             * Fastly Bots Available
+             * @default true
+             */
+            fastly_bots_available: boolean;
             /** Views */
             views?: components["schemas"]["SavedView"][];
             log_fields_catalog?: components["schemas"]["LogFieldsCatalogResponse"] | null;

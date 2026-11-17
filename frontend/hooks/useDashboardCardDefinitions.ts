@@ -211,6 +211,7 @@ export function useDashboardCards(): DashboardCard[] {
     const seen = new Set<string>()
     return [...standardCards, ...customCards].filter(c => {
       if (NGWAF_CARD_IDS.has(c.id) && bootstrap.ngwaf_configured !== true) return false
+      if (c.id === '_bot_name' && bootstrap.fastly_bots_available === false) return false
       if (seen.has(c.id)) return false
       seen.add(c.id)
       return true

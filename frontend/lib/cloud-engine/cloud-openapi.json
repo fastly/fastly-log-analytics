@@ -4245,6 +4245,11 @@
           "updated_at": { "type": "integer" },
           "config_version": { "type": "integer" },
           "log_fields": { "$ref": "#/components/schemas/CaptureFields" },
+          "active_log_field_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Listing only: resolved catalog field ids in id order, then enabled custom field names. Virtual fields are never listed."
+          },
           "logging_enabled": { "type": "boolean" },
           "logging_endpoint_name": { "type": "string" },
           "log_period": { "type": "integer" },

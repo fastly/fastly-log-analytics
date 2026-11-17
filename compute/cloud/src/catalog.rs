@@ -109,6 +109,22 @@ pub fn resolve_enabled_fields(config: &Value) -> BTreeSet<String> {
     enabled
 }
 
+/// fla v3 bootstrap `active_log_field_ids`: the resolved catalog fields in id order, then the
+/// enabled custom fields. The dashboard shows these cards by default; virtual fields such as
+/// Score Reasons are never logged, so never listed.
+pub fn active_log_field_ids(config: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = resolve_enabled_fields(config).into_iter().collect();
+    ids.extend(
+        config["custom_fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|field| field["enabled"] != false)
+            .filter_map(|field| field["name"].as_str().map(str::to_owned)),
+    );
+    ids
+}
+
 pub fn get_required_edge_headers(config: &Value) -> BTreeSet<String> {
     let enabled = resolve_enabled_fields(config);
     let mut required = BTreeSet::new();
@@ -364,6 +380,34 @@ pub fn dashboard_cards(log_fields: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_log_field_ids_list_resolved_groups_and_enabled_custom_fields() {
+        let ids = active_log_field_ids(&json!({
+            "groups": ["A", "G"],
+            "field_overrides": {"ja3": true, "host": false},
+            "custom_fields": [
+                {"name": "tenant", "enabled": true},
+                {"name": "plan"},
+                {"name": "off", "enabled": false},
+            ],
+        }));
+        let has = |id: &str| ids.iter().any(|logged| logged == id);
+        for id in ["status", "url", "asn", "ploss", "ja3", "tenant", "plan"] {
+            assert!(has(id), "{id} missing from {ids:?}");
+        }
+        for id in [
+            "host",
+            "pop",
+            "ja4",
+            "edge_score_reason_ind",
+            "_bot_name",
+            "off",
+        ] {
+            assert!(!has(id), "{id} unexpectedly in {ids:?}");
+        }
+        assert_eq!(&ids[ids.len() - 2..], ["tenant", "plan"]);
+    }
 
     #[test]
     fn dashboard_cards_list_enabled_marked_custom_fields_only() {

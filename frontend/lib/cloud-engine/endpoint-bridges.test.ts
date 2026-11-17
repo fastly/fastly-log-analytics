@@ -326,6 +326,33 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(body.header_badge).toBeUndefined();
   });
 
+  it("boots the dashboard with the active service's logged fields and without the unbuilt Fastly Bots card", async () => {
+    const listed = {
+      services: [
+        { service_id: "fixture-a", active_log_field_ids: ["status", "host"] },
+        { service_id: "fixture-b", active_log_field_ids: ["status", "pop", "tenant"] },
+      ],
+    };
+    let servicesBody: unknown = listed;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role: "admin" } });
+      if (path === "/api/services") return Response.json(servicesBody);
+      return Response.json({}, { status: 404 });
+    }));
+    const boot = async (serviceId?: string) =>
+      (await handleCloudAnalyticalRequest(request("/api/bootstrap", "GET", undefined, serviceId)))!.json();
+
+    const active = await boot("fixture-b");
+    expect(active.active_log_field_ids).toEqual(["status", "pop", "tenant"]);
+    expect(active.fastly_bots_available).toBe(false);
+    expect(active.ngwaf_configured).toBe(false);
+
+    resetCloudMetadataCache();
+    servicesBody = { services: [{ service_id: "fixture-a" }] };
+    expect((await boot()).active_log_field_ids).toEqual([]);
+  });
+
   it("lets one caller abort without cancelling the shared read for the others", async () => {
     const { pending, servicesCalls } = heldServices();
     const owner = new AbortController();

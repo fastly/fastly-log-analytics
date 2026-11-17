@@ -364,7 +364,12 @@ fn services(context: &Context<'_, impl Runtime>) -> Result<Value, Error> {
     let mut result = Vec::new();
     if let Some(sid) = install.service_id {
         match load_service(context, &sid) {
-            Ok((record, service)) => result.push(service_value(&service, &record.generation)),
+            Ok((record, service)) => {
+                let mut value = service_value(&service, &record.generation);
+                value["active_log_field_ids"] =
+                    json!(crate::catalog::active_log_field_ids(&service.log_fields));
+                result.push(value);
+            }
             Err(error) if error.status == 404 => (),
             Err(error) => return Err(error),
         }

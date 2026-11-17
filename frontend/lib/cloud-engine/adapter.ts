@@ -862,7 +862,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
             name?: string;
             rum_enabled?: boolean;
             cmcd?: { enabled?: boolean };
-            log_fields?: { selected_fields?: string[] };
+            active_log_field_ids?: string[];
           }>;
         })
       : { services: [] };
@@ -878,7 +878,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const requestedService = searchParams.get("service_id") ?? request.headers.get("x-service-id");
     const activeServiceId = services.find((service) => service.service_id === requestedService)?.service_id ??
       services[0]?.service_id ?? null;
-    const activeLogFieldIds = rawServices.find((service) => service.service_id === activeServiceId)?.log_fields?.selected_fields ?? [];
+    // An older Compute omits the list; empty makes the dashboard treat every card as logged.
+    const activeLogFieldIds = rawServices.find((service) => service.service_id === activeServiceId)?.active_log_field_ids ?? [];
     return jsonResponse(
       {
         runtime_mode: "cloud",
@@ -889,6 +890,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         header_badge: await headerBadge,
         // Cloud has no NGWAF; saying so up front keeps /security from drawing the NGWAF row then removing it.
         ngwaf_configured: false,
+        // Cloud has no known-bot classifier, so the Fastly Bots card would never fill.
+        fastly_bots_available: false,
         settings: {
           needs_login: false,
           is_remote_analyst: isRemoteAnalyst,

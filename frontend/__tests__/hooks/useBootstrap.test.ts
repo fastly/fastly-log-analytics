@@ -1498,6 +1498,37 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
       rerender()
       expect(result.current.map(c => c.id)).toEqual(['_bot_name'])
     })
+
+    it('defaults to the logged cards, and leaves out Fastly Bots only where bot classification is unavailable', () => {
+      useLogFieldsCatalogMock.mockReturnValue({
+        data: {
+          fields: [
+            { id: 'host', label: 'Host', group: 'A' },
+            { id: 'pop', label: 'POP', group: 'C' },
+            { id: 'ja3', label: 'JA3', group: 'H' },
+            { id: 'c_type', label: 'Connection Type', group: 'G' },
+            { id: 'edge_score_reason_ind', label: 'Score Reasons', group: 'VIRTUAL' },
+            { id: '_bot_name', label: 'Fastly Bots', group: 'VIRTUAL' },
+          ],
+        },
+      })
+      const logged = { active_log_field_ids: ['host', 'pop', 'status'], ngwaf_configured: false }
+      useBootstrapMock.mockReturnValue({ data: { ...logged, fastly_bots_available: false } })
+      const { result, rerender } = renderHook(() => useDashboardCards())
+      expect(Object.fromEntries(result.current.map(c => [c.id, c.inActiveFormat]))).toEqual({
+        host: true,
+        pop: true,
+        ja3: false,
+        c_type: false,
+        edge_score_reason_ind: false,
+      })
+
+      for (const elevation of [logged, { ...logged, fastly_bots_available: true }]) {
+        useBootstrapMock.mockReturnValue({ data: elevation })
+        rerender()
+        expect(result.current.find(c => c.id === '_bot_name')).toEqual({ id: '_bot_name', label: 'Fastly Bots', inActiveFormat: true })
+      }
+    })
   })
 
   describe('useFilterUrlWriteback, useFilterPayload & useTimeRange', () => {

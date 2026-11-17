@@ -48515,6 +48515,11 @@
             "title": "Ngwaf Configured",
             "default": false
           },
+          "fastly_bots_available": {
+            "type": "boolean",
+            "title": "Fastly Bots Available",
+            "default": true
+          },
           "views": {
             "items": {
               "$ref": "#/components/schemas/SavedView"

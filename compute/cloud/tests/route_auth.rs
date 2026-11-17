@@ -779,10 +779,20 @@ fn services_listing_is_redacted_for_analysts_only() {
         "faro_version",
         "cmcd",
         "scoring",
+        "active_log_field_ids",
     ]
     .into();
     let full = read("admin");
     assert!(!full.is_empty());
+    let logged = full[0]["active_log_field_ids"]
+        .as_array()
+        .expect("services list the enabled log field ids");
+    for id in ["status", "host", "pop"] {
+        assert!(logged.contains(&json!(id)), "{id} missing from {logged:?}");
+    }
+    for id in ["edge_score_reason_ind", "_bot_name", "ja3", "ploss"] {
+        assert!(!logged.contains(&json!(id)), "{id} listed in {logged:?}");
+    }
     let full_keys: BTreeSet<String> = full[0].as_object().unwrap().keys().cloned().collect();
     assert!(
         full_keys.iter().any(|key| key.ends_with("_ref")
@@ -803,6 +813,10 @@ fn services_listing_is_redacted_for_analysts_only() {
                 );
             }
             assert_eq!(service["rum_enabled"], original["rum_enabled"]);
+            assert_eq!(
+                service["active_log_field_ids"],
+                original["active_log_field_ids"]
+            );
             assert_eq!(service["faro_version"], original["faro_version"]);
             assert_eq!(
                 service["rum"],
