@@ -689,6 +689,26 @@ def test_disable_call_order_and_rollback(caplog):
     assert any("rollback activation of version 200 failed" in r.getMessage() for r in caplog.records)
 
 
+class _FastlyNativeFos(_Fastly):
+    def __call__(self, method, path, body=None, **kwargs):
+        if method == "GET" and path.endswith("/logging/s3"):
+            self.calls.append((method, path))
+            self.kwargs.append(kwargs)
+            return []
+        if method == "GET" and path.endswith("/logging/fos"):
+            self.calls.append((method, path))
+            self.kwargs.append(kwargs)
+            return [{"name": "Fastly Object Storage Logs"}]
+        return super().__call__(method, path, body, **kwargs)
+
+
+def test_disable_updates_the_format_on_a_native_fos_endpoint():
+    fake = _FastlyNativeFos()
+    _run_disable(fake)
+    puts = [p for m, p in fake.calls if m == "PUT" and "/logging/" in p]
+    assert puts == [f"/service/{LOG_SVC}/version/201/logging/fos/Fastly%20Object%20Storage%20Logs"]
+
+
 def test_teardown_call_order():
     meta = {"scoring_service_id": SCORE_SVC, "scoring_keys_store_id": "K", "scoring_config_store_id": "C"}
     fake_ok = _Fastly()
@@ -833,7 +853,7 @@ def test_remove_endpoint_call_order(caplog):
     def _run_rm(fake):
         with (
             patch("backend.provision.fastly_api.get_active_version", return_value=10),
-            patch("backend.provision.fastly_api.list_s3_endpoints", return_value=["MyEndpoint"]),
+            patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "s3"}),
             patch("backend.provision.fastly_api.fastly", side_effect=fake),
         ):
             return fastly_api.remove_logging_endpoint(SID, "MyEndpoint", "tok")
@@ -1266,7 +1286,7 @@ def test_session_scoring_config_merge_and_lock_release():
         patch.object(sso, "_remove_scoring_backend"),
         patch.object(sso, "ensure_vcl_snippet"),
         patch.object(sso, "fastly", MagicMock(return_value={})),
-        patch("backend.core.fastly.client.list_s3_endpoints", return_value=[]),
+        patch("backend.core.fastly.client.list_log_endpoints", return_value={}),
         patch("backend.provision.fastly_api.generate_capture_vcl", return_value={"recv": ""}),
         patch.object(
             sso, "delete_scoring_service", side_effect=lambda *_a, **_k: (_concurrent_write(compute_key="kept"), [])[1]

@@ -939,18 +939,75 @@ def test_ensure_condition_url_encodes_condition_name():
     assert put_path.endswith("Path%20%2F%20With%20%25%20Spaces")
 
 
-def test_list_s3_endpoints_returns_names_list():
-    fake = [{"name": "logs-fos"}, {"name": "audit-logs"}]
-    with patch("backend.core.fastly.client.fastly", return_value=fake):
-        assert service.list_s3_endpoints("svc", 5, "tkn") == ["logs-fos", "audit-logs"]
+def test_list_log_endpoints_maps_names_to_their_endpoint_type():
+    def fake(method, path, **_kw):
+        if path.endswith("/logging/s3"):
+            return [{"name": "logs-fos"}, {"name": "audit-logs"}]
+        return [{"name": "native-logs"}]
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
+        assert service.list_log_endpoints("svc", 5, "tkn") == {
+            "logs-fos": "s3",
+            "audit-logs": "s3",
+            "native-logs": "fos",
+        }
 
 
-def test_list_s3_endpoints_returns_empty_on_error():
-    """RuntimeError → empty list. Pinned because the cron's
+def test_list_log_endpoints_returns_empty_on_error():
+    """RuntimeError → empty mapping. Pinned because the cron's
     teardown-detector reads this to know what to remove; a raise
     would abort the whole teardown."""
     with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("404")):
-        assert service.list_s3_endpoints("svc", 5, "tkn") == []
+        assert service.list_log_endpoints("svc", 5, "tkn") == {}
+
+
+@pytest.mark.parametrize(
+    ("token_info", "extra", "allowed"),
+    [
+        ({"user_id": "u1"}, {"/current_user": {"role": "superuser", "limit_services": True}}, True),
+        ({"user_id": "u1"}, {"/current_user": {"role": "engineer", "limit_services": False}}, True),
+        ({"user_id": "u1"}, {"/current_user": {"role": "engineer", "limit_services": True}}, False),
+        ({"user_id": "u1"}, {"/current_user": {"role": "user", "limit_services": False}}, False),
+        ({"id": "tok1", "role": "engineer"}, {}, True),
+        ({"id": "tok1"}, {"/automation-tokens/tok1": {"role": "superuser"}}, True),
+        ({"id": "tok1"}, {"/automation-tokens/tok1": {"role": "user"}}, False),
+    ],
+)
+def test_logging_endpoint_role_error(token_info, extra, allowed):
+    responses = {"/tokens/self": token_info, **extra}
+
+    def fake(method, path, **_kw):
+        assert method == "GET"
+        return responses[path]
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
+        error = service.logging_endpoint_role_error("tkn")
+    assert (error is None) is allowed
+    if not allowed:
+        assert "Engineer" in error and "Superuser" in error
+
+
+def test_get_log_endpoint_falls_back_to_the_legacy_s3_endpoint():
+    calls: list[str] = []
+
+    def fake(method, path, **_kw):
+        calls.append(path)
+        if "/logging/fos/" in path:
+            raise RuntimeError("HTTP 404: not found")
+        return {"name": "Fastly Log Analytics", "period": "60"}
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
+        assert service.get_log_endpoint("svc", 5, "Fastly Log Analytics", "tkn")["period"] == "60"
+    assert calls == [
+        "/service/svc/version/5/logging/fos/Fastly%20Log%20Analytics",
+        "/service/svc/version/5/logging/s3/Fastly%20Log%20Analytics",
+    ]
+
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 500: boom")),
+        pytest.raises(RuntimeError, match="500"),
+    ):
+        service.get_log_endpoint("svc", 5, "Fastly Log Analytics", "tkn")
 
 
 def test_list_vcl_snippets_returns_names_list():

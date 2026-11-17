@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-import urllib.parse
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
@@ -269,7 +268,7 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
 
     api_key = api_key_or_mock(get_fastly_api_key(source["service_id"]))
     if api_key:
-        from backend.core.fastly.client import fastly, find_condition, get_active_version
+        from backend.core.fastly.client import find_condition, get_active_version, get_log_endpoint
 
         logging_svc_id = (
             source.get("logging_service_id") or source.get("service_id") or get_fastly_logging_service_id() or ""
@@ -289,12 +288,8 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
                 if not active_ver:
                     return updates
                 endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-                encoded_name = urllib.parse.quote(endpoint_name, safe="")
                 current_ep = await asyncio.to_thread(
-                    fastly,
-                    "GET",
-                    f"/service/{logging_svc_id}/version/{active_ver}/logging/s3/{encoded_name}",
-                    token=api_key,
+                    get_log_endpoint, logging_svc_id, active_ver, endpoint_name, api_key
                 )
                 if "period" in current_ep:
                     updates["log_period_seconds"] = int(current_ep["period"])

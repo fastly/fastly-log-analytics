@@ -358,7 +358,7 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
         stripped = svcconfig.mutate_config(logging_service_id, _strip_fields)
         if stripped is not None:
             cfg = stripped
-        from backend.core.fastly.client import list_s3_endpoints
+        from backend.core.fastly.client import list_log_endpoints
         from backend.provision.fastly_api import generate_capture_vcl, load_log_format
 
         capture = generate_capture_vcl(cfg.get("log_fields"))
@@ -376,13 +376,13 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
                 token,
             )
         endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-        existing_endpoints = list_s3_endpoints(logging_service_id, new_ver, token)
-        if endpoint_name in existing_endpoints:
+        existing_endpoints = list_log_endpoints(logging_service_id, new_ver, token)
+        if endpoint_type := existing_endpoints.get(endpoint_name):
             new_format = load_log_format(cfg.get("log_fields"))
             encoded = urllib.parse.quote(endpoint_name, safe="")
             fastly(
                 "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/s3/{encoded}",
+                f"/service/{logging_service_id}/version/{new_ver}/logging/{endpoint_type}/{encoded}",
                 {"format": new_format, "format_version": 2},
                 token=token,
             )

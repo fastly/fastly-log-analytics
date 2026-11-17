@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import time
-import urllib.parse
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -89,16 +88,15 @@ def api_service_logging_settings(request: Request, service_id: str):
     cfg = load_service_config(service_id)
     token = stored_fastly_token(cfg)
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-    from backend.core.fastly.client import fastly, find_condition, get_active_version
+    from backend.core.fastly.client import find_condition, get_active_version, get_log_endpoint
 
     _t = time.perf_counter()
     active_ver = get_active_version(service_id, token)
     timer.mark("get_active_version", _t)
     if not active_ver:
         raise HTTPException(status_code=400, detail={"error": "No active version found"})
-    encoded_name = urllib.parse.quote(endpoint_name, safe="")
     _t = time.perf_counter()
-    ep = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3/{encoded_name}", token=token)
+    ep = get_log_endpoint(service_id, active_ver, endpoint_name, token)
     timer.mark("get_logging_endpoint", _t)
     sample_rate, edge_only, custom_condition = 100, False, ""
     cond_name = ep.get("response_condition")

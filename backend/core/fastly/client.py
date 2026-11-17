@@ -676,6 +676,9 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
             "services": [],
         }
 
+    if path == "/current_user" and method == "GET":
+        return {"id": "mock-user", "role": "superuser", "limit_services": False}
+
     if path == "/service" and method == "POST":
         return {"id": "mock-svc-id", "name": (body or {}).get("name", "mock"), "version": 1}
 
@@ -696,7 +699,7 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
         return {"number": 1, "active": True}
 
     if method == "GET" and "/version/" in path:
-        if path.endswith(("/logging/s3", "/snippet", "/condition", "/domain", "/backend", "/vcl")):
+        if path.endswith(("/logging/s3", "/logging/fos", "/snippet", "/condition", "/domain", "/backend", "/vcl")):
             return []
 
     if "/version/" in path and "/activate" in path:
@@ -1126,11 +1129,59 @@ def ensure_condition(name: str, statement: str, type: str, service_id: str, vers
     return fastly("POST", f"/service/{service_id}/version/{version}/condition", payload, token=token)
 
 
-def list_s3_endpoints(service_id: str, version: int, token: str) -> list[str]:
+# New installs use the native "fos" endpoint; "s3" is the legacy S3-compatible endpoint older installs still run.
+LOG_ENDPOINT_TYPES = ("s3", "fos")
+
+
+def list_log_endpoints(service_id: str, version: int, token: str) -> dict[str, str]:
+    """Map each FOS-capable logging endpoint name on a version to its endpoint type."""
+    found: dict[str, str] = {}
+    for endpoint_type in LOG_ENDPOINT_TYPES:
+        try:
+            items = fastly("GET", f"/service/{service_id}/version/{version}/logging/{endpoint_type}", token=token)
+        except RuntimeError:
+            continue
+        for item in items if isinstance(items, list) else []:
+            found.setdefault(item["name"], endpoint_type)
+    return found
+
+
+def get_log_endpoint(service_id: str, version: int, name: str, token: str) -> dict:
+    """Read a logging endpoint by name, native FOS first, then the legacy S3 endpoint."""
+    encoded = urllib.parse.quote(name, safe="")
     try:
-        return [r["name"] for r in fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)]
-    except RuntimeError:
-        return []
+        return fastly("GET", f"/service/{service_id}/version/{version}/logging/fos/{encoded}", token=token)
+    except RuntimeError as exc:
+        if "404" not in str(exc):
+            raise
+    return fastly("GET", f"/service/{service_id}/version/{version}/logging/s3/{encoded}", token=token)
+
+
+def logging_endpoint_role_error(token: str) -> str | None:
+    """Explain why ``token`` can't manage a logging endpoint, or return None when it can.
+
+    Fastly requires Engineer with access to all services, or Superuser, to create
+    a native FOS logging endpoint (Engineers can also create the CDN service and
+    Object Storage keys); this mirrors the Cloud install's token check.
+    """
+    try:
+        info = fastly("GET", "/tokens/self", token=token)
+        if info.get("user_id"):
+            user = fastly("GET", "/current_user", token=token)
+            role = user.get("role") or ""
+            if role == "superuser" or (role == "engineer" and user.get("limit_services") is False):
+                return None
+            if role == "engineer":
+                return "Token belongs to an Engineer limited to some services; use an Engineer with all-services access, or Superuser."
+        else:
+            role = info.get("role") or ""
+            if not role and info.get("id"):
+                role = fastly("GET", f"/automation-tokens/{info['id']}", token=token).get("role") or ""
+            if role in ("engineer", "superuser"):
+                return None
+    except RuntimeError as exc:
+        return f"Could not verify the token's role with Fastly: {exc}"
+    return f"Token role {role or 'unknown'!r} can't add the logging endpoint; use an Engineer with all-services access, or Superuser."
 
 
 def list_vcl_snippets(service_id: str, version: int, token: str) -> list[str]:

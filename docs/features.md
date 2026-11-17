@@ -25,13 +25,13 @@ Every Fastly service / bucket / prefix combination gets its own configuration JS
 ## Provisioning
 
 ### Automated provisioning
-A guided wizard (`token → service → storage → ngwaf → fields → execute`) or the `python -m backend.provision.cli` CLI creates the FOS bucket, a read-write access key scoped to it, a CDN-fronting Fastly Delivery service, and the logging endpoint on your target VCL service in one flow. Provisioning failures auto-rollback to leave your Fastly account in a clean state.
+A guided wizard (`token → service → storage → ngwaf → fields → execute`) or the `python -m backend.provision.cli` CLI creates the FOS bucket, a read-write access key scoped to it (used by ingest and the CDN-fronting service), a CDN-fronting Fastly Delivery service, and a native Fastly Object Storage logging endpoint on your target VCL service in one flow. Fastly mints the endpoint's own write key. Adding that endpoint needs a token whose user is an Engineer with all-services access, or Superuser; provisioning checks the role first and stops before it changes anything. Services provisioned before the native endpoint keep their S3-compatible endpoint; reconcile updates it in place and never converts it. Provisioning failures auto-rollback to leave your Fastly account in a clean state.
 
 ### Log sampling
 Optionally log only a random percentage (1–100%) of requests to manage storage costs on high-traffic services. Sampling is implemented via Fastly [logging conditions](https://www.fastly.com/documentation/guides/full-site-delivery/conditions/using-conditions/), which the app creates and manages automatically.
 
 ### Teardown
-A single command (or button in the UI) removes everything provisioning created: the logging endpoint on the VCL service, the CDN service, the FOS access key, the local config, and the service's ClickHouse and PostgreSQL records. Optionally also removes the FOS bucket contents.
+A single command (or button in the UI) removes everything provisioning created: the logging endpoint on the VCL service (native or S3-compatible), the CDN service, the FOS access key, the local config, and the service's ClickHouse and PostgreSQL records. Optionally also removes the FOS bucket contents. The access key Fastly minted for a native logging endpoint isn't removed; delete it under Object Storage access keys in the Fastly UI if you want it gone.
 
 ## Log Field Configuration
 

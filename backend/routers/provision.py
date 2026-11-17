@@ -820,7 +820,7 @@ def provision_check_config(
 ):
     """Verify that both services are correctly configured for log analysis."""
     service_id = require_service_id(service_id)
-    from backend.core.fastly.client import fastly
+    from backend.core.fastly.client import LOG_ENDPOINT_TYPES, fastly
 
     results = {
         "logging_service": {"ok": False, "details": ""},
@@ -830,11 +830,17 @@ def provision_check_config(
     try:
         try:
             active_ver = fastly("GET", f"/service/{service_id}/version/active", token=token).get("number")
-            endpoints = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/s3", token=token)
+            endpoints = [
+                ep
+                for endpoint_type in LOG_ENDPOINT_TYPES
+                for ep in fastly(
+                    "GET", f"/service/{service_id}/version/{active_ver}/logging/{endpoint_type}", token=token
+                )
+            ]
             endpoint = next((ep for ep in endpoints if ep.get("bucket_name") == bucket), None)
 
             if not endpoint:
-                results["logging_service"]["details"] = f"No S3 logging endpoint found pointing to bucket '{bucket}'"
+                results["logging_service"]["details"] = f"No logging endpoint found pointing to bucket '{bucket}'"
             else:
                 snippets = fastly("GET", f"/service/{service_id}/version/{active_ver}/snippet", token=token)
                 snip_names = {s.get("name") for s in snippets}

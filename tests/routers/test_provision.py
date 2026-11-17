@@ -529,6 +529,7 @@ def _wizard_env(tmp_path, monkeypatch, *, service_name="Wizard E2E Service", ext
     monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
     (tmp_path / "data").mkdir(exist_ok=True)
     base_patches = [
+        patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None),
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
@@ -1330,12 +1331,14 @@ _REQUIRED_CDN_SNIPPETS = [
 ]
 
 
-def _check_config_fastly_router(*, endpoints, snippets, dicts, backends, cdn_snippets):
+def _check_config_fastly_router(*, endpoints, snippets, dicts, backends, cdn_snippets, fos_endpoints=()):
     def fake_fastly(method, path, token=None, **_):
         if path == "/service/log-svc/version/active":
             return {"number": 7}
         if "/version/7/logging/s3" in path:
             return endpoints
+        if "/version/7/logging/fos" in path:
+            return list(fos_endpoints)
         if "/version/7/snippet" in path:
             return snippets
         if "/version/active/dictionary" in path:
@@ -1374,7 +1377,7 @@ def test_check_config_logging_and_cdn_permutations():
     with patch("backend.core.fastly.client.fastly", side_effect=side_no_ep):
         body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
         assert body["logging_service"]["ok"] is False
-        assert "No S3 logging endpoint" in body["logging_service"]["details"]
+        assert "No logging endpoint" in body["logging_service"]["details"]
 
     # 2. Missing core logging snippets + missing CDN perf snippets
     side_missing_snip = _check_config_fastly_router(
@@ -1404,6 +1407,18 @@ def test_check_config_logging_and_cdn_permutations():
         assert "3 origin metric snippets" in res_full["logging_service"]["details"]
         assert res_full["cdn_service"]["ok"] is True
         assert "fully configured" in res_full["cdn_service"]["details"]
+
+    # 3b. A native FOS endpoint pointing at the bucket counts the same as the legacy S3 one
+    side_fos = _check_config_fastly_router(
+        endpoints=[],
+        fos_endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "fos-sample"}],
+        snippets=[{"name": s} for s in _REQUIRED_SNIPPETS + _OPTIONAL_SNIPPETS],
+        dicts=full_dicts,
+        backends=full_backends,
+        cdn_snippets=full_cdn_snips,
+    )
+    with patch("backend.core.fastly.client.fastly", side_effect=side_fos):
+        assert _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()["logging_service"]["ok"]
 
     # 4. No response condition warns + CDN missing dicts/backend
     side_warn = _check_config_fastly_router(

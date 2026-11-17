@@ -134,6 +134,7 @@ def _mocked_provision_steps(
     )
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("backend.provision.orchestrator.validate_log_format", return_value=[]))
+        stack.enter_context(patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None))
         stack.enter_context(
             patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[_fos_key("T"), _fos_key("P")])
         )
@@ -360,6 +361,18 @@ def test_provision_preflight_and_happy_path(tmp_path, monkeypatch):
     assert exc is None and events[-1]["type"] == "error" and "Log format" in events[-1]["message"]
     mock_create_key.assert_not_called()
 
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch(
+            "backend.provision.orchestrator.logging_endpoint_role_error",
+            return_value="Token role 'user' can't add the logging endpoint",
+        ),
+        patch("backend.provision.orchestrator.ensure_fos_access_key") as mock_create_key,
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+    assert exc is None and events[-1]["type"] == "error" and "Token role 'user'" in events[-1]["message"]
+    mock_create_key.assert_not_called()
+
     monkeypatch.chdir(tmp_path)
     with _mocked_provision_steps(write_side_effect=None) as env:
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
@@ -517,6 +530,7 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
     captured_state = {}
     with (
         patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None),
         patch(
             "backend.provision.orchestrator.ensure_fos_access_key",
             side_effect=lambda desc, state, token, **kw: (

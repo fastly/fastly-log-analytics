@@ -28,7 +28,7 @@ from backend.core.fastly.client import (
     get_active_version,
     get_generated_vcl,
     is_mock_mode,
-    list_s3_endpoints,
+    list_log_endpoints,
     load_vcl,
     parse_period,
     region_endpoint,
@@ -766,7 +766,7 @@ def remove_logging_endpoint(
         return
     ok(f"Active version: {active_ver}")
 
-    existing = list_s3_endpoints(service_id, active_ver, token)
+    existing = list_log_endpoints(service_id, active_ver, token)
     eps_list = []
     if remove_logging:
         eps_list.extend(["Fastly Log Analytics", "Fastly Object Storage Logs", endpoint_name])
@@ -815,7 +815,7 @@ def remove_logging_endpoint(
 
         for ep in endpoints_to_delete:
             info(f"Removing '{_c(BOLD, ep)}' from draft…")
-            if _delete_draft_resource("logging/s3", ep):
+            if _delete_draft_resource(f"logging/{existing[ep]}", ep):
                 ok(f"Logging endpoint '{ep}' removed from draft")
 
         info("Removing VCL snippets…")

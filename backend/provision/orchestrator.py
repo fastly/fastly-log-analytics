@@ -7,7 +7,7 @@ import shutil
 
 from backend.core import log_fields as lf
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.fastly.client import is_mock_mode, region_endpoint
+from backend.core.fastly.client import is_mock_mode, logging_endpoint_role_error, region_endpoint
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.provision.cli import ok, run_with_events, step, warn
 from backend.provision.cmcd_fields import (
@@ -428,6 +428,10 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 yield {"type": "status", "message": f"  ERROR: {err}"}
             raise _PreflightError(f"Log format validation failed ({len(fmt_errors)} error(s)).")
         yield {"type": "status", "message": "✅ Pre-flight: Log format OK."}
+        role_error = logging_endpoint_role_error(token)
+        if role_error:
+            raise _PreflightError(role_error)
+        yield {"type": "status", "message": "✅ Pre-flight: Token role OK."}
         yield {"type": "progress", "current": 1, "total": total}
         yield {"type": "status", "message": "🔑 Step 2/8: Creating temporary Admin Fastly Object Storage key..."}
         step(2, total, "Creating temporary Admin Fastly Object Storage key")

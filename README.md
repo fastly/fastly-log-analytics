@@ -21,7 +21,7 @@ A short video walks through installation and provisioning end to end:
 
 You'll need:
 
-- A **Fastly account** with permission to create [services](https://www.fastly.com/documentation/guides/getting-started/services/about-services/) and Object Storage buckets
+- A **Fastly account** with permission to create [services](https://www.fastly.com/documentation/guides/getting-started/services/about-services/) and Object Storage buckets, and an API token whose user is an **Engineer with all-services access, or Superuser** (Fastly requires that role to add the native Object Storage logging endpoint)
 - **Object Storage enabled** on the account — it's a separately activated product, not on by default
 - At least one **VCL service** to stream logs from
 - **Docker** (recommended) — or Python 3.12+, Node.js 24+, **ClickHouse**, and a **PostgreSQL 16** server for a manual install
@@ -243,7 +243,7 @@ Then open **http://localhost:3000**.
 
 ### CLI provisioning (alternative to the wizard)
 
-If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Superuser** permissions (provisioning creates new services, which an Engineer token can't do), you can provision from the command line (with `METADATA_DSN` and `CLICKHOUSE_URL` exported in your shell, or via `docker compose exec backend`):
+If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) whose user is an **Engineer with all-services access, or Superuser** (provisioning creates services, Object Storage keys and the native Object Storage logging endpoint; Fastly allows all three for those roles, and provisioning checks the token's role before it changes anything), you can provision from the command line (with `METADATA_DSN` and `CLICKHOUSE_URL` exported in your shell, or via `docker compose exec backend`):
 
 ```bash
 # Guided
