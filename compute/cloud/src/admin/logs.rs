@@ -715,6 +715,8 @@ pub(super) struct MaintOutcome {
     pub(super) next: usize,
     pub(super) rows: Vec<StageRow>,
     pub(super) worker_executions_metrics: Vec<telemetry::execution::WorkerExecutionMetrics>,
+    /// Delete Data stopped only for this execution's budget, with more to delete now.
+    pub(super) delete_pending: bool,
 }
 
 pub(super) struct CompactOutcome {
@@ -754,6 +756,7 @@ pub(super) fn maintenance_stage(
         next: start,
         rows: Vec::new(),
         worker_executions_metrics: Vec::new(),
+        delete_pending: false,
     };
     let fencing = reset::fencing(tick.service);
     if store.within_wall() {
@@ -787,6 +790,10 @@ pub(super) fn maintenance_stage(
             break;
         }
     }
+    outcome.delete_pending = outcome
+        .rows
+        .iter()
+        .any(|row| row.kind == "delete_data" && row.more_pending);
     for row in outcome.rows.iter().filter(|row| row.outcome != "idle") {
         write_log(
             runtime,

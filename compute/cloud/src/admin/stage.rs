@@ -68,6 +68,11 @@ pub fn reply_compact_pending(reply: &Value) -> bool {
     reply["compact_pending"].as_bool() == Some(true)
 }
 
+/// Whether the reply's Delete Data step stopped only for its budget, with more to delete now.
+pub fn reply_delete_pending(reply: &Value) -> bool {
+    reply["delete_pending"].as_bool() == Some(true)
+}
+
 /// The FOS usage and API rows a stage reply carries back for the tick to write.
 pub fn reply_rows(reply: &Value) -> Vec<(telemetry::WritableLogKind, Value)> {
     reply["rows"]
@@ -154,6 +159,7 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
         "status": "ok",
         "ran": outcome.ran.map(|index| MAINT_STAGES[index]),
         "next": outcome.next,
+        "delete_pending": outcome.delete_pending,
         "worker_executions_metrics": outcome.worker_executions_metrics,
     }))
 }

@@ -2418,8 +2418,13 @@ fn dispatch(
     let compact_at = usize::from(maint_sent);
     let answered = |replies: &[Result<Value, String>]| {
         let reply = replies.first().filter(|_| maint_sent)?.as_ref().ok()?;
-        Some((stage::reply_next(reply)?, stage::reply_rows(reply)))
+        Some((
+            stage::reply_next(reply)?,
+            stage::reply_rows(reply),
+            stage::reply_delete_pending(reply),
+        ))
     };
+    let mut delete_pending = false;
     // `None`: not dispatched; `Some(None)`: unanswered; `Some(Some(pending))`: ran.
     let mut compact_reply: Option<Option<bool>> = None;
     let mut compact_rows = Vec::new();
@@ -2604,9 +2609,10 @@ fn dispatch(
                 inline_queues.push(pq);
             }
             // The stage worker may have run even when the ingest step failed.
-            if let Some((next, rows)) = answered(&report.extra_results) {
+            if let Some((next, rows, pending)) = answered(&report.extra_results) {
                 maint_reply = Some(Some(next));
                 stage_rows = rows;
+                delete_pending = pending;
             }
             stage.kv_ops += report.kv_ops;
             stage.cache_ops += report.cache_lookups;
@@ -2686,9 +2692,10 @@ fn dispatch(
             observe_extras(&replies);
             compact_answered(&replies);
             backend_requests_used += extras.len() as u32;
-            if let Some((next, rows)) = answered(&replies) {
+            if let Some((next, rows, pending)) = answered(&replies) {
                 maint_reply = Some(Some(next));
                 stage_rows = rows;
+                delete_pending = pending;
             }
         }
 
@@ -2708,9 +2715,10 @@ fn dispatch(
         if let Some((stage, reply)) = rum_stage {
             if let Some(replies) = reply {
                 compact_answered(&replies);
-                if let Some((next, rows)) = answered(&replies) {
+                if let Some((next, rows, pending)) = answered(&replies) {
                     maint_reply = Some(Some(next));
                     stage_rows = rows;
+                    delete_pending = pending;
                 }
             }
             backend_requests_used += stage.calls;
@@ -2808,10 +2816,11 @@ fn dispatch(
     }
     if maint_reply.is_some() {
         let answered = matches!(maint_reply, Some(Some(_)));
+        // A Delete Data step that stopped only for its budget brings the next stage forward.
         jobs.maint = job_state(
             now,
             if answered { "done" } else { "missed" },
-            false,
+            answered && delete_pending,
             0,
             &jobs.maint,
         );

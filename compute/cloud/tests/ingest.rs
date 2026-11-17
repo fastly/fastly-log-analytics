@@ -133,7 +133,8 @@ struct Fake {
     /// What `heap_mib` reports.
     heap_mib: Cell<Option<u32>>,
     linear_memory_high_water_bytes: Cell<Option<u64>>,
-    /// Transient answers the next PUTs (`"PUT"`) or CDN GETs (`"GET"`) get instead of running,
+    /// Transient answers the next PUTs (`"PUT"`), CDN GETs (`"GET"`) or `DeleteObjects` requests
+    /// (`"DELETE"`) get instead of running,
     /// as `(method, status, Retry-After seconds)`.
     transient: RefCell<std::collections::VecDeque<(&'static str, u16, Option<u64>)>>,
     /// Every `admin_wait`, in milliseconds.
@@ -146,6 +147,14 @@ struct Fake {
     /// vCPU milliseconds a GET of a key containing the pattern spends, as reading and decoding
     /// a multi-MB body does live.
     get_vcpu: RefCell<Vec<(&'static str, u64)>>,
+    /// Simulated `(LIST, DeleteObjects)` milliseconds; when set, `admin_elapsed` is the real
+    /// time since `started` plus the FOS time this execution spent, an `admin_fos_many` round
+    /// costing only its slowest request.
+    fos_wall: Cell<Option<(u64, u64)>>,
+    wall_ms: Cell<u64>,
+    in_round: Cell<bool>,
+    /// The `DeleteObjects` requests each `admin_fos_many` round sent together.
+    delete_rounds: RefCell<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +262,20 @@ impl Fake {
             uploads: RefCell::new(BTreeMap::new()),
             upload_seq: Cell::new(0),
             get_vcpu: Default::default(),
+            fos_wall: Cell::new(None),
+            wall_ms: Cell::new(0),
+            in_round: Cell::new(false),
+            delete_rounds: Default::default(),
+        }
+    }
+    fn fos_ms(&self, request: &FosRequest<'_>) -> u64 {
+        let Some((list, delete)) = self.fos_wall.get() else {
+            return 0;
+        };
+        match request.method {
+            "POST" if request.query == "delete" => delete,
+            "GET" if request.query.contains("list-type") => list,
+            _ => 0,
         }
     }
     fn take_transient(&self, method: &str) -> Option<FosResponse> {
@@ -300,7 +323,9 @@ impl Fake {
         let sent = self.worker_sent.replace(0);
         let secrets = std::mem::take(&mut *self.secrets_read.borrow_mut());
         let in_worker = self.in_worker.replace(true);
+        let wall = self.wall_ms.replace(0);
         let out = body();
+        self.wall_ms.set(wall);
         self.in_worker.set(in_worker);
         self.note_peak(kind);
         let mut peaks = self.vcpu_peaks.borrow_mut();
@@ -339,6 +364,7 @@ impl Fake {
         self.vcpu.set(0);
         self.worker_sent.set(0);
         self.cache_ops.set(0);
+        self.wall_ms.set(0);
         self.secrets_read.borrow_mut().clear();
     }
     fn keys(&self, prefix: &str) -> Vec<String> {
@@ -569,8 +595,20 @@ impl Runtime for Fake {
         self.fos_rounds
             .borrow_mut()
             .push(requests.iter().map(|r| r.key.to_owned()).collect());
+        let deletes = requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.query == "delete")
+            .count();
+        if deletes > 0 {
+            self.delete_rounds.borrow_mut().push(deletes);
+        }
         if !self.fos_defer.get() {
-            return requests.into_iter().map(|r| self.admin_fos(r)).collect();
+            let slowest = requests.iter().map(|r| self.fos_ms(r)).max().unwrap_or(0);
+            self.wall_ms.set(self.wall_ms.get() + slowest);
+            self.in_round.set(true);
+            let out: Vec<_> = requests.into_iter().map(|r| self.admin_fos(r)).collect();
+            self.in_round.set(false);
+            return out;
         }
         let mut requests = requests.into_iter();
         let mut results: Vec<_> = requests
@@ -610,6 +648,9 @@ impl Runtime for Fake {
             );
         } else {
             self.charge()?;
+        }
+        if !self.in_round.get() {
+            self.wall_ms.set(self.wall_ms.get() + self.fos_ms(&request));
         }
         let query: BTreeMap<String, String> = url::form_urlencoded::parse(request.query.as_bytes())
             .into_owned()
@@ -751,6 +792,9 @@ impl Runtime for Fake {
                     .map(|part| part.split("</Key>").next().unwrap().to_owned())
                     .collect();
                 self.delete_posts.borrow_mut().push(keys.len());
+                if let Some(response) = self.take_transient("DELETE") {
+                    return Ok(response);
+                }
                 if self.delete_status.get() != 200 {
                     return Ok(FosResponse {
                         cdn_cache: None,
@@ -884,8 +928,12 @@ impl Runtime for Fake {
     fn execution_vcpu_ms(&self) -> Option<u64> {
         Some(self.vcpu_ms())
     }
-    fn admin_elapsed(&self, _: Instant) -> std::time::Duration {
-        std::time::Duration::from_secs(self.elapsed_s.get())
+    fn admin_elapsed(&self, started: Instant) -> std::time::Duration {
+        let base = std::time::Duration::from_secs(self.elapsed_s.get());
+        if self.fos_wall.get().is_none() {
+            return base;
+        }
+        base + started.elapsed() + std::time::Duration::from_millis(self.wall_ms.get())
     }
     fn admin_wait(&self, millis: u64) {
         self.waits.borrow_mut().push(millis);
@@ -14344,6 +14392,181 @@ mod delete_data_gate {
             peak <= 1000,
             "stage execution used {peak}ms vCPU: {kinds:?}"
         );
+    }
+
+    const OLD: &str = "processed/request/day=1/old-";
+
+    /// A Delete Data job in cleanup past its retirement grace, with `objects` pre-reset
+    /// processed files to delete.
+    fn cleanup_fixture(objects: usize) -> Fake {
+        let fake = Fake::new(BASE + 3600);
+        tick_runtime(&fake);
+        let reset_at = BASE as u64 + 540;
+        let cas_at = reset_at + 30;
+        let mut svc = rum_service();
+        svc.data_reset = Some(DataReset {
+            job_id: "job1".into(),
+            reset_at,
+            phase: ResetPhase::Cleanup,
+            started_at: reset_at,
+            actor: "tester".into(),
+            rum_held: false,
+        });
+        store_service(&fake, &svc);
+        let floor = format!("raw/request/{}", ingest::minute_dir(reset_at as i64));
+        fake.kv.borrow_mut().insert(
+            ingest::WATERMARK_KEY.into(),
+            (
+                1,
+                json!({"key": floor, "floor_key": floor, "at": cas_at, "passes": [], "swept": [],
+                "sweep": {"after": floor, "at": cas_at}, "manifest_gen": 1}),
+            ),
+        );
+        fake.kv.borrow_mut().insert(
+            JOB_KEY.into(),
+            (
+                1,
+                json!({"job_id": "job1", "status": "cleanup", "reset_at": reset_at,
+                "started_at": reset_at, "resetting_at": cas_at, "reset_cas_at": cas_at,
+                "steps_done": ["rum_watermark", "rum_released", "keys", "deleteq", "quarantine"]}),
+            ),
+        );
+        for i in 0..objects {
+            fake.bucket
+                .borrow_mut()
+                .insert(format!("{OLD}{i:05}.parquet"), vec![1, 2]);
+        }
+        fake
+    }
+
+    fn job(fake: &Fake) -> Value {
+        fake.kv.borrow()[JOB_KEY].1.clone()
+    }
+
+    fn deleted(job: &Value) -> u64 {
+        job["deleted"]
+            .as_object()
+            .map_or(0, |map| map.values().filter_map(Value::as_u64).sum())
+    }
+
+    fn left(fake: &Fake) -> usize {
+        fake.keys(OLD).len()
+    }
+
+    fn maint_more_pending(fake: &Fake) -> Value {
+        fake.kv.borrow()["cron:state"].1["jobs"]["maint"]["more_pending"].clone()
+    }
+
+    #[test]
+    fn delete_data_sends_a_rounds_deletes_together_and_ticks_again_at_once_while_objects_remain() {
+        use fastly_log_analytics::admin::schedule::{peek, tick_wake_at, SCHED_KEY};
+        let n = 25_000;
+        let fake = cleanup_fixture(n);
+        // Half a second per LIST and four seconds per round of DeleteObjects requests.
+        fake.fos_wall.set(Some((500, 4_000)));
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        let first = n - left(&fake);
+        assert!(first >= 5_000, "the first step deleted {first} objects");
+        let rounds = fake.delete_rounds.borrow().clone();
+        assert!(rounds.iter().any(|&sent| sent >= 5), "{rounds:?}");
+        assert!(fake.delete_posts.borrow().iter().all(|&keys| keys <= 1000));
+        assert_eq!(maint_more_pending(&fake), true);
+        let record = peek(&fake, SCHED_KEY).unwrap();
+        assert!(tick_wake_at(&record) <= fake.now.get());
+        let mut ticks = 1;
+        while left(&fake) > 0 {
+            assert!(
+                ticks < 6,
+                "{} objects left after {ticks} ticks",
+                left(&fake)
+            );
+            fake.now.set(fake.now.get() + 1);
+            run_tick(&fake);
+            ticks += 1;
+        }
+        let job = job(&fake);
+        assert_eq!(deleted(&job), n as u64, "{job}");
+        assert_eq!(job["bytes"], 2 * n as u64, "{job}");
+        assert_eq!(job["pending"], 0, "{job}");
+        assert!(job["error"].is_null(), "{job}");
+        assert!(job["delete_ms"].as_u64().unwrap() >= 4_000, "{job}");
+        fake.now.set(fake.now.get() + 1);
+        run_tick(&fake);
+        assert_eq!(maint_more_pending(&fake), false);
+    }
+
+    #[test]
+    fn delete_data_keeps_a_partly_failed_rounds_cursor_and_counts_each_object_once() {
+        let n = 3_000;
+        let fake = cleanup_fixture(n);
+        fake.fail_delete_keys
+            .borrow_mut()
+            .insert(format!("{OLD}01500.parquet"));
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        assert_eq!(*fake.delete_rounds.borrow(), vec![3]);
+        assert_eq!(left(&fake), 1);
+        let failed = job(&fake);
+        assert_eq!(
+            failed["error"], "delete_failed: 1 objects under processed/request/",
+            "{failed}"
+        );
+        assert_eq!(failed["pending"], 1, "{failed}");
+        assert_eq!(deleted(&failed), n as u64 - 1, "{failed}");
+        assert_eq!(
+            failed["cursors"]["processed/request/"],
+            format!("{OLD}00999.parquet"),
+            "{failed}"
+        );
+        assert_eq!(maint_more_pending(&fake), false);
+        fake.fail_delete_keys.borrow_mut().clear();
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        assert_eq!(left(&fake), 0);
+        let job = job(&fake);
+        assert_eq!(deleted(&job), n as u64, "{job}");
+        assert_eq!(job["pending"], 0, "{job}");
+    }
+
+    #[test]
+    fn delete_data_sends_a_slowed_down_batch_again_after_its_retry_after() {
+        let fake = cleanup_fixture(2_000);
+        fake.transient
+            .borrow_mut()
+            .push_back(("DELETE", 503, Some(1)));
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        assert_eq!(*fake.delete_rounds.borrow(), vec![2, 1]);
+        assert!(fake.waits.borrow().contains(&1000), "{:?}", fake.waits);
+        assert_eq!(left(&fake), 0);
+        let job = job(&fake);
+        assert!(job["error"].is_null(), "{job}");
+        assert_eq!(deleted(&job), 2_000, "{job}");
+    }
+
+    #[test]
+    fn delete_data_reports_a_persistent_delete_failure_and_resumes_later() {
+        let n = 1_500;
+        let fake = cleanup_fixture(n);
+        fake.delete_status.set(503);
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        assert_eq!(*fake.delete_rounds.borrow(), vec![2, 2]);
+        assert_eq!(left(&fake), n);
+        let failed = job(&fake);
+        assert_eq!(failed["status"], "cleanup", "{failed}");
+        assert_eq!(failed["error"], "delete_objects_http_503", "{failed}");
+        assert_eq!(failed["pending"], n as u64, "{failed}");
+        assert_eq!(deleted(&failed), 0, "{failed}");
+        assert_eq!(maint_more_pending(&fake), false);
+        fake.delete_status.set(200);
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        assert_eq!(left(&fake), 0);
+        let job = job(&fake);
+        assert_eq!(deleted(&job), n as u64, "{job}");
+        assert_eq!(job["pending"], 0, "{job}");
     }
 }
 

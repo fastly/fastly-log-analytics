@@ -1999,6 +1999,7 @@ export interface components {
       cursors?: {
         [key: string]: string | null;
       };
+      delete_ms?: number;
       raw_recheck_at?: number | null;
       steps_done?: string[];
       purge_failures?: number;

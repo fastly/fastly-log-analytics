@@ -6,14 +6,17 @@ use crate::{
     ingest::{
         bundle, catalog, compaction, inflight_prefix, minute_dir, plan_key, raw_key_minute,
         raw_prefix, retention, scope, settle_s,
-        storage::{Object, Store},
+        storage::{Object, Retry, Store, WALL_STOP},
         watermark_key, BACKFILL_KEY, DELETEQ_PREFIX, FLOOR_FIELD, QUARANTINE_PREFIX, WATERMARK_KEY,
     },
     shell::Runtime,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    time::Duration,
+};
 
 pub const JOB_KEY: &str = "reset:delete_data";
 const MAX_MESSAGES: usize = 50;
@@ -46,6 +49,9 @@ pub struct ResetJob {
     pub bytes: u64,
     pub pending: u64,
     pub cursors: BTreeMap<String, Option<String>>,
+    /// How long a recent cleanup round's `DeleteObjects` requests took, in ms; `0` before the
+    /// first. It decides how many pages a round lists before its deletes must go out.
+    pub delete_ms: u64,
     pub raw_recheck_at: Option<u64>,
     /// The reset parts and the final purge that are done; cleanup finishes any others.
     pub steps_done: BTreeSet<String>,
@@ -54,6 +60,17 @@ pub struct ResetJob {
     pub error: Option<String>,
     pub messages: VecDeque<Message>,
     pub updated_at: u64,
+    /// This step deleted something and stopped only for its budget, so the next can follow at
+    /// once.
+    #[serde(skip)]
+    pub more: bool,
+    /// A cleanup round in this step deleted objects or moved a cursor.
+    #[serde(skip)]
+    pub progressed: bool,
+    /// The most vCPU one cleanup LIST page and one `DeleteObjects` batch were seen to cost in
+    /// this step, in ms; `0` before one was measured.
+    #[serde(skip)]
+    pub page_vcpu: (u64, u64),
 }
 
 pub fn push_message(job: &mut ResetJob, at: u64, text: impl Into<String>) {
@@ -206,8 +223,9 @@ pub fn rum_held(service: &Service) -> bool {
 
 pub(super) fn reset_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let started = store.runtime.now();
-    let result = advance(store)?;
+    let (result, more) = advance_job(store)?;
     let mut row = StageRow::new("delete_data", started);
+    row.more_pending = more;
     match result {
         Ok(()) => row.outcome = "done",
         Err(error) => {
@@ -220,6 +238,11 @@ pub(super) fn reset_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> 
 
 /// One bounded Delete Data step for the cron; `None` when there is nothing to do.
 pub fn advance<R: Runtime>(store: &Store<'_, R>) -> Option<Result<(), String>> {
+    advance_job(store).map(|(result, _)| result)
+}
+
+/// [`advance`], and whether the step left cleanup work it could do straight away.
+fn advance_job<R: Runtime>(store: &Store<'_, R>) -> Option<(Result<(), String>, bool)> {
     let marker = store.service.data_reset.as_ref()?;
     let runtime = store.runtime;
     let record = runtime.admin_get(JOB_KEY).ok().flatten()?;
@@ -231,10 +254,10 @@ pub fn advance<R: Runtime>(store: &Store<'_, R>) -> Option<Result<(), String>> {
         if job.status == "failed" {
             // A failed job whose reset CAS landed is committed: it resumes into cleanup.
             match committed(store, &job) {
-                Err(error) => return Some(Err(error)),
+                Err(error) => return Some((Err(error), false)),
                 Ok(Some(watermark)) => {
                     adopt(&mut job, &watermark, runtime.now());
-                    return Some(step(store, &mut job, &record.generation));
+                    return Some((step(store, &mut job, &record.generation), false));
                 }
                 Ok(None) => {}
             }
@@ -242,9 +265,11 @@ pub fn advance<R: Runtime>(store: &Store<'_, R>) -> Option<Result<(), String>> {
         // A terminal job whose marker clear did not land retries here, so ingest resumes: a
         // failed or complete job's own clear, or a cancel or rolled-back start whose save failed.
         let stranded = marker.phase == owned_phase(&job);
-        return stranded.then(|| clear_marker(store, &job));
+        return stranded.then(|| (clear_marker(store, &job), false));
     }
-    Some(step(store, &mut job, &record.generation))
+    let result = step(store, &mut job, &record.generation);
+    let more = result.is_ok() && job.more && job.status == "cleanup";
+    Some((result, more))
 }
 
 fn step<R: Runtime>(
@@ -1095,9 +1120,31 @@ fn purge<R: Runtime>(
     settled
 }
 
-/// One pass over `prefix`, a LIST page at a time from its cursor in `job.cursors`; `true` once
-/// the pass is done. A page whose deletes partly fail keeps its cursor, so the next step lists
-/// it again: deleted keys are gone from that LIST, so nothing is counted twice.
+/// Pages a cleanup round lists before sending their `DeleteObjects` requests together.
+const SWEEP_WIDTH: usize = 10;
+/// What a round's `DeleteObjects` requests are assumed to take before one has been timed.
+const DELETE_MS_PRIOR: u64 = 10_000;
+/// What a LIST is assumed to take before one has been timed in this step.
+const LIST_MS_PRIOR: u64 = 1_000;
+/// vCPU milliseconds one `DeleteObjects` batch (building, signing and reading back up to 1,000
+/// keys) is assumed to cost at least, before a round in this step has measured it, when it also
+/// has no LIST page to go by.
+const DELETE_VCPU_PRIOR: u64 = 25;
+
+/// One listed page of a cleanup round: the objects it dooms and the last key it covered.
+struct Listed {
+    doomed: Vec<Object>,
+    last: Option<String>,
+}
+
+/// Empties `prefix` under `rule` in rounds: up to [`SWEEP_WIDTH`] LIST pages, then one
+/// `DeleteObjects` request per page, all in flight together. A round lists another page only
+/// while its deletes would still finish inside the step, judged by the slowest LIST so far and
+/// the last round's delete time, and while the vCPU it and every held page's delete would cost
+/// stays under the stop. The cursor moves past a page only once every doomed object on
+/// it and on every page before it is confirmed deleted, so an interrupted or failed round is
+/// listed again, and deleted keys are gone from that LIST, so nothing is counted twice. `true`
+/// once the prefix is done; `false` when the step's budget ran out first.
 fn sweep<R: Runtime>(
     store: &Store<'_, R>,
     job: &mut ResetJob,
@@ -1110,6 +1157,11 @@ fn sweep<R: Runtime>(
     let now = store.runtime.now();
     let name = format!("{pass}{prefix}");
     let full = format!("{}{prefix}", scope(store.service));
+    let elapsed = || store.runtime.admin_elapsed(store.started);
+    // Where `Store::within_wall` stops: a stage that ends there is still heard by its tick.
+    let finish_by = WALL_STOP;
+    let mut list_est = Duration::ZERO;
+    job.more = false;
     loop {
         let after = match job.cursors.get(&name) {
             Some(None) => return Ok(true),
@@ -1118,55 +1170,165 @@ fn sweep<R: Runtime>(
         };
         if matches!(rule, Rule::Processed { .. }) && references.is_none() {
             if !affordable(4) {
+                job.more = job.progressed;
                 return Ok(false);
             }
             *references = Some(head_references(store, job)?);
         }
-        if !affordable(2) {
-            return Ok(false);
-        }
-        let page = store.list(&full, after.as_deref(), None, 1000, None)?;
-        let mut end = page.next_token.is_none() || page.objects.is_empty();
+        let delete_est = Duration::from_millis(if job.delete_ms == 0 {
+            DELETE_MS_PRIOR
+        } else {
+            job.delete_ms
+        });
+        let mut pages: Vec<Listed> = Vec::new();
         let mut last = after;
-        let mut doomed = Vec::new();
-        for object in &page.objects {
-            let delete = match rule {
-                Rule::Raw { floor, before } => {
-                    if object.key >= *floor {
-                        end = true;
-                        break;
-                    }
-                    raw_key_minute(&object.key, &full).is_some_and(|minute| minute < *before)
-                }
-                Rule::Processed { cutoff } => {
-                    modified(object).is_some_and(|at| at < *cutoff)
-                        && !references
-                            .as_ref()
-                            .is_some_and(|keys| keys.contains(&object.key))
+        let mut end = false;
+        let mut list_error = None;
+        let mut checked: Option<u64> = None;
+        while pages.len() < SWEEP_WIDTH && !end {
+            // One reading per page: a page's cost is the gap between two checks, so it includes
+            // the checking itself.
+            let spent = store.vcpu_ms();
+            if let Some(before) = checked {
+                job.page_vcpu.0 = job.page_vcpu.0.max(spent.saturating_sub(before));
+            }
+            checked = Some(spent);
+            let (list_vcpu, measured) = job.page_vcpu;
+            // Until a delete is timed, a batch is taken to cost what a LIST page did: both build
+            // or read about 1,000 keys of XML.
+            let delete_vcpu = if measured == 0 {
+                list_vcpu.max(DELETE_VCPU_PRIOR)
+            } else {
+                measured
+            };
+            // The step's first page always goes, as one page per step always did.
+            let first = pages.is_empty() && !job.progressed;
+            let fits = first
+                || (elapsed() + list_est.max(Duration::from_millis(LIST_MS_PRIOR)) + delete_est
+                    <= finish_by
+                    && spent + list_vcpu + (pages.len() as u64 + 1) * delete_vcpu
+                        < retention::VCPU_STOP_MS);
+            if !fits || !affordable(pages.len() as u32 + 2) {
+                break;
+            }
+            let listed_at = elapsed();
+            let page = match store.list(&full, last.as_deref(), None, 1000, None) {
+                Ok(page) => page,
+                Err(error) if pages.is_empty() => return Err(error),
+                Err(error) => {
+                    list_error = Some(error);
+                    break;
                 }
             };
-            last = Some(object.key.clone());
-            if delete {
-                doomed.push(object);
+            list_est = list_est.max(elapsed().saturating_sub(listed_at));
+            end = page.next_token.is_none() || page.objects.is_empty();
+            let mut doomed = Vec::new();
+            for object in page.objects {
+                let delete = match rule {
+                    Rule::Raw { floor, before } => {
+                        if object.key >= *floor {
+                            end = true;
+                            break;
+                        }
+                        raw_key_minute(&object.key, &full).is_some_and(|minute| minute < *before)
+                    }
+                    Rule::Processed { cutoff } => {
+                        modified(&object).is_some_and(|at| at < *cutoff)
+                            && !references
+                                .as_ref()
+                                .is_some_and(|keys| keys.contains(&object.key))
+                    }
+                };
+                last = Some(object.key.clone());
+                if delete {
+                    doomed.push(object);
+                }
+            }
+            pages.push(Listed {
+                doomed,
+                last: last.clone(),
+            });
+        }
+        if pages.is_empty() {
+            job.more = job.progressed;
+            return Ok(false);
+        }
+        let keys: Vec<Vec<String>> = pages
+            .iter()
+            .filter(|page| !page.doomed.is_empty())
+            .map(|page| {
+                page.doomed
+                    .iter()
+                    .map(|object| object.key.clone())
+                    .collect()
+            })
+            .collect();
+        let batches: Vec<&[String]> = keys.iter().map(Vec::as_slice).collect();
+        let mut results = (if batches.is_empty() {
+            Vec::new()
+        } else {
+            let sent_at = elapsed();
+            let retry = Retry::new(1, finish_by.saturating_sub(delete_est));
+            let results = store.delete_batches(&batches, Some(&retry), CALL_RESERVE);
+            job.delete_ms = elapsed().saturating_sub(sent_at).as_millis().max(1) as u64;
+            // From the round's last check, so it may also hold the last page's LIST.
+            job.page_vcpu.1 = job
+                .page_vcpu
+                .1
+                .max(store.vcpu_ms().saturating_sub(checked.unwrap_or(0)) / batches.len() as u64);
+            results
+        })
+        .into_iter();
+        let mut clean = true;
+        let mut failed = 0u64;
+        let mut batch_error = None;
+        for page in &pages {
+            let confirmed = if page.doomed.is_empty() {
+                true
+            } else {
+                match results
+                    .next()
+                    .unwrap_or_else(|| Err("delete_objects_missing".into()))
+                {
+                    Ok(outcome) => {
+                        let deleted: BTreeSet<&String> = outcome.deleted.iter().collect();
+                        *job.deleted.entry(prefix.to_owned()).or_default() += deleted.len() as u64;
+                        job.bytes += page
+                            .doomed
+                            .iter()
+                            .filter(|object| deleted.contains(&object.key))
+                            .map(|object| object.size)
+                            .sum::<u64>();
+                        if !deleted.is_empty() {
+                            job.progressed = true;
+                        }
+                        failed += outcome.failed.len() as u64;
+                        outcome.failed.is_empty()
+                    }
+                    Err(error) => {
+                        failed += page.doomed.len() as u64;
+                        batch_error.get_or_insert(error);
+                        false
+                    }
+                }
+            };
+            clean &= confirmed;
+            if let (true, Some(last)) = (clean, &page.last) {
+                job.cursors.insert(name.clone(), Some(last.clone()));
+                job.progressed = true;
             }
         }
-        if !doomed.is_empty() {
-            let keys: Vec<String> = doomed.iter().map(|object| object.key.clone()).collect();
-            let outcome = store.delete_objects(&keys)?;
-            let deleted: BTreeSet<&String> = outcome.deleted.iter().collect();
-            *job.deleted.entry(prefix.to_owned()).or_default() += deleted.len() as u64;
-            job.bytes += doomed
-                .iter()
-                .filter(|object| deleted.contains(&object.key))
-                .map(|object| object.size)
-                .sum::<u64>();
-            job.pending = outcome.failed.len() as u64;
-            if !outcome.failed.is_empty() {
-                return Err(format!(
-                    "delete_failed: {} objects under {prefix}",
-                    outcome.failed.len()
-                ));
-            }
+        if !batches.is_empty() {
+            job.pending = failed;
+        }
+        if let Some(error) = batch_error {
+            return Err(error);
+        }
+        if failed > 0 {
+            return Err(format!("delete_failed: {failed} objects under {prefix}"));
+        }
+        if let Some(error) = list_error {
+            return Err(error);
         }
         if end {
             job.cursors.insert(name, None);
@@ -1174,7 +1336,6 @@ fn sweep<R: Runtime>(
             push_message(job, now, format!("Deleted {count} objects under {prefix}"));
             return Ok(true);
         }
-        job.cursors.insert(name.clone(), last);
     }
 }
 

@@ -1141,6 +1141,12 @@ impl Runtime for FastlyRuntime {
     ) -> Result<crate::admin::FosResponse, String> {
         self.fos_call(input).map(|(response, _)| response)
     }
+    fn admin_fos_many(
+        &self,
+        requests: Vec<crate::admin::FosRequest<'_>>,
+    ) -> Vec<Result<crate::admin::FosResponse, String>> {
+        self.fos_many(requests)
+    }
     fn admin_fos_etag(
         &self,
         input: crate::admin::FosRequest<'_>,
@@ -1955,101 +1961,213 @@ fn cdn_response(
 impl FastlyRuntime {
     fn fos_call(
         &self,
-        input: crate::admin::FosRequest<'_>,
+        mut input: crate::admin::FosRequest<'_>,
     ) -> Result<(crate::admin::FosResponse, Option<String>), String> {
-        let method = input.method;
         let started = Instant::now();
         let timeout = input.timeout.min(FOS_TIMEOUT);
         let mut stage = "budget";
         let mut status = None;
         let mut bytes_read = 0;
         let bytes_in = input.body.len() as u64;
-        let (usage_key, usage_query) = (input.key, input.query);
         let result: Result<_, String> = (|| {
             if timeout.is_zero() {
                 return Err("backend_deadline".into());
             }
             self.budget.charge()?;
             stage = "request";
-            if !crate::admin::REGIONS.contains(&input.region)
-                || !crate::admin::valid_bucket(input.bucket)
-            {
-                return Err("invalid_fos_target".into());
-            }
-            let host = format!("{}.object.fastlystorage.app", input.region);
-            let path = crate::admin::fos_path(input.bucket, input.key);
-            let query = if input.query.is_empty() {
-                String::new()
-            } else {
-                format!("?{}", input.query)
-            };
-            let mut request = Request::new(input.method, format!("https://{host}{path}{query}"));
-            for (name, value) in crate::admin::fos_headers(&input, self.now())? {
-                request.set_header(name, value);
-            }
-            if !input.body.is_empty() {
-                // POST bodies (bulk delete, multipart complete) are XML whatever the key.
-                let content_type = if input.method == "POST" {
-                    "application/xml"
-                } else if input.key.ends_with(".json") {
-                    "application/json"
-                } else if input.key.ends_with(".js") {
-                    "application/javascript; charset=utf-8"
-                } else if input.key.ends_with(".parquet") {
-                    "application/vnd.apache.parquet"
-                } else {
-                    "application/xml"
-                };
-                request = request
-                    .with_header("content-type", content_type)
-                    .with_body(input.body);
-            }
+            let request = self.fos_request(&mut input)?;
             stage = "headers";
-            let mut response = bounded_send_with_timeout(
+            let response = bounded_send_with_timeout(
                 request,
-                &format!("fos_{}", input.region.replace('-', "_")),
+                &fos_backend(input.region),
                 timeout.saturating_sub(started.elapsed()),
             )?;
-            let response_status = response.get_status().as_u16();
-            status = Some(response_status);
-            let etag = response.get_header_str("etag").map(str::to_owned);
-            let retry_after =
-                crate::admin::transport::parse_retry_after(response.get_header_str("retry-after"));
+            status = Some(response.get_status().as_u16());
             stage = "body";
-            let bytes = crate::admin::transport::read_fos_body(
-                response.take_body(),
-                response_status,
+            fos_answer(
+                response,
                 input.response_limit,
+                started,
+                timeout,
                 &mut bytes_read,
-            )?;
-            if started.elapsed() >= timeout {
-                return Err("backend_deadline".into());
-            }
-            Ok((
-                crate::admin::FosResponse {
-                    retry_after,
-                    status: response_status,
-                    body: bytes,
-                    cdn_cache: None,
-                },
-                etag,
-            ))
+            )
         })();
-        self.usage.record_fos(
-            method,
-            usage_key,
-            usage_query,
+        let call = FosCall {
+            stage,
             status,
-            started.elapsed().as_millis() as u64,
+            started,
+            timeout,
             bytes_in,
-            bytes_read as u64,
+            bytes_read,
+        };
+        self.fos_record(&input, &call, result.as_ref().err());
+        result
+    }
+
+    /// The signed request for `input`. Its body moves into the request.
+    fn fos_request(&self, input: &mut crate::admin::FosRequest<'_>) -> Result<Request, String> {
+        if !crate::admin::REGIONS.contains(&input.region)
+            || !crate::admin::valid_bucket(input.bucket)
+        {
+            return Err("invalid_fos_target".into());
+        }
+        let host = format!("{}.object.fastlystorage.app", input.region);
+        let path = crate::admin::fos_path(input.bucket, input.key);
+        let query = if input.query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", input.query)
+        };
+        let mut request = Request::new(input.method, format!("https://{host}{path}{query}"));
+        for (name, value) in crate::admin::fos_headers(input, self.now())? {
+            request.set_header(name, value);
+        }
+        if !input.body.is_empty() {
+            // POST bodies (bulk delete, multipart complete) are XML whatever the key.
+            let content_type = if input.method == "POST" {
+                "application/xml"
+            } else if input.key.ends_with(".json") {
+                "application/json"
+            } else if input.key.ends_with(".js") {
+                "application/javascript; charset=utf-8"
+            } else if input.key.ends_with(".parquet") {
+                "application/vnd.apache.parquet"
+            } else {
+                "application/xml"
+            };
+            request = request
+                .with_header("content-type", content_type)
+                .with_body(std::mem::take(&mut input.body));
+        }
+        Ok(request)
+    }
+
+    fn fos_record(
+        &self,
+        input: &crate::admin::FosRequest<'_>,
+        call: &FosCall,
+        error: Option<&String>,
+    ) {
+        self.usage.record_fos(
+            input.method,
+            input.key,
+            input.query,
+            call.status,
+            call.started.elapsed().as_millis() as u64,
+            call.bytes_in,
+            call.bytes_read as u64,
         );
         println!(
             "{}",
-            json!({"event":"admin.external.call","level":if result.is_err() {"error"} else {"info"},"service":"fos","method":method,"status":status,"stage":stage,"error":result.as_ref().err(),"timeout_ms":timeout.as_millis(),"duration_ms":started.elapsed().as_millis(),"bytes":bytes_read})
+            json!({"event":"admin.external.call","level":if error.is_some() {"error"} else {"info"},"service":"fos","method":input.method,"status":call.status,"stage":call.stage,"error":error,"timeout_ms":call.timeout.as_millis(),"duration_ms":call.started.elapsed().as_millis(),"bytes":call.bytes_read})
         );
-        result
     }
+
+    /// Sends every request before waiting for any, so the round takes about as long as its
+    /// slowest request. Each is charged and logged like [`Self::fos_call`].
+    fn fos_many(
+        &self,
+        requests: Vec<crate::admin::FosRequest<'_>>,
+    ) -> Vec<Result<crate::admin::FosResponse, String>> {
+        let started = Instant::now();
+        let sent: Vec<_> = requests
+            .into_iter()
+            .map(|mut input| {
+                let timeout = input.timeout.min(FOS_TIMEOUT);
+                let bytes_in = input.body.len() as u64;
+                let mut stage = "budget";
+                let pending: Result<_, String> = (|| {
+                    if timeout.is_zero() {
+                        return Err("backend_deadline".into());
+                    }
+                    self.budget.charge()?;
+                    stage = "request";
+                    let request = self.fos_request(&mut input)?;
+                    stage = "headers";
+                    request
+                        .with_pass(true)
+                        .send_async(fos_backend(input.region).as_str())
+                        .map_err(|error| send_error_category(&error, "backend_send_failed").into())
+                })();
+                (input, timeout, bytes_in, stage, pending)
+            })
+            .collect();
+        sent.into_iter()
+            .map(|(input, timeout, bytes_in, mut stage, pending)| {
+                let mut status = None;
+                let mut bytes_read = 0;
+                let result = pending.and_then(|pending| {
+                    let response = wait_pending(pending, started, timeout)?;
+                    status = Some(response.get_status().as_u16());
+                    stage = "body";
+                    fos_answer(
+                        response,
+                        input.response_limit,
+                        started,
+                        timeout,
+                        &mut bytes_read,
+                    )
+                });
+                let call = FosCall {
+                    stage,
+                    status,
+                    started,
+                    timeout,
+                    bytes_in,
+                    bytes_read,
+                };
+                self.fos_record(&input, &call, result.as_ref().err());
+                result.map(|(response, _)| response)
+            })
+            .collect()
+    }
+}
+
+/// What [`FastlyRuntime::fos_record`] logs about one object storage call.
+struct FosCall {
+    stage: &'static str,
+    status: Option<u16>,
+    started: Instant,
+    timeout: std::time::Duration,
+    bytes_in: u64,
+    bytes_read: usize,
+}
+
+fn fos_backend(region: &str) -> String {
+    format!("fos_{}", region.replace('-', "_"))
+}
+
+/// Reads an object storage answer whose headers arrived; a body that finishes past `timeout`
+/// after `started` is a deadline error.
+fn fos_answer(
+    mut response: fastly::Response,
+    response_limit: usize,
+    started: Instant,
+    timeout: std::time::Duration,
+    bytes_read: &mut usize,
+) -> Result<(crate::admin::FosResponse, Option<String>), String> {
+    let status = response.get_status().as_u16();
+    let etag = response.get_header_str("etag").map(str::to_owned);
+    let retry_after =
+        crate::admin::transport::parse_retry_after(response.get_header_str("retry-after"));
+    let body = crate::admin::transport::read_fos_body(
+        response.take_body(),
+        status,
+        response_limit,
+        bytes_read,
+    )?;
+    if started.elapsed() >= timeout {
+        return Err("backend_deadline".into());
+    }
+    Ok((
+        crate::admin::FosResponse {
+            retry_after,
+            status,
+            body,
+            cdn_cache: None,
+        },
+        etag,
+    ))
 }
 
 fn bounded_send_with_timeout(

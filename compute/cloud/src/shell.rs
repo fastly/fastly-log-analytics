@@ -220,12 +220,13 @@ pub trait Runtime: SetupStores {
     fn admin_unread(&self, _service_id: &str) -> std::collections::BTreeMap<String, usize> {
         Default::default()
     }
-    /// Whether [`Self::admin_fos_many`] sends its requests concurrently; only then is it used.
+    /// Whether [`Self::admin_fos_many`] sends its requests concurrently; speculative reads use
+    /// it only then.
     fn admin_fos_concurrent(&self) -> bool {
         false
     }
-    /// Sends every request concurrently, charging one backend call each; results keep request
-    /// order. Called only when [`Self::admin_fos_concurrent`] is true.
+    /// Sends every request, concurrently where the runtime can, charging one backend call each;
+    /// results keep request order. The default sends them one after another.
     fn admin_fos_many(
         &self,
         requests: Vec<crate::admin::FosRequest<'_>>,

@@ -356,7 +356,8 @@ fn cleanup_is_bounded_and_resumes_across_executions() {
         }
         assert!(fake.calls.get() <= 32);
         assert!(fake.vcpu.get() <= 700 + 2 * 60, "{}", fake.vcpu.get());
-        vcpu_bound |= fake.vcpu.get() >= 700 && fake.calls.get() < 28;
+        // Stopped because one more page (a LIST and its delete) would cross the vCPU bound.
+        vcpu_bound |= fake.vcpu.get() + 2 * 60 >= 700 && fake.calls.get() < 28;
         job = fake.kv.borrow()[reset::JOB_KEY].1.clone();
         if job["status"] == "complete" {
             break;

@@ -109,6 +109,16 @@ struct KeyOnly {
     key: String,
 }
 
+/// A `DeleteObjects` request body naming `keys`.
+fn delete_body(keys: &[String]) -> Vec<u8> {
+    let mut body = String::from("<Delete>");
+    for key in keys {
+        body.push_str(&format!("<Object><Key>{}</Key></Object>", xml_escape(key)));
+    }
+    body.push_str("</Delete>");
+    body.into_bytes()
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -197,6 +207,14 @@ pub fn transient_error(code: &str) -> bool {
         .and_then(|(_, status)| status.parse::<u16>().ok());
     status.is_some_and(|status| transient_status(status, b""))
         || crate::admin::transport::retryable_transport(code)
+}
+
+/// A `DeleteObjects` batch that failed: its error, whether sending it again may succeed, and
+/// the `Retry-After` its answer asked for.
+struct DeleteFailure {
+    error: String,
+    again: bool,
+    wait: Option<Duration>,
 }
 
 enum Sent {
@@ -582,12 +600,7 @@ impl<R: Runtime> Store<'_, R> {
     pub fn delete_objects(&self, keys: &[String]) -> Result<DeleteResult, String> {
         let mut result = DeleteResult::default();
         for (index, chunk) in keys.chunks(DELETE_BATCH).enumerate() {
-            let mut body = String::from("<Delete>");
-            for key in chunk {
-                body.push_str(&format!("<Object><Key>{}</Key></Object>", xml_escape(key)));
-            }
-            body.push_str("</Delete>");
-            let response = match self.fos("POST", "", "delete", body.into_bytes()) {
+            let response = match self.fos("POST", "", "delete", delete_body(chunk)) {
                 Ok(response) => response,
                 Err(error) if index == 0 => return Err(error),
                 Err(_) => {
@@ -597,11 +610,7 @@ impl<R: Runtime> Store<'_, R> {
                     break;
                 }
             };
-            let parsed = (response.status == 200)
-                .then(|| std::str::from_utf8(&response.body).ok())
-                .flatten()
-                .and_then(|text| quick_xml::de::from_str::<DeleteResponse>(text).ok());
-            let Some(parsed) = parsed else {
+            let Some(answer) = self.delete_answer(chunk, &response) else {
                 if index == 0 {
                     return Err(format!("delete_objects_http_{}", response.status));
                 }
@@ -610,31 +619,133 @@ impl<R: Runtime> Store<'_, R> {
                     .extend(keys[index * DELETE_BATCH..].iter().cloned());
                 break;
             };
-            let (mut confirmed, mut errored) = (
-                std::collections::BTreeSet::new(),
-                std::collections::BTreeSet::new(),
-            );
-            for item in parsed.items {
-                match item {
-                    DeleteItem::Deleted(k) => confirmed.insert(k.key),
-                    DeleteItem::Error(k) => errored.insert(k.key),
-                    DeleteItem::Other => continue,
-                };
-            }
-            let mut done = Vec::new();
-            for key in chunk {
-                if confirmed.contains(key) && !errored.contains(key) {
-                    done.push(key.clone());
-                } else {
-                    result.failed.push(key.clone());
-                }
-            }
-            if let Some(usage) = self.runtime.usage_agg() {
-                usage.record_deleted(&done);
-            }
-            result.deleted.extend(done);
+            result.deleted.extend(answer.deleted);
+            result.failed.extend(answer.failed);
         }
         Ok(result)
+    }
+
+    /// One `DeleteObjects` POST per batch (at most [`DELETE_BATCH`] keys each), all in flight
+    /// together where the runtime allows. Results keep batch order: a batch whose request failed
+    /// or whose answer was not a readable 200 is an `Err`. Batches answered transiently (429,
+    /// 5xx, `SlowDown`, or a retryable transport failure) are sent once more together after
+    /// `retry`'s wait, while `reserve` calls would still be left over afterwards.
+    pub fn delete_batches(
+        &self,
+        batches: &[&[String]],
+        retry: Option<&Retry>,
+        reserve: u32,
+    ) -> Vec<Result<DeleteResult, String>> {
+        let mut results: Vec<_> = self
+            .delete_round(batches)
+            .into_iter()
+            .map(|sent| self.delete_settle(batches, sent))
+            .collect();
+        let again: Vec<usize> = (0..batches.len())
+            .filter(|&i| results[i].as_ref().is_err_and(|failure| failure.again))
+            .collect();
+        let wait = again
+            .iter()
+            .filter_map(|&i| results[i].as_ref().err().and_then(|failure| failure.wait))
+            .max();
+        if !again.is_empty()
+            && self.runtime.admin_remaining_calls() >= again.len() as u32 + reserve
+            && self.retry_wait(retry, wait)
+        {
+            let resend: Vec<&[String]> = again.iter().map(|&i| batches[i]).collect();
+            for (&i, (_, sent)) in again.iter().zip(self.delete_round(&resend)) {
+                results[i] = self.delete_settle(batches, (i, sent));
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.map_err(|failure| failure.error))
+            .collect()
+    }
+
+    /// Sends one round of `DeleteObjects` POSTs, concurrently when the runtime can.
+    fn delete_round(
+        &self,
+        batches: &[&[String]],
+    ) -> Vec<(usize, Result<crate::admin::FosResponse, String>)> {
+        let timeout = request_timeout(FOS_TIMEOUT, self.runtime.admin_elapsed(self.started));
+        self.runtime
+            .admin_fos_many(
+                batches
+                    .iter()
+                    .map(|batch| FosRequest {
+                        method: "POST",
+                        region: &self.service.fos_region,
+                        bucket: &self.service.fos_bucket,
+                        key: "",
+                        query: "delete",
+                        access_key: &self.access_key,
+                        secret_key: &self.secret_key,
+                        body: delete_body(batch),
+                        timeout,
+                        response_limit: crate::admin::transport::FOS_RESPONSE_LIMIT,
+                        content_md5: None,
+                    })
+                    .collect(),
+            )
+            .into_iter()
+            .enumerate()
+            .collect()
+    }
+
+    /// One batch's answer, or why it failed.
+    fn delete_settle(
+        &self,
+        batches: &[&[String]],
+        (index, sent): (usize, Result<crate::admin::FosResponse, String>),
+    ) -> Result<DeleteResult, DeleteFailure> {
+        let response = sent.map_err(|error| DeleteFailure {
+            again: crate::admin::transport::retryable_transport(&error),
+            error,
+            wait: None,
+        })?;
+        self.delete_answer(batches[index], &response)
+            .ok_or_else(|| DeleteFailure {
+                error: format!("delete_objects_http_{}", response.status),
+                again: transient_status(response.status, &response.body),
+                wait: response.retry_after,
+            })
+    }
+
+    /// Which of `chunk` a `DeleteObjects` answer confirms; `None` unless it is a readable 200.
+    /// A key the answer neither confirms nor reports as an error counts as failed.
+    fn delete_answer(
+        &self,
+        chunk: &[String],
+        response: &crate::admin::FosResponse,
+    ) -> Option<DeleteResult> {
+        let parsed = (response.status == 200)
+            .then(|| std::str::from_utf8(&response.body).ok())
+            .flatten()
+            .and_then(|text| quick_xml::de::from_str::<DeleteResponse>(text).ok())?;
+        let (mut confirmed, mut errored) = (
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        );
+        for item in parsed.items {
+            match item {
+                DeleteItem::Deleted(k) => confirmed.insert(k.key),
+                DeleteItem::Error(k) => errored.insert(k.key),
+                DeleteItem::Other => continue,
+            };
+        }
+        let mut result = DeleteResult::default();
+        for key in chunk {
+            if confirmed.contains(key) && !errored.contains(key) {
+                result.deleted.push(key.clone());
+            } else {
+                result.failed.push(key.clone());
+            }
+        }
+        if let Some(usage) = self.runtime.usage_agg() {
+            usage.record_deleted(&result.deleted);
+        }
+        Some(result)
     }
 
     /// `Ok(None)` is a missing object. Every read goes through the CDN path.

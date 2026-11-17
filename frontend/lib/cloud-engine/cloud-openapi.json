@@ -4332,6 +4332,7 @@
             "type": "object",
             "additionalProperties": { "type": ["string", "null"] }
           },
+          "delete_ms": { "type": "integer" },
           "raw_recheck_at": { "type": ["integer", "null"] },
           "steps_done": { "type": "array", "items": { "type": "string" } },
           "purge_failures": { "type": "integer" },

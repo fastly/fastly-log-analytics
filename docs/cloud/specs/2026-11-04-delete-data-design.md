@@ -181,11 +181,33 @@ every maintenance tick, until the job is complete.
    `T + log_period + 120s` (settle) has passed, so it catches late uploads
    too. After its LIST, it re-checks once more after another settle interval.
 
-   The deletes use the `sweep_dataset` pattern (LIST 1000, persist pending,
-   delete, one CAS on the way out) with `Store::delete_objects`. That is one
-   `DeleteObjects` POST per 1000 keys, on the service's permanent FOS key, so
-   no fresh Fastly token is needed. Deletes are recorded in `fos_usage` as
-   usual. `processed/ops/` is never listed.
+   The deletes go in rounds (`sweep` in `admin/reset.rs`). A round LISTs up to
+   10 pages of 1000 keys, then sends one `DeleteObjects` POST per page, all in
+   flight together (`Store::delete_batches`). They use the service's permanent
+   FOS key, so no fresh Fastly token is needed. Deletes are recorded in
+   `fos_usage` as usual. `processed/ops/` is never listed.
+   - A page's cursor moves only once every object on it, and on every page
+     before it, is confirmed deleted. A failed or interrupted round is listed
+     again, and keys already deleted are gone from that LIST, so nothing is
+     counted twice.
+   - Partly failed batches are surfaced as `delete_failed: N objects under
+     <prefix>`, and `pending` shows how many failed. Batches answered with 429,
+     5xx or `SlowDown` are sent once more together after their `Retry-After`.
+     A second failure is the step's error (`delete_objects_http_<status>`),
+     and the next maintenance tick retries.
+   - A round adds a page only while its deletes would still finish before the
+     stage's wall stop (`storage::WALL_STOP`) and vCPU stop. That is judged by
+     the slowest LIST so far and the job's last measured round time
+     (`delete_ms`, 10 s before the first). For vCPU it uses the most a page
+     and a delete batch have cost in this step; before a delete is measured, a
+     batch is taken to cost what a LIST page did. The step's first page
+     always goes.
+   - Each page costs two backend requests, so the 32-request execution limit
+     caps a step at about 10 pages, or 10,000 objects.
+   - A step that deleted something and stopped only for its budget reports
+     `delete_pending`. The tick then sets the maintenance job's `more_pending`,
+     so the next tick runs it straight away, instead of on the 120 s
+     maintenance interval.
 8. Run `request_storage_reconcile`, so the Usage page's storage figures match.
    Then clear the marker and mark the job complete in the audit trail.
 
