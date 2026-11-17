@@ -80,12 +80,12 @@ describe("performanceAggregatesFromRollup", () => {
 
   it("marks TTL buckets lower bounds when a summary cut TTL values to its top K", async () => {
     const result = await rollupOf(WINDOWS);
-    const cut: Rollup = { ...result.rollup, truncated: new Set(["fields/ttl"]) };
+    const cut: Rollup = { ...result.rollup, truncated: new Set(["all_fields/ttl"]) };
     expect(performanceAggregatesFromRollup({ ...result, rollup: cut }, body()).rollup.lower_bound).toEqual(["ttl_dist"]);
   });
 
   it("answers only the requested sections, and an empty rollup with no waterfall and no buckets", () => {
-    const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, truncated: new Set() };
+    const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set() };
     const result = { rollup: empty, dataFromMs: T0, dataThroughMs: T1 };
     const out = performanceAggregatesFromRollup(result, body());
     expect(out.waterfall).toEqual({ avg: null });

@@ -95,6 +95,31 @@ describe("decodeRollup and mergeRollups", () => {
     expect(rtt(day).quantile(0.5)).toBe(rtt(windows).quantile(0.5));
   });
 
+  it("keeps the all_fields value counts of the timed raw rows, merged across windows and bundles", async () => {
+    const raw = await Promise.all(
+      RAW.map((file) => readColumns(BUFFERS[file.key], ["cache", "asn", "timestamp"])),
+    );
+    const expected = { cache: new Map<string, number>(), asn: new Map<string, number>() };
+    for (const { rows: n, columns } of raw) {
+      const ts = columns.get("timestamp")!;
+      for (let i = 0; i < n; i++) {
+        if (ts[i] == null) continue;
+        for (const field of ["cache", "asn"] as const) {
+          const value = columns.get(field)![i];
+          if (value == null) continue;
+          const counts = expected[field];
+          counts.set(String(value), (counts.get(String(value)) ?? 0) + 1);
+        }
+      }
+    }
+    const counts = (rollup: Rollup, field: string) => Object.fromEntries(rollup.fields.get(field) ?? []);
+    for (const rollup of [await decodeAll(WINDOWS), await decodeAll(HOURS), await decodeAll(DAY, HOUR)]) {
+      expect(counts(rollup, "cache")).toEqual(Object.fromEntries(expected.cache));
+      expect(counts(rollup, "asn")).toEqual(Object.fromEntries(expected.asn));
+      expect([...rollup.truncated].filter((key) => key.startsWith("all_fields/"))).toEqual([]);
+    }
+  });
+
   it("returns null for a file that is not summary v3", async () => {
     expect(await decodeRollup(BUFFERS[RAW[0].key], 300_000)).toBeNull();
   });

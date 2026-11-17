@@ -18,6 +18,8 @@ import {
   type CacheCollapseDetailRequest,
 } from "./insights";
 import { escapeSqlLiteral } from "./sql-validator";
+import type { RollupResult } from "./dashboard/rollup-query";
+import { rollupInsightsBaseline } from "./insights-rollup";
 
 export { CLOUD_INSIGHT_DETECTORS } from "./insights";
 
@@ -32,16 +34,28 @@ export function insightScanColumns(filters: readonly DashboardFilter[]): string[
   return [...new Set([...INSIGHT_SCAN_COLUMNS, ...filters.map((filter) => filter.field)])];
 }
 
+/**
+ * Evaluates the Cloud detectors over local Parquet. With `baseline` (summaries
+ * of the unfiltered baseline), only the window is scanned raw and the baseline
+ * columns come from the summaries.
+ */
 export async function queryCloudInsights(
   body: InsightsRequest,
-  options: { signal: AbortSignal; maskIps: boolean; filters: DashboardFilter[]; engine?: DuckDBReadContext },
+  options: {
+    signal: AbortSignal;
+    maskIps: boolean;
+    filters: DashboardFilter[];
+    engine?: DuckDBReadContext;
+    baseline?: RollupResult;
+  },
 ) {
   const engine = options.engine ?? getDuckDBEngine().readContext();
   const { end, start, baselineHours, windowStart: windowStartMs } = resolveInsightWindow(body);
   const windowStart = new Date(windowStartMs).toISOString();
   const filters = compileFiltersToSql(options.filters, false, [], engine.getCustomColumnTypes());
+  const scanFrom = options.baseline ? windowStartMs : start;
   const scope = `WITH cloud_insight_scope AS (
-    SELECT * FROM requests WHERE ts_ms >= ${start} AND ts_ms < ${end} AND (${filters || "TRUE"})
+    SELECT * FROM requests WHERE ts_ms >= ${scanFrom} AND ts_ms < ${end} AND (${filters || "TRUE"})
   )`;
   const [availableColumns, totals] = await Promise.all([
     engine.getPresentColumns(),
@@ -52,8 +66,8 @@ export async function queryCloudInsights(
   ]);
   const availability = handleInsightAvailability(body.service_id, availableColumns);
   const availableIds = new Set(availability.insights.filter((d) => d.available).map((d) => d.id));
-  const historyHours = totals[0]?.first_ms == null ? 0
-    : Math.max(0, (windowStartMs - Number(totals[0].first_ms)) / 3_600_000);
+  const firstMs = options.baseline ? options.baseline.dataFromMs : totals[0]?.first_ms;
+  const historyHours = firstMs == null ? 0 : Math.max(0, (windowStartMs - Number(firstMs)) / 3_600_000);
   const scan = (builder: (table: string, start: string) => string, ids: string[]) =>
     Number(totals[0]?.requests ?? 0) > 0 && ids.some((id) => availableIds.has(id) &&
       (historyHours >= Math.min(min_Baseline, baselineHours) || CURRENT_WINDOW_INSIGHT_DETECTORS.has(id)))
@@ -68,6 +82,9 @@ export async function queryCloudInsights(
     scan(_coalesced_geo_latency_aggregates, ["pop_latency_regression"]),
     scan(_coalesced_scalar_aggregates, ["cache_hit_cliff", "http3_fallback"]),
   ]);
+  const summarized = options.baseline && rollupInsightsBaseline(options.baseline, {
+    city: cityRows, dimension: dimensionRows, asn: asnRows, scalar: scalarRows,
+  });
   const envelope = await handleInsights(body, {
     now: new Date(end),
     maskIps: options.maskIps,
@@ -75,16 +92,18 @@ export async function queryCloudInsights(
     availableHistoryHours: historyHours,
     urlAggregateRows: urlRows,
     ipSecurityRows: ipRows,
-    cityAggregateRows: cityRows,
-    dimensionAggregateRows: dimensionRows,
-    asnAggregateRows: asnRows,
+    cityAggregateRows: summarized?.rows.city ?? cityRows,
+    dimensionAggregateRows: summarized?.rows.dimension ?? dimensionRows,
+    asnAggregateRows: summarized?.rows.asn ?? asnRows,
     geoLatencyRows: geoRows,
-    scalarAggregateRows: scalarRows,
+    scalarAggregateRows: summarized?.rows.scalar ?? scalarRows,
     windowTotalRequests: Number(totals[0]?.requests ?? 0),
-    baselineTotalRequests: Number(totals[0]?.baseline_requests ?? 0),
+    baselineTotalRequests: summarized?.baselineRequests ?? Number(totals[0]?.baseline_requests ?? 0),
+    baselineSource: summarized?.source,
   });
   return {
     ...envelope,
+    ...(summarized ? { rollup: summarized.meta } : {}),
     unsupported_detectors: availability.unavailable.filter((d) => d.reason === "cloud_detector_unsupported")
       .map(({ id, reason }) => ({ id, reason })),
     unavailable_detectors: availability.unavailable,

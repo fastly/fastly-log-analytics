@@ -178,7 +178,7 @@ describe("networkHealthFromRollup", () => {
   });
 
   it("answers an empty rollup with the empty response, still carrying its span", () => {
-    const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, truncated: new Set() };
+    const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set() };
     const health = networkHealthFromRollup({ rollup: empty, dataFromMs: T0, dataThroughMs: T1 }, {})!;
     expect(health.has_data).toBe(false);
     expect(health.summary.total_requests).toBe(0);

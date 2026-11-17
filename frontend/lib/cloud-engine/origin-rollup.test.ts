@@ -130,7 +130,7 @@ describe("originAggregatesFromRollup", () => {
   });
 
   it("answers an empty rollup with empty sections", () => {
-    const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, truncated: new Set() };
+    const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set() };
     const out = originAggregatesFromRollup({ rollup: empty, dataFromMs: T0, dataThroughMs: T1 }, body())!;
     expect(out.has_data).toBe(false);
     expect(out.ip_health).toEqual({ has_data: false, rows: [] });

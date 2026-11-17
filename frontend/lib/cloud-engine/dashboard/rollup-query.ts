@@ -61,15 +61,15 @@ export type Rollup = {
   series: Map<string, Map<string, Map<number, RollupAgg>>>;
   /** The coarsest series bucket merged: 5 minutes, or an hour once a day bundle is in. */
   seriesStepMs: number;
+  /** `all_fields` rows: field → value → row count; null values are not counted, '' is. */
+  fields: Map<string, Map<string, number>>;
   /**
-   * `group/field` (e.g. `dims/asn`, `series5/asn`) where some source cut values
-   * to its top K: kept counts there are lower bounds and cut values are absent.
+   * `group/field` (e.g. `dims/asn`, `series5/asn`, `all_fields/ua`) where some source
+   * cut values to its top K: kept counts there are lower bounds and cut values are absent.
    */
   truncated: Set<string>;
   /** `overview` waterfall sums in ms over rows with both TTFB and elapsed (absent before any overview row). */
   waterfall?: RollupWaterfall;
-  /** `all_fields` counts for `FIELD_COUNTS` fields: field → value → rows; a cut field is `fields/<field>` in `truncated`. */
-  fields?: Map<string, Map<string, number>>;
 };
 
 export type RollupWaterfall = {
@@ -88,9 +88,6 @@ const WATERFALL_COLUMNS = {
   clientDownload: "client_download_sum",
 } as const;
 const WATERFALL_KEYS = Object.keys(WATERFALL_COLUMNS) as (keyof RollupWaterfall)[];
-
-/** The `all_fields` fields decoded into `Rollup.fields`; the rest stay unread to keep decodes small. */
-const FIELD_COUNTS = new Set(["ttl"]);
 
 function addWaterfall(into: RollupWaterfall | undefined, from: RollupWaterfall): RollupWaterfall {
   const out = { ...(into ?? from) };
@@ -203,16 +200,16 @@ export async function decodeRollup(
   ]);
   const binary = await readColumns(bytes, Object.values(HIST_COLUMNS), false);
   const col = (name: string) => columns.get(name) ?? [];
-  const [group, bucket, field, value, truncated, label] = [
+  const [group, bucket, field, value, truncated, label, count] = [
     col("bundle"),
     col("bucket"),
     col("field"),
     col("value"),
     col("truncated"),
     col("label"),
+    col("count"),
   ];
   const sums = SUM_KEYS.map((key) => [key, col(SUM_COLUMNS[key])] as const);
-  const count = col("count");
   const hists = HIST_KEYS.map(
     (key) => [key, binary.columns.get(HIST_COLUMNS[key]) ?? []] as const,
   );
@@ -220,6 +217,7 @@ export async function decodeRollup(
     dims: new Map(),
     series: new Map(),
     seriesStepMs,
+    fields: new Map(),
     truncated: new Set(),
   };
   const read = (i: number) => {
@@ -266,18 +264,16 @@ export async function decodeRollup(
         rollup.waterfall = addWaterfall(rollup.waterfall, sums);
         break;
       }
-      case "field_totals":
-        if (FIELD_COUNTS.has(name) && truncated[i] === true) rollup.truncated.add(`fields/${name}`);
-        break;
       case "all_fields": {
-        if (!FIELD_COUNTS.has(name)) break;
-        const fields = (rollup.fields ??= new Map());
-        const values = fields.get(name) ?? new Map<string, number>();
-        fields.set(name, values);
+        const values = rollup.fields.get(name) ?? new Map<string, number>();
+        rollup.fields.set(name, values);
         const key = String(value[i] ?? "");
         values.set(key, (values.get(key) ?? 0) + num(count[i]));
         break;
       }
+      case "field_totals":
+        if (truncated[i] === true) rollup.truncated.add(`all_fields/${name}`);
+        break;
     }
   }
   return rollup;
@@ -289,11 +285,12 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
     dims: new Map(),
     series: new Map(),
     seriesStepMs: Math.max(FIVE_MINUTES_MS, ...rollups.map((r) => r.seriesStepMs)),
+    fields: new Map(),
     truncated: new Set(rollups.flatMap((r) => [...r.truncated])),
   };
   for (const rollup of rollups) {
     if (rollup.waterfall) out.waterfall = addWaterfall(out.waterfall, rollup.waterfall);
-    if (rollup.fields) addFieldCounts((out.fields ??= new Map()), rollup.fields);
+    addFieldCounts(out.fields, rollup.fields);
     for (const [dim, values] of rollup.dims) {
       const target = out.dims.get(dim) ?? new Map<string, RollupAgg>();
       out.dims.set(dim, target);

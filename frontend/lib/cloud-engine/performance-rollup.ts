@@ -61,14 +61,14 @@ export function performanceAggregatesFromRollup(
       } : null,
     };
   }
-  if (sections.has("ttl_dist")) out.ttl_dist = ttlDist(fields?.get("ttl"));
+  if (sections.has("ttl_dist")) out.ttl_dist = ttlDist(fields.get("ttl"));
   return {
     ...out,
     rollup: {
       data_from: new Date(result.dataFromMs).toISOString(),
       data_through: new Date(result.dataThroughMs).toISOString(),
       approximate: [],
-      lower_bound: sections.has("ttl_dist") && truncated.has("fields/ttl") ? ["ttl_dist"] : [],
+      lower_bound: sections.has("ttl_dist") && truncated.has("all_fields/ttl") ? ["ttl_dist"] : [],
     },
   };
 }

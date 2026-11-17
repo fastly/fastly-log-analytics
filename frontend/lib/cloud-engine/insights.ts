@@ -9,6 +9,7 @@
  */
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
+import type { InsightsBaselineSource } from "./insights-rollup";
 
 export const INSIGHTS_ROLLUP_MIN_COVERAGE = 0.8; // 80% hourly rollup coverage threshold
 export const min_Baseline = 24;
@@ -383,7 +384,10 @@ export function threshold_checks(params: {
 export interface InsightItem {
   label: string;
   current_val: number;
-  baseline_val: number;
+  /** Null when the baseline is not known (a window-only detector served from summaries). */
+  baseline_val: number | null;
+  /** Set when the baseline is estimated (`≈`) or a lower bound (`≥`). */
+  baseline_label?: string;
   unit: string;
   meta: Record<string, unknown>;
   severity: "critical" | "warning" | "info";
@@ -505,6 +509,8 @@ export interface CloudInsightsContext {
   scalarAggregateRows?: Record<string, unknown>[];
   windowTotalRequests?: number;
   baselineTotalRequests?: number;
+  /** Set when the baseline rows came from summaries rather than raw rows. */
+  baselineSource?: InsightsBaselineSource;
 }
 
 export function resolveInsightWindow(body: InsightsRequest, now = new Date()) {
@@ -570,12 +576,28 @@ export async function handleInsights(
         items: [],
       };
     }
+    const source = ctx.baselineSource;
+    const unsummarized = source?.unsummarized.get(d.id);
+    if (unsummarized && !CURRENT_WINDOW_INSIGHT_DETECTORS.has(d.id)) {
+      return {
+        id: d.id,
+        title: d.title,
+        description: d.description,
+        category: d.category,
+        severity: "info",
+        summary: `The baseline comes from log summaries, which keep no ${unsummarized} breakdown. Not evaluated.`,
+        items: [],
+      };
+    }
+    const baselineLabel = source?.lowerBound.has(d.id) ? "≥ baseline"
+      : source?.approximate.has(d.id) ? "≈ baseline" : undefined;
 
     const items: InsightItem[] = [];
     const add = (label: string, current: number, baseline: number, unit: string,
       meta: Record<string, unknown>, severity: InsightItem["severity"] = "warning") => {
       items.push({ label, current_val: Math.round(current * 10) / 10,
-        baseline_val: Math.round(baseline * 10) / 10, unit, meta, severity });
+        baseline_val: unsummarized ? null : Math.round(baseline * 10) / 10,
+        ...(baselineLabel ? { baseline_label: baselineLabel } : {}), unit, meta, severity });
     };
     const scan = (rows: Record<string, unknown>[] | undefined) => {
       if (!rows) throw new Error(`Missing local aggregate input for ${d.id}`);
@@ -731,7 +753,7 @@ export async function handleInsights(
       default:
         throw new Error(`Cloud detector ${d.id} is advertised without an implementation`);
     }
-    items.sort((a, b) => Math.abs(b.current_val - b.baseline_val) - Math.abs(a.current_val - a.baseline_val));
+    items.sort((a, b) => Math.abs(b.current_val - (b.baseline_val ?? 0)) - Math.abs(a.current_val - (a.baseline_val ?? 0)));
     const findings = items.slice(0, 20);
     for (const item of findings) {
       const filters = item.meta.filters as Record<string, unknown> | undefined;
