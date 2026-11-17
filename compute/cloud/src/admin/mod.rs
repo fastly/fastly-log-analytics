@@ -2863,11 +2863,12 @@ fn dispatch(
     if manual {
         if let Some((ak, sk)) = has_creds {
             let key = format!("meta/cron-runs/dt={}/{}.json", &started_at[..10], run_id);
+            let finished_now = runtime.now();
             let manifest = json!({
                 "id": run_id,
                 "started_at": started_at,
-                "finished_at": started_at,
-                "duration_ms": 0,
+                "finished_at": rfc3339_from_secs(finished_now),
+                "duration_ms": finished_now.saturating_sub(now).saturating_mul(1000),
                 "outcome": "done",
                 "trigger": trigger,
                 "actor": actor,

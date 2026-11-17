@@ -3025,6 +3025,29 @@ fn capacity_telemetry_reports_explicit_zero_fanout_without_inventing_heap() {
 }
 
 #[test]
+fn manual_run_manifest_records_when_the_run_finished() {
+    let fake = Fake::new(BASE + 3600);
+    tick_runtime(&fake);
+    put_raw(&fake, BASE, "a", &[line(BASE, "a")]);
+    fake.call_ms.set(1500);
+    fake.new_request();
+    let started = fake.now.get();
+    fastly_log_analytics::admin::record_tick(&fake, "manual", "admin").unwrap();
+    let keys = fake.keys("meta/cron-runs/");
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    let manifest: Value = serde_json::from_slice(&fake.bucket.borrow()[&keys[0]]).unwrap();
+    let at = fastly_log_analytics::admin::rfc3339_from_secs;
+    let duration_s = manifest["duration_ms"].as_u64().unwrap() / 1000;
+    assert!(duration_s > 0, "{manifest}");
+    assert_eq!(manifest["started_at"], at(started as u64), "{manifest}");
+    assert_eq!(
+        manifest["finished_at"],
+        at(started as u64 + duration_s),
+        "{manifest}"
+    );
+}
+
+#[test]
 fn capacity_telemetry_keeps_maintenance_only_worker_coverage_in_root_stdout() {
     let fake = Fake::new(BASE + 3600);
     tick_runtime(&fake);
