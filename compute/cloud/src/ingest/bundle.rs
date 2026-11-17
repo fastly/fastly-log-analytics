@@ -25,14 +25,16 @@
 //! bundle keeps the top [`HOUR_TOP_K`]/[`DAY_TOP_K`] values per field by `(count desc, value
 //! asc)`; `field_totals.truncated` marks any field that lost values.
 //!
-//! v3 groups (`dims`, `series5`, `bins`, `assets`, `transport`, `origin`, `urls`) sum per
+//! v3 groups (`dims`, `series5`, `bins`, `assets`, `transport`, `origin`, `urls`, `quality`) sum per
 //! value, histograms add bucket-wise,
 //! and `series5`/`bins` buckets floor to 5 minutes (hour) or an hour (day). Folding keeps 4x
-//! candidates (`DIM_K`, `summary::SERIES_ASN_K`) by summed requests. An hour bundle writes all
-//! of them, because day bundles fold hour bundles; a day bundle writes its top [`DAY_TOP_K`]
-//! ([`SERIES_ASN_TOP_K`] for `series5` ASNs). `dim_totals.truncated` marks a group field that
+//! candidates (`DIM_K`, `summary::SERIES_ASN_K`, `summary::SERIES_CITY_K`) by summed requests.
+//! An hour bundle writes all of them, because day bundles fold hour bundles; a day bundle writes
+//! its top [`DAY_TOP_K`] ([`SERIES_ASN_TOP_K`] for `series5` ASNs, [`SERIES_CITY_TOP_K`] for
+//! `series5` cities). `dim_totals.truncated` marks a group field that
 //! lost values, whose counts are then lower bounds. Fields added after version 3 shipped
-//! (`transport`, `origin`, `urls` and `series5` `origin`) are written only when every source
+//! (`transport`, `origin`, `urls`, `quality` and `series5` `origin` and `city`) are written only
+//! when every source
 //! carried their `dim_totals` row, so a bundle over older windows lacks them and readers fall
 //! back to raw. `sample` keeps the
 //! `summary::SAMPLE_K` rows with the smallest `sample_key`. A source of another summary version
@@ -64,6 +66,8 @@ pub const HOUR_TOP_K: usize = 500;
 pub const DAY_TOP_K: usize = 500;
 /// ASNs a day bundle writes per `series5` bucket set: the 30 a page shows by default.
 pub const SERIES_ASN_TOP_K: usize = 30;
+/// Cities a day bundle writes in `series5` (the /network map).
+pub const SERIES_CITY_TOP_K: usize = 50;
 /// Sources folded per execution, which bounds heap and time per build step.
 pub const MAX_SOURCES: usize = 24;
 /// Minimum unfolded window summaries in an open hour before pre-folding a `partial=` batch.
@@ -433,6 +437,9 @@ const SERIES_COLS: &[(C, Op)] = &[
     (C::RttCount, Sum),
     (C::PlossSum, Sum),
     (C::PlossCount, Sum),
+    (C::LatSum, Sum),
+    (C::LonSum, Sum),
+    (C::GeoCount, Sum),
     (C::Label, Min),
     (C::TtfbHist, Merge),
     (C::ElapsedHist, Merge),
@@ -473,6 +480,18 @@ const URL_COLS: &[(C, Op)] = &[
     (C::ElapsedHist, Merge),
 ];
 
+const QUALITY_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::RttSum, Sum),
+    (C::RttCount, Sum),
+    (C::RttvarSum, Sum),
+    (C::RttvarCount, Sum),
+    (C::PlossSum, Sum),
+    (C::PlossCount, Sum),
+    (C::ThroughputSum, Sum),
+    (C::ThroughputCount, Sum),
+];
+
 const ASSET_COLS: &[(C, Op)] = &[
     (C::Requests, Sum),
     (C::RespBytesSum, Sum),
@@ -501,7 +520,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 7] = [
+const GROUPS: [Group; 8] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -513,8 +532,8 @@ const GROUPS: [Group; 7] = [
         name: "series5",
         cols: SERIES_COLS,
         timed: true,
-        fields: &["overall", "proto", "asn", "origin"],
-        gated: &["origin"],
+        fields: &["overall", "proto", "asn", "origin", "city"],
+        gated: &["origin", "city"],
     },
     Group {
         name: "bins",
@@ -551,15 +570,22 @@ const GROUPS: [Group; 7] = [
         fields: &["url", "asn"],
         gated: &["url", "asn"],
     },
+    Group {
+        name: "quality",
+        cols: QUALITY_COLS,
+        timed: false,
+        fields: &["overall", "asn", "region"],
+        gated: &["overall", "asn", "region"],
+    },
 ];
 
 impl Group {
     /// Candidate values kept per field while folding: 4x what a final bundle writes.
     fn keep(&self, field: &str) -> usize {
-        if self.name == "series5" && field == "asn" {
-            summary::SERIES_ASN_K
-        } else {
-            summary::DIM_K
+        match (self.name, field) {
+            ("series5", "asn") => summary::SERIES_ASN_K,
+            ("series5", "city") => summary::SERIES_CITY_K,
+            _ => summary::DIM_K,
         }
     }
 
@@ -569,6 +595,7 @@ impl Group {
         match unit {
             Unit::Hour => self.keep(field),
             Unit::Day if self.name == "series5" && field == "asn" => SERIES_ASN_TOP_K,
+            Unit::Day if self.name == "series5" && field == "city" => SERIES_CITY_TOP_K,
             Unit::Day => DAY_TOP_K,
         }
     }
@@ -805,7 +832,7 @@ struct Acc {
     fields: BTreeMap<String, FieldAcc>,
     sessions: HashMap<SessionKey, Vec<Cell>>,
     /// Per [`GROUPS`] entry, per field.
-    groups: [BTreeMap<String, GroupAcc>; 7],
+    groups: [BTreeMap<String, GroupAcc>; 8],
     /// The lowest [`summary::SAMPLE_K`] sample rows, by `(key, timestamp)`.
     sample: Vec<SampleRow>,
     /// A source of another summary version was folded in: the bundle is written as `mixed`,
@@ -2561,7 +2588,8 @@ mod tests {
                 "asn": i % 150 + offset,
                 "proto": (["HTTP/2", "HTTP/3"][(i % 2) as usize]),
                 "country": (["US", "DE"][(i % 2) as usize]),
-                "city": (["Ashburn", "Berlin", "Tokyo"][(i % 3) as usize]),
+                // 60 cities per window, 240 over an hour's four: past `SERIES_CITY_K`.
+                "city": format!("c{}", i % 60 + offset / 5),
                 "lat": 1.5,
                 "lon": -2.5,
                 "waf_sig": (["VERIFIED-BOT.googlebot", "x"][(i % 2) as usize]),
@@ -2636,33 +2664,37 @@ mod tests {
         let has = |bytes: Vec<u8>| {
             let mut acc = Acc::default();
             acc.fold(bytes, 1).unwrap();
-            ["transport", "origin", "urls"].map(|g| {
-                let at = GROUPS.iter().position(|x| x.name == g).unwrap();
-                !acc.groups[at].is_empty()
+            let series = GROUPS.iter().position(|x| x.name == "series5").unwrap();
+            ["transport", "origin", "urls", "quality", "city"].map(|g| match g {
+                "city" => acc.groups[series].contains_key("city"),
+                _ => {
+                    let at = GROUPS.iter().position(|x| x.name == g).unwrap();
+                    !acc.groups[at].is_empty()
+                }
             })
         };
         let mut first = Acc::default();
         first.fold(windows[0].clone(), 1).unwrap();
-        // A source from before the transport, origin and urls rows.
+        // A source from before the transport, origin, urls, quality and city rows.
         first.sources += 1;
         let mut resumed = Acc::decode_partial(&first.encode_partial(), Unit::Hour).unwrap();
         resumed.fold(windows[1].clone(), 1).unwrap();
         let fin = resumed
             .write(1_800_000_000, Some(Unit::Hour), "hour")
             .unwrap();
-        assert_eq!(has(fin), [false; 3]);
+        assert_eq!(has(fin), [false; 5]);
         let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
         assert_eq!(
             has(merge(&refs, 1_800_000_000, Unit::Hour).unwrap()),
-            [true; 3]
+            [true; 5]
         );
     }
 
     #[test]
     fn hours_keep_the_candidate_margin_and_days_write_the_planned_k() {
         use arrow_array::{Array, BooleanArray, StringArray};
-        // `series5` ASN values and whether the bundle flags that group's ASN field as cut.
-        let read = |bundle: &[u8]| {
+        // `series5` values of `want` and whether the bundle flags that group field as cut.
+        let read = |bundle: &[u8], want: &str| {
             let mut asns = BTreeSet::new();
             let mut flagged = None;
             for batch in
@@ -2680,7 +2712,7 @@ mod tests {
                 let value = value.as_any().downcast_ref::<StringArray>().unwrap();
                 let cut = cut.as_any().downcast_ref::<BooleanArray>().unwrap();
                 for i in 0..batch.num_rows() {
-                    if field.is_null(i) || field.value(i) != "asn" {
+                    if field.is_null(i) || field.value(i) != want {
                         continue;
                     }
                     match kind.value(i) {
@@ -2698,9 +2730,11 @@ mod tests {
         let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
         // A day folds hour bundles, so an hour must keep the 4x margin for the day's ranking.
         let hour = merge(&refs, 1_800_000_000, Unit::Hour).unwrap();
-        assert_eq!(read(&hour), (summary::SERIES_ASN_K, Some(true)));
+        assert_eq!(read(&hour, "asn"), (summary::SERIES_ASN_K, Some(true)));
+        assert_eq!(read(&hour, "city"), (summary::SERIES_CITY_K, Some(true)));
         let day = merge(&[&hour], 1_800_000_000, Unit::Day).unwrap();
-        assert_eq!(read(&day), (SERIES_ASN_TOP_K, Some(true)));
+        assert_eq!(read(&day, "asn"), (SERIES_ASN_TOP_K, Some(true)));
+        assert_eq!(read(&day, "city"), (SERIES_CITY_TOP_K, Some(true)));
     }
 
     /// Every resumed execution decodes the partial first and encodes it last, on top of the

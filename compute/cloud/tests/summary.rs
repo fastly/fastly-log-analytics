@@ -1270,7 +1270,193 @@ fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
         .is_none());
 }
 
-/// `bytes` as a summary written before the transport, origin and urls rows existed.
+/// `fixture_v3` rows with the /network quality columns: regions, and the client-only loss and RTT
+/// variance custom fields on some rows.
+fn quality_rows() -> Vec<Value> {
+    fixture_v3(0, 700)
+        .into_iter()
+        .enumerate()
+        .map(|(k, mut row)| {
+            if k % 5 != 2 {
+                row["region"] = ["VA", "CA", "HE"][k % 3].into();
+            }
+            if k % 4 == 1 {
+                row["client_ploss"] = (0.001 * (k % 7) as f64).into();
+            }
+            if k % 6 == 2 {
+                row["client_tcpi_rttvar"] = (300.0 + (k % 11) as f64).into();
+            }
+            row
+        })
+        .collect()
+}
+
+#[test]
+fn city_series_and_quality_rows_match_a_brute_force_computation() {
+    let rows = quality_rows();
+    let client = [
+        ("client_ploss", convert::Kind::Float64),
+        ("client_tcpi_rttvar", convert::Kind::Float64),
+    ];
+    let out = read(&summary::write_summary(&[&custom_batch(&rows, &client)], BASE).unwrap());
+    let step = |r: &Value| {
+        let at = time::OffsetDateTime::parse(
+            s(r, "timestamp").unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        (at.unix_timestamp() * 1000).div_euclid(300_000) * 300_000
+    };
+
+    // series5 city: the map's cells, per five minutes and `[COALESCE(country), COALESCE(city)]`.
+    let cells = groups_by(&rows, |r| {
+        let city = s(r, "city")?;
+        Some(json!([step(r), [r.get("country"), city]]).to_string())
+    });
+    let got: Vec<_> = bundle(&out, "series5")
+        .into_iter()
+        .filter(|r| r["field"] == "city")
+        .collect();
+    let (_, total) = group_rows(&out, "series5", "city");
+    let with_city = rows.iter().filter(|r| s(r, "city").is_some()).count();
+    assert!(with_city < rows.len());
+    assert_eq!(total["requests"], with_city as i64);
+    assert_eq!(total["truncated"], false);
+    assert_eq!(got.len(), cells.len());
+    for row in got {
+        let value: Value = serde_json::from_str(row["value"].as_str().unwrap()).unwrap();
+        let key = json!([row["bucket"], value]).to_string();
+        let group = &cells[&key];
+        assert_eq!(row["requests"], group.len() as i64, "{key}");
+        assert_eq!(
+            row["status_5xx"],
+            group
+                .iter()
+                .filter(|r| i(r, "status").is_some_and(|s| (500..600).contains(&s)))
+                .count() as i64
+        );
+        close(
+            &row["ploss_sum"],
+            group
+                .iter()
+                .filter_map(|r| f(r, "client_ploss").or_else(|| f(r, "ploss")))
+                .sum(),
+        );
+        let geo: Vec<&&Value> = group.iter().filter(|r| f(r, "lat").is_some()).collect();
+        assert_eq!(row["geo_count"], geo.len() as i64);
+        close(
+            &row["lat_sum"],
+            geo.iter().filter_map(|r| f(r, "lat")).sum(),
+        );
+        close(
+            &row["lon_sum"],
+            geo.iter().filter_map(|r| f(r, "lon")).sum(),
+        );
+        assert_eq!(
+            hist_cell(row, "rtt_hist"),
+            hist_of(group.iter().filter_map(|r| i(r, "tcp_rtt"))),
+            "{key}"
+        );
+        assert!(row.get("ttfb_hist").is_none() && row.get("rtt_sum").is_none());
+    }
+    assert!(
+        cells.keys().any(|k| k.contains("[null,")),
+        "a city without a country"
+    );
+
+    // quality overall: every row's request and its throughput where elapsed > 0.
+    let (got, total) = group_rows(&out, "quality", "overall");
+    assert_eq!(total["requests"], rows.len() as i64);
+    let row = got[""];
+    assert_eq!(row["requests"], rows.len() as i64);
+    let tp: Vec<f64> = rows
+        .iter()
+        .filter_map(|r| {
+            let e = i(r, "elapsed").filter(|e| *e > 0)?;
+            Some(i(r, "resp_bytes").unwrap_or(0) as f64 * 8.0 / e as f64)
+        })
+        .collect();
+    assert_eq!(row["throughput_count"], tp.len() as i64);
+    close(&row["throughput_sum"], tp.iter().sum());
+
+    // quality region: requests and RTT per `[country, COALESCE(region, 'Unknown')]`.
+    let regions = groups_by(&rows, |r| {
+        Some(json!([s(r, "country")?, s(r, "region").unwrap_or("Unknown")]).to_string())
+    });
+    let (got, total) = group_rows(&out, "quality", "region");
+    assert_eq!(
+        total["requests"],
+        regions.values().map(Vec::len).sum::<usize>() as i64
+    );
+    assert_eq!(got.len(), regions.len());
+    assert!(got.keys().any(|k| k.contains("Unknown")));
+    for (value, group) in &regions {
+        let row = got[value];
+        assert_eq!(row["requests"], group.len() as i64, "{value}");
+        let rtt: Vec<i64> = group.iter().filter_map(|r| i(r, "tcp_rtt")).collect();
+        assert_eq!(row["rtt_sum"], rtt.iter().sum::<i64>(), "{value}");
+        assert_eq!(row["rtt_count"], rtt.len() as i64, "{value}");
+    }
+
+    // quality asn: only the client-only loss and RTT variance, over rows that carry them.
+    let asns = groups_by(&rows, |r| {
+        (f(r, "client_ploss").is_some() || f(r, "client_tcpi_rttvar").is_some())
+            .then(|| i(r, "asn").unwrap_or(0).to_string())
+    });
+    let (got, total) = group_rows(&out, "quality", "asn");
+    assert_eq!(
+        total["requests"],
+        asns.values().map(Vec::len).sum::<usize>() as i64
+    );
+    assert_eq!(got.len(), asns.len());
+    for (value, group) in &asns {
+        let row = got[value];
+        let sum = |k: &str| group.iter().filter_map(|r| f(r, k)).sum::<f64>();
+        let count = |k: &str| group.iter().filter(|r| f(r, k).is_some()).count() as i64;
+        assert_eq!(row["requests"], group.len() as i64, "{value}");
+        close(&row["ploss_sum"], sum("client_ploss"));
+        assert_eq!(row["ploss_count"], count("client_ploss"), "{value}");
+        close(&row["rttvar_sum"], sum("client_tcpi_rttvar"));
+        assert_eq!(row["rttvar_count"], count("client_tcpi_rttvar"), "{value}");
+    }
+}
+
+#[test]
+fn city_series_cut_to_the_top_k_and_quality_asn_present_without_client_columns() {
+    let n = summary::SERIES_CITY_K as i64 + 5;
+    let rows: Vec<Value> = (0..n)
+        .map(|i| json!({"timestamp": iso(BASE * 1000 + i), "city": format!("c{i}"), "country": "US"}))
+        .chain((0..3).map(|i| json!({"timestamp": iso(BASE * 1000 + i), "city": "Hot"})))
+        .collect();
+    let out = read(&summary::write_summary(&[&batch(&rows)], BASE).unwrap());
+    let (_, total) = group_rows(&out, "series5", "city");
+    assert_eq!(total["requests"], rows.len() as i64);
+    assert_eq!(total["truncated"], true);
+    let cities: Vec<_> = bundle(&out, "series5")
+        .into_iter()
+        .filter(|r| r["field"] == "city")
+        .collect();
+    assert_eq!(cities.len(), summary::SERIES_CITY_K);
+    assert!(cities
+        .iter()
+        .any(|r| r["value"] == r#"[null,"Hot"]"# && r["requests"] == 3));
+    // No client columns: `asn` keeps its presence row and no values.
+    for (field, requests, values) in [
+        ("overall", rows.len(), 1),
+        ("asn", 0, 0),
+        ("region", n as usize, 1),
+    ] {
+        let (got, total) = group_rows(&out, "quality", field);
+        assert_eq!(total["requests"], requests as i64, "{field}");
+        assert_eq!(got.len(), values, "{field}");
+    }
+    assert_eq!(
+        group_rows(&out, "quality", "region").0[r#"["US","Unknown"]"#]["requests"],
+        n
+    );
+}
+
+/// `bytes` as a summary written before the transport, origin, urls, quality and city rows existed.
 fn without_new_rows(bytes: &[u8]) -> Vec<u8> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes)).unwrap();
     let kv = builder
@@ -1301,8 +1487,10 @@ fn without_new_rows(bytes: &[u8]) -> Vec<u8> {
             } else {
                 name.value(i)
             };
-            matches!(g, "transport" | "origin" | "urls")
-                || (g == "series5" && !field.is_null(i) && field.value(i) == "origin")
+            matches!(g, "transport" | "origin" | "urls" | "quality")
+                || (g == "series5"
+                    && !field.is_null(i)
+                    && matches!(field.value(i), "origin" | "city"))
         };
         let mut start = None;
         for i in 0..=batch.num_rows() {
@@ -1344,23 +1532,29 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
                 )
             })
             .filter(|(g, f)| {
-                matches!(g.as_str(), "transport" | "origin" | "urls")
-                    || (g == "series5" && f == "origin")
+                matches!(g.as_str(), "transport" | "origin" | "urls" | "quality")
+                    || (g == "series5" && matches!(f.as_str(), "origin" | "city"))
             })
             .collect()
     };
     let both = read(&bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap());
-    assert_eq!(new_fields(&both).len(), 8);
+    assert_eq!(new_fields(&both).len(), 12);
 
     let mixed_bytes = bundles::merge(&[&old, &w2], BASE, Unit::Hour).unwrap();
     let mixed = read(&mixed_bytes);
     assert!(new_fields(&mixed).is_empty());
-    for name in ["transport", "origin", "urls"] {
+    for name in ["transport", "origin", "urls", "quality"] {
         assert!(bundle(&mixed, name).is_empty(), "{name}");
     }
     assert!(!bundle(&mixed, "series5")
         .iter()
-        .any(|r| r["field"] == "origin"));
+        .any(|r| r["field"] == "origin" || r["field"] == "city"));
+    assert!(bundle(&both, "series5")
+        .iter()
+        .any(|r| r["field"] == "city"));
+    assert!(bundle(&both, "quality")
+        .iter()
+        .any(|r| r["field"] == "overall"));
     // Older fields still merge both sources.
     assert_eq!(keyed(&mixed, "dims"), keyed(&both, "dims"));
 
@@ -1369,7 +1563,7 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
     let day = read(&bundles::merge(&[&mixed_bytes, &full_hour], BASE, Unit::Day).unwrap());
     assert!(new_fields(&day).is_empty());
     let day = read(&bundles::merge(&[&full_hour], BASE, Unit::Day).unwrap());
-    assert_eq!(new_fields(&day).len(), 8);
+    assert_eq!(new_fields(&day).len(), 12);
 }
 
 #[test]
@@ -1650,7 +1844,7 @@ fn write_dashboard_fixtures() {
             row
         })
         .collect();
-    write_summary_fixtures("dashboard/__fixtures__/summaries", &rows);
+    write_summary_fixtures("dashboard/__fixtures__/summaries", &rows, &[]);
 }
 
 /// Writes `frontend/lib/cloud-engine/__fixtures__/network-summaries/`: rows carrying the
@@ -1689,9 +1883,10 @@ fn write_network_fixtures() {
                 "rtt_var": 500 + i % 700,
                 "retrans": i % 4,
                 "delivery_rate": 100_000 + i * 31,
+                "elapsed": (i * 97) % 300_000,
             });
             // Nulls exercise each coalesce: unknown city and country, ASN 0, protocol
-            // default and absent RTT, loss and timestamp.
+            // default and absent RTT, loss, elapsed and timestamp.
             if i % 11 == 0 {
                 row["city"] = Value::Null;
             } else {
@@ -1714,13 +1909,26 @@ fn write_network_fixtures() {
             if i % 9 == 0 {
                 row["ploss"] = Value::Null;
             }
+            if i % 17 == 0 {
+                row["elapsed"] = Value::Null;
+            }
+            if i % 3 == 0 {
+                row["client_ploss"] = (0.001 * (i % 6) as f64).into();
+            }
+            if i % 4 == 1 {
+                row["client_tcpi_rttvar"] = (250 + (i * 3) % 900).into();
+            }
             if i % 401 == 7 {
                 row["timestamp"] = Value::Null;
             }
             row
         })
         .collect();
-    write_summary_fixtures("__fixtures__/network-summaries", &rows);
+    let client = [
+        ("client_ploss", convert::Kind::Float64),
+        ("client_tcpi_rttvar", convert::Kind::Float64),
+    ];
+    write_summary_fixtures("__fixtures__/network-summaries", &rows, &client);
 }
 
 /// Writes `frontend/lib/cloud-engine/__fixtures__/origin-summaries/`: rows carrying the
@@ -1788,13 +1996,13 @@ fn write_origin_fixtures() {
             row
         })
         .collect();
-    write_summary_fixtures("__fixtures__/origin-summaries", &rows);
+    write_summary_fixtures("__fixtures__/origin-summaries", &rows, &[]);
 }
 
 /// Writes `frontend/lib/cloud-engine/{rel}/`: 15-minute raw windows of `rows`, their window
 /// summaries, hour bundles (and each hour's bundle without its last window), the day bundle
 /// and `index.json`.
-fn write_summary_fixtures(rel: &str, rows: &[Value]) {
+fn write_summary_fixtures(rel: &str, rows: &[Value], custom: &[(&str, convert::Kind)]) {
     use fastly_log_analytics::ingest::bundle::{self, Unit};
     const FIXTURE_WINDOW: i64 = 900;
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1807,7 +2015,24 @@ fn write_summary_fixtures(rel: &str, rows: &[Value]) {
         writeln!(text, "{row}").unwrap();
     }
     let gz = zstd::stream::encode_all(text.as_slice(), 1).unwrap();
-    let converted = convert::convert_object(&gz, FIXTURE_WINDOW, BASE + 3600).unwrap();
+    let schema = convert::RequestSchema::new(
+        custom
+            .iter()
+            .map(|(name, kind)| convert::CustomColumn {
+                name: (*name).into(),
+                kind: *kind,
+                slot_only: false,
+            })
+            .collect(),
+    );
+    let converted = convert::convert_object_capped(
+        &gz,
+        FIXTURE_WINDOW,
+        BASE + 3600,
+        convert::MAX_DECOMPRESSED_BYTES,
+        &schema,
+    )
+    .unwrap();
     let summaries = summary::summary_prefix("", "request");
     let bundles = bundle::bundle_prefix("", "request");
     let mut index = Vec::new();

@@ -3,8 +3,9 @@
 //! One long-format file per window, rows tagged by `bundle`. Shapes and definitions mirror the
 //! fla v3 hourly rollups (`backend/core/rollups/` at 2c75f058): `time_series`, `overview`,
 //! `all_fields` (+ `field_totals`), `all_fields_ip`, `sessions` and additive `dims`, plus the
-//! Cloud-only `transport`, `origin` and `urls` groups (/network transport, /origin and
-//! /performance rankings), which always write their `dim_totals` rows as a presence mark. Every
+//! Cloud-only `transport`, `origin`, `urls` and `quality` groups and `series5` `origin` and
+//! `city` fields (/network transport, quality and map, /origin and /performance rankings), which
+//! always write their `dim_totals` rows as a presence mark. Every
 //! value is an additive sum or count, a min/max, a histogram or an HLL sketch, so windows merge
 //! into hours and days.
 
@@ -37,6 +38,9 @@ pub const SESSION_K: usize = 2000;
 pub const DIM_K: usize = 2000;
 /// ASNs kept in `series5` per window and hour bundle: 4x the 30 a day bundle writes.
 pub const SERIES_ASN_K: usize = 120;
+/// Cities kept in `series5` per window and hour bundle (the /network map): 4x the 50 a day
+/// bundle writes.
+pub const SERIES_CITY_K: usize = 200;
 /// `sample` rows per window and bundle.
 pub const SAMPLE_K: usize = 300;
 /// `series5` and `bins` bucket width in windows and hour bundles; day bundles use an hour.
@@ -218,6 +222,8 @@ columns! {
     ElapsedCount = ("elapsed_count", I64),
     ObytesHist = ("obytes_hist", Bin),
     OverheadHist = ("overhead_hist", Bin),
+    ThroughputSum = ("throughput_sum", F64),
+    ThroughputCount = ("throughput_count", I64),
 }
 
 /// The histogram columns, in [`Lat`] order.
@@ -830,6 +836,12 @@ struct NetCols<'a> {
     transport_rtt: Num<'a>,
     delivery: Num<'a>,
     obytes: Num<'a>,
+    /// /network quality's `COALESCE(geo_region, region)`, client-only loss and RTT variance, and
+    /// throughput elapsed `COALESCE(time_elapsed_usec, elapsed)`.
+    region: Str<'a>,
+    client_ploss: Num<'a>,
+    client_rttvar: Num<'a>,
+    tp_elapsed: Num<'a>,
 }
 
 impl<'a> NetCols<'a> {
@@ -897,6 +909,10 @@ impl<'a> NetCols<'a> {
                 &[("delivery_rate", 1.0), ("tcpi_delivery_rate", 1.0)],
             ),
             obytes: Num::new(batch, &[("obytes", 1.0)]),
+            region: Str::new(batch, &["geo_region", "region"]),
+            client_ploss: Num::new(batch, &[("client_ploss", 1.0)]),
+            client_rttvar: Num::new(batch, &[("client_tcpi_rttvar", 1.0)]),
+            tp_elapsed: Num::new(batch, &[("time_elapsed_usec", 1.0), ("elapsed", 1.0)]),
         }
     }
 }
@@ -1094,6 +1110,87 @@ impl Transport {
         ];
         push_hists(&mut row, &[C::RttHist], std::slice::from_ref(&rtt));
         out.push(&row);
+    }
+}
+
+/// A `series5` `city` cell: the /network map's requests, 5xx, loss, coordinates and RTT per
+/// bucket and `[COALESCE(geo_country, country), COALESCE(geo_city, city)]`.
+#[derive(Default)]
+struct MapCell {
+    requests: i64,
+    s5: i64,
+    ploss: (f64, i64),
+    geo: (f64, f64, i64),
+    rtt: Hist,
+}
+
+impl MapCell {
+    fn add(&mut self, n: &Net<'_>) {
+        self.requests += 1;
+        self.s5 += i64::from(n.s5);
+        if let Some(p) = n.ploss {
+            self.ploss.0 += p;
+            self.ploss.1 += 1;
+        }
+        if let Some((la, lo)) = n.geo {
+            self.geo.0 += la;
+            self.geo.1 += lo;
+            self.geo.2 += 1;
+        }
+        if let Some((v, slot)) = n.lat[2] {
+            self.rtt.add_slot(v, slot);
+        }
+    }
+
+    fn push(&self, out: &mut Out, bucket: i64, value: &str) {
+        let rtt = self.rtt.to_bytes();
+        let mut row = vec![
+            (C::Bundle, V::S("series5")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("city")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+            (C::Status5xx, V::I(self.s5)),
+            (C::PlossSum, V::F(self.ploss.0)),
+            (C::PlossCount, V::I(self.ploss.1)),
+            (C::LatSum, V::F(self.geo.0)),
+            (C::LonSum, V::F(self.geo.1)),
+            (C::GeoCount, V::I(self.geo.2)),
+        ];
+        push_hists(&mut row, &[C::RttHist], std::slice::from_ref(&rtt));
+        out.push(&row);
+    }
+}
+
+/// A `quality` row: /network quality's sums the other rows lack. `overall` counts every row and
+/// its throughput; `region` requests and RTT per `[country, region]`; `asn` the client-only loss
+/// and RTT variance, over rows that carry either.
+#[derive(Default)]
+struct Quality {
+    requests: i64,
+    rtt: (i64, i64),
+    rttvar: (f64, i64),
+    ploss: (f64, i64),
+    throughput: (f64, i64),
+}
+
+impl Quality {
+    fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str) {
+        out.push(&[
+            (C::Bundle, V::S("quality")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+            (C::RttSum, V::I(self.rtt.0)),
+            (C::RttCount, V::I(self.rtt.1)),
+            (C::RttvarSum, V::F(self.rttvar.0)),
+            (C::RttvarCount, V::I(self.rttvar.1)),
+            (C::PlossSum, V::F(self.ploss.0)),
+            (C::PlossCount, V::I(self.ploss.1)),
+            (C::ThroughputSum, V::F(self.throughput.0)),
+            (C::ThroughputCount, V::I(self.throughput.1)),
+        ]);
     }
 }
 
@@ -1537,6 +1634,10 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
     let mut origin_series: FastMap<(i64, Cow<str>), OriginSeries> = FastMap::default();
     let mut by_url: FastMap<Cow<str>, UrlAgg> = FastMap::default();
     let mut by_raw_asn: FastMap<Cow<str>, UrlAgg> = FastMap::default();
+    let mut map_cells: FastMap<(i64, Option<&str>, &str), MapCell> = FastMap::default();
+    let mut quality = Quality::default();
+    let mut quality_regions: FastMap<(&str, &str), Quality> = FastMap::default();
+    let mut quality_asns: FastMap<i64, Quality> = FastMap::default();
 
     for (at, r) in rows.iter().enumerate() {
         let c = &r.net;
@@ -1556,6 +1657,7 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
             let ottfb = get_i(r.ottfb, i);
             let rtt = c.rtt.get(i).map(|v| v.round() as i64);
             let as_name = c.as_name.get(i, false);
+            let (country, city) = (c.country.get(i, false), c.city.get(i, false));
             let n = Net {
                 status,
                 s5: status.is_some_and(|s| (500..=599).contains(&s)),
@@ -1570,8 +1672,8 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
                 retrans: c.retrans.get(i).is_some_and(|v| v > 0.0),
                 geo: c.lat.get(i).zip(c.lon.get(i)),
                 as_name,
-                country: c.country.get(i, false).unwrap_or("Unknown"),
-                city: c.city.get(i, false).unwrap_or("Unknown"),
+                country: country.unwrap_or("Unknown"),
+                city: city.unwrap_or("Unknown"),
                 proto: c.proto.get(i, false).unwrap_or("Other"),
                 asn: c.asn.get(i).map_or(0, |v| v as i64),
                 lat: [
@@ -1619,6 +1721,38 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
                 .entry((step, Cow::Owned(n.asn.to_string())))
                 .or_default()
                 .add(&n, true);
+            if let Some(city) = city {
+                map_cells.entry((step, country, city)).or_default().add(&n);
+            }
+
+            quality.requests += 1;
+            if let Some(e) = c.tp_elapsed.get(i).filter(|e| *e > 0.0) {
+                quality.throughput.0 += c.body.get(i).unwrap_or(0.0) * 8.0 / e;
+                quality.throughput.1 += 1;
+            }
+            if let Some(country) = country {
+                let q = quality_regions
+                    .entry((country, c.region.get(i, false).unwrap_or("Unknown")))
+                    .or_default();
+                q.requests += 1;
+                if let Some(r) = n.rtt {
+                    q.rtt.0 += r;
+                    q.rtt.1 += 1;
+                }
+            }
+            let (client_ploss, client_rttvar) = (c.client_ploss.get(i), c.client_rttvar.get(i));
+            if client_ploss.is_some() || client_rttvar.is_some() {
+                let q = quality_asns.entry(n.asn).or_default();
+                q.requests += 1;
+                if let Some(p) = client_ploss {
+                    q.ploss.0 += p;
+                    q.ploss.1 += 1;
+                }
+                if let Some(v) = client_rttvar {
+                    q.rttvar.0 += v;
+                    q.rttvar.1 += 1;
+                }
+            }
 
             if let Some(h) = c.header.get(i) {
                 *header_bins
@@ -1793,6 +1927,19 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
         series_row(out, *step, "asn", value, s);
     }
     drop(asn);
+    let cells: FastMap<(i64, Cow<str>), MapCell> = map_cells
+        .into_iter()
+        .map(|((step, country, city), cell)| {
+            let key = serde_json::to_string(&(country, city)).expect("strings serialize");
+            ((step, Cow::Owned(key)), cell)
+        })
+        .collect();
+    let (cities, total, truncated) = top_timed(cells, |c| c.requests, SERIES_CITY_K);
+    push_total(out, bucket, "series5", "city", total, truncated);
+    for (step, value, cell) in &cities {
+        cell.push(out, *step, value);
+    }
+    drop(cities);
     let (legs, total, truncated) = top_timed(origin_series, |s| s.requests, DIM_K);
     push_total(out, bucket, "series5", "origin", total, truncated);
     for (step, value, s) in &legs {
@@ -1874,6 +2021,27 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
         push_total(out, bucket, "origin", field, total, truncated);
         for (value, o) in &kept {
             o.push(out, bucket, field, value, false);
+        }
+    }
+
+    push_total(out, bucket, "quality", "overall", quality.requests, false);
+    quality.push(out, bucket, "overall", "");
+    let regions: FastMap<Cow<str>, Quality> = quality_regions
+        .into_iter()
+        .map(|(key, q)| {
+            let key = serde_json::to_string(&key).expect("strings serialize");
+            (Cow::Owned(key), q)
+        })
+        .collect();
+    let asns: FastMap<Cow<str>, Quality> = quality_asns
+        .into_iter()
+        .map(|(asn, q)| (Cow::Owned(asn.to_string()), q))
+        .collect();
+    for (field, map) in [("asn", asns), ("region", regions)] {
+        let (kept, total, truncated) = top_untimed(map, |q| q.requests, DIM_K);
+        push_total(out, bucket, "quality", field, total, truncated);
+        for (value, q) in &kept {
+            q.push(out, bucket, field, value);
         }
     }
 
