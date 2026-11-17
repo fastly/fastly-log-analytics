@@ -13,8 +13,11 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { ColumnVisibilityDropdown, DataTable } from '@/components/DataTable'
 import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { CHART_COLORS } from '@/lib/utils'
-import type { FiltersPayload, PlotlyTrace } from '@/types/api'
+import { boundMark, readRollupMeta, RollupDataThrough } from '@/components/network/rollupLabels'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
+import { CHART_COLORS, type RangeWire } from '@/lib/utils'
+import type { components, FiltersPayload, PlotlyTrace } from '@/types/api'
 import {
   ASN_COLUMN_IDS,
   asnColumns,
@@ -36,6 +39,9 @@ export {
   CacheTtlHelp,
   OriginVsEdgeHelp,
 } from './PerformanceHelp'
+
+type PerformanceSection = NonNullable<components['schemas']['PerformanceRequest']['sections']>[number]
+const RAW_SECTIONS: PerformanceSection[] = ['top_urls', 'top_asns', 'scatter']
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
@@ -71,28 +77,45 @@ function PerformanceBody({
   onAsnVisChange,
 }: PerformanceBodyProps) {
   const [sortBy] = useQueryState('sort_by', parseAsStringLiteral(PERF_SORT_BY).withDefault('p99'))
+  // Cloud answers the waterfall and TTL buckets from summaries only when unfiltered; read them apart
+  // so they paint without waiting on the raw scan the URL and network rankings need.
+  const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
+  const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+  const postPerformance = (sections: PerformanceSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
+    unwrapClient(
+      client.POST('/api/performance/aggregates', {
+        signal,
+        body: {
+          filters: filterPayload,
+          sort_by: sortBy,
+          sections,
+          ...rangeBody,
+        },
+      }),
+    )
+
   const performanceQuery = useAnalyticsReportQuery({
     namespace: ['performance', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
-    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    keyParts: [sortBy],
-    queryFn: async ({ rangeBody, signal }) =>
-      unwrapClient(
-        client.POST('/api/performance/aggregates', {
-          signal,
-          body: {
-            filters: filterPayload,
-            sort_by: sortBy,
-            sections: undefined,
-            ...rangeBody,
-          },
-        }),
-      ),
+    range,
+    keyParts: rollupFirst ? [sortBy, RAW_SECTIONS] : [sortBy],
+    queryFn: ({ rangeBody, signal }) => postPerformance(rollupFirst ? RAW_SECTIONS : undefined, rangeBody, signal),
+  })
+
+  const rollupQuery = useAnalyticsReportQuery({
+    namespace: ['performance', 'aggregates', 'rollup'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    queryOptions: { enabled: rollupFirst },
+    queryFn: ({ rangeBody, signal }) => postPerformance([...PERFORMANCE_ROLLUP_SECTIONS], rangeBody, signal),
   })
 
   const coreData = performanceQuery.data
-  const distData = performanceQuery.data
+  const distQuery = rollupFirst ? rollupQuery : performanceQuery
+  const distData = distQuery.data
+  const rollup = rollupFirst ? readRollupMeta(distData) : undefined
 
   const ttlDist = distData?.ttl_dist
   const ttlDistData = React.useMemo((): PlotlyTrace[] => {
@@ -133,7 +156,7 @@ function PerformanceBody({
     ]
   }, [scatterRows])
 
-  const avg = coreData?.waterfall?.avg
+  const avg = distData?.waterfall?.avg
   const waterfallData = React.useMemo((): PlotlyTrace[] => {
     if (!avg) return []
     return [
@@ -146,15 +169,16 @@ function PerformanceBody({
 
   return (
     <>
+      {rollup && <div className="mb-4"><RollupDataThrough meta={rollup} /></div>}
       <div className="mb-6">
         <AnalyticsCard
           title="End-to-End Latency Waterfall (Average)"
           icon={<Network className="h-4 w-4" />}
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Calculating latency percentiles..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={!coreData?.waterfall?.avg}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={!avg}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpContent={
@@ -246,12 +270,12 @@ function PerformanceBody({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard
-          title="Cache TTL Distribution"
+          title={boundMark(rollup, 'ttl_dist') ? 'Cache TTL Distribution (≥ counts)' : 'Cache TTL Distribution'}
           icon={<Clock className="h-4 w-4" />}
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling cache TTL distribution..."
-          error={performanceQuery.error as AnalyticsCardError | null}
+          error={distQuery.error as AnalyticsCardError | null}
           isEmpty={(distData?.ttl_dist?.length ?? 0) === 0}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
