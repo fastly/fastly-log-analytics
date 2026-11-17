@@ -13,7 +13,13 @@ Cloud owns a resource when its name is in the service's owner marker snippet (`f
 | `managed` (default) | its marker, the capture snippets (`Fastly Log Analytics - vcl_recv` / `vcl_deliver`), the logging endpoint (default `Fastly Object Storage Logs`), `log_analytics_condition`, and when RUM is on the RUM snippets, backend and dictionary | Cloud's own |
 | `attached` | its marker, one `logging/s3` endpoint (default `FLP Cloud Logs`) and its response condition `flp_cloud_log_condition` | the other install's |
 
-In `attached` mode the endpoint's log format is the same one `managed` mode writes. It reads the `x-fos-edge-data:*` / `x-fos-origin-data:*` headers that the other install's capture VCL sets. The condition has the same statement as `log_analytics_condition` (sample rate, edge only, custom condition).
+In `attached` mode the endpoint's log format is the same one `managed` mode writes. It reads the `x-fos-edge-data:*` / `x-fos-origin-data:*` headers that the other install's capture VCL sets.
+
+Cloud's condition logs exactly the requests the other install's request-log endpoint logs, so both installs hold the same request data (`reconcile::attach_condition_statement`):
+
+- When the service has `log_analytics_condition`, `flp_cloud_log_condition` copies its statement verbatim, including the other install's sample rate, edge-only setting, custom condition and RUM-beacon exclusion. Cloud's own `sample_rate`, `edge_only` and `custom_condition` are then not used. Each reconcile re-reads it, so a change to the other install's condition reaches Cloud's on the next reconcile.
+- When it is absent, Cloud uses its own statement with `req.url.path != "/rum-beacon"` added after the first clause.
+- When it exists but has no non-empty statement or is not a `RESPONSE` condition, validate, provision and reconcile stop with `capture_condition_unreadable` rather than guess. Teardown keeps Cloud's condition as it is.
 
 `attached` mode is request logs only. RUM and CMCD need VCL that Cloud would have to own, so they are rejected.
 
@@ -35,6 +41,7 @@ In `attached` mode the endpoint's log format is the same one `managed` mode writ
 | 409 | `managed_resources_not_owned` | a reconcile finds managed names Cloud doesn't own (`managed` mode only) |
 | 409 | `resource_name_collision` | the chosen endpoint name already exists and Cloud doesn't own it |
 | 409 | `capture_vcl_missing` | `attached` mode, but the service has neither both `Fastly Log Analytics - vcl_recv` and `- vcl_deliver` snippets nor `Fastly Log Analysis Capture` (validate, provision and reconcile; teardown still runs) |
+| 409 | `capture_condition_unreadable` | `attached` mode, and the service's `log_analytics_condition` has no non-empty statement or is not a `RESPONSE` condition (validate, provision and reconcile) |
 | 400 | `invalid_capture` | `capture` is not `managed` or `attached` |
 | 400 | `rum_unavailable_in_attach_mode` | `attached` with RUM enabled |
 | 400 | `cmcd_unavailable_in_attach_mode` | `attached` with CMCD enabled |
@@ -52,6 +59,6 @@ What to know:
 
 - Both installs clone and activate versions of the same service. If both run at once, the later activation can drop the other's draft change. A Cloud job stops with `active_version_changed` when the active version moves under it; run one install's change at a time.
 - Cloud depends on the other install's capture VCL. If that install is torn down or drops a header, the matching Cloud columns go blank, and Cloud's next reconcile fails with `capture_vcl_missing`.
-- When the other install has RUM, its condition excludes `/rum-beacon` requests; Cloud's doesn't, so Cloud also logs those beacon requests.
+- Cloud's condition follows the other install's `log_analytics_condition` only at reconcile. Between a change to it and Cloud's next reconcile, the two installs log different requests.
 - A second Cloud install can't attach: Cloud's marker on the service makes it `service_managed_by_other_install` for any other install that checks markers.
 - Cloud teardown in `attached` mode deletes only its marker, endpoint and condition.

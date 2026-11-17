@@ -22,6 +22,29 @@ pub fn capture_present(snippets: &[Value]) -> bool {
     has("Fastly Log Analytics - vcl_recv") && has("Fastly Log Analytics - vcl_deliver")
         || has("Fastly Log Analysis Capture")
 }
+/// Attach mode logs exactly the requests the other install's request-log endpoint
+/// logs, so both installs' data can be compared: its `log_analytics_condition`
+/// verbatim, or `fallback` (Cloud's own statement) minus RUM beacons when absent.
+pub fn attach_condition_statement(conditions: &[Value], fallback: &str) -> Result<String, Error> {
+    let Some(existing) = conditions
+        .iter()
+        .find(|v| v["name"] == "log_analytics_condition")
+    else {
+        const BEACON: &str = "req.url.path != \"/rum-beacon\"";
+        return Ok(match fallback.split_once(" && ") {
+            Some((first, rest)) => format!("{first} && {BEACON} && {rest}"),
+            None => format!("{fallback} && {BEACON}"),
+        });
+    };
+    match (existing["statement"].as_str(), existing["type"].as_str()) {
+        (Some(statement), Some(kind))
+            if !statement.trim().is_empty() && kind.eq_ignore_ascii_case("RESPONSE") =>
+        {
+            Ok(statement.to_owned())
+        }
+        _ => Err(Error::new(409, "capture_condition_unreadable")),
+    }
+}
 pub fn active_version(
     context: &Context<'_, impl Runtime>,
     sid: &str,
@@ -376,6 +399,27 @@ fn discover(
     if attached {
         if job.kind != "teardown" && !capture_present(snippets) {
             return Err(Error::new(409, "capture_vcl_missing"));
+        }
+        let conditions = &current["condition"];
+        if let Some(ours) = target
+            .get_mut("condition")
+            .and_then(|c| c.iter_mut().find(|v| v["name"] == ATTACH_CONDITION))
+        {
+            let statement = match attach_condition_statement(
+                conditions,
+                ours["statement"].as_str().unwrap_or(""),
+            ) {
+                Ok(statement) => statement,
+                // Teardown keeps a condition it leaves in place as it is.
+                Err(error) if job.kind == "teardown" => conditions
+                    .iter()
+                    .find(|v| v["name"] == ATTACH_CONDITION)
+                    .and_then(|v| v["statement"].as_str())
+                    .map(str::to_owned)
+                    .ok_or(error)?,
+                Err(error) => return Err(error),
+            };
+            ours["statement"] = statement.into();
         }
     } else if !own_marker
         && snippets

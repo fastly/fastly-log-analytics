@@ -521,6 +521,7 @@ fn preflight(
         .and_then(|r| r.value["owned_endpoint_names"].as_array());
     let attached = capture == Capture::Attached;
     let mut snippets = Vec::new();
+    let mut conditions = Vec::new();
     for resource in ["snippet", "logging/s3", "condition"] {
         let current = context.api(
             "GET",
@@ -547,10 +548,15 @@ fn preflight(
         }
         if resource == "snippet" {
             snippets = list(&current)?.clone();
+        } else if resource == "condition" {
+            conditions = list(&current)?.clone();
         }
     }
     if attached && !reconcile::capture_present(&snippets) {
         return Err(Error::new(409, "capture_vcl_missing"));
+    }
+    if attached {
+        reconcile::attach_condition_statement(&conditions, "")?;
     }
     Ok((service, snippets))
 }

@@ -6481,12 +6481,17 @@ fn attach_alongside(other_has_rum: bool) {
     let conditions = platform.adapter.resources("fixtureService", "condition");
     let statement =
         |name: &str| conditions.iter().find(|v| v["name"] == name).unwrap()["statement"].clone();
-    if !other_has_rum {
-        assert_eq!(
-            statement("flp_cloud_log_condition"),
-            statement("log_analytics_condition")
-        );
-    }
+    assert_eq!(
+        statement("flp_cloud_log_condition"),
+        statement("log_analytics_condition")
+    );
+    assert_eq!(
+        statement("flp_cloud_log_condition")
+            .as_str()
+            .unwrap()
+            .contains("req.url.path != \"/rum-beacon\""),
+        other_has_rum
+    );
     let touched: Vec<_> = platform
         .adapter
         .calls()
@@ -6612,4 +6617,107 @@ fn attach_validation_reports_fields_the_existing_capture_vcl_never_sets() {
         validated["capture"]["missing_fields"],
         json!(["server_region"])
     );
+}
+
+fn seed_other_install_condition(platform: &Platform, condition: Option<Value>) {
+    for (resource, value) in other_install_resources(None, false) {
+        if resource != "condition" || value["name"] != "log_analytics_condition" {
+            platform
+                .adapter
+                .seed_resource("fixtureService", resource, value);
+        }
+    }
+    if let Some(condition) = condition {
+        platform
+            .adapter
+            .seed_resource("fixtureService", "condition", condition);
+    }
+}
+
+fn attached_statement(platform: &Platform) -> Value {
+    platform
+        .adapter
+        .resources("fixtureService", "condition")
+        .into_iter()
+        .find(|v| v["name"] == "flp_cloud_log_condition")
+        .unwrap()["statement"]
+        .clone()
+}
+
+#[test]
+fn attach_mode_copies_the_other_install_condition_verbatim_and_follows_its_changes() {
+    let platform = Platform::new();
+    let theirs = "!segmented_caching.is_inner_req && req.url.path != \"/rum-beacon\" && (req.http.host == \"shop.example\")";
+    seed_other_install_condition(
+        &platform,
+        Some(
+            json!({"name":"log_analytics_condition","statement":theirs,"type":"RESPONSE","priority":10}),
+        ),
+    );
+    let job = platform.json(
+        "POST",
+        "/api/admin/provision/execute",
+        attach_body(json!({"sample_rate":50,"custom_condition":"req.http.x-other == \"1\""})),
+    )["job"]
+        .clone();
+    assert_eq!(platform.drain(job)["status"], "complete");
+    assert_eq!(attached_statement(&platform), theirs);
+
+    let changed = "!segmented_caching.is_inner_req && randombool(25, 100)";
+    platform.adapter.seed_resource(
+        "fixtureService",
+        "condition",
+        json!({"name":"log_analytics_condition","statement":changed,"type":"RESPONSE","priority":10}),
+    );
+    let service = platform.service();
+    let again = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"]}),
+    );
+    let job = platform.drain(again["job"].clone());
+    assert_eq!(job["status"], "complete");
+    assert_eq!(attached_statement(&platform), changed);
+}
+
+#[test]
+fn attach_mode_without_the_other_condition_excludes_the_rum_beacon() {
+    let platform = Platform::new();
+    seed_other_install_condition(&platform, None);
+    let job = platform.json(
+        "POST",
+        "/api/admin/provision/execute",
+        attach_body(json!({"edge_only":true})),
+    )["job"]
+        .clone();
+    assert_eq!(platform.drain(job)["status"], "complete");
+    assert_eq!(
+        attached_statement(&platform),
+        "!segmented_caching.is_inner_req && req.url.path != \"/rum-beacon\" && fastly.ff.visits_this_service == 0"
+    );
+}
+
+#[test]
+fn attach_mode_rejects_an_other_install_condition_it_cannot_read() {
+    for condition in [
+        json!({"name":"log_analytics_condition","statement":"  ","type":"RESPONSE"}),
+        json!({"name":"log_analytics_condition","type":"RESPONSE"}),
+        json!({"name":"log_analytics_condition","statement":"req.url.path != \"/x\"","type":"REQUEST"}),
+    ] {
+        let platform = Platform::new();
+        seed_other_install_condition(&platform, Some(condition.clone()));
+        for path in [
+            "/api/admin/provision/validate",
+            "/api/admin/provision/execute",
+        ] {
+            let response = platform.call("POST", path, attach_body(json!({})));
+            assert_eq!(response.status, 409, "{path} {condition}");
+            assert_eq!(
+                error_code(&response),
+                "capture_condition_unreadable",
+                "{path} {condition}"
+            );
+        }
+        assert_eq!(platform.adapter.key_count(), 0);
+    }
 }
