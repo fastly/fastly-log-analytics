@@ -7,12 +7,11 @@ import hashlib
 import json
 import logging
 import os
-import sys
 import threading
 import time as _time
-import types as _types
 from datetime import UTC, datetime, timedelta
 
+from backend.utils.module_shim import install_shim_module
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 
 from backend.core import metadata as metadata_db
@@ -267,24 +266,4 @@ for _reg_name, _reg_cache in (
 _SUBMODULES = (scoring_analytics, scoring_admin, scoring_vcl)
 
 
-class _SessionScoringShimModule(_types.ModuleType):
-    """Forwards attribute writes/deletes on backend.routers.session_scoring to all 3 submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        for _mod in _SUBMODULES:
-            _types.ModuleType.__setattr__(_mod, name, value)
-
-    def __delattr__(self, name: str) -> None:
-        super().__delattr__(name)
-        for _mod in _SUBMODULES:
-            if hasattr(_mod, name):
-                try:
-                    _types.ModuleType.__delattr__(_mod, name)
-                except AttributeError:
-                    pass
-
-
-_self_mod = sys.modules.get(__name__)
-if _self_mod is not None and not isinstance(_self_mod, _SessionScoringShimModule):
-    _self_mod.__class__ = _SessionScoringShimModule
+install_shim_module(__name__, _SUBMODULES, install_on_submodules=False, fallback_getattr=False)
