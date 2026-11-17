@@ -18,6 +18,8 @@ Cloud uses `CloudCostCalculator.tsx` and the canonical `lib/cloud-engine/usage/e
 
 There is no capacity panel and no compaction toggle: compaction follows the logged service's setting from the prefill (off otherwise), and the ingest capacity model ([cost-methodology.md](../cloud/cost-methodology.md#ingest-capacity-task-253)) is not shown. The Cloud adapter supplies measured inputs, unit costs and configured rates through `/api/usage/prefill`; unavailable measurements remain labelled reference assumptions. Editing an input recalculates the estimate locally.
 
+On Cloud, `/api/usage/current-storage` reports Deleted (Still Billed) as the `bytes_deleted` from `fos_usage` records in the last `min_billed_days` (30 by default) before now, whatever range is selected, matching High-Scale's 30-day window.
+
 ## Roles
 
 Admin only. `/api/usage/` is in the analyst blocklist (`_ANALYST_BLOCKED_PREFIXES`) and `AppLayout` redirects analysts away from `/usage`.

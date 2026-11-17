@@ -139,6 +139,37 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     });
   });
 
+  it.each([
+    ["covers the billing window", 31, 0],
+    ["is shorter than the billing window", 1 / 24, 1],
+  ])("reports bytes deleted in the last 30 days as still billed when the range %s", async (_, rangeDays, kindReads) => {
+    const now = fixtureUsageInput.now;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const deletion = (ageDays: number, bytes: number) => ({
+      ...fixtureUsageInput.rows.fos_usage[0], op: "DELETE_OBJECTS", timestamp: now - ageDays * 86_400_000,
+      bytes_in: 0, bytes_deleted: bytes,
+    });
+    const fosUsage = [deletion(40, 9_000), deletion(1, 2_000), deletion(1 / 48, 500)];
+    const input = { ...fixtureUsageInput, rows: { ...fixtureUsageInput.rows, fos_usage: rangeDays >= 30 ? fosUsage : [] } };
+    const summary = usage.summarizeUsage(input);
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({ ...summary, input, summary, lines: [], totalUsd: 0 });
+    const fetchKind = vi.spyOn(usage, "fetchUsageKind").mockResolvedValue(fosUsage);
+    const params = new URLSearchParams({
+      start: new Date(now - rangeDays * 86_400_000).toISOString(),
+      end: new Date(now).toISOString(),
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/current-storage?${params}`),
+    );
+
+    expect(await response!.json()).toMatchObject({ deleted_bytes: 2_500 });
+    expect(fetchKind).toHaveBeenCalledTimes(kindReads);
+    if (kindReads) {
+      expect(fetchKind.mock.calls[0][1]).toEqual({ from: now - 30 * 86_400_000, to: now });
+    }
+  });
+
   it("returns filtered Cloud share audit rows with parseable timestamps and requested limits", async () => {
     const since = Date.parse("2026-01-01T00:00:00Z");
     const until = since + 1500;

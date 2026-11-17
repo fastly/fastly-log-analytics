@@ -405,6 +405,11 @@ function ranked(map: Map<string, RouteTotals>): RouteTotals[] {
   );
 }
 
+/** Bytes deleted since `from`; FOS still bills them for its minimum storage duration. */
+export function deletedBytesSince(rows: FosUsageRow[], from: number): number {
+  return rows.reduce((sum, row) => (row.timestamp >= from ? sum + row.bytes_deleted : sum), 0);
+}
+
 export function reconcileSnapshot(runs: CronRunRow[]) {
   const candidates = runs
     .filter(

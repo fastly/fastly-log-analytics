@@ -87,6 +87,8 @@ import { LIST_RATES } from "./usage/rates";
 import { bucketUsage } from "./usage/series";
 import {
   buildSevenLineCostTable,
+  deletedBytesSince,
+  fetchUsageKind,
   fetchUsageSettings,
   resetUsageSettingsCache,
   fetchUsageSummary,
@@ -1624,11 +1626,14 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     });
 
     if (pathname === "/api/usage/current-storage") {
+      const billedFrom = now - input.settings.min_billed_days * 86_400_000;
+      const deletions = fromMs <= billedFrom && toMs >= now ? input.rows.fos_usage
+        : await fetchUsageKind("fos_usage", { from: billedFrom, to: now }, { user: "default", role: "admin" }, undefined, request.signal);
       return jsonResponse(
         {
           total_billed_gb_hours: summary.storage.billedGbMonths * 720,
           live_bytes: summary.storage.totalBytes,
-          deleted_bytes: 0,
+          deleted_bytes: deletedBytesSince(deletions, billedFrom),
           regular_log_bytes:
             summary.storage.datasets.find((d) => d.dataset === "pq_request")
               ?.bytes ?? 0,
