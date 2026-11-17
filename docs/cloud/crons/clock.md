@@ -5,9 +5,10 @@ The clock behind every background job. A health-check probe reaches Compute at m
 ## Purpose
 
 Supplies the only schedule `flp` has. The dispatcher (`compute/cloud/src/admin/schedule.rs`) triggers:
-- ingest, once per log period after the period closes plus a grace, and on every tick while a backlog remains (coordinator plus up to 8 shard workers);
+- ingest, once per log period as soon as the period closes, and on every tick while a backlog remains (coordinator plus up to 8 shard workers). Request ingest has no grace (`INGEST_GRACE_S` is 0); RUM ingest waits `max(rum log_period, 60) + SETTLE_S` (120 s) past its period's close;
 - raw delete, after a successful ingest, or on its own while deletes remain queued;
-- one maintenance stage on `flp-worker` at most every 120 s, in round-robin order: retention, compaction, delete-history, storage reconcile ([stage-worker.md](stage-worker.md)).
+- one maintenance stage on `flp-worker` at most every 120 s (30 s while `summary_bundle` has work left). A pending Delete Data job advances first; then the first of the seven `MAINT_STAGES` with work runs, in round-robin order: `retention_sweep`, `log_compact`, `delete_history`, `storage_reconcile`, `summary_bundle`, `request_compact` (skipped here: it is its own job, below), `delete_data` ([stage-worker.md](stage-worker.md));
+- request compaction, as its own compact-only job on `flp-worker`, every 30 s (10 s while it has a backlog) when compaction is configured.
 
 It records only the jobs that ran. It is not a page. `/admin` and `/logs` display it and can trigger it.
 
@@ -37,9 +38,9 @@ Compute runs only when a request arrives, and there is no server, scheduler proc
    - otherwise counts an idle tick: `idle_ticks += 1`, `idle_vcpu_ms += this execution's vCPU`, and returns `Idle`.
    Idle and busy ticks end there: no backend call, no KV write, no log row.
 4. **Due-ness** (`schedule::due`, `schedule.rs:367-399`), decided from the record's mirror of KV `cron:state.jobs` plus the service's `log_period`:
-   - ingest: `sync_interval = max(5, log_period)` (v3, `MIN_PERIOD_S`). Period *p* is ready when `now - INGEST_GRACE_S ≥ (p+1) × period`, where `INGEST_GRACE_S` is 60 s plus ingest's `SETTLE_S` (120 s). Ingest is due when the newest ready period is past `last_success_period`, or when the last run left `more_pending` (catch-up on every tick until the backlog is gone);
+   - ingest: `sync_interval = max(5, log_period)` (v3, `MIN_PERIOD_S`). The 5 s floor never binds for a saved service: settings validation rejects a `log_period` (or RUM `log_period`) below `MIN_LOG_PERIOD` (60 s, `log_period_below_minimum` / `rum_log_period_below_minimum`), and loading a service raises an older, smaller value to 60 s. Period *p* is ready when `now - INGEST_GRACE_S ≥ (p+1) × period`, where `INGEST_GRACE_S` is 0: request raw objects are immutable once they are listed, so the schedule adds no partition-closing allowance and ingest polls as soon as the period closes. RUM ingest uses `rum_grace_s` = `max(rum log_period, 60) + SETTLE_S` (120 s) instead. Ingest is due when the newest ready period is past `last_success_period`, or when the last run left `more_pending` (catch-up on every tick until the backlog is gone);
    - raw delete: while the last run left `more_pending`;
-   - maintenance: every `MAINT_INTERVAL_S` (120 s), or `MAINT_CATCHUP_S` (30 s) after a turn whose `summary_bundle` left work pending (the stage reply's `bundle_pending`; `schedule::maint_catching_up`). A turn on another stage keeps the previous flag, and a bundle turn that ends with nothing pending or only an error clears it. A Delete Data step that stopped only for its budget (`delete_pending`) makes maintenance due again on the next tick. Each turn runs the first rotating stage with work; request compaction is not in the rotation;
+   - maintenance: every `MAINT_INTERVAL_S` (120 s), or `MAINT_CATCHUP_S` (30 s) after a turn whose `summary_bundle` left work pending (the stage reply's `bundle_pending`; `schedule::maint_catching_up`). A turn on another stage keeps the previous flag, and a bundle turn that ends with nothing pending or only an error clears it. A Delete Data step that stopped only for its budget (`delete_pending`) makes maintenance due again on the next tick. Each turn runs the first rotating stage with work (the seven `MAINT_STAGES`, of which `request_compact` is always skipped); request compaction is not in the rotation;
    - request compaction: its own job, only while the service has compaction configured: every `COMPACT_INTERVAL_S` (30 s) once caught up, or `COMPACT_CATCHUP_S` (10 s) after a run that left `more_pending`. It runs as a compact-only `StageRequest` (`compact_only: true`) with the whole 20 s stage wall for chained worker passes, dispatched as a second `extra` beside the maintenance stage (or alone), so a compaction backlog drains at the job's own cadence instead of waiting for a maintenance turn;
    - a failed job backs off `RETRY_S` (30 s), a busy one `BUSY_RETRY_S` (5 s).
 5. **Run** (`dispatch`, `mod.rs:2258-3157`). The lease holder reads `cron:state` and the installed service, recomputes due-ness from the durable state, and runs:
@@ -92,13 +93,13 @@ Compute runs only when a request arrives, and there is no server, scheduler proc
 - **Executions:** each probe that reaches Compute is one billed execution, idle or not. At one probe a second, `/_tick` would be about 86,400 a day, 2.6 M a month, and `/_flush` doubles that; the sleep TTL cuts this while nothing is due. See the cost note in [recommendation.md](../recommendation.md#1-s-clock-executions).
 - **Wall time:** the limits assume the 60 s trial limit and a documented 50 ms CPU per execution. Every guard measures from the start of the execution. Nothing enforces 50 ms CPU except the compaction stop.
 - **KV writes:** repeated writes to one key within an execution are spaced at least 1.1 s apart (`transport.rs:49-52`).
-- **Cadence:** the probe interval is `check_interval` 1000 ms in provisioning, with `clock_interval_s = 1` (`provision.py:353`) and `CLOCK_INTERVAL_S` (`admin/mod.rs:1545`). The ingest cadence comes from `log_period`; the maintenance cadence is `MAINT_INTERVAL_S`. Log rows and the outbox still use 120 s buckets (`ROW_BUCKET_S`).
+- **Cadence:** the probe interval is `check_interval` 1000 ms in provisioning, with `clock_interval_s = 1` (`provision.py:353`) and `CLOCK_INTERVAL_S` (`admin/mod.rs:1545`). The ingest cadence comes from `log_period` (at least 60 s); the maintenance cadence is `MAINT_INTERVAL_S`. The Config Store keys `grace_s` and `run_interval_s` are legacy: provisioning still writes them (180 and 120) and the setup check still requires them, but nothing reads them, so changing them has no effect. Log rows and the outbox still use 120 s buckets (`ROW_BUCKET_S`).
 - **Off-shield probes** return `off_shield`. A POP that cannot reach the shield runs nothing, by design.
 - **Stage order:** ingest (with the maintenance stage in its dispatch batch) → raw_delete → rows → state save → release. `TICK_STAGES` is `["request_ingest", "rum_ingest", "raw_delete"]` (`admin/mod.rs:1687`).
 
 ## Failure modes and recovery
 
-- **The clock stops:** nothing runs. The "Ingestion clock" system check (`checks.rs:384-400`) reads `last_seen` from the schedule record on the shield and fails when no tick arrived within two probe intervals (at least 10 s). Off the shield it falls back to `cron:state.last_tick` with a 300 s limit (`DURABLE_CLOCK_LIMIT_S`) and warns. Use the manual trigger until the clock is fixed.
+- **The clock stops:** nothing runs. The "Ingestion clock" system check (`checks.rs:384-400`) reads the schedule record on the shield and fails when no tick arrived within two probe intervals (at least 10 s). It uses `schedule::check_seen`, not the raw `last_seen`: while no lease is held, the clock counts as seen up to the record's next scheduled wake (capped at `last_seen + REFRESH_S`), because that is exactly how long the shield serves the cached sleep answer without a probe reaching Compute. Once that wake passes with no probe, freshness stays pinned to it, so the check fails about 10 s after a missed wake. While a lease is held, Compute answers with a 1 s TTL, so probes keep refreshing `last_seen`. Off the shield it falls back to `cron:state.last_tick` with a 300 s limit (`DURABLE_CLOCK_LIMIT_S`) and warns. Use the manual trigger until the clock is fixed.
 - **Core Cache evicted or unavailable:** the next tick finds no record, takes the lease and rebuilds the mirror from KV; nothing reruns, because the durable job state already records the last runs. If the claim errors, every tick reads KV until the cache recovers.
 - **A holder dies mid-run:** its lease expires after 55 s and the next tick takes over. The jobs' own fences stop duplicate work.
 - **No service or control plane:** the tick stores an unconfigured mirror and does nothing until the next refresh.
@@ -133,8 +134,7 @@ Native tests only; none is live evidence.
 
 - **Capacity (native simulation):** at 52 raw files per 60 s period with 1 s ticks, ingest, raw delete, every maintenance stage and the flush keep up, with every execution within 32 calls and 64 Core Cache operations, and raw objects consumed about 120 s after their period closes. Live confirmation is pending.
 - **Code, spec and plan disagreements**
-  - The manual-trigger manifest records `finished_at = started_at` and `duration_ms = 0`.
-  - `grace_s` and `run_interval_s` are required at setup but never read.
+  - `grace_s` and `run_interval_s` are required at setup but never read (see Cadence above).
 
 **Plan and docs housekeeping**
 - Every checkbox in the logging plan (in the former fastly-logs-parquet repository; its design is [specs/2026-10-30-operational-logging-and-telemetry-design.md](../specs/2026-10-30-operational-logging-and-telemetry-design.md)) is unchecked.
@@ -146,10 +146,10 @@ Native tests only; none is live evidence.
 
 **Wanted — not yet in a plan task (Drew 2026-10-30)**
 - KV operation, Core Cache replace and purge counters per tick are now built: every `cron_runs` row carries `kv_ops`, `cache_replaces` and `purges` (`StageRow::json`, `admin/mod.rs:1983-2010`). The `/usage` loader still returns `counters: {kv_ops: null, cache_replaces: null, purges: null}` (`frontend/lib/cloud-engine/usage/summary.ts:1284`), so `/usage` sums the logged values instead (`1033-1037`).
-- The other wanted items, log accounting/gap-heal and full_sync, are listed in [request-ingest.md](request-ingest.md). (The FLP `/admin/tick` per-tick budget and stage-health page was not carried into the shared frontend: the Cloud shell still treats `/admin/tick` as an admin path (`shell.rs:1677`), but `frontend/app/admin/` has no `tick` page. Quarantine inspection and purge is the `QuarantineSection` on `/admin`, `frontend/app/admin/page.tsx:45`.)
+- The other wanted items, log accounting/gap-heal and full_sync, are listed in [request-ingest.md](request-ingest.md). (The FLP `/admin/tick` per-tick budget and stage-health page was not carried into the shared frontend: the Cloud shell still treats `/admin/tick` as an admin path (`ANALYTICS_SITE_ROUTES` and its admin-path match in `shell.rs`), but `frontend/app/admin/` has no `tick` page. Clock health is the "Ingestion clock" system check on `/admin` and the Cron Runs tab on `/logs`. Quarantine inspection and purge is the `QuarantineSection` on `/admin`, `frontend/app/admin/page.tsx:45`.)
 
 **v3 parity**
-- Cadence: ingest follows v3's `sync_interval = max(5, log_period)` (`backend/provision/orchestrator.py:286`) on a 1 s clock. A separate configurable `run_interval_s` (from the FLP master plan's "Clock and pipeline settings") is not implemented.
+- Cadence: ingest follows v3's `sync_interval = max(5, log_period)` (`backend/provision/orchestrator.py:286`) on a 1 s clock; with `log_period` held to at least 60 s, the 5 s floor never applies. A separate configurable `run_interval_s` (from the FLP master plan's "Clock and pipeline settings") is not implemented: the Config Store key exists but is ignored.
 - SSE run progress: we keep polling (FLP master plan). This is a note only.
 - Out of scope (Drew 2026-10-30):
   - the dev "no crons" switch;

@@ -106,7 +106,7 @@ An admin's prefill sets the period, sample rate and retention from `logging` in 
 
 ### Ingest capacity (Task 25.3)
 
-The ingest capacity model (`ingestCapacity`, `frontend/lib/cloud-engine/usage/capacity.ts:157`) checks whether request ingest keeps up with the service's average logged traffic. It is a planning model, not a measurement; Task 25.4 must confirm it live. The shared Cost Estimator does not show it as a panel; the Cloud adapter exports it as `evaluateCapacity` (`frontend/lib/cloud-engine/adapter.ts:2125`).
+The ingest capacity model (`ingestCapacity`, `frontend/lib/cloud-engine/usage/capacity.ts:157`) checks whether request ingest keeps up with the service's average logged traffic. It is a planning model, not a measurement; Task 25.4 must confirm it live. The Cost Estimator on `/usage` does not show it: there is no capacity panel. It is exported as `evaluateCapacity` (`capacity.ts`, re-exported by the Cloud adapter and `components/CostCalculator/costCalculatorModel.ts`) for code and tests; the verdicts and figures below come from the model, not from the UI.
 
 Limits, mirrored from `compute/cloud/src/ingest`:
 
@@ -133,8 +133,8 @@ From the calculator inputs (lines L/s, raw files F/s, gzip bytes per line g, ass
 - Shards a tick `W = min(8 × max(relay, 1), P(k))`. `P(k)` is how many shards of k objects fit one 2 MiB plan once each reserves room for its worst-case result: up to `min((27 − k) / 2, 12k)` windows, each a window file and a summary entry, plus per object its key, a 512-byte bad-line sample escaped to 3,074 JSON bytes and its window list (`coordinator.rs` `result_reserve`; `ingestShape.ts` `planShards`, assuming 130-byte raw keys). P(1) = 123 and P(22) = 21. In the worked results below the 200-key LIST page or the 24 MiB segment read binds first, so the bound does not change them.
 - Utilization `= max(F·S/k × T / W, F × T / 200)`. Over 1 is "over capacity", over 0.8 "near".
 - "Not supported" when an object is over 24 MiB compressed or 512 MiB decompressed (shorten the log period), or a full shard needs more than the 28 s worker stop.
-- Busiest worker execution vCPU `= min(lines per shard, L × max(log period, T)) × worker vCPU per line + (S − 1) × 24 MiB × 10 ms/MiB`. The second term is the last segment decompressing and skipping every segment before its range (`convert.rs` `read_segment`). Over Fastly's documented 50 ms per execution (`INGEST_LIMITS.executionVcpuMs`) is "Past documented CPU", with the figure in the panel.
-- Throughput envelope: the highest rate (sampling, nodes and period unchanged) that is not "not supported" and has utilization ≤ 1. Supported rate: the highest that also keeps the busiest execution within 50 ms vCPU. The panel shows the throughput envelope separately when it is higher.
+- Busiest worker execution vCPU `= min(lines per shard, L × max(log period, T)) × worker vCPU per line + (S − 1) × 24 MiB × 10 ms/MiB`. The second term is the last segment decompressing and skipping every segment before its range (`convert.rs` `read_segment`). Over Fastly's documented 50 ms per execution (`INGEST_LIMITS.executionVcpuMs`) is "Past documented CPU", with the busiest-execution figure in the model's result.
+- Throughput envelope: the highest rate (sampling, nodes and period unchanged) that is not "not supported" and has utilization ≤ 1. Supported rate: the highest that also keeps the busiest execution within 50 ms vCPU. The model reports the throughput envelope separately when it is higher.
 
 Worked results (CPU 96 ms/1k lines, the default conversion plus summary units; 109 nodes), supported rate / throughput envelope:
 
@@ -158,7 +158,7 @@ Unmeasured assumptions that Task 25.4 must check: per-execution worker vCPU agai
 
 ### High-RPS ingest costs (Task 25)
 
-The monthly estimate adds a line for each high-RPS path, only when the calculator's inputs trigger it, so a small service without relay prices exactly as before. Each line has an info tip with its formula. They share the capacity model's limits and object shape (`frontend/lib/cloud-engine/usage/ingestShape.ts`). F is raw files a day, S segments per file, W window files a day (`window files per file × F`), w windows per shard (`window files per file ÷ worker requests per file`).
+The monthly estimate adds a line for each high-RPS path, only when the calculator's inputs trigger it, so a small service without relay prices exactly as before. Each line shows its monthly quantities as muted text under its label; the formulas are below, not in the UI. They share the capacity model's limits and object shape (`frontend/lib/cloud-engine/usage/ingestShape.ts`). F is raw files a day, S segments per file, W window files a day (`window files per file × F`), w windows per shard (`window files per file ÷ worker requests per file`).
 
 - **Split raw files** (S > 1, Task 25.1), per day:
   - Worker requests `F × (S − worker requests per file)`: one worker execution per segment instead of a share of one.

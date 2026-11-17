@@ -13,7 +13,7 @@ Small files make browser reads slow and LIST-heavy. Request and RUM window files
 ## How it works
 
 **Trigger**
-- Runs on `flp-worker` as one of the four round-robin maintenance stages (`compact_stage`, `admin/logs.rs:957-1006`). See [stage-worker.md](stage-worker.md).
+- Runs on `flp-worker` as one of the seven round-robin maintenance stages (`compact_stage`, `admin/logs.rs:957-1006`). See [stage-worker.md](stage-worker.md).
 - It takes its turn only when all of these hold:
   - `compaction_enabled` is set (default true);
   - at least `TAIL (3) + MIN_COMPACT_CALLS (6)` = 9 calls remain in the stage execution;

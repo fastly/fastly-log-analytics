@@ -222,9 +222,9 @@ def backend(name: str, host: str, *, shield: bool = False) -> dict[str, str]:
 
 
 # The front service's health checks are the clocks: `/_tick` drives ingest and maintenance,
-# `/_flush` the operational-log flush in its own Compute execution. The VCL caches each per
-# one-second bucket at the IAD shield, so about one probe a second reaches flp, whose
-# dispatcher decides whether anything runs.
+# `/_flush` the operational-log flush in its own Compute execution. The VCL caches each at the
+# IAD shield for 1 s, or for the sleep TTL flp returns in `x-flp-tick-ttl` (up to 60 s), so at
+# most one probe a second reaches flp, whose dispatcher decides whether anything runs.
 APP_CONDITION = 'req.url.path != "/_tick" && req.url.path != "/_flush" && req.url.path !~ "^/fos(/|$)"'
 TICK_CONDITION = 'req.url.path == "/_tick" || req.url.path == "/_flush"'
 

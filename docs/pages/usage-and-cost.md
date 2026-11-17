@@ -10,7 +10,13 @@ Source: [`frontend/app/usage/`](../../frontend/app/usage/) (`page.tsx` re-export
 - Charts: FOS Operations, CDN Bandwidth, Estimated Cost, Log Activity (Processed), and Real User Monitoring (RUM) Operations.
 - Cost Estimator: inputs for storage, Class A and Class B rates, retention, volumes and a delivery billing zone selector (`MBZ100` $0.08/GB, `MBZ200` $0.12/GB default, `Global` $0.18/GB; `costCalculatorModel.ts`). Calculations run in the browser from the prefilled values. Storage sizing follows the service's data and RUM retention (0 keeps forever, modelled as 365 days; deleted objects floor at the 30-day FOS minimum) and includes the batch archive footprint.
 
-Cloud uses `CloudCostCalculator.tsx` and the canonical `lib/cloud-engine/usage/estimate.ts` model instead of the High-Scale archive model. Its breakdown includes Compute requests and vCPU, KV operations, secrets, CDN requests and delivery, storage, and the model's summary/RUM/compaction costs. The Cloud adapter supplies measured inputs, unit costs and configured rates through `/api/usage/prefill`; unavailable measurements remain labelled reference assumptions. Editing traffic recalculates the estimate locally.
+Cloud uses `CloudCostCalculator.tsx` and the canonical `lib/cloud-engine/usage/estimate.ts` model instead of the High-Scale archive model. It has three parts:
+
+- **Your Traffic & Config:** editable total and edge requests per day, log sample rate, log file period, raw files per period, compressed bytes per line, Parquet bytes per row and log retention, each labelled Measured, Reference or What-if (after an edit); switches for edge-only logging and deleting raw logs after ingest; and RUM pageviews, sample rate and retention when RUM is enabled.
+- **Contract Rates:** the configured rates, read-only, with list-price fallbacks. There is no billing zone selector.
+- **Monthly Estimate Breakdown:** Compute requests and vCPU, KV operations, secrets, CDN requests and delivery, storage, and the model's summary/RUM/compaction/high-RPS lines, each with its monthly quantities under the label, and the total.
+
+There is no capacity panel and no compaction toggle: compaction follows the logged service's setting from the prefill (off otherwise), and the ingest capacity model ([cost-methodology.md](../cloud/cost-methodology.md#ingest-capacity-task-253)) is not shown. The Cloud adapter supplies measured inputs, unit costs and configured rates through `/api/usage/prefill`; unavailable measurements remain labelled reference assumptions. Editing an input recalculates the estimate locally.
 
 ## Roles
 

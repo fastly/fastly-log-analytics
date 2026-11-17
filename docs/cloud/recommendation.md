@@ -107,10 +107,10 @@ The operation counts come from running the real tick (`admin::record_tick`) agai
 
 ### 1 s clock executions
 
-The tables below price the 2-minute tick that ran when they were simulated; the 2-minute bucket in [In short](#in-short) item 2 and the latency note under [How it works](#how-it-works) are historical too. The clock now runs a 1 s dispatcher (`compute/cloud/src/admin/schedule.rs`, [clock](crons/clock.md)): VCL caches `/_tick` and `/_flush` for 1 s at the IAD shield, so about one probe a second of each reaches Compute.
+The tables below price the 2-minute tick that ran when they were simulated; the 2-minute bucket in [In short](#in-short) item 2 and the latency note under [How it works](#how-it-works) are historical too. The clock now runs a 1 s dispatcher (`compute/cloud/src/admin/schedule.rs`, [clock](crons/clock.md)): the health checks probe `/_tick` and `/_flush` every second, and VCL caches each answer at the IAD shield with no grace or stale serving. The TTL is 1 s by default, but a 200 that carries `x-flp-tick-ttl` is cached for that many seconds (less the response's `Age`). Compute sets that header to 1 s while work is due or a run holds the lease, and otherwise to the seconds until its next scheduled wake, capped at 60 s (`schedule::next_ttl_s`). So at most one probe a second of each reaches Compute, and far fewer while nothing is due: an idle `/_flush` wakes about once a minute, and an idle `/_tick` sleeps until the next ingest, maintenance or compaction job is due.
 
-- `/_tick` alone is 86,400 executions a day, about **2.59M a month** ($1.30 at $0.50 per million). That matches Drew's estimate of about 2.6M.
-- `/_flush` probed every second doubles it to about **5.18M a month** ($2.59).
+- Upper bound: `/_tick` at one execution a second is 86,400 a day, about **2.59M a month** ($1.30 at $0.50 per million). That matches Drew's estimate of about 2.6M.
+- `/_flush` at one a second doubles the bound to about **5.18M a month** ($2.59). The sleep TTL keeps real counts below these bounds; how far below depends on the log period and backlog, and is not yet measured live.
 - An idle probe makes 0 backend calls and 0 KV writes, and 1 Core Cache operation, so the idle KV figure below falls; the cost moves to Compute requests. Idle vCPU is reported per run as `idle_vcpu_ms` on `cron_runs` and is not yet measured live.
 - Decided (Drew, 2026-10-31): keep `/_flush` at 1 s. A 10 s bucket (about 2.85M in total, $1.43) was considered; the extra ~$1.16 a month isn't worth the added flush delay.
 

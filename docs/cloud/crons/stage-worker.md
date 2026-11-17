@@ -1,6 +1,6 @@
 # stage worker (`/_internal/stage`)
 
-Runs one maintenance stage per clock tick in its own `flp-worker` execution. The stages are retention sweep, log compaction, delete-history and storage reconcile. The tick sends the stage request in the same parallel batch as its ingest shard workers, so maintenance costs the tick one backend call.
+Runs one maintenance stage per clock tick in its own `flp-worker` execution. `MAINT_STAGES` lists seven stages, in this order: retention sweep, log compaction, delete-history, storage reconcile, summary bundle, request compaction and Delete Data. Request compaction is in the list only for its cron row and schedule entry: it runs as its own compaction job, not in the rotation. The tick sends the stage request in the same parallel batch as its ingest shard workers, so maintenance costs the tick one backend call.
 
 ## Purpose
 
@@ -27,24 +27,36 @@ Before F4, maintenance ran at the end of the tick on whatever calls ingest left,
 2. Loads the installed service; a different `service_id` replies `not_installed` with `next = start`. Reads the FOS credentials.
 3. Backdates its wall clock so every storage helper stops starting FOS calls at `STAGE_STOP` (20 s), well before the tick stops waiting.
 4. Runs `logs::maintenance_stage` (`admin/logs.rs:736-808`):
-   - Tries the `MAINT_STAGES` (`logs.rs:694-702`) in round-robin order from `start`: `retention_sweep`, `log_compact`, `delete_history`, `storage_reconcile`, `summary_bundle`, `request_compact`, `delete_data`.
+   - First advances a pending Delete Data job (`reset::reset_stage`) while within the wall time. That step writes its own `delete_data` row; when it ran, the rotation's `delete_data` entry is skipped this turn.
+   - No rotating stage starts once the execution has used more than `ROTATING_VCPU_MS` (300 ms) of vCPU, or once the wall time is spent.
+   - Then tries the `MAINT_STAGES` in round-robin order from `start`:
+     1. `retention_sweep`
+     2. `log_compact`
+     3. `delete_history`
+     4. `storage_reconcile`
+     5. `summary_bundle`
+     6. `request_compact`: always skipped here; it runs in the compaction job (`compact_execution`, dispatched as a compact-only `StageRequest`, see [clock.md](clock.md)).
+     7. `delete_data`
+   - While a Delete Data job is fencing (`reset::fencing`), `retention_sweep`, `storage_reconcile` and `summary_bundle` are skipped.
    - A stage with nothing to do costs one or two reads and passes the turn on in the same execution.
-   - The first stage with work runs, and no other stage runs after it.
+   - The first stage with work runs, and no other rotating stage runs after it.
    - `next` = the stage after the one that ran, or `start` if none ran.
 5. Writes that stage's `cron_runs` row itself, through the KV `logq_{sid}_{bucket}` outbox, with buffer `{run_id}-maint` and `tick_event_id` = the tick's id. The row is recorded exactly once whether or not the tick hears the reply.
-6. Replies `{status, ran, next, rows, calls, cache_ops, vcpu_ms, bundle_pending}`. `bundle_pending` is `true` or `false` when `summary_bundle` had its turn (`true` when the run left work and did not end in an error), and `null` otherwise. The tick uses it to bring the next maintenance turn forward to `MAINT_CATCHUP_S` (30 s) while bundles are behind. `rows` carries the execution's `fos_usage` and `api_telemetry` rows (`telemetry::api::runtime_rows`). The tick writes them into its own buffer. They are best-effort: lost if the tick stops waiting first.
+6. Replies `{status, ran, next, rows, calls, cache_ops, vcpu_ms, bundle_pending, delete_pending}`. `delete_pending` is `true` when the Delete Data step stopped only for its budget; the tick then makes maintenance due again on the next tick. `bundle_pending` is `true` or `false` when `summary_bundle` had its turn (`true` when the run left work and did not end in an error), and `null` otherwise. The tick uses it to bring the next maintenance turn forward to `MAINT_CATCHUP_S` (30 s) while bundles are behind. `rows` carries the execution's `fos_usage` and `api_telemetry` rows (`telemetry::api::runtime_rows`). The tick writes them into its own buffer. They are best-effort: lost if the tick stops waiting first.
 
 **Round-robin** (`cron:state.maint_next`, `maint_misses`; `admin/mod.rs:3111-3125`)
 - A stage reply sets `maint_next = next` and clears `maint_misses`.
 - No reply (`worker_deadline`, error or a non-stage body) increments `maint_misses`. After `MAINT_MISS_LIMIT` (2) misses in a row, the pointer moves on by one. A stage whose worker always times out therefore cannot block the others.
-- **Fairness bound:** every stage with work runs within 4 answered ticks of the last one, and within 8 ticks when every turn misses twice. The F5 simulation measured at most 2 ticks between turns for delete-history and 1 for reconcile, at 52 raw files per 2-minute period.
+- **Fairness bound:** the rotation has six runnable entries (`request_compact` is skipped), so every stage with work runs within 6 answered maintenance turns of the last one, and within 12 when every turn misses twice. The soak simulation allows `MAINT_STAGES.len() × MAINT_INTERVAL_S + 1` s (`TURN_S`) for a requested stage. The F5 simulation measured at most 2 ticks between turns for delete-history and 1 for reconcile, at 52 raw files per 2-minute period.
 
-**Stage gates** (unchanged from the in-tick maintenance)
+**Stage gates**
 - `retention_sweep`: every 6 h (`SWEEP_INTERVAL_S`), and on every turn until a started sweep completes. See [retention-sweep.md](retention-sweep.md).
 - `log_compact`: when `compaction_enabled` is on and a day has work. See [log-compact.md](log-compact.md).
 - `delete_history`: while an admin-started job is incomplete. See [delete-history.md](delete-history.md).
 - `storage_reconcile`: only after an admin request. See [storage-reconcile.md](storage-reconcile.md).
 - `summary_bundle`: while a closed hour or day has window summaries its bundle does not cover, or the open hour has at least `OPEN_BATCH_SOURCES` (18) unfolded ones. Its catalog reads and writes use their own admission gate (`catalog::bundles::admitted`, the bundle's `VCPU_STOP_MS` 600 ms) rather than the ingest commit's 150 ms catalog gate, so a turn that starts late in a busy execution still makes progress. A turn that publishes an hour bundle continues with the next fold in the same execution.
+- `request_compact`: never in the rotation. Request and RUM compaction run as their own job every `COMPACT_INTERVAL_S` (30 s), or `COMPACT_CATCHUP_S` (10 s) after a run that left work, while compaction is configured. See [clock.md](clock.md).
+- `delete_data`: while an admin-started Delete Data job is incomplete (`reset::reset_stage`). It normally runs before the rotation; the rotation's entry runs it only when that first step did not.
 
 ## Roles and permissions
 

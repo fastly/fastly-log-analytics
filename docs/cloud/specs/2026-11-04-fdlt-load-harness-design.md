@@ -338,7 +338,10 @@ This keeps cold loads to one per page per stage, which is the closest the
 ladder can get to the `AGENTS.md` "one cold dashboard load" rule while still
 measuring every page under load. (My call.) It covers every
 route (`/dashboard` and every dashboard section, `/cache`, `/logs`, `/usage`,
-`/admin`, `/admin/tick`), plus `/how-it-works` and `/setup` as static checks.
+`/admin`), plus `/how-it-works` and `/setup` as static checks. There is no
+`/admin/tick` page: the Cloud shell still lists the path as an admin route, but
+the frontend has no page for it. Clock health is the "Ingestion clock" check on
+`/admin` and the Cron Runs tab on `/logs`.
 
 For each page it records:
 
