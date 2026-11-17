@@ -517,6 +517,15 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await bundle!.json()).toEqual({ served: "bundle" });
     expect(vi.mocked(networkFromRollup).mock.calls[0][0]).toBe("/api/network/bundle");
     expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce({ served: "transport" } as never);
+    const transport = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network/bundle", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: ["transport"] }),
+    }));
+    expect(await transport!.json()).toEqual({ served: "transport" });
+    expect(vi.mocked(networkFromRollup).mock.calls[0][1]).toMatchObject({ sections: ["transport"] });
+    expect(ensureCloudRange).not.toHaveBeenCalled();
   });
 
   it("falls back to the raw /network scan when summaries can't answer or fail, but not when aborted", async () => {

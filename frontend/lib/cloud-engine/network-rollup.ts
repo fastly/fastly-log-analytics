@@ -1,5 +1,5 @@
 import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
-import { queryRollup, rebucketSeries, sumAggs } from "./dashboard/rollup-query";
+import { queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
@@ -265,13 +265,56 @@ export function popHealthFromRollup(result: RollupResult) {
   };
 }
 
+const TRANSPORT_APPROXIMATE = ["tcp_rtt_p50_ms", "tcp_rtt_p90_ms", "tcp_rtt_p95_ms", "tcp_rtt_p99_ms"];
+
+/**
+ * `queryNetworkTransport` from the `transport` rows: requests, bytes, packet
+ * loss, delivery rate and the protocol split are exact; RTT percentiles come
+ * from the coalesced RTT histogram. Null when a summary predates the rows.
+ */
+export function transportFromRollup(result: RollupResult) {
+  const overall = rollupGroup(result.rollup, "transport", "overall");
+  const protos = rollupGroup(result.rollup, "transport", "proto");
+  if (!overall || !protos) return null;
+  const agg = overall.get("");
+  const total = agg?.requests ?? 0;
+  const rtt = (q: number) => {
+    const us = total ? agg!.hists.rtt?.quantile(q) : null;
+    return us == null ? null : us / 1000;
+  };
+  const p50 = rtt(0.5);
+  const lowerBound = result.rollup.truncated.has("transport/proto") ? ["protocol_distribution"] : [];
+  return {
+    total_requests: total,
+    bandwidth_bytes: total ? agg!.respBytes : null,
+    tcp_rtt_p50_ms: p50,
+    tcp_rtt_p90_ms: rtt(0.9),
+    tcp_rtt_p95_ms: rtt(0.95),
+    tcp_rtt_p99_ms: rtt(0.99),
+    packet_loss_pct: agg?.plossCount ? (agg.plossSum / agg.plossCount) * 100 : null,
+    delivery_rate_mbps: agg?.deliveryCount ? ((agg.deliverySum / agg.deliveryCount) * 8) / 1_000_000 : null,
+    has_transport_data: total > 0,
+    missing_fields: p50 == null ? ["tcp_rtt"] : [],
+    protocol_distribution: [...protos]
+      .filter(([, p]) => p.requests > 0)
+      .sort((a, b) => b[1].requests - a[1].requests || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      .map(([protocol, p]) => ({ protocol, requests: p.requests, share_pct: (p.requests * 100) / total })),
+    _approx: true,
+    _approx_note: lowerBound.length
+      ? "TCP RTT percentiles are estimated from summary histograms (≈); protocol counts are lower bounds (≥)."
+      : "TCP RTT percentiles are estimated from summary histograms (≈); the other figures are exact.",
+    rollup: meta(result, TRANSPORT_APPROXIMATE, lowerBound),
+  };
+}
+
 /**
  * True when every requested /network/bundle section can come from summaries:
- * the health core sections and the PoP table. Transport needs delivery rate,
- * which summaries don't keep, and quality, the map and shielding need rows.
+ * the health core sections, the PoP table and transport. Quality, the map and
+ * shielding need rows.
  */
 function canServeBundleFromRollup(sections: readonly string[] | undefined): boolean {
-  return Boolean(sections?.length) && sections!.every((section) => HEALTH_SECTIONS.has(section) || section === "pop_health");
+  return Boolean(sections?.length) &&
+    sections!.every((section) => HEALTH_SECTIONS.has(section) || section === "pop_health" || section === "transport");
 }
 
 /** Whether summaries may answer this read at all, before any range or listing is resolved. */
@@ -308,7 +351,9 @@ export async function networkFromRollup(
     const wantsHealth = sections.some((section) => HEALTH_SECTIONS.has(section));
     const core = wantsHealth ? networkHealthFromRollup(result, params) : null;
     if (wantsHealth && core === null) return null;
-    return networkBundle(core, null, sections.includes("pop_health") ? popHealthFromRollup(result) : null, null);
+    const transport = sections.includes("transport") ? transportFromRollup(result) : null;
+    if (sections.includes("transport") && transport === null) return null;
+    return networkBundle(core, null, sections.includes("pop_health") ? popHealthFromRollup(result) : null, transport);
   }
   return health ? networkHealthFromRollup(result, params) : popHealthFromRollup(result);
 }

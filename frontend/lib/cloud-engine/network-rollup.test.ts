@@ -21,6 +21,7 @@ import {
   networkFromRollup,
   networkHealthFromRollup,
   popHealthFromRollup,
+  transportFromRollup,
 } from "./network-rollup";
 
 const HOUR = 3_600_000;
@@ -28,6 +29,7 @@ const T0 = FIXTURE_START * 1000;
 const T1 = T0 + 2 * HOUR;
 const RAW = fixtureFiles("raw");
 const WINDOWS = fixtureFiles("window");
+const HOURS = fixtureFiles("hour").filter((f) => f.key.includes("-c4-"));
 const SECTIONS = ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"];
 
 async function rollupOf(files: ManifestFile[], stepMs = 300_000): Promise<RollupResult> {
@@ -53,6 +55,7 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
   let raw: Awaited<ReturnType<typeof queryNetworkHealth>>;
   let rawPops: Awaited<ReturnType<typeof queryPopHealth>>;
   let rawBundle: Record<string, unknown>;
+  let rawTransport: Record<string, unknown>;
 
   beforeAll(async () => {
     for (const file of RAW) {
@@ -65,6 +68,9 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
     raw = await queryNetworkHealth({ ...params, sections: SECTIONS });
     rawPops = await queryPopHealth(params);
     rawBundle = await handleNetworkRequest("/api/network/bundle", { ...params, sections: [...SECTIONS, "pop_health"] });
+    rawTransport = (await handleNetworkRequest("/api/network/bundle", { ...params, sections: ["transport"] }) as {
+      transport: Record<string, unknown>;
+    }).transport;
   }, 60_000);
 
   afterAll(async () => {
@@ -173,6 +179,61 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
     expect(pops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted())
       .toEqual(rawBundlePops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted());
   });
+
+  it("matches the raw transport counts, bytes, loss, delivery rate and protocol shares, with approximate RTT", async () => {
+    expect(rawTransport.has_transport_data).toBe(true);
+    expect((rawTransport.protocol_distribution as unknown[]).length).toBeGreaterThan(2);
+    for (const [list, step] of [[WINDOWS, 300_000], [HOURS, 300_000], [fixtureFiles("day"), HOUR]] as const) {
+      const got = transportFromRollup(await rollupOf([...list], step))! as Record<string, unknown>;
+      const exact = ["total_requests", "has_transport_data", "missing_fields"];
+      expect(Object.fromEntries(exact.map((k) => [k, got[k]]))).toEqual(Object.fromEntries(exact.map((k) => [k, rawTransport[k]])));
+      // Raw SUM is a HUGEINT that comes back as a quoted string; summaries answer the number the schema declares.
+      expect(got.bandwidth_bytes).toBe(Number(String(rawTransport.bandwidth_bytes).replaceAll('"', "")));
+      // Raw orders protocols by requests only, so equal counts may come in either order.
+      const shares = got.protocol_distribution as { protocol: string; requests: number }[];
+      const byProtocol = (rows: unknown) => (rows as { protocol: string }[]).toSorted((x, y) => x.protocol.localeCompare(y.protocol));
+      expect(byProtocol(shares)).toEqual(byProtocol(rawTransport.protocol_distribution));
+      expect(shares.map((r) => r.requests)).toEqual(shares.map((r) => r.requests).toSorted((x, y) => y - x));
+      expect(got.packet_loss_pct).toBeCloseTo(rawTransport.packet_loss_pct as number, 9);
+      expect(got.delivery_rate_mbps).toBeCloseTo(rawTransport.delivery_rate_mbps as number, 9);
+      for (const q of ["p50", "p90", "p95", "p99"]) near(got[`tcp_rtt_${q}_ms`], rawTransport[`tcp_rtt_${q}_ms`] as number);
+      expect([got._approx, typeof got._approx_note]).toEqual([true, "string"]);
+      const keys = (o: Record<string, unknown>) => Object.keys(o).filter((k) => !k.startsWith("_") && k !== "rollup").toSorted();
+      expect(keys(got)).toEqual(keys(rawTransport));
+    }
+  });
+});
+
+describe("transportFromRollup", () => {
+  it("returns null when a summary predates the transport rows, so raw answers", async () => {
+    const result = await rollupOf(WINDOWS);
+    for (const row of ["transport/overall", "transport/proto"]) {
+      const present = new Set(result.rollup.present);
+      present.delete(row);
+      expect(transportFromRollup({ ...result, rollup: { ...result.rollup, present } }), row).toBeNull();
+    }
+  });
+
+  it("labels RTT approximate and protocol counts lower bounds when protocols were cut to a top K", async () => {
+    const result = await rollupOf(WINDOWS);
+    const cut: Rollup = { ...result.rollup, truncated: new Set(["transport/proto"]) };
+    expect(transportFromRollup(result)!.rollup.lower_bound).toEqual([]);
+    expect(transportFromRollup({ ...result, rollup: cut })!.rollup).toMatchObject({
+      approximate: ["tcp_rtt_p50_ms", "tcp_rtt_p90_ms", "tcp_rtt_p95_ms", "tcp_rtt_p99_ms"],
+      lower_bound: ["protocol_distribution"],
+    });
+  });
+
+  it("answers an empty span like the raw scan of no rows", () => {
+    const empty: Rollup = {
+      dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set(),
+      present: new Set(["transport/overall", "transport/proto"]),
+    };
+    expect(transportFromRollup({ rollup: empty, dataFromMs: T0, dataThroughMs: T1 })).toMatchObject({
+      total_requests: 0, bandwidth_bytes: null, tcp_rtt_p50_ms: null, packet_loss_pct: null, delivery_rate_mbps: null,
+      has_transport_data: false, missing_fields: ["tcp_rtt"], protocol_distribution: [],
+    });
+  });
 });
 
 describe("networkHealthFromRollup", () => {
@@ -249,6 +310,18 @@ describe("networkFromRollup", () => {
     expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
   });
 
+  it("answers the transport card from summaries without reading raw files", async () => {
+    const s = source();
+    const served = await networkFromRollup("/api/network/bundle", { ...health, sections: ["transport"] }, s) as Record<string, unknown>;
+    expect(served.transport).toEqual(transportFromRollup(await rollupOf(WINDOWS)));
+    expect([served.network_health, served.pop_health, served.quality]).toEqual([null, null, null]);
+    expect(s.log.files.length).toBeGreaterThan(0);
+    expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
+    const both = await networkFromRollup("/api/network/bundle", { ...health, sections: ["summary", "transport"] }, source()) as
+      Record<string, { total_requests?: number; summary?: { total_requests: number } }>;
+    expect(both.transport.total_requests).toBe(both.network_health.summary!.total_requests);
+  });
+
   it("omits the open tail newer than the newest summary and says how far the data goes", async () => {
     const served = await networkFromRollup("/api/network-health", health, source(WINDOWS.slice(0, 7))) as {
       summary: { total_requests: number }; rollup: { data_through: string };
@@ -274,8 +347,8 @@ describe("networkFromRollup", () => {
       expect(s.log.json).toEqual([]);
     }
     expect(await networkFromRollup("/api/network-quality", health, source())).toBeNull();
-    // The transport card needs delivery rate, which summaries don't keep; quality needs per-row throughput.
-    for (const sections of [["transport"], ["quality"], ["summary", "transport"], ["map_buckets"], ["pop_health", "cities"], [], undefined]) {
+    // Quality needs per-row throughput.
+    for (const sections of [["quality"], ["transport", "quality"], ["map_buckets"], ["pop_health", "cities"], [], undefined]) {
       const s = source();
       expect(await networkFromRollup("/api/network/bundle", { ...health, sections }, s), String(sections)).toBeNull();
       expect(s.log.json).toEqual([]);
