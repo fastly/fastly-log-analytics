@@ -79,6 +79,7 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     }
     if (
       msg.type === "result" ||
+      msg.type === "rollupResult" ||
       msg.type === "searchResult" ||
       msg.type === "searchSummariesResult" ||
       msg.type === "sqlResult" ||
@@ -174,6 +175,35 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
         options: serializable,
         pageLoadId: getPageLoadId(),
         reportApiCalls: useDebugStore.getState().apiCallsEnabled,
+        cacheScope: dashboardCacheScope(),
+      };
+      worker.postMessage(req);
+    });
+  }
+
+  answerRollup(
+    path: string,
+    params: Record<string, unknown>,
+    serviceId: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<unknown> | null {
+    const worker = this.getWorker(this.handleMessage);
+    if (!worker) return null;
+    if (signal?.aborted) {
+      return Promise.reject(new DOMException("Aborted", "AbortError"));
+    }
+    const id = this.allocateId();
+    return new Promise((resolve, reject) => {
+      this.callbacks.set(id, { resolve });
+      this.registerJob(id, worker, signal, reject, () => {
+        this.callbacks.delete(id);
+      });
+      const req: WorkerRequest = {
+        id,
+        type: "rollup",
+        path,
+        params,
+        serviceId,
         cacheScope: dashboardCacheScope(),
       };
       worker.postMessage(req);
@@ -344,6 +374,20 @@ export function syncRumFiles(
   signal?: AbortSignal,
 ): Promise<void> {
   return getClient().syncRumFiles(vitalsFiles, errorFiles, signal);
+}
+
+/**
+ * Answers a Cloud summary read (`answerFromRollup`) in the dashboard engine
+ * worker, so decoding and merging summaries never blocks the page. Returns
+ * null where there is no Worker; the caller then answers in-thread.
+ */
+export function answerRollupInWorker(
+  path: string,
+  params: Record<string, unknown>,
+  serviceId: string | undefined,
+  signal?: AbortSignal,
+): Promise<unknown> | null {
+  return getClient().answerRollup(path, params, serviceId, signal);
 }
 
 export function prewarmDashboardEngine(): void {

@@ -1,5 +1,5 @@
 import type { DashboardFilter } from "./dashboard/filters";
-import { queryRollup, type RollupResult } from "./dashboard/rollup-query";
+import { queryRollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
 import { resolveInsightWindow, type InsightsRequest } from "./insights";
 import type { NetworkRollupMeta } from "./network-rollup";
 
@@ -81,6 +81,31 @@ export type InsightScanRows = {
   asn: Row[];
   scalar: Row[];
 };
+
+const NO_HISTS: RollupAgg["hists"] = { ttfb: null, elapsed: null, rtt: null, ottfb: null, ottlb: null };
+
+/**
+ * A baseline rollup cut to what `rollupInsightsBaseline` reads (field counts,
+ * city dims, the overall request series and truncation), without histograms,
+ * so the worker that merged it posts a small, plain-data copy to the page.
+ */
+export function insightsBaselineRollup(result: RollupResult): RollupResult {
+  const { rollup } = result;
+  const bare = <K>(values: Map<K, RollupAgg>) =>
+    new Map([...values].map(([key, agg]) => [key, { ...agg, hists: { ...NO_HISTS } }]));
+  const cities = rollup.dims.get("city");
+  const overall = rollup.series.get("overall")?.get("");
+  return {
+    ...result,
+    rollup: {
+      dims: new Map(cities ? [["city", bare(cities)]] : []),
+      series: new Map(overall ? [["overall", new Map([["", bare(overall)]])]] : []),
+      seriesStepMs: rollup.seriesStepMs,
+      fields: rollup.fields,
+      truncated: rollup.truncated,
+    },
+  };
+}
 
 /**
  * Fills the `b_*` columns of window-only scan rows from summaries, the way the

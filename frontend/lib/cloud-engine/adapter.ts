@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  answerRollupInWorker,
   runInWorker,
   searchFieldSummariesInWorker,
   searchFieldValuesInWorker,
@@ -22,13 +23,13 @@ import {
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
-import { networkFromRollup, networkRollupEligible } from "./network-rollup";
-import { insightsBaselineFromRollup } from "./insights-rollup";
+import { networkRollupEligible } from "./network-rollup";
 import type { RollupResult } from "./dashboard/rollup-query";
+import { answerFromRollup } from "./rollup-answer";
 import { handleOriginRequest, originScanColumns } from "./origin";
-import { originFromRollup, originRollupEligible } from "./origin-rollup";
+import { originRollupEligible } from "./origin-rollup";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
-import { performanceFromRollup, performanceRollupEligible } from "./performance-rollup";
+import { performanceRollupEligible } from "./performance-rollup";
 import {
   executeCloudQuery,
   getQueryPresets,
@@ -377,6 +378,17 @@ async function prepareInsightsScan(request: Request): Promise<Request> {
 }
 
 /**
+ * Answers a summary read (`answerFromRollup`) in the dashboard engine worker, so
+ * decoding and merging summaries stays off the main thread, or in-thread over
+ * the same range-loader source where there is no Worker (tests, SSR).
+ */
+function rollupAnswer(path: string, params: Record<string, unknown>, serviceId: string | undefined,
+  signal: AbortSignal): Promise<unknown> {
+  return answerRollupInWorker(path, params, serviceId, signal)
+    ?? answerFromRollup(path, params, cloudFileSource(serviceId), signal);
+}
+
+/**
  * Serves an unfiltered /network read from v3 summaries over the range and
  * service the raw scan would use, so it neither waits for queued scans nor
  * loads DuckDB. Null (or a summary failure) leaves the read to the raw scan.
@@ -396,9 +408,9 @@ async function cloudNetworkRollup(request: Request, path: string): Promise<Respo
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
   try {
-    const answer = await networkFromRollup(path, {
+    const answer = await rollupAnswer(path, {
       ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
-    }, cloudFileSource(serviceId), request.signal);
+    }, serviceId, request.signal);
     return answer ? jsonResponse(answer, request) : null;
   } catch (error) {
     if (request.signal.aborted) throw error;
@@ -410,16 +422,12 @@ async function cloudNetworkRollup(request: Request, path: string): Promise<Respo
 type SectionRollup = {
   label: string;
   eligible: (path: string, params: Record<string, unknown>) => boolean;
-  answer: (path: string, params: Record<string, unknown>, source: ReturnType<typeof cloudFileSource>,
-    signal: AbortSignal) => Promise<unknown>;
 };
 
 const SECTION_ROLLUPS: Record<string, SectionRollup> = {
-  "/api/origin/aggregates": { label: "/origin", eligible: originRollupEligible, answer: originFromRollup },
-  "/api/performance": { label: "/performance", eligible: performanceRollupEligible, answer: performanceFromRollup },
-  "/api/performance/aggregates": {
-    label: "/performance", eligible: performanceRollupEligible, answer: performanceFromRollup,
-  },
+  "/api/origin/aggregates": { label: "/origin", eligible: originRollupEligible },
+  "/api/performance": { label: "/performance", eligible: performanceRollupEligible },
+  "/api/performance/aggregates": { label: "/performance", eligible: performanceRollupEligible },
 };
 
 /**
@@ -442,9 +450,9 @@ async function cloudSectionRollup(request: Request, path: string, route: Section
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
   try {
-    const answer = await route.answer(path, {
+    const answer = await rollupAnswer(path, {
       ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
-    }, cloudFileSource(serviceId), request.signal);
+    }, serviceId, request.signal);
     return answer ? jsonResponse(answer, request) : null;
   } catch (error) {
     if (request.signal.aborted) throw error;
@@ -476,8 +484,8 @@ async function cloudInsightsBaseline(request: Request): Promise<RollupResult | n
   const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
   try {
-    return await insightsBaselineFromRollup({ ...body, clamp_end: end } as InsightsRequest, filters,
-      cloudFileSource(serviceId), request.signal);
+    return await rollupAnswer("/api/insights", { ...body, clamp_end: end }, serviceId,
+      request.signal) as RollupResult | null;
   } catch (error) {
     if (request.signal.aborted) throw error;
     console.warn("flp: /insights baseline summaries failed; reading raw Parquet", error);

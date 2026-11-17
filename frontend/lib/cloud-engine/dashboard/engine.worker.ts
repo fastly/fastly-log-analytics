@@ -1,3 +1,4 @@
+import { answerFromRollup } from "../rollup-answer";
 import { createWorkerRpcHost } from "../worker-rpc";
 import { getDuckDBEngine } from "./duckdb";
 import {
@@ -67,8 +68,18 @@ type SyncRumFilesMessage = {
   }[];
 };
 
+type RollupMessage = {
+  id: number;
+  type: "rollup";
+  path: string;
+  params: Record<string, unknown>;
+  serviceId?: string;
+  cacheScope?: string;
+};
+
 export type WorkerRequest =
   | RunMessage
+  | RollupMessage
   | SearchMessage
   | ControlMessage
   | ExecuteSqlMessage
@@ -79,6 +90,7 @@ export type WorkerMessage =
   | { id: number; type: "progress"; progress: RunProgress }
   | { id: number; type: "apiCall"; call: BrowserSourceCallEvent }
   | { id: number; type: "result"; result: DashboardResult | null }
+  | { id: number; type: "rollupResult"; result: unknown }
   | {
       id: number;
       type: "searchResult";
@@ -119,6 +131,27 @@ const sourceForScope = (cacheScope: string | undefined) => {
   return sharedSource;
 };
 
+// Summary reads use their own source, as the page's in-thread reads do: folded
+// file telemetry is only flushed by a dashboard run's beacon, which a /network
+// or /origin page never sends. The decoded summaries stay cached in this worker
+// (`queryRollup`), so the page only ever receives the answer.
+let rollupBase: ReturnType<typeof browserSource> | null = null;
+let rollupScope: string | undefined;
+const rollupSource = (cacheScope: string | undefined, serviceId: string | undefined) => {
+  if (!rollupBase || rollupScope !== cacheScope) {
+    rollupBase?.clearMemoryCache?.();
+    rollupScope = cacheScope;
+    rollupBase = browserSource(
+      typeof self !== "undefined" && self.location ? self.location.origin : "",
+      undefined,
+      { cacheScope },
+    );
+  }
+  const scoped = serviceId ? rollupBase.withOptions({ serviceId }) : rollupBase;
+  // The page's `cloudFileSource` scope, so decoded summaries never cross services or identities.
+  return { ...scoped, cacheScope: `${cacheScope}:${serviceId ?? ""}` };
+};
+
 self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   if (msg.type === "prewarm") {
     await getDuckDBEngine().prewarm();
@@ -145,6 +178,16 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
   if (msg.type === "get_present_columns") {
     const cols = await getDuckDBEngine().getPresentColumns(msg.scopedKeys);
     ctx.post({ id: msg.id, type: "presentColumnsResult", result: [...cols] });
+    return;
+  }
+  if (msg.type === "rollup") {
+    const result = await answerFromRollup(
+      msg.path,
+      msg.params,
+      rollupSource(msg.cacheScope, msg.serviceId),
+      ctx.signal,
+    );
+    ctx.post({ id: msg.id, type: "rollupResult", result });
     return;
   }
   if (msg.type === "sync_rum_files") {
