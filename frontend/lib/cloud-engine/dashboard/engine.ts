@@ -24,6 +24,7 @@ import {
 import type { FilteredFileResult } from "./filtered-cache";
 import { Hll } from "./hll";
 import { readColumns } from "./parquet";
+import { dashboardScanColumns, projectedReader } from "./projected-read";
 import {
   CARD_FIELDS,
   customFieldsKey,
@@ -1897,6 +1898,15 @@ async function collectAggregator(
   await reserveMicroFiles(
     pending.filter((entry) => !entry.summary).map((entry) => entry.file),
   );
+  // A filtered scan reads rows of only its cards' and filters' columns, so it
+  // fetches those column chunks rather than the whole file.
+  const scanColumns =
+    (hasFilters || edgeOnly) && searchQuery === undefined && source.fetchRange
+      ? dashboardScanColumns(fields, options.filters ?? [], readFields)
+      : null;
+  const readProjected = scanColumns
+    ? projectedReader(source, scanColumns, signal)
+    : null;
 
   await runPool(pending, async (entry) => {
     const { file, scopedKey, hadRollup, rollupMeta } = entry;
@@ -1933,19 +1943,25 @@ async function collectAggregator(
         file.size <= WHOLE_READ_MAX_BYTES
       ) {
         access.release?.();
-        await acquireWhole(file.size);
-        wholeBytes = file.size;
-        let whole: Awaited<ReturnType<FileSource["fetchFile"]>>;
+        // A whole file the browser already holds costs no transfer.
+        const projected =
+          readProjected && !entry.local ? await readProjected(file) : null;
+        const held = projected ? projected.bytes : file.size;
+        await acquireWhole(held);
+        wholeBytes = held;
+        let whole: { bytes: ArrayBuffer; cached: boolean; downloaded?: number };
         try {
-          whole = await source.fetchFile(file.key, signal, { transfer: true });
+          whole = projected
+            ? await projected.read()
+            : await source.fetchFile(file.key, signal, { transfer: true });
         } catch (error) {
           releaseWhole(wholeBytes);
           throw error;
         }
         if (!whole.cached) {
           downloaded = true;
-          stats.bytes += whole.bytes.byteLength;
-          progress.downloadedBytes += whole.bytes.byteLength;
+          stats.bytes += whole.downloaded ?? whole.bytes.byteLength;
+          progress.downloadedBytes += whole.downloaded ?? whole.bytes.byteLength;
         }
         access = { kind: "buffer", bytes: whole.bytes, cached: whole.cached };
       }

@@ -1,9 +1,13 @@
 // @vitest-environment node
-// Opt-in measurement of the bytes /origin, /fastly-value, /assets-shield, /network and /performance load per
-// cold scan, whole files against their column projections, over 720k rows of Cloud-shaped Parquet
+// Opt-in measurement of the bytes /origin, /fastly-value, /assets-shield, /network, /performance and a filtered
+// /dashboard load per cold scan, whole files against their column projections, over 720k rows of Cloud-shaped Parquet
 // (40 ZSTD files over 24h, under the 64 MiB whole-file budget), and of the projected results' exactness. Run with FLP_ROUTE_BENCH=1.
 import { describe, expect, it } from "vitest";
 import { DuckDBAnalyticalEngine, type DuckDBReadContext } from "./dashboard/duckdb";
+import { Aggregator } from "./dashboard/engine";
+import type { DashboardFilter } from "./dashboard/filters";
+import { dashboardScanColumns } from "./dashboard/projected-read";
+import { CARD_FIELDS } from "./dashboard/summaries";
 import {
   assembleProjectedParquet, FOOTER_PROBE_BYTES, fetchProjectedRanges, planParquetProjection, readParquetFooter,
 } from "./dashboard/parquet-projection";
@@ -211,11 +215,14 @@ async function results(files: ArrayBuffer[], presentColumns: string[] | undefine
   }
 }
 
+let generated: Promise<ArrayBuffer[]> | undefined;
+const benchFiles = () => (generated ??= generateFiles());
+
 const mib = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MiB`;
 
 describe.skipIf(!process.env.FLP_ROUTE_BENCH)("Cloud route projection benchmark", () => {
   it("measures whole against projected bytes per route, and the projected results' exactness", async () => {
-    const files = await generateFiles();
+    const files = await benchFiles();
     const whole = files.reduce((sum, file) => sum + file.byteLength, 0);
     console.log(`generated ${FILES} files, ${FILES * ROWS_PER_FILE} rows, ${mib(whole)}`);
     for (const route of ROUTES) {
@@ -237,5 +244,42 @@ describe.skipIf(!process.env.FLP_ROUTE_BENCH)("Cloud route projection benchmark"
         `(${full.json.length} chars)`);
       expect(part.json, route.name).toBe(full.json);
     }
+  }, 900_000);
+
+  it("measures a filtered /dashboard's whole against projected bytes, and the projected result's exactness", async () => {
+    const files = await benchFiles();
+    const whole = files.reduce((sum, file) => sum + file.byteLength, 0);
+    // A filtered /dashboard scans raw files selectively, with no ingest.
+    const filters: DashboardFilter[] = [{ mode: "include", field: "status", value: "200" }];
+    const columns = dashboardScanColumns(CARD_FIELDS, filters, []);
+    expect(columns).not.toBeNull();
+    let downloaded = 0;
+    const projected: ArrayBuffer[] = [];
+    for (const file of files) {
+      const fetchRange = async (start: number, end: number) => { downloaded += end - start; return file.slice(start, end); };
+      const plan = planParquetProjection(await readParquetFooter(file.byteLength, fetchRange), new Set(columns));
+      projected.push(assembleProjectedParquet(plan, await fetchProjectedRanges(plan, fetchRange)));
+    }
+    const dashboard = async (buffers: ArrayBuffer[]) => {
+      const engine = new DuckDBAnalyticalEngine();
+      try {
+        const aggregator = new Aggregator(START_MS, END_MS, CARD_FIELDS);
+        const started = performance.now();
+        // One file per query, as the engine batches selective reads under its memory budget.
+        for (const bytes of buffers) {
+          await engine.queryParquetIntoAggregator([{ kind: "buffer", bytes }],
+            START_MS, END_MS, filters, aggregator, { topK: null, allValuesFields: ["country"] });
+        }
+        return { json: JSON.stringify(aggregator.result()), ms: performance.now() - started };
+      } finally {
+        await engine.reset();
+      }
+    };
+    const full = await dashboard(files);
+    const part = await dashboard(projected);
+    console.log(`/dashboard status=200: whole ${mib(whole)} -> projected ${mib(downloaded)} (${(100 * downloaded / whole).toFixed(1)}%); ` +
+      `query ${Math.round(full.ms)} ms -> ${Math.round(part.ms)} ms; results ${part.json === full.json ? "identical" : "DIFFER"} ` +
+      `(${full.json.length} chars)`);
+    expect(part.json).toBe(full.json);
   }, 900_000);
 });

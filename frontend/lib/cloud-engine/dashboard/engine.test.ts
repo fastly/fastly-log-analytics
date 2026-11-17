@@ -661,6 +661,93 @@ describe("runDashboard", () => {
     }
   });
 
+  it("reads unpersisted filtered raw compacts as column-projected ranges with whole-file results", async () => {
+    // `rid` is read by no card or filter, and big enough that the footer probe doesn't cover the file.
+    const compact = (offset: number) => {
+      const n = 3000;
+      const at = (i: number) => i % 7;
+      let seed = offset;
+      const hex = () => Array.from({ length: 4 }, () => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed.toString(16).padStart(8, "0");
+      }).join("");
+      return parquetWriteBuffer({
+        codec: "SNAPPY",
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: n }, (_, i) => new Date(T0 + (offset + i % 50) * 1000)) },
+          { name: "status", type: "INT32", data: Array.from({ length: n }, (_, i) => (at(i) === 3 ? 503 : 200)) },
+          { name: "cache", type: "STRING", data: Array.from({ length: n }, (_, i) => (at(i) < 4 ? "HIT" : "MISS")) },
+          { name: "resp_bytes", type: "INT64", data: Array.from({ length: n }, (_, i) => BigInt(100 + at(i))) },
+          { name: "country", type: "STRING", data: Array.from({ length: n }, (_, i) => (at(i) < 5 ? "US" : "DE")) },
+          { name: "edge", type: "BOOLEAN", data: Array.from({ length: n }, (_, i) => i % 3 !== 0) },
+          { name: "tenant", type: "STRING", data: Array.from({ length: n }, (_, i) => `t${i % 4}`) },
+          { name: "plan", type: "STRING", data: Array.from({ length: n }, (_, i) => (i % 2 ? "pro" : "free")) },
+          { name: "rid", type: "STRING", data: Array.from({ length: n }, hex) },
+        ],
+      });
+    };
+    const buffers = { a: compact(5), b: compact(65) };
+    const files = (["a", "b"] as const).map((key, i) => ({
+      ...manifestEntry(key, `2026-10-29T10:0${i}:00Z`, `2026-10-29T10:0${i + 1}:00Z`, 3000),
+      size: buffers[key].byteLength,
+    }));
+    const page = { files, next_cursor: null, complete: true };
+    const http = async (file: { key: string }) => ({
+      kind: "http" as const, url: `https://flp.example/api/file/${file.key}`, cached: false,
+    });
+    const options = {
+      from: "2026-10-29T10:00:00Z",
+      to: "2026-10-29T10:05:00Z",
+      filters: [
+        { mode: "include" as const, field: "country", value: "US" },
+        { mode: "include" as const, field: "plan", value: "pro" },
+      ],
+      edgeOnly: true,
+      customFields: [{ id: "tenant", type: "string" as const }],
+      filterFields: [{ id: "plan", type: "string" as const }],
+      concurrency: 1,
+    };
+    const expected = await runDashboard({ ...fixtureSource([page], buffers), openParquet: http }, options);
+    expect(expected.totalRequests).toBeGreaterThan(0);
+    expect(expected.cards.tenant.top.length).toBeGreaterThan(0);
+
+    const source = fixtureSource([page], buffers);
+    const fetchFile = vi.spyOn(source, "fetchFile");
+    const ranges: [string, number, number][] = [];
+    const derived = new Map<string, { bytes: ArrayBuffer; meta: string }>();
+    const ranged = {
+      ...source,
+      openParquet: http,
+      fetchRange: async (file: { key: string }, start: number, end: number) => {
+        ranges.push([file.key, start, end]);
+        return buffers[file.key as keyof typeof buffers].slice(start, end);
+      },
+      readDerivedFile: async (key: string, identity: string) => {
+        const hit = derived.get(`${key}|${identity}`);
+        return hit ? { byteLength: hit.bytes.byteLength, meta: hit.meta, bytes: async () => hit.bytes.slice(0) } : null;
+      },
+      writeDerivedFile: async (key: string, identity: string, bytes: ArrayBuffer, meta: string) => {
+        derived.set(`${key}|${identity}`, { bytes: bytes.slice(0), meta });
+      },
+    };
+    const result = await runDashboard(ranged, options);
+    expect(fetchFile).not.toHaveBeenCalled();
+    expect(new Set(ranges.map(([key]) => key))).toEqual(new Set(["a", "b"]));
+    const fetched = ranges.reduce((sum, [, start, end]) => sum + end - start, 0);
+    expect(fetched).toBeLessThan(buffers.a.byteLength + buffers.b.byteLength);
+    expect(result.stats.bytes).toBe(fetched);
+    const { stats: _stats, ...answer } = result;
+    const { stats: _expectedStats, ...wholeAnswer } = expected;
+    expect(answer).toEqual(wholeAnswer);
+
+    // A repeat view reads the persisted projections instead of the network.
+    const again = await runDashboard(ranged, options);
+    expect(ranges.reduce((sum, [, start, end]) => sum + end - start, 0)).toBe(fetched);
+    expect(fetchFile).not.toHaveBeenCalled();
+    const { stats: _againStats, ...againAnswer } = again;
+    expect(againAnswer).toEqual(wholeAnswer);
+  });
+
   it("bounds the bytes of whole selective reads held between fetch and query", async () => {
     const MiB = 1024 * 1024;
     const keys = ["a", "b", "c", "d"] as const;
