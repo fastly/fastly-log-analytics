@@ -2,7 +2,7 @@
 
 `flp`'s tick-driven background jobs. Two health-check probes reach Compute about once a second each. On `/_tick` a dispatcher decides from a Core Cache schedule whether ingest, raw delete or a maintenance stage on `flp-worker` is due; on `/_flush` it decides whether the operational-log flush is due. Idle probes do nothing and write nothing.
 
-This directory documents the code on `main` at `1006ff2`, not the plans. Each file cites `file:line`.
+This directory documents the code under `compute/cloud/` at `540813619`, not the plans. Each file cites `file:line`; bare paths such as `admin/mod.rs` are relative to `compute/cloud/src/`.
 
 ## Purpose
 
@@ -15,16 +15,15 @@ Compute only runs when a request arrives. The front VCL service supplies that re
 ## How it works
 
 The clock and the tick orchestration are documented in [clock.md](clock.md). In summary:
-- A VCL health check probes `/_tick` every second; VCL caches it for 1 s at the IAD shield, so about one probe a second reaches Compute. Compute answers 200 at once, then calls `crate::admin::record_tick` (`app/src/shell.rs:415-427`).
-- `record_tick` claims the Core Cache schedule record `flp-sched-v1` with one atomic replace (`app/src/admin/schedule.rs`). Off-shield, idle and busy ticks stop there with no backend call. A due tick takes a 55 s lease and runs request_ingest (whose dispatch batch can carry one maintenance stage request) → raw_delete → rows → `cron:state` save → lease release.
+- A VCL health check probes `/_tick` every second; VCL caches it for 1 s at the IAD shield, so about one probe a second reaches Compute. Compute answers 200 at once, then calls `crate::admin::record_tick` (`compute/cloud/src/shell.rs:633-642`).
+- `record_tick` claims the Core Cache schedule record `flp-sched-v1` with one atomic replace (`compute/cloud/src/admin/schedule.rs`). Off-shield, idle and busy ticks stop there with no backend call. A due tick takes a 55 s lease and runs request_ingest (whose dispatch batch can carry one maintenance stage request) → raw_delete → rows → `cron:state` save → lease release.
 - Ingest is due once per log period (`max(5, log_period)` s) after the period closes plus a 180 s grace, and on every tick while a backlog remains. Maintenance is due every 120 s. Durable per-job state is in KV `cron:state.jobs`; the cache record mirrors it and is rebuilt after an eviction.
 - The maintenance stage runs on `flp-worker` (`/_internal/stage`): the first of retention_sweep → log_compact → delete_history → storage_reconcile, from `cron:state.maint_next`, that has work ([stage-worker.md](stage-worker.md)).
 - A second health check probes `/_flush` the same way. `crate::admin::record_flush` claims its own record `flp-flush-sched-v1` and runs log_flush, alone in its execution, at most once a minute when idle and on the next probe while work remains.
-- Each execution has 32 backend calls, and KV operations charge the budget too (`admin/transport.rs:35-75`). Each also has 64 Core Cache operations (`CACHE_OP_BUDGET`, `shell.rs:18`).
+- Each execution has 32 backend calls, and KV operations charge the budget too (`admin/transport.rs:45-89`). Each also has 64 Core Cache operations (`CACHE_OP_BUDGET`, `shell.rs:16`).
   - A stage is admitted only if its call need fits the remaining budget.
   - Stage loops stop starting new work 40 s into the execution.
   - Unfinished work resumes from KV on the next tick.
-- Limits are audited in [compute-limits-audit.md](../compute-limits-audit.md). Operator procedures are in [runbook.md](../runbook.md).
 
 | Cron | `cron_kind` | Runs when | File |
 |---|---|---|---|
@@ -40,7 +39,7 @@ The clock and the tick orchestration are documented in [clock.md](clock.md). In 
 | Storage reconcile | `storage_reconcile` | Its turn, only after an admin request | [storage-reconcile.md](storage-reconcile.md) |
 | Delete history | `delete_history` | Its turn, while an admin-started job is incomplete | [delete-history.md](delete-history.md) |
 
-Provisioning, reconcile and teardown jobs (`job:<id>`) are not tick stages. They advance only through admin calls to `POST /api/admin/jobs/{id}/step` (`admin/mod.rs:214-223`).
+Provisioning, reconcile and teardown jobs (`job:<id>`) are not tick stages. They advance only through admin calls to `POST /api/admin/jobs/{id}/step` (`admin/mod.rs:278-281`).
 
 ## Roles and permissions
 
@@ -66,6 +65,6 @@ Cross-cutting items (plan checkboxes, the wanted tick view and per-tick counters
 
 ## Code
 
-- `app/src/admin/schedule.rs`: the 1 s dispatcher's claim, due rules and release.
-- `app/src/admin/mod.rs:1608-1660`, `1824-2335`: `record_flush`, `record_tick` and `dispatch`.
-- `app/src/admin/stage.rs`; `app/src/admin/logs.rs:452-530`: the stage worker and `maintenance_stage`.
+- `compute/cloud/src/admin/schedule.rs`: the 1 s dispatcher's claim, due rules and release.
+- `compute/cloud/src/admin/mod.rs:1800-1836`, `2083-3157`: `record_flush`, `record_tick` and `dispatch`.
+- `compute/cloud/src/admin/stage.rs`; `compute/cloud/src/admin/logs.rs:736-808`: the stage worker and `maintenance_stage`.

@@ -1,7 +1,9 @@
 # Delete Data: design
 
 Status: draft for review, 2026-11-04. This is a prerequisite for the fdlt
-load harness (`2026-11-04-fdlt-load-harness-design.md`).
+load harness ([`2026-11-04-fdlt-load-harness-design.md`](2026-11-04-fdlt-load-harness-design.md)).
+
+**Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers are from when this was written. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository.
 
 ## Why
 
@@ -236,13 +238,13 @@ every maintenance tick, until the job is complete.
     stream, because this job runs on the cron, not inside the request.
     Closing the dialog doesn't affect the job, and reopening Delete Data on
     that service shows the running job's panel instead of a new confirmation.
-- Update `app/web/openapi.json` for the two routes and regenerate the types
+- Update `app/web/openapi.json` (now `frontend/lib/cloud-engine/cloud-openapi.json`) for the two routes and regenerate the types
   with `npm run gen:types`. Then pass `tools/check-api-contract.ts`.
 
 ## Tests
 
-- **Rust** (`app/tests/service_jobs.rs`, `app/tests/ingest.rs`,
-  `app/tests/retention_state.rs`):
+- **Rust** (`compute/cloud/tests/service_jobs.rs`, `compute/cloud/tests/ingest.rs`,
+  `compute/cloud/tests/retention_state.rs`):
   - the marker skips and gates every listed stage and route;
   - fencing waits out leases and abandons in-flight plans, so an in-flight
     plan can't commit after the reset;

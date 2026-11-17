@@ -2,6 +2,8 @@
 
 Status: draft for review, 2026-11-04.
 
+**Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers are from when this was written. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository.
+
 ## Why
 
 We want to load-test the live install in production and find the log periods
@@ -104,7 +106,7 @@ For each stage of a stepped ladder (for example 100, 500, 1,000, 2,500 and
 
 Both are VARCHAR and empty for non-synthetic traffic. Custom fields are
 per-install config (`log_fields.custom_fields`). They are set through
-`/admin` and applied by the reconciler (`app/src/admin/mod.rs:472-530`), so
+`/admin` and applied by the reconciler (`compute/cloud/src/admin/mod.rs:472-530`), so
 adding them is an approved config change, not a catalog code change. That is
 my call: putting them in the catalog would give every install two
 load-test-only columns.
@@ -144,7 +146,7 @@ these columns under their current names:
 No existing column is renamed.
 
 **VCL snippets for fdlt.** Add these to the monitored VCL service. Their names
-must avoid everything `managed_name` matches (`app/src/admin/reconcile.rs:4-18`):
+must avoid everything `managed_name` matches (`compute/cloud/src/admin/reconcile.rs:4-18`):
 
 - the `flp-owner-` prefix
 - names starting with "Fastly Log Analytics" or "Fastly Log Analysis"
@@ -318,7 +320,7 @@ a mismatch and 2 for bad input. The harness parses the JSON after
 ### 5. Browser probe (Node + Playwright)
 
 The probe reuses the passkey sign-in and saved `storageState` from
-`app/tools/browser_verify.mjs`. It also reuses that file's injected observers
+`compute/cloud/tools/browser_verify.mjs`. It also reuses that file's injected observers
 (`window.__flpWebVitals` for CLS, LCP, paint and long tasks) and its
 loading-stage timeline (`window.__flpLoadingStages`). It adds an INP observer
 based on event timing. INP needs interactions, so the probe performs scripted
@@ -370,7 +372,7 @@ fixed absolute range against a DuckDB count of the same range in Parquet.
   `tail_latency`, `cache_hit_cliff` and `cache_collapse`. It also checks
   that unrelated insights stay quiet. The builder maps each profile to its
   expected insights from each insight's definition in
-  `app/src/logging/catalog.json`.
+  `compute/cloud/src/logging/catalog.json`.
 - **Security insights:** load-checked only. They need attack-like traffic
   that fdlt doesn't generate.
 - The incident stages are reconciled just like the ladder stages, and the
@@ -473,7 +475,7 @@ projection.
   nothing more.
 
 Projections reuse the app's own cost model, `estimateMonthly` in
-`app/web/lib/usage/estimate.ts`. That is the same function the Usage page's
+`frontend/lib/cloud-engine/usage/estimate.ts`. That is the same function the Usage page's
 Cost Estimator runs, so there is one source of truth for pricing. The
 harness calls it through a small Node entry point and never reimplements it
 in Python.
@@ -494,7 +496,7 @@ in Python.
    `GET /stats/service/{id}/field/{field}`. It uses `by=minute` and
    `from`/`to` set to the stage's `first_sent_at` and `last_response_at`, plus
    the settle window. These are the same fields `compute_billing` reads
-   (`app/src/sdk.rs`):
+   (`compute/cloud/src/sdk.rs`):
    - for the app and worker services: `compute_requests`,
      `compute_execution_time_ms`, `compute_request_time_billed_ms`,
      `bandwidth`, `kv_store_class_a_operations` and
@@ -622,7 +624,7 @@ Delete these:
 - `app/tools/loadtest/generate.py`, `verify.py`, `replay.py`, `bench.py`
   and `README.md`
 - `app/tools/capacity_campaign.py`
-- `app/tools/generator_fixtures.py`, if nothing else uses it
+- `compute/cloud/tools/generator_fixtures.py`, if nothing else uses it
 - their tests (`test_loadtest.py`, `test_replay.py`,
   `test_sender_workers.py` and the related parts of other test files)
 

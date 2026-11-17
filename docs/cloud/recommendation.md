@@ -5,10 +5,13 @@
 > [`/usage`](https://flp-dpbk03nn.edgecompute.app/usage) page and the method is in
 > [`cost-methodology.md`](cost-methodology.md). Operational-logging overhead
 > (flush, compaction, retention) is **estimated** in
-> [Spec §7.1](superpowers/specs/2026-10-30-operational-logging-and-telemetry-design.md#71-steady-state-overhead-of-this-system-quiet-install-defaults)
+> [Spec §7.1](specs/2026-10-30-operational-logging-and-telemetry-design.md#71-steady-state-overhead-of-this-system-quiet-install-defaults)
 > (about $0.00030/day in FOS operations for a quiet install at list price) until measured live.
+> Its evidence (the `research/` notes, `architecture-options.md`, `PLAN.md`, `runbook.md`, the
+> compute-limits audit and `experiments/`) stayed in the former fastly-logs-parquet repository, so those
+> references are plain text here.
 
-**Start here.** This is the plain-language summary. The option comparison is in [`architecture-options.md`](architecture-options.md), the live evidence is in [`research/07-live-verification.md`](research/07-live-verification.md), the capacity tables come from [`experiments/archive/capacity-model/model.py`](../experiments/archive/capacity-model/model.py), and the cost tables come from simulating the current tick code at list prices (see [What it costs per month](#what-it-costs-per-month)).
+**Start here.** This is the plain-language summary. The option comparison is in `architecture-options.md`, the live evidence is in `research/07-live-verification.md`, the capacity tables come from `experiments/archive/capacity-model/model.py`, and the cost tables come from simulating the current tick code at list prices (see [What it costs per month](#what-it-costs-per-month)).
 
 How much to trust each number:
 
@@ -21,7 +24,7 @@ How much to trust each number:
 1. **Use Fastly's S3 logging endpoint to land raw logs in an FOS bucket, then convert them to Parquet with a Compute service.** HTTPS log streaming to anything hosted on Fastly is blocked by default, so a Compute service can't receive logs directly. S3 logging into FOS works and loses nothing (measured).
 2. **A health check is the clock, and VCL's cache throttles it.** Compute has no scheduler, so a VCL backend health check is the trigger. Every POP that serves the VCL service probes every 30 s. The health check probes the VCL service itself, and VCL rewrites `/_tick` into a 2-minute cache bucket that is shielded at IAD. Only about one probe per bucket reaches the converter; the rest are cache hits. Measured: about 0.8 Compute executions a minute instead of 28–86 when probes went straight to Compute, IPv4 only. The current app replaces the fixed bucket: the health check probes every second and Compute sets the `/_tick` cache TTL (`x-flp-tick-ttl`) to when the next job is due, so ingest wakes once per log period. Cloud log periods are at least 1 minute (`MIN_LOG_PERIOD`).
 3. **One converter execution handles about 1 million typical log lines** (23 fields) in a 30 s CPU budget. Wider logs cost more: CPU tracks the number of field values (measured).
-4. **The real limit is 32 backend requests per execution.** Fastly wrote about 52 raw files per logging period in the benchmarks, more than one execution can read. The prototype grouped inputs across peer workers that uploaded parts of the final Parquet directly (measured). The current `app/` has no fan-out: one tick reads up to 16 raw files (about 12 in practice) and writes each window file with one PUT.
+4. **The real limit is 32 backend requests per execution.** Fastly wrote about 52 raw files per logging period in the benchmarks, more than one execution can read. The prototype grouped inputs across peer workers that uploaded parts of the final Parquet directly (measured). The 2026-10-30 app had no fan-out: one tick read up to 16 raw files (about 12 in practice) and wrote each window file with one PUT.
 5. **Capacity:** the current code keeps up only to about 0.1 req/s with 1-minute S3 periods ([costs](#how-much-traffic-the-current-code-keeps-up-with)). The prototype, with 8 workers running at once (the most we tested), handled a site logging typical lines at about **125,000 requests/second at 1, 5 or 15-minute windows, and about 60,000 at 60 minutes** (derived). 1,000 req/s uses about 6% of one worker.
 6. **At the traffic it handles, cost is about $0.79–1.87 a month, mostly KV and FOS operations.** An idle install costs about $0.79 a month at list price, most of it KV reads and writes from the 2-minute tick. Up to 0.1 req/s, Fastly's raw-file PUTs and raw GETs push it to about $1.87; storage is cents. Above about 0.01 req/s the retention sweep stops getting calls, and above about 0.03 req/s raw delete falls behind, so storage then grows month by month. The scheduled log flush never commits in simulation. Every 100+ req/s cell exceeds current per-tick capacity. See [costs](#what-it-costs-per-month).
 7. **Prototype hourly and daily rollups work up to a point.** Archived experiments stitched window files again without decoding: hourly files up to about 10,000 req/s, daily up to about 1,000 req/s. Each rollup level stores another full copy of the Parquet data (measured up to a 17.7 GB file; see [Rolling up](#rolling-up-into-hourly-or-daily-files)). The current app has no request rollup; its daily compaction of operational logs only gets calls below about 0.01 req/s. Production hourly rollup remains a separate stretch gate in PLAN, not an implemented feature inferred from those experiments.
@@ -30,7 +33,7 @@ How much to trust each number:
 
 The production app uses direct multipart parts, not staged Parquet objects.
 The capacity tables below remain benchmark-era models, not a passed production
-load test; current results are in the [accuracy report](research/09-accuracy-test.md).
+load test; current results are in the accuracy report.
 
 ```
  your VCL service ── S3 logging (period = S3 period) ──► raw bucket (FOS, us-east-1)
@@ -98,13 +101,13 @@ Two workers is the minimum for any busy period: one execution can read about 28 
 
 ## What it costs per month
 
-These are estimates, not a bill. They price the code as it runs on `main` (2026-10-30): one Compute execution per 2-minute tick reads raw files, converts them inside that execution and writes each window file with **one PUT**. There is no worker fan-out, multipart upload, staged copy or padding. Measured usage for an install is on `/usage`; rules and rates are in the [cost methodology](cost-methodology.md). The older prototype estimates are kept in the [appendix](#historical-direct-parts-estimate-prototype).
+These are estimates, not a bill. They price the code as it ran on `main` (2026-10-30; the code line numbers below are from that date): one Compute execution per 2-minute tick reads raw files, converts them inside that execution and writes each window file with **one PUT**. There is no worker fan-out, multipart upload, staged copy or padding. Measured usage for an install is on `/usage`; rules and rates are in the [cost methodology](cost-methodology.md). The older prototype estimates are kept in the [appendix](#historical-direct-parts-estimate-prototype).
 
 The operation counts come from running the real tick (`admin::record_tick`) against the native test runtime with an operation counter, for 3 simulated days per scenario, counting the last day and multiplying by 30. Fastly's raw files were simulated from the measured file curve ([below](#assumptions)). The harness was temporary and isn't committed. Dollars are list prices.
 
 ### 1 s clock executions
 
-The tables below price the 2-minute tick that ran when they were simulated; the 2-minute bucket in [In short](#in-short) item 2 and the latency note under [How it works](#how-it-works) are historical too. The clock now runs a 1 s dispatcher (`app/src/admin/schedule.rs`, [clock](crons/clock.md)): VCL caches `/_tick` and `/_flush` for 1 s at the IAD shield, so about one probe a second of each reaches Compute.
+The tables below price the 2-minute tick that ran when they were simulated; the 2-minute bucket in [In short](#in-short) item 2 and the latency note under [How it works](#how-it-works) are historical too. The clock now runs a 1 s dispatcher (`compute/cloud/src/admin/schedule.rs`, [clock](crons/clock.md)): VCL caches `/_tick` and `/_flush` for 1 s at the IAD shield, so about one probe a second of each reaches Compute.
 
 - `/_tick` alone is 86,400 executions a day, about **2.59M a month** ($1.30 at $0.50 per million). That matches Drew's estimate of about 2.6M.
 - `/_flush` probed every second doubles it to about **5.18M a month** ($2.59).
@@ -113,25 +116,25 @@ The tables below price the 2-minute tick that ran when they were simulated; the 
 
 ### What one tick does
 
-All calls share one budget of 32 backend requests (KV, FOS, CDN and secret reads; [`transport.rs:57-74`](../app/src/admin/transport.rs)), plus 8 for the tick's own log writes. Stages run in this order and each runs only if enough calls are left.
+All calls share one budget of 32 backend requests (KV, FOS, CDN and secret reads; [`transport.rs:57-74`](../../compute/cloud/src/admin/transport.rs)), plus 8 for the tick's own log writes. Stages run in this order and each runs only if enough calls are left.
 
 | Step | Operations per tick | Billed as | Code |
 |---|---|---|---|
-| Clock | 1 Compute request; a second probe in the same bucket returns `busy` after reading state and writing its log rows | Compute request | [`admin/mod.rs:1391`](../app/src/admin/mod.rs), `:1670` |
-| Load state | `cron:state`, `admin:install`, `svc:<id>`, operational settings, flush cursor (overdue check): 5 KV reads. FOS keys: 2 secret reads (budget only) | KV Class B | `admin/mod.rs:1611`, `:1428-1447`, `:1449`, `:1666`, `:1675`; [`telemetry/api.rs:354`](../app/src/telemetry/api.rs) |
-| Ingest: plan | plan and watermark: 2 KV reads; 1 raw LIST page (200 keys) | KV B; FOS Class A | [`ingest/mod.rs:288-289`](../app/src/ingest/mod.rs), `:311` |
-| Ingest: read | up to 16 raw GETs through the `/fos` CDN path, while enough budget remains and within the 40 s wall guard. A CDN miss is one FOS Class B; a hit is free. Objects over 8 MiB fail | FOS Class B | `ingest/mod.rs:39`, `:335-355`; [`storage.rs:12`](../app/src/ingest/storage.rs), `:266` |
+| Clock | 1 Compute request; a second probe in the same bucket returns `busy` after reading state and writing its log rows | Compute request | [`admin/mod.rs:1391`](../../compute/cloud/src/admin/mod.rs), `:1670` |
+| Load state | `cron:state`, `admin:install`, `svc:<id>`, operational settings, flush cursor (overdue check): 5 KV reads. FOS keys: 2 secret reads (budget only) | KV Class B | `admin/mod.rs:1611`, `:1428-1447`, `:1449`, `:1666`, `:1675`; [`telemetry/api.rs:354`](../../compute/cloud/src/telemetry/api.rs) |
+| Ingest: plan | plan and watermark: 2 KV reads; 1 raw LIST page (200 keys) | KV B; FOS Class A | [`ingest/mod.rs:288-289`](../../compute/cloud/src/ingest/mod.rs), `:311` |
+| Ingest: read | up to 16 raw GETs through the `/fos` CDN path, while enough budget remains and within the 40 s wall guard. A CDN miss is one FOS Class B; a hit is free. Objects over 8 MiB fail | FOS Class B | `ingest/mod.rs:39`, `:335-355`; [`storage.rs:12`](../../compute/cloud/src/ingest/storage.rs), `:266` |
 | Ingest: write | plan CAS; **one Parquet PUT per window present in this tick's batch**; delete-queue record; watermark CAS | KV A ×3; FOS Class A per file | `ingest/mod.rs:368`, `:382-407`, `:488-508` |
-| Raw delete | list delete queues (≤ 20); per queue 1 KV read, 1 `DeleteObjects` (≤ 1,000 keys) and a KV delete | KV list (A, **unverified**), KV B, FOS Class A; KV deletes free | [`retention.rs:221-262`](../app/src/ingest/retention.rs); `storage.rs:207` |
-| Tick logs | one Core Cache append per tick (`cron_ticks`); one KV outbox write per `cron_runs` row; `cron:state` CAS | KV Class A; Core Cache not priced | [`telemetry/mod.rs:373`](../app/src/telemetry/mod.rs), `:394-396`; `admin/mod.rs:1480-1499` |
-| Log flush | cursor and manifest reads, outbox list, up to 480 Core Cache lookups. Committing a flush needs 19 free calls | KV B, KV A | [`flush.rs:37-39`](../app/src/telemetry/flush.rs), `:1004-1085`, `:1115` |
-| Maintenance | compaction on even buckets, retention sweep every 6 h, history sweep and storage reconcile on the ticks between, each only if its calls are left | FOS A (LIST, PUT, `DeleteObjects`), FOS B, KV | [`admin/logs.rs:446-530`](../app/src/admin/logs.rs) |
+| Raw delete | list delete queues (≤ 20); per queue 1 KV read, 1 `DeleteObjects` (≤ 1,000 keys) and a KV delete | KV list (A, **unverified**), KV B, FOS Class A; KV deletes free | [`retention.rs:221-262`](../../compute/cloud/src/ingest/retention.rs); `storage.rs:207` |
+| Tick logs | one Core Cache append per tick (`cron_ticks`); one KV outbox write per `cron_runs` row; `cron:state` CAS | KV Class A; Core Cache not priced | [`telemetry/mod.rs:373`](../../compute/cloud/src/telemetry/mod.rs), `:394-396`; `admin/mod.rs:1480-1499` |
+| Log flush | cursor and manifest reads, outbox list, up to 480 Core Cache lookups. Committing a flush needs 19 free calls | KV B, KV A | [`flush.rs:37-39`](../../compute/cloud/src/telemetry/flush.rs), `:1004-1085`, `:1115` |
+| Maintenance | compaction on even buckets, retention sweep every 6 h, history sweep and storage reconcile on the ticks between, each only if its calls are left | FOS A (LIST, PUT, `DeleteObjects`), FOS B, KV | [`admin/logs.rs:446-530`](../../compute/cloud/src/admin/logs.rs) |
 
 Whether `DeleteObjects` and LIST count as Class A follows the [methodology](cost-methodology.md); KV list billing is **unverified** and counted as Class A.
 
 ### How much traffic the current code keeps up with
 
-The tick reads at most about 12 raw files: the 32-call budget runs out before the 16-object cap. Fastly writes about 52 files per S3 period under load ([07 §3.2, §6.4](research/07-live-verification.md)), so with 1-minute S3 periods the tick falls behind at about **0.15 req/s**. Simulated backlog at 2-minute windows:
+The tick reads at most about 12 raw files: the 32-call budget runs out before the 16-object cap. Fastly writes about 52 files per S3 period under load (07 §3.2, §6.4), so with 1-minute S3 periods the tick falls behind at about **0.15 req/s**. Simulated backlog at 2-minute windows:
 
 | req/s | Raw files a day | Raw files read a day | Backlog after day 2 → 3 | Stages that still run |
 |---|---|---|---|---|
@@ -164,7 +167,7 @@ Every cell in the usual grid exceeds current per-tick capacity, so it isn't pric
 | 10,000 | exceeds current per-tick capacity | exceeds | exceeds | exceeds | exceeds |
 | 100,000 | exceeds current per-tick capacity | exceeds | exceeds | exceeds | exceeds |
 
-At 100 req/s the tick reads about 9,300 of the 74,800 raw files written each day (12%); at 10,000 req/s each raw file is about 1 MB and the 8 MiB batch cap allows about 8 a tick; at 100,000 req/s each file is over the 8 MiB read limit and none can be read. The window setting (1–3,600 s, [`ingest/mod.rs:86-93`](../app/src/ingest/mod.rs)) doesn't change this, because the cap is on raw files read per tick.
+At 100 req/s the tick reads about 9,300 of the 74,800 raw files written each day (12%); at 10,000 req/s each raw file is about 1 MB and the 8 MiB batch cap allows about 8 a tick; at 100,000 req/s each file is over the 8 MiB read limit and none can be read. The window setting (1–3,600 s, [`ingest/mod.rs:86-93`](../../compute/cloud/src/ingest/mod.rs)) doesn't change this, because the cap is on raw files read per tick.
 
 The rates the code supports, at 2-minute windows (the provisioned default). FOS Class A includes Fastly's own raw-file PUTs, one per raw file, because they are billed to the bucket owner:
 
@@ -190,35 +193,35 @@ Window size changes only the Parquet PUT count. At 0.1 req/s a tick writes one f
 ### What drives these numbers
 
 - **KV is most of the bill below about 0.05 req/s.** An idle tick makes about 5 KV writes or lists and 13 reads, so about 87k Class A and 271k Class B a month ($0.72) before any traffic. Ingest adds 3 writes per tick with files. KV list is counted as Class A (**unverified**); at list rates it is about $0.28 of the idle figure.
-- **Compute requests are fixed** at 21,600 a month ($0.011) from the 2-minute tick. The prototype saw about 0.8 executions a minute (about 35k a month, $0.017) because of extra cache misses ([07 §7.13](research/07-live-verification.md)); extras return `busy` but still read and write state. There is no worker fan-out.
-- **vCPU is small and mostly unmeasured.** Conversion is about 32 ms per 1,000 typical lines (measured on the prototype converter, [07 §7.8](research/07-live-verification.md)), so under a cent at these rates. Fixed per-tick vCPU for `app/` isn't measured ([compute-limits audit](compute-limits-audit.md)); every 10 ms per tick adds $0.011 a month.
+- **Compute requests are fixed** at 21,600 a month ($0.011) from the 2-minute tick. The prototype saw about 0.8 executions a minute (about 35k a month, $0.017) because of extra cache misses (07 §7.13); extras return `busy` but still read and write state. There is no worker fan-out.
+- **vCPU is small and mostly unmeasured.** Conversion is about 32 ms per 1,000 typical lines (measured on the prototype converter, 07 §7.8), so under a cent at these rates. Fixed per-tick vCPU for the app isn't measured (compute-limits audit); every 10 ms per tick adds $0.011 a month.
 - **FOS Class A** is Fastly's raw-file PUTs (about one per line at these rates: 259k a month, $0.65, at 0.1 req/s), the raw LIST every tick, one Parquet PUT per window per tick, and `DeleteObjects` per delete queue.
 - **FOS Class B** is one raw GET per file through the `/fos` CDN path. Every read is assumed to miss.
 - **Storage is cents.** Raw is billed for 30 days at about 88 B per line; Parquet per window file is about 20.7 KB of fixed overhead (measured in the simulation for one-row files) plus about 74 B per line.
 
 ### Operational logging overhead
 
-The spec's quiet-install estimate ([§7.1](superpowers/specs/2026-10-30-operational-logging-and-telemetry-design.md#71-steady-state-overhead-of-this-system-quiet-install-defaults)) is about 93 Class A and 168 Class B FOS operations a day, about **$0.00030 a day** at list (93 × $0.0000025 + 168 × $0.0000004). In the simulation the scheduled flush never commits (see above), so those flush and compaction operations don't happen today. What does happen is already in the totals: the `logq:` outbox writes (about 22k–43k KV Class A a month, $0.14–0.28), the flush cursor reads and outbox list each tick, and, at idle only, retention and compaction LISTs over `processed/ops/` (about 12 a day per kind). Core Cache lookups (up to 480 a tick) and appends aren't priced.
+The spec's quiet-install estimate ([§7.1](specs/2026-10-30-operational-logging-and-telemetry-design.md#71-steady-state-overhead-of-this-system-quiet-install-defaults)) is about 93 Class A and 168 Class B FOS operations a day, about **$0.00030 a day** at list (93 × $0.0000025 + 168 × $0.0000004). In the simulation the scheduled flush never commits (see above), so those flush and compaction operations don't happen today. What does happen is already in the totals: the `logq:` outbox writes (about 22k–43k KV Class A a month, $0.14–0.28), the flush cursor reads and outbox list each tick, and, at idle only, retention and compaction LISTs over `processed/ops/` (about 12 a day per kind). Core Cache lookups (up to 480 a tick) and appends aren't priced.
 
 ### Assumptions
 
 - List prices from the [pricing page](https://www.fastly.com/pricing), as in the [methodology](cost-methodology.md): FOS Class A $2.50 per million, Class B $0.40 per million, storage $0.020 per GB-month with a 30-day minimum; Compute $0.50 per million requests and $0.05 per million vCPU-ms; KV Class A $0.65 per 100k and Class B $0.55 per million. Free tiers, graduated tiers and contracts are ignored; they would cover all of this.
-- Typical line ~620 B, 23 fields: 88 B gzip and 74 B Parquet per line in large files ([07 §7.8](research/07-live-verification.md)). Small raw files compress worse, so raw storage here is a floor; it stays under a cent.
-- 1-minute S3 periods (the logger default). Raw files per period follow 52 × (1 − e^(−lines/52)) ([07 §3.2, §6.4](research/07-live-verification.md)). Longer periods mean fewer files, but files that land after their minute has settled are skipped by the watermark ([`ingest/mod.rs:12-13`](../app/src/ingest/mod.rs), `:38`), so they aren't priced as supported.
+- Typical line ~620 B, 23 fields: 88 B gzip and 74 B Parquet per line in large files (07 §7.8). Small raw files compress worse, so raw storage here is a floor; it stays under a cent.
+- 1-minute S3 periods (the logger default). Raw files per period follow 52 × (1 − e^(−lines/52)) (07 §3.2, §6.4). Longer periods mean fewer files, but files that land after their minute has settled are skipped by the watermark ([`ingest/mod.rs:12-13`](../../compute/cloud/src/ingest/mod.rs), `:38`), so they aren't priced as supported.
 - One install, one service. Query, API, page and CDN delivery traffic is excluded.
 - `DeleteObjects` is one Class A operation per call; per key is **unverified**.
 
 ## Rolling up into hourly or daily files
 
-**Current status:** the app has no request rollup. Request and RUM window files are never merged on the server (master-plan D1); readers combine them in the browser. The only server compaction is `log_compact`, for operational logs: once a UTC day has been closed for 2 hours, it merges that day's window files for each kind into chunks of at most 24 files (at most 2 MiB of compressed input and 10,000 rows per chunk), then deletes the sources with `DeleteObjects` ([logging spec §4](superpowers/specs/2026-10-30-operational-logging-and-telemetry-design.md)). It cuts files to LIST and open, not storage; see [Operational logging overhead](#operational-logging-overhead). The minute-summary rollup benchmark failed its larger case and stays out of the query path ([10](research/10-rollup-costs.md)).
+**Current status:** the app has no request rollup. Request and RUM window files are never merged on the server (master-plan D1); readers combine them in the browser. The only server compaction is `log_compact`, for operational logs: once a UTC day has been closed for 2 hours, it merges that day's window files for each kind into chunks of at most 24 files (at most 2 MiB of compressed input and 10,000 rows per chunk), then deletes the sources with `DeleteObjects` ([logging spec §4](specs/2026-10-30-operational-logging-and-telemetry-design.md)). It cuts files to LIST and open, not storage; see [Operational logging overhead](#operational-logging-overhead). The minute-summary rollup benchmark failed its larger case and stays out of the query path (10).
 
 ### Prototype stitch experiments (archived)
 
-Customers who want fewer, bigger files can have a second pass combine the window files, for example 12 five-minute files into one hourly file, then 24 hourly files into one daily file. For inputs of 5 MiB or more this is a server-side stitch: FOS copies the bytes with `UploadPartCopy`, and Compute only writes a new footer. Nothing is decoded. Measured from Compute up to a 30.6 GB, 4,004-row-group file built in 19 s ([07 §7.10](research/07-live-verification.md), [RESULTS-rollup](../experiments/archive/stitch/RESULTS-rollup.md)).
+Customers who want fewer, bigger files can have a second pass combine the window files, for example 12 five-minute files into one hourly file, then 24 hourly files into one daily file. For inputs of 5 MiB or more this is a server-side stitch: FOS copies the bytes with `UploadPartCopy`, and Compute only writes a new footer. Nothing is decoded. Measured from Compute up to a 30.6 GB, 4,004-row-group file built in 19 s (07 §7.10, RESULTS-rollup).
 
 **Short answer:** the files don't get too big to copy. Copying parallelizes, and one multipart upload can be filled from several executions. What runs out is the **footer**: Parquet's 32,767-row-group cap, and how slow a big footer is for readers. Row groups stay about 4–5 MB (Compute's heap limits how big a worker can make them), so file size turns directly into row-group count.
 
-Typical lines, from 5-minute windows (derived from [`model.py`](../experiments/archive/capacity-model/model.py)):
+Typical lines, from 5-minute windows (derived from `model.py`):
 
 | req/s | 5-min file | Hourly file | Daily file |
 |---|---|---|---|
@@ -231,7 +234,7 @@ Typical lines, from 5-minute windows (derived from [`model.py`](../experiments/a
 
 What sets each limit:
 
-- **Footer memory is no longer a limit.** The first planner ran out of Compute's heap at 4,004 row groups. The streaming footer writer keeps raw input footers and writes the merged footer as it goes. In Compute it built a 32,760-row-group footer in 98 MiB and 4.3 s of CPU, and a real 4,004-row-group stitch validated (measured, [07 §7.10](research/07-live-verification.md)).
+- **Footer memory is no longer a limit.** The first planner ran out of Compute's heap at 4,004 row groups. The streaming footer writer keeps raw input footers and writes the merged footer as it goes. In Compute it built a 32,760-row-group footer in 98 MiB and 4.3 s of CPU, and a real 4,004-row-group stitch validated (measured, 07 §7.10).
 - **Parquet's 32,767 row groups per file.** The row-group ordinal is a 16-bit number. With 5 MB row groups that's about 160 GB per file. Above about 20k req/s, a daily file has to be split (for example, 4 six-hour files) or its row groups made bigger by re-encoding.
 - **Footer size, about 2.2 KB per row group** (23 fields). A reader must fetch and parse it before reading any data. A 5 MB footer took 3.2 s to open from a laptop. A 30 MB daily footer at 10k req/s would be slow for every query.
 - **Small files must be re-encoded.** FOS can't copy parts under 5 MiB, so below about 250 req/s the rollup decodes and rewrites. That's cheap: 2.7–5.6 ms of CPU per 1,000 rows (measured), about 2 s of CPU for an hour at 100 req/s and 5 s for a day at 10 req/s. It also fixes the tiny row groups that low-traffic window files have. One execution can read at most about 28 inputs (the 32-request limit), which is enough for 12 or 24.
@@ -260,23 +263,23 @@ Each raw file must fit in one execution (about 940k typical lines), which is wha
 
 | What | Result | Where |
 |---|---|---|
-| HTTPS log streaming to a Fastly-hosted endpoint | **Blocked** (`log destination address is blocked`) | [07 §3.1](research/07-live-verification.md) |
-| S3 logging → FOS | Works, nothing lost or duplicated; about 52 files per period | [07 §3.2, §6.4, §7.3](research/07-live-verification.md) |
-| Health check as a clock | Works. Every POP that serves the VCL service probes, and keeps probing after traffic stops. Probing the service itself and caching `/_tick` in 2-minute buckets at the IAD shield cut Compute executions from 28–86 to about 0.8 a minute, IPv4 only | [07 §6.3, §7.2, §7.13](research/07-live-verification.md) |
-| Answer first, keep working | Work after `send_to_client` keeps the full ~60 s CPU | [07 §6.1](research/07-live-verification.md) |
-| Conversion speed and memory | Up to 2.08M lines per execution; CPU about 1 µs per field value; heap 51–113 MiB of 128 | [07 §6.5, §7.8](research/07-live-verification.md) |
-| Fan-out to workers | 20 workers dispatched in 0.5 s; 8 heavy ones in parallel without throttling | [07 §6.6](research/07-live-verification.md) |
-| Backend-request limit | **32 per execution**; KV calls don't count; going over returns an error | [07 §7.6](research/07-live-verification.md) |
-| Full cycle with lease, crashes and concurrency | Exactly-once output over 27,447 real lines | [07 §7.7](research/07-live-verification.md) |
-| Stitching Parquet files server-side | Works on FOS; 8 files → 62.8 MB in 2.4–2.9 s, byte-identical | [07 §7.4](research/07-live-verification.md) |
-| Rollups of stitched files | 3 levels up to 17.7 GB / 2,366 row groups, validated; Parquet re-encode in Compute at 2.7–5.6 ms CPU per 1k rows | [07 §7.9](research/07-live-verification.md) |
-| Workers write parts of the final file directly | No staged files. Crash recovery passed at 6 crash points; FOS rejected a stale part with `InvalidPart` and the next run redid it. 5 concurrent calls gave 1 `done` and 4 `busy`. Zero-padded parts read fine in pyarrow and DuckDB | [07 §7.11](research/07-live-verification.md) |
-| Reads through the CDN, shielded at IAD | Raw and Parquet GETs from the converter and from people go through the VCL service, which signs SigV4 itself. Proven by reading a deleted raw file from the IAD cache | [07 §7.12](research/07-live-verification.md) |
-| Stitch from Compute with a streaming footer | 30.6 GB / 4,004 row groups in 19 s with 6 copy workers sharing one upload (1.74 GB/s), validated; footer built to 32,760 row groups in 98 MiB | [07 §7.10](research/07-live-verification.md) |
-| Hosted production codebase | Same Wasm on `flp` and `flp-worker`, now v18; all four pages pass unmocked checks in both themes. Cloud Files has live raw/Parquet previews; costs use the current three-service scope; dashboard panels expose actual APIs and timings | [PLAN](PLAN.md), [runbook](runbook.md) |
-| Autonomous production clock | Historical raw backlog drained without skipped inputs. Current paired v18 passes 61 consecutive full-inventory zero-backlog observations over 3,651.771348 seconds, with fresh error-free status, zero pending/MPUs and exact unchanged build identities; no manual tick or test load. Prior v17 proof remains retained. This is sampled evidence, not continuous observation; higher-tier accuracy remains blocked | [Accuracy evidence](research/09-accuracy-test.md#autonomous-operation-evidence) |
-| Dashboard fanout | All 16 first/repeat historical one-hour panel observations succeeded: 328 rows, 14 files, 15 executions and 54 calls. All 32 six-/24-hour observations rejected the file cap without partial data; controlled cold-cache results remain blocked | [Query evidence](research/08-dashboard-query-path.md) |
-| Production accuracy | Corrected 150-request canary, full 30,000-request T1 and renewed HTTP/2 canary passed. All three T2 attempts failed at sender capacity, including HTTP/2 with connection reuse; no further load or T3 is authorized. Failed-client rows are accounted separately, not fully field-verified | [Accuracy evidence](research/09-accuracy-test.md) |
+| HTTPS log streaming to a Fastly-hosted endpoint | **Blocked** (`log destination address is blocked`) | 07 §3.1 |
+| S3 logging → FOS | Works, nothing lost or duplicated; about 52 files per period | 07 §3.2, §6.4, §7.3 |
+| Health check as a clock | Works. Every POP that serves the VCL service probes, and keeps probing after traffic stops. Probing the service itself and caching `/_tick` in 2-minute buckets at the IAD shield cut Compute executions from 28–86 to about 0.8 a minute, IPv4 only | 07 §6.3, §7.2, §7.13 |
+| Answer first, keep working | Work after `send_to_client` keeps the full ~60 s CPU | 07 §6.1 |
+| Conversion speed and memory | Up to 2.08M lines per execution; CPU about 1 µs per field value; heap 51–113 MiB of 128 | 07 §6.5, §7.8 |
+| Fan-out to workers | 20 workers dispatched in 0.5 s; 8 heavy ones in parallel without throttling | 07 §6.6 |
+| Backend-request limit | **32 per execution**; KV calls don't count; going over returns an error | 07 §7.6 |
+| Full cycle with lease, crashes and concurrency | Exactly-once output over 27,447 real lines | 07 §7.7 |
+| Stitching Parquet files server-side | Works on FOS; 8 files → 62.8 MB in 2.4–2.9 s, byte-identical | 07 §7.4 |
+| Rollups of stitched files | 3 levels up to 17.7 GB / 2,366 row groups, validated; Parquet re-encode in Compute at 2.7–5.6 ms CPU per 1k rows | 07 §7.9 |
+| Workers write parts of the final file directly | No staged files. Crash recovery passed at 6 crash points; FOS rejected a stale part with `InvalidPart` and the next run redid it. 5 concurrent calls gave 1 `done` and 4 `busy`. Zero-padded parts read fine in pyarrow and DuckDB | 07 §7.11 |
+| Reads through the CDN, shielded at IAD | Raw and Parquet GETs from the converter and from people go through the VCL service, which signs SigV4 itself. Proven by reading a deleted raw file from the IAD cache | 07 §7.12 |
+| Stitch from Compute with a streaming footer | 30.6 GB / 4,004 row groups in 19 s with 6 copy workers sharing one upload (1.74 GB/s), validated; footer built to 32,760 row groups in 98 MiB | 07 §7.10 |
+| Hosted production codebase | Same Wasm on `flp` and `flp-worker`, now v18; all four pages pass unmocked checks in both themes. Cloud Files has live raw/Parquet previews; costs use the current three-service scope; dashboard panels expose actual APIs and timings | PLAN, runbook |
+| Autonomous production clock | Historical raw backlog drained without skipped inputs. Current paired v18 passes 61 consecutive full-inventory zero-backlog observations over 3,651.771348 seconds, with fresh error-free status, zero pending/MPUs and exact unchanged build identities; no manual tick or test load. Prior v17 proof remains retained. This is sampled evidence, not continuous observation; higher-tier accuracy remains blocked | Accuracy evidence |
+| Dashboard fanout | All 16 first/repeat historical one-hour panel observations succeeded: 328 rows, 14 files, 15 executions and 54 calls. All 32 six-/24-hour observations rejected the file cap without partial data; controlled cold-cache results remain blocked | Query evidence |
+| Production accuracy | Corrected 150-request canary, full 30,000-request T1 and renewed HTTP/2 canary passed. All three T2 attempts failed at sender capacity, including HTTP/2 with connection reuse; no further load or T3 is authorized. Failed-client rows are accounted separately, not fully field-verified | Accuracy evidence |
 | Project-scoped cost data | Live stats and complete bucket inventories work. Unattributable billing stays omitted; nonempty service billing and exact billed charges are not claimed | [Cost methodology](cost-methodology.md) |
 
 ## Risks and open questions
@@ -289,7 +292,7 @@ Each raw file must fit in one execution (about 940k typical lines), which is wha
 | FOS public-endpoint cap (~150 Mbps, 100 req/s per bucket) | Typical lines at 125k req/s move about 160 Mbps through Compute | Not enforced in our tests (270 Mbps for 35 s; 207 PUT/s for 21 s). Sustained behaviour **unverified** |
 | Per-tick capacity of the current code | One tick reads about 12 raw files, so ingest falls behind at about 0.15 req/s; raw delete stops keeping up at about 0.04 req/s and retention and compaction stop at about 0.01 req/s, so storage grows month by month | Fan out or split stages across ticks before any real traffic. Longer S3 periods cut files but risk skipped late files under the watermark (**untested**) |
 | Scheduled log flush never commits (simulation) | A commit needs 19 free calls; an idle tick has 16 left at the check. Operational rows stay in Core Cache (lost after 24 h) and the KV outbox grows by 720–1,440 keys a day | Confirm on a live install with `/usage` and the outbox depth; give the flush its own tick or budget |
-| KV operations from the tick | About 87k–173k Class A and 151k–271k Class B a month, most of the bill; near or above the 100k Class A the pricing page includes (older docs say 250k; see [02](research/02-kv-store-staging.md)). KV list billing is **unverified** | Pay for them ($0.72–1.25 a month), or cut per-tick reads and writes |
+| KV operations from the tick | About 87k–173k Class A and 151k–271k Class B a month, most of the bill; near or above the 100k Class A the pricing page includes (older docs say 250k; see 02). KV list billing is **unverified** | Pay for them ($0.72–1.25 a month), or cut per-tick reads and writes |
 | Wide logs (50+ fields) near the 128 MB heap | Out-of-memory kills the run | Input concurrency 1 or smaller row groups for wide schemas |
 | Converter falls behind | Raw backlog grows; a raw lifecycle rule could delete unconverted data | Alert on backlog; set any raw expiry well above the worst backlog |
 | Credentials | The logging endpoint's FOS key lives in the logging config | Use a key scoped to the raw bucket and rotate it. The converter's keys go in a Secret Store. Never log `SendError` with `{:?}`; it prints the access key ID |
@@ -299,7 +302,7 @@ Each raw file must fit in one execution (about 940k typical lines), which is wha
 
 ## Next steps
 
-1. **Finish the production proof.** The closed-window converter, durable plan and hosted apps are implemented, and the historical raw backlog drained. Pass the corrected canary and approved serial tiers, then measure sustained autonomous operation before calling it ready; follow [PLAN](PLAN.md).
+1. **Finish the production proof.** The closed-window converter, durable plan and hosted apps are implemented, and the historical raw backlog drained. Pass the corrected canary and approved serial tiers, then measure sustained autonomous operation before calling it ready; follow PLAN.
 2. **Measure the real costs.** The cost tables simulate the current tick code at list prices. Replace them with measured `/usage` figures (FOS and KV operations, vCPU, storage ledger) from a live install, measure fixed vCPU per tick, and confirm whether KV list is billed. Reprice when the write path changes.
 3. **Scale test.** 16–28 parallel workers, and S3 logging at 10k+ req/s, to check the 52-file assumption and sustained FOS throughput.
 4. **Tick over a day.** Watch the VCL-cached tick for misses per bucket and gaps between runs over 24 h, with traffic from many POPs.
@@ -317,7 +320,7 @@ Each raw file must fit in one execution (about 940k typical lines), which is wha
 | Stage in KV Store, then compact | Needs HTTPS ingest (blocked) and one KV write per POST |
 | Keep a multipart upload open across requests | Needs HTTPS ingest; one bad part fails the whole file late |
 
-Details: [architecture-options.md](architecture-options.md).
+Details: architecture-options.md.
 
 ### How crash safety works
 
@@ -329,13 +332,13 @@ Details: [architecture-options.md](architecture-options.md).
 
 ### Fixed decisions in `CLAUDE.md` to revisit
 
-- **HTTPS ingest to a Compute receiver** is blocked by default. It needs an operator allowlist entry (`AllowListFastlyIPServices`). That comes from internal source; don't publish [05 §2.9](research/05-https-log-streaming.md).
+- **HTTPS ingest to a Compute receiver** is blocked by default. It needs an operator allowlist entry (`AllowListFastlyIPServices`). That comes from internal source; don't publish 05 §2.9.
 - **The auth line is wrong for this design.** The challenge file contains `*` or `hex(sha256(service_id))`, not a Fastly-Customer-ID, and with S3 logging there's no ingest request to authenticate. Only the tick needs the shared secret.
 - **`%{req.service_id}V` works only for VCL sources.** Here `service_id` is also in the raw file path.
 
 ### Historical: direct-parts estimate (prototype)
 
-**Prototype evidence, not the current code.** These tables came from running the archived direct-parts estimator ([`model.ts`](../experiments/archive/prototype-app/web/src/routes/calculator/model.ts)) on 2026-10-30, with a 2-minute tick and S3 period = window. Peer workers uploaded parts of the final Parquet directly ([07 §7.11](research/07-live-verification.md)); each worker's trailing part was padded to 5 MiB, which is most of the 1-minute storage. Cells marked † needed more than 8 workers or 30 coordinator calls per window. The current `app/` writes each window file with one PUT and has none of this.
+**Prototype evidence, not the current code.** These tables came from running the archived direct-parts estimator (`model.ts`) on 2026-10-30, with a 2-minute tick and S3 period = window. Peer workers uploaded parts of the final Parquet directly (07 §7.11); each worker's trailing part was padded to 5 MiB, which is most of the 1-minute storage. Cells marked † needed more than 8 workers or 30 coordinator calls per window. The 2026-10-30 app wrote each window file with one PUT and had none of this.
 
 #### Operations, typical lines
 
@@ -404,7 +407,7 @@ The synthetic shapes use random values, so their raw and Parquet sizes (and ther
 
 ### Historical: staged-copy benchmark (superseded)
 
-**Superseded.** These are the benchmark-era cost tables from [`model.py`](../experiments/archive/capacity-model/model.py), kept as evidence. Workers wrote staged Parquet pieces that a stitch then copied server-side, so every Parquet byte was also billed once as a staged file for 30 days (twice for two-level stitches: the 3.8 TB and 38.4 TB cells). They used 0.8 ticks a minute, at least 2 workers per period and no multipart padding. The prototype's direct parts removed the staged copy ([07 §7.11](research/07-live-verification.md)); the current code has neither. The operations and line-size tables of this model are reproducible from `model.py`.
+**Superseded.** These are the benchmark-era cost tables from `model.py`, kept as evidence. Workers wrote staged Parquet pieces that a stitch then copied server-side, so every Parquet byte was also billed once as a staged file for 30 days (twice for two-level stitches: the 3.8 TB and 38.4 TB cells). They used 0.8 ticks a minute, at least 2 workers per period and no multipart padding. The prototype's direct parts removed the staged copy (07 §7.11); the current code has neither. The operations and line-size tables of this model are reproducible from `model.py`.
 
 | req/s | Window | Raw billed (GB-month) | Staged billed (GB-month) | Parquet created | FOS operations | Raw + staged storage | Parquet storage per month kept | FOS total, 1 month kept |
 |---|---|---|---|---|---|---|---|---|

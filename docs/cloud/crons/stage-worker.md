@@ -15,26 +15,26 @@ Before F4, maintenance ran at the end of the tick on whatever calls ingest left,
 
 ## How it works
 
-**Dispatch** (`record_tick_inner`, `app/src/admin/mod.rs:1752-1990`)
+**Dispatch** (`dispatch`, `compute/cloud/src/admin/mod.rs:2375-2417`)
 1. On every non-busy tick with FOS credentials, the tick builds a `StageRequest`:
    - `service_id`, `run_id`, `tick_id` (the tick row's `event_id`, fixed up front), `trigger`, `actor`, `bucket`;
    - `start = cron:state.maint_next`.
-2. It passes the request to the ingest coordinator as `Options.extra` (`mod.rs:1840-1860`). The coordinator sends it with the shard workers in one `worker_dispatch` batch. When there is no ingest work, the batch carries only the stage request. Dispatch happens only within the first 10 s of the tick (`DISPATCH_BY`). The coordinator waits for replies until `DRAIN_AT` (32 s).
+2. It passes the request to the ingest coordinator as `Options.extra` (`mod.rs:2411-2417`). The coordinator sends it with the shard workers in one `worker_dispatch` batch. When there is no ingest work, the batch carries only the stage request. Dispatch happens only within the first 10 s of the tick (`DISPATCH_BY`). The coordinator waits for replies until `DRAIN_AT` (32 s).
 3. Ingest reserves `RAW_DELETE_CALLS` (5) for raw delete. Raw delete keeps `TICK_TAIL` (4) for the tick row, the `cron:state` CAS and its conflict retry. Shards, the stage request and the coordinator's own calls share the rest. The tick never skips ingest for maintenance.
 
-**Worker** (`handle_worker_stage`, `app/src/admin/stage.rs:76-146`; route in `sdk.rs:1052-1053`)
+**Worker** (`handle_worker_stage`, `compute/cloud/src/admin/stage.rs:84-159`; route in `sdk.rs:2249-2250`)
 1. Requires the `x-flp-worker-key` peer secret (`ingest::worker::authorized`), like `/_internal/ingest` and `/_internal/delete`. A bad key gets 403, and a malformed or invalid body gets 400.
 2. Loads the installed service; a different `service_id` replies `not_installed` with `next = start`. Reads the FOS credentials.
 3. Backdates its wall clock so every storage helper stops starting FOS calls at `STAGE_STOP` (20 s), well before the tick stops waiting.
-4. Runs `logs::maintenance_stage` (`admin/logs.rs:473-525`):
-   - Tries the `MAINT_STAGES` (`logs.rs:452-457`) in round-robin order from `start`: `retention_sweep`, `log_compact`, `delete_history`, `storage_reconcile`.
+4. Runs `logs::maintenance_stage` (`admin/logs.rs:736-808`):
+   - Tries the `MAINT_STAGES` (`logs.rs:694-702`) in round-robin order from `start`: `retention_sweep`, `log_compact`, `delete_history`, `storage_reconcile`.
    - A stage with nothing to do costs one or two reads and passes the turn on in the same execution.
    - The first stage with work runs, and no other stage runs after it.
    - `next` = the stage after the one that ran, or `start` if none ran.
 5. Writes that stage's `cron_runs` row itself, through the KV `logq_{sid}_{bucket}` outbox, with buffer `{run_id}-maint` and `tick_event_id` = the tick's id. The row is recorded exactly once whether or not the tick hears the reply.
 6. Replies `{status, ran, next, rows, calls, cache_ops, vcpu_ms}`. `rows` carries the execution's `fos_usage` and `api_telemetry` rows (`telemetry::api::runtime_rows`). The tick writes them into its own buffer. They are best-effort: lost if the tick stops waiting first.
 
-**Round-robin** (`cron:state.maint_next`, `maint_misses`; `admin/mod.rs:2108-2122`)
+**Round-robin** (`cron:state.maint_next`, `maint_misses`; `admin/mod.rs:3111-3125`)
 - A stage reply sets `maint_next = next` and clears `maint_misses`.
 - No reply (`worker_deadline`, error or a non-stage body) increments `maint_misses`. After `MAINT_MISS_LIMIT` (2) misses in a row, the pointer moves on by one. A stage whose worker always times out therefore cannot block the others.
 - **Fairness bound:** every stage with work runs within 4 answered ticks of the last one, and within 8 ticks when every turn misses twice. The F5 simulation measured at most 2 ticks between turns for delete-history and 1 for reconcile, at 52 raw files per 2-minute period.
@@ -75,11 +75,11 @@ Peer-only: the route exists only on `flp-worker` and needs the `worker_secret` k
 ## Tests
 
 Native only; none is live evidence.
-- `app/tests/ingest.rs`: `simulation::every_maintenance_stage_gets_a_turn_within_four_ticks_under_load`, and the stage tests that drive `record_tick` with `worker_dispatch` running `handle_worker_stage` in a fresh execution.
+- `compute/cloud/tests/ingest.rs`: `simulation::every_maintenance_stage_gets_a_turn_within_four_intervals_under_load`, and the stage tests that drive `record_tick` with `worker_dispatch` running `handle_worker_stage` in a fresh execution.
 
 ## Code
 
-- `app/src/admin/stage.rs`: request, reply parsing, handler.
-- `app/src/admin/logs.rs:440-540`: `TickContext`, `MAINT_STAGES`, `maintenance_stage`.
-- `app/src/admin/mod.rs:1509-1527`, `1752-2122`: constants, dispatch and round-robin.
-- `app/src/sdk.rs:1052-1053`: worker route.
+- `compute/cloud/src/admin/stage.rs`: request, reply parsing, handler.
+- `compute/cloud/src/admin/logs.rs:678-808`: `TickContext`, `MAINT_STAGES`, `maintenance_stage`.
+- `compute/cloud/src/admin/mod.rs:1701-1727`, `2258-3157`: constants, dispatch and round-robin.
+- `compute/cloud/src/sdk.rs:2249-2250`: worker route.

@@ -4,6 +4,7 @@
 **Status:** Ready for implementation planning. All decisions confirmed (§8).
 **Target:** `app/` — Fastly Compute `flp` (`wasm32-wasip1`, `fastly = "=0.13.2"`), Next.js static export `app/web/`.
 **Master plan:** `docs/superpowers/plans/2026-10-28-fastly-log-analytics-shell-and-dashboard.md`.
+**Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers in code spans are from when this was written, and links point at the current symbol. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository.
 
 ---
 
@@ -12,12 +13,12 @@
 ### Goals
 1. **Eliminate redundant per-file Parquet decoding and row scanning:** When 222 of 231 window files have already been processed, subsequent refreshes, preset range changes (`1h` ↔ `6h` ↔ `24h`), filter toggles, and full browser reloads (`Cmd+R`) must not re-decode and re-scan immutable interior files from scratch.
 2. **Introduce a persistent, self-hosted `@duckdb/duckdb-wasm` (`duckdb-eh`) analytical engine:** Maintain a singleton Web Worker holding an incremental DuckDB database (`ingested_files` ledger + consolidated `requests` table) so every file is ingested into DuckDB at most once per worker lifetime and ad-hoc filtered/boundary queries run via vectorized SQL.
-3. **Persist unfiltered per-file rollup summaries in `CacheStorage` (`flp-parquet-rollup-v1`):** Store compact, mergeable per-file [`Aggregator`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/engine.ts#L146-L266) summaries keyed by immutable `file.key` so unfiltered interior files merge in `<5 ms` even across full page reloads.
-4. **Stay well within Fastly Compute resource limits:** Compress `.wasm` static assets with gzip at build time in [`app/build.rs`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/build.rs) (~8.5 MB in `flp.wasm` linear memory) and serve them with `Content-Encoding: gzip` from [`Shell::static_response`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/src/shell.rs#L1093-L1106) without external CDN dependencies.
+3. **Persist unfiltered per-file rollup summaries in `CacheStorage` (`flp-parquet-rollup-v1`):** Store compact, mergeable per-file [`Aggregator`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L388) summaries keyed by immutable `file.key` so unfiltered interior files merge in `<5 ms` even across full page reloads.
+4. **Stay well within Fastly Compute resource limits:** Compress `.wasm` static assets with gzip at build time in [`compute/cloud/build.rs`](../../../compute/cloud/build.rs) (~8.5 MB in `flp.wasm` linear memory) and serve them with `Content-Encoding: gzip` from [`Shell::static_response`](../../../compute/cloud/src/shell.rs#L1451) without external CDN dependencies.
 
 ### Non-Goals
 - Server-side request rollups or server-side request compaction (master-plan D1 remains unchanged).
-- Changing the [`DashboardResult`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/engine.ts#L50-L57) or [`FetchStats`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/engine.ts#L34-L42) public return shape consumed by [`Dashboard.tsx`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/components/dashboard/Dashboard.tsx).
+- Changing the [`DashboardResult`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L87) or [`FetchStats`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L71) public return shape consumed by `Dashboard.tsx` (not carried into `frontend/`).
 
 ---
 
@@ -50,11 +51,11 @@ flowchart LR
 
 ### 3.1 Frontend Static Export (`app/web`)
 - Add `@duckdb/duckdb-wasm` to `app/web/package.json`.
-- Provide a build/prebuild step (`scripts/copy-duckdb-assets.mjs`, wired into `dev`, `build`, and `test`) that copies only the modern Exception Handling bundle (`duckdb-eh.wasm` and `duckdb-browser-eh.worker.js`) from `node_modules/@duckdb/duckdb-wasm/dist/` into `app/web/public/duckdb/`.
+- Provide a build/prebuild step (`frontend/scripts/copy-duckdb-assets.mjs`, wired into `dev`, `build`, and `test`) that copies only the modern Exception Handling bundle (`duckdb-eh.wasm` and `duckdb-browser-eh.worker.js`) from `node_modules/@duckdb/duckdb-wasm/dist/` into `app/web/public/duckdb/`.
 - Exclude the legacy `duckdb-mvp.wasm` and `duckdb-coi.wasm` bundles from `app/web/public/` so `app/web/out/` contains a single `.wasm` binary.
 
-### 3.2 Compile-Time Gzip Embedding (`app/build.rs` & `app/src/site.rs`)
-- Extend [`site::Asset`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/src/site.rs#L1-L5) with `pub content_encoding: Option<&'static str>`:
+### 3.2 Compile-Time Gzip Embedding (`compute/cloud/build.rs` & `compute/cloud/src/site.rs`)
+- Extend [`site::Asset`](../../../compute/cloud/src/site.rs#L1-L7) with `pub content_encoding: Option<&'static str>`:
   ```rust
   pub struct Asset {
       pub path: &'static str,
@@ -63,13 +64,13 @@ flowchart LR
       pub content_encoding: Option<&'static str>,
   }
   ```
-- Update [`app/build.rs`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/build.rs#L14-L33):
+- Update [`compute/cloud/build.rs`](../../../compute/cloud/build.rs):
   - Map `Some("wasm") => "application/wasm"`.
   - For `.wasm` files (or any asset `> 1 MiB`), compress the bytes with `flate2::write::GzEncoder` (`Compression::best()`) into `$OUT_DIR/compressed/<relpath>.gz` during `build.rs` execution and emit `include_bytes!` pointing to the compressed file with `content_encoding: Some("gzip")`.
   - All other assets emit `content_encoding: None`.
 
-### 3.3 Edge Serving (`app/src/shell.rs`)
-- Update [`Shell::static_response`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/src/shell.rs#L1093-L1106) to accept the request's `accept-encoding` header:
+### 3.3 Edge Serving (`compute/cloud/src/shell.rs`)
+- Update [`Shell::static_response`](../../../compute/cloud/src/shell.rs#L1451) to accept the request's `accept-encoding` header:
   - When `asset.content_encoding == Some("gzip")`:
     - Always include `Vary: Accept-Encoding`.
     - If `accept-encoding` contains `gzip` (case-insensitive token check), return `asset.bytes` directly with `Content-Encoding: gzip` (zero decompression allocation in Compute).
@@ -79,8 +80,8 @@ flowchart LR
 
 ## 4. Persistent Singleton Worker & Prewarm Protocol
 
-### 4.1 Worker Multiplexing & Cancellation (`app/web/lib/dashboard/client.ts` & `engine.worker.ts`)
-- Replace the per-call `new Worker()` + `worker.terminate()` in [`runInWorker`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/client.ts#L5-L52) with a module-level singleton worker instance.
+### 4.1 Worker Multiplexing & Cancellation (`frontend/lib/cloud-engine/dashboard/client.ts` & `engine.worker.ts`)
+- Replace the per-call `new Worker()` + `worker.terminate()` in [`runInWorker`](../../../frontend/lib/cloud-engine/dashboard/client.ts#L381) with a module-level singleton worker instance.
 - Messages between main thread and worker carry a numeric `requestId`:
   - **Main → Worker:**
     - `{ type: "prewarm", baseUrl: string }`
@@ -93,8 +94,8 @@ flowchart LR
 - When the caller's `AbortSignal` fires, `client.ts` posts `{ type: "abort", requestId }` to the worker and rejects the caller's promise with `AbortError` **without terminating the worker**, preserving the initialized DuckDB instance and in-memory caches. The worker aborts the per-request `AbortController` mapped to `requestId`.
 
 ### 4.2 Idle Prewarming (`DuckDBPrewarm` in `AppLayout.tsx`)
-- Export `prewarmDashboardWorker()` and a `<DuckDBPrewarm />` client component from `app/web/lib/dashboard/client.ts` (following the exact `requestIdleCallback` + 250ms timeout pattern of [`PlotlyPrewarm`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/components/PlotlyChart/index.tsx#L139-L173)).
-- Mount `<DuckDBPrewarm />` next to `<PlotlyPrewarm />` in [`AppLayout.tsx`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/components/AppLayout.tsx#L244) so the singleton worker and `duckdb-eh.wasm` initialize in the background before the user navigates to `/dashboard`.
+- Export `prewarmDashboardWorker()` and a `<DuckDBPrewarm />` client component from `frontend/lib/cloud-engine/dashboard/client.ts` (following the exact `requestIdleCallback` + 250ms timeout pattern of [`PlotlyPrewarm`](../../../frontend/components/PlotlyChart/index.tsx#L437)).
+- Mount `<DuckDBPrewarm />` next to `<PlotlyPrewarm />` in [`AppLayout.tsx`](../../../frontend/components/AppLayout.tsx#L328) so the singleton worker and `duckdb-eh.wasm` initialize in the background before the user navigates to `/dashboard`.
 
 ---
 
@@ -113,9 +114,9 @@ export type FileRollup = {
   cards: Record<string, { nonNull: number; counts: [Scalar, number][] }>;
 };
 ```
-- `FileSource` in [`engine.ts`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/engine.ts#L59-L67) gains optional `readRollup?: (key: string) => Promise<FileRollup | null>` and `writeRollup?: (key: string, rollup: FileRollup) => Promise<void>`.
-- [`browserSource`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/sources.ts#L16-L44) implements `readRollup` and `writeRollup` using a fast in-memory `Map<string, FileRollup>` backed by `CacheStorage` (`flp-parquet-rollup-v1`), and deletes matching entries in `evict(key)`.
-- [`Aggregator`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/engine.ts#L146-L266) gains `mergeRollup(rollup: FileRollup)` which adds `rollup.totalRequests`, ORs `rollup.hasBytes`, sums each `MinuteBucket` into `this.buckets`, and sums each field's `nonNull` and `[Scalar, number]` entries into `this.nonNull` and `this.counts`.
+- `FileSource` in [`engine.ts`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L133) gains optional `readRollup?: (key: string) => Promise<FileRollup | null>` and `writeRollup?: (key: string, rollup: FileRollup) => Promise<void>`.
+- [`browserSource`](../../../frontend/lib/cloud-engine/dashboard/sources.ts#L458) implements `readRollup` and `writeRollup` using a fast in-memory `Map<string, FileRollup>` backed by `CacheStorage` (`flp-parquet-rollup-v1`), and deletes matching entries in `evict(key)`.
+- [`Aggregator`](../../../frontend/lib/cloud-engine/dashboard/engine.ts#L388) gains `mergeRollup(rollup: FileRollup)` which adds `rollup.totalRequests`, ORs `rollup.hasBytes`, sums each `MinuteBucket` into `this.buckets`, and sums each field's `nonNull` and `[Scalar, number]` entries into `this.nonNull` and `this.counts`.
 
 ### 5.2 Interior vs. Boundary File Classification
 Given a query window `[fromMs, toMs)` and a `ManifestFile` with `fileStartMs = Date.parse(file.start)` and `fileEndMs = Date.parse(file.end)`:
@@ -166,23 +167,23 @@ When ingesting a Parquet buffer for `file_key`:
 - Register the `Uint8Array` buffer with DuckDB (`db.registerFileBuffer(tempName, new Uint8Array(bytes))`), inspect present columns via `DESCRIBE SELECT * FROM read_parquet(tempName)`, verify `timestamp` is present (throwing `${file.key} has no timestamp column` if missing, matching existing behavior), and insert rows where `timestamp IS NOT NULL AND NOT isnan(timestamp)` into `requests` with missing catalog columns projected as `NULL`. Always `db.dropFile(tempName)` in a `finally` block.
 
 ### 6.2 Filter Predicate Translation
-Must match [`matchesFilters`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/filters.ts#L60-L92) 100%:
+Must match [`matchesFilters`](../../../frontend/lib/cloud-engine/dashboard/filters.ts#L121) (now `compileFilters`) 100%:
 - **Include filters:** Grouped by `field`. Within a field, conditions combine with `OR`; across fields, groups combine with `AND`. `NULL` values never match an `include` filter.
   - Exact value (no `*`): `CAST("field" AS VARCHAR) = ?`
   - Wildcard value (contains `*`): regexp or `GLOB` matching `^...$` where `*` matches `.*`.
-- **Exclude filters:** Every exclude filter requires that either `"field" IS NULL` OR `CAST("field" AS VARCHAR)` does **not** match the pattern (`"field" IS NULL OR NOT (...)`), preserving rows with `NULL` in that column (matching the existing `excludes drop matches but keep null values` test in [`engine.test.ts`](file:///Users/drew.michael/Projects/fastly-logs-parquet/app/web/lib/dashboard/engine.test.ts#L364-L368)).
+- **Exclude filters:** Every exclude filter requires that either `"field" IS NULL` OR `CAST("field" AS VARCHAR)` does **not** match the pattern (`"field" IS NULL OR NOT (...)`), preserving rows with `NULL` in that column (matching the existing `excludes drop matches but keep null values` test in [`engine.test.ts`](../../../frontend/lib/cloud-engine/dashboard/engine.test.ts#L1246)).
 
 ---
 
 ## 7. Testing & Verification Plan
 
-1. **Unit & Integration Tests (`app/web/lib/dashboard/engine.test.ts`):**
+1. **Unit & Integration Tests (`frontend/lib/cloud-engine/dashboard/engine.test.ts`):**
    - All existing `runDashboard`, `dashboard filters`, `manifest paging`, and `query beacon` tests must pass unchanged.
    - **Incremental Rollup Reuse Test:** Run `runDashboard` with 3 interior files (`f1`, `f2`, `f3`), then run again with `f1`, `f2`, `f3`, and a new `f4`. Assert `source.fetchFile` is called **only once for `f4`** on the second run (0 times for `f1..f3`), `stats.cached === 3`, `stats.fetched === 1`, and the aggregated totals, buckets, and cards equal a cold run over `f1..f4`.
    - **Cross-Reload Rollup Cache Test:** Simulate a fresh worker with a pre-populated `readRollup` cache (`flp-parquet-rollup-v1` hit) and assert interior files are aggregated without calling `source.fetchFile`.
    - **Boundary vs. Interior Correctness Test:** Verify that a file straddling `toMs` (containing rows both `< toMs` and `>= toMs`) filters out rows `>= toMs` via DuckDB SQL while an interior file in the same run uses its rollup summary.
    - **DuckDB Filtered Reuse Test:** Run `runDashboard` with `include` and `exclude` filters twice over the same files; assert the second filtered query reuses DuckDB's `ingested_files` table without calling `source.fetchFile` again.
-2. **Rust Static Asset Gzip Tests (`app/src/site.rs` & `app/src/shell.rs`):**
+2. **Rust Static Asset Gzip Tests (`compute/cloud/src/site.rs` & `compute/cloud/src/shell.rs`):**
    - Test that an `Asset` with `content_encoding: Some("gzip")` returns compressed bytes + `Content-Encoding: gzip` + `Vary: Accept-Encoding` when `Accept-Encoding: gzip, deflate, br` is sent, and returns decompressed bytes + `Vary: Accept-Encoding` (without `Content-Encoding`) when `Accept-Encoding` is omitted.
 3. **End-to-End Browser Verification:**
    - Build static export (`STATIC_EXPORT=1 npx next build`) and run Playwright E2E specs (`dashboard-parity.spec.ts`, `loading-cls.spec.ts`, `usage-cost-parity.spec.ts`).

@@ -13,7 +13,7 @@ Small files make browser reads slow and LIST-heavy. Request and RUM window files
 ## How it works
 
 **Trigger**
-- Runs on `flp-worker` as one of the four round-robin maintenance stages (`compact_stage`, `admin/logs.rs:600-646`). See [stage-worker.md](stage-worker.md).
+- Runs on `flp-worker` as one of the four round-robin maintenance stages (`compact_stage`, `admin/logs.rs:957-1006`). See [stage-worker.md](stage-worker.md).
 - It takes its turn only when all of these hold:
   - `compaction_enabled` is set (default true);
   - at least `TAIL (3) + MIN_COMPACT_CALLS (6)` = 9 calls remain in the stage execution;
@@ -21,14 +21,14 @@ Small files make browser reads slow and LIST-heavy. Request and RUM window files
   - the run did some work. An idle run passes the turn to the next stage in the same execution.
 - The function is called with reserve `TAIL + 1`.
 
-**Coverage rule** (module doc `compact.rs:1-12`; `analyze`/`classify` `177-261`)
+**Coverage rule** (module doc `compact.rs:1-12`; `analyze`/`classify` `190-314`)
 - `compact={a}-{b}-c{nsrc}-n{rows}-{tags}.parquet` lives in the `day=DD/` folder.
 - `tags` are the sorted 8-hex FNV-1a hashes of the source window file names (`compact_key`, `104-111`).
 - A compact file covers exactly those windows, whether or not they still exist.
 - Legacy names without tags fall back to the `[a, b]` range rule. Such a file is valid only while all or none of its `nsrc` windows are listed.
-- The browser applies the same rule (`app/web/lib/telemetry/engine.ts:38`).
+- The browser applies the same rule (`frontend/lib/cloud-engine/telemetry/engine.ts:56-57`).
 
-**Steps** (`log_compact`, `compact.rs:619-733`)
+**Steps** (`log_compact`, `compact.rs:736-850`)
 1. Read KV `logs:compact_state`, which holds `done` per kind, `pending` queue ids and `checked` times.
 2. For each kind, pick the days to process:
    - New days run from `done + 1` (or `today − min(retention, 30)`) up to `closed_last = (now − 2 h)/day − 1`.
@@ -60,7 +60,7 @@ There is no endpoint. The stage runs only from the tick. `compaction_enabled` is
 
 ## Telemetry
 
-- A `cron_runs` row (`cron_kind = log_compact`) in buffer `{run_id}-maint` (`logs.rs:486-514`).
+- A `cron_runs` row (`cron_kind = log_compact`) in buffer `{run_id}-maint` (`logs.rs:742`).
 - Field mapping: `listed_files` = sources, `parquet_files_written` = chunks, `rows_written`, `bytes_written`, `deleted_files`, `more_pending`. `error` holds the first error.
 - Outcome:
   - `done` or `partial` when anything was written or deleted;
@@ -71,12 +71,11 @@ There is no endpoint. The stage runs only from the tick. `compaction_enabled` is
 ## Constraints and gotchas
 
 - A full 24-source chunk needs about `nsrc + 4` calls. The chunk is sized to fit the calls that remain, so an idle tick writes small chunks.
-- Peak heap is bounded by the byte and row caps: 2 MiB source and 10,000 rows, well under 128 MB (`compact.rs:36-39`). This is not measured live.
+- Peak heap is bounded by the byte and row caps: 2 MiB source and 10,000 rows, well under 128 MB (`compact.rs:38-39`). This is not measured live.
 - A day with more than 1,000 objects never compacts (`compact_day_too_large`).
-- Compacted-away files still bill 30 days (`min_billed_days`, `docs/runbook.md:325`).
-- Compaction and retention never run in the same execution. Retention removes a `compact=` file only with its expired day (`retention.rs:389-415`).
-- The source comment in `drain` (`compact.rs:544`) says worker fan-out "is not charged to the tick budget". In fact `worker_delete` charges 1 call (`sdk.rs:729`). The fallback is disabled here either way.
-- See `docs/compute-limits-audit.md` (Compaction row, "OK") and `docs/runbook.md:307-325`.
+- Compacted-away files still bill 30 days (`min_billed_days`, `auth/settings.rs:112`).
+- Compaction and retention never run in the same execution. Retention removes a `compact=` file only with its expired day (`retention.rs:557-598`).
+- The source comment in `drain` (`compact.rs:661`) says worker fan-out "is not charged to the tick budget". In fact `worker_delete` charges 1 call (`sdk.rs:1635`). The fallback is disabled here either way.
 
 ## Failure modes and recovery
 
@@ -87,33 +86,33 @@ There is no endpoint. The stage runs only from the tick. `compaction_enabled` is
 
 ## Tests
 
-- `app/src/telemetry/compact.rs:749`, `764`: unit tests.
-- `app/tests/ingest.rs`:
-  - `closed_day_is_merged_in_chunks_of_at_most_24_and_deduplicated` (2535)
-  - `coverage_is_the_recorded_source_set_and_a_late_window_in_range_is_still_read` (2584)
-  - `partial_source_deletes_never_hide_rows_or_invalidate_the_compact` (2602)
-  - `a_chunk_is_sized_to_the_calls_that_fit_and_never_exceeds_them` (2644)
-  - `a_failed_commit_queues_and_deletes_nothing` (2680)
-  - `request_and_rum_files_are_never_touched` (2695)
-  - `the_delete_queue_only_removes_this_services_ops_window_and_compact_keys` (2857)
-  - `a_window_over_the_row_cap_stays_loose_and_readable` (2938)
-  - `compaction_stops_cleanly_at_the_wall_time_limit_and_resumes_next_tick` (2950)
-  - `a_tick_with_a_backlog_stays_inside_the_lookup_and_call_limits` (2966)
-  - `an_idle_tick_runs_log_compact` (2992)
+- `compute/cloud/src/telemetry/compact.rs:853-988`: unit tests.
+- `compute/cloud/tests/ingest.rs`:
+  - `closed_day_is_merged_in_chunks_of_at_most_24_and_deduplicated` (7273)
+  - `coverage_is_the_recorded_source_set_and_a_late_window_in_range_is_still_read` (7322)
+  - `partial_source_deletes_never_hide_rows_or_invalidate_the_compact` (7340)
+  - `a_chunk_is_sized_to_the_calls_that_fit_and_never_exceeds_them` (7382)
+  - `a_failed_commit_queues_and_deletes_nothing` (7418)
+  - `request_and_rum_files_are_never_touched` (7433)
+  - `the_delete_queue_only_removes_this_services_ops_window_and_compact_keys` (7765)
+  - `a_window_over_the_row_cap_stays_loose_and_readable` (7846)
+  - `compaction_stops_cleanly_at_the_wall_time_limit_and_resumes_next_tick` (7858)
+  - `a_tick_with_a_backlog_stays_inside_the_lookup_and_call_limits` (7874)
+  - `an_idle_tick_runs_log_compact` (7900)
 
 ## TODOs
 
 - The spec says nothing of the round-robin turn, the tag suffix or the size caps. Master plan Goal 3 ("Where the code differs") records all three.
 - Idle-tick headroom has not been measured live. Spec §4 says Task 0 measures it, and plan Task 11.3 (approval-gated) must show that "compaction and retention run on idle ticks within budget".
 - A day folder with more than 1,000 objects stays blocked indefinitely. No split-listing path exists.
-- v3 parity: `~/Projects/fastly-log-analytics/docs/cron/jobs/local-compact.md`, `rollup-compact.md`, `partial-hour-merge.md` and `optimize.md` compact request data on the server. That is intentionally not ported: master plan D1, table line 673, where compaction happens in the browser.
+- v3 parity: v3's `local-compact`, `rollup-compact`, `partial-hour-merge` and `optimize` jobs compact request data on the server. That is intentionally not ported: master plan D1, table line 673, where compaction happens in the browser.
 
 ## Code
 
-- `app/src/telemetry/compact.rs:1-43`: design notes and constants.
-- `app/src/telemetry/compact.rs:104-261`: key format, `analyze`, `classify`.
-- `app/src/telemetry/compact.rs:303-367`: queues, `next_chunk`.
-- `app/src/telemetry/compact.rs:400-512`: `compact_day`.
-- `app/src/telemetry/compact.rs:528-614`: `is_compactable`, `drain`.
-- `app/src/telemetry/compact.rs:619-733`: `log_compact`.
-- `app/src/admin/logs.rs:25-27`, `466-519`: constants and wiring.
+- `compute/cloud/src/telemetry/compact.rs:1-43`: design notes and constants.
+- `compute/cloud/src/telemetry/compact.rs:102-314`: key format, `analyze`, `classify`.
+- `compute/cloud/src/telemetry/compact.rs:414-484`: queues, `next_chunk`.
+- `compute/cloud/src/telemetry/compact.rs:517-629`: `compact_day`.
+- `compute/cloud/src/telemetry/compact.rs:645-731`: `is_compactable`, `drain`.
+- `compute/cloud/src/telemetry/compact.rs:736-850`: `log_compact`.
+- `compute/cloud/src/admin/logs.rs:31`, `957-1006`: constant and wiring.

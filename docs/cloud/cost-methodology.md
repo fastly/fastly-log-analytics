@@ -1,8 +1,8 @@
 # Cost methodology
 
-How this install reports and estimates cost. Admins see it on `/usage`; anyone can use the public `/calculator`. **Usage is not an invoice.** Fastly bills by contract, and nothing here calls a Fastly billing API.
+How this install reports and estimates cost. Admins see it on `/usage`, which also embeds the calculator as the Cost Estimator; there is no separate public calculator page. **Usage is not an invoice.** Fastly bills by contract, and nothing here calls a Fastly billing API.
 
-Spec: `docs/superpowers/specs/2026-10-30-operational-logging-and-telemetry-design.md` §7.
+Spec: [specs/2026-10-30-operational-logging-and-telemetry-design.md](specs/2026-10-30-operational-logging-and-telemetry-design.md) §7.
 
 ## Measured vs. estimated
 
@@ -23,7 +23,7 @@ The **Estimated Incurred Cost** card prices every product the install uses: FOS 
 
 ## Rates
 
-`UsageLogging` (`app/src/auth/settings.rs`) is the single source of rates; defaults are list/contract price: Class A $0.0025 per 1,000 ($2.50 per million), Class B $0.004 per 10,000 ($0.40 per million), storage $0.02/GB-month, egress $0.12/GB, CDN requests $0.01 per 10k, Compute $0.50 per million requests plus contract CPU terms (`compute_vcpu_free_ms_per_request = 20` ms included per request, `compute_vcpu_excess_rate_per_second = $0.00005`/s on excess CPU—equivalent to $0.05 per million excess ms—and `compute_vcpu_rounding_ms = 10` ms nearest-increment rounding per request), KV Class A $6.50 and Class B $0.55 per million, secrets $5/month each, `min_billed_days` 30. Account-level free tiers (first 1M CDN requests, first 10 secrets) are not subtracted, while the per-request Compute CPU allowance (`compute_vcpu_free_ms_per_request`) and nearest-increment rounding (`compute_vcpu_rounding_ms`) are applied per Compute request in both `/usage` and `/calculator`. Recording is on by default; when `enabled` is false `fos_usage` is not recorded and `/usage` says how to turn it on. The calculator works per million operations, so one conversion helper turns per-1k and per-10k rates into per-million (`lib/usage/summary.ts`).
+`UsageLogging` (`compute/cloud/src/auth/settings.rs:7`) is the single source of rates; defaults are list/contract price: Class A $0.0025 per 1,000 ($2.50 per million), Class B $0.004 per 10,000 ($0.40 per million), storage $0.02/GB-month, egress $0.12/GB, CDN requests $0.01 per 10k, Compute $0.50 per million requests plus contract CPU terms (`compute_vcpu_free_ms_per_request = 20` ms included per request, `compute_vcpu_excess_rate_per_second = $0.00005`/s on excess CPU—equivalent to $0.05 per million excess ms—and `compute_vcpu_rounding_ms = 10` ms nearest-increment rounding per request), KV Class A $6.50 and Class B $0.55 per million, secrets $5/month each, `min_billed_days` 30. Account-level free tiers (first 1M CDN requests, first 10 secrets) are not subtracted, while the per-request Compute CPU allowance (`compute_vcpu_free_ms_per_request`) and nearest-increment rounding (`compute_vcpu_rounding_ms`) are applied per Compute request in both `/usage` and its Cost Estimator. Recording is on by default; when `enabled` is false `fos_usage` is not recorded and `/usage` says how to turn it on. The calculator works per million operations, so two helpers turn per-1k and per-10k rates into per-million (`perThousandToPerMillion` and `perTenThousandToPerMillion`, `frontend/lib/cloud-engine/usage/summary.ts:258-264`).
 
 ## Operation classes
 
@@ -45,7 +45,7 @@ A quiet install (defaults) adds roughly 93 Class A and 168 Class B operations a 
 
 ## Calculator
 
-Public and fully working without sign-in; `/usage` embeds it as the Cost Estimator. Like FLA, it extrapolates a month from the logged service's traffic and logging settings rather than pricing hand-entered monthly quantities. Logged lines a day are requests (or edge requests when edge-only) × sample rate; raw files a day are the expected files when those lines spread over `files_per_period` writing nodes each period, `P × N × (1 − e^(−L/P/N))`. Each product's monthly cost is 30 × (fixed per day + per raw file × files + per 1,000 lines × lines). Every Compute vCPU component (app fixed, worker conversion, summary bundles, split raw files, relayed fan-out, RUM and compaction) is priced per execution using the contract CPU formula: divide daily vCPU ms by the line's daily execution count, subtract `compute_vcpu_free_ms_per_request` (20 ms default), round excess ms to the nearest `compute_vcpu_rounding_ms` (10 ms default), multiply by daily executions × 30 days, and price at `compute_vcpu_excess_rate_per_second / 1000`. Admins get the install's measured values: traffic from the stats API over the last 3 complete UTC days (`/api/admin/usage/logged-traffic`), and unit costs from up to 7 days of Compute billing (divided by the hours Fastly actually reported), `ingest_files`, `request_ingest` cron runs, `fos_usage` and the latest storage reconcile. Billed KV and front CDN requests are split into a per-file default and a fixed remainder, because those operations are not logged per caller. See [`docs/pages/calculator.md`](pages/calculator.md).
+`/usage` embeds it as the Cost Estimator (`frontend/components/CostCalculator/CloudCostCalculator.tsx`, model `frontend/lib/cloud-engine/usage/estimate.ts`). Like FLA, it extrapolates a month from the logged service's traffic and logging settings rather than pricing hand-entered monthly quantities. Logged lines a day are requests (or edge requests when edge-only) × sample rate; raw files a day are the expected files when those lines spread over `filesPerPeriod` writing nodes each period, `P × N × (1 − e^(−L/P/N))`. Each product's monthly cost is 30 × (fixed per day + per raw file × files + per 1,000 lines × lines). Every Compute vCPU component (app fixed, worker conversion, summary bundles, split raw files, relayed fan-out, RUM and compaction) is priced per execution using the contract CPU formula: divide daily vCPU ms by the line's daily execution count, subtract `compute_vcpu_free_ms_per_request` (20 ms default), round excess ms to the nearest `compute_vcpu_rounding_ms` (10 ms default), multiply by daily executions × 30 days, and price at `compute_vcpu_excess_rate_per_second / 1000`. Admins get the install's measured values: traffic from the stats API over the last 3 complete UTC days (`/api/admin/usage/logged-traffic`), and unit costs from up to 7 days of Compute billing (divided by the hours Fastly actually reported), `ingest_files`, `request_ingest` cron runs, `fos_usage` and the latest storage reconcile. Billed KV and front CDN requests are split into a per-file default and a fixed remainder, because those operations are not logged per caller. See [`docs/pages/usage-and-cost.md`](../pages/usage-and-cost.md).
 
 ### Summary bundles (always on)
 
@@ -56,7 +56,7 @@ The ingest worker writes one summary Parquet next to each window file (Task 22.1
 - **Class B and front requests:** the hour bundles read every window summary through `/fos`, and the day bundle reads 24 hour bundles (`W + 24`), each counted as a front request and a Class B miss.
 - **Storage:** `S(L/W) × W + 24 × S(L/24) + S(L)` bytes a day, retained like the request logs (`max(retention, min billed days)`), where `S(r) = 23 KB + ceiling × r / (r + 2,600)`.
   - The 23 KB footer, the 2,600-row half point and the 380 KB default ceiling are a fit on a native ZSTD(1) run of the summary v2 `write_summary` over 1–40,000 synthetic rows with about 30 fields (23 KB at 1 row, 39 KB at 100, 128 KB at 1,000, 223 KB at 5,000, 310 KB at 20,000 and 359 KB at 40,000).
-  - Summary v3 adds latency histograms, city/proto/ASN groups, 5-minute series and a row sample, and its p=12 HyperLogLog++ sketches are sparse (a few bytes per distinct IP) up to 1,024 entries and 4,099 B dense above. On `tests/summary_bench.rs`'s synthetic 800-row windows it writes 179 KB per window (v2: 95 KB) and 941 KB per hour bundle (v2: 254 KB), which keeps 4x top-value candidates so day bundles rank from the same margin; a day bundle is 660 KB (v2: 259 KB). The defaults above are not yet refitted for v3.
+  - Summary v3 adds latency histograms, city/proto/ASN groups, 5-minute series and a row sample, and its p=12 HyperLogLog++ sketches are sparse (a few bytes per distinct IP) up to 1,024 entries and 4,099 B dense above. On `compute/cloud/tests/summary_bench.rs`'s synthetic 800-row windows it writes 179 KB per window (v2: 95 KB) and 941 KB per hour bundle (v2: 254 KB), which keeps 4x top-value candidates so day bundles rank from the same margin; a day bundle is 660 KB (v2: 259 KB). The defaults above are not yet refitted for v3.
   - High-cardinality services can reach a few MB per window. The worst case is 42 fields × 2,000 top values plus 42 × 500 HyperLogLog sketches; a field's sketches split its rows between them, so together they hold at most one sparse entry per IP row, and only a value with over 1,024 distinct IPs goes dense. The ceiling is an editable unit.
   - Hour and day bundles keep 500 values per field, so the same curve over-states them.
 - **Worker CPU:** `summary_vcpu_ms_per_1k_lines × L / 1000` total daily vCPU ms across `W` window-summary executions, priced per execution with the contract CPU allowance (`compute_vcpu_free_ms_per_request`) and nearest-increment rounding (`compute_vcpu_rounding_ms`). Task 22.4 measured 79.7 ms per 1,000 rows over 34 `request_ingest` runs (267,300 rows) on 2026-11-01. Total worker CPU was 228.7 ms per 1,000 rows, so the remainder was about 149 ms. Subsequent inline-summary tuning changed the default assumptions to 32 ms for summaries and 64 ms for other worker work; these are not a fresh live measurement. The measured prefill partitions the billed worker total: subtract the estimated summary share, capped at that total, before pricing the worker line. It does not add the summary share to an already inclusive bill; the summary share remains labelled as an assumption.
@@ -69,7 +69,7 @@ The ingest worker writes one summary Parquet next to each window file (Task 22.1
 
 A closed hour's window files below the target size can be merged (Task 23). FOS bills every object for at least the minimum billed days, so merged-away sources still cost their full month. Option A in the remediation plan expects that to add about 100% to Parquet storage at 30-day retention and about 33% at 90 days. At high request rates window files are already 10–25 MB, so compaction mainly helps low and medium traffic.
 
-The calculator's "Compact small Parquet files" toggle and target size use the per-service setting `compaction = { "mode": "off" | "size_target", "size_target_mb": 64 }`, default `off`. With an admin's measured data, the toggle starts from the logged service's setting when `/api/admin/usage/logged-traffic` reports it in `logging.compaction`; otherwise it starts off. The calculator only displays that setting and never writes it.
+The calculator's "Compaction" line uses the per-service setting `compaction = { "mode": "off" | "size_target", "size_target_mb": 64 }`, default `off`. With an admin's measured data, it follows the logged service's setting when `/api/admin/usage/logged-traffic` reports one (`measureEstimate`, `estimate.ts:839-846`); otherwise compaction is off. The Cost Estimator has no compaction toggle and never writes the setting.
 
 Each hour holds `W/24` files of `L × parquet_bytes_per_row / W` bytes. `compactionPlan` merges them level by level:
 
@@ -79,7 +79,7 @@ Each hour holds `W/24` files of `L × parquet_bytes_per_row / W` bytes. `compact
 
 Priced on the "Compaction" line, per day:
 
-- **Compute:** one request per execution, plus `compact_vcpu_ms_per_mb` × MB copied across `executionsPerDay` executions (priced per execution after subtracting `compute_vcpu_free_ms_per_request` and rounding excess ms to the nearest `compute_vcpu_rounding_ms`).
+- **Compute:** one request per execution, plus `compactVcpuMsPerMb` × MB copied across `executionsPerDay` executions (priced per execution after subtracting `compute_vcpu_free_ms_per_request` and rounding excess ms to the nearest `compute_vcpu_rounding_ms`).
   - The default of 22 ms per MB is the pre-summary worker rate (97 ms per 1,000 lines before the 64 + 32 = 96 ms worker+summary split and Task 22.4's 228.7 ms measurement, ÷ 0.194 MB of Parquet per 1,000 lines ≈ 500 ms per MB written) × 0.044.
   - 0.044 is the native ratio, per output MB, of copying encoded column chunks with `append_column` (3.7 ms per MB for 13 × 42 KB sources) to converting and encoding them (83 ms per MB at 300-row windows).
   - Large sources copy at 0.6 ms per MB, so the default is conservative.
@@ -96,7 +96,7 @@ The tracker batches every metric and error of a pageview into one `POST /rum-bea
 Priced on the "RUM" line, per day:
 
 - **Beacons:** `pageviews × sample rate × beacons per pageview`, each a CDN request on the logged service and one raw line. The default is 1 beacon per pageview; long-lived pages flush more than once.
-- **Storage:** raw lines × `rum_gz_bytes_per_line` (default 95, the zstd-compressed positional-array size of a ~380 B line), billed like request raw files; rows (`rows_per_line`, default 6) × `rum_parquet_bytes_per_row` (default 30), kept `max(rum retention, min billed days)`.
+- **Storage:** raw lines × `rumGzBytesPerLine` (default 95, the zstd-compressed positional-array size of a ~380 B line), billed like request raw files; rows (`rumRowsPerLine`, default 6) × `rumParquetBytesPerRow` (default 30), kept `max(rum retention, min billed days)`.
 - **Per raw file:** raw RUM files a day use the request formula with the RUM period, priced at the request per-file units (Class A/B, front requests, worker requests, KV).
 - **Runs:** one LIST of the raw RUM prefix (Class A) per due run. CPU is the request rate per 1,000 lines.
 
@@ -105,9 +105,9 @@ An admin's prefill sets the period, sample rate and retention from `logging` in 
 
 ### Ingest capacity (Task 25.3)
 
-The calculator's "Ingest capacity" panel (`app/web/lib/usage/capacity.ts`) checks whether request ingest keeps up with the service's average logged traffic. It is a planning model, not a measurement; Task 25.4 must confirm it live.
+The ingest capacity model (`ingestCapacity`, `frontend/lib/cloud-engine/usage/capacity.ts:157`) checks whether request ingest keeps up with the service's average logged traffic. It is a planning model, not a measurement; Task 25.4 must confirm it live. The shared Cost Estimator does not show it as a panel; the Cloud adapter exports it as `evaluateCapacity` (`frontend/lib/cloud-engine/adapter.ts:2125`).
 
-Limits, mirrored from `app/src/ingest`:
+Limits, mirrored from `compute/cloud/src/ingest`:
 
 | Limit | Value | Source |
 |---|---|---|
@@ -144,7 +144,7 @@ Worked results (CPU 96 ms/1k lines, the default conversion plus summary units; 1
 | 88 B/line, 60 s period | ≈ 43 / 23.7k req/s | ≈ 43 / 455k req/s |
 | 88 B/line, 300 s period | ≈ 9 / 26k req/s | ≈ 9 / 104k req/s |
 
-**The 100k req/s target is blocked under the documented 50 ms vCPU.** Shard throughput reaches it with relay 16, but each worker execution then converts thousands of lines: at 100k req/s, 88 B/line and a 300 s period the busiest segment needs ≈ 5.1 s vCPU, 1,680 ms of it skipping 7 earlier segments. Even the calculator defaults pass 50 ms at a few hundred req/s. Ingest workers have always used more than 50 ms (`docs/compute-limits-audit.md`: the 50 ms figure is enforced only in compaction and bundles); the throughput envelope is what the pipeline does if Fastly keeps allowing that, which Task 25.4 must measure, not a supported figure. Holding to 50 ms would need far smaller shards, and so many more executions per tick than the 32-call budget dispatches; that is an architecture change, not a tuning step.
+**The 100k req/s target is blocked under the documented 50 ms vCPU.** Shard throughput reaches it with relay 16, but each worker execution then converts thousands of lines: at 100k req/s, 88 B/line and a 300 s period the busiest segment needs ≈ 5.1 s vCPU, 1,680 ms of it skipping 7 earlier segments. Even the calculator defaults pass 50 ms at a few hundred req/s. Ingest workers have always used more than 50 ms (the compute-limits audit in the former fastly-logs-parquet repository: the 50 ms figure is enforced only in compaction and bundles); the throughput envelope is what the pipeline does if Fastly keeps allowing that, which Task 25.4 must measure, not a supported figure. Holding to 50 ms would need far smaller shards, and so many more executions per tick than the 32-call budget dispatches; that is an architecture change, not a tuning step.
 
 Workers check their wall stop every 1 MiB decompressed (`convert.rs` `CHECKPOINT_BYTES`), including the skipped prefix and the measurement of an object too large to convert whole. A segment that reaches the stop answers `worker_budget_stopped`: nothing is written, the raw object stays, and the coordinator counts the failure, logs it as a platform error and retries (after 3, it abandons and replans the plan). The checkpoint does not enforce 50 ms vCPU: that would stop every conversion above a few hundred lines.
 
@@ -157,7 +157,7 @@ Unmeasured assumptions that Task 25.4 must check: per-execution worker vCPU agai
 
 ### High-RPS ingest costs (Task 25)
 
-The monthly estimate adds a line for each high-RPS path, only when the calculator's inputs trigger it, so a small service without relay prices exactly as before. Each line has an info tip with its formula. They share the capacity model's limits and object shape (`app/web/lib/usage/ingestShape.ts`). F is raw files a day, S segments per file, W window files a day (`window files per file × F`), w windows per shard (`window files per file ÷ worker requests per file`).
+The monthly estimate adds a line for each high-RPS path, only when the calculator's inputs trigger it, so a small service without relay prices exactly as before. Each line has an info tip with its formula. They share the capacity model's limits and object shape (`frontend/lib/cloud-engine/usage/ingestShape.ts`). F is raw files a day, S segments per file, W window files a day (`window files per file × F`), w windows per shard (`window files per file ÷ worker requests per file`).
 
 - **Split raw files** (S > 1, Task 25.1), per day:
   - Worker requests `F × (S − worker requests per file)`: one worker execution per segment instead of a share of one.
@@ -276,7 +276,7 @@ The browser uses TanStack Query with a ten-minute stale interval and no automati
 
 ## Direct-parts traffic estimate
 
-The pure typed model is `app/web/src/routes/calculator/model.ts`. It reuses the measured compression/CPU shapes and list prices from `experiments/archive/capacity-model/model.py` and the existing how-it-works calculator:
+The pure typed model was `app/web/src/routes/calculator/model.ts` in the former fastly-logs-parquet repository, since archived. It reused the measured compression/CPU shapes and list prices from that repository's `experiments/archive/capacity-model/model.py` and the existing how-it-works calculator:
 
 | Shape | gzip bytes/row | Parquet bytes/row | CPU ms/1,000 rows |
 |---|---:|---:|---:|
@@ -306,7 +306,7 @@ Also excluded: rollup copies, query/UI traffic, failure retries, incomplete-uplo
 
 - [Fastly billing usage API](https://www.fastly.com/documentation/reference/api/account/billing-usage-metrics/): consulted before API implementation.
 - [Historical stats API](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/): active CPU time is `compute_execution_time_ms`, not wall time.
-- [Live verification §6–§7.13](research/07-live-verification.md): ingestion shapes, direct parts and tick rate.
+- Live verification §6–§7.13 (`docs/research/07-live-verification.md` in the former fastly-logs-parquet repository): ingestion shapes, direct parts and tick rate.
 - [Recommendation](recommendation.md): its older tables still include staged storage; they are not the direct-parts estimator.
 
 Live read-only schema checks found `data.details: []` for the allowlisted VCL service's two-month billing response. The account-usage response has `usage[]`; only its schema was inspected. No nonempty service billing fixture or service-attributed charged-USD response has been observed. The calculator does not imply otherwise.
@@ -344,6 +344,6 @@ Reported refresh work was **27 calls = 7 billing + 18 stats + 2 LIST** in
 2,456 ms; these are snapshot telemetry, not independently captured upstream
 call counts. Both one-page bucket listings were complete. Public-schema,
 privacy, coverage and arithmetic checks passed. Private evidence is
-`data/overnight/costs-w4-v15-20261028T101941Z.json`.
+`data/overnight/costs-w4-v15-20261028T101941Z.json` in the former fastly-logs-parquet repository.
 Project billing rowsets remain empty and actual charged USD remains null;
 nonempty billing is still unvalidated.

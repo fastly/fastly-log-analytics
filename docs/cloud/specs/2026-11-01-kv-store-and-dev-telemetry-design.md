@@ -2,6 +2,7 @@
 
 **Date:** 2026-11-01
 **Status:** Approved
+**Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers are from when this was written. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository.
 
 ## 1. Goals
 
@@ -22,7 +23,7 @@
   - *Amendment (2026-11-10):* `ingest_files` moved to always-on. It backs the Logs page's Ingestion History tab and the cost-calculator prefill on both deployments, and the unified UI has no developer-telemetry toggle, so gating it left that tab empty on Cloud.
 - **Unlock check (`telemetry::dev_telemetry_available(runtime)`)**:
   - Checks `runtime.config("dev_telemetry")` (`"1"` or `"true"`, case-insensitive) with fallback to compile-time `option_env!("FLP_DEV_TELEMETRY")`.
-  - `app/infra/provision.py` and `app/tools/release.py` propagate `FLP_DEV_TELEMETRY` from `.env` / environment into the `flp_config` Config Store (`dev_telemetry`) when present.
+  - `compute/cloud/infra/provision.py` and `compute/cloud/tools/release.py` propagate `FLP_DEV_TELEMETRY` from `.env` / environment into the `flp_config` Config Store (`dev_telemetry`) when present.
 - **Settings & Runtime behavior**:
   - `OperationalLogSettings` adds `#[serde(default)] pub dev_telemetry_enabled: bool` (default: `false`).
   - `telemetry::effective_dev_telemetry(runtime, settings)` returns `dev_telemetry_available(runtime) && settings.dev_telemetry_enabled`.
@@ -40,7 +41,7 @@
 - In `flush_admin_audit`, `kv_list("audit:")` is skipped when `audit:seq` has not advanced past `cursor.admin_audit_seq`.
 
 ### 2.3 Core Cache Read-Through / Write-Through for Control-Plane Config Keys
-- `app/src/admin/kv.rs` caches `admin:install`, `svc:<sid>`, and `settings:operational_logs` in Core Cache under `flp:kvcache:v1:<key>` with a 300-second TTL (`CacheOverride::ttl(300)`).
+- The KV client in `compute/cloud/src/sdk.rs` (`kv_core_cache_key`) caches `admin:install`, `svc:<sid>`, and `settings:operational_logs` in Core Cache under `flp:kvcache:v1:<key>` with a 300-second TTL (`CacheOverride::ttl(300)`).
 - Reads (`admin_get`) check Core Cache first for cacheable config keys; on miss, they read from KV Store and populate Core Cache (including a sentinel for missing keys).
 - Writes (`admin_cas`) and deletes (`kv_delete`) on cacheable config keys write through to KV Store and immediately update or purge the corresponding `flp:kvcache:v1:<key>` entry in Core Cache.
 
@@ -51,7 +52,7 @@
   - If `delete_after == false`, call budget is insufficient, or `delete_objects` returns any failed keys, the remaining keys are written to `ingest:deleteq:<plan_id>` for the scheduled `raw_delete` job to retry.
 
 ### 2.5 Telemetry Cost Attribution on `/usage` and Cost Calculator
-- `incurredCost` in `app/web/lib/usage/summary.ts` computes `telemetryUsd` from:
+- `incurredCost` in `frontend/lib/cloud-engine/usage/summary.ts` computes `telemetryUsd` from:
   - Operational log storage (`ops_*` / `cron_runs`, `ingest_files`, `fos_usage`, `admin_audit`, `api_telemetry`, `platform_errors` datasets),
   - Operational log FOS Class A & Class B calls (`cron:log_flush`, `cron:log_compact`, `cron:ops_retention`, `api:logs`, and `ops_*` datasets),
   - Operational log Compute requests and vCPU ms (`log_flush`, `log_compact`, `ops_retention`, `storage_reconcile`, and `/api/logs` / `/api/telemetry` routes).

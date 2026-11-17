@@ -42,7 +42,7 @@ A segment shard (`segment: {start, end?}`, exactly one key) is sent to `POST /_i
 6. PUT the intent manifest `processed/_inflight/<plan_id>/<shard>.json` = `{plan_id, shard, attempt, keys}`.
 7. For each window, write Parquet and PUT `processed/<table>/<hour_dir>window=<s>-<e>-<plan_id>s<shard>-n<rows>.parquet`. Before the manifest and each window PUT, the worker checks the stop time and refuses to start within 30 s of `lease_until` (`WORKER_LEASE_MARGIN_S`, error `worker_lease_expired`).
    - Every PUT is `Store::put_verified`: the ETag returned by FOS must equal the body's MD5, or the shard fails with `etag_mismatch`.
-   - A window file over 8 MiB (`compaction::PART_BYTES`) is uploaded as 8 MiB multipart parts when the remaining calls cover create + parts + complete and still leave every later window PUT, the summary PUT and one spare. Each part is ETag-checked, any failure aborts the upload, and `md5` is the whole body's MD5. Otherwise the window falls back to one PUT. A crash between create and complete leaves an open upload until FOS cleans it up on its platform-managed schedule (`docs/research/04-object-storage-writes.md`); the shard is retried under a new upload.
+   - A window file over 8 MiB (`compaction::PART_BYTES`) is uploaded as 8 MiB multipart parts when the remaining calls cover create + parts + complete and still leave every later window PUT, the summary PUT and one spare. Each part is ETag-checked, any failure aborts the upload, and `md5` is the whole body's MD5. Otherwise the window falls back to one PUT. A crash between create and complete leaves an open upload until FOS cleans it up on its platform-managed schedule (per the object-storage-writes research note in the former fastly-logs-parquet repository); the shard is retried under a new upload.
 8. Answer `{status: "ok", result: {attempt, manifest, outputs: [{key, rows, bytes, md5}], objects: [...]}}`. The `objects` list gives per raw key: status, rows, lines, bad lines and a bad sample of at most 512 bytes. Every reply also carries `usage` (FOS usage rows), `calls` and `vcpu_ms`.
 
 ## Budgets
@@ -70,12 +70,12 @@ None is written by the worker. The coordinator buffers the returned usage rows a
 
 ## Tests
 
-`app/tests/ingest_fanout_faults.rs`: `worker_signs_with_the_secret_key_unwrapped_from_its_envelope`, `a_worker_past_its_lease_writes_nothing`.
+`compute/cloud/tests/ingest_fanout_faults.rs`: `worker_signs_with_the_secret_key_unwrapped_from_its_envelope`, `a_worker_past_its_lease_writes_nothing`.
 
-`app/tests/ingest.rs`: `worker_ingest_authenticates_validates_and_reports_schema_mismatch`, `a_shard_with_too_many_windows_for_its_budget_splits_before_writing`, `lost_and_failed_worker_calls_are_retried_without_duplicates`, `an_etag_that_is_not_the_body_md5_is_never_recorded`, and `sustained_load_of_sixty_files_a_minute_drains_without_backlog`.
+`compute/cloud/tests/ingest.rs`: `worker_ingest_authenticates_validates_and_reports_schema_mismatch`, `a_shard_with_too_many_windows_for_its_budget_splits_before_writing`, `lost_and_failed_worker_calls_are_retried_without_duplicates`, `an_etag_that_is_not_the_body_md5_is_never_recorded`, and `sustained_load_of_sixty_files_a_minute_drains_without_backlog`.
 
 ## Code
 
-- `app/src/ingest/worker.rs`: request and result types, `handle_worker_ingest`, `convert_shard`.
-- `app/src/ingest/storage.rs`: `put_verified`, `normalize_etag`.
-- `app/src/sdk.rs`: `worker_dispatch`, the worker router route.
+- `compute/cloud/src/ingest/worker.rs`: request and result types, `handle_worker_ingest`, `convert_shard`.
+- `compute/cloud/src/ingest/storage.rs`: `put_verified`, `normalize_etag`.
+- `compute/cloud/src/sdk.rs`: `worker_dispatch`, the worker router route.

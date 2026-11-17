@@ -1,12 +1,13 @@
 # Route access matrix
 
-Enforced in `app/src/shell.rs`; the table and registry guard live in `app/tests/route_auth.rs`
+Enforced in `compute/cloud/src/shell.rs`; the table and registry guard live in `compute/cloud/tests/route_auth.rs`
 (a new route without a declared class fails the test).
 
-Per-page access (roles, nav, and the API routes each page calls with the role each needs) is in the
-`## Access` section of every page doc; see [pages/README.md](pages/README.md). The audit test
-`app/web/tools/check-page-access.test.ts` checks those sections against this table, `shell.rs`, and
-the web nav and role gating.
+Per-page access (roles, nav, and the API routes each page calls with the role each needs) was in the
+`## Access` section of every FLP page doc; the shared [page docs](../pages/README.md) do not carry
+those sections. The audit test `frontend/lib/cloud-engine/tools/check-page-access.test.ts` now checks
+only the nav gating of Data Management and Usage & Cost, and the role mapping and log redaction in
+`main.rs` and `auth/mod.rs`.
 
 Gate order: front key, setup gate, Origin and JSON checks for non-GET, then session. Sessions are
 HMAC-checked and the role is reloaded from the store on every request.
@@ -20,7 +21,7 @@ HMAC-checked and the role is reloaded from the store on every request.
 | Front key | `/fos/<service>/<key>` | needs `x-fastly-key` | n/a | n/a | n/a |
 | Tick | `/_tick`, `/_flush` (exact paths only; `/_tick/` and `/_flush/` return 403) | VCL-bucketed | n/a | n/a | n/a |
 
-`/api/admin/audit-logs` and `/api/sync-status` `audit_logs` return Service History only (service and infrastructure changes). User and admin actions are read from `/api/logs/admin_audit/live` and the archived `admin_audit` dataset; see the runbook's "Service History vs Audit".
+`/api/admin/audit-logs` and `/api/sync-status` `audit_logs` return Service History only (service and infrastructure changes). User and admin actions are read from `/api/logs/admin_audit/live` and the archived `admin_audit` dataset.
 
 `/api/files?dataset=ops:*` and `/api/file` keys under the operational-log root are admin-only
 (403 for analysts, no-PII and anonymous 401), even though the routes are otherwise Session or

@@ -4,6 +4,7 @@
 **Status:** Approved for implementation and deployment on 2026-11-03; implementation in progress.
 **Scope:** Request analytics in `app/`: ingestion publication, historical Parquet,
 metadata discovery, browser caching, traffic-over-time, and top-10 charts.
+**Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers are from when this was written. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository.
 
 This approved design supersedes earlier restrictions against server-side
 compaction for this migration.
@@ -66,11 +67,11 @@ Selected footer reads remain part of the read budget.
 
 Evidence:
 
-- `app/src/ingest/compaction.rs:1-14,38-51,108-145,284-337,436-573`
-- `app/src/ingest/api.rs:1346-1387`
-- `app/src/sdk.rs:1490-1515`
-- `app/src/main.rs:91-127`
-- `app/web/lib/dashboard/sources.ts:476-553`
+- `compute/cloud/src/ingest/compaction.rs:1-14,38-51,108-145,284-337,436-573`
+- `compute/cloud/src/ingest/api.rs:1346-1387`
+- `compute/cloud/src/sdk.rs:1490-1515`
+- `compute/cloud/src/main.rs:91-127`
+- `frontend/lib/cloud-engine/dashboard/sources.ts:476-553`
 
 ## 1. Publication and catalog
 

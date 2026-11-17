@@ -15,8 +15,8 @@ Fastly delivers logs only as raw zstd NDJSON. Analytics needs typed, windowed Pa
 Ingest is split between a **coordinator**, which runs inside the tick and owns all KV state, and up to 8 **workers**: peer `flp-worker` executions that each convert one shard. The worker contract is in [ingest-worker.md](ingest-worker.md).
 
 **Trigger**
-- Stage 1 of every non-busy tick (clock or manual) for an installed service with FOS credentials (`admin/mod.rs`, `record_tick`).
-- `record_tick` calls `ingest::coordinator::coordinate` directly with `Options::request` (`stream` and `table` = `request`), `reserve = RAW_DELETE_CALLS` (5) so raw delete always fits, and one `extra` request: the tick's maintenance stage for `flp-worker` ([stage-worker.md](stage-worker.md)), sent in the same dispatch batch as the shards (`admin/mod.rs:1840-1868`). Usage is tagged `cron:ingest`.
+- Stage 1 of every non-busy tick (clock or manual) for an installed service with FOS credentials (`admin/mod.rs`, `dispatch`, called from `record_tick`).
+- `dispatch` calls `ingest::coordinator::coordinate_reporting` with `Options::request` (`stream` and `table` = `request`), `reserve = INGEST_RESERVE` so raw delete still finds `RAW_DELETE_CALLS` (5) above the tick's tail, and the tick's `extra` requests: its maintenance stage and compaction job for `flp-worker` ([stage-worker.md](stage-worker.md)), sent in the same dispatch batch as the shards (`admin/mod.rs:2576-2594`). Usage is tagged `cron:ingest`.
 - Ingest never yields a tick to the flush or to maintenance: the flush runs on its own `/_flush` probe ([log-flush.md](log-flush.md)).
 
 **Plan v2** (`ingest:plan`, `coordinator.rs` `Plan`)
@@ -127,7 +127,7 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 
 ## Constraints and gotchas
 
-- Throughput: up to 8 shards × 22 objects = 176 settled objects per tick, within the 200-key LIST page. With `ingest_relay` the shard count per tick rises to calls × relay, still within one 200-key LIST page per plan; see `docs/cost-methodology.md` for the capacity envelope. The sustained-load test holds 60 files a minute at one tick every 2 minutes with no growing backlog.
+- Throughput: up to 8 shards × 22 objects = 176 settled objects per tick, within the 200-key LIST page. With `ingest_relay` the shard count per tick rises to calls × relay, still within one 200-key LIST page per plan; see [cost-methodology.md](../cost-methodology.md) for the capacity envelope. The sustained-load test holds 60 files a minute at one tick every 2 minutes with no growing backlog.
 - Exactly once:
   - Output keys carry the plan and shard (`<plan_id>s<shard>`), so a retried shard rewrites identical keys.
   - Split halves write under new ids. This is safe because a shard splits before any PUT, so its parent wrote nothing.
@@ -149,7 +149,7 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 
 ## Tests
 
-`app/tests/ingest.rs`. The fake runtime runs the real worker in-process with a fresh 32-call budget per worker execution, and asserts that each stays within 32.
+`compute/cloud/tests/ingest.rs`. The fake runtime runs the real worker in-process with a fresh 32-call budget per worker execution, and asserts that each stays within 32.
 - `sustained_load_of_sixty_files_a_minute_drains_without_backlog`
 - `a_crash_at_any_call_of_the_tick_never_duplicates_or_loses_rows`
 - `lost_and_failed_worker_calls_are_retried_without_duplicates`
@@ -163,7 +163,7 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 - `extra_worker_requests_ride_the_same_dispatch_batch`
 - `raw_delete_requeues_manifests_it_could_not_delete`
 
-`app/tests/ingest_fanout_faults.rs` uses the same fake with real `fos_sk` envelopes, a charged `worker_secret` read and dispatch hooks:
+`compute/cloud/tests/ingest_fanout_faults.rs` uses the same fake with real `fos_sk` envelopes, a charged `worker_secret` read and dispatch hooks:
 - `worker_signs_with_the_secret_key_unwrapped_from_its_envelope`, `worker_delete_signs_with_the_secret_key_unwrapped_from_its_envelope`
 - `dispatch_budgets_the_worker_secret_read_and_leaves_the_reserve`, `abandon_cleanup_leaves_the_reserve`
 - `a_result_from_another_attempt_is_not_recorded`
@@ -188,10 +188,10 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 
 ## Code
 
-- `app/src/ingest/mod.rs`: design notes, `Report`, `run_capped`, `load`, legacy `finish`.
-- `app/src/ingest/coordinator.rs`: `Options`, `Plan`, `pack`, `coordinate`, `resume`, `dispatch`, `commit`, `cleanup_and_replan`.
-- `app/src/ingest/worker.rs`: the shard worker ([ingest-worker.md](ingest-worker.md)).
-- `app/src/ingest/storage.rs`: `Store::put_verified`, `get_direct`.
-- `app/src/ingest/convert.rs`: limits, `schema_hash`, `convert_object`.
-- `app/src/sdk.rs`: `FastlyRuntime::worker_dispatch`.
-- `app/src/admin/mod.rs`: stage wiring and the `cron_runs` row.
+- `compute/cloud/src/ingest/mod.rs`: design notes, `Report`, `run_capped`, `load`, legacy `finish`.
+- `compute/cloud/src/ingest/coordinator.rs`: `Options`, `Plan`, `pack`, `coordinate`, `resume`, `dispatch`, `commit`, `cleanup_and_replan`.
+- `compute/cloud/src/ingest/worker.rs`: the shard worker ([ingest-worker.md](ingest-worker.md)).
+- `compute/cloud/src/ingest/storage.rs`: `Store::put_verified`, `get_direct`.
+- `compute/cloud/src/ingest/convert.rs`: limits, `schema_hash`, `convert_object`.
+- `compute/cloud/src/sdk.rs`: `FastlyRuntime::worker_dispatch`.
+- `compute/cloud/src/admin/mod.rs`: stage wiring and the `cron_runs` row.

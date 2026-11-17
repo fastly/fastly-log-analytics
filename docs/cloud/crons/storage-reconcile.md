@@ -19,12 +19,12 @@ Spec D13 (lines 268, 272, 342) rules out a recursive storage-tree walk on every 
 
 ## How it works
 
-**Request** (`POST /api/admin/usage/reconcile-storage`, `admin/logs.rs:422-430`)
-- `request_storage_reconcile` (`retention.rs:652-664`) Add-CASes KV `storage:reconcile`:
-  - `{requested_at, actor, index: 0, token: null, totals: [(0,0)×5], by_kind: {}}`
+**Request** (`POST /api/admin/usage/reconcile-storage`, `admin/logs.rs:668-676`)
+- `request_storage_reconcile` (`retention.rs:945-957`) Add-CASes KV `storage:reconcile`:
+  - `{requested_at, actor, index: 0, token: null, totals: [(0,0)×7], by_kind: {}}`
 - It returns `{started: false}` if a reconcile already exists. Only one runs at a time.
 
-**Step** (`storage_reconcile_step`, `retention.rs:669-753`)
+**Step** (`storage_reconcile_step`, `retention.rs:962-1057`)
 1. Read `storage:reconcile`. If it is absent, return `None` (no row).
 2. While `room(3)` holds (the 40 s wall guard plus calls), LIST one 1,000-key page of `{scope}{folder}` for the current `index`. `scope` is the service's `fos_prefix`.
 3. Add the sizes and counts to `totals[index]`. For `processed/ops/`, also add them to `by_kind[first path segment]`.
@@ -33,20 +33,20 @@ Spec D13 (lines 268, 272, 342) rules out a recursive storage-tree walk on every 
    - build `{datasets: {name: {bytes, objects[, by_kind]}}, requested_at, completed_at}`;
    - `kv_delete storage:reconcile`.
 
-**Tick wiring** (`admin/logs.rs:572-597`)
-- The step runs on its round-robin turn in the stage worker ([stage-worker.md](stage-worker.md)), when `enough(RECONCILE_CALLS)` holds (`reconcile_stage`, `admin/logs.rs:694-722`).
+****Tick wiring** (`admin/logs.rs:736-808`)
+- The step runs on its round-robin turn in the stage worker ([stage-worker.md](stage-worker.md)), when `enough(RECONCILE_CALLS)` holds (`reconcile_stage`, `admin/logs.rs:1383-1415`).
 - It runs with reserve `TAIL`.
 
 **Output:** the snapshot is stored only as `details_json` on a `cron_runs` row with `outcome = done`. No KV or FOS object keeps it.
 
 ## Roles and permissions
 
-Admin only (`shell.rs:488-501`, `778-787`). A request that starts a job is audited as `storage_reconcile_requested` with target `storage`. A request that finds one already running is not audited.
+Admin only (`shell.rs:792-806`, `1279-1287`). A request that starts a job is audited as `storage_reconcile_requested` with target `storage`. A request that finds one already running is not audited.
 
 ## Manual triggers and admin controls
 
-- `POST /api/admin/usage/reconcile-storage` is called from the `/usage` page (`app/web/lib/usage/summary.ts:571-574`) and from `RetentionCleanup` on `/logs`.
-- `GET /api/admin/logs/status` returns `storage_reconcile: {requested_at, actor}` while it runs (`logs.rs:148-160`).
+- No page calls `POST /api/admin/usage/reconcile-storage` today. The Cloud adapter maps `POST /api/admin/metadata-cleanup` with `action: "reconcile_storage"` to it (`frontend/lib/cloud-engine/adapter.ts:1613-1615`).
+- `GET /api/admin/logs/status` returns `storage_reconcile: {requested_at, actor}` while it runs (`logs.rs:174-187`).
 - `POST /api/cron-runs/trigger` advances it right away.
 - The job cannot be cancelled.
 
@@ -66,7 +66,7 @@ Admin only (`shell.rs:488-501`, `778-787`). A request that starts a job is audit
 
 **Accuracy**
 - The snapshot is not point-in-time. Ingest, flush, compaction and retention keep changing the tree while pages are listed across ticks.
-- `by_kind` keys come from FOS keys, so their count is unbounded, and the whole map is rewritten into the KV state on every page. It is listed as a residual in [compute-limits-audit.md](../compute-limits-audit.md) (row 27, residual line 40).
+- `by_kind` keys come from FOS keys. The state keeps at most `MAX_RECONCILE_KINDS` (32) of them and folds further folders into `other` (`retention.rs:914-915`). The whole map is rewritten into the KV state on every page.
 
 **Where the snapshot lives**
 - It exists only in `cron_runs`, so it ages out with that kind's retention (30 days by default).
@@ -87,26 +87,24 @@ Admin only (`shell.rs:488-501`, `778-787`). A request that starts a job is audit
 
 ## Tests
 
-- `app/tests/ingest.rs`:
-  - `storage_reconcile_does_nothing_until_requested` (1966)
-  - `storage_reconcile_sums_bytes_and_objects_per_dataset_across_resumed_steps` (1974)
-  - `sweep_and_reconcile_endpoints_run_on_demand_and_are_audited` (2284)
-  - `retention_loops_stop_at_the_wall_and_resume` (3026)
-- Web: `app/web/lib/usage/summary.test.ts` and `app/web/components/usage/UsagePage.test.tsx` mock the endpoint.
+- `compute/cloud/tests/ingest.rs`:
+  - `storage_reconcile_does_nothing_until_requested` (6588)
+  - `storage_reconcile_sums_bytes_and_objects_per_dataset_across_resumed_steps` (6644)
+  - `sweep_and_reconcile_endpoints_run_on_demand_and_are_audited` (6983)
+  - `retention_loops_stop_at_the_wall_and_resume` (7934)
+- Web: `frontend/lib/cloud-engine/usage/summary.test.ts` mocks the endpoint.
 
 ## TODOs
 
 - `reconcileSnapshot` should select only `done` rows. As written, a newer partial row hides the snapshot.
 - Persist the last snapshot somewhere longer-lived than `cron_runs` retention, or document the dependency. The spec does not decide this.
-- Bound or cap the `by_kind` cardinality ([compute-limits-audit.md](../compute-limits-audit.md) residual).
 - There is no cancel or reset endpoint for a stuck or corrupt reconcile.
-- v3 parity: v3's usage-log storage cost and "sync and storage state" views (`~/Projects/fastly-log-analytics/docs/pages/admin/usage-log.md`, `overview.md:27`) map to this ledger and `/usage`. Spec D13 covers this, and it is implemented as an estimate.
+- v3 parity: v3's usage-log storage cost and "sync and storage state" views ([usage-log.md](../../pages/admin/usage-log.md), [overview.md](../../pages/admin/overview.md) line 27) map to this ledger and `/usage`. Spec D13 covers this, and it is implemented as an estimate.
 
 ## Code
 
-- `app/src/ingest/retention.rs:626-664`: key, dataset list, state, request.
-- `app/src/ingest/retention.rs:669-753`: `storage_reconcile_step`.
-- `app/src/admin/logs.rs:422-430`: endpoint.
-- `app/src/admin/logs.rs:694-722`: stage wiring.
-- `app/web/lib/usage/summary.ts:185-206`, `273-285`: snapshot and ledger.
-- `docs/runbook.md:327-333`: operator notes.
+- `compute/cloud/src/ingest/retention.rs:913-957`: key, dataset list, state, request.
+- `compute/cloud/src/ingest/retention.rs:962-1057`: `storage_reconcile_step`.
+- `compute/cloud/src/admin/logs.rs:668-676`: endpoint.
+- `compute/cloud/src/admin/logs.rs:1383-1415`: stage wiring.
+- `frontend/lib/cloud-engine/usage/summary.ts:408-435`, `955-1006`: snapshot and ledger.
