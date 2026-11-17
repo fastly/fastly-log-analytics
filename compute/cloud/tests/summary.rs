@@ -1764,7 +1764,10 @@ fn write_origin_fixtures() {
                 row["ottfb"] = ottfb.into();
                 row["obytes"] = (200 + (i * 61) % 50_000).into();
                 if i % 6 != 0 {
-                    row["ottlb"] = (ottfb + (i * 53) % 90_000).into();
+                    let ottlb = ottfb + (i * 53) % 90_000;
+                    row["ottlb"] = ottlb.into();
+                    // Fastly's elapsed time spans the origin fetch, so CDN overhead is positive.
+                    row["elapsed"] = (ottlb + 200 + (i * 37) % 20_000).into();
                 }
             }
             if i % 9 == 0 {

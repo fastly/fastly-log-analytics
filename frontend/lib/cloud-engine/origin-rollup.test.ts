@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import type { ManifestFile } from "./dashboard/manifest";
+import { Histogram } from "./dashboard/histogram";
 import { decodeRollup, mergeRollups, type Rollup, type RollupResult } from "./dashboard/rollup-query";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
@@ -15,6 +16,9 @@ const T1 = T0 + 2 * HOUR;
 const { buffers: BUFFERS, files } = loadSummaryFixtures("origin-summaries");
 const RAW = files("raw");
 const WINDOWS = files("window");
+const HOURS = files("hour").filter((f) => f.key.includes("-c4-"));
+const SPANS = [[WINDOWS, 300_000], [HOURS, 300_000], [files("day"), HOUR]] as const;
+const PAGE_SECTIONS = ["summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"];
 
 async function rollupOf(list: ManifestFile[], stepMs = 300_000): Promise<RollupResult> {
   const parts = await Promise.all(list.map((f) => decodeRollup(BUFFERS[f.key], stepMs)));
@@ -105,6 +109,75 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
       expect(got.rollup.approximate).toEqual([]);
     }
   });
+
+  it("matches the raw origin summary's MISS/PASS counts and error rate exactly, with approximate percentiles", async () => {
+    const want = (await raw({ sections: ["summary"] })).summary;
+    expect(want.has_data).toBe(true);
+    for (const [list, step] of SPANS) {
+      const got = originAggregatesFromRollup(await rollupOf([...list], step), body({ sections: ["summary"] }))!.summary;
+      expect([got.has_data, got.total_misses, got.total_passes, got.origin_error_rate])
+        .toEqual([true, want.total_misses, want.total_passes, want.origin_error_rate]);
+      for (const key of ["ottfb_p50_ms", "ottfb_p75_ms", "ottfb_p95_ms", "ottfb_p99_ms", "ottlb_p50_ms", "ottlb_p95_ms",
+        "cdn_overhead_p50_ms", "obytes_p50"] as const) near(got[key], want[key], 0.15);
+    }
+  });
+
+  it("matches raw slow URLs' request counts exactly, with approximate percentiles, ranked by p95", async () => {
+    for (const min of [10, 50]) {
+      const extra = { sections: ["slow_urls"], slow_urls_min_requests: min, slow_urls_limit: 100 };
+      const want = (await raw(extra)).slow_urls;
+      expect(want.rows.length).toBeGreaterThan(20);
+      for (const [list, step] of SPANS) {
+        const got = originAggregatesFromRollup(await rollupOf([...list], step), body(extra))!;
+        const exact = (rows: typeof want.rows) => rows.map((r) => [r.url, r.requests]).toSorted();
+        expect(exact(got.slow_urls.rows)).toEqual(exact(want.rows));
+        const byUrl = new Map(want.rows.map((r) => [r.url, r]));
+        for (const row of got.slow_urls.rows) near(row.p95_ms, byUrl.get(row.url)!.p95_ms, 0.2);
+        const p95s = got.slow_urls.rows.map((r) => r.p95_ms!);
+        expect(p95s).toEqual(p95s.toSorted((a, b) => b - a));
+        expect(got.rollup.lower_bound).toEqual([]);
+      }
+    }
+    const top = originAggregatesFromRollup(await rollupOf(WINDOWS), body({ sections: ["slow_urls"] }))!;
+    expect(top.slow_urls.rows).toHaveLength(20);
+  });
+
+  it("matches raw path-leg and POP request counts exactly, with approximate percentiles", async () => {
+    const extra = { sections: ["path_breakdown", "pop_latency"], pop_latency_limit: 100 };
+    const want = await raw(extra);
+    expect(want.path_breakdown.rows.length).toBe(3);
+    for (const [list, step] of SPANS) {
+      const got = originAggregatesFromRollup(await rollupOf([...list], step), body(extra))!;
+      const legs = (rows: typeof want.path_breakdown.rows) => rows.map((r) => [String(r.edge), r.requests]).toSorted();
+      expect(legs(got.path_breakdown.rows)).toEqual(legs(want.path_breakdown.rows));
+      expect(got.path_breakdown.shielding_detected).toBe(want.path_breakdown.shielding_detected);
+      for (const row of got.path_breakdown.rows) {
+        near(row.p95_ms, want.path_breakdown.rows.find((r) => r.edge === row.edge)!.p95_ms, 0.15);
+      }
+      const pops = (rows: typeof want.pop_latency.rows) => rows.map((r) => [r.pop, r.requests]).toSorted();
+      expect(pops(got.pop_latency.rows)).toEqual(pops(want.pop_latency.rows));
+      expect(got.pop_latency.requires_group_c).toBe(want.pop_latency.requires_group_c);
+      near(got.pop_latency.median_p95_ms, want.pop_latency.median_p95_ms, 0.15);
+      const p95s = got.pop_latency.rows.map((r) => r.p95_ms!);
+      expect(p95s).toEqual(p95s.toSorted((a, b) => b - a));
+    }
+  });
+
+  it("matches raw TTFB and per-leg miss counts exactly per bucket, with approximate percentiles", async () => {
+    for (const [metric, split] of [["ttfb", false], ["ttfb", true], ["ttlb", true]] as const) {
+      for (const [list, step] of SPANS) {
+        const extra = { sections: ["timeseries"], timeseries_metric: metric, split_by_leg: split };
+        const want = (await raw(extra)).timeseries;
+        const got = originAggregatesFromRollup(await rollupOf([...list], step), body(extra))!.timeseries;
+        expect(want.series.length).toBeGreaterThan(split ? 2 : 1);
+        const counts = (series: typeof want.series) => series.map((p) => [p.time, String(p.edge), p.miss_count]).toSorted();
+        expect(counts(got.series)).toEqual(counts(want.series));
+        for (const p of got.series) {
+          near(p.value, want.series.find((w) => w.time === p.time && w.edge === p.edge)!.value, 0.2);
+        }
+      }
+    }
+  });
 });
 
 describe("originAggregatesFromRollup", () => {
@@ -166,6 +239,58 @@ describe("originAggregatesFromRollup", () => {
     expect(originAggregatesFromRollup({ ...result, rollup: cut }, body({ sections: ["ip_health"] }))).not.toBeNull();
   });
 
+  it("returns null when a summary predates a section's rows, so raw answers", async () => {
+    const result = await rollupOf(WINDOWS);
+    for (const [section, row, extra] of [
+      ["summary", "origin/overall", {}],
+      ["path_breakdown", "origin/edge", {}],
+      ["pop_latency", "origin/pop", {}],
+      ["slow_urls", "urls/url", {}],
+      ["timeseries", "series5/origin", { timeseries_metric: "ttfb" }],
+      ["timeseries", "series5/origin", { split_by_leg: true }],
+    ] as const) {
+      const present = new Set(result.rollup.present);
+      expect(present.delete(row), row).toBe(true);
+      const params = body({ sections: [section], ...extra });
+      expect(originAggregatesFromRollup(result, params), row).not.toBeNull();
+      expect(originAggregatesFromRollup({ ...result, rollup: { ...result.rollup, present } }, params), row).toBeNull();
+    }
+  });
+
+  it("returns null when any merged summary predates the rows, so a mixed range scans raw", async () => {
+    const parts = await Promise.all(WINDOWS.map((f) => decodeRollup(BUFFERS[f.key], 300_000)));
+    const old = { ...parts[0]!, present: new Set([...parts[0]!.present!].filter((row) => !row.startsWith("origin/"))) };
+    const result = { rollup: mergeRollups([old, ...parts.slice(1).map((p) => p!)]), dataFromMs: T0, dataThroughMs: T1 };
+    expect(originAggregatesFromRollup(result, body({ sections: ["summary"] }))).toBeNull();
+    expect(originAggregatesFromRollup(result, body({ sections: ["slow_urls"] }))).not.toBeNull();
+  });
+
+  it("returns null when the median CDN overhead falls among negative values, which a histogram can't place", async () => {
+    const result = await rollupOf(WINDOWS);
+    const withOverhead = (under: number, min: number): RollupResult => {
+      const overall = result.rollup.groups!.get("origin")!.get("overall")!;
+      const agg = overall.get("")!;
+      const overhead = new Histogram();
+      Object.assign(overhead, { under, min, max: 5_000 });
+      overhead.buckets[10] = 3;
+      const groups = new Map(result.rollup.groups);
+      groups.set("origin", new Map([...groups.get("origin")!, ["overall", new Map([["", { ...agg, hists: { ...agg.hists, overhead } }]])]]));
+      return { ...result, rollup: { ...result.rollup, groups } };
+    };
+    const params = body({ sections: ["summary"] });
+    expect(originAggregatesFromRollup(withOverhead(4, -50_000), params)).toBeNull();
+    expect(originAggregatesFromRollup(withOverhead(2, -50_000), params)!.summary.cdn_overhead_p50_ms).toBeGreaterThan(0);
+    expect(originAggregatesFromRollup(withOverhead(4, 20), params)!.summary.cdn_overhead_p50_ms).not.toBeNull();
+  });
+
+  it("marks slow-URL request counts lower bounds when the URLs were cut to a top K", async () => {
+    const result = await rollupOf(WINDOWS);
+    const cut: Rollup = { ...result.rollup, truncated: new Set(["urls/url"]) };
+    const meta = originAggregatesFromRollup({ ...result, rollup: cut }, body({ sections: ["slow_urls"] }))!.rollup;
+    expect(meta.lower_bound).toEqual(["slow_urls.requests"]);
+    expect(meta.approximate).toEqual(["slow_urls.p50_ms", "slow_urls.p95_ms", "slow_urls.p99_ms"]);
+  });
+
   it("answers an empty rollup with empty sections", () => {
     const empty: Rollup = { dims: new Map(), series: new Map(), seriesStepMs: 300_000, fields: new Map(), truncated: new Set() };
     const out = originAggregatesFromRollup({ rollup: empty, dataFromMs: T0, dataThroughMs: T1 },
@@ -178,13 +303,17 @@ describe("originAggregatesFromRollup", () => {
 });
 
 describe("originRollupSections", () => {
-  it("offers origin IP health and status codes always and the series only for OTTLB on whole 5-minute steps", () => {
-    const always = ["ip_health", "status_codes"];
-    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 60 })).toEqual(always);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1 })).toEqual(always);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 60, splitByLeg: true })).toEqual(always);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 60 })).toEqual([...always, "timeseries"]);
-    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1440 })).toEqual([...always, "timeseries"]);
+  it("offers every table always and the latency series only on whole 5-minute steps that tile a day", () => {
+    const tables = PAGE_SECTIONS.filter((s) => s !== "timeseries");
+    expect(originRollupSections({ metric: "ttlb", bucketMinutes: 1 })).toEqual(tables);
+    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 35 })).toEqual(tables);
+    expect(originRollupSections({ metric: "other", bucketMinutes: 60 })).toEqual(tables);
+    for (const metric of ["ttfb", "ttlb"]) {
+      for (const splitByLeg of [false, true]) {
+        expect(originRollupSections({ metric, bucketMinutes: 60, splitByLeg }).toSorted()).toEqual(PAGE_SECTIONS.toSorted());
+      }
+    }
+    expect(originRollupSections({ metric: "ttfb", bucketMinutes: 1440 })).toContain("timeseries");
   });
 });
 
@@ -203,18 +332,26 @@ describe("originFromRollup", () => {
     expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
   });
 
+  it("answers the page's full unfiltered TTFB read from summaries without reading raw files", async () => {
+    const s = source();
+    const params = body({ sections: PAGE_SECTIONS, timeseries_metric: "ttfb", slow_urls_min_requests: 50 });
+    const served = await originFromRollup("/api/origin/aggregates", params, s) as OriginAggregatesResponse;
+    expect(served).toEqual(originAggregatesFromRollup(await rollupOf(WINDOWS), params));
+    expect([served.summary, served.timeseries, served.slow_urls, served.path_breakdown, served.pop_latency]
+      .every((section) => section.has_data)).toBe(true);
+    expect(s.log.files.length).toBeGreaterThan(0);
+    expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
+  });
+
   it("leaves filtered reads, raw-only sections and options and other routes to the raw scan", async () => {
     for (const params of [
       body({ filters: { pop: { values: ["IAD"], mode: "include" } } }),
       body({ custom_filters: { tier: { values: ["a"], mode: "include" } } }),
-      body({ sections: ["ip_health", "summary"] }),
-      body({ sections: ["pop_latency"] }),
-      body({ sections: ["status_codes", "slow_urls"] }),
+      body({ sections: ["ip_health", "drilldown"] }),
       body({ sections: undefined }),
       body({ sections: [] }),
-      body({ timeseries_metric: "ttfb" }),
       body({ bucket_minutes: 1 }),
-      body({ split_by_leg: true }),
+      body({ timeseries_metric: "ttfb", bucket_minutes: 7 }),
       body({ end_time: "not a time" }),
     ]) {
       expect(originRollupEligible("/api/origin/aggregates", params) &&

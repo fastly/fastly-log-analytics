@@ -19,6 +19,10 @@ export type RollupHists = {
   rtt: Histogram | null;
   ottfb: Histogram | null;
   ottlb: Histogram | null;
+  /** Origin bytes (`origin` rows only), not microseconds. */
+  obytes: Histogram | null;
+  /** `elapsed - ottlb` (`origin` rows only); negative values are underflow. */
+  overhead: Histogram | null;
 };
 
 /**
@@ -26,7 +30,8 @@ export type RollupHists = {
  * them: `status5xx` is 500-599, `errors` is status >= 400 or 0, `cacheHits`
  * counts HIT and HIT-STALE, `rtt*` is the coalesced client RTT in µs and
  * `ploss*` the coalesced packet loss. Series rows carry no `errors`,
- * `cacheHits`, latency, origin or TCP sums beyond RTT and loss.
+ * `cacheHits`, latency, origin or TCP sums beyond RTT and loss. The `transport`,
+ * `origin` and `urls` groups carry their own subsets (see `Rollup.groups`).
  */
 export type RollupAgg = {
   requests: number;
@@ -50,6 +55,12 @@ export type RollupAgg = {
   latSum: number;
   lonSum: number;
   geoCount: number;
+  missRequests: number;
+  passRequests: number;
+  deliverySum: number;
+  deliveryCount: number;
+  elapsedSum: number;
+  elapsedCount: number;
   /** AS name for `asn` values (the smallest seen). */
   label: string | null;
   hists: RollupHists;
@@ -75,7 +86,26 @@ export type Rollup = {
   overview?: RollupOverview;
   /** `assets` rows: JSON `[asset_type, cache, encoding]` → sums (absent before any assets row). */
   assets?: Map<string, RollupAsset>;
+  /** `transport`, `origin` and `urls` rows: group → field → value → sums; read them through `rollupGroup`. */
+  groups?: Map<string, Map<string, Map<string, RollupAgg>>>;
+  /**
+   * `group/field` with a `dim_totals` row in every merged file. Summaries written before a
+   * group or field existed lack the row, so its data is unknown there, not zero.
+   */
+  present?: Set<string>;
 };
+
+/** Groups whose rows `decodeRollup` keeps in `Rollup.groups`. */
+const KEYED_GROUPS = new Set(["transport", "origin", "urls"]);
+
+/**
+ * One field of a `transport`, `origin` or `urls` group, or null when some merged
+ * summary predates it (raw must answer then).
+ */
+export function rollupGroup(rollup: Rollup, group: string, field: string): Map<string, RollupAgg> | null {
+  if (!rollup.present?.has(`${group}/${field}`)) return null;
+  return rollup.groups?.get(group)?.get(field) ?? new Map();
+}
 
 /**
  * `overview` sums: hit elapsed covers cache HIT, HIT-STALE and HIT-CLUSTER exactly
@@ -180,6 +210,12 @@ const SUM_COLUMNS = {
   latSum: "lat_sum",
   lonSum: "lon_sum",
   geoCount: "geo_count",
+  missRequests: "miss_requests",
+  passRequests: "pass_requests",
+  deliverySum: "delivery_rate_sum",
+  deliveryCount: "delivery_rate_count",
+  elapsedSum: "elapsed_sum",
+  elapsedCount: "elapsed_count",
 } as const;
 type SumKey = keyof typeof SUM_COLUMNS;
 const SUM_KEYS = Object.keys(SUM_COLUMNS) as SumKey[];
@@ -190,6 +226,8 @@ const HIST_COLUMNS = {
   rtt: "rtt_hist",
   ottfb: "ottfb_hist",
   ottlb: "ottlb_hist",
+  obytes: "obytes_hist",
+  overhead: "overhead_hist",
 } as const;
 const HIST_KEYS = Object.keys(HIST_COLUMNS) as (keyof RollupHists)[];
 
@@ -273,6 +311,8 @@ export async function decodeRollup(
     seriesStepMs,
     fields: new Map(),
     truncated: new Set(),
+    groups: new Map(),
+    present: new Set(),
   };
   const read = (i: number) => {
     const agg = emptyAgg();
@@ -310,6 +350,7 @@ export async function decodeRollup(
         break;
       }
       case "dim_totals":
+        rollup.present!.add(`${String(value[i])}/${name}`);
         if (truncated[i] === true) rollup.truncated.add(`${String(value[i])}/${name}`);
         break;
       case "overview": {
@@ -339,9 +380,30 @@ export async function decodeRollup(
       case "field_totals":
         if (truncated[i] === true) rollup.truncated.add(`all_fields/${name}`);
         break;
+      default:
+        if (KEYED_GROUPS.has(String(group[i]))) {
+          addKeyed(rollup.groups!, String(group[i]), name, String(value[i] ?? ""), read(i), false);
+        }
     }
   }
   return rollup;
+}
+
+function addKeyed(
+  into: Map<string, Map<string, Map<string, RollupAgg>>>,
+  group: string,
+  field: string,
+  value: string,
+  agg: RollupAgg,
+  copy = true,
+) {
+  const fields = into.get(group) ?? new Map<string, Map<string, RollupAgg>>();
+  into.set(group, fields);
+  const values = fields.get(field) ?? new Map<string, RollupAgg>();
+  fields.set(field, values);
+  const target = values.get(value);
+  if (target) addAgg(target, agg);
+  else values.set(value, copy ? sumAggs([agg]) : agg);
 }
 
 /** Sums rollups into new aggregates; the inputs (often cached) are not changed. */
@@ -352,8 +414,16 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
     seriesStepMs: Math.max(FIVE_MINUTES_MS, ...rollups.map((r) => r.seriesStepMs)),
     fields: new Map(),
     truncated: new Set(rollups.flatMap((r) => [...r.truncated])),
+    groups: new Map(),
+    present: new Set(rollups.length ? [...rollups[0].present ?? []] : []),
   };
   for (const rollup of rollups) {
+    for (const key of out.present!) if (!rollup.present?.has(key)) out.present!.delete(key);
+    for (const [group, fields] of rollup.groups ?? []) {
+      for (const [field, values] of fields) {
+        for (const [value, agg] of values) addKeyed(out.groups!, group, field, value, agg);
+      }
+    }
     if (rollup.waterfall) out.waterfall = addWaterfall(out.waterfall, rollup.waterfall);
     if (rollup.overview) out.overview = addSums(out.overview, rollup.overview, OVERVIEW_KEYS);
     if (rollup.assets) {

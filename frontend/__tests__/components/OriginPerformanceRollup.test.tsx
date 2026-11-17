@@ -12,7 +12,7 @@ import OriginClient from '@/app/origin/_sections/OriginClient'
 import PerformanceClient from '@/app/performance/_sections/PerformanceClient'
 import { useTimezoneStore } from '@/stores/filterStore'
 
-const layout = vi.hoisted(() => ({ filterPayload: {} as Record<string, unknown> }))
+const layout = vi.hoisted(() => ({ filterPayload: {} as Record<string, unknown>, interval: '1 hour' }))
 
 vi.mock('@/components/ReportLayout', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/ReportLayout')>()
@@ -20,7 +20,7 @@ vi.mock('@/components/ReportLayout', async (importOriginal) => {
     <div>{props.children({
       activeServiceId: 'svc-1', startTime: '2027-01-15T08:00:00Z', endTime: '2027-01-15T10:00:00Z',
       filterPayload: layout.filterPayload, timezone: 'UTC', trend: 'off', setTrend: () => {}, intervalButtons: null,
-      config: { spanHours: 2, effectiveInterval: '1 hour', validIntervals: new Set(['1 hour']), validTrends: new Set(['off']) },
+      config: { spanHours: 2, effectiveInterval: layout.interval, validIntervals: new Set([layout.interval]), validTrends: new Set(['off']) },
     })}</div>
   )
   return { ...actual, default: ReportLayout, ReportLayout }
@@ -71,6 +71,7 @@ const originRaw = {
 beforeEach(() => {
   useTimezoneStore.setState({ timezone: 'UTC' })
   layout.filterPayload = {}
+  layout.interval = '1 hour'
   window.history.replaceState(null, '', '/')
 })
 
@@ -80,43 +81,41 @@ afterEach(() => {
 })
 
 describe('OriginClient on Cloud', () => {
-  it('paints summary-served origin IP health while the raw sections load, with ≈ and ≥ marks', async () => {
+  it('answers every unfiltered origin section from one summary read, with ≈ and ≥ marks', async () => {
     setCloudModeRuntime(true)
-    const sections = recordPosts('/api/origin/aggregates', (asked) => asked?.includes('summary') ? never() : {
+    const sections = recordPosts('/api/origin/aggregates', () => ({
       ...originRaw,
-      ip_health: { has_data: true, rows: [ipRow] },
-      rollup: meta(['ip_health.p50_ms', 'ip_health.p95_ms'], ['ip_health.requests']),
-    })
+      slow_urls: { has_data: true, rows: [{ url: '/slow', requests: 77, p50_ms: 10, p95_ms: 300, p99_ms: 400 }] },
+      rollup: meta(
+        ['summary.ottfb_p50_ms', 'slow_urls.p95_ms', 'ip_health.p50_ms', 'ip_health.p95_ms', 'timeseries.value'],
+        ['slow_urls.requests', 'ip_health.requests'],
+      ),
+    }))
     renderWithQuery(<OriginClient />, { withNuqs: true })
 
     const slot = screen.getByTestId('rollup-data-through-slot')
-    expect(slot).toBeEmptyDOMElement()
     expect(await within(slot).findByText(/Data through 09:45/)).toBeInTheDocument()
     const row = (await screen.findByText('203.0.113.1')).closest('tr')!
     expect(within(row).getByText('≥1,234')).toBeInTheDocument()
     expect(within(row).getByText('≈45.0ms')).toBeInTheDocument()
-    expect(within(row).getByText('≈120.0ms')).toBeInTheDocument()
-    expect(within(row).getByText('0.5%')).toBeInTheDocument()
-    expect(sections).toEqual(expect.arrayContaining([['ip_health'], ORIGIN_SECTIONS.filter((s) => s !== 'ip_health')]))
-    expect(screen.getByText('Loading origin latency timeseries...')).toBeInTheDocument()
+    expect(await screen.findByText('/slow')).toBeInTheDocument()
+    expect(screen.getAllByText('Approximate').length).toBeGreaterThanOrEqual(2)
+    expect(sections).toHaveLength(1)
+    expect(sections[0]!.toSorted()).toEqual(ORIGIN_SECTIONS.toSorted())
   })
 
-  it('asks summaries for the OTTLB series too and marks it approximate', async () => {
+  it('reads the latency series raw when its bucket does not tile summary steps, and the rest from summaries', async () => {
     setCloudModeRuntime(true)
-    window.history.replaceState(null, '', '/?metric=ttlb')
-    const sections = recordPosts('/api/origin/aggregates', (asked) => asked?.includes('summary') ? originRaw : {
+    layout.interval = '1 minute'
+    const sections = recordPosts('/api/origin/aggregates', (asked) => asked?.includes('timeseries') ? never() : {
       ...originRaw,
-      timeseries: { has_data: true, series: [{ time: '2027-01-15T08:00:00.000Z', miss_count: 5, value: 80 }] },
-      rollup: meta(['ip_health.p50_ms', 'ip_health.p95_ms', 'timeseries.value'], []),
+      rollup: meta(['ip_health.p50_ms', 'ip_health.p95_ms'], []),
     })
     renderWithQuery(<OriginClient />, { withNuqs: true })
 
-    expect(await screen.findByText('Approximate')).toBeInTheDocument()
-    expect(sections).toEqual(expect.arrayContaining([['ip_health', 'timeseries']]))
-    expect(sections.find((s) => s?.includes('summary'))).toEqual(
-      ORIGIN_SECTIONS.filter((s) => s !== 'ip_health' && s !== 'timeseries'),
-    )
-    expect(within(screen.getByText('203.0.113.1').closest('tr')!).getByText('1,234')).toBeInTheDocument()
+    expect(await screen.findByText('≈45.0ms')).toBeInTheDocument()
+    expect(sections).toEqual(expect.arrayContaining([['timeseries'], ORIGIN_SECTIONS.filter((s) => s !== 'timeseries')]))
+    expect(screen.getByText('Loading origin latency timeseries...')).toBeInTheDocument()
   })
 
   it('keeps one raw read, with no summary labels, when a filter is applied', async () => {

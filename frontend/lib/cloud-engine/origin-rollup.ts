@@ -1,14 +1,23 @@
 import type { Histogram } from "./dashboard/histogram";
 import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
-import { queryRollup, rebucketSeries } from "./dashboard/rollup-query";
+import { queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import {
   emptyOriginAggregates,
+  emptyOriginSummary,
+  shapeOriginPathBreakdownRows,
+  shapeOriginPopLatencyRows,
+  shapeOriginSlowUrlsRows,
+  shapeOriginSummaryRow,
   type OriginAggregatesResponse,
   type OriginIpHealthRow,
   type OriginIpHealthSection,
+  type OriginPathBreakdownSection,
+  type OriginPopLatencySection,
+  type OriginSlowUrlsSection,
   type OriginStatusCodesSection,
+  type OriginSummarySection,
   type OriginTimeseriesPoint,
   type OriginTimeseriesSection,
 } from "./origin";
@@ -24,6 +33,9 @@ export type OriginRollupBody = {
   timeseries_metric?: string;
   timeseries_percentile?: string;
   ip_health_limit?: number;
+  slow_urls_limit?: number;
+  slow_urls_min_requests?: number;
+  pop_latency_limit?: number;
   sections?: readonly string[] | null;
 };
 
@@ -97,6 +109,122 @@ function statusCodes(result: RollupResult): OriginStatusCodesSection | null {
   return { has_data: rows.length > 0, rows };
 }
 
+const clampLimit = (limit: number | undefined, fallback: number) =>
+  Math.max(1, Math.min(100, Math.trunc(limit ?? fallback)));
+
+const legValue = (leg: string) => leg === "true" ? true : leg === "false" ? false : null;
+
+/**
+ * `buildOriginSummarySql` from the overall `origin` row, which sums rows with an
+ * origin latency as raw does: MISS and PASS counts and the 5xx share are exact,
+ * percentiles come from histograms. Undefined when a summary predates the row,
+ * or when the median CDN overhead falls among negative values, which a histogram
+ * reads as its minimum.
+ */
+function originSummary(result: RollupResult): OriginSummarySection | undefined {
+  const agg = rollupGroup(result.rollup, "origin", "overall")?.get("");
+  if (agg === undefined) return result.rollup.present?.has("origin/overall") ? emptyOriginSummary() : undefined;
+  const { ttfb, ottlb, overhead, obytes } = agg.hists;
+  if (!ttfb?.count()) return emptyOriginSummary();
+  const n = overhead?.count() ?? 0;
+  if (overhead && overhead.min < 0 && Math.ceil(n / 2) <= overhead.under) return undefined;
+  return shapeOriginSummaryRow({
+    total_misses: agg.missRequests,
+    total_passes: agg.passRequests,
+    ottfb_p50_ms: ms(ttfb, 0.5),
+    ottfb_p75_ms: ms(ttfb, 0.75),
+    ottfb_p95_ms: ms(ttfb, 0.95),
+    ottfb_p99_ms: ms(ttfb, 0.99),
+    ottlb_p50_ms: ms(ottlb, 0.5),
+    ottlb_p95_ms: ms(ottlb, 0.95),
+    cdn_overhead_p50_ms: ms(overhead, 0.5),
+    origin_error_rate: agg.ostTotal ? agg.ost5xx / agg.ostTotal : null,
+    obytes_p50: obytes?.quantile(0.5) ?? null,
+  });
+}
+
+/**
+ * `queryOriginSlowUrlsWithFallback` from the `urls` rows: per URL, the origin
+ * latency histogram counts the rows raw ranks, so requests are exact unless the
+ * URLs were cut to a top K. Ranked by the histograms' p95.
+ */
+function slowUrls(result: RollupResult, body: OriginRollupBody): OriginSlowUrlsSection | null {
+  const urls = rollupGroup(result.rollup, "urls", "url");
+  if (!urls) return null;
+  const all = [...urls].flatMap(([url, agg]) => {
+    const requests = agg.hists.ttfb?.count() ?? 0;
+    return requests ? [{ url, requests, hist: agg.hists.ttfb }] : [];
+  });
+  const min = Math.max(1, Math.trunc(body.slow_urls_min_requests ?? 10));
+  let kept = all.filter((row) => row.requests >= min);
+  if (!kept.length) kept = all;
+  const rows = kept
+    .map((row) => ({ ...row, p95: row.hist!.quantile(0.95)! }))
+    .sort((a, b) => b.p95 - a.p95 || b.requests - a.requests || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0))
+    .slice(0, clampLimit(body.slow_urls_limit, 20))
+    .map(({ url, requests, hist }) => ({
+      url, requests, p50_ms: ms(hist, 0.5), p95_ms: ms(hist, 0.95), p99_ms: ms(hist, 0.99),
+    }));
+  return shapeOriginSlowUrlsRows(rows);
+}
+
+/** `buildOriginPathBreakdownSql` from the `origin` rows per edge flag (true, false, then null). */
+function pathBreakdown(result: RollupResult): OriginPathBreakdownSection | null {
+  const legs = rollupGroup(result.rollup, "origin", "edge");
+  if (!legs) return null;
+  const rows = ["true", "false", ""].flatMap((leg) => {
+    const agg = legs.get(leg);
+    const hist = agg?.hists.ttfb ?? null;
+    return agg?.requests ? [{ edge: legValue(leg), requests: agg.requests, p50_ms: ms(hist, 0.5), p95_ms: ms(hist, 0.95) }] : [];
+  });
+  return shapeOriginPathBreakdownRows(rows);
+}
+
+/** `buildOriginPopLatencySql` from the `origin` rows per POP, ranked by the histograms' p95. */
+function popLatency(result: RollupResult, body: OriginRollupBody): OriginPopLatencySection | null {
+  const pops = rollupGroup(result.rollup, "origin", "pop");
+  if (!pops) return null;
+  const rows = [...pops]
+    .filter(([pop, agg]) => pop !== "" && agg.requests > 0)
+    .map(([pop, agg]) => ({ pop, requests: agg.requests, p50_ms: ms(agg.hists.ttfb, 0.5), p95_ms: ms(agg.hists.ttfb, 0.95) }))
+    .sort((a, b) => (b.p95_ms ?? -1) - (a.p95_ms ?? -1) || b.requests - a.requests || (a.pop < b.pop ? -1 : 1))
+    .slice(0, clampLimit(body.pop_latency_limit, 30));
+  return shapeOriginPopLatencyRows(rows, { requiresGroupC: false });
+}
+
+/**
+ * The origin latency series of `buildOriginTimeseriesSql` per bucket, and per
+ * path leg when split, from the `series5` `origin` histograms: TTFB counts rows
+ * with an origin latency and TTLB rows with an OTTLB, as raw does. The unsplit
+ * OTTLB series reads the overall histograms, which older summaries carry too.
+ */
+function latencySeries(result: RollupResult, body: OriginRollupBody): OriginTimeseriesSection | null {
+  const metric = body.timeseries_metric === "ttlb" ? "ttlb" : "ttfb";
+  const percentile = body.timeseries_percentile ?? "p95";
+  const bucketMinutes = body.bucket_minutes ?? 5;
+  if (metric === "ttlb" && !body.split_by_leg) return ottlbSeries(result, bucketMinutes, percentile);
+  if (!result.rollup.present?.has("series5/origin")) return null;
+  const rebucketed = rebucketSeries(result.rollup, "origin", bucketMinutes * 60_000);
+  if (!rebucketed) return null;
+  const key = metric === "ttlb" ? "ottlb" : "ttfb";
+  const q = PERCENTILES[percentile] ?? 0.95;
+  const point = (t: number, agg: RollupAgg, leg?: string): OriginTimeseriesPoint[] => {
+    const count = agg.hists[key]?.count() ?? 0;
+    if (!count) return [];
+    const p: OriginTimeseriesPoint = { time: new Date(t).toISOString(), miss_count: count, value: ms(agg.hists[key], q) };
+    if (leg !== undefined) p.edge = legValue(leg);
+    return [p];
+  };
+  const times = [...new Set([...rebucketed.values()].flatMap((buckets) => [...buckets.keys()]))].sort((a, b) => a - b);
+  const series = times.flatMap((t) => body.split_by_leg
+    ? ["true", "false", ""].flatMap((leg) => {
+      const agg = rebucketed.get(leg)?.get(t);
+      return agg ? point(t, agg, leg) : [];
+    })
+    : point(t, sumAggs([...rebucketed.values()].flatMap((buckets) => buckets.get(t) ?? []))));
+  return { has_data: series.length > 0, series };
+}
+
 /** The OTTLB series of `buildOriginTimeseriesSql` from the overall `series5` histograms. */
 function ottlbSeries(result: RollupResult, bucketMinutes: number, percentile: string): OriginTimeseriesSection | null {
   const rebucketed = rebucketSeries(result.rollup, "overall", bucketMinutes * 60_000);
@@ -124,10 +252,11 @@ export function originRollupEligible(path: string, body: OriginRollupBody): bool
 }
 
 /**
- * The requested /origin aggregates sections (origin IP health, status codes and
- * the OTTLB series) from merged summaries, shaped like `queryOriginAggregates`,
- * or null when a section can't match raw (see `ipHealth`, `statusCodes` and
- * `rebucketSeries`). Counts and shares are exact; percentiles come from histograms.
+ * The requested /origin aggregates sections from merged summaries, shaped like
+ * `queryOriginAggregates`, or null when a section can't match raw (a summary
+ * without its rows, a cut status list, a series bucket that doesn't tile; see
+ * each section's reader). Counts and shares are exact unless a top K cut them;
+ * percentiles come from histograms.
  */
 export function originAggregatesFromRollup(
   result: RollupResult,
@@ -153,12 +282,42 @@ export function originAggregatesFromRollup(
     out.status_codes = section;
   }
   if (sections.has("timeseries")) {
-    const section = ottlbSeries(result, body.bucket_minutes ?? 5, body.timeseries_percentile ?? "p95");
+    const section = latencySeries(result, body);
     if (!section) return null;
     out.timeseries = section;
     approximate.push("timeseries.value");
   }
-  out.has_data = out.ip_health.has_data || out.status_codes.has_data || out.timeseries.has_data;
+  if (sections.has("summary")) {
+    const section = originSummary(result);
+    if (!section) return null;
+    out.summary = section;
+    approximate.push(
+      "summary.ottfb_p50_ms", "summary.ottfb_p75_ms", "summary.ottfb_p95_ms", "summary.ottfb_p99_ms",
+      "summary.ottlb_p50_ms", "summary.ottlb_p95_ms", "summary.cdn_overhead_p50_ms", "summary.obytes_p50",
+    );
+  }
+  if (sections.has("slow_urls")) {
+    const section = slowUrls(result, body);
+    if (!section) return null;
+    out.slow_urls = section;
+    approximate.push("slow_urls.p50_ms", "slow_urls.p95_ms", "slow_urls.p99_ms");
+    if (result.rollup.truncated.has("urls/url")) lowerBound.push("slow_urls.requests");
+  }
+  if (sections.has("path_breakdown")) {
+    const section = pathBreakdown(result);
+    if (!section) return null;
+    out.path_breakdown = section;
+    approximate.push("path_breakdown.p50_ms", "path_breakdown.p95_ms");
+  }
+  if (sections.has("pop_latency")) {
+    const section = popLatency(result, body);
+    if (!section) return null;
+    out.pop_latency = section;
+    approximate.push("pop_latency.p50_ms", "pop_latency.p95_ms");
+    if (result.rollup.truncated.has("origin/pop")) lowerBound.push("pop_latency.requests");
+  }
+  out.has_data = out.summary.has_data || out.timeseries.has_data || out.slow_urls.has_data ||
+    out.status_codes.has_data || out.path_breakdown.has_data || out.pop_latency.has_data || out.ip_health.has_data;
   return {
     ...out,
     rollup: {

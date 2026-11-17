@@ -21,7 +21,7 @@ import {
 } from '@/hooks/useReportPageState'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
-import { approxMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { approxMark, boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues, originRollupSections } from '@/lib/cloud-engine/rollup-sections'
 import {
@@ -131,6 +131,7 @@ function OriginReportContent({
     filterPayload,
     range,
     keyParts: [bucketMinutes, originMetric, originPercentile, rawSections],
+    queryOptions: { enabled: rawSections.length > 0 },
     queryFn: ({ rangeBody, signal }) => postOrigin(rawSections, rangeBody, signal),
   })
 
@@ -145,9 +146,21 @@ function OriginReportContent({
   })
   const rollup = rollupSections.length > 0 ? readRollupMeta(rollupQuery.data) : undefined
 
-  const { isLoading, isFetching, error } = bundle
-  const summary = React.useMemo(() => ({ data: bundle.data?.summary, isLoading, isFetching, error }), [bundle.data?.summary, isLoading, isFetching, error])
-  const tsSource = rollupSections.includes('timeseries') ? rollupQuery : bundle
+  const sourceOf = (section: OriginSection) => (rollupSections.includes(section) ? rollupQuery : bundle)
+  const approxNote = (section: string, field: string) =>
+    approxMark(rollup, `${section}.${field}`) === ''
+      ? null
+      : boundMark(rollup, `${section}.requests`) === ''
+        ? 'Percentiles are estimated from summary histograms (≈). Counts are exact.'
+        : 'Percentiles are estimated from summary histograms (≈). Request counts are lower bounds (≥): summaries keep only their busiest values.'
+  const summarySource = sourceOf('summary')
+  const summaryData = summarySource.data?.summary
+  const summaryNote = approxNote('summary', 'ottfb_p50_ms')
+  const summary = React.useMemo(() => ({
+    data: summaryNote && summaryData ? { ...summaryData, _approx: true, _approx_note: summaryNote } : summaryData,
+    isLoading: summarySource.isLoading, isFetching: summarySource.isFetching, error: summarySource.error,
+  }), [summaryData, summaryNote, summarySource.isLoading, summarySource.isFetching, summarySource.error])
+  const tsSource = sourceOf('timeseries')
   const tsData = tsSource.data?.timeseries
   const tsApprox = approxMark(rollup, 'timeseries.value') !== ''
   const originTs = React.useMemo(() => ({
@@ -156,14 +169,26 @@ function OriginReportContent({
       : tsData,
     isLoading: tsSource.isLoading, isFetching: tsSource.isFetching, error: tsSource.error,
   }), [tsData, tsApprox, tsSource.isLoading, tsSource.isFetching, tsSource.error])
-  const slowUrls = React.useMemo(() => ({ data: bundle.data?.slow_urls, isLoading, isFetching, error }), [bundle.data?.slow_urls, isLoading, isFetching, error])
-  const statusSource = rollupSections.includes('status_codes') ? rollupQuery : bundle
+  const slowSource = sourceOf('slow_urls')
+  const slowData = slowSource.data?.slow_urls
+  const slowNote = approxNote('slow_urls', 'p95_ms')
+  const slowUrls = React.useMemo(() => ({
+    data: slowNote && slowData ? { ...slowData, _approx: true, _approx_note: slowNote } : slowData,
+    isLoading: slowSource.isLoading, isFetching: slowSource.isFetching, error: slowSource.error,
+  }), [slowData, slowNote, slowSource.isLoading, slowSource.isFetching, slowSource.error])
+  const statusSource = sourceOf('status_codes')
   const statusCodes = React.useMemo(
     () => ({ data: statusSource.data?.status_codes, isLoading: statusSource.isLoading, isFetching: statusSource.isFetching, error: statusSource.error }),
     [statusSource.data?.status_codes, statusSource.isLoading, statusSource.isFetching, statusSource.error],
   )
-  const popLatency = React.useMemo(() => ({ data: bundle.data?.pop_latency, isLoading, isFetching, error }), [bundle.data?.pop_latency, isLoading, isFetching, error])
-  const ipSource = rollupSections.includes('ip_health') ? rollupQuery : bundle
+  const popSource = sourceOf('pop_latency')
+  const popData = popSource.data?.pop_latency
+  const popNote = approxNote('pop_latency', 'p95_ms')
+  const popLatency = React.useMemo(() => ({
+    data: popNote && popData ? { ...popData, _approx: true, _approx_note: popNote } : popData,
+    isLoading: popSource.isLoading, isFetching: popSource.isFetching, error: popSource.error,
+  }), [popData, popNote, popSource.isLoading, popSource.isFetching, popSource.error])
+  const ipSource = sourceOf('ip_health')
   const ipHealth = React.useMemo(
     () => ({ data: ipSource.data?.ip_health, isLoading: ipSource.isLoading, isFetching: ipSource.isFetching, error: ipSource.error }),
     [ipSource.data?.ip_health, ipSource.isLoading, ipSource.isFetching, ipSource.error],

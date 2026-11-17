@@ -82,7 +82,7 @@ export type InsightScanRows = {
   scalar: Row[];
 };
 
-const NO_HISTS: RollupAgg["hists"] = { ttfb: null, elapsed: null, rtt: null, ottfb: null, ottlb: null };
+const NO_HISTS: RollupAgg["hists"] = { ttfb: null, elapsed: null, rtt: null, ottfb: null, ottlb: null, obytes: null, overhead: null };
 
 /**
  * A baseline rollup cut to what `rollupInsightsBaseline` reads (field counts,

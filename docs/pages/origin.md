@@ -43,11 +43,11 @@ Unfiltered, the page sends the sections v3 summaries can answer as their own req
 
 - `status_codes`: exact, from the per-field origin status counts. Raw when those counts were cut to a top K.
 - `ip_health`: counts and error shares exact, p50/p95 ≈ from the IP's OTTFB or client TTFB histogram. Raw when an IP mixes the two or has rows without an origin status. Requests are shown as "≥ N" when the IP list was cut to a top K.
-- `timeseries`: only for OTTLB on whole 5-minute buckets that tile a day, without a leg split. Miss counts exact, percentiles ≈.
-- Raw only. Each needs summary data the v3 format lacks:
-  - `summary`: an `elapsed − ottlb` histogram, an `obytes` histogram, and MISS/PASS counts and OTTFB/OTTLB histograms restricted to rows with an origin latency.
-  - `slow_urls`: a complete per-URL `COALESCE(ottfb, ttfb)` histogram.
-  - `path_breakdown`, `pop_latency` and the TTFB series: a `COALESCE(ottfb, ttfb)` histogram per edge flag, per POP and per 5-minute bucket. Summaries keep OTTFB and client TTFB apart.
+- `timeseries`: TTFB or OTTLB, with or without the leg split, on whole 5-minute buckets that tile a day. Miss counts exact, percentiles ≈. TTFB and the split read the per-leg origin series (`COALESCE(ottfb, ttfb)` and OTTLB histograms); raw when a summary predates it.
+- `summary`: MISS/PASS counts and the origin 5xx rate exact; OTTFB, OTTLB, CDN overhead (`elapsed − ottlb`) and origin-bytes percentiles ≈, all over rows with an origin latency. Raw when the median CDN overhead falls among negative values, which the histogram can't place.
+- `slow_urls`: per-URL request counts exact, percentiles ≈, ranked by the histogram p95. Summaries keep each window's busiest 2,000 URLs (500 in day bundles); when the list was cut, request counts are lower bounds (the card's Approximate note says so) and the ranking is approximate.
+- `path_breakdown` and `pop_latency`: request counts per edge flag and per POP exact, percentiles ≈.
+- A section whose summary rows are missing (written before they existed) sends the request to the raw scan.
 
 ## Tests
 
