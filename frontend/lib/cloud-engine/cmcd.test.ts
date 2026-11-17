@@ -19,7 +19,7 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
       expect(data.overview).toMatchObject({
         rebuffer_rate: null, avg_bitrate: null, avg_buffer_length: null, median_throughput: null,
       });
-      expect(data.bitrate_ts[0].utilization_ratio).toBeNull();
+      expect(data.bitrate_ts).toEqual([]);
     } finally {
       await engine.reset();
     }
@@ -51,6 +51,24 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
         engine, filters: { country: { mode: "exclude", values: ["CA"] } },
       });
       expect(filtered.overview.active_sessions).toBe(1);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("omits sections whose CMCD keys the window never reported, like High-Scale", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests (scoped_key, ts_ms, url, geo_country, client_asn, cmcd_sid, cmcd_ot)
+        VALUES ('native', 1700000100000, '/seg-1.m4s', 'US', 15169, 'a', 'v'),
+          ('native', 1700000101000, '/seg-2.m4s', 'US', 15169, 'a', NULL)`);
+      const data = await queryCmcdAggregates({ engine });
+      expect(data.sessions_ts).toHaveLength(1);
+      for (const section of ["buffer_health_ts", "bitrate_ts", "throughput_ts", "startup_ts", "top_content",
+        "rebuffer_by_country", "rebuffer_by_asn", "streaming_format_dist"] as const) {
+        expect(data[section], section).toEqual([]);
+      }
+      expect(data.object_type_dist.map((row) => row.object_type)).toEqual(["v"]);
     } finally {
       await engine.reset();
     }

@@ -173,7 +173,7 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
 /** Every request column the /api/cmcd/aggregates scans read. */
 export const CMCD_SCAN_COLUMNS = [
   "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_cid", "cmcd_br", "cmcd_bl", "cmcd_bs", "cmcd_mtp", "cmcd_ot",
-  "cmcd_sf", "cmcd_st", "cmcd_tb", "cmcd_su", "url", "geo_country", "country", "client_asn", "asn",
+  "cmcd_sf", "cmcd_st", "cmcd_tb", "cmcd_su", "geo_country", "country", "client_asn", "asn",
   "as_name", "ttfb_ms", "ttfb", "time_elapsed_usec", "elapsed",
 ] as const;
 
@@ -205,6 +205,11 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
       QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS median_throughput,
       COUNT(NULLIF(cmcd_ot, '')) AS has_ot,
+      COUNT(cmcd_bl) AS has_bl,
+      COUNT(cmcd_br) AS has_br,
+      COUNT(cmcd_mtp) AS has_mtp,
+      COUNT(cmcd_su) AS has_su,
+      COUNT(NULLIF(cmcd_cid, '')) AS has_cid,
       AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_bitrate,
       AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_buffer,
       QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_median_throughput,
@@ -226,6 +231,8 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   // Like High-Scale, quality measurements cover video segments once the window reports object types.
   const hasOt = Number(s.has_ot) > 0;
   const video = hasOt ? "cmcd_ot = 'v'" : "TRUE";
+  // High-Scale omits a section when the window never reported the CMCD keys it needs.
+  const has = (key: string) => Number(s[`has_${key}`]) > 0;
   const rebufferEvents = Number(s.rebuffer_events ?? 0);
   const rebufferRate =
     totalRequests > 0 ? roundTo((rebufferEvents * 100) / totalRequests, 2) : 0;
@@ -392,16 +399,16 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   ] = await Promise.all([
     engine.executeSql<Record<string, unknown>>(
       `SELECT
-        COALESCE(cmcd_cid, url, 'Unknown') AS content_id,
+        cmcd_cid AS content_id,
         COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions,
         COUNT(*)::BIGINT AS requests,
         AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate_kbps,
         AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
         CASE WHEN COUNT(cmcd_bs) > 0 THEN COUNT(DISTINCT cmcd_sid) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT cmcd_sid), 0) END AS rebuffer_rate
       FROM requests
-      WHERE ${where}
+      WHERE ${where} AND cmcd_cid <> ''
       GROUP BY 1
-      ORDER BY sessions DESC, requests DESC
+      ORDER BY sessions DESC, content_id
       LIMIT ${topN}`,
       [],
       params.signal,
@@ -442,12 +449,12 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       params.signal,
     ),
     engine.executeSql<{ object_type: string; requests: number }>(
-      `SELECT COALESCE(cmcd_ot, 'unknown') AS object_type, COUNT(*)::BIGINT AS requests FROM requests WHERE ${where} GROUP BY 1 ORDER BY requests DESC`,
+      `SELECT cmcd_ot AS object_type, COUNT(*)::BIGINT AS requests FROM requests WHERE ${where} AND cmcd_ot <> '' GROUP BY 1 ORDER BY requests DESC, object_type`,
       [],
       params.signal,
     ),
     engine.executeSql<{ format: string; requests: number; sessions: number }>(
-      `SELECT COALESCE(cmcd_sf, 'unknown') AS format, COUNT(*)::BIGINT AS requests, COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions FROM requests WHERE ${where} GROUP BY 1 ORDER BY requests DESC`,
+      `SELECT cmcd_sf AS format, COUNT(*)::BIGINT AS requests, COUNT(DISTINCT cmcd_sid)::BIGINT AS sessions FROM requests WHERE ${where} AND cmcd_sf <> '' GROUP BY 1 ORDER BY sessions DESC, format`,
       [],
       params.signal,
     ),
@@ -478,11 +485,11 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       utilization_ratio: utilizationRatio,
     },
     sessions_ts,
-    buffer_health_ts,
-    bitrate_ts,
-    throughput_ts,
-    startup_ts,
-    top_content: topContentRows.map((r) => ({
+    buffer_health_ts: has("bl") ? buffer_health_ts : [],
+    bitrate_ts: has("br") ? bitrate_ts : [],
+    throughput_ts: has("mtp") ? throughput_ts : [],
+    startup_ts: has("su") ? startup_ts : [],
+    top_content: !has("cid") ? [] : topContentRows.map((r) => ({
       content_id: String(r.content_id ?? "Unknown"),
       sessions: Number(r.sessions ?? 0),
       session_count: Number(r.sessions ?? 0),
@@ -492,7 +499,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       avg_buffer_length: nullable(r.avg_buffer_length),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_country: countryRows.map((r) => ({
+    rebuffer_by_country: !has("bs") ? [] : countryRows.map((r) => ({
       country: String(r.country ?? "Unknown"),
       session_count: Number(r.sessions ?? 0),
       median_throughput: nullable(r.median_throughput),
@@ -501,7 +508,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       rebuffer_events: Number(r.rebuffer_events ?? 0),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_asn: asnRows.map((r) => ({
+    rebuffer_by_asn: !has("bs") ? [] : asnRows.map((r) => ({
       asn: Number(r.asn ?? 0),
       as_name: String(r.as_name ?? ""),
       label: String(r.as_name ?? ""),
