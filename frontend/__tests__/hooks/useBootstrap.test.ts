@@ -1523,8 +1523,8 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
         edge_score_reason_ind: false,
       })
 
-      for (const elevation of [logged, { ...logged, fastly_bots_available: true }]) {
-        useBootstrapMock.mockReturnValue({ data: elevation })
+      for (const highScale of [logged, { ...logged, fastly_bots_available: true }]) {
+        useBootstrapMock.mockReturnValue({ data: highScale })
         rerender()
         expect(result.current.find(c => c.id === '_bot_name')).toEqual({ id: '_bot_name', label: 'Fastly Bots', inActiveFormat: true })
       }

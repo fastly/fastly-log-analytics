@@ -2,7 +2,7 @@ export type BotRow = { id: string; name: string; category: string; request_count
 
 type Bot = { id: string; name: string; category: string; patterns: RegExp[] };
 
-/** Elevation classifies the top 2,000 user agents by request count. */
+/** High-Scale classifies the top 2,000 user agents by request count. */
 export const BOT_UA_CLASSIFY_LIMIT = 2000;
 const UA_CACHE_LIMIT = 10_000;
 

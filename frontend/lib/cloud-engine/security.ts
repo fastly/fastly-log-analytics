@@ -209,7 +209,7 @@ export interface SecurityActiveClientItem extends ApiActiveClientItem {
   city: string | null;
 }
 
-/** The Proxy Watchdog slice of the shared `SecurityAggregatesResponse` wire contract (Elevation's shape). */
+/** The Proxy Watchdog slice of the shared `SecurityAggregatesResponse` wire contract (High-Scale's shape). */
 export type SecurityProxiesData = Pick<
   ApiSecurityAggregates,
   "active_proxies_count" | "tunnel_requests_count" | "distance_mismatches_count" | "traffic_quality" | "suspicious_isps"
@@ -515,7 +515,7 @@ export function buildSecurityTopIpsHeaderSql(
   return { sql, params };
 }
 
-/** The user agents Elevation classifies into known bots: the top 2,000 by count. */
+/** The user agents High-Scale classifies into known bots: the top 2,000 by count. */
 export function buildSecurityTopUserAgentsSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,

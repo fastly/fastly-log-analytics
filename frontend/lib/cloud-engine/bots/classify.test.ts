@@ -23,7 +23,7 @@ const ROWS: [string, number][] = [
 
 // Expected values come from backend classify_ua_counts over the bundled seed.
 describe("classifyUserAgentCounts", () => {
-  it("matches the Elevation classifier on real user agents", async () => {
+  it("matches the High-Scale classifier on real user agents", async () => {
     expect(await classifyUserAgentCounts(ROWS, 10)).toEqual([
       { id: "google-crawler", name: "Google Crawler", category: "google", request_count: 50 },
       { id: "bing-crawler", name: "Bing Crawler", category: "microsoft", request_count: 47 },

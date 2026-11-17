@@ -99,7 +99,7 @@ describe("security cloud-engine module (F20)", () => {
     }
   });
 
-  it("classifies top bots from the filtered range's user agents like Elevation", async () => {
+  it("classifies top bots from the filtered range's user agents like High-Scale", async () => {
     const engine = getDuckDBEngine();
     const rows: [string, string, number][] = [
       ["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "US", 3],
@@ -345,7 +345,7 @@ describe("security cloud-engine module (F20)", () => {
     expect(ACTIVE_CLIENTS_LIMIT).toBe(100);
   });
 
-  it("shapes Watchdog proxies to the Elevation wire contract (label/value %, tunnel_requests_count, asn_name)", () => {
+  it("shapes Watchdog proxies to the High-Scale wire contract (label/value %, tunnel_requests_count, asn_name)", () => {
     const direct = (ip: string) => ({ ip, asn: 15169, rtt_min: 20000, tcp_rtt: 20000, lat: 37.33, lon: -121.89, pop: "SJC" });
     const shaped = shapeSecurityProxiesFromRawRows(
       [

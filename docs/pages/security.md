@@ -37,7 +37,7 @@ Bot enrichment uses the PostgreSQL `ngwaf_bots` and `rdns` tables. The ClickHous
 
 `top_bots.bots` (here and in the dashboard bundle's Fastly Bots card) takes the top 2,000 user agents by request count in the filtered range and classifies them at query time: every well-known-bots entry with an accepted pattern that matches the UA (case-insensitive search) adds that UA's count to the entry. Rows are `{id, name, category, request_count}` with `name` the title-cased id and `category` the entry's first category, sorted descending, top 10. With no UA logged the list is empty.
 
-- Elevation: `classify_ua_counts` in [`backend/repositories/security/watchdog.py`](../../backend/repositories/security/watchdog.py), using the list `bot_data_refresh` keeps current.
+- High-Scale: `classify_ua_counts` in [`backend/repositories/security/watchdog.py`](../../backend/repositories/security/watchdog.py), using the list `bot_data_refresh` keeps current.
 - Cloud: [`frontend/lib/cloud-engine/bots/classify.ts`](../../frontend/lib/cloud-engine/bots/classify.ts) in the browser, against the bundled seed. The seed is generated from [`backend/utils/well_known_bots_seed.json`](../../backend/utils/well_known_bots_seed.json) into `well-known-bots.generated.ts` (id, first category and patterns only, about 41 KB raw / 11 KB gzip) and loaded lazily on the first classification. After changing the backend seed, run `node scripts/generate-well-known-bots.mjs` from `frontend/`; `classify.test.ts` fails when the two drift. Cloud's NGWAF bot lists stay empty.
 
 ## Tests
