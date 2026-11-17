@@ -16,20 +16,20 @@ export type InsightsRollupMeta = NetworkRollupMeta;
 export type InsightsBaselineSource = {
   approximate: ReadonlySet<string>;
   lowerBound: ReadonlySet<string>;
-  /** Detectors whose baseline the summaries do not keep, with the missing breakdown. */
-  unsummarized: ReadonlyMap<string, string>;
+  /** Detectors whose baseline the summaries do not keep; a raw follow-up computes them. */
+  deferred: ReadonlySet<string>;
 };
 
-export const INSIGHTS_UNSUMMARIZED: ReadonlyMap<string, string> = new Map([
-  ["error_spikes", "per-URL status"],
-  ["cache_collapse", "per-URL cache state"],
-  ["cacheability_regression", "per-URL cache state"],
-  ["latency_regression", "per-URL latency"],
-  ["credential_enumeration", "per-IP authentication-path"],
-  ["content_discovery", "per-IP 404"],
-  ["city_latency_regressions", "per-city latency"],
-  ["pop_latency_regression", "per-PoP latency"],
-  ["asn_hosting_shift", "per-ASN proxy-type"],
+/**
+ * Detectors that need a breakdown the summaries do not keep (per-URL status,
+ * cache state and latency; per-IP auth paths and 404s; per-city and per-PoP
+ * latency; per-ASN proxy type). Content discovery is window-only but its
+ * baseline 404 count is per IP too.
+ */
+export const INSIGHTS_DEFERRED: ReadonlySet<string> = new Set([
+  "error_spikes", "cache_collapse", "cacheability_regression", "latency_regression",
+  "credential_enumeration", "content_discovery", "city_latency_regressions",
+  "pop_latency_regression", "asn_hosting_shift",
 ]);
 
 /** Summaries merge a city's regions and count status 0 as an error. */
@@ -150,7 +150,7 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
   return {
     rows: { city, dimension, asn, scalar },
     baselineRequests,
-    source: { approximate, lowerBound, unsummarized: INSIGHTS_UNSUMMARIZED },
+    source: { approximate, lowerBound, deferred: INSIGHTS_DEFERRED },
     meta: {
       data_from: new Date(result.dataFromMs).toISOString(),
       data_through: new Date(result.dataThroughMs).toISOString(),

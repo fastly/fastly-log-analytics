@@ -6,6 +6,8 @@ import {
   CLOUD_INSIGHT_DETECTORS, insightScanColumns, queryCloudCacheCollapse, queryCloudInsights,
 } from "./insight-scans";
 import { handleInsightAvailability, INSIGHT_DEFINITIONS } from "./insights";
+import { INSIGHTS_DEFERRED } from "./insights-rollup";
+import { escapeSqlLiteral } from "./sql-validator";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
 
@@ -164,6 +166,43 @@ describe("local Parquet insight scans", () => {
       await queryCloudInsights(body, { ...options, filters, engine: read });
       await queryCloudCacheCollapse({ ...body, url: "/a" }, { signal, maskIps: false, engine: read });
       expect(sqls.length).toBeGreaterThan(8);
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it("evaluates the deferred detectors from their own column projection exactly as the full scan", async () => {
+    await seedRichHistory();
+    const deferred = [...INSIGHTS_DEFERRED];
+    const full = await queryCloudInsights(body, options);
+    const columns = insightScanColumns([], deferred);
+    for (const unneeded of ["ua", "referer", "method", "transport"]) expect(columns).not.toContain(unneeded);
+    const physical = columns.filter((column) => column !== "timestamp" && column !== "ts_ms");
+    const rows = await engine.executeSql(`SELECT ts_ms, ${physical.map((c) => `"${c}"`).join(", ")} FROM requests`);
+    const literal = (value: unknown) => value == null ? "NULL"
+      : typeof value === "string" ? `'${escapeSqlLiteral(value)}'` : String(value);
+    const backend = await createNodeBackend();
+    try {
+      // Only the projected columns exist, so any other column reference fails to bind.
+      await backend.query(`CREATE TABLE requests AS SELECT ts_ms::BIGINT AS ts_ms,
+        epoch_ms(ts_ms::BIGINT)::TIMESTAMPTZ AS "timestamp",
+        ${physical.map((column) => `"${column}"::${FIELD_DUCKDB_TYPES[column]} AS "${column}"`).join(", ")}
+        FROM (VALUES ${rows.map((row) => `(${["ts_ms", ...physical].map((c) => literal(row[c])).join(", ")})`).join(", ")})
+        v(ts_ms, ${physical.map((c) => `"${c}"`).join(", ")})`);
+      const read = {
+        executeSql: async (sql: string) => tableRows(await backend.query(sql)).map((row) => Object.fromEntries(
+          Object.entries({ ...row }).map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value]))),
+        // A projected file still reports its source file's columns.
+        getPresentColumns: () => engine.getPresentColumns(),
+        getCustomColumnTypes: () => new Map(),
+      } as unknown as DuckDBReadContext;
+      const followUp = await queryCloudInsights({ ...body, detectors: deferred }, { ...options, engine: read });
+
+      expect(followUp.insights.map((card) => card.id).sort()).toEqual(deferred.sort());
+      expect(followUp.insights).toEqual(full.insights.filter((card) => deferred.includes(card.id)));
+      for (const card of followUp.insights) expect(card.items.length, card.id).toBeGreaterThan(0);
+      expect(followUp.unavailable_detectors).toEqual([]);
+      expect(followUp).not.toHaveProperty("deferred_detectors");
     } finally {
       await backend.dispose();
     }

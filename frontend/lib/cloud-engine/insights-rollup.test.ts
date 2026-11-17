@@ -17,7 +17,7 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
-import { INSIGHTS_UNSUMMARIZED, insightsBaselineFromRollup, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, rollupInsightsBaseline } from "./insights-rollup";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -117,6 +117,7 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     })();
 
     expect(raw).not.toHaveProperty("rollup");
+    expect(raw).not.toHaveProperty("deferred_detectors");
     expect(rolled.rollup).toMatchObject({
       data_from: new Date(T0).toISOString(),
       data_through: new Date(WINDOW_START).toISOString(),
@@ -125,28 +126,27 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(rolled.rollup!.approximate).toEqual(expect.arrayContaining(["city_surges", "city_error_spikes", "new_city_traffic"]));
     expect(rolled.window_total_requests).toBe(raw.window_total_requests);
     expect(rolled.insights.map((c) => c.id)).toEqual(raw.insights.map((c) => c.id));
-    expect(raw.insights.filter((c) => c.summary.includes("Not evaluated"))).toEqual([]);
+    expect(raw.insights.filter((c) => c.summary.includes("Not evaluated") || c.placeholder)).toEqual([]);
     const ids = raw.insights.map((c) => c.id);
-    const unsummarized = ids.filter((id) => INSIGHTS_UNSUMMARIZED.has(id) && id !== "content_discovery");
-    expect(unsummarized.length).toBeGreaterThan(0);
+    const deferred = ids.filter((id) => INSIGHTS_DEFERRED.has(id));
+    expect(deferred).toEqual(expect.arrayContaining(["content_discovery", "error_spikes"]));
+    expect(rolled.deferred_detectors).toEqual(deferred);
     expect(ids).toEqual(expect.arrayContaining(["city_surges", "new_country_traffic", "asn_concentration", "cache_hit_cliff"]));
-    const strip = (items: { baseline_val: number | null; baseline_label?: string }[], dropBaseline: boolean) =>
+    const strip = (items: { baseline_val: number; baseline_label?: string }[], dropBaseline: boolean) =>
       items.map(({ baseline_label: _, baseline_val, ...rest }) => (dropBaseline ? rest : { ...rest, baseline_val }));
     for (const card of rolled.insights) {
       const rawCard = raw.insights.find((c) => c.id === card.id)!;
-      if (unsummarized.includes(card.id)) {
-        expect(card, card.id).toMatchObject({ severity: "info", items: [] });
-        expect(card.summary, card.id).toMatch(/log summaries, which keep no .* breakdown\. Not evaluated\./);
+      if (deferred.includes(card.id)) {
+        expect(card, card.id).toMatchObject({ severity: "info", summary: "Computing baseline…", items: [], placeholder: true });
         continue;
       }
       const approximate = rolled.rollup!.approximate.includes(card.id);
       expect(card.severity, card.id).toBe(rawCard.severity);
-      expect(strip(card.items, approximate || card.id === "content_discovery"), card.id)
-        .toEqual(strip(rawCard.items, approximate || card.id === "content_discovery"));
+      expect(strip(card.items, approximate), card.id).toEqual(strip(rawCard.items, approximate));
       for (const [i, item] of card.items.entries()) {
         expect(item.baseline_label, card.id).toBe(approximate ? "≈ baseline" : undefined);
         // Summaries also count status 0 as an error.
-        if (card.id === "city_error_spikes") expect(item.baseline_val).toBeGreaterThanOrEqual(rawCard.items[i].baseline_val!);
+        if (card.id === "city_error_spikes") expect(item.baseline_val).toBeGreaterThanOrEqual(rawCard.items[i].baseline_val);
       }
     }
     expect(rolled.insights.find((c) => c.id === "city_error_spikes")!.items.length).toBeGreaterThan(0);

@@ -19,7 +19,7 @@ import {
 } from "./insights";
 import { escapeSqlLiteral } from "./sql-validator";
 import type { RollupResult } from "./dashboard/rollup-query";
-import { rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, rollupInsightsBaseline } from "./insights-rollup";
 
 export { CLOUD_INSIGHT_DETECTORS } from "./insights";
 
@@ -29,15 +29,42 @@ export const INSIGHT_SCAN_COLUMNS = [
   "country", "p_type", "method", "referer", "ua", "pop", "server_region", "metro", "asn", "transport",
 ] as const;
 
-/** The columns a column-projected Insights load needs, including filtered fields. */
-export function insightScanColumns(filters: readonly DashboardFilter[]): string[] {
-  return [...new Set([...INSIGHT_SCAN_COLUMNS, ...filters.map((filter) => filter.field)])];
+/** Each coalesced scan, the columns its SQL reads, and the detectors it serves. */
+const INSIGHT_SCANS = {
+  url: { build: _coalesced_url_aggregates, columns: ["url", "status", "cache", "elapsed", "resp_bytes"],
+    ids: ["error_spikes", "cache_collapse", "cacheability_regression", "latency_regression", "tail_latency"] },
+  ip: { build: _coalesced_ip_security_aggregates, columns: ["ip", "url", "status"],
+    ids: ["credential_enumeration", "content_discovery"] },
+  city: { build: _coalesced_city_aggregates, columns: ["city", "region", "country", "status", "elapsed"],
+    ids: ["city_surges", "city_error_spikes", "city_latency_regressions", "new_city_traffic"] },
+  dimension: { build: _coalesced_dim_aggregates, columns: ["country", "p_type", "method", "referer", "ua"],
+    ids: ["new_country_traffic", "ua_monoculture", "referer_monoculture", "method_drift", "proxy_surge"] },
+  asn: { build: _coalesced_asn_aggregates, columns: ["asn", "p_type"],
+    ids: ["asn_concentration", "new_asn_traffic", "asn_hosting_shift"] },
+  geo: { build: _coalesced_geo_latency_aggregates, columns: ["pop", "server_region", "metro", "elapsed"],
+    ids: ["pop_latency_regression"] },
+  scalar: { build: _coalesced_scalar_aggregates, columns: ["transport", "cache"],
+    ids: ["cache_hit_cliff", "http3_fallback"] },
+} as const;
+
+/**
+ * The columns a column-projected Insights load needs, including filtered
+ * fields; with `detectors`, only those the scans serving them read.
+ */
+export function insightScanColumns(filters: readonly DashboardFilter[], detectors?: readonly string[]): string[] {
+  const columns = detectors
+    ? ["timestamp", "ts_ms", ...Object.values(INSIGHT_SCANS)
+      .filter((scan) => scan.ids.some((id) => detectors.includes(id))).flatMap((scan) => scan.columns)]
+    : INSIGHT_SCAN_COLUMNS;
+  return [...new Set([...columns, ...filters.map((filter) => filter.field)])];
 }
 
 /**
  * Evaluates the Cloud detectors over local Parquet. With `baseline` (summaries
  * of the unfiltered baseline), only the window is scanned raw and the baseline
- * columns come from the summaries.
+ * columns come from the summaries; detectors the summaries can't answer come
+ * back as placeholders listed in `deferred_detectors`, for a follow-up request
+ * with `detectors` to evaluate raw.
  */
 export async function queryCloudInsights(
   body: InsightsRequest,
@@ -68,19 +95,16 @@ export async function queryCloudInsights(
   const availableIds = new Set(availability.insights.filter((d) => d.available).map((d) => d.id));
   const firstMs = options.baseline ? options.baseline.dataFromMs : totals[0]?.first_ms;
   const historyHours = firstMs == null ? 0 : Math.max(0, (windowStartMs - Number(firstMs)) / 3_600_000);
-  const scan = (builder: (table: string, start: string) => string, ids: string[]) =>
-    Number(totals[0]?.requests ?? 0) > 0 && ids.some((id) => availableIds.has(id) &&
+  const wanted = (id: string) => body.detectors ? body.detectors.includes(id)
+    : !(options.baseline && INSIGHTS_DEFERRED.has(id));
+  const scan = ({ build, ids }: (typeof INSIGHT_SCANS)[keyof typeof INSIGHT_SCANS]) =>
+    Number(totals[0]?.requests ?? 0) > 0 && ids.some((id) => wanted(id) && availableIds.has(id) &&
       (historyHours >= Math.min(min_Baseline, baselineHours) || CURRENT_WINDOW_INSIGHT_DETECTORS.has(id)))
-      ? engine.executeSql(`${scope} SELECT * FROM (${builder("cloud_insight_scope", windowStart)})`, [], options.signal)
+      ? engine.executeSql(`${scope} SELECT * FROM (${build("cloud_insight_scope", windowStart)})`, [], options.signal)
       : Promise.resolve([]);
   const [urlRows, ipRows, cityRows, dimensionRows, asnRows, geoRows, scalarRows] = await Promise.all([
-    scan(_coalesced_url_aggregates, ["error_spikes", "cache_collapse", "cacheability_regression", "latency_regression", "tail_latency"]),
-    scan(_coalesced_ip_security_aggregates, ["credential_enumeration", "content_discovery"]),
-    scan(_coalesced_city_aggregates, ["city_surges", "city_error_spikes", "city_latency_regressions", "new_city_traffic"]),
-    scan(_coalesced_dim_aggregates, ["new_country_traffic", "ua_monoculture", "referer_monoculture", "method_drift", "proxy_surge"]),
-    scan(_coalesced_asn_aggregates, ["asn_concentration", "new_asn_traffic", "asn_hosting_shift"]),
-    scan(_coalesced_geo_latency_aggregates, ["pop_latency_regression"]),
-    scan(_coalesced_scalar_aggregates, ["cache_hit_cliff", "http3_fallback"]),
+    scan(INSIGHT_SCANS.url), scan(INSIGHT_SCANS.ip), scan(INSIGHT_SCANS.city), scan(INSIGHT_SCANS.dimension),
+    scan(INSIGHT_SCANS.asn), scan(INSIGHT_SCANS.geo), scan(INSIGHT_SCANS.scalar),
   ]);
   const summarized = options.baseline && rollupInsightsBaseline(options.baseline, {
     city: cityRows, dimension: dimensionRows, asn: asnRows, scalar: scalarRows,
@@ -101,12 +125,17 @@ export async function queryCloudInsights(
     baselineTotalRequests: summarized?.baselineRequests ?? Number(totals[0]?.baseline_requests ?? 0),
     baselineSource: summarized?.source,
   });
+  // A follow-up's projection hides the columns other detectors need; only its own count.
+  const unavailable = availability.unavailable.filter((d) => !body.detectors || body.detectors.includes(d.id));
   return {
     ...envelope,
-    ...(summarized ? { rollup: summarized.meta } : {}),
-    unsupported_detectors: availability.unavailable.filter((d) => d.reason === "cloud_detector_unsupported")
+    ...(summarized ? {
+      rollup: summarized.meta,
+      deferred_detectors: envelope.insights.filter((card) => card.placeholder).map((card) => card.id),
+    } : {}),
+    unsupported_detectors: unavailable.filter((d) => d.reason === "cloud_detector_unsupported")
       .map(({ id, reason }) => ({ id, reason })),
-    unavailable_detectors: availability.unavailable,
+    unavailable_detectors: unavailable,
   };
 }
 

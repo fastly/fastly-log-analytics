@@ -542,6 +542,30 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(vi.mocked(insightsBaselineFromRollup).mock.calls[0]?.[1]).not.toEqual([]);
   });
 
+  it("reads a deferred-detector follow-up raw under its own projection, shortening its baseline when over budget", async () => {
+    const detectors = ["error_spikes", "pop_latency_regression"];
+    const followUp = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
+        end_time: "2026-11-06T00:00:00Z", detectors }),
+    }));
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear();
+    expect((await followUp())?.status).toBe(200);
+    expect(insightsBaselineFromRollup).not.toHaveBeenCalled();
+    const [[start, end, , , options]] = vi.mocked(ensureCloudRange).mock.calls;
+    expect([start, end]).toEqual([new Date(Date.parse("2026-11-06T00:00:00Z") - 192 * 3_600_000).toISOString(),
+      "2026-11-06T00:00:00Z"]);
+    expect(options?.projection?.columns).toEqual(insightScanColumns([], detectors));
+    expect(options?.projection?.columns).not.toContain("ua");
+
+    const budget = new CloudBudgetError("over budget");
+    vi.mocked(ensureCloudRange).mockClear().mockRejectedValueOnce(budget);
+    const shortened = await followUp();
+    expect((await shortened!.json() as { baseline_hours: number }).baseline_hours).toBe(24);
+    expect(vi.mocked(ensureCloudRange).mock.calls).toHaveLength(2);
+  });
+
   it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
     const options = async (path: string, body?: Record<string, unknown>) => {
       vi.mocked(ensureCloudRange).mockClear();

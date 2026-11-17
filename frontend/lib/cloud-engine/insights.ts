@@ -384,8 +384,7 @@ export function threshold_checks(params: {
 export interface InsightItem {
   label: string;
   current_val: number;
-  /** Null when the baseline is not known (a window-only detector served from summaries). */
-  baseline_val: number | null;
+  baseline_val: number;
   /** Set when the baseline is estimated (`≈`) or a lower bound (`≥`). */
   baseline_label?: string;
   unit: string;
@@ -402,6 +401,8 @@ export interface InsightCard {
   severity: "critical" | "warning" | "info" | "clean" | "error";
   summary: string;
   items: InsightItem[];
+  /** Not evaluated yet: a follow-up request (`detectors`) computes it. */
+  placeholder?: boolean;
 }
 
 export interface InsightsEnvelope {
@@ -489,6 +490,8 @@ export interface InsightsRequest {
   clamp_start?: string | null;
   clamp_end?: string | null;
   filters?: Record<string, unknown>;
+  /** Evaluate only these detectors (a follow-up for deferred ones). */
+  detectors?: string[];
 }
 
 export interface CloudInsightsContext {
@@ -553,7 +556,8 @@ export async function handleInsights(
     serviceId,
     ctx.availableColumns,
   );
-  const availableDefs = availability.insights.filter((i) => i.available);
+  const availableDefs = availability.insights.filter((i) => i.available &&
+    (!body.detectors || body.detectors.includes(i.id)));
   const historyHours = ctx.availableHistoryHours ?? 0;
   const n = (r: Record<string, unknown>, key: string) => Number(r[key] ?? 0);
   const pct = (value: number, total: number) => total > 0 ? value * 100 / total : 0;
@@ -577,16 +581,16 @@ export async function handleInsights(
       };
     }
     const source = ctx.baselineSource;
-    const unsummarized = source?.unsummarized.get(d.id);
-    if (unsummarized && !CURRENT_WINDOW_INSIGHT_DETECTORS.has(d.id)) {
+    if (source?.deferred.has(d.id)) {
       return {
         id: d.id,
         title: d.title,
         description: d.description,
         category: d.category,
         severity: "info",
-        summary: `The baseline comes from log summaries, which keep no ${unsummarized} breakdown. Not evaluated.`,
+        summary: "Computing baseline…",
         items: [],
+        placeholder: true,
       };
     }
     const baselineLabel = source?.lowerBound.has(d.id) ? "≥ baseline"
@@ -596,7 +600,7 @@ export async function handleInsights(
     const add = (label: string, current: number, baseline: number, unit: string,
       meta: Record<string, unknown>, severity: InsightItem["severity"] = "warning") => {
       items.push({ label, current_val: Math.round(current * 10) / 10,
-        baseline_val: unsummarized ? null : Math.round(baseline * 10) / 10,
+        baseline_val: Math.round(baseline * 10) / 10,
         ...(baselineLabel ? { baseline_label: baselineLabel } : {}), unit, meta, severity });
     };
     const scan = (rows: Record<string, unknown>[] | undefined) => {
@@ -753,7 +757,7 @@ export async function handleInsights(
       default:
         throw new Error(`Cloud detector ${d.id} is advertised without an implementation`);
     }
-    items.sort((a, b) => Math.abs(b.current_val - (b.baseline_val ?? 0)) - Math.abs(a.current_val - (a.baseline_val ?? 0)));
+    items.sort((a, b) => Math.abs(b.current_val - b.baseline_val) - Math.abs(a.current_val - a.baseline_val));
     const findings = items.slice(0, 20);
     for (const item of findings) {
       const filters = item.meta.filters as Record<string, unknown> | undefined;

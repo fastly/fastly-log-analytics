@@ -463,6 +463,8 @@ const insightBaselines = new WeakMap<Request, RollupResult>();
  */
 async function cloudInsightsBaseline(request: Request): Promise<RollupResult | null> {
   const body = await request.clone().json() as Record<string, unknown>;
+  // A detector-restricted request is the raw follow-up for detectors the summaries can't answer.
+  if (Array.isArray(body.detectors)) return null;
   const filters = parseFiltersPayload(body.filters as Parameters<typeof parseFiltersPayload>[0], undefined);
   if (filters.length) return null;
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
@@ -557,7 +559,7 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
-      columns: insightScanColumns(filters),
+      columns: insightScanColumns(filters, Array.isArray(params.detectors) ? params.detectors as string[] : undefined),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
     } } : scanColumns ? { projection: { columns: scanColumns } } : {},
   });
