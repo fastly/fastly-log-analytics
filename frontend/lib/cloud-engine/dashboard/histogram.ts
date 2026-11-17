@@ -72,15 +72,19 @@ export class Histogram {
       h.buckets[s] = c;
       last = s;
     }
-    return h.isEmpty() || h.min > h.max ? null : h;
+    return (last < 0 && under === 0 && over === 0) || h.min > h.max ? null : h;
   }
 
   isEmpty(): boolean {
-    return this.count() === 0;
+    if (this.under > 0 || this.over > 0) return false;
+    for (let i = 0; i < BUCKETS; i++) if (this.buckets[i] !== 0) return false;
+    return true;
   }
 
   count(): number {
-    return this.buckets.reduce((sum, c) => sum + c, this.under + this.over);
+    let sum = this.under + this.over;
+    for (let i = 0; i < BUCKETS; i++) sum += this.buckets[i];
+    return sum;
   }
 
   merge(other: Histogram) {
