@@ -1,4 +1,4 @@
-// Which /origin, /performance and /security sections Cloud summaries can answer. Kept free of
+// Which /origin, /performance, /security, /assets and /fastly-value sections Cloud summaries can answer. Kept free of
 // engine imports so page components can split their requests without loading them.
 
 /** Whether a filter body narrows anything; empty filter objects and value lists don't. */
@@ -53,3 +53,33 @@ export const SECURITY_ROLLUP_SECTIONS = [
   "conn_reuse_dist",
   "verified_bots_ts",
 ] as const;
+
+/** The /assets sections; `summary` covers the totals, the three breakdowns and `missing_fields`. */
+export type AssetsSection = "summary" | "large_uncompressed_assets" | "low_ttl_assets";
+
+/** The /assets sections summaries answer exactly: the totals and breakdowns from the `assets` rows. */
+export const ASSETS_ROLLUP_SECTIONS = ["summary"] as const satisfies readonly AssetsSection[];
+
+/** The /assets sections the raw scan answers on Cloud once summaries take the rest. */
+export const ASSETS_RAW_SECTIONS = ["large_uncompressed_assets", "low_ttl_assets"] as const satisfies readonly AssetsSection[];
+
+/**
+ * The cache filter summaries can apply to /assets: null when unfiltered, the
+ * filter when the only one is an exact-value `cache` filter (the `assets` key
+ * carries the cache status), or false when the raw scan must answer.
+ */
+export function assetsRollupCacheFilter(filters: unknown): { mode: "include" | "exclude"; values: string[] } | null | false {
+  if (!hasFilterValues(filters)) return null;
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return false;
+  const active = Object.entries(filters as Record<string, unknown>).filter(([key, spec]) =>
+    key !== "filter_mode" && hasFilterValues({ [key]: spec }));
+  if (active.length !== 1) return false;
+  const [field, spec] = active[0];
+  const { mode, values } = (spec ?? {}) as { mode?: unknown; values?: unknown };
+  if (field !== "cache" || (mode !== "include" && mode !== "exclude") || !Array.isArray(values)) return false;
+  if (!values.every((value) => typeof value === "string" && value !== "" && !value.includes("*"))) return false;
+  return { mode, values: values as string[] };
+}
+
+/** The /fastly-value sections summaries answer exactly, unfiltered: the overview cards and the network adoption figures. */
+export const VALUE_ROLLUP_SECTIONS = ["overview", "network"] as const;

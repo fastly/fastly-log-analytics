@@ -5,6 +5,7 @@ import {
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
+import type { AssetsSection } from "./rollup-sections";
 
 export const LARGE_UNCOMPRESSED_THRESHOLD_BYTES = 10240; // 10 KB
 export const LOW_TTL_THRESHOLD_SECONDS = 3600; // 1 hour
@@ -22,6 +23,8 @@ export interface AssetsQueryParams {
   filters?: readonly AssetFilterClause[] | FiltersPayload;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
   customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
+  /** Cloud only: answer just these sections (all when absent or empty). */
+  sections?: readonly AssetsSection[] | null;
   signal?: AbortSignal;
 }
 
@@ -62,6 +65,19 @@ export function emptyAssetsAggregates() {
 }
 
 export const empty_assets_aggregates = emptyAssetsAggregates;
+
+const SECTION_KEYS: Record<AssetsSection, readonly string[]> = {
+  summary: ["missing_fields", "summary", "asset_type_breakdown", "cache_performance", "compression_performance"],
+  large_uncompressed_assets: ["large_uncompressed_assets"],
+  low_ttl_assets: ["low_ttl_assets"],
+};
+
+/** The response keys of the requested sections, every key when none are named; typed whole, as a caller naming sections reads only those. */
+export function selectAssetsSections<T extends object>(out: T, sections?: readonly AssetsSection[] | null): T {
+  if (!sections?.length) return out;
+  const keys = new Set(sections.flatMap((section) => SECTION_KEYS[section] ?? []));
+  return Object.fromEntries(Object.entries(out).filter(([key]) => keys.has(key))) as T;
+}
 
 /**
  * Computes summary metrics and breakdowns (asset_type_breakdown,
@@ -347,7 +363,9 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildAssetsWhere(params);
 
-  const dimRows = await engine.executeSql<DimRowInput>(
+  const sections = Array.isArray(params.sections) && params.sections.length ? params.sections : null;
+  const want = (section: AssetsSection) => !sections || sections.includes(section);
+  const dimRows = !want("summary") ? [] : await engine.executeSql<DimRowInput>(
     `${DERIVED_ASSET_CTE}
     SELECT
       derived_asset_type AS asset_type,
@@ -365,14 +383,14 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     params.signal,
   );
 
-  if (dimRows.length === 0) {
-    return emptyAssetsAggregates();
+  if (want("summary") && dimRows.length === 0) {
+    return selectAssetsSections(emptyAssetsAggregates(), sections);
   }
 
   const computed = computeSummaryFromDims(dimRows);
 
   // Large uncompressed text assets (JavaScript/CSS/HTML/JSON with avg size > 10240 bytes and identity/none encoding)
-  const largeUncompressedRows = await engine.executeSql<Record<string, unknown>>(
+  const largeUncompressedRows = !want("large_uncompressed_assets") ? [] : await engine.executeSql<Record<string, unknown>>(
     `${DERIVED_ASSET_CTE}
     SELECT
       norm_url AS url,
@@ -395,7 +413,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
   );
 
   // Low TTL static assets (ttl < 3600s and not cache hit)
-  const lowTtlRows = await engine.executeSql<Record<string, unknown>>(
+  const lowTtlRows = !want("low_ttl_assets") ? [] : await engine.executeSql<Record<string, unknown>>(
     `${DERIVED_ASSET_CTE}
     SELECT
       norm_url AS url,
@@ -415,8 +433,8 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     params.signal,
   );
 
-  const present = await engine.getPresentColumns();
-  return {
+  const present = want("summary") ? await engine.getPresentColumns() : new Set<string>();
+  return selectAssetsSections({
     missing_fields: [
       ...(!present.has("ttl") ? ["ttl"] : []),
       ...(!present.has("content_encoding") && !present.has("resp_header_content_encoding") ? ["resp_header_content_encoding"] : []),
@@ -451,7 +469,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       avg_ttl: roundTo(Number(r.avg_ttl_seconds ?? 0), 1),
       hit_ratio_pct: roundTo(Number(r.hit_ratio_pct ?? 0), 2),
     })),
-  };
+  }, sections);
 }
 
 /** Every request column the /api/assets/aggregates scans read, physical Cloud names and their aliases alike. */

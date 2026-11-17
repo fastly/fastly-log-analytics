@@ -10,6 +10,7 @@ import { cloudCacheIdentity } from "./cache-identity";
 
 z.config({ jitless: true });
 import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
+import { assetsRollupEligible } from "./assets-rollup";
 import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import type { DashboardFilter } from "./dashboard/filters";
@@ -95,6 +96,7 @@ import {
   reconcileSnapshot,
 } from "./usage/summary";
 import { handleValueRequest, valueScanColumns, type ValueQueryParams } from "./value";
+import { valueRollupEligible } from "./value-rollup";
 import {
   useDebugStore,
   useFilterStore,
@@ -436,12 +438,15 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/performance/aggregates": { label: "/performance", eligible: performanceRollupEligible },
   "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible },
   "/api/security/bundle": { label: "/security", eligible: securityRollupEligible },
+  "/api/assets/aggregates": { label: "/assets", eligible: assetsRollupEligible },
+  "/api/value/summary": { label: "/fastly-value", eligible: valueRollupEligible },
 };
 
 /**
- * Serves the summary-backed sections of an unfiltered /origin, /performance or
- * /security read like `cloudNetworkRollup`: over the raw scan's range and service, with
- * null (or a summary failure) leaving the read to the raw scan.
+ * Serves the summary-backed sections of an /origin, /performance, /security,
+ * /assets or /fastly-value read like `cloudNetworkRollup`: over the raw scan's
+ * range and service, with null (or a summary failure) leaving the read to the
+ * raw scan.
  */
 async function cloudSectionRollup(request: Request, path: string, route: SectionRollup): Promise<Response | null> {
   const url = new URL(request.url);

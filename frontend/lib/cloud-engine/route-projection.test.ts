@@ -93,8 +93,10 @@ describe("Cloud route column projections", () => {
     getPresentColumns: async () => new Set(FIELDS),
     getCustomColumnTypes: () => new Map(),
   } as unknown as DuckDBReadContext;
-  const view = (columns: readonly string[]) =>
-    backend.query(`CREATE OR REPLACE VIEW requests AS SELECT ${columns.map((c) => `"${c}"`).join(", ")} FROM source`);
+  // `nullFill` lists every column, unprojected ones as NULL, as the Cloud view over a projected file does.
+  const view = (columns: readonly string[], nullFill = false) =>
+    backend.query(`CREATE OR REPLACE VIEW requests AS SELECT ${(nullFill ? all : columns).map((c) => columns.includes(c)
+      ? `"${c}"` : `NULL::${{ ts_ms: "BIGINT", timestamp: "TIMESTAMPTZ" }[c] ?? FIELD_DUCKDB_TYPES[c] ?? SCORING_OPTIONAL_COLUMNS[c]} AS "${c}"`).join(", ")} FROM source`);
   const all = ["ts_ms", "timestamp", ...FIELDS];
 
   beforeAll(async () => {
@@ -108,14 +110,19 @@ describe("Cloud route column projections", () => {
   afterAll(async () => { await backend?.dispose(); });
 
   // Each variant's own projection gives the full-table result; every projected column is read by some variant.
-  async function guard(variants: Variant[]) {
+  // `nullFill` checks only that each projection answers like the full table; its NULLs can't show a column unread.
+  async function guard(variants: Variant[], nullFill = false) {
     for (const variant of variants) {
       expect(variant.columns, variant.name).not.toBeNull();
       expect(variant.columns!.filter((column) => !all.includes(column)), variant.name).toEqual([]);
       await view(all);
       const expected = await variant.run(read);
-      await view(variant.columns!);
+      await view(variant.columns!, nullFill);
       expect(await variant.run(read), variant.name).toEqual(expected);
+    }
+    if (nullFill) {
+      await view(all);
+      return;
     }
     // The loader derives ts_ms from the physical timestamp, which no scan names.
     const used = new Set(variants.flatMap((variant) => variant.columns!).filter((column) => column !== "timestamp"));
@@ -176,10 +183,18 @@ describe("Cloud route column projections", () => {
     const page = { filters: {}, chart_interval: "1 day", sections: ["overview", "caching", "network"], service_id: "svc" };
     expect(await value(page).run(read)).toMatchObject({ overview: { total_requests: expect.any(Number) } });
     await guard([
-      value(page),
       value({ service_id: "svc", chart_interval: "1 hour" }),
       value({ filters: { ua_1: { mode: "exclude", values: ["ua-2"] } }, custom_filters: { method: { mode: "include", values: ["method-1"] } } }),
     ]);
+    // A sectioned scan reads only its sections' columns; the Cloud view lists the rest as NULL.
+    await guard([
+      value(page),
+      ...["overview", "caching", "performance", "network", "security", "bots", "io"].map((section) =>
+        value({ ...page, sections: [section] })),
+      value({ ...page, sections: ["caching"], filters: { host: { mode: "include", values: ["a.example"] } } }),
+    ], true);
+    expect(valueScanColumns({ sections: ["network"] })).toEqual(expect.not.arrayContaining(["url", "cache"]));
+    expect(valueScanColumns({ sections: ["nope"] })).toEqual(valueScanColumns({}));
     expect(valueScanColumns({ filters: "host" })).toBeNull();
     expect(valueScanColumns({ custom_filters: [] })).toBeNull();
   });

@@ -154,7 +154,7 @@ export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | nul
   )
 }
 
-export function SummaryValueTab({ data, loading }: { data?: ValueData; loading?: boolean }) {
+export function SummaryValueTab({ data, loading, cachingLoading }: { data?: ValueData; loading?: boolean; cachingLoading?: boolean }) {
   const overview = data?.overview
   const caching = data?.caching
   const network = data?.network
@@ -198,14 +198,14 @@ export function SummaryValueTab({ data, loading }: { data?: ValueData; loading?:
         <StatCard
           title="Origin Offload"
           icon={ArrowDownToLine}
-          loading={loading}
+          loading={loading || cachingLoading}
           value={formatPctValue(caching?.origin_offload_pct)}
           sub="requests served from cache"
         />
         <StatCard
           title="Bandwidth Saved"
           icon={HardDrive}
-          loading={loading}
+          loading={loading || cachingLoading}
           value={caching?.bandwidth_saved_bytes != null ? formatBytes(caching.bandwidth_saved_bytes) : '—'}
           sub="served from edge cache"
         />

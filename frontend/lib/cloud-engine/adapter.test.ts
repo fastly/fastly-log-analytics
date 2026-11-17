@@ -744,8 +744,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await options("/api/origin/shielding-analysis", {}))
       .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]] });
     expect(await options("/api/origin/drilldown", { dimension: "pop" })).toEqual({ columns: [...ORIGIN_SCAN_COLUMNS.drilldown] });
-    expect(await options("/api/value/summary", { sections: ["overview"], custom_filters: { team: { mode: "include", values: ["a"] } } }))
-      .toEqual({ columns: [...VALUE_SCAN_COLUMNS, "team"] });
+    const team = { team: { mode: "include", values: ["a"] } };
+    const overview = await options("/api/value/summary", { sections: ["overview"], custom_filters: team });
+    expect(overview?.columns).toEqual(expect.arrayContaining(["cache", "elapsed", "resp_bytes", "team"]));
+    expect(overview?.columns).not.toContain("url");
+    expect(await options("/api/value/summary", { custom_filters: team })).toEqual({ columns: [...VALUE_SCAN_COLUMNS, "team"] });
     expect(await options("/api/assets/aggregates", { filters: [{ column: "host", operator: "=", value: "a" }] }))
       .toEqual({ columns: [...ASSETS_SCAN_COLUMNS, "host"] });
     expect(await options("/api/origin/aggregates", { filters: [filters] })).toBeUndefined();

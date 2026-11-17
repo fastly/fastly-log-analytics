@@ -347,15 +347,46 @@ export const VALUE_SCAN_COLUMNS = [
   "io_output_format", "ofmt", "io_input_format", "ifmt", "io_input_bytes", "io_output_bytes",
 ] as const;
 
-/** The columns a projected /api/value/summary load needs, or null when the filters can't name theirs. */
-export function valueScanColumns(params: { filters?: unknown; custom_filters?: unknown }): string[] | null {
-  const fields: string[] = [];
+/** The columns each section's figures read, beyond the time and service ones every scan needs. */
+const VALUE_SECTION_COLUMNS: Record<ValueSection, readonly (typeof VALUE_SCAN_COLUMNS)[number][]> = {
+  overview: [
+    "cache_status", "cache", "resp_body_size", "resp_body_bytes", "resp_bytes", "time_elapsed_usec", "elapsed",
+    "waf_action", "ngwaf_decision",
+  ],
+  caching: [
+    "cache_status", "cache", "resp_body_size", "resp_body_bytes", "resp_bytes", "fastly_is_shield", "is_shield", "edge",
+  ],
+  performance: ["cache_status", "cache", "time_elapsed_usec", "elapsed"],
+  network: ["protocol", "proto", "is_ssl", "tls_version", "tls", "is_ipv6", "ipv6"],
+  security: ["waf_action", "ngwaf_decision", "waf_sig"],
+  bots: ["bot_verified", "verified_bot", "_bot_name", "ngwaf_bot_name", "bot_category", "is_bot"],
+  io: [
+    "url", "content_type", "resp_header_content_type", "resp_body_size", "resp_body_bytes", "resp_bytes",
+    "fastly_is_shield", "is_shield", "edge", "io_output_format", "ofmt", "io_input_format", "ifmt", "io_input_bytes",
+    "io_output_bytes",
+  ],
+};
+
+/**
+ * The columns a projected /api/value/summary load needs, or null when the
+ * filters can't name theirs: the requested sections' columns (every one when
+ * none are named), as the figures of other sections are dropped from the answer.
+ */
+export function valueScanColumns(
+  params: { filters?: unknown; custom_filters?: unknown; sections?: unknown },
+): string[] | null {
+  const sections = Array.isArray(params.sections) && params.sections.length &&
+    params.sections.every((section) => Object.hasOwn(VALUE_SECTION_COLUMNS, section))
+    ? params.sections as ValueSection[] : null;
+  const fields: string[] = sections
+    ? ["timestamp", "ts_ms", "service_id", ...sections.flatMap((section) => VALUE_SECTION_COLUMNS[section])]
+    : [...VALUE_SCAN_COLUMNS];
   for (const filters of [params.filters, params.custom_filters]) {
     if (filters == null || filters === "") continue;
     if (typeof filters !== "object" || Array.isArray(filters)) return null;
     fields.push(...Object.keys(filters).map((key) => key.replace(/_\d+$/, "")));
   }
-  return [...new Set([...VALUE_SCAN_COLUMNS, ...fields])];
+  return [...new Set(fields)];
 }
 
 export async function handleValueRequest(_path: string, params: ValueQueryParams = {}): Promise<ValueSummary> {

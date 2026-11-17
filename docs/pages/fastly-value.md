@@ -24,7 +24,14 @@ Source: [`frontend/app/fastly-value/`](../../frontend/app/fastly-value/) (`page.
 
 Request sections query ClickHouse `request_facts` and minute projections for the active service. The `io` section reads the Fastly Historical Stats API (`/stats/service/{id}?by=day`) with the service's stored token, cached for 60 seconds (`_IO_STATS_CACHE`); it returns nothing if no token or service ID is configured. Optional log fields that are absent degrade to null or zero rather than failing the query.
 
+## Cloud
+
+Cloud answers `POST /api/value/summary` in the browser. With no filter, `overview` and `network` are served from v3 summaries and read apart from the other sections, so the Network tab reads only summaries and the Summary tab paints its overview and protocol cards while `caching` scans raw (the Origin Offload and Bandwidth Saved cards show loading until then). "Data through" shows above the tabs. A filter keeps one raw read per tab.
+
+Counts come from the summaries' per-field value counts and the overview row's bytes and HIT/MISS latency sums; the protocol series rebuckets the 5-minute protocol series. The read falls back to the raw scan when a needed field (`cache`, `proto`, `tls`, `is_ipv6`) is cut to its top K or holds non-ASCII values, a custom field shadows one the raw scan reads, a `HIT`-prefixed cache state other than `HIT`, `HIT-STALE` or `HIT-CLUSTER` or a `MISS`-prefixed one other than `MISS` is logged, the byte total is zero, the protocol series is cut or can't be rebucketed to the chart interval, or the range isn't covered by bundles. `caching`, `performance`, `security`, `bots` and `io` always scan raw: they need per-bucket prefix-matched cache counts, exact p99, WAF and bot fields and per-format image bytes that summaries don't hold. The raw scan projects only the columns its requested sections read.
+
 ## Tests
 
+- Cloud: [`frontend/lib/cloud-engine/value-rollup.test.ts`](../../frontend/lib/cloud-engine/value-rollup.test.ts), [`frontend/lib/cloud-engine/adapter-section-rollups.test.ts`](../../frontend/lib/cloud-engine/adapter-section-rollups.test.ts), [`frontend/__tests__/components/AssetsValueRollup.test.tsx`](../../frontend/__tests__/components/AssetsValueRollup.test.tsx)
 - Frontend: `fastly-value page mounts and renders title and tab navigation` in [`frontend/__tests__/app/dashboard.test.tsx`](../../frontend/__tests__/app/dashboard.test.tsx)
 - Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/repositories/test_base_helpers.py`](../../tests/repositories/test_base_helpers.py)

@@ -71,7 +71,58 @@ export type Rollup = {
   truncated: Set<string>;
   /** `overview` waterfall sums in ms over rows with both TTFB and elapsed (absent before any overview row). */
   waterfall?: RollupWaterfall;
+  /** `overview` request, byte and exact HIT/MISS elapsed sums (absent before any overview row). */
+  overview?: RollupOverview;
+  /** `assets` rows: JSON `[asset_type, cache, encoding]` → sums (absent before any assets row). */
+  assets?: Map<string, RollupAsset>;
 };
+
+/**
+ * `overview` sums: hit elapsed covers cache HIT, HIT-STALE and HIT-CLUSTER exactly
+ * and miss elapsed cache MISS exactly, each over rows with an elapsed (µs).
+ */
+export type RollupOverview = {
+  requests: number;
+  totalBandwidth: number;
+  hitElapsedSum: number;
+  hitElapsedCount: number;
+  missElapsedSum: number;
+  missElapsedCount: number;
+};
+
+const OVERVIEW_COLUMNS = {
+  requests: "requests",
+  totalBandwidth: "total_bandwidth_bytes",
+  hitElapsedSum: "hit_elapsed_sum",
+  hitElapsedCount: "hit_elapsed_count",
+  missElapsedSum: "miss_elapsed_sum",
+  missElapsedCount: "miss_elapsed_count",
+} as const;
+const OVERVIEW_KEYS = Object.keys(OVERVIEW_COLUMNS) as (keyof RollupOverview)[];
+
+/** /assets sums for one asset key: body bytes, TTFB ms, and origin ms over rows with origin time. */
+export type RollupAsset = {
+  requests: number;
+  respBytes: number;
+  ttfbSum: number;
+  originWaitSum: number;
+  originRequests: number;
+};
+
+const ASSET_COLUMNS = {
+  requests: "requests",
+  respBytes: "resp_bytes_sum",
+  ttfbSum: "ttfb_sum",
+  originWaitSum: "origin_wait_sum",
+  originRequests: "origin_requests",
+} as const;
+const ASSET_KEYS = Object.keys(ASSET_COLUMNS) as (keyof RollupAsset)[];
+
+function addSums<T extends Record<string, number>>(into: T | undefined, from: T, keys: readonly (keyof T)[]): T {
+  const out = { ...(into ?? from) };
+  if (into) for (const key of keys) (out[key] as number) += from[key];
+  return out;
+}
 
 export type RollupWaterfall = {
   count: number;
@@ -188,7 +239,7 @@ export async function decodeRollup(
   if (version !== SUMMARY_VERSION) return null;
   const { readColumns } = await import("./parquet");
   const sumNames = Object.values(SUM_COLUMNS);
-  const { rows, columns } = await readColumns(bytes, [
+  const { rows, columns } = await readColumns(bytes, [...new Set([
     "bundle",
     "bucket",
     "field",
@@ -198,7 +249,9 @@ export async function decodeRollup(
     "count",
     ...sumNames,
     ...Object.values(WATERFALL_COLUMNS),
-  ]);
+    ...Object.values(OVERVIEW_COLUMNS),
+    ...Object.values(ASSET_COLUMNS),
+  ])]);
   const binary = await readColumns(bytes, Object.values(HIST_COLUMNS), false);
   const col = (name: string) => columns.get(name) ?? [];
   const [group, bucket, field, value, truncated, label, count] = [
@@ -263,6 +316,17 @@ export async function decodeRollup(
         const sums = {} as RollupWaterfall;
         for (const key of WATERFALL_KEYS) sums[key] = num(col(WATERFALL_COLUMNS[key])[i]);
         rollup.waterfall = addWaterfall(rollup.waterfall, sums);
+        const overview = {} as RollupOverview;
+        for (const key of OVERVIEW_KEYS) overview[key] = num(col(OVERVIEW_COLUMNS[key])[i]);
+        rollup.overview = addSums(rollup.overview, overview, OVERVIEW_KEYS);
+        break;
+      }
+      case "assets": {
+        const asset = {} as RollupAsset;
+        for (const key of ASSET_KEYS) asset[key] = num(col(ASSET_COLUMNS[key])[i]);
+        const assets = (rollup.assets ??= new Map());
+        const key = String(value[i] ?? "");
+        assets.set(key, addSums(assets.get(key), asset, ASSET_KEYS));
         break;
       }
       case "all_fields": {
@@ -291,6 +355,11 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
   };
   for (const rollup of rollups) {
     if (rollup.waterfall) out.waterfall = addWaterfall(out.waterfall, rollup.waterfall);
+    if (rollup.overview) out.overview = addSums(out.overview, rollup.overview, OVERVIEW_KEYS);
+    if (rollup.assets) {
+      const assets = (out.assets ??= new Map());
+      for (const [key, asset] of rollup.assets) assets.set(key, addSums(assets.get(key), asset, ASSET_KEYS));
+    }
     addFieldCounts(out.fields, rollup.fields);
     for (const [dim, values] of rollup.dims) {
       const target = out.dims.get(dim) ?? new Map<string, RollupAgg>();
