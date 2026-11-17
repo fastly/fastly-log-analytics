@@ -588,6 +588,12 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(vi.mocked(performanceFromRollup).mock.calls[0][1])
       .toMatchObject({ start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z" });
     expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(performanceFromRollup).mockClear().mockResolvedValueOnce({ served: "rankings" } as never);
+    const perfPage = { sections: ["ttl_dist", "waterfall", "top_urls", "top_asns"], sort_by: "p95", filters: {} };
+    expect(await (await post("/api/performance/aggregates", perfPage))!.json()).toEqual({ served: "rankings" });
+    expect(vi.mocked(performanceFromRollup).mock.calls[0][1]).toMatchObject(perfPage);
+    expect(ensureCloudRange).not.toHaveBeenCalled();
   });
 
   it("answers unfiltered /security summary sections before any raw scan, and scans raw for the rest", async () => {

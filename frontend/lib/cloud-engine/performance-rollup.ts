@@ -1,8 +1,17 @@
-import type { RollupResult } from "./dashboard/rollup-query";
-import { queryRollup } from "./dashboard/rollup-query";
+import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
+import { queryRollup, rollupGroup } from "./dashboard/rollup-query";
 import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
-import type { PerformanceAggregatesResponse, PerfTtlDistItem } from "./performance";
+import {
+  MIN_ASN_REQUESTS,
+  MIN_URL_REQUESTS,
+  PERF_TOP_N,
+  resolveSortColumn,
+  shapePerformanceAsnRows,
+  shapePerfTopUrlRows,
+  type PerformanceAggregatesResponse,
+  type PerfTtlDistItem,
+} from "./performance";
 import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from "./rollup-sections";
 
 export type PerformanceRollupBody = {
@@ -10,6 +19,7 @@ export type PerformanceRollupBody = {
   end_time?: string | number | null;
   filters?: unknown;
   sections?: readonly string[] | null;
+  sort_by?: string | null;
 };
 
 /** `buildTtlBucketCaseSql`'s buckets, in its `MIN(ttl)` order. */
@@ -28,6 +38,38 @@ function ttlDist(counts: Map<string, number> | undefined): PerfTtlDistItem[] {
     .map(([bucket]) => ({ bucket, count: totals.get(bucket)! }));
 }
 
+/**
+ * `buildPerfLatencyRankingSql` from the `urls` rows: requests and the average
+ * count only rows with an elapsed, so both are exact; percentiles come from
+ * the elapsed histogram and so does the ranking unless sorted by average.
+ * Null when a summary predates the rows.
+ */
+function latencyRanking(result: RollupResult, key: "url" | "asn", minRequests: number, sortBy: string | null | undefined) {
+  const rows = rollupGroup(result.rollup, "urls", key);
+  if (!rows) return null;
+  const sortColumn = resolveSortColumn(sortBy);
+  const quantile = (agg: RollupAgg, q: number) => {
+    const us = agg.hists.elapsed?.quantile(q);
+    return us == null ? null : us / 1000;
+  };
+  return [...rows]
+    .filter(([value, agg]) => value !== "" && agg.elapsedCount > minRequests)
+    .map(([value, agg]) => ({
+      [key]: value,
+      req_count: agg.elapsedCount,
+      avg_ms: agg.elapsedSum / agg.elapsedCount / 1000,
+      p50_ms: quantile(agg, 0.5),
+      p95_ms: quantile(agg, 0.95),
+      p99_ms: quantile(agg, 0.99),
+    } as Record<string, unknown>))
+    .sort((a, b) => {
+      const x = a[sortColumn] as number | null;
+      const y = b[sortColumn] as number | null;
+      return x == null ? (y == null ? 0 : 1) : y == null ? -1 : y - x;
+    })
+    .slice(0, PERF_TOP_N);
+}
+
 /** Whether summaries may answer this /performance read at all, before any range or listing is resolved. */
 export function performanceRollupEligible(path: string, body: PerformanceRollupBody): boolean {
   if (!/^\/api\/performance(?:\/aggregates)?\/*$/.test(path) || hasFilterValues(body.filters)) return false;
@@ -37,18 +79,36 @@ export function performanceRollupEligible(path: string, body: PerformanceRollupB
 }
 
 /**
- * The requested /performance waterfall averages and TTL buckets from merged
- * summaries, shaped like `executePerformanceAggregates`. Both are exact: the
+ * The requested /performance waterfall averages, TTL buckets and URL and
+ * network rankings from merged summaries, shaped like
+ * `executePerformanceAggregates`. The waterfall and TTL buckets are exact: the
  * waterfall sums the same per-row components, and TTL counts every value
  * unless a summary cut TTLs to its top K, when the buckets are lower bounds.
+ * Ranking percentiles are approximate, and their counts lower bounds when a
+ * summary cut URLs or networks to its top K. Null when a summary predates the
+ * ranking rows.
  */
 export function performanceAggregatesFromRollup(
   result: RollupResult,
   body: PerformanceRollupBody,
-): PerformanceAggregatesResponse & { rollup: NetworkRollupMeta } {
+): (PerformanceAggregatesResponse & { rollup: NetworkRollupMeta }) | null {
   const sections = new Set(body.sections ?? []);
   const out: PerformanceAggregatesResponse = { _approx: false };
   const { waterfall, fields, truncated } = result.rollup;
+  const approximate: string[] = [];
+  const lowerBound: string[] = [];
+  for (const [section, key, minRequests] of [
+    ["top_urls", "url", MIN_URL_REQUESTS], ["top_asns", "asn", MIN_ASN_REQUESTS],
+  ] as const) {
+    if (!sections.has(section)) continue;
+    const rows = latencyRanking(result, key, minRequests, body.sort_by);
+    if (!rows) return null;
+    if (section === "top_urls") out.top_urls = shapePerfTopUrlRows(rows);
+    else out.top_asns = shapePerformanceAsnRows(rows);
+    out._approx = true;
+    approximate.push(`${section}.p50`, `${section}.p95`, `${section}.p99`);
+    if (truncated.has(`urls/${key}`)) lowerBound.push(`${section}.requests`);
+  }
   if (sections.has("waterfall")) {
     const n = waterfall?.count ?? 0;
     const avg = (sum: number) => Math.max(0, roundTo(sum / n, 2));
@@ -67,16 +127,16 @@ export function performanceAggregatesFromRollup(
     rollup: {
       data_from: new Date(result.dataFromMs).toISOString(),
       data_through: new Date(result.dataThroughMs).toISOString(),
-      approximate: [],
-      lower_bound: sections.has("ttl_dist") && truncated.has("all_fields/ttl") ? ["ttl_dist"] : [],
+      approximate,
+      lower_bound: sections.has("ttl_dist") && truncated.has("all_fields/ttl") ? [...lowerBound, "ttl_dist"] : lowerBound,
     },
   };
 }
 
 /**
- * Answers an unfiltered Cloud /performance read of the waterfall and TTL
- * sections from v3 summaries, or returns null when the raw scan must: a
- * filter, a row-level section (URL and ASN rankings, the scatter sample), or a
+ * Answers an unfiltered Cloud /performance read of the waterfall, TTL and
+ * ranking sections from v3 summaries, or returns null when the raw scan must:
+ * a filter, the scatter sample, summaries without the ranking rows, or a
  * range the summaries don't cover (see `queryRollup`).
  */
 export async function performanceFromRollup(

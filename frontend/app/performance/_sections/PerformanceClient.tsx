@@ -41,7 +41,7 @@ export {
 } from './PerformanceHelp'
 
 type PerformanceSection = NonNullable<components['schemas']['PerformanceRequest']['sections']>[number]
-const RAW_SECTIONS: PerformanceSection[] = ['top_urls', 'top_asns', 'scatter']
+const RAW_SECTIONS: PerformanceSection[] = ['scatter']
 
 interface PerformanceBodyProps {
   activeServiceId: string | null
@@ -77,8 +77,8 @@ function PerformanceBody({
   onAsnVisChange,
 }: PerformanceBodyProps) {
   const [sortBy] = useQueryState('sort_by', parseAsStringLiteral(PERF_SORT_BY).withDefault('p99'))
-  // Cloud answers the waterfall and TTL buckets from summaries only when unfiltered; read them apart
-  // so they paint without waiting on the raw scan the URL and network rankings need.
+  // Cloud answers the waterfall, TTL buckets and rankings from summaries only when unfiltered; read them
+  // apart so they paint without waiting on the raw scan the scatter sample needs.
   const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   const postPerformance = (sections: PerformanceSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
@@ -99,7 +99,7 @@ function PerformanceBody({
     serviceId: activeServiceId,
     filterPayload,
     range,
-    keyParts: rollupFirst ? [sortBy, RAW_SECTIONS] : [sortBy],
+    keyParts: rollupFirst ? [RAW_SECTIONS] : [sortBy],
     queryFn: ({ rangeBody, signal }) => postPerformance(rollupFirst ? RAW_SECTIONS : undefined, rangeBody, signal),
   })
 
@@ -108,6 +108,7 @@ function PerformanceBody({
     serviceId: activeServiceId,
     filterPayload,
     range,
+    keyParts: [sortBy],
     queryOptions: { enabled: rollupFirst },
     queryFn: ({ rangeBody, signal }) => postPerformance([...PERFORMANCE_ROLLUP_SECTIONS], rangeBody, signal),
   })
@@ -199,13 +200,15 @@ function PerformanceBody({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Slowest URLs"
+          title={boundMark(rollup, 'top_urls.requests') ? 'Slowest URLs (≥ counts)' : 'Slowest URLs'}
           icon={<Server className="h-4 w-4" />}
           headerAction={
             <div className="flex items-center gap-2">
-              {coreData?._approx === true && (
+              {distData?._approx === true && (
                 <span
-                  title="Latency percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Request counts are exact."
+                  title={rollup
+                    ? 'Latency percentiles and the ranking by them are estimated from summary histograms (≈); averages are exact. Request counts are exact unless marked ≥: summaries keep only their busiest values.'
+                    : 'Latency percentiles on this window are request-weighted averages of per-hour percentiles (sub-second accuracy on most services). Request counts are exact.'}
                   className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-[10px] font-bold uppercase tracking-wider cursor-help"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60" />
@@ -219,18 +222,18 @@ function PerformanceBody({
               />
             </div>
           }
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling endpoint latency..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={(coreData?.top_urls?.length ?? 0) === 0}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={(distData?.top_urls?.length ?? 0) === 0}
           className="min-h-[560px] [contain-intrinsic-size:560px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestUrlsHelp />}
         >
           <DataTable
             columns={urlColumns}
-            data={coreData?.top_urls || []}
+            data={distData?.top_urls || []}
             hideToolbar
             columnVisibility={urlVisibility}
             onColumnVisibilityChange={setUrlVisibility}
@@ -238,7 +241,7 @@ function PerformanceBody({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Slowest Networks"
+          title={boundMark(rollup, 'top_asns.requests') ? 'Slowest Networks (≥ counts)' : 'Slowest Networks'}
           icon={<Shield className="h-4 w-4" />}
           headerAction={
             <div className="flex items-center gap-2">
@@ -249,18 +252,18 @@ function PerformanceBody({
               />
             </div>
           }
-          isLoading={performanceQuery.isLoading}
-          isFetching={performanceQuery.isFetching}
+          isLoading={distQuery.isLoading}
+          isFetching={distQuery.isFetching}
           loadingMessage="Profiling network latency..."
-          error={performanceQuery.error as AnalyticsCardError | null}
-          isEmpty={(coreData?.top_asns?.length ?? 0) === 0}
+          error={distQuery.error as AnalyticsCardError | null}
+          isEmpty={(distData?.top_asns?.length ?? 0) === 0}
           className="min-h-[560px] [contain-intrinsic-size:560px] [content-visibility:auto]"
           contentClassName="p-0"
           helpContent={<SlowestNetworksHelp />}
         >
           <DataTable
             columns={asnColumns}
-            data={coreData?.top_asns || []}
+            data={distData?.top_asns || []}
             hideToolbar
             columnVisibility={asnVisibility}
             onColumnVisibilityChange={setAsnVisibility}

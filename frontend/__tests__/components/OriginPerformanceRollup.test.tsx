@@ -137,10 +137,13 @@ const waterfall = { avg: { edge_processing: 1.5, origin_wait: 40, origin_downloa
 const ttlDist = [{ bucket: '< 60s', count: 9 }, { bucket: '> 1d', count: 4 }]
 
 describe('PerformanceClient on Cloud', () => {
-  it('paints the summary-served waterfall and TTL buckets while URL and network rankings load', async () => {
+  it('paints the summary-served waterfall, TTL buckets and rankings while the scatter sample loads', async () => {
     setCloudModeRuntime(true)
-    const sections = recordPosts('/api/performance/aggregates', (asked) => asked?.includes('top_urls') ? never() : {
-      ttl_dist: ttlDist, waterfall, _approx: false, rollup: meta([], ['ttl_dist']),
+    const sections = recordPosts('/api/performance/aggregates', (asked) => asked?.includes('scatter') ? never() : {
+      ttl_dist: ttlDist, waterfall, _approx: true,
+      top_urls: [{ url: '/slow/report', requests: 42, avg: 310, p50: 250, p95: 900, p99: 1200 }],
+      top_asns: [{ asn: '64512', label: 'AS64512', requests: 77, avg: 120, p50: 100, p95: 300, p99: 450 }],
+      rollup: meta(['top_urls.p99', 'top_asns.p99'], ['ttl_dist', 'top_urls.requests']),
     })
     renderWithQuery(<PerformanceClient />, { withNuqs: true })
 
@@ -151,8 +154,14 @@ describe('PerformanceClient on Cloud', () => {
     const plots = screen.getAllByTestId('plot').map((plot) => plot.textContent)
     expect(plots).toContain(JSON.stringify([['< 60s', '> 1d'], [9, 4]]))
     expect(plots.some((plot) => plot?.includes(JSON.stringify([[40], ['Origin TTFB Wait']])))).toBe(true)
-    expect(sections).toEqual(expect.arrayContaining([['ttl_dist', 'waterfall'], ['top_urls', 'top_asns', 'scatter']]))
-    expect(screen.getByText('Profiling endpoint latency...')).toBeInTheDocument()
+    expect(sections).toEqual(expect.arrayContaining([['ttl_dist', 'waterfall', 'top_urls', 'top_asns'], ['scatter']]))
+    expect(sections).toHaveLength(2)
+    expect(await screen.findByText('/slow/report')).toBeInTheDocument()
+    expect(screen.getByText('Slowest URLs (≥ counts)')).toBeInTheDocument()
+    expect(screen.getByText('Slowest Networks')).toBeInTheDocument()
+    expect(screen.getByText('Approximate')).toHaveAttribute('title', expect.stringMatching(/summary histograms/))
+    expect(screen.getByText('Profiling origin vs edge latency...')).toBeInTheDocument()
+    expect(screen.queryByText('Profiling endpoint latency...')).not.toBeInTheDocument()
   })
 
   it('keeps one raw read, with no summary labels, when a filter is applied', async () => {
