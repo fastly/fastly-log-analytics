@@ -787,7 +787,7 @@ def _step_job_to_completion(
 
 
 def _finish_existing_job(client: httpx.Client, job: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Drive a leftover job to completion; it blocks every new reconcile until it does."""
+    """Try to finish a leftover job; a reconcile that stays failed is superseded by the next one."""
     steps_taken = 0
     for _ in range(RESUME_RETRIES):
         job, steps = _step_job_to_completion(client, job, allow_retry=True)
@@ -795,10 +795,7 @@ def _finish_existing_job(client: httpx.Client, job: dict[str, Any]) -> tuple[dic
         if _job_status(job) != "failed" or job.get("error") not in TRANSIENT_STEP_ERRORS:
             break
     if _job_status(job) == "failed":
-        raise RuntimeError(
-            f"existing reconcile job {job.get('id')} is still failed ({job.get('error')}) "
-            f"after {RESUME_RETRIES} retries; it blocks new reconciles until retried"
-        )
+        print(f"[Step 2] Leaving failed job {job.get('id')} ({job.get('error')}) for a new reconcile to supersede")
     return job, steps_taken
 
 

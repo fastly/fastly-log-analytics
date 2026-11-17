@@ -1130,12 +1130,12 @@ def test_finish_existing_job_retries_a_transient_failure_until_it_completes() ->
     assert retries[0] == 3
 
 
-def test_finish_existing_job_names_the_job_when_it_stays_failed() -> None:
+def test_finish_existing_job_leaves_a_still_failed_job_for_the_next_reconcile_to_supersede() -> None:
     transport, retries = _failing_job_transport(failures=10_000)
     failed = {"id": "job-5", "status": "failed", "error": "state_unavailable"}
     with httpx.Client(transport=transport, base_url="https://example.test") as client:
-        with pytest.raises(RuntimeError, match="job-5.*state_unavailable"):
-            deploy_test_all._finish_existing_job(client, failed)
+        job, _ = deploy_test_all._finish_existing_job(client, failed)
+    assert job["status"] == "failed"
     assert retries[0] == deploy_test_all.RESUME_RETRIES
 
 
