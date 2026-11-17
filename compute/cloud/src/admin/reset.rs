@@ -750,24 +750,46 @@ fn clear_pre_reset<R: Runtime>(
     Ok(())
 }
 
-/// Lifts this job's RUM hold once its RUM reset landed. A marker without the hold is left alone.
-fn release_rum<R: Runtime>(store: &Store<'_, R>, job: &ResetJob) -> Result<(), String> {
+/// Writes `edit`'s change to the service record; `edit` returns `None` when the record already
+/// needs none. A POP can serve another POP's step a service record cached from before this
+/// job's own last marker write, so a lost CAS (which drops the cached copy) re-reads and edits
+/// once more before it is a conflict.
+fn update_service<R: Runtime>(
+    store: &Store<'_, R>,
+    mut edit: impl FnMut(&Value) -> Result<Option<Value>, String>,
+) -> Result<(), String> {
     let runtime = store.runtime;
     let key = format!("svc:{}", store.service.service_id);
-    let record = runtime.admin_get(&key)?.ok_or("service_missing")?;
-    let marker = &record.value["data_reset"];
-    if marker["job_id"].as_str() != Some(job.job_id.as_str()) || marker["rum_held"] != true {
-        return Ok(());
+    for attempt in 0..2 {
+        if attempt > 0 && runtime.admin_remaining_calls() < 2 + CALL_RESERVE {
+            break;
+        }
+        let record = runtime.admin_get(&key)?.ok_or("service_missing")?;
+        let Some(value) = edit(&record.value)? else {
+            return Ok(());
+        };
+        if runtime.admin_cas(&key, Some(&record.generation), &value)? {
+            return Ok(());
+        }
     }
-    let mut value = record.value.clone();
-    if let Some(marker) = value["data_reset"].as_object_mut() {
-        marker.remove("rum_held");
-    }
-    value["updated_at"] = runtime.now().into();
-    if !runtime.admin_cas(&key, Some(&record.generation), &value)? {
-        return Err("service_conflict".into());
-    }
-    Ok(())
+    Err("service_conflict".into())
+}
+
+/// Lifts this job's RUM hold once its RUM reset landed. A marker without the hold is left alone.
+fn release_rum<R: Runtime>(store: &Store<'_, R>, job: &ResetJob) -> Result<(), String> {
+    let now = store.runtime.now();
+    update_service(store, |current| {
+        let marker = &current["data_reset"];
+        if marker["job_id"].as_str() != Some(job.job_id.as_str()) || marker["rum_held"] != true {
+            return Ok(None);
+        }
+        let mut value = current.clone();
+        if let Some(marker) = value["data_reset"].as_object_mut() {
+            marker.remove("rum_held");
+        }
+        value["updated_at"] = now.into();
+        Ok(Some(value))
+    })
 }
 
 /// Moves the marker to cleanup after a committed reset that may have left parts undone, first
@@ -1282,6 +1304,8 @@ fn sweep<R: Runtime>(
         let mut clean = true;
         let mut failed = 0u64;
         let mut batch_error = None;
+        // Whether every batch that failed failed by outlasting the step's remaining wall time.
+        let mut out_of_time = true;
         for page in &pages {
             let confirmed = if page.doomed.is_empty() {
                 true
@@ -1303,10 +1327,12 @@ fn sweep<R: Runtime>(
                             job.progressed = true;
                         }
                         failed += outcome.failed.len() as u64;
+                        out_of_time &= outcome.failed.is_empty();
                         outcome.failed.is_empty()
                     }
                     Err(error) => {
                         failed += page.doomed.len() as u64;
+                        out_of_time &= error == "backend_deadline";
                         batch_error.get_or_insert(error);
                         false
                     }
@@ -1322,6 +1348,13 @@ fn sweep<R: Runtime>(
             job.pending = failed;
         }
         if let Some(error) = batch_error {
+            if out_of_time {
+                // A delete times out at the step's end, so the step ran out; FOS may still
+                // finish it, and the next step lists those keys gone, or dooms them again.
+                job.pending = 0;
+                job.more = true;
+                return Ok(false);
+            }
             return Err(error);
         }
         if failed > 0 {
@@ -1423,32 +1456,41 @@ fn enter_cleanup<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result
         push_message(job, now, "Resuming ingest on the next tick.");
         return Ok(());
     }
-    let key = format!("svc:{}", store.service.service_id);
-    let record = runtime.admin_get(&key)?.ok_or("service_missing")?;
-    if record.value["data_reset"]["job_id"].as_str() != Some(job.job_id.as_str()) {
-        return Err("data_reset_marker_lost".into());
-    }
     let mut held = !job.steps_done.contains(RUM_PART);
-    if record.value["data_reset"]["phase"] != json!(ResetPhase::Cleanup) {
-        let mut value = record.value.clone();
+    // Whether an earlier step already moved the marker, and then whether it held RUM ingest.
+    let mut moved = None;
+    update_service(store, |current| {
+        let marker = &current["data_reset"];
+        if marker["job_id"].as_str() != Some(job.job_id.as_str()) {
+            return Err("data_reset_marker_lost".into());
+        }
+        if marker["phase"] == json!(ResetPhase::Cleanup) {
+            moved = Some(marker["rum_held"] == true);
+            return Ok(None);
+        }
+        moved = None;
+        let mut value = current.clone();
         value["data_reset"]["phase"] = json!(ResetPhase::Cleanup);
         if held {
             value["data_reset"]["rum_held"] = true.into();
         }
         value["updated_at"] = now.into();
-        if !runtime.admin_cas(&key, Some(&record.generation), &value)? {
-            return Err("service_conflict".into());
+        Ok(Some(value))
+    })?;
+    match moved {
+        Some(false) => {
+            // An earlier step resumed ingest after the RUM reset landed: nothing to hold or redo.
+            job.steps_done.insert(RUM_PART.into());
+            job.steps_done.insert(RUM_RELEASED.into());
+            push_message(job, now, "Catalog reset; ingest resumed");
+            return Ok(());
         }
-    } else if record.value["data_reset"]["rum_held"] != true {
-        // An earlier step resumed ingest after the RUM reset landed: nothing to hold or redo.
-        job.steps_done.insert(RUM_PART.into());
-        job.steps_done.insert(RUM_RELEASED.into());
-        push_message(job, now, "Catalog reset; ingest resumed");
-        return Ok(());
-    } else {
-        // An earlier step held RUM ingest; the stored hold lifts only through `release_rum`.
-        job.steps_done.remove(RUM_RELEASED);
-        held = true;
+        Some(true) => {
+            // An earlier step held RUM ingest; the stored hold lifts only through `release_rum`.
+            job.steps_done.remove(RUM_RELEASED);
+            held = true;
+        }
+        None => {}
     }
     if held {
         push_message(
@@ -1476,16 +1518,17 @@ fn owned_phase(job: &ResetJob) -> ResetPhase {
 /// Clears this terminal job's marker so ingest resumes or the next Delete Data can start, with
 /// its audit entry; leaves any other marker alone.
 fn clear_marker<R: Runtime>(store: &Store<'_, R>, job: &ResetJob) -> Result<(), String> {
-    let runtime = store.runtime;
-    let key = format!("svc:{}", store.service.service_id);
-    let record = runtime.admin_get(&key)?.ok_or("service_missing")?;
-    let owned = record.value["data_reset"]["job_id"].as_str() == Some(job.job_id.as_str())
-        && record.value["data_reset"]["phase"] == json!(owned_phase(job));
-    if !owned {
-        return Ok(());
-    }
-    let now = runtime.now();
-    let mut value = record.value.clone();
+    let now = store.runtime.now();
+    update_service(store, |current| {
+        let owned = current["data_reset"]["job_id"].as_str() == Some(job.job_id.as_str())
+            && current["data_reset"]["phase"] == json!(owned_phase(job));
+        Ok(owned.then(|| cleared(current, job, now)))
+    })
+}
+
+/// The service record without this terminal job's marker, with its audit entry.
+fn cleared(current: &Value, job: &ResetJob, now: u64) -> Value {
+    let mut value = current.clone();
     if let Some(object) = value.as_object_mut() {
         object.remove("data_reset");
     }
@@ -1506,8 +1549,5 @@ fn clear_marker<R: Runtime>(store: &Store<'_, R>, job: &ResetJob) -> Result<(), 
         Some(_) => {}
         None => value["_audit_outbox"] = json!([audit]),
     }
-    if !runtime.admin_cas(&key, Some(&record.generation), &value)? {
-        return Err("service_conflict".into());
-    }
-    Ok(())
+    value
 }

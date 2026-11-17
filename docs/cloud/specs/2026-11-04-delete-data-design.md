@@ -195,6 +195,11 @@ every maintenance tick, until the job is complete.
      5xx or `SlowDown` are sent once more together after their `Retry-After`.
      A second failure is the step's error (`delete_objects_http_<status>`),
      and the next maintenance tick retries.
+   - A delete request times out at the step's remaining wall time, so a
+     round whose only failures are `backend_deadline` ran out of step time:
+     the step stops with `more_pending` and no error, without moving the
+     cursor. FOS may still finish those deletes; the next round's LIST shows
+     them gone (they are not counted in `deleted`) or dooms them again.
    - A round adds a page only while its deletes would still finish before the
      stage's wall stop (`storage::WALL_STOP`) and vCPU stop. That is judged by
      the slowest LIST so far and the job's last measured round time
@@ -219,6 +224,11 @@ every maintenance tick, until the job is complete.
   within the `AGENTS.md` limits, and resumes from KV state.
 - **Before the phase 2 CAS,** the job can be cancelled. Cancelling clears the
   marker and ingest resumes with nothing deleted.
+- The marker writes after the CAS (the move to `cleanup`, the RUM hold's
+  release and the terminal clear) read the service record through the POP
+  cache, which can still hold the marker from before this job's own last
+  write. A lost CAS drops that cached copy, so each re-reads and retries
+  once before it reports `service_conflict`.
 - **After the CAS,** the job only moves forward. A failing step retries with
   backoff, and the error shows on the Services row. Ingest is already
   running again in phase 3, so a stuck cleanup never pauses ingest. It only

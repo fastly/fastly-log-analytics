@@ -4736,16 +4736,21 @@ fn fence_tick(platform: &Platform) -> Value {
 }
 
 fn fence_try(platform: &Platform) -> Option<Result<(), String>> {
-    use fastly_log_analytics::ingest::storage::Store;
-    CALLS.with(|calls| calls.set(0));
-    SECRETS.with(|secrets| secrets.borrow_mut().clear());
-    ELAPSED_MS.with(|elapsed| elapsed.set(0));
     let service: admin::Service = serde_json::from_value(
         platform.adapter.records()["svc:fixtureService"]
             .value
             .clone(),
     )
     .unwrap();
+    fence_try_as(platform, service)
+}
+
+/// [`fence_try`] on a tick that loaded `service`, which a POP's read cache can hold stale.
+fn fence_try_as(platform: &Platform, service: admin::Service) -> Option<Result<(), String>> {
+    use fastly_log_analytics::ingest::storage::Store;
+    CALLS.with(|calls| calls.set(0));
+    SECRETS.with(|secrets| secrets.borrow_mut().clear());
+    ELAPSED_MS.with(|elapsed| elapsed.set(0));
     let (access_key, secret_key) = admin::fos_credentials(platform, &service).unwrap();
     let store = Store {
         runtime: platform,
@@ -6093,6 +6098,50 @@ fn a_cancel_whose_service_save_failed_clears_its_stranded_marker_on_the_next_tic
     assert_eq!(fence_try(&platform), Some(Ok(())));
     assert!(marker(&platform).is_null(), "ingest resumes");
     assert_eq!(last_audit(&platform)["event"], "data_reset.cancelled");
+}
+
+/// Steps the job as a POP whose read cache still holds `before`, the service record from
+/// before this job's own last marker write.
+fn stale_pop_tick(platform: &Platform, before: &Record) -> Option<Result<(), String>> {
+    platform
+        .adapter
+        .cache_stale("svc:fixtureService", Some(before.clone()));
+    fence_try_as(
+        platform,
+        serde_json::from_value(before.value.clone()).unwrap(),
+    )
+}
+
+#[test]
+fn a_stale_cached_fencing_marker_does_not_fail_the_step_after_the_move_to_cleanup() {
+    let (platform, _) = reset_ready();
+    let before = platform.adapter.records()["svc:fixtureService"].clone();
+    assert_eq!(reset_tick(&platform)["status"], "cleanup");
+    let moved = platform.adapter.records()["svc:fixtureService"].clone();
+    assert_eq!(moved.value["data_reset"]["phase"], "cleanup");
+    advance_clock(&platform, 2);
+    assert_eq!(stale_pop_tick(&platform, &before), Some(Ok(())));
+    let after = platform.adapter.records()["svc:fixtureService"].clone();
+    assert_eq!(after.generation, moved.generation, "nothing to write again");
+    let job = snapshot(&platform, admin::reset::JOB_KEY).1;
+    assert_eq!(job["status"], "cleanup", "{job}");
+    assert!(job["error"].is_null(), "{job}");
+}
+
+#[test]
+fn a_stale_cached_cleanup_marker_does_not_fail_a_completed_jobs_clear() {
+    let (platform, _, _) = cleanup_ready();
+    let before = platform.adapter.records()["svc:fixtureService"].clone();
+    assert_eq!(before.value["data_reset"]["phase"], "cleanup");
+    assert_eq!(run_cleanup(&platform)["status"], "complete");
+    let cleared = platform.adapter.records()["svc:fixtureService"].clone();
+    assert!(cleared.value.get("data_reset").is_none());
+    assert_eq!(stale_pop_tick(&platform, &before), Some(Ok(())));
+    let after = platform.adapter.records()["svc:fixtureService"].clone();
+    assert_eq!(
+        after.generation, cleared.generation,
+        "no second clear or audit"
+    );
 }
 
 #[test]

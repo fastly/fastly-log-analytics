@@ -603,10 +603,24 @@ impl Runtime for Fake {
             self.delete_rounds.borrow_mut().push(deletes);
         }
         if !self.fos_defer.get() {
-            let slowest = requests.iter().map(|r| self.fos_ms(r)).max().unwrap_or(0);
+            // A request slower than its timeout still lands, as FOS finishes it server-side,
+            // but its caller sees the deadline.
+            let waited = |r: &FosRequest<'_>| self.fos_ms(r).min(r.timeout.as_millis() as u64);
+            let slowest = requests.iter().map(waited).max().unwrap_or(0);
             self.wall_ms.set(self.wall_ms.get() + slowest);
             self.in_round.set(true);
-            let out: Vec<_> = requests.into_iter().map(|r| self.admin_fos(r)).collect();
+            let out: Vec<_> = requests
+                .into_iter()
+                .map(|r| {
+                    let late = self.fos_ms(&r) > r.timeout.as_millis() as u64;
+                    let result = self.admin_fos(r);
+                    if late {
+                        Err("backend_deadline".to_owned())
+                    } else {
+                        result
+                    }
+                })
+                .collect();
             self.in_round.set(false);
             return out;
         }
@@ -14594,6 +14608,34 @@ mod delete_data_gate {
         assert_eq!(left(&fake), 0);
         let job = job(&fake);
         assert_eq!(deleted(&job), n as u64, "{job}");
+        assert_eq!(job["pending"], 0, "{job}");
+    }
+
+    /// A round's `DeleteObjects` outlasting the step's remaining wall time is the step's budget
+    /// running out, not a failure: the step stops with more pending and the next one lists
+    /// the prefix again.
+    #[test]
+    fn delete_data_stops_with_more_pending_when_a_rounds_deletes_outlast_the_step() {
+        let n = 1_500;
+        let fake = cleanup_fixture(n);
+        fake.fos_wall.set(Some((500, 50_000)));
+        fake.now.set(fake.now.get() + 120);
+        run_tick(&fake);
+        assert!(!fake.delete_rounds.borrow().is_empty());
+        let stopped = job(&fake);
+        assert_eq!(stopped["status"], "cleanup", "{stopped}");
+        assert!(stopped["error"].is_null(), "{stopped}");
+        assert!(
+            stopped["cursors"]["processed/request/"].is_null(),
+            "{stopped}"
+        );
+        assert_eq!(maint_more_pending(&fake), true);
+        fake.fos_wall.set(None);
+        fake.now.set(fake.now.get() + 1);
+        run_tick(&fake);
+        assert_eq!(left(&fake), 0);
+        let job = job(&fake);
+        assert!(job["error"].is_null(), "{job}");
         assert_eq!(job["pending"], 0, "{job}");
     }
 
