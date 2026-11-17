@@ -170,41 +170,47 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     }
   });
 
-  it("returns filtered Cloud share audit rows with parseable timestamps and requested limits", async () => {
-    const since = Date.parse("2026-01-01T00:00:00Z");
-    const until = since + 1500;
-    const rows = [
-      { timestamp: since + 2000, event_id: "later", actor: "admin@example.test", action: "logout", target: "later" },
-      { timestamp: since + 1200, event_id: "selected", actor: "admin@example.test", action: "login", target: "selected" },
-      { timestamp: since + 1000, event_id: "older", actor: "admin@example.test", action: "login", target: "older" },
-      { timestamp: since + 500, event_id: "other", actor: "other@example.test", action: "login", target: "other" },
-      ...Array.from({ length: 250 }, (_, index) => ({
-        timestamp: since + 250 - index,
-        event_id: `extra-${index}`, actor: "other@example.test",
-        action: "logout", target: `extra-${index}`,
-      })),
-    ];
-    const queryLogs = vi.spyOn(ops, "queryOpsLogs").mockResolvedValue({
-      kind: "admin_audit", from: "", to: "", rows, oldestLiveMs: null, status: null,
+  const mockAuditRows = (rows: Array<Record<string, unknown>>) =>
+    vi.spyOn(ops, "queryOpsLogs").mockResolvedValue({
+      kind: "admin_audit", from: "", to: "", rows: rows as never, oldestLiveMs: null, status: null,
       stats: {
         listed: 0, read: 0, cached: 0, cdnHits: 0, skippedCovered: 0,
         ignoredCompact: 0, evicted: 0, liveRows: rows.length,
       },
     });
+  const auth = { domain: "auth", source: "auth_archive" };
+  const controlPlane = { domain: "control_plane", source: "svc_outbox" };
+
+  it("returns filtered Cloud share audit rows with parseable timestamps and requested limits", async () => {
+    const since = Date.parse("2026-01-01T00:00:00Z");
+    const until = since + 1500;
+    const rows = [
+      { ...auth, timestamp: since + 2000, actor: "admin-user", action: "login", target: "admin-user", ip: "198.51.100.1" },
+      { ...auth, timestamp: since + 1200, actor: "admin-user", action: "login", target: "admin-user", ip: "198.51.100.7" },
+      { ...auth, timestamp: since + 1000, actor: "admin-user", action: "login", target: "admin-user", ip: "198.51.100.8" },
+      { ...auth, timestamp: since + 900, actor: "other-user", action: "login", target: "other-user", ip: "198.51.100.9" },
+      ...Array.from({ length: 250 }, (_, index) => index % 2
+        ? { ...controlPlane, timestamp: since + 800, actor: "clock", action: "job.completed", job_id: `job-${index}` }
+        : { ...auth, timestamp: since + 800, actor: "anonymous", action: "login_challenge", target: `c-${index}`, ip: "198.51.100.2" }),
+      ...Array.from({ length: 250 }, (_, index) => ({
+        ...auth, timestamp: since + 500 - index, actor: "other-user", action: "login", target: "other-user",
+      })),
+    ];
+    const queryLogs = mockAuditRows(rows);
     const params = new URLSearchParams({
       since: new Date(since).toISOString(),
       until: new Date(until).toISOString(),
-      event_type: "login", email: "admin", limit: "1",
+      event_type: "LOGIN_SUCCESS", email: "admin", limit: "1",
     });
 
     const response = await handleCloudAnalyticalRequest(
       new Request(`http://localhost/api/admin/share/audit-logs?${params}`),
     );
 
-    expect(await response!.json()).toMatchObject({
+    expect(await response!.json()).toEqual({
       audit_logs: [{
-        timestamp: "2026-01-01T00:00:01.200Z",
-        event_type: "login", email: "admin@example.test", details: "selected",
+        id: 1, timestamp: "2026-01-01T00:00:01.200Z", event_type: "LOGIN_SUCCESS",
+        email: "admin-user", ip_address: "198.51.100.7", details: "",
       }],
     });
     expect(queryLogs).toHaveBeenCalledWith(
@@ -215,7 +221,61 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const defaultResponse = await handleCloudAnalyticalRequest(
       new Request(`http://localhost/api/admin/share/audit-logs?since=${new Date(since).toISOString()}&until=${new Date(until).toISOString()}`),
     );
-    expect((await defaultResponse!.json()).audit_logs).toHaveLength(200);
+    const defaultRows = (await defaultResponse!.json()).audit_logs as Array<{ event_type: string; ip_address: string }>;
+    expect(defaultRows).toHaveLength(200);
+    expect(new Set(defaultRows.map((r) => r.event_type))).toEqual(new Set(["LOGIN_SUCCESS"]));
+    expect(defaultRows.at(-1)!.ip_address).toBe("-");
+  });
+
+  it("keeps only invite, accept, login and access events in the Cloud share audit under share event names", async () => {
+    const at = Date.parse("2026-01-01T00:00:00Z");
+    const ip = "203.0.113.4";
+    const rows = [
+      { ...auth, actor: "owner-id", action: "invite_created", target: "inv-1", ip },
+      { ...auth, actor: "owner-id", action: "invite_revoked", target: "inv-2", ip },
+      { ...auth, actor: "analyst-id", action: "user_registered", target: "analyst-id", ip },
+      { ...auth, actor: "analyst-id", action: "login", target: "analyst-id", ip },
+      { ...auth, actor: "anonymous", action: "authentication_failure", target: "login_verify", ip },
+      { ...auth, actor: "owner-id", action: "role_changed", target: "analyst-id", ip },
+      { ...auth, actor: "owner-id", action: "credential_revoked", target: "analyst-id", ip },
+      { ...auth, actor: "owner-id", action: "user_revoked", target: "analyst-id", ip },
+      { ...auth, actor: "setup", action: "setup_grant", target: "setup", ip },
+      { actor: "owner-id", action: "invite_created", target: "inv-legacy" },
+      ...[
+        "login_challenge", "login_attempt", "registration_challenge", "registration_attempt",
+        "challenge_rate", "setup_generation", "setup_closed", "setup_failure",
+        "usage_logging_updated", "quarantine_purged",
+      ].map((action) => ({ ...auth, actor: "anonymous", action, target: "x", ip })),
+      ...["job.started", "job.completed", "endpoint.claimed", "bucket.checked", "config.updated", "data_reset.requested"]
+        .map((action) => ({ ...controlPlane, actor: "clock", action, job_id: "job-1" })),
+      { domain: "control_plane", actor: "clock", action: "invite_created", target: "inv-3" },
+    ].map((row, index) => ({ ...row, timestamp: at - index }));
+    mockAuditRows(rows);
+    const query = (extra: Record<string, string> = {}) => handleCloudAnalyticalRequest(new Request(
+      `http://localhost/api/admin/share/audit-logs?${new URLSearchParams({
+        since: new Date(at - 1000).toISOString(), until: new Date(at).toISOString(), ...extra,
+      })}`,
+    ));
+
+    const body = await (await query())!.json() as {
+      audit_logs: Array<{ event_type: string; email: string; ip_address: string; details: string }>;
+    };
+
+    expect(body.audit_logs.map(({ event_type, email, ip_address, details }) => [event_type, email, ip_address, details]))
+      .toEqual([
+        ["INVITE_CREATE", "owner-id", ip, "inv-1"],
+        ["INVITE_REVOKE", "owner-id", ip, "inv-2"],
+        ["INVITE_CLAIMED", "analyst-id", ip, ""],
+        ["LOGIN_SUCCESS", "analyst-id", ip, ""],
+        ["LOGIN_FAIL", "anonymous", ip, "login_verify"],
+        ["ROLE_CHANGED", "owner-id", ip, "analyst-id"],
+        ["CREDENTIAL_REVOKED", "owner-id", ip, "analyst-id"],
+        ["USER_REVOKED", "owner-id", ip, "analyst-id"],
+        ["OWNER_SETUP", "setup", ip, ""],
+        ["INVITE_CREATE", "owner-id", "-", "inv-legacy"],
+      ]);
+    const invites = await (await query({ event_type: "INVITE_CREATE" }))!.json() as typeof body;
+    expect(invites.audit_logs.map((r) => r.details)).toEqual(["inv-1", "inv-legacy"]);
   });
 
   it.each([

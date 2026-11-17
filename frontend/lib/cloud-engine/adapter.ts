@@ -64,6 +64,7 @@ import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetr
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
 import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
+import { shareAuditRows } from "./share-audit";
 import {
   handleSessionsDetail,
   handleSessionsList,
@@ -1263,21 +1264,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       },
       { signal: request.signal },
     );
-    const audit_logs = res.rows
-      .filter((r) => r.timestamp >= from && r.timestamp <= to)
-      .map((r, idx) => ({
-        id: idx + 1,
-        timestamp: new Date(r.timestamp).toISOString(),
-        event_type: String(r.action ?? r.event_type ?? "ADMIN_ACTION"),
-        email: String(r.actor ?? r.user_id ?? "admin"),
-        ip_address: String(r.ip ?? r.target ?? "-"),
-        details: String(r.target ?? r.details ?? ""),
-      }))
-      .filter((r) =>
-        (!eventType || r.event_type === eventType) &&
-        (!email || r.email.includes(email)),
-      )
-      .slice(0, limit);
+    const audit_logs = shareAuditRows(res.rows, { from, to, eventType, email, limit });
     return jsonResponse({ audit_logs }, request);
   }
 
