@@ -709,6 +709,21 @@ fn fixture_v3(offset_ms: i64, n: i64) -> Vec<Value> {
             if k.is_multiple_of(9) {
                 row["resp_header_content_encoding"] = "GZIP".into();
             }
+            if !k.is_multiple_of(5) {
+                row["edge"] = k.is_multiple_of(2).into();
+            }
+            if !k.is_multiple_of(4) {
+                row["pop"] = ["ATL", "", "FRA"][k % 3].into();
+            }
+            if k.is_multiple_of(2) {
+                row["obytes"] = (500 + i * 7).into();
+            }
+            if !k.is_multiple_of(3) {
+                row["delivery_rate"] = (1_000_000 + i * 1000).into();
+            }
+            if k % 5 != 1 {
+                row["ost"] = [200, 503, 404, 599][k % 4].into();
+            }
             row["waf_sig"] = [
                 "VERIFIED-BOT.googlebot",
                 "verified-bot.bingbot",
@@ -1001,6 +1016,362 @@ fn v3_rows_match_a_brute_force_computation_over_the_rows() {
     }
 }
 
+/// `COALESCE(ottfb, ttfb * 1e6)` in whole µs: /origin's latency.
+fn origin_us(r: &Value) -> Option<i64> {
+    i(r, "ottfb").or_else(|| ttfb_us(r))
+}
+
+fn leg_of(r: &Value) -> &'static str {
+    match r.get("edge").and_then(Value::as_bool) {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "",
+    }
+}
+
+type Row = Map<String, Value>;
+
+/// The `name` rows of `field` by value, and the field's `dim_totals` row.
+fn group_rows<'a>(out: &'a [Row], name: &str, field: &str) -> (BTreeMap<String, &'a Row>, &'a Row) {
+    let rows = bundle(out, name)
+        .into_iter()
+        .filter(|r| r["field"] == field)
+        .map(|r| (r["value"].as_str().unwrap().to_owned(), r))
+        .collect();
+    let total = bundle(out, "dim_totals")
+        .into_iter()
+        .find(|r| r["value"] == name && r["field"] == field)
+        .unwrap_or_else(|| panic!("{name}/{field} dim_totals"));
+    (rows, total)
+}
+
+fn groups_by<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    key: impl Fn(&Value) -> Option<String>,
+) -> BTreeMap<String, Vec<&'a Value>> {
+    let mut out: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    for r in rows {
+        if let Some(k) = key(r) {
+            out.entry(k).or_default().push(r);
+        }
+    }
+    out
+}
+
+#[test]
+fn transport_origin_and_url_rows_match_a_brute_force_computation() {
+    let rows = fixture_v3(0, 700);
+    let out = read(&summary::write_summary(&[&batch(&rows)], BASE).unwrap());
+
+    // transport: /network transport's sums over every row, and per protocol.
+    let by_proto = groups_by(&rows, |r| {
+        Some(s(r, "proto").unwrap_or("Unknown").to_owned())
+    });
+    let all: Vec<&Value> = rows.iter().collect();
+    for (field, groups) in [
+        ("overall", BTreeMap::from([(String::new(), all.clone())])),
+        ("proto", by_proto),
+    ] {
+        let (got, total) = group_rows(&out, "transport", field);
+        assert_eq!(total["requests"], rows.len() as i64, "{field}");
+        assert_eq!(total["truncated"], false);
+        assert_eq!(got.len(), groups.len(), "{field}");
+        for (value, group) in &groups {
+            let row = got[value];
+            let what = format!("transport {field}={value}");
+            assert_eq!(row["requests"], group.len() as i64, "{what}");
+            assert_eq!(
+                row["resp_bytes_sum"],
+                group.iter().filter_map(|r| i(r, "resp_bytes")).sum::<i64>(),
+                "{what}"
+            );
+            assert_eq!(
+                hist_cell(row, "rtt_hist"),
+                hist_of(group.iter().filter_map(|r| i(r, "tcp_rtt"))),
+                "{what}"
+            );
+            close(
+                &row["ploss_sum"],
+                group.iter().filter_map(|r| f(r, "ploss")).sum(),
+            );
+            assert_eq!(
+                row["ploss_count"],
+                group.iter().filter(|r| f(r, "ploss").is_some()).count() as i64
+            );
+            let rates: Vec<f64> = group.iter().filter_map(|r| f(r, "delivery_rate")).collect();
+            close(&row["delivery_rate_sum"], rates.iter().sum());
+            assert_eq!(row["delivery_rate_count"], rates.len() as i64, "{what}");
+        }
+    }
+
+    // origin: over rows with an origin latency; overall carries every column, legs and POPs
+    // requests and latency.
+    let lat_rows: Vec<&Value> = rows.iter().filter(|r| origin_us(r).is_some()).collect();
+    assert!(lat_rows.len() < rows.len());
+    let (got, total) = group_rows(&out, "origin", "overall");
+    assert_eq!(total["requests"], lat_rows.len() as i64);
+    let row = got[""];
+    let n = |pred: &dyn Fn(&Value) -> bool| lat_rows.iter().filter(|r| pred(r)).count() as i64;
+    assert_eq!(row["requests"], lat_rows.len() as i64);
+    let cache = |r: &Value, p: &str| s(r, "cache").is_some_and(|c| c.starts_with(p));
+    assert_eq!(row["miss_requests"], n(&|r| cache(r, "MISS")));
+    assert_eq!(row["pass_requests"], n(&|r| cache(r, "PASS")));
+    assert!(row["pass_requests"].as_i64().unwrap() > 0);
+    assert_eq!(
+        row["ost_5xx_count"],
+        n(&|r| i(r, "ost").is_some_and(|s| (500..600).contains(&s)))
+    );
+    assert_eq!(row["ost_total_count"], n(&|r| i(r, "ost").is_some()));
+    assert_eq!(
+        hist_cell(row, "ttfb_hist"),
+        hist_of(lat_rows.iter().filter_map(|r| origin_us(r)))
+    );
+    assert_eq!(
+        hist_cell(row, "ottlb_hist"),
+        hist_of(lat_rows.iter().filter_map(|r| i(r, "ottlb")))
+    );
+    let overhead = hist_cell(row, "overhead_hist").unwrap();
+    assert_eq!(
+        Some(overhead.clone()),
+        hist_of(
+            lat_rows
+                .iter()
+                .filter_map(|r| Some(i(r, "elapsed")? - i(r, "ottlb")?))
+        )
+    );
+    assert!(overhead.under > 0, "negative overheads stay counted");
+    assert_eq!(
+        hist_cell(row, "obytes_hist"),
+        hist_of(lat_rows.iter().filter_map(|r| i(r, "obytes")))
+    );
+    for (field, groups) in [
+        (
+            "edge",
+            groups_by(lat_rows.iter().copied(), |r| Some(leg_of(r).to_owned())),
+        ),
+        (
+            "pop",
+            groups_by(lat_rows.iter().copied(), |r| {
+                s(r, "pop").filter(|p| !p.is_empty()).map(str::to_owned)
+            }),
+        ),
+    ] {
+        let (got, total) = group_rows(&out, "origin", field);
+        assert_eq!(
+            total["requests"],
+            groups.values().map(Vec::len).sum::<usize>() as i64,
+            "{field}"
+        );
+        assert_eq!(got.len(), groups.len(), "{field}");
+        for (value, group) in &groups {
+            let row = got[value];
+            assert_eq!(row["requests"], group.len() as i64, "{field}={value}");
+            assert_eq!(
+                hist_cell(row, "ttfb_hist"),
+                hist_of(group.iter().filter_map(|r| origin_us(r))),
+                "{field}={value}"
+            );
+            assert!(row.get("miss_requests").is_none() && row.get("ottlb_hist").is_none());
+        }
+    }
+    assert_eq!(
+        group_rows(&out, "origin", "edge")
+            .0
+            .keys()
+            .collect::<Vec<_>>(),
+        ["", "false", "true"]
+    );
+
+    // urls: origin latency and elapsed per URL, elapsed per ASN.
+    for (field, groups) in [
+        ("url", groups_by(&rows, |r| s(r, "url").map(str::to_owned))),
+        (
+            "asn",
+            groups_by(&rows, |r| i(r, "asn").map(|a| a.to_string())),
+        ),
+    ] {
+        let (got, total) = group_rows(&out, "urls", field);
+        assert_eq!(
+            total["requests"],
+            groups.values().map(Vec::len).sum::<usize>() as i64
+        );
+        assert_eq!(got.len(), groups.len(), "{field}");
+        for (value, group) in &groups {
+            let row = got[value];
+            let what = format!("urls {field}={value}");
+            assert_eq!(row["requests"], group.len() as i64, "{what}");
+            let elapsed: Vec<i64> = group.iter().filter_map(|r| i(r, "elapsed")).collect();
+            close(&row["elapsed_sum"], elapsed.iter().sum::<i64>() as f64);
+            assert_eq!(row["elapsed_count"], elapsed.len() as i64, "{what}");
+            assert_eq!(hist_cell(row, "elapsed_hist"), hist_of(elapsed), "{what}");
+            let lat = if field == "url" {
+                hist_of(group.iter().filter_map(|r| origin_us(r)))
+            } else {
+                None
+            };
+            assert_eq!(hist_cell(row, "ttfb_hist"), lat, "{what}");
+        }
+    }
+
+    // series5 origin: per leg and five minutes, origin latency and OTTLB.
+    let legs = groups_by(&rows, |r| Some(leg_of(r).to_owned()));
+    let series: Vec<_> = bundle(&out, "series5")
+        .into_iter()
+        .filter(|r| r["field"] == "origin")
+        .collect();
+    assert_eq!(series.len(), legs.len());
+    for row in series {
+        let group = &legs[row["value"].as_str().unwrap()];
+        assert_eq!(row["bucket"], BASE * 1000);
+        assert_eq!(row["requests"], group.len() as i64);
+        assert_eq!(
+            hist_cell(row, "ttfb_hist"),
+            hist_of(group.iter().filter_map(|r| origin_us(r)))
+        );
+        assert_eq!(
+            hist_cell(row, "ottlb_hist"),
+            hist_of(group.iter().filter_map(|r| i(r, "ottlb")))
+        );
+    }
+}
+
+#[test]
+fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
+    // No origin columns at all: every new field still has its dim_totals row.
+    let rows: Vec<Value> = (0..summary::DIM_K as i64 + 5)
+        .map(|i| json!({"timestamp": iso(BASE * 1000 + i), "url": format!("/u/{i}")}))
+        .chain((0..3).map(|i| json!({"timestamp": iso(BASE * 1000 + i), "url": "/hot"})))
+        .collect();
+    let out = read(&summary::write_summary(&[&batch(&rows)], BASE).unwrap());
+    for (group, field) in [
+        ("transport", "overall"),
+        ("transport", "proto"),
+        ("origin", "overall"),
+        ("origin", "edge"),
+        ("origin", "pop"),
+        ("urls", "asn"),
+        ("series5", "origin"),
+    ] {
+        let (_, total) = group_rows(&out, group, field);
+        let want = match (group, field) {
+            ("origin", _) | ("urls", "asn") => 0,
+            _ => rows.len() as i64,
+        };
+        assert_eq!(total["requests"], want, "{group}/{field}");
+        assert_eq!(total["truncated"], false, "{group}/{field}");
+    }
+    let (urls, total) = group_rows(&out, "urls", "url");
+    assert_eq!(total["requests"], rows.len() as i64);
+    assert_eq!(total["truncated"], true);
+    assert_eq!(urls.len(), summary::DIM_K);
+    assert_eq!(urls["/hot"]["requests"], 3);
+    assert!(group_rows(&out, "origin", "overall").0[""]
+        .get("ttfb_hist")
+        .is_none());
+}
+
+/// `bytes` as a summary written before the transport, origin and urls rows existed.
+fn without_new_rows(bytes: &[u8]) -> Vec<u8> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes)).unwrap();
+    let kv = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    let schema = builder.schema().clone();
+    let props = parquet::file::properties::WriterProperties::builder()
+        .set_key_value_metadata(kv)
+        .build();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(Vec::new(), schema, Some(props)).unwrap();
+    for batch in builder.build().unwrap() {
+        let batch = batch.unwrap();
+        let col = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .clone()
+        };
+        let (name, field, value) = (col("bundle"), col("field"), col("value"));
+        let new = |i: usize| {
+            let g = if name.value(i) == "dim_totals" {
+                value.value(i)
+            } else {
+                name.value(i)
+            };
+            matches!(g, "transport" | "origin" | "urls")
+                || (g == "series5" && !field.is_null(i) && field.value(i) == "origin")
+        };
+        let mut start = None;
+        for i in 0..=batch.num_rows() {
+            let keep = i < batch.num_rows() && !new(i);
+            match (keep, start) {
+                (true, None) => start = Some(i),
+                (false, Some(at)) => {
+                    writer.write(&batch.slice(at, i - at)).unwrap();
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    writer.into_inner().unwrap()
+}
+
+#[test]
+fn bundles_drop_new_rows_unless_every_source_has_them() {
+    use fastly_log_analytics::ingest::bundle::{self as bundles, Unit};
+    let (b1, b2) = (
+        batch(&fixture_v3(0, 400)),
+        batch(&fixture_v3(WINDOW * 1000, 500)),
+    );
+    let w1 = summary::write_summary(&[&b1], BASE).unwrap();
+    let w2 = summary::write_summary(&[&b2], BASE + WINDOW).unwrap();
+    let old = without_new_rows(&w1);
+    let stripped = read(&old);
+    assert!(bundle(&stripped, "transport").is_empty());
+    assert_eq!(bundle(&stripped, "dims"), bundle(&read(&w1), "dims"));
+
+    let new_fields = |out: &[Map<String, Value>]| -> BTreeSet<(String, String)> {
+        bundle(out, "dim_totals")
+            .into_iter()
+            .map(|r| {
+                (
+                    r["value"].as_str().unwrap().to_owned(),
+                    r["field"].as_str().unwrap().to_owned(),
+                )
+            })
+            .filter(|(g, f)| {
+                matches!(g.as_str(), "transport" | "origin" | "urls")
+                    || (g == "series5" && f == "origin")
+            })
+            .collect()
+    };
+    let both = read(&bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap());
+    assert_eq!(new_fields(&both).len(), 8);
+
+    let mixed_bytes = bundles::merge(&[&old, &w2], BASE, Unit::Hour).unwrap();
+    let mixed = read(&mixed_bytes);
+    assert!(new_fields(&mixed).is_empty());
+    for name in ["transport", "origin", "urls"] {
+        assert!(bundle(&mixed, name).is_empty(), "{name}");
+    }
+    assert!(!bundle(&mixed, "series5")
+        .iter()
+        .any(|r| r["field"] == "origin"));
+    // Older fields still merge both sources.
+    assert_eq!(keyed(&mixed, "dims"), keyed(&both, "dims"));
+
+    // A day over an hour that lacks them lacks them too; over full hours it keeps them.
+    let full_hour = bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap();
+    let day = read(&bundles::merge(&[&mixed_bytes, &full_hour], BASE, Unit::Day).unwrap());
+    assert!(new_fields(&day).is_empty());
+    let day = read(&bundles::merge(&[&full_hour], BASE, Unit::Day).unwrap());
+    assert_eq!(new_fields(&day).len(), 8);
+}
+
 #[test]
 fn series5_keeps_the_top_asns_and_marks_the_cut() {
     let k = summary::SERIES_ASN_K as i64;
@@ -1087,7 +1458,16 @@ fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
     let hour_bytes = bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap();
     assert_eq!(meta(&hour_bytes, "flp_summary").as_deref(), Some("3"));
     let hour = read(&hour_bytes);
-    for name in ["dims", "series5", "bins", "assets", "dim_totals"] {
+    for name in [
+        "dims",
+        "series5",
+        "bins",
+        "assets",
+        "transport",
+        "origin",
+        "urls",
+        "dim_totals",
+    ] {
         let (a, b) = (keyed(&whole, name), keyed(&hour, name));
         assert_eq!(
             a.keys().collect::<Vec<_>>(),
@@ -1344,7 +1724,7 @@ fn write_network_fixtures() {
 }
 
 /// Writes `frontend/lib/cloud-engine/__fixtures__/origin-summaries/`: rows carrying the
-/// /origin and /performance columns (origin IP, status and timings, TTL, elapsed), with
+/// /origin and /performance columns (origin IP, status, timings and bytes, TTL, elapsed, ASN), with
 /// their summaries and bundles, for the rollup-vs-raw parity tests.
 /// Run with `cargo test --test summary -- --ignored write_origin_fixtures`.
 #[test]
@@ -1374,6 +1754,7 @@ fn write_origin_fixtures() {
                 "url": format!("/p/{}", i % 40),
                 "ttfb": 0.000_05 + 0.000_2 * ((i * 13) % 400) as f64,
                 "elapsed": 1_000 + (i * 97) % 300_000,
+                "asn": ([13335, 15169, 16509, 7922][(k / 5) % 4]),
             });
             // Only origin fetches carry the origin columns, as on Fastly: HITs have none.
             if !cache.starts_with("HIT") {
@@ -1381,6 +1762,7 @@ fn write_origin_fixtures() {
                 row["oip"] = OIPS[(k / 2) % 6].into();
                 row["ost"] = ([200, 200, 503, 500, 404, 200, 302, 502][(k / 3) % 8]).into();
                 row["ottfb"] = ottfb.into();
+                row["obytes"] = (200 + (i * 61) % 50_000).into();
                 if i % 6 != 0 {
                     row["ottlb"] = (ottfb + (i * 53) % 90_000).into();
                 }
@@ -1390,6 +1772,9 @@ fn write_origin_fixtures() {
             }
             if i % 11 == 0 {
                 row["elapsed"] = Value::Null;
+            }
+            if i % 17 == 0 {
+                row["edge"] = Value::Null;
             }
             if i % 7 != 0 {
                 row["ttl"] = TTLS[k % 9].into();

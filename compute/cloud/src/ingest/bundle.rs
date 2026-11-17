@@ -25,12 +25,16 @@
 //! bundle keeps the top [`HOUR_TOP_K`]/[`DAY_TOP_K`] values per field by `(count desc, value
 //! asc)`; `field_totals.truncated` marks any field that lost values.
 //!
-//! v3 groups (`dims`, `series5`, `bins`, `assets`) sum per value, histograms add bucket-wise,
+//! v3 groups (`dims`, `series5`, `bins`, `assets`, `transport`, `origin`, `urls`) sum per
+//! value, histograms add bucket-wise,
 //! and `series5`/`bins` buckets floor to 5 minutes (hour) or an hour (day). Folding keeps 4x
 //! candidates (`DIM_K`, `summary::SERIES_ASN_K`) by summed requests. An hour bundle writes all
 //! of them, because day bundles fold hour bundles; a day bundle writes its top [`DAY_TOP_K`]
 //! ([`SERIES_ASN_TOP_K`] for `series5` ASNs). `dim_totals.truncated` marks a group field that
-//! lost values, whose counts are then lower bounds. `sample` keeps the
+//! lost values, whose counts are then lower bounds. Fields added after version 3 shipped
+//! (`transport`, `origin`, `urls` and `series5` `origin`) are written only when every source
+//! carried their `dim_totals` row, so a bundle over older windows lacks them and readers fall
+//! back to raw. `sample` keeps the
 //! `summary::SAMPLE_K` rows with the smallest `sample_key`. A source of another summary version
 //! makes the bundle `mixed`, which readers treat as unknown.
 
@@ -86,7 +90,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x02";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x03";
 
 /// `{scope}processed/summary_bundle/{table}/`, holding hour and day bundles.
 pub fn bundle_prefix(scope: &str, table: &str) -> String {
@@ -439,6 +443,36 @@ const SERIES_COLS: &[(C, Op)] = &[
 
 const BIN_COLS: &[(C, Op)] = &[(C::Requests, Sum)];
 
+const TRANSPORT_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::RespBytesSum, Sum),
+    (C::PlossSum, Sum),
+    (C::PlossCount, Sum),
+    (C::DeliveryRateSum, Sum),
+    (C::DeliveryRateCount, Sum),
+    (C::RttHist, Merge),
+];
+
+const ORIGIN_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::MissRequests, Sum),
+    (C::PassRequests, Sum),
+    (C::Ost5xxCount, Sum),
+    (C::OstTotalCount, Sum),
+    (C::TtfbHist, Merge),
+    (C::OttlbHist, Merge),
+    (C::OverheadHist, Merge),
+    (C::ObytesHist, Merge),
+];
+
+const URL_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::ElapsedSum, Sum),
+    (C::ElapsedCount, Sum),
+    (C::TtfbHist, Merge),
+    (C::ElapsedHist, Merge),
+];
+
 const ASSET_COLS: &[(C, Op)] = &[
     (C::Requests, Sum),
     (C::RespBytesSum, Sum),
@@ -462,32 +496,60 @@ struct Group {
     timed: bool,
     /// Field write order; others follow by name.
     fields: &'static [&'static str],
+    /// Fields newer than some version-3 summaries: written only when every source has them
+    /// (a `dim_totals` row), so a mix with older sources reads as absent, not as a partial sum.
+    gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 4] = [
+const GROUPS: [Group; 7] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
         timed: false,
         fields: DIMS,
+        gated: &[],
     },
     Group {
         name: "series5",
         cols: SERIES_COLS,
         timed: true,
-        fields: &["overall", "proto", "asn"],
+        fields: &["overall", "proto", "asn", "origin"],
+        gated: &["origin"],
     },
     Group {
         name: "bins",
         cols: BIN_COLS,
         timed: true,
         fields: &["req_header_size", "verified_bot"],
+        gated: &[],
     },
     Group {
         name: "assets",
         cols: ASSET_COLS,
         timed: false,
         fields: &["asset"],
+        gated: &[],
+    },
+    Group {
+        name: "transport",
+        cols: TRANSPORT_COLS,
+        timed: false,
+        fields: &["overall", "proto"],
+        gated: &["overall", "proto"],
+    },
+    Group {
+        name: "origin",
+        cols: ORIGIN_COLS,
+        timed: false,
+        fields: &["overall", "edge", "pop"],
+        gated: &["overall", "edge", "pop"],
+    },
+    Group {
+        name: "urls",
+        cols: URL_COLS,
+        timed: false,
+        fields: &["url", "asn"],
+        gated: &["url", "asn"],
     },
 ];
 
@@ -711,6 +773,8 @@ struct GroupAcc {
     total: i64,
     truncated: bool,
     values: HashMap<String, BTreeMap<i64, Vec<Cell>>>,
+    /// Folded sources (weighted like `Acc::sources`) with this field's `dim_totals` row.
+    sources: u64,
 }
 
 impl GroupAcc {
@@ -741,7 +805,7 @@ struct Acc {
     fields: BTreeMap<String, FieldAcc>,
     sessions: HashMap<SessionKey, Vec<Cell>>,
     /// Per [`GROUPS`] entry, per field.
-    groups: [BTreeMap<String, GroupAcc>; 4],
+    groups: [BTreeMap<String, GroupAcc>; 7],
     /// The lowest [`summary::SAMPLE_K`] sample rows, by `(key, timestamp)`.
     sample: Vec<SampleRow>,
     /// A source of another summary version was folded in: the bundle is written as `mixed`,
@@ -819,6 +883,7 @@ impl Acc {
             .build()
             .map_err(|_| "summary_unreadable".to_string())?;
         let mut seen = BTreeSet::new();
+        let mut seen_groups = BTreeSet::new();
         for batch in reader {
             let batch = batch.map_err(|_| "summary_unreadable".to_string())?;
             let cols = Cols::new(&batch);
@@ -829,6 +894,13 @@ impl Acc {
                         seen.insert(f.to_owned());
                     }
                 }
+                if cols.s(C::Bundle, i) == Some("dim_totals") {
+                    let g = cols.s(C::Value, i).unwrap_or_default();
+                    if let Some(g) = GROUPS.iter().position(|x| x.name == g) {
+                        seen_groups
+                            .insert((g, cols.s(C::FieldName, i).unwrap_or_default().to_owned()));
+                    }
+                }
                 self.fold_row(&cols, i);
             }
         }
@@ -836,8 +908,17 @@ impl Acc {
             let acc = self.fields.entry(field).or_default();
             acc.sources = acc.sources.saturating_add(weight);
         }
+        for (g, field) in seen_groups {
+            let acc = self.group_acc(g, &field);
+            acc.sources = acc.sources.saturating_add(weight);
+        }
         self.sources = self.sources.saturating_add(weight);
         Ok(())
+    }
+
+    /// A gated field (see [`Group::gated`]) that some source lacks is left out.
+    fn group_covered(&self, group: &Group, field: &str, acc: &GroupAcc) -> bool {
+        !group.gated.contains(&field) || acc.sources >= self.sources
     }
 
     /// A custom field that some source never summarized (it predates the field or the
@@ -1137,6 +1218,7 @@ impl Acc {
                 put_str(&mut out, field);
                 put_i64(&mut out, acc.total);
                 out.push(u8::from(acc.truncated));
+                put_u64(&mut out, acc.sources);
                 put_u32(&mut out, acc.values.len() as u32);
                 for (val, rows) in &acc.values {
                     put_str(&mut out, val);
@@ -1300,6 +1382,7 @@ impl Acc {
                 let field = cur.str()?;
                 let total = cur.i64()?;
                 let truncated = cur.u8()? != 0;
+                let sources = cur.u64()?;
                 let v_len = cur.u32()? as usize;
                 let mut values = HashMap::with_capacity(v_len);
                 for _ in 0..v_len {
@@ -1318,6 +1401,7 @@ impl Acc {
                         total,
                         truncated,
                         values,
+                        sources,
                     },
                 );
             }
@@ -1494,6 +1578,9 @@ impl Acc {
         for (group, fields) in GROUPS.iter().zip(&self.groups) {
             for field in ordered(fields.keys().collect(), group.fields) {
                 let acc = &fields[&field];
+                if !self.group_covered(group, &field, acc) {
+                    continue;
+                }
                 let mut ranked = acc.ranked();
                 let cut = unit.map_or(ranked.len(), |u| group.written(&field, u));
                 let truncated = acc.truncated || ranked.len() > cut;
@@ -2541,6 +2628,34 @@ mod tests {
             .windows(2)
             .all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1)));
         assert!(Acc::decode_partial(&acc.encode_partial()[..40], Unit::Hour).is_err());
+    }
+
+    #[test]
+    fn binary_partials_keep_gated_field_coverage() {
+        let windows: Vec<Vec<u8>> = (0..2).map(|i| rich_window(i * 300)).collect();
+        let has = |bytes: Vec<u8>| {
+            let mut acc = Acc::default();
+            acc.fold(bytes, 1).unwrap();
+            ["transport", "origin", "urls"].map(|g| {
+                let at = GROUPS.iter().position(|x| x.name == g).unwrap();
+                !acc.groups[at].is_empty()
+            })
+        };
+        let mut first = Acc::default();
+        first.fold(windows[0].clone(), 1).unwrap();
+        // A source from before the transport, origin and urls rows.
+        first.sources += 1;
+        let mut resumed = Acc::decode_partial(&first.encode_partial(), Unit::Hour).unwrap();
+        resumed.fold(windows[1].clone(), 1).unwrap();
+        let fin = resumed
+            .write(1_800_000_000, Some(Unit::Hour), "hour")
+            .unwrap();
+        assert_eq!(has(fin), [false; 3]);
+        let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            has(merge(&refs, 1_800_000_000, Unit::Hour).unwrap()),
+            [true; 3]
+        );
     }
 
     #[test]

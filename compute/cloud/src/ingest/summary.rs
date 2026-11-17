@@ -2,8 +2,11 @@
 //!
 //! One long-format file per window, rows tagged by `bundle`. Shapes and definitions mirror the
 //! fla v3 hourly rollups (`backend/core/rollups/` at 2c75f058): `time_series`, `overview`,
-//! `all_fields` (+ `field_totals`), `all_fields_ip`, `sessions` and additive `dims`. Every value
-//! is an additive sum or count, a min/max, or an HLL sketch, so windows merge into hours and days.
+//! `all_fields` (+ `field_totals`), `all_fields_ip`, `sessions` and additive `dims`, plus the
+//! Cloud-only `transport`, `origin` and `urls` groups (/network transport, /origin and
+//! /performance rankings), which always write their `dim_totals` rows as a presence mark. Every
+//! value is an additive sum or count, a min/max, a histogram or an HLL sketch, so windows merge
+//! into hours and days.
 
 use super::convert::{self, FastMap};
 use super::hist::{self, Hist};
@@ -209,6 +212,12 @@ columns! {
     GeoCount = ("geo_count", I64),
     SampleKey = ("sample_key", I64),
     ElapsedUs = ("elapsed_us", I64),
+    DeliveryRateSum = ("delivery_rate_sum", F64),
+    DeliveryRateCount = ("delivery_rate_count", I64),
+    ElapsedSum = ("elapsed_sum", F64),
+    ElapsedCount = ("elapsed_count", I64),
+    ObytesHist = ("obytes_hist", Bin),
+    OverheadHist = ("overhead_hist", Bin),
 }
 
 /// The histogram columns, in [`Lat`] order.
@@ -816,6 +825,11 @@ struct NetCols<'a> {
     ttfb_ms: Num<'a>,
     origin_ms: Num<'a>,
     req_id: Str<'a>,
+    /// /network transport's `COALESCE(proto, protocol, 'Unknown')`, RTT and delivery rate.
+    transport_proto: Str<'a>,
+    transport_rtt: Num<'a>,
+    delivery: Num<'a>,
+    obytes: Num<'a>,
 }
 
 impl<'a> NetCols<'a> {
@@ -868,6 +882,21 @@ impl<'a> NetCols<'a> {
             ),
             origin_ms: Num::new(batch, &[("origin_Whole_ms", 1.0), ("origin_time_ms", 1.0)]),
             req_id: Str::new(batch, &["fastly_req_id", "rid"]),
+            transport_proto: Str::new(batch, &["proto", "protocol"]),
+            transport_rtt: Num::new(
+                batch,
+                &[
+                    ("tcp_rtt", 1.0),
+                    ("client_rtt_us", 1.0),
+                    ("client_tcpi_rtt", 1.0),
+                    ("tcpi_rtt", 1.0),
+                ],
+            ),
+            delivery: Num::new(
+                batch,
+                &[("delivery_rate", 1.0), ("tcpi_delivery_rate", 1.0)],
+            ),
+            obytes: Num::new(batch, &[("obytes", 1.0)]),
         }
     }
 }
@@ -1020,6 +1049,205 @@ struct Asset {
     ttfb_ms: f64,
     origin_ms: f64,
     origin_requests: i64,
+}
+
+/// A `transport` row: /network transport's sums over every row.
+#[derive(Default)]
+struct Transport {
+    requests: i64,
+    bytes: i64,
+    rtt: Hist,
+    ploss: (f64, i64),
+    delivery: (f64, i64),
+}
+
+impl Transport {
+    fn add(&mut self, bytes: i64, rtt: Option<(i64, u8)>, ploss: Option<f64>, rate: Option<f64>) {
+        self.requests += 1;
+        self.bytes += bytes;
+        if let Some((v, slot)) = rtt {
+            self.rtt.add_slot(v, slot);
+        }
+        if let Some(p) = ploss {
+            self.ploss.0 += p;
+            self.ploss.1 += 1;
+        }
+        if let Some(r) = rate {
+            self.delivery.0 += r;
+            self.delivery.1 += 1;
+        }
+    }
+
+    fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str) {
+        let rtt = self.rtt.to_bytes();
+        let mut row = vec![
+            (C::Bundle, V::S("transport")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+            (C::RespBytesSum, V::I(self.bytes)),
+            (C::PlossSum, V::F(self.ploss.0)),
+            (C::PlossCount, V::I(self.ploss.1)),
+            (C::DeliveryRateSum, V::F(self.delivery.0)),
+            (C::DeliveryRateCount, V::I(self.delivery.1)),
+        ];
+        push_hists(&mut row, &[C::RttHist], std::slice::from_ref(&rtt));
+        out.push(&row);
+    }
+}
+
+/// One row's /origin values, over rows with an origin latency (`COALESCE(ottfb, ttfb * 1e6)`).
+struct OriginRow {
+    lat: (i64, u8),
+    miss: bool,
+    pass: bool,
+    ost: Option<i64>,
+    ottlb: Option<i64>,
+    overhead: Option<i64>,
+    obytes: Option<i64>,
+}
+
+/// An `origin` row: the /origin summary's counts and histograms (`overall`), or requests and
+/// latency per path leg (`edge`) or POP (`pop`).
+#[derive(Default)]
+struct Origin {
+    requests: i64,
+    miss: i64,
+    pass: i64,
+    ost5: i64,
+    ost: i64,
+    lat: Hist,
+    ottlb: Hist,
+    overhead: Hist,
+    obytes: Hist,
+}
+
+impl Origin {
+    fn add(&mut self, o: &OriginRow, full: bool) {
+        self.requests += 1;
+        self.lat.add_slot(o.lat.0, o.lat.1);
+        if !full {
+            return;
+        }
+        self.miss += i64::from(o.miss);
+        self.pass += i64::from(o.pass);
+        if let Some(s) = o.ost {
+            self.ost += 1;
+            self.ost5 += i64::from((500..600).contains(&s));
+        }
+        for (h, v) in [
+            (&mut self.ottlb, o.ottlb),
+            (&mut self.overhead, o.overhead),
+            (&mut self.obytes, o.obytes),
+        ] {
+            if let Some(v) = v {
+                h.add(v);
+            }
+        }
+    }
+
+    fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str, full: bool) {
+        let mut row = vec![
+            (C::Bundle, V::S("origin")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+        ];
+        if full {
+            row.extend([
+                (C::MissRequests, V::I(self.miss)),
+                (C::PassRequests, V::I(self.pass)),
+                (C::Ost5xxCount, V::I(self.ost5)),
+                (C::OstTotalCount, V::I(self.ost)),
+            ]);
+        }
+        let blobs = [&self.lat, &self.ottlb, &self.overhead, &self.obytes].map(Hist::to_bytes);
+        push_hists(
+            &mut row,
+            &[C::TtfbHist, C::OttlbHist, C::OverheadHist, C::ObytesHist],
+            &blobs,
+        );
+        out.push(&row);
+    }
+}
+
+/// A `urls` row: per URL or ASN, origin latency for /origin's slow URLs and elapsed time for
+/// /performance's rankings.
+#[derive(Default)]
+struct UrlAgg {
+    requests: i64,
+    lat: Hist,
+    elapsed: Hist,
+    elapsed_sum: f64,
+}
+
+impl UrlAgg {
+    fn add(&mut self, lat: Option<(i64, u8)>, elapsed: Option<(i64, u8)>) {
+        self.requests += 1;
+        if let Some((v, slot)) = lat {
+            self.lat.add_slot(v, slot);
+        }
+        if let Some((v, slot)) = elapsed {
+            self.elapsed.add_slot(v, slot);
+            self.elapsed_sum += v as f64;
+        }
+    }
+
+    fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str) {
+        let mut row = vec![
+            (C::Bundle, V::S("urls")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+            (C::ElapsedSum, V::F(self.elapsed_sum)),
+            (C::ElapsedCount, V::I(self.elapsed.count() as i64)),
+        ];
+        let blobs = [&self.lat, &self.elapsed].map(Hist::to_bytes);
+        push_hists(&mut row, &[C::TtfbHist, C::ElapsedHist], &blobs);
+        out.push(&row);
+    }
+}
+
+/// A `series5` `origin` row per path leg: origin latency and OTTLB for /origin's series.
+#[derive(Default)]
+struct OriginSeries {
+    requests: i64,
+    lat: Hist,
+    ottlb: Hist,
+}
+
+/// `requests` per value of one untimed field, cut to the `keep` with the most: `(total,
+/// truncated)` and the kept values in order.
+fn top_untimed<'a, T>(
+    map: FastMap<Cow<'a, str>, T>,
+    requests: impl Fn(&T) -> i64,
+    keep: usize,
+) -> (Vec<(Cow<'a, str>, T)>, i64, bool) {
+    let total = map.values().map(&requests).sum();
+    let truncated = map.len() > keep;
+    let mut ranked: Vec<(Cow<'a, str>, T)> = map.into_iter().collect();
+    rank(
+        &mut ranked,
+        |a, b| {
+            requests(&b.1)
+                .cmp(&requests(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        },
+        keep,
+    );
+    (ranked, total, truncated)
+}
+
+/// `true`, `false` or '' (null): the /origin path leg.
+fn leg(edge: Option<bool>) -> &'static str {
+    match edge {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "",
+    }
 }
 
 /// A `dims` key: a card-style value, or a `city` within its country.
@@ -1301,10 +1529,23 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
     // Max-heap of the smallest sample keys: (key, ts, batch, row).
     let mut sample: std::collections::BinaryHeap<(i64, i64, usize, usize)> =
         std::collections::BinaryHeap::with_capacity(SAMPLE_K + 1);
+    let mut transport = Transport::default();
+    let mut by_transport: FastMap<Cow<str>, Transport> = FastMap::default();
+    let mut origin_all = Origin::default();
+    let mut origin_legs: FastMap<Cow<str>, Origin> = FastMap::default();
+    let mut origin_pops: FastMap<Cow<str>, Origin> = FastMap::default();
+    let mut origin_series: FastMap<(i64, Cow<str>), OriginSeries> = FastMap::default();
+    let mut by_url: FastMap<Cow<str>, UrlAgg> = FastMap::default();
+    let mut by_raw_asn: FastMap<Cow<str>, UrlAgg> = FastMap::default();
 
     for (at, r) in rows.iter().enumerate() {
         let c = &r.net;
         let field_cols = FIELD_DIMS.map(|d| FieldCol::resolve(r.batch, d));
+        let (url_col, asn_col, pop_col) = (
+            FieldCol::resolve(r.batch, "url"),
+            FieldCol::resolve(r.batch, "asn"),
+            FieldCol::resolve(r.batch, "pop"),
+        );
         for i in r.live() {
             let ts = r.ts.value(i);
             let step = ts.div_euclid(SERIES_STEP_MS) * SERIES_STEP_MS;
@@ -1404,6 +1645,70 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
             a.origin_ms += origin;
             a.origin_requests += i64::from(origin > 0.0);
 
+            let ottlb = get_i(r.ottlb, i);
+            let origin_lat = lat(n.lat_us.map(|v| v.round() as i64));
+            let edge = get_b(r.edge, i);
+            let elapsed_lat = n.lat[1];
+            let (body, t_rtt, rate) = (
+                c.body.get(i).map_or(0, |v| v as i64),
+                lat(c.transport_rtt.get(i).map(|v| v.round() as i64)),
+                c.delivery.get(i),
+            );
+            transport.add(body, t_rtt, n.ploss, rate);
+            by_transport
+                .entry(Cow::Borrowed(
+                    c.transport_proto.get(i, false).unwrap_or("Unknown"),
+                ))
+                .or_default()
+                .add(body, t_rtt, n.ploss, rate);
+            if let Some(latency) = origin_lat {
+                let o = OriginRow {
+                    lat: latency,
+                    miss: cache.is_some_and(|s| s.starts_with("MISS")),
+                    pass: cache.is_some_and(|s| s.starts_with("PASS")),
+                    ost: n.ost,
+                    ottlb,
+                    overhead: elapsed.zip(ottlb).map(|(e, l)| e - l),
+                    obytes: c.obytes.get(i).map(|v| v.round() as i64),
+                };
+                origin_all.add(&o, true);
+                origin_legs
+                    .entry(Cow::Borrowed(leg(edge)))
+                    .or_default()
+                    .add(&o, false);
+                if let Some(col) = &pop_col {
+                    col.for_each_key(i, true, |key| {
+                        origin_pops.entry(key.render()).or_default().add(&o, false);
+                    });
+                }
+            }
+            let s = origin_series
+                .entry((step, Cow::Borrowed(leg(edge))))
+                .or_default();
+            s.requests += 1;
+            if let Some((v, slot)) = origin_lat {
+                s.lat.add_slot(v, slot);
+            }
+            if let Some((v, slot)) = n.lat[4] {
+                s.ottlb.add_slot(v, slot);
+            }
+            if let Some(col) = &url_col {
+                col.for_each_key(i, false, |key| {
+                    by_url
+                        .entry(key.render())
+                        .or_default()
+                        .add(origin_lat, elapsed_lat);
+                });
+            }
+            if let Some(col) = &asn_col {
+                col.for_each_key(i, false, |key| {
+                    by_raw_asn
+                        .entry(key.render())
+                        .or_default()
+                        .add(None, elapsed_lat);
+                });
+            }
+
             if ttfb.is_some() {
                 let key = sample_key(c.req_id.get(i, false), ts, url, get_s(r.ip, i), i);
                 let entry = (key, ts, at, i);
@@ -1488,6 +1793,21 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
         series_row(out, *step, "asn", value, s);
     }
     drop(asn);
+    let (legs, total, truncated) = top_timed(origin_series, |s| s.requests, DIM_K);
+    push_total(out, bucket, "series5", "origin", total, truncated);
+    for (step, value, s) in &legs {
+        let blobs = [&s.lat, &s.ottlb].map(Hist::to_bytes);
+        let mut row = vec![
+            (C::Bundle, V::S("series5")),
+            (C::Bucket, V::I(*step)),
+            (C::FieldName, V::S("origin")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(s.requests)),
+        ];
+        push_hists(&mut row, &[C::TtfbHist, C::OttlbHist], &blobs);
+        out.push(&row);
+    }
+    drop(legs);
 
     for (field, bins) in [("req_header_size", header_bins), ("verified_bot", bot_bins)] {
         let (kept, total, truncated) = top_timed(bins, |n| *n, DIM_K);
@@ -1530,6 +1850,40 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
     }
     drop(kept);
     drop(assets);
+
+    push_total(
+        out,
+        bucket,
+        "transport",
+        "overall",
+        transport.requests,
+        false,
+    );
+    transport.push(out, bucket, "overall", "");
+    let (kept, total, truncated) = top_untimed(by_transport, |t| t.requests, DIM_K);
+    push_total(out, bucket, "transport", "proto", total, truncated);
+    for (value, t) in &kept {
+        t.push(out, bucket, "proto", value);
+    }
+    drop(kept);
+
+    push_total(out, bucket, "origin", "overall", origin_all.requests, false);
+    origin_all.push(out, bucket, "overall", "", true);
+    for (field, map) in [("edge", origin_legs), ("pop", origin_pops)] {
+        let (kept, total, truncated) = top_untimed(map, |o| o.requests, DIM_K);
+        push_total(out, bucket, "origin", field, total, truncated);
+        for (value, o) in &kept {
+            o.push(out, bucket, field, value, false);
+        }
+    }
+
+    for (field, map) in [("url", by_url), ("asn", by_raw_asn)] {
+        let (kept, total, truncated) = top_untimed(map, |u| u.requests, DIM_K);
+        push_total(out, bucket, "urls", field, total, truncated);
+        for (value, u) in &kept {
+            u.push(out, bucket, field, value);
+        }
+    }
 
     for (key, ts, at, i) in sample.into_sorted_vec() {
         let r = &rows[at];
