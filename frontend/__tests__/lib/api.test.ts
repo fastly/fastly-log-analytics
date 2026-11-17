@@ -7,7 +7,7 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { hashKey, hydrate, QueryClient, useMutation, useQuery, type QueryKey } from '@tanstack/react-query'
 import { createTestQueryClient, makeQueryWrapper, invalidInput, setupNextHeadersMock, withTestHttpServer } from '../helpers/page-smoke'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'

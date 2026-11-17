@@ -3,7 +3,7 @@ import { act, render, renderHook, screen, waitFor, within } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import { axe } from 'vitest-axe'
 import { useQuery } from '@tanstack/react-query'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import childProcess, { ChildProcess, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'

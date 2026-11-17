@@ -1,5 +1,5 @@
 import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { UsageLogClient } from '@/app/admin/usage-log/page'
 import Loading from '@/app/admin/usage-log/loading'

@@ -6,7 +6,7 @@ import {
 import { render, screen, fireEvent, cleanup, act, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, test, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { QueryClient, type QueryCacheNotifyEvent } from '@tanstack/react-query'
 import { axe } from 'vitest-axe'
 import React, { type ComponentProps, type ReactNode } from 'react'

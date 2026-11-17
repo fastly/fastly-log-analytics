@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { describe, expect, it, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { useServiceStore, useFilterStore } from '@/stores/filterStore'
 import { server } from '@/__tests__/helpers/msw/handlers'

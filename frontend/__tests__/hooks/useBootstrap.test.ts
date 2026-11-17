@@ -18,7 +18,7 @@ import {
   makeStreamResponse,
   postOk,
 } from '../helpers/page-smoke'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'

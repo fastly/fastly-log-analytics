@@ -6,7 +6,7 @@
  */
 import React from 'react'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useColumnVisibility } from '@/hooks/useSSE'

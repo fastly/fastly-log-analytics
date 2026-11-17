@@ -14,7 +14,7 @@ import { toggleLogFieldGroup, toggleLogFieldOverride, toggleLogFieldPreset, upda
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { axe } from 'vitest-axe'
 import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'

@@ -8,7 +8,7 @@ import { stubSystemTimeZone, stubResizeObserver, stubPointerCaptureAndScroll, re
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { axe } from 'vitest-axe'
 import { Server } from 'lucide-react'
 import { AppLayout } from '@/components/AppLayout'
