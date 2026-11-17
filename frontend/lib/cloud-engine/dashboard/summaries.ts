@@ -411,6 +411,31 @@ export function planSummaries(
   };
 }
 
+/** Plans day bundles, then hour bundles, then window summaries, so the fewest files answer. */
+export function planCoarsestFirst(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): { summaries: SummaryUse[]; raw: ManifestFile[] } {
+  const days = summaryFiles.filter((f) => f.key.includes("/day_bundle="));
+  const hours = summaryFiles.filter((f) => f.key.includes("/hour_bundle="));
+  const windows = summaryFiles.filter((f) => f.key.includes("/summary="));
+  const p1 = planSummaries(rawFiles, days, fromMs, toMs);
+  const p2 = planSummaries(p1.raw, hours, fromMs, toMs);
+  const p3 = planSummaries(p2.raw, windows, fromMs, toMs);
+  const p4 = planSummaries(p3.raw, summaryFiles, fromMs, toMs);
+  return {
+    summaries: [
+      ...p1.summaries,
+      ...p2.summaries,
+      ...p3.summaries,
+      ...p4.summaries,
+    ],
+    raw: p4.raw,
+  };
+}
+
 export type DecodedSummary = {
   rollup: FileRollupData;
   /** Card fields whose values were cut to the top K in some source. */
