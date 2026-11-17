@@ -8,7 +8,13 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.models.admin.health_and_sync import MAX_PAGE_SIZE
-from backend.models.common.base import BaseResponse, ErrorDetail, JsonDict, WireSafeModel
+from backend.models.common.base import (
+    BaseResponse,
+    ErrorDetail,
+    JsonDict,
+    WireSafeModel,
+    resolve_legacy_range_shorthand,
+)
 
 # ── High-Scale Models (folded from high_scale.py) ─────────────────────────────
 
@@ -30,19 +36,7 @@ class HighScaleRequestFactRequest(BaseModel):
     def _resolve_legacy_range_shorthand(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        if data.get("start_time") is not None or data.get("end_time") is not None:
-            return data
-        raw_range = data.get("range_token") or data.get("range")
-        if not isinstance(raw_range, str):
-            return data
-        from backend.utils.time_window import resolve_window
-
-        resolved = resolve_window(raw_range, data.get("anchor") if isinstance(data.get("anchor"), str) else None)
-        if resolved is None:
-            return data
-        out = dict(data)
-        out["start_time"], out["end_time"] = resolved
-        return out
+        return resolve_legacy_range_shorthand(data)
 
 
 class ServingWatermarkResponse(BaseModel):

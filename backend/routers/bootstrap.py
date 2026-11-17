@@ -6,8 +6,6 @@ import asyncio
 import logging
 import sys
 import time
-from collections.abc import Callable
-from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -24,31 +22,12 @@ from backend.models.common import (
     RecentSqliteResponse,
     SchemaResponse,
 )
+from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils import telemetry as statement_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import query_errors
-
-_T = TypeVar("_T")
-
-
-class SectionTimer:
-    """Lightweight wall-clock section timer for bootstrap diagnostics."""
-
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def mark(self, section: str, started_at: float) -> None:
-        self.entries.append({"section": section, "time_ms": round((time.perf_counter() - started_at) * 1000.0, 2)})
-
-    def call(self, section: str, fn: Callable[[], _T]) -> _T:
-        t0 = time.perf_counter()
-        try:
-            return fn()
-        finally:
-            self.mark(section, t0)
-
 
 logger = logging.getLogger(__name__)
 

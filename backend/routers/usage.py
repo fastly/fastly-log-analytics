@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import time
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, TypeVar
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -30,30 +28,11 @@ from backend.models.admin import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import assets as repo
+from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import window_to_epoch
 from backend.utils.router_utils import query_errors, raise_internal
-
-_T = TypeVar("_T")
-
-
-class SectionTimer:
-    """Lightweight wall-clock section timer for usage diagnostics."""
-
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def mark(self, section: str, started_at: float) -> None:
-        self.entries.append({"section": section, "time_ms": round((time.perf_counter() - started_at) * 1000.0, 2)})
-
-    def call(self, section: str, fn: Callable[[], _T]) -> _T:
-        t0 = time.perf_counter()
-        try:
-            return fn()
-        finally:
-            self.mark(section, t0)
-
 
 logger = logging.getLogger(__name__)
 
