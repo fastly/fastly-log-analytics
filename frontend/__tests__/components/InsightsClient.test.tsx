@@ -257,6 +257,26 @@ describe('InsightsClient notices', () => {
     expect(screen.queryAllByRole('alert')).toEqual([])
   })
 
+  it('says when the baseline came from log summaries, through when, and what ≈ and ≥ mean', async () => {
+    const dataThrough = new Date(Date.now() - 25 * 3600_000).toISOString()
+    serveInsights([
+      envelope({ computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')] }),
+      envelope({
+        computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')],
+        rollup: { data_from: new Date(Date.now() - 48 * 3600_000).toISOString(), data_through: dataThrough, approximate: ['city_surges'], lower_bound: [] },
+      }),
+    ])
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    const { queryClient } = renderWithQuery(<InsightsClient />, { withNuqs: true })
+    await waitFor(() => expect(tabCount('all')).toBe('1'))
+    expect(screen.queryByText(/Baseline from log summaries/)).toBeNull()
+
+    await queryClient.refetchQueries({ queryKey: ['insights'] })
+    const note = await screen.findByText(/Baseline from log summaries through \d\d:\d\d/)
+    expect(note.closest('[role="note"]')).not.toBeNull()
+    expect(note).toHaveTextContent(/24h window is read from raw logs.*≈ are estimated.*≥ are lower bounds/)
+  })
+
   it('still shows a failed requested window as an error alert', async () => {
     server.use(
       http.get(`${getApiBase()}/api/log-extents`, () =>

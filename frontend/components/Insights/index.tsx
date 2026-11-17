@@ -20,16 +20,19 @@ import {
 } from '@/hooks/useDashboardCards'
 import { useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useSSE'
+import { useTimezone } from '@/hooks/usePersistentPreferences'
 import { client, queryKeys, unwrapClient } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
   groupInsightsBySection,
   historyHoursFromExtents,
+  formatDate,
   normalizeTabKey,
   SECTION_LOADING_MESSAGES,
 } from '@/lib/utils'
 import { useSessionRoleStore } from '@/stores/filterStore'
 import type { FiltersPayload, InsightCardData } from '@/types/api'
+import { readRollupMeta } from '@/components/network/rollupLabels'
 import { InsightCard } from './InsightCard'
 import { InsightCardSkeleton } from './shared'
 import { InsightTabs, InsightsHeaderControls } from './InsightTabsAndControls'
@@ -188,6 +191,9 @@ function InsightsBody({
   // Cloud shortens the baseline when window + baseline outgrow the browser scan budget.
   const appliedBaselineHours = data?.baseline_hours
   const baselineShortened = appliedBaselineHours !== undefined && appliedBaselineHours < parseFloat(baselineHours)
+  // Cloud reads an unfiltered baseline from log summaries; only the window is raw.
+  const rollupMeta = readRollupMeta(data)
+  const timezone = useTimezone()
 
   // Group both real cards and skeleton entries by section, in the same fixed
   // order, so the loading tab bar mirrors the loaded tab bar (CLS). Skeleton
@@ -333,6 +339,15 @@ function InsightsBody({
       </div>
 
       <div className="min-h-[68px]">
+        {rollupMeta && (
+          <div role="note" className="mb-2 flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            <span title={formatDate(rollupMeta.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}>
+              Baseline from log summaries through {formatDate(rollupMeta.data_through, timezone, 'HH:mm')}; the {windowHours}h window is read from raw logs.
+              Baseline values marked ≈ are estimated and ≥ are lower bounds; detectors the summaries can&apos;t compare are not evaluated.
+            </span>
+          </div>
+        )}
         {baselineShortened && (
           <Alert role="status" className="border-amber-500/30 bg-amber-500/5 mb-2">
             <Info className="h-4 w-4 text-amber-500 shrink-0" />
