@@ -29,6 +29,7 @@ import {
   formatDate,
   normalizeTabKey,
   SECTION_LOADING_MESSAGES,
+  sortInsights,
 } from '@/lib/utils'
 import { useSessionRoleStore } from '@/stores/filterStore'
 import type { FiltersPayload, InsightCardData } from '@/types/api'
@@ -240,17 +241,25 @@ function InsightsBody({
   const rollupMeta = readRollupMeta(data)
   const timezone = useTimezone()
 
+  // Cards keep the severity order of the primary response, so a follow-up
+  // filling its computing-baseline cards changes them in place (CLS).
+  const sortByPrimary = useMemo(() => {
+    const rank = new Map(sortInsights(data?.insights ?? []).map((insight, index) => [insight.id, index]))
+    return (cards: readonly InsightCardData[]) =>
+      [...cards].sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size))
+  }, [data?.insights])
   // Group both real cards and skeleton entries by section, in the same fixed
-  // order, so the loading tab bar mirrors the loaded tab bar (CLS). Skeleton
-  // entries have no severity → sortInsights orders them by title.
+  // order, so the loading tab bar mirrors the loaded tab bar (CLS).
   const groupedInsights = useMemo(
     () =>
       groupInsightsBySection(filteredInsights, {
         includeAll: true,
         includeEmptySections: true,
+        sort: sortByPrimary,
       }),
-    [filteredInsights],
+    [filteredInsights, sortByPrimary],
   )
+  // Skeleton entries have no severity → sortInsights orders them by title.
   const groupedSkeletons = useMemo(
     () =>
       groupInsightsBySection(availableInsights, {

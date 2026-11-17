@@ -53,15 +53,26 @@ export async function ensureCloudRange(
     /**
      * Loads only these request columns, read as byte ranges, and budgets the
      * range on their footer-measured bytes (at most `maxBytes`, default the
-     * range byte budget) instead of whole-file sizes.
+     * range byte budget) instead of whole-file sizes. Files a listing from
+     * `wider.from` to the range end would include also load `wider.columns`,
+     * so they share the cache entries of an earlier load of that range.
      */
-    projection?: { columns: readonly string[]; maxBytes?: number };
+    projection?: {
+      columns: readonly string[];
+      maxBytes?: number;
+      wider?: { from: string; columns: readonly string[] };
+    };
   } = {},
 ): Promise<DuckDBReadContext> {
   const projection = options.projection;
   if (projection && datasets.some((dataset) => dataset !== "request"))
     throw new Error("Cloud column projection applies to request files only");
   const projectedColumns = projection ? new Set(projection.columns) : null;
+  const wider = projection?.wider;
+  const widerColumns = wider ? new Set([...projection.columns, ...wider.columns]) : null;
+  // The same second-floored bound as the listing below.
+  const widerFromMs = wider ? Math.floor(Date.parse(wider.from) / 1000) * 1000 : NaN;
+  if (wider && !Number.isFinite(widerFromMs)) throw new Error("Invalid Cloud projection range");
   const byteLimit = Math.min(projection?.maxBytes ?? MAX_RANGE_BYTES, MAX_RANGE_BYTES);
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
@@ -94,10 +105,11 @@ export async function ensureCloudRange(
       manifest.files.map((file) => {
         const identity = [scope, options.serviceId ?? "", datasets[index],
           file.key, file.etag ?? "", file.size, file.schema_version ?? ""];
-        return { ...file, dataset: datasets[index],
+        const columns = widerColumns && Date.parse(file.end) > widerFromMs ? widerColumns : projectedColumns;
+        return { ...file, dataset: datasets[index], columns,
           footerKey: JSON.stringify([...identity, "footer"]),
           scopedKey: JSON.stringify([...identity,
-            ...projectedColumns ? ["projection", ...[...projectedColumns].sort()] : []]),
+            ...columns ? ["projection", ...[...columns].sort()] : []]),
         };
       }),
     );
@@ -148,7 +160,7 @@ export async function ensureCloudRange(
         await Promise.all(unknown.map(async (file) => {
           const stored = await source.readDerivedFile(file.key, file.scopedKey);
           if (stored) persisted.set(file.scopedKey, stored);
-          else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), projectedColumns));
+          else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), file.columns!));
         }));
         generation.assertCurrent();
         signal.throwIfAborted();
@@ -193,7 +205,7 @@ export async function ensureCloudRange(
           return { bytes: await stored.bytes(), cached: true, presentColumns };
         }
         // Resident at the budget check but evicted since.
-        const plan = plans.get(file.scopedKey) ?? planParquetProjection(await readFooter(file), projectedColumns!);
+        const plan = plans.get(file.scopedKey) ?? planParquetProjection(await readFooter(file), file.columns!);
         let downloaded = 0;
         const parts = await fetchProjectedRanges(plan, async (start, end) => {
           const part = await fetchRange(file, start, end);

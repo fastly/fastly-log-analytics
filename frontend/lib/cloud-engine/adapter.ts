@@ -564,11 +564,17 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
     : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters)
     : /^\/api\/services\/[^/]+\/scoring\//.test(url.pathname) ? scoringScanColumns() : null;
+  const detectors = Array.isArray(params.detectors) ? params.detectors as string[] : undefined;
   const read = await ensureCloudRange(scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
-      columns: insightScanColumns(filters, Array.isArray(params.detectors) ? params.detectors as string[] : undefined),
+      columns: insightScanColumns(filters, detectors),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
+      // A detector follow-up reuses the window its summary pass already loaded with every insight column.
+      ...detectors && url.pathname === "/api/insights" ? { wider: {
+        from: new Date(Date.parse(end) - Number(params.window_size_hrs ?? 24) * 3_600_000).toISOString(),
+        columns: insightScanColumns(filters),
+      } } : {},
     } } : scanColumns ? { projection: { columns: scanColumns } } : {},
   });
   try {

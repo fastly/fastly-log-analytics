@@ -10,16 +10,27 @@ import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire
 import { executePerformanceAggregates } from "./performance";
 import { handleCloudAnalyticalRequest } from "./adapter";
 import * as sqlBuilder from "../sqlBuilder";
+import { insightsBaselineFromRollup } from "./insights-rollup";
+import { mergeRollups } from "./dashboard/rollup-query";
 
-const source = vi.hoisted(() => ({
-  fetchJson: vi.fn(), fetchFile: vi.fn(), fetchRange: vi.fn(), readDerivedFile: vi.fn(), writeDerivedFile: vi.fn(),
-}));
+const source = vi.hoisted(() => {
+  const mock = {
+    fetchJson: vi.fn(), fetchFile: vi.fn(), fetchRange: vi.fn(), readDerivedFile: vi.fn(), writeDerivedFile: vi.fn(),
+    withOptions: vi.fn(),
+  };
+  mock.withOptions.mockReturnValue(mock);
+  return mock;
+});
 // Stands in for the persisted browser file cache, which outlives a page load.
 const derived = new Map<string, { bytes: ArrayBuffer; meta: string }>();
 vi.mock("./dashboard/sources", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/sources")>(),
   browserSource: () => source,
   dashboardCacheScope: () => "fixture-session",
+}));
+vi.mock("./insights-rollup", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./insights-rollup")>(),
+  insightsBaselineFromRollup: vi.fn(async () => null),
 }));
 vi.mock("./dashboard/manifest", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/manifest")>(),
@@ -349,6 +360,43 @@ describe("Cloud first-page analytical range loading", () => {
       start_time: recentFrom, end_time: recentTo,
     }, "ignored-service", from, to);
     expect((await analyticalPost("/api/query", explicit)).data).toEqual([{ count: 1 }]);
+  });
+
+  it("downloads the Insights window once across the summary pass and its raw follow-up", async () => {
+    const windowStart = Date.parse("2026-11-05T00:00:00Z");
+    // Distinct URLs put the url chunk ahead of the footer probe, so reading it takes its own range request.
+    const hourFile = (key: string, start: string) => {
+      const startMs = Date.parse(start);
+      const rows = 2000;
+      const columnData = [
+        { name: "timestamp", type: "TIMESTAMP" as const, data: Array.from({ length: rows }, (_, i) => new Date(startMs + 1000 + i)) },
+        { name: "url", type: "STRING" as const, data: Array.from({ length: rows }, () => `/${crypto.randomUUID()}${crypto.randomUUID()}`) },
+        { name: "status", type: "INT32" as const, data: Array.from({ length: rows }, () => 503) },
+        { name: "cache", type: "STRING" as const, data: Array.from({ length: rows }, () => "MISS") },
+        { name: "resp_bytes", type: "INT64" as const, data: Array.from({ length: rows }, () => BigInt(10)) },
+        { name: "country", type: "STRING" as const, data: Array.from({ length: rows }, () => "US") },
+      ];
+      return { ...file, key, start, end: new Date(startMs + 3_600_000).toISOString(), bytes: parquetWriteBuffer({ columnData }) };
+    };
+    const windowFile = hourFile("processed/request/window.parquet", "2026-11-05T12:00:00Z");
+    const baselineFile = hourFile("processed/request/baseline.parquet", "2026-11-04T12:00:00Z");
+    await analyticalFiles([windowFile, baselineFile]);
+    const reads = (key: string) => source.fetchRange.mock.calls.filter(([entry]) => (entry as ManifestFile).key === key).length;
+    vi.mocked(insightsBaselineFromRollup).mockResolvedValueOnce({
+      rollup: mergeRollups([]), dataFromMs: windowStart - 24 * 3_600_000, dataThroughMs: windowStart,
+    });
+    const body = { window_size_hrs: 24, baseline_hours: 24, filters: {} };
+
+    const first = await analyticalPost("/api/insights", body);
+    expect(first.rollup).toBeDefined();
+    const windowReads = reads(windowFile.key);
+    expect(windowReads).toBeGreaterThan(0);
+    expect(reads(baselineFile.key)).toBe(0);
+
+    await analyticalPost("/api/insights", { ...body, end_time: first.window_end,
+      detectors: ["error_spikes", "pop_latency_regression"] });
+    expect(reads(windowFile.key)).toBe(windowReads);
+    expect(reads(baselineFile.key)).toBeGreaterThan(0);
   });
 
   it("keeps a Performance half-open window invariant under valid Parquet regrouping", async () => {

@@ -325,8 +325,9 @@ export interface InsightSectionGroup<T> {
 
 export function groupInsightsBySection<T extends SectionableInsight>(
   cards: readonly T[],
-  options?: { includeAll?: boolean; includeEmptySections?: boolean },
+  options?: { includeAll?: boolean; includeEmptySections?: boolean; sort?: (cards: readonly T[]) => T[] },
 ): InsightSectionGroup<T>[] {
+  const sort = options?.sort ?? sortInsights
   const buckets = new Map<string, T[]>()
   for (const card of cards) {
     const key = categoryToSection(card.category).key
@@ -335,11 +336,11 @@ export function groupInsightsBySection<T extends SectionableInsight>(
     else buckets.set(key, [card])
   }
   const groups: InsightSectionGroup<T>[] = options?.includeAll
-    ? [{ section: ALL_SECTION, cards: sortInsights(cards) }]
+    ? [{ section: ALL_SECTION, cards: sort(cards) }]
     : []
   for (const section of [...INSIGHT_SECTIONS, OTHER_SECTION]) {
     const bucket = buckets.get(section.key)
-    if (bucket?.length) groups.push({ section, cards: sortInsights(bucket) })
+    if (bucket?.length) groups.push({ section, cards: sort(bucket) })
     else if (options?.includeEmptySections && section.key !== OTHER_SECTION.key) groups.push({ section, cards: [] })
   }
   return groups

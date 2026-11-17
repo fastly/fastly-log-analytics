@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { renderWithQuery } from '@/__tests__/helpers/page-smoke'
-import { cleanup, screen, waitFor } from '@testing-library/react'
+import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { delay } from 'msw/utils/delay'
@@ -285,6 +285,26 @@ describe('InsightsClient deferred baseline follow-up', () => {
     expect(screen.getAllByTestId('insights-grid')[0]).not.toHaveTextContent('Computing baseline…')
     expect(tabCount('all')).toBe('2')
     expect(followUps).toHaveLength(1)
+  })
+
+  it('fills the computing-baseline cards in place instead of re-sorting the grid by their new severity', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    serveFollowUp(async () => {
+      await gate
+      return HttpResponse.json(envelope({ window_end: windowEnd, insights: [card('slow', 'critical', 'Slow spike')] }))
+    })
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+    const order = () => within(screen.getAllByTestId('insights-grid')[0])
+      .getAllByText(/^Title (fast|slow)$/).map((title) => title.textContent)
+
+    await waitFor(() => expect(screen.getAllByTestId('insights-grid')[0]).toHaveTextContent('Computing baseline…'))
+    expect(order()).toEqual(['Title fast', 'Title slow'])
+
+    release()
+    await waitFor(() => expect(screen.getAllByTestId('insights-grid')[0]).toHaveTextContent('Slow spike'))
+    expect(order()).toEqual(['Title fast', 'Title slow'])
   })
 
   it('shows the computing-baseline cards in their normal error state when the follow-up fails', async () => {
