@@ -1040,17 +1040,22 @@ def step_3_confirm_active(
     if not flush_hc or flush_hc.get("path") != "/_flush":
         raise RuntimeError(f"Invalid /_flush healthcheck on front v{front_active}: {flush_hc}")
 
-    # Verify monitored VCL service S3 logging period and snippets
-    s3_resp = fastly_http.get(f"/service/{service_id}/version/{vcl_active}/logging/s3")
-    s3_resp.raise_for_status()
-    s3_loggers = {item["name"]: item for item in s3_resp.json()}
-    req_logger = s3_loggers.get("Fastly Object Storage Logs")
+    # New installs log through the native FOS endpoint; older ones keep the legacy S3 endpoint.
+    req_logger = None
+    endpoint_type = None
+    for kind in ("logging/fos", "logging/s3"):
+        resp = fastly_http.get(f"/service/{service_id}/version/{vcl_active}/{kind}")
+        resp.raise_for_status()
+        req_logger = next((item for item in resp.json() if item.get("name") == "Fastly Object Storage Logs"), None)
+        if req_logger:
+            endpoint_type = kind
+            break
     if not req_logger:
         raise RuntimeError(f"Missing 'Fastly Object Storage Logs' on {service_id} v{vcl_active}")
     actual_period = int(req_logger.get("period", 0))
     if actual_period != log_period:
         raise RuntimeError(
-            f"VCL S3 logger period on {service_id} v{vcl_active} is {actual_period}, expected {log_period}"
+            f"VCL {endpoint_type} logger period on {service_id} v{vcl_active} is {actual_period}, expected {log_period}"
         )
 
     snip_resp = fastly_http.get(f"/service/{service_id}/version/{vcl_active}/snippet")
@@ -1094,6 +1099,7 @@ def step_3_confirm_active(
             "id": service_id,
             "active_version": vcl_active,
             "s3_log_period_s": actual_period,
+            "log_endpoint_type": endpoint_type,
             "snippets": snippet_names,
             "status": svc_status,
         },

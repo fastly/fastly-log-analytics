@@ -27,6 +27,7 @@ from deploy_test_all import (
     render_markdown_report,
     step_1_deploy,
     step_2_reconcile_vcl,
+    step_3_confirm_active,
     step_4_deploy_check,
     step_5_confirm_crons,
     step_6_browser_verify,
@@ -1217,3 +1218,62 @@ def test_download_parquet_files_fetches_concurrently(tmp_path: Path) -> None:
     with httpx.Client(base_url="https://app.test", transport=httpx.MockTransport(handler)) as client:
         paths = download_parquet_files(client, keys, tmp_path)
     assert [p.read_bytes() for p in paths] == [k.encode() for k in keys]
+
+
+def _step_3_clients(loggers: dict[str, list[dict]]) -> tuple[httpx.Client, httpx.Client]:
+    def fastly(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/version"):
+            return httpx.Response(200, json=[{"number": 7, "active": True}])
+        if path.endswith("/healthcheck"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"name": "flp_clock", "path": "/_tick", "check_interval": 1000},
+                    {"name": "flp_flush", "path": "/_flush"},
+                ],
+            )
+        if path.endswith("/snippet"):
+            return httpx.Response(200, json=[{"name": "flp-owner-svc1"}])
+        for kind, items in loggers.items():
+            if path == f"/service/svc1/version/7/{kind}":
+                return httpx.Response(200, json=items)
+        return httpx.Response(404)
+
+    def app(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/version":
+            return httpx.Response(200, json={"build_sha": "abc"})
+        if request.url.path == "/api/admin/services/svc1":
+            return httpx.Response(200, json={"service": {"status": "active"}})
+        return httpx.Response(202)
+
+    return (
+        httpx.Client(base_url="https://app.test", transport=httpx.MockTransport(app)),
+        httpx.Client(base_url="https://api.test", transport=httpx.MockTransport(fastly)),
+    )
+
+
+_STEP_3_INVENTORY = {name: {"id": f"{name}-id", "version": 7} for name in ("compute", "worker", "front")}
+
+
+@pytest.mark.parametrize("kind", ["logging/fos", "logging/s3"])
+def test_step_3_accepts_native_fos_or_legacy_s3_endpoint(kind: str) -> None:
+    other = "logging/s3" if kind == "logging/fos" else "logging/fos"
+    app_http, fastly_http = _step_3_clients({kind: [{"name": "Fastly Object Storage Logs", "period": "10"}], other: []})
+    with app_http, fastly_http:
+        result = step_3_confirm_active(app_http, fastly_http, _STEP_3_INVENTORY, "abc", "svc1", 10)
+    assert result["monitored_vcl"]["s3_log_period_s"] == 10
+    assert result["monitored_vcl"]["log_endpoint_type"] == kind
+
+
+def test_step_3_rejects_wrong_period_and_unmanaged_endpoint_names() -> None:
+    app_http, fastly_http = _step_3_clients(
+        {"logging/fos": [{"name": "Fastly Object Storage Logs", "period": "60"}], "logging/s3": []}
+    )
+    with app_http, fastly_http, pytest.raises(RuntimeError, match="period"):
+        step_3_confirm_active(app_http, fastly_http, _STEP_3_INVENTORY, "abc", "svc1", 10)
+    app_http, fastly_http = _step_3_clients(
+        {"logging/fos": [{"name": "Fastly Object Storage Logs (copy)", "period": "10"}], "logging/s3": []}
+    )
+    with app_http, fastly_http, pytest.raises(RuntimeError, match="Missing 'Fastly Object Storage Logs'"):
+        step_3_confirm_active(app_http, fastly_http, _STEP_3_INVENTORY, "abc", "svc1", 10)
