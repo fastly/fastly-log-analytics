@@ -27,12 +27,12 @@ Before F4, maintenance ran at the end of the tick on whatever calls ingest left,
 2. Loads the installed service; a different `service_id` replies `not_installed` with `next = start`. Reads the FOS credentials.
 3. Backdates its wall clock so every storage helper stops starting FOS calls at `STAGE_STOP` (20 s), well before the tick stops waiting.
 4. Runs `logs::maintenance_stage` (`admin/logs.rs:736-808`):
-   - Tries the `MAINT_STAGES` (`logs.rs:694-702`) in round-robin order from `start`: `retention_sweep`, `log_compact`, `delete_history`, `storage_reconcile`.
+   - Tries the `MAINT_STAGES` (`logs.rs:694-702`) in round-robin order from `start`: `retention_sweep`, `log_compact`, `delete_history`, `storage_reconcile`, `summary_bundle`, `request_compact`, `delete_data`.
    - A stage with nothing to do costs one or two reads and passes the turn on in the same execution.
    - The first stage with work runs, and no other stage runs after it.
    - `next` = the stage after the one that ran, or `start` if none ran.
 5. Writes that stage's `cron_runs` row itself, through the KV `logq_{sid}_{bucket}` outbox, with buffer `{run_id}-maint` and `tick_event_id` = the tick's id. The row is recorded exactly once whether or not the tick hears the reply.
-6. Replies `{status, ran, next, rows, calls, cache_ops, vcpu_ms}`. `rows` carries the execution's `fos_usage` and `api_telemetry` rows (`telemetry::api::runtime_rows`). The tick writes them into its own buffer. They are best-effort: lost if the tick stops waiting first.
+6. Replies `{status, ran, next, rows, calls, cache_ops, vcpu_ms, bundle_pending}`. `bundle_pending` is `true` or `false` when `summary_bundle` had its turn (`true` when the run left work and did not end in an error), and `null` otherwise. The tick uses it to bring the next maintenance turn forward to `MAINT_CATCHUP_S` (30 s) while bundles are behind. `rows` carries the execution's `fos_usage` and `api_telemetry` rows (`telemetry::api::runtime_rows`). The tick writes them into its own buffer. They are best-effort: lost if the tick stops waiting first.
 
 **Round-robin** (`cron:state.maint_next`, `maint_misses`; `admin/mod.rs:3111-3125`)
 - A stage reply sets `maint_next = next` and clears `maint_misses`.
@@ -44,6 +44,7 @@ Before F4, maintenance ran at the end of the tick on whatever calls ingest left,
 - `log_compact`: when `compaction_enabled` is on and a day has work. See [log-compact.md](log-compact.md).
 - `delete_history`: while an admin-started job is incomplete. See [delete-history.md](delete-history.md).
 - `storage_reconcile`: only after an admin request. See [storage-reconcile.md](storage-reconcile.md).
+- `summary_bundle`: while a closed hour or day has window summaries its bundle does not cover, or the open hour has at least `OPEN_BATCH_SOURCES` (18) unfolded ones. Its catalog reads and writes use their own admission gate (`catalog::bundles::admitted`, the bundle's `VCPU_STOP_MS` 600 ms) rather than the ingest commit's 150 ms catalog gate, so a turn that starts late in a busy execution still makes progress. A turn that publishes an hour bundle continues with the next fold in the same execution.
 
 ## Roles and permissions
 
