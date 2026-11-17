@@ -48,8 +48,34 @@ Both installs use the same classification and the same row shapes (`WellknownBot
 - Verification: High-Scale checks each IP against bot CIDRs and cached reverse DNS, and counts an IP as `pending` until its lookup finishes. Cloud can't do reverse DNS from the browser and the seed has no CIDRs, so it reports what High-Scale reports before a lookup: `pending` for bots that publish verification domains, `unverified` for the rest, and never `verified` or `spoofed`. On Cloud the card's intro drops the FCrDNS/CIDR verification claim, and the Pending help text and cell tooltip say the IPs are not verified because the browser can't run reverse-DNS checks, instead of High-Scale's "check back soon".
 - `bot_efficiency` ranks the top 2,000 user agents by response bytes, groups them by bot (or vendor) name, and sets each bot's share of site bytes against the unique human IPs referred by the same vendor (referer host stem, or a `<vendor>-user` / `-externalfetcher` UA): top 25 by bytes. High-Scale reads the sampled table and scales; Cloud reads every row. Cloud implements both in [`frontend/lib/cloud-engine/bots/summarize.ts`](../../frontend/lib/cloud-engine/bots/summarize.ts), ported from `summarize_wellknown_bot_rows` and `summarize_bot_efficiency_rows` in [`backend/repositories/security/watchdog.py`](../../backend/repositories/security/watchdog.py).
 
+### Cloud summaries
+
+With no filter values, Cloud answers part of the WAF Activity tab from the v3 summary files. The rest is read from raw Parquet. The page makes two requests. The summary request covers `ngwaf_verified_bots`, `ngwaf_verified_bots_ts`, `tls_fingerprints`, `fingerprint_coverage`, `req_size_dist`, `ipv6_adoption`, `proxy_dist` and `conn_reuse_dist`. The raw request covers `wellknown_bots`, `bot_efficiency`, `top_ips_header` and `proxies`. Summary cards paint without waiting for the raw scan, and a "Data through" note gives the end of the summarized data. [`frontend/lib/cloud-engine/security-rollup.ts`](../../frontend/lib/cloud-engine/security-rollup.ts) builds these answers. `verified_bots_ts` can also be served from summaries when `bucket_seconds` is a whole multiple of the files' step and divides a day.
+
+Summaries return the raw response's shapes and values, with these exceptions:
+
+- Fingerprint `ip_count` merges HLL sketches, so it is marked ≈.
+- Values whose summary top-K or histogram was cut are lower bounds, marked ≥: fingerprint `request_count`, request-header size, proxy type, connection reuse and `verified_bots_ts`.
+
+Cloud falls back to the raw scan when any of these holds:
+
+- A filter has values.
+- A summary file is missing or incomplete.
+- `client_ip` or `proxy_type` is a custom field.
+- The empty value is missing from a truncated `tls_ciphers_sha` list.
+- A connection count isn't an integer.
+- IPv6 is requested and a file spans more than one UTC hour (or only day bundles cover the range).
+
+The remaining sections stay on the raw scan because summaries lack the data they need:
+
+- **Well-known bots:** the (UA, IP) pairs and the full top-5,000 UA list. Bundles keep 500 user agents.
+- **Bot efficiency:** response bytes per UA and the IPs each referrer sends.
+- **Oversized headers:** the largest header size per IP.
+- **Proxy Watchdog and the export:** per-row RTT, location, POP and ASN.
+- **Threat intel:** the cross-tab of fingerprint, country, WAF, bot and proxy.
+
 ## Tests
 
-- Frontend unit: [`frontend/__tests__/app/security.test.tsx`](../../frontend/__tests__/app/security.test.tsx)
+- Frontend unit: [`frontend/__tests__/app/security.test.tsx`](../../frontend/__tests__/app/security.test.tsx), [`frontend/__tests__/components/SecurityRollup.test.tsx`](../../frontend/__tests__/components/SecurityRollup.test.tsx), [`frontend/lib/cloud-engine/security-rollup.test.ts`](../../frontend/lib/cloud-engine/security-rollup.test.ts)
 - Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/utils/test_rdns_cache.py`](../../tests/utils/test_rdns_cache.py)
 - E2E: `Security Page Contract` in [`frontend/e2e/pages/core-analytics-pages.spec.ts`](../../frontend/e2e/pages/core-analytics-pages.spec.ts)

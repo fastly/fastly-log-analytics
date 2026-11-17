@@ -19,6 +19,7 @@ import {
   Shield,
 } from 'lucide-react'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import type { PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
@@ -380,7 +381,8 @@ export const ngwafBotColumns: ColumnDef<NgwafVerifiedBot>[] = [
   },
 ]
 
-export const fingerprintColumns: ColumnDef<TlsFingerprint>[] = [
+/** Summary-served rows mark merged-sketch IP counts ≈ and top-K-cut request counts ≥. */
+export const fingerprintColumns = (rollup?: NetworkRollupMeta): ColumnDef<TlsFingerprint>[] => [
   {
     accessorKey: 'fingerprint',
     header: 'Cipher Fingerprint (SHA)',
@@ -395,14 +397,19 @@ export const fingerprintColumns: ColumnDef<TlsFingerprint>[] = [
   {
     accessorKey: 'ip_count',
     header: 'Unique IPs',
-    cell: ({ row }) => formatCountMaybe(row.original.ip_count) ?? '—',
+    cell: ({ row }) => markCount(approxMark(rollup, 'tls_fingerprints.ip_count'), row.original.ip_count),
   },
   {
     accessorKey: 'request_count',
     header: 'Requests',
-    cell: ({ row }) => formatCountMaybe(row.original.request_count) ?? '—',
+    cell: ({ row }) => markCount(boundMark(rollup, 'tls_fingerprints.request_count'), row.original.request_count),
   },
 ]
+
+function markCount(mark: string, n: number | null | undefined) {
+  const text = formatCountMaybe(n)
+  return text === undefined ? '—' : `${mark}${text}`
+}
 
 export const botEfficiencyColumns: ColumnDef<BotEfficiency>[] = [
   {

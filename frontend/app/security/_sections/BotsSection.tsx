@@ -11,6 +11,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Bot, Fingerprint, Scale } from 'lucide-react'
 import type { PlotlyLayout } from '@/types/api'
+import type { NetworkRollupMeta } from '@/components/network/rollupLabels'
 import {
   BOT_COLUMN_IDS,
   BOT_EFFICIENCY_COLUMN_IDS,
@@ -28,6 +29,14 @@ import {
 } from './botsSectionConfig'
 
 export { SECURITY_INFO, type SecurityData }
+
+/** Cloud's summary read for the cards it can answer; absent when the page makes one raw read. */
+export type SummaryQueryState = {
+  isLoading: boolean
+  isFetching: boolean
+  error: Error | null
+  rollup: NetworkRollupMeta | undefined
+}
 
 export type BotsSectionProps = {
   data: SecurityData | undefined
@@ -51,6 +60,7 @@ export type BotsSectionProps = {
   fingerprintVisibility: ColumnVisibilityState
   setFingerprintVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onFingerprintVisChange: (id: string, vis: boolean) => void
+  summary?: SummaryQueryState
 }
 
 export function BotsSection({
@@ -75,6 +85,7 @@ export function BotsSection({
   fingerprintVisibility,
   setFingerprintVisibility,
   onFingerprintVisChange,
+  summary,
 }: BotsSectionProps) {
   const { isFieldActive } = useActiveLogFields()
   const queryClient = React.useContext(QueryClientContext)
@@ -93,6 +104,9 @@ export function BotsSection({
   const botEfficiencyChartData = useBotEfficiencyChartData(data)
 
   const cardErr = error as AnalyticsCardError | null
+  const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
+  const sumErr = sum.error as AnalyticsCardError | null
+  const fpColumns = React.useMemo(() => fingerprintColumns(sum.rollup), [sum.rollup])
   const uaEmptyMsg = isFieldActive('ua')
     ? 'No bot or crawler traffic detected in this time window.'
     : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'
@@ -105,16 +119,16 @@ export function BotsSection({
             title="Verified Bots (NGWAF)"
             icon={<Bot className="h-4 w-4" />}
             headerAction={intervalButtons}
-            isLoading={isLoading}
-            isFetching={isFetching}
+            isLoading={sum.isLoading}
+            isFetching={sum.isFetching}
             loadingMessage="Loading NGWAF verified bots..."
-            error={cardErr}
+            error={sumErr}
             className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
             contentClassName="p-2"
             helpTitle={SECURITY_INFO.ngwaf_bots.title}
             helpContent={SECURITY_INFO.ngwaf_bots.body}
           >
-            {ngwafBotsData.length === 0 && !isLoading ? (
+            {ngwafBotsData.length === 0 && !sum.isLoading ? (
               <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
                 {ngwafConfigured ? (
                   'No NGWAF bot detections in this time window.'
@@ -149,10 +163,10 @@ export function BotsSection({
                 onChange={onNgwafBotVisChange}
               />
             }
-            isLoading={isLoading}
-            isFetching={isFetching}
+            isLoading={sum.isLoading}
+            isFetching={sum.isFetching}
             loadingMessage="Loading NGWAF bot names..."
-            error={cardErr}
+            error={sumErr}
             className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
             contentClassName="p-0"
             helpTitle={SECURITY_INFO.ngwaf_bots.title}
@@ -162,7 +176,7 @@ export function BotsSection({
               columns={ngwafBotColumns}
               data={data?.ngwaf_verified_bots || []}
               emptyMessage={
-                isLoading
+                sum.isLoading
                   ? ''
                   : ngwafConfigured
                     ? 'No NGWAF bot detections in this time window.'
@@ -218,10 +232,10 @@ export function BotsSection({
               onChange={onFingerprintVisChange}
             />
           }
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading TLS fingerprints..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-0"
           helpTitle={SECURITY_INFO.fingerprints.title}
@@ -229,10 +243,10 @@ export function BotsSection({
         >
           <FingerprintCoverageHint coverage={data?.fingerprint_coverage?.tls_ciphers_sha} field="tls_ciphers_sha" />
           <DataTable
-            columns={fingerprintColumns}
+            columns={fpColumns}
             data={data?.tls_fingerprints || []}
             emptyMessage={
-              isLoading
+              sum.isLoading
                 ? ''
                 : isFieldActive('ja3') || isFieldActive('ja4')
                   ? 'No TLS fingerprints in this time range.'

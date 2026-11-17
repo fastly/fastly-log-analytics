@@ -18,7 +18,8 @@ import { Button } from '@/components/ui/button'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import { SECURITY_INFO, type SecurityData } from './BotsSection'
+import { SECURITY_INFO, type SecurityData, type SummaryQueryState } from './BotsSection'
+import { boundMark } from '@/components/network/rollupLabels'
 
 type TopIpHeader = components['schemas']['TopIpHeaderRow']
 type ThreatIntelItem = components['schemas']['ThreatIntelItem']
@@ -281,6 +282,7 @@ export type HeaderAnomaliesProps = {
   topIpVisibility: ColumnVisibilityState
   setTopIpVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onTopIpVisChange: (id: string, vis: boolean) => void
+  summary?: SummaryQueryState
 }
 
 export function HeaderAnomaliesSection({
@@ -292,6 +294,7 @@ export function HeaderAnomaliesSection({
   topIpVisibility,
   setTopIpVisibility,
   onTopIpVisChange,
+  summary,
 }: HeaderAnomaliesProps) {
   const { isFieldActive } = useActiveLogFields()
   const headerSizeData = React.useMemo((): PlotlyTrace[] => {
@@ -323,22 +326,24 @@ export function HeaderAnomaliesSection({
   ]
 
   const cardErr = error as AnalyticsCardError | null
+  const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
+  const sumErr = sum.error as AnalyticsCardError | null
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
       <AnalyticsCard
-        title="Request Header Size Distribution"
+        title={`Request Header Size Distribution${boundMark(sum.rollup, 'req_size_dist') ? ' (≥ counts)' : ''}`}
         icon={<Scale className="h-4 w-4" />}
-        isLoading={isLoading}
-        isFetching={isFetching}
+        isLoading={sum.isLoading}
+        isFetching={sum.isFetching}
         loadingMessage="Loading request header size distribution..."
-        error={cardErr}
+        error={sumErr}
         className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
         contentClassName="p-2"
         helpTitle={SECURITY_INFO.req_size.title}
         helpContent={SECURITY_INFO.req_size.body}
       >
-        {headerSizeData.length === 0 && !isLoading ? (
+        {headerSizeData.length === 0 && !sum.isLoading ? (
           <ChartEmptyState
             requires={
               isFieldActive('req_header_bytes')
@@ -396,6 +401,7 @@ export type NetworkSectionProps = {
   error: Error | null
   timezone: string
   commonTimeLayout: PlotlyLayout
+  summary?: SummaryQueryState
 }
 
 export function NetworkSection({
@@ -405,6 +411,7 @@ export function NetworkSection({
   error,
   timezone,
   commonTimeLayout,
+  summary,
 }: NetworkSectionProps) {
   const { isFieldActive } = useActiveLogFields()
   const ipv6Data = useTimeseriesToTraces(
@@ -442,7 +449,8 @@ export function NetworkSection({
     ]
   }, [data])
 
-  const cardErr = error as AnalyticsCardError | null
+  const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
+  const sumErr = sum.error as AnalyticsCardError | null
 
   return (
     <>
@@ -450,16 +458,16 @@ export function NetworkSection({
         <AnalyticsCard
           title="IPv6 Adoption over Time"
           icon={<Globe className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading IPv6 adoption data..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.ipv6.title}
           helpContent={SECURITY_INFO.ipv6.body}
         >
-          {ipv6Data.length === 0 && !isLoading ? (
+          {ipv6Data.length === 0 && !sum.isLoading ? (
             <ChartEmptyState
               requires={isFieldActive('is_ipv6') ? undefined : 'Infrastructure (Group C) fields to be enabled in Fastly logging.'}
             />
@@ -473,18 +481,18 @@ export function NetworkSection({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Proxy/Anonymizer Breakdown"
+          title={`Proxy/Anonymizer Breakdown${boundMark(sum.rollup, 'proxy_dist') ? ' (≥ counts)' : ''}`}
           icon={<Network className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading proxy/anonymizer breakdown..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.proxy.title}
           helpContent={SECURITY_INFO.proxy.body}
         >
-          {proxyData.length === 0 && !isLoading ? (
+          {proxyData.length === 0 && !sum.isLoading ? (
             <ChartEmptyState
               requires={
                 isFieldActive('p_type')
@@ -500,18 +508,18 @@ export function NetworkSection({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard
-          title="Connection Reuse (Requests per Connection)"
+          title={`Connection Reuse (Requests per Connection)${boundMark(sum.rollup, 'conn_reuse_dist') ? ' (≥ counts)' : ''}`}
           icon={<Repeat className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading connection reuse distribution..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.conn_reuse.title}
           helpContent={SECURITY_INFO.conn_reuse.body}
         >
-          {connReuseData.length === 0 && !isLoading ? (
+          {connReuseData.length === 0 && !sum.isLoading ? (
             <ChartEmptyState
               requires={
                 isFieldActive('conn_requests')
