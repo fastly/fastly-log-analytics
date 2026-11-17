@@ -1327,28 +1327,7 @@ impl Runtime for FastlyRuntime {
                 if response.status != 200 {
                     return Err(format!("stats_api_status_{}", response.status));
                 }
-                if matches!(
-                    field,
-                    "kv_store_class_a_operations" | "kv_store_class_b_operations"
-                ) {
-                    let (total, first, last, buckets) =
-                        crate::telemetry::usage::stats_field_buckets(&response.body, field)?;
-                    let bucket_key = if field == "kv_store_class_a_operations" {
-                        "kv_class_a_buckets"
-                    } else {
-                        "kv_class_b_buckets"
-                    };
-                    service[field] = total.into();
-                    service[bucket_key] = buckets.into();
-                    service["covered_from"] = first.into();
-                    service["covered_to"] = last.map(|start| start + 3600).into();
-                } else {
-                    let (total, first, last) =
-                        crate::telemetry::usage::sum_stats_field(&response.body, field)?;
-                    service[field] = total.into();
-                    service["covered_from"] = first.into();
-                    service["covered_to"] = last.map(|start| start + 3600).into();
-                }
+                crate::telemetry::usage::record_billing_field(&mut service, field, &response.body)?;
             }
             services.push(service);
         }

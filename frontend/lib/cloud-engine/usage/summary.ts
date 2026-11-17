@@ -1326,6 +1326,15 @@ export async function fetchUsageKind<K extends UsageKind>(
   return parseRows(raw)[kind];
 }
 
+export interface ComputeHour {
+  t: number;
+  appRequests: number;
+  workerRequests: number;
+  appVcpuMs: number;
+  workerVcpuMs: number;
+  billedMs: number;
+}
+
 /** Fastly's own Compute figures for the app and worker services, the numbers it bills. */
 export interface ComputeBilling {
   requests: number;
@@ -1343,6 +1352,8 @@ export interface ComputeBilling {
   kvClassA: number;
   kvClassB: number;
   kvByHour?: Array<{ t: number; classA: number; classB: number }>;
+  /** Hourly app and worker Compute, merged by hour; absent when the response has no buckets. */
+  computeByHour?: ComputeHour[];
   /** Secrets in the install's Secret Store; null when the response lacks it. */
   secrets: number | null;
   /** The same figures per service role, for the cost estimator's per-service units. */
@@ -1369,7 +1380,48 @@ export function parseComputeBilling(raw: unknown): ComputeBilling {
   };
   const kvHours = new Map<number, { classA: number; classB: number }>();
   let hasKvBuckets = false;
+  const computeHours = new Map<number, ComputeHour>();
+  const computeHour = (t: number) => {
+    let hour = computeHours.get(t);
+    if (!hour) {
+      hour = {
+        t,
+        appRequests: 0,
+        workerRequests: 0,
+        appVcpuMs: 0,
+        workerVcpuMs: 0,
+        billedMs: 0,
+      };
+      computeHours.set(t, hour);
+    }
+    return hour;
+  };
   for (const service of body.services as Record<string, unknown>[]) {
+    if (service.role === "app" || service.role === "worker") {
+      const app = service.role === "app";
+      const eachBucket = (
+        key: string,
+        apply: (hour: ComputeHour, value: number) => void,
+      ) => {
+        const buckets = service[`${key}_buckets`];
+        if (!Array.isArray(buckets)) return;
+        const ctx = `billing.${key}_buckets`;
+        for (const b of buckets as Record<string, unknown>[]) {
+          apply(computeHour(num(b, "start_time", ctx) * 1000), num(b, key, ctx));
+        }
+      };
+      eachBucket("compute_requests", (h, v) => {
+        if (app) h.appRequests += v;
+        else h.workerRequests += v;
+      });
+      eachBucket("compute_execution_time_ms", (h, v) => {
+        if (app) h.appVcpuMs += v;
+        else h.workerVcpuMs += v;
+      });
+      eachBucket("compute_request_time_billed_ms", (h, v) => {
+        h.billedMs += v;
+      });
+    }
     if (typeof service.role === "string") {
       const role = (billing.byRole![service.role] ??= {
         requests: 0,
@@ -1456,6 +1508,9 @@ export function parseComputeBilling(raw: unknown): ComputeBilling {
     billing.kvByHour = [...kvHours.entries()]
       .sort(([a], [b]) => a - b)
       .map(([t, v]) => ({ t, classA: v.classA, classB: v.classB }));
+  }
+  if (computeHours.size > 0) {
+    billing.computeByHour = [...computeHours.values()].sort((a, b) => a.t - b.t);
   }
   const store = (raw as { secret_store?: Record<string, unknown> })
     .secret_store;

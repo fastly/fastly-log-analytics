@@ -13,6 +13,10 @@ import {
   formatCountMaybe,
   type ChartInterval,
 } from '@/lib/utils'
+import {
+  rollupComputeByDay,
+  type ComputeUsageResponse,
+} from '@/lib/cloud-engine/usage/computeSeries'
 import type { PlotlyTrace } from '@/types/api'
 import type { operations } from '@/types/api.generated'
 
@@ -75,6 +79,11 @@ export function UsageChartsGrid({
   rateEgress,
   effectiveInterval,
   setChartInterval,
+  showCompute = false,
+  compute,
+  loadingCompute = false,
+  fetchingCompute = false,
+  errorCompute = null,
 }: {
   ops: OperationsUsageData | undefined
   loadingOps: boolean
@@ -101,6 +110,12 @@ export function UsageChartsGrid({
   rateEgress: number
   effectiveInterval: ChartInterval
   setChartInterval: (interval: ChartInterval) => void
+  /** Cloud only: the Compute Requests and Compute vCPU charts. */
+  showCompute?: boolean
+  compute?: ComputeUsageResponse
+  loadingCompute?: boolean
+  fetchingCompute?: boolean
+  errorCompute?: unknown
 }) {
   // FOS Operations, Bandwidth, and Log Activity use Fastly's /stats/* APIs
   // which only support hour/day granularity. Render a custom button group
@@ -338,6 +353,66 @@ export function UsageChartsGrid({
     [baseLayout, gridColor],
   )
 
+  // ── Compute charts (Cloud: Fastly Stats API, app + worker services) ────────
+  const computePoints = useMemo(() => {
+    if (compute?.source !== 'fastly') return []
+    return effectiveInterval === '1 day' ? rollupComputeByDay(compute.data) : compute.data
+  }, [compute, effectiveInterval])
+  const computeDescription =
+    compute?.source === 'unavailable' && compute.reason === 'range_over_31_days'
+      ? 'Fastly Stats API Compute figures cover ranges of up to 31 days'
+      : 'Fastly Stats API, app and worker services; the latest hour can still be filling in'
+  const computeRequestsData = useMemo<PlotlyTrace[]>(() => {
+    const x = computePoints.map((p) => p.time)
+    return [
+      {
+        type: 'bar',
+        name: 'App service',
+        x,
+        y: computePoints.map((p) => p.app_requests),
+        marker: { color: accent },
+        hovertemplate: 'App service: %{y:,}<extra></extra>',
+      },
+      {
+        type: 'bar',
+        name: 'Worker service',
+        x,
+        y: computePoints.map((p) => p.worker_requests),
+        marker: { color: accentB },
+        hovertemplate: 'Worker service: %{y:,}<extra></extra>',
+      },
+    ]
+  }, [computePoints, accent, accentB])
+  const computeVcpuData = useMemo<PlotlyTrace[]>(() => {
+    const x = computePoints.map((p) => p.time)
+    return [
+      {
+        type: 'bar',
+        name: 'App service',
+        x,
+        y: computePoints.map((p) => p.app_vcpu_ms / 1000),
+        marker: { color: accent },
+        hovertemplate: 'App service: %{y:,.2f} s<extra></extra>',
+      },
+      {
+        type: 'bar',
+        name: 'Worker service',
+        x,
+        y: computePoints.map((p) => p.worker_vcpu_ms / 1000),
+        marker: { color: accentB },
+        hovertemplate: 'Worker service: %{y:,.2f} s<extra></extra>',
+      },
+    ]
+  }, [computePoints, accent, accentB])
+  const computeVcpuLayout = useMemo(
+    () => ({
+      ...baseLayout,
+      barmode: 'stack' as const,
+      yaxis: { title: 'vCPU s', gridcolor: gridColor, zerolinecolor: gridColor, showspikes: false },
+    }),
+    [baseLayout, gridColor],
+  )
+
   return (
     <div
       className={cn(
@@ -402,6 +477,37 @@ export function UsageChartsGrid({
         <PlotlyChart data={logProcData} layout={baseLayout} height="100%" />
       </AnalyticsCard>
 
+      {showCompute && (
+        <>
+          <AnalyticsCard
+            title="Compute Requests"
+            description={computeDescription}
+            headerAction={restictedIntervalButtons}
+            isLoading={loadingCompute}
+            isFetching={fetchingCompute}
+            error={errorCompute as AnalyticsCardError | null}
+            isEmpty={computePoints.length === 0}
+            className="h-[360px]"
+            contentClassName="p-2"
+          >
+            <PlotlyChart data={computeRequestsData} layout={opsLayout} height="100%" />
+          </AnalyticsCard>
+
+          <AnalyticsCard
+            title="Compute vCPU"
+            description={computeDescription}
+            headerAction={restictedIntervalButtons}
+            isLoading={loadingCompute}
+            isFetching={fetchingCompute}
+            error={errorCompute as AnalyticsCardError | null}
+            isEmpty={computePoints.length === 0}
+            className="h-[360px]"
+            contentClassName="p-2"
+          >
+            <PlotlyChart data={computeVcpuData} layout={computeVcpuLayout} height="100%" />
+          </AnalyticsCard>
+        </>
+      )}
       {isRumEnabled && rumBreakdown && (
         <AnalyticsCard
           title="Real User Monitoring (RUM) Operations"

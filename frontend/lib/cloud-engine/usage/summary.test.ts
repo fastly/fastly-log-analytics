@@ -646,6 +646,71 @@ describe("parseComputeBilling", () => {
     });
   });
 
+  it("merges the app and worker hourly Compute buckets by hour and keeps front traffic out", () => {
+    const billing = parseComputeBilling({
+      services: [
+        {
+          role: "app",
+          compute_requests: 30,
+          compute_execution_time_ms: 300,
+          compute_request_time_billed_ms: 3_000,
+          compute_requests_buckets: [
+            { start_time: 3_600, compute_requests: 10 },
+            { start_time: 7_200, compute_requests: 20 },
+          ],
+          compute_execution_time_ms_buckets: [
+            { start_time: 3_600, compute_execution_time_ms: 100 },
+            { start_time: 7_200, compute_execution_time_ms: 200 },
+          ],
+          compute_request_time_billed_ms_buckets: [
+            { start_time: 3_600, compute_request_time_billed_ms: 1_000 },
+            { start_time: 7_200, compute_request_time_billed_ms: 2_000 },
+          ],
+        },
+        {
+          role: "worker",
+          compute_requests: 4,
+          compute_execution_time_ms: 40,
+          compute_request_time_billed_ms: 400,
+          compute_requests_buckets: [{ start_time: 7_200, compute_requests: 4 }],
+          compute_execution_time_ms_buckets: [
+            { start_time: 7_200, compute_execution_time_ms: 40 },
+          ],
+          compute_request_time_billed_ms_buckets: [
+            { start_time: 7_200, compute_request_time_billed_ms: 400 },
+          ],
+        },
+        { role: "front", requests: 9_000, bandwidth: 1 },
+      ],
+    });
+    expect(billing.computeByHour).toEqual([
+      {
+        t: 3_600_000,
+        appRequests: 10,
+        workerRequests: 0,
+        appVcpuMs: 100,
+        workerVcpuMs: 0,
+        billedMs: 1_000,
+      },
+      {
+        t: 7_200_000,
+        appRequests: 20,
+        workerRequests: 4,
+        appVcpuMs: 200,
+        workerVcpuMs: 40,
+        billedMs: 2_400,
+      },
+    ]);
+  });
+
+  it("leaves computeByHour unset when the response has no Compute buckets", () => {
+    expect(
+      parseComputeBilling({
+        services: [{ role: "app", compute_requests: 1 }],
+      }).computeByHour,
+    ).toBeUndefined();
+  });
+
   it("keeps Compute bandwidth and requests on the Compute side and reads KV and secrets", () => {
     const billing = parseComputeBilling({
       services: [

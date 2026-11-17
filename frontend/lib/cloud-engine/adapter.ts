@@ -83,6 +83,7 @@ import {
 import { queryOpsLogs } from "./telemetry/client";
 import type { OpsKind } from "./telemetry/kinds";
 import { evaluateCapacity } from "./usage/capacity";
+import { computeUsage } from "./usage/computeUsage";
 import { estimateMonthlyUsage } from "./usage/estimate";
 import { fetchEstimatePrefill } from "./usage/estimatePrefill";
 import { LIST_RATES } from "./usage/rates";
@@ -1595,6 +1596,9 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         request.signal,
       ).catch(() => null);
       return jsonResponse(prefill ?? { rates: LIST_RATES }, request);
+    }
+    if (pathname === "/api/usage/compute") {
+      return jsonResponse(await computeUsage({ from: fromMs, to: toMs }, request.signal), request);
     }
 
     const usageRes = await fetchUsageSummary({

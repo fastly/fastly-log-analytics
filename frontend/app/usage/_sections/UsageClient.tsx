@@ -9,12 +9,13 @@ import { AnalyticsCard, useInViewOnce } from '@/components/AnalyticsCard'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
 import { ReportLayout } from '@/components/ReportLayout'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 import { useIsDataReady } from '@/hooks/useBootstrap'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
-import { client, unwrapClient } from '@/lib/api'
+import { adminFetch, client, unwrapClient } from '@/lib/api'
 import type { ChartInterval } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
 import {
@@ -220,8 +221,29 @@ export function UsagePageContent({
     staleTime: 5 * 60_000,
   })
 
-  const prefill = prefillFull ?? prefillRates
   const cloudMode = isCloudMode()
+
+  // One Stats API read per range, shared by the cost card and both Compute charts.
+  const {
+    data: compute,
+    isLoading: loadingCompute,
+    isFetching: fetchingCompute,
+    error: errorCompute,
+  } = useQuery({
+    queryKey: ['usage', 'compute', activeServiceId, startTime, endTime],
+    queryFn: async ({ signal }): Promise<ComputeUsageResponse> => {
+      const params = new URLSearchParams()
+      if (startTime) params.set('start_time', startTime)
+      if (endTime) params.set('end_time', endTime)
+      const response = await adminFetch(`/api/usage/compute?${params}`, { signal })
+      if (!response.ok) throw new Error(`Compute usage failed (${response.status})`)
+      return response.json()
+    },
+    enabled: isReady && cloudMode,
+    staleTime: 60_000,
+  })
+
+  const prefill = prefillFull ?? prefillRates
   const cloudPrefill = cloudMode ? prefillFull as unknown as Partial<MeasuredEstimate> | undefined : undefined
   const rateSettings = cloudMode ? cloudPrefill?.rates ?? prefillRates : prefill
   const loadingPrefill = !prefillRates && !prefillFull
@@ -267,6 +289,7 @@ export function UsagePageContent({
         rateStorage={rateStorage}
         activeServiceId={activeServiceId}
         onNavigateToAdmin={(href) => router.push(href)}
+        compute={compute}
       />
 
       <UsageChartsGrid
@@ -295,6 +318,11 @@ export function UsagePageContent({
         rateEgress={rateEgress}
         effectiveInterval={config.effectiveInterval}
         setChartInterval={setChartInterval}
+        showCompute={cloudMode}
+        compute={compute}
+        loadingCompute={loadingCompute}
+        fetchingCompute={fetchingCompute}
+        errorCompute={errorCompute}
       />
 
       <div

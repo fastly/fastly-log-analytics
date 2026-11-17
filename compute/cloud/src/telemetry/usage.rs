@@ -275,6 +275,27 @@ pub fn sum_stats_field(
 
 pub type StatsBuckets = (f64, Option<u64>, Option<u64>, Vec<Value>);
 
+/// Writes one app or worker service's Stats API `field` onto `service`: its total, the hours
+/// covered and, for the fields the cost page charts, the hourly buckets.
+pub fn record_billing_field(service: &mut Value, field: &str, body: &Value) -> Result<(), String> {
+    let (total, first, last, buckets) = stats_field_buckets(body, field)?;
+    let bucket_key = match field {
+        "kv_store_class_a_operations" => Some("kv_class_a_buckets".to_string()),
+        "kv_store_class_b_operations" => Some("kv_class_b_buckets".to_string()),
+        "compute_requests" | "compute_execution_time_ms" | "compute_request_time_billed_ms" => {
+            Some(format!("{field}_buckets"))
+        }
+        _ => None,
+    };
+    service[field] = total.into();
+    if let Some(key) = bucket_key {
+        service[key] = buckets.into();
+    }
+    service["covered_from"] = first.into();
+    service["covered_to"] = last.map(|start| start + 3600).into();
+    Ok(())
+}
+
 /// Sums one `/stats/service/<id>/field/<field>` response and returns `(total, first, last, buckets)`
 /// where each bucket has `{"start_time": u64, "<field>": f64}`.
 pub fn stats_field_buckets(body: &Value, field: &str) -> Result<StatsBuckets, String> {
@@ -299,9 +320,50 @@ pub fn stats_field_buckets(body: &Value, field: &str) -> Result<StatsBuckets, St
 
 #[cfg(test)]
 mod billing_tests {
-    use super::{daily_totals, sum_stats_field, UsageAgg};
+    use super::{daily_totals, record_billing_field, sum_stats_field, UsageAgg, BILLING_FIELDS};
     use crate::auth::settings::UsageLogging;
     use serde_json::json;
+
+    #[test]
+    fn keeps_the_hourly_buckets_of_every_compute_and_kv_billing_field() {
+        let hour = 1_793_469_600u64;
+        let mut service = json!({"role": "app", "service_id": "svc"});
+        for field in BILLING_FIELDS {
+            let body = json!({"status": "success", "data": [
+                {"start_time": hour, field: 2.0},
+                {"start_time": hour + 3_600, field: 3.0},
+            ]});
+            record_billing_field(&mut service, field, &body).unwrap();
+        }
+        for field in BILLING_FIELDS {
+            assert_eq!(service[field], 5.0, "{field}");
+        }
+        for (key, field) in [
+            ("compute_requests_buckets", "compute_requests"),
+            (
+                "compute_execution_time_ms_buckets",
+                "compute_execution_time_ms",
+            ),
+            (
+                "compute_request_time_billed_ms_buckets",
+                "compute_request_time_billed_ms",
+            ),
+            ("kv_class_a_buckets", "kv_store_class_a_operations"),
+            ("kv_class_b_buckets", "kv_store_class_b_operations"),
+        ] {
+            assert_eq!(
+                service[key],
+                json!([
+                    {"start_time": hour, field: 2.0},
+                    {"start_time": hour + 3_600, field: 3.0},
+                ]),
+                "{key}"
+            );
+        }
+        assert!(service.get("bandwidth_buckets").is_none());
+        assert_eq!(service["covered_from"], hour);
+        assert_eq!(service["covered_to"], hour + 7_200);
+    }
 
     #[test]
     fn harness_mark_labels_and_prefixes_every_drained_row() {

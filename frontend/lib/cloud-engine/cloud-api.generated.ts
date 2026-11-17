@@ -4145,6 +4145,21 @@ export interface operations {
                 start_time: number;
                 bandwidth: number;
               }[];
+              /** @description app and worker only; hourly */
+              compute_requests_buckets?: {
+                start_time: number;
+                compute_requests: number;
+              }[];
+              /** @description app and worker only; hourly */
+              compute_execution_time_ms_buckets?: {
+                start_time: number;
+                compute_execution_time_ms: number;
+              }[];
+              /** @description app and worker only; hourly */
+              compute_request_time_billed_ms_buckets?: {
+                start_time: number;
+                compute_request_time_billed_ms: number;
+              }[];
               /** @description First hourly bucket start (unix s) */
               covered_from?: number | null;
               /** @description Last hourly bucket end (unix s) */

@@ -3064,6 +3064,42 @@
                               }
                             }
                           },
+                          "compute_requests_buckets": {
+                            "type": "array",
+                            "description": "app and worker only; hourly",
+                            "items": {
+                              "type": "object",
+                              "required": ["start_time", "compute_requests"],
+                              "properties": {
+                                "start_time": { "type": "integer" },
+                                "compute_requests": { "type": "number" }
+                              }
+                            }
+                          },
+                          "compute_execution_time_ms_buckets": {
+                            "type": "array",
+                            "description": "app and worker only; hourly",
+                            "items": {
+                              "type": "object",
+                              "required": ["start_time", "compute_execution_time_ms"],
+                              "properties": {
+                                "start_time": { "type": "integer" },
+                                "compute_execution_time_ms": { "type": "number" }
+                              }
+                            }
+                          },
+                          "compute_request_time_billed_ms_buckets": {
+                            "type": "array",
+                            "description": "app and worker only; hourly",
+                            "items": {
+                              "type": "object",
+                              "required": ["start_time", "compute_request_time_billed_ms"],
+                              "properties": {
+                                "start_time": { "type": "integer" },
+                                "compute_request_time_billed_ms": { "type": "number" }
+                              }
+                            }
+                          },
                           "covered_from": {
                             "type": ["integer", "null"],
                             "description": "First hourly bucket start (unix s)"

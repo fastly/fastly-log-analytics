@@ -341,6 +341,51 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
   })
 
+  test('Cloud cost card and Compute charts use one Fastly Stats API read for the range', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') return { data: { compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2 } as never }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({
+      source: 'fastly', requests: 1_500, vcpu_ms: 2_500, billed_ms: 60_000,
+      app_requests: 1_000, worker_requests: 500, app_vcpu_ms: 2_000, worker_vcpu_ms: 500,
+      covered_from: '2026-01-01T00:00:00.000Z', covered_to: '2026-01-01T01:00:00.000Z',
+      data: [{ time: '2026-01-01T00:00:00.000Z', app_requests: 1_000, worker_requests: 500, app_vcpu_ms: 2_000, worker_vcpu_ms: 500, billed_ms: 60_000 }],
+    }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('Fastly stats · KV logged')).toBeInTheDocument()
+    expect(screen.getByText('1.5K reqs')).toBeInTheDocument()
+    expect(screen.queryByText('7 reqs')).not.toBeInTheDocument()
+    expect(screen.getByText('Compute Requests')).toBeInTheDocument()
+    expect(screen.getByText('Compute vCPU')).toBeInTheDocument()
+    expect(mockAdminFetch).toHaveBeenCalledTimes(1)
+    expect(mockAdminFetch.mock.calls[0][0]).toBe(
+      '/api/usage/compute?start_time=2026-01-01T00%3A00%3A00Z&end_time=2026-01-01T01%3A00%3A00Z',
+    )
+    const vcpuTraces = plotlyMock.mock.calls.map(([props]) => props.data as Array<{ name?: string; y?: number[]; hovertemplate?: string }>)
+      .findLast((traces) => traces.some((t) => t.hovertemplate?.includes(' s<extra>')))
+    expect(vcpuTraces?.map((t) => [t.name, t.y])).toEqual([['App service', [2]], ['Worker service', [0.5]]])
+  })
+
+  test('Cloud cost card falls back to the logged Compute figures when the Stats API is unavailable', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') return { data: { compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2 } as never }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({ source: 'unavailable', reason: 'stats_unavailable' }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('logged')).toBeInTheDocument()
+    expect(screen.getByText('7 reqs')).toBeInTheDocument()
+  })
+
   test('High-Scale missing traffic is labelled reference rather than measured service traffic', async () => {
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill')
@@ -350,6 +395,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     expect(await screen.findByText(/Traffic measurements are unavailable/)).toBeInTheDocument()
     expect(screen.queryByText('Compute (app + worker)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Compute Requests')).not.toBeInTheDocument()
   })
 
   test('High-Scale does not call traffic unavailable before the below-the-fold estimator loads its measurements', async () => {

@@ -139,6 +139,35 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     });
   });
 
+  it("answers /api/usage/compute from Fastly's Stats API without reading the usage logs", async () => {
+    const from = Date.parse("2026-11-10T00:00:00Z");
+    const to = from + 2 * 3_600_000;
+    const fetchSummary = vi.spyOn(usage, "fetchUsageSummary");
+    const fetchBilling = vi.spyOn(usage, "fetchComputeBilling").mockResolvedValue({
+      requests: 5, executionTimeMs: 50, billedTimeMs: 500, coveredFrom: from, coveredTo: from + 3_600_000,
+      computeBandwidthBytes: 0, cdnRequests: null, kvClassA: 0, kvClassB: 0, secrets: null,
+      byRole: { app: { requests: 3, vcpuMs: 30 }, worker: { requests: 2, vcpuMs: 20 } },
+      computeByHour: [{ t: from, appRequests: 3, workerRequests: 2, appVcpuMs: 30, workerVcpuMs: 20, billedMs: 500 }],
+    });
+    const params = new URLSearchParams({
+      start_time: new Date(from).toISOString(),
+      end_time: new Date(to).toISOString(),
+    });
+
+    const response = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/compute?${params}`),
+    );
+
+    expect(fetchBilling).toHaveBeenCalledWith({ from, to }, expect.anything());
+    expect(fetchSummary).not.toHaveBeenCalled();
+    expect(await response!.json()).toMatchObject({
+      source: "fastly",
+      requests: 5,
+      vcpu_ms: 50,
+      data: [{ time: "2026-11-10T00:00:00.000Z", app_requests: 3, worker_requests: 2 }],
+    });
+  });
+
   it.each([
     ["covers the billing window", 31, 0],
     ["is shorter than the billing window", 1 / 24, 1],

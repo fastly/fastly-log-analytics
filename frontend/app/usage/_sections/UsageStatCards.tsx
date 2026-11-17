@@ -20,9 +20,13 @@ import {
   formatAbbreviatedCount,
   formatBytes,
   formatCount,
+  formatDuration,
   formatUSD,
 } from '@/lib/utils'
+import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
 import type { operations } from '@/types/api.generated'
+
+const formatVcpu = (ms: number) => (ms < 1000 ? `${Math.round(ms)}ms` : formatDuration(ms / 1000))
 
 export type StorageUsageData =
   operations['usage_current_storage_api_usage_current_storage_get']['responses'][200]['content']['application/json']
@@ -83,6 +87,7 @@ export function UsageStatCards({
   rateStorage,
   activeServiceId,
   onNavigateToAdmin,
+  compute,
 }: {
   storage: StorageUsageData | undefined
   loadingStorage: boolean
@@ -101,6 +106,8 @@ export function UsageStatCards({
   rateStorage: number
   activeServiceId: string | null
   onNavigateToAdmin: (href: string) => void
+  /** Cloud only: Fastly Stats API Compute for the range; the logged figures are the fallback. */
+  compute?: ComputeUsageResponse
 }) {
   const roughCostA = (totalClassA / 1000) * rateA
   const roughCostB = (totalClassB / 1000) * rateB
@@ -109,6 +116,21 @@ export function UsageStatCards({
   const roughTotal = roughCostA + roughCostB + roughStorage + roughBandwidth
   const fmtUSD = (n: number) => formatUSD(n, { subDollarDigits: 2 })
 
+  const loggedRequests = ((storage as Record<string, unknown> | undefined)?.compute_requests as number | undefined) ?? 0
+  const computeRow = useMemo(
+    () =>
+      compute?.source === 'fastly' && compute.requests > 0
+        ? { source: 'fastly' as const, requests: compute.requests, vcpuMs: compute.vcpu_ms, billedMs: compute.billed_ms }
+        : loggedRequests > 0
+          ? {
+              source: 'logged' as const,
+              requests: loggedRequests,
+              vcpuMs: ((storage as Record<string, unknown>)?.compute_vcpu_ms as number) ?? 0,
+              billedMs: null,
+            }
+          : null,
+    [compute, loggedRequests, storage],
+  )
   const storageBreakdownRows = useMemo<BreakdownRow[]>(
     () => [
       {
@@ -267,7 +289,7 @@ export function UsageStatCards({
           </div>
         ),
       },
-      ...(((storage as Record<string, unknown> | undefined)?.compute_requests as number | undefined ?? 0) > 0
+      ...(computeRow
         ? [
             {
               id: 'compute',
@@ -275,10 +297,18 @@ export function UsageStatCards({
               value: (
                 <div className="flex flex-col items-end">
                   <strong className="text-foreground">
-                    {formatAbbreviatedCount(((storage as Record<string, unknown>)?.compute_requests as number) ?? 0)} reqs
+                    {formatAbbreviatedCount(computeRow.requests)} reqs
                   </strong>
                   <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
-                    vCPU: {Math.round(((storage as Record<string, unknown>)?.compute_vcpu_ms as number) ?? 0)}ms · KV: {formatAbbreviatedCount(((storage as Record<string, unknown>)?.kv_ops as number) ?? 0)}
+                    vCPU: {formatVcpu(computeRow.vcpuMs)}
+                    {computeRow.billedMs != null && <> · billed: {formatVcpu(computeRow.billedMs)}</>}
+                    {' '}· KV: {formatAbbreviatedCount(((storage as Record<string, unknown>)?.kv_ops as number) ?? 0)}
+                  </span>
+                  <span
+                    className="text-[9px] uppercase tracking-tighter text-muted-foreground"
+                    data-testid="compute-source"
+                  >
+                    {computeRow.source === 'fastly' ? 'Fastly stats · KV logged' : 'logged'}
                   </span>
                 </div>
               ),
@@ -297,6 +327,7 @@ export function UsageStatCards({
       roughBandwidth,
       rateEgress,
       storage,
+      computeRow,
     ],
   )
 
