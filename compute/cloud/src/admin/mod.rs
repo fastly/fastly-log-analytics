@@ -691,9 +691,7 @@ fn patch_service(
 ) -> Result<Value, Error> {
     let (record, previous) = load_service(context, sid)?;
     check_generation(&record, &input)?;
-    if previous.pending_job_id.is_some() {
-        return Err(Error::new(409, "job_in_progress"));
-    }
+    reject_blocking_job(context, &previous)?;
     check_unlocked(context, sid)?;
     let mut value = serialize(&previous)?;
     let allowed = [
@@ -855,6 +853,21 @@ fn new_job(
         uncertain_operations: Default::default(),
     })
 }
+// A failed reconcile is superseded by the next one: it can fail for good (service_changed_rerun),
+// and keeping it pending would wedge the service. Failed provision/teardown jobs still block.
+fn reject_blocking_job(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+) -> Result<(), Error> {
+    if let Some(id) = &service.pending_job_id {
+        let (_, job) = load_job(context, id)?;
+        let superseded = job.status == "failed" && job.kind == "reconcile";
+        if job.status != "complete" && !superseded {
+            return Err(Error::new(409, "job_in_progress"));
+        }
+    }
+    Ok(())
+}
 fn start_job(
     context: &Context<'_, impl Runtime>,
     record: &Record,
@@ -862,12 +875,7 @@ fn start_job(
     mut job: Job,
 ) -> Result<Value, Error> {
     context.confirm_with_secret(&service.fastly_token_ref);
-    if let Some(id) = &service.pending_job_id {
-        let (_, previous) = load_job(context, id)?;
-        if previous.status != "complete" {
-            return Err(Error::new(409, "job_in_progress"));
-        }
-    }
+    reject_blocking_job(context, service)?;
     check_unlocked(context, &service.service_id)?;
     service.pending_job_id = Some(job.id.clone());
     job.expected_generation = record.generation.clone();

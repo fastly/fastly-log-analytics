@@ -1101,6 +1101,51 @@ fn lost_activation_response_is_recovered_without_a_second_activation() {
 }
 
 #[test]
+fn a_failed_reconcile_job_does_not_block_the_next_reconcile() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let service = platform.service();
+    let job = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"],"cmcd":{"enabled":true,"mode":"query_string","version":1}}),
+    )["job"]
+        .clone();
+    let job = platform.until(job, "activate");
+    let mut record = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
+    record.value["sample_rate"] = 7.into();
+    assert!(platform
+        .adapter
+        .cas(
+            "svc:fixtureService",
+            Some(&record.generation),
+            &record.value
+        )
+        .unwrap());
+    let failed = platform.json(
+        "POST",
+        &format!("/api/admin/jobs/{}/step", job["id"].as_str().unwrap()),
+        json!({}),
+    );
+    assert_eq!(failed["job"]["status"], "failed");
+    assert_eq!(failed["job"]["error"], "service_changed_rerun");
+    let service = platform.service();
+    platform.json(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":service["generation"],"sample_rate":50}),
+    );
+    let service = platform.service();
+    assert_eq!(service["service"]["sample_rate"], 50);
+    let next = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"]}),
+    );
+    assert_eq!(platform.drain(next["job"].clone())["status"], "complete");
+}
+
+#[test]
 fn validation_failure_and_config_generation_change_leave_draft_inactive() {
     let platform = Platform::new();
     let job = platform.until(platform.provision()["job"].clone(), "validate");
