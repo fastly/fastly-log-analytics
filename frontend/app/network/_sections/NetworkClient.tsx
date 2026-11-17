@@ -15,7 +15,7 @@ import {
 } from '@/hooks/useReportPageState'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { Skeleton } from '@/components/ui/skeleton'
-import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { AnalyticsCard, useInViewOnce, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import {
   Network as NetworkIcon,
   AlertCircle,
@@ -157,8 +157,13 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
     queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_MAP_SECTIONS, rangeToken, signal, mapAsn),
   })
 
+  // Shielding always reads raw rows in Cloud, so it waits until its panel nears the viewport.
+  const shieldingRef = React.useRef<HTMLDivElement>(null)
+  const shieldingNear = useInViewOnce(shieldingRef, { rootMargin: '600px' })
+  const shieldingEnabled = !rollupFirst || shieldingNear
   const shieldingQuery = useAnalyticsReportQuery<NetworkHealthResponse>({
     namespace: ['network', 'health', 'shielding'], serviceId: activeServiceId, filterPayload, range,
+    queryOptions: { enabled: shieldingEnabled },
     queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_SHIELDING_SECTIONS, rangeToken, signal, mapAsn),
   })
 
@@ -176,7 +181,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   const qualityData = qualityQuery.data
   const isCoreLoadingInitial = coreQuery.isLoading || (coreQuery.isFetching && !coreQuery.data)
   const isMapLoadingInitial = !mapData && (mapFromCore ? isCoreLoadingInitial : mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data))
-  const isShieldingLoadingInitial = shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
+  const isShieldingLoadingInitial = !shieldingEnabled || shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
   const isQualityLoadingInitial = qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data)
 
   const shieldingData = shieldingQuery.data?.shielding_analysis
@@ -270,6 +275,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
         </AnalyticsCard>
       )}
 
+      <div ref={shieldingRef}>
       {(shieldingData || isShieldingLoadingInitial || shieldingQuery.error) && (
         <ShieldingSection
           shieldingData={shieldingData}
@@ -285,6 +291,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
           isPridActive={isFieldActive('prid')}
         />
       )}
+      </div>
 
       <NetworkLeaderboardsSection
         data={data}

@@ -25,7 +25,7 @@ import {
 import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, networkScans, type NetworkQueryParams } from "./network";
-import { networkRollupEligible } from "./network-rollup";
+import { isNetworkPartial, mergeNetworkPartial, networkRollupEligible } from "./network-rollup";
 import type { RollupResult } from "./dashboard/rollup-query";
 import { answerFromRollup } from "./rollup-answer";
 import { handleOriginRequest, originScanColumns } from "./origin";
@@ -399,9 +399,10 @@ function rollupAnswer(path: string, params: Record<string, unknown>, serviceId: 
 /**
  * Serves an unfiltered /network read from v3 summaries over the range and
  * service the raw scan would use, so it neither waits for queued scans nor
- * loads DuckDB. Null (or a summary failure) leaves the read to the raw scan.
+ * loads DuckDB. Null (or a summary failure) leaves the read to the raw scan. A
+ * partial answer has only its missing parts read raw, over the summaries' range.
  */
-async function cloudNetworkRollup(request: Request, path: string): Promise<Response | null> {
+async function cloudNetworkRollup(request: Request, path: string, origin?: CloudQueryContext): Promise<Response | null> {
   const url = new URL(request.url);
   const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : {};
   const params = { ...Object.fromEntries(url.searchParams), ...body } as NetworkQueryParams & Record<string, unknown>;
@@ -415,16 +416,23 @@ async function cloudNetworkRollup(request: Request, path: string): Promise<Respo
   const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  let answer: unknown;
   try {
-    const answer = await rollupAnswer(path, {
+    answer = await rollupAnswer(path, {
       ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
     }, serviceId, request.signal);
-    return answer ? jsonResponse(answer, request) : null;
   } catch (error) {
     if (request.signal.aborted) throw error;
     console.warn("flp: /network summaries failed; reading raw Parquet", error);
     return null;
   }
+  if (!isNetworkPartial(answer)) return answer ? jsonResponse(answer, request) : null;
+  const residual = await handleCloudRequest(new Request(request.url, {
+    method: "POST", headers: request.headers, signal: request.signal,
+    body: JSON.stringify({ ...params, ...answer.residual, network_residual: true }),
+  }), origin);
+  if (!residual?.ok) return residual;
+  return jsonResponse(mergeNetworkPartial(answer, await residual.json()), request);
 }
 
 type SectionRollup = {
@@ -798,8 +806,8 @@ async function handleCloudRequest(
       localScan ||= RAW_CHART_METRICS.has(body.chart_metric ?? body.metric ?? "requests") ||
         chartInterval === "1 second" || chartInterval === "1s";
     }
-    if (localScan && /^\/api\/network(?:-health|\/pop-health|\/bundle)$/.test(path)) {
-      const answer = await cloudNetworkRollup(request, path);
+    if (localScan && /^\/api\/network(?:-health|-quality|\/pop-health|\/bundle)$/.test(path)) {
+      const answer = await cloudNetworkRollup(request, path, origin);
       if (answer) return answer;
     }
     const sectionRollup = localScan ? SECTION_ROLLUPS[path] : undefined;

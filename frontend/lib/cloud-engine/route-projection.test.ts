@@ -362,6 +362,10 @@ describe("Cloud route column projections", () => {
     await guard([
       network("/api/network-health", { ...page, sections: ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"] }),
       network("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" }),
+      network("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"] }),
+      network("/api/network-quality", { region_country: "US", quality_parts: ["throughput"] }),
+      network("/api/network-quality", { region_country: "US", quality_parts: ["region"] }),
+      network("/api/network-quality", { quality_parts: ["asn_client", "throughput"], quality_asns: [600, 601] }),
       network("/api/network-health", { ...page, sections: ["shielding_analysis"] }),
       network("/api/network-health", { filter_country: "geo_country-1", filter_asn: 600, filter_pop: "IAD" }),
       network("/api/network-quality", { region_country: "US", filters: { host: { mode: "include", values: ["a.example"] } } }),
@@ -374,6 +378,22 @@ describe("Cloud route column projections", () => {
     for (const heavy of ["rid", "prid", "city", "as_name", "lat", "region", "cache", "ttfb"]) {
       expect(networkScanColumns("/api/network/bundle", transport), heavy).not.toContain(heavy);
     }
+    // The map alone groups no ASN, metro or name; summaries that lack its rows fall back to just these.
+    const map = networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"] })!;
+    for (const heavy of ["asn", "client_asn", "as_name", "rid", "region", "proto", "pop"]) expect(map, heavy).not.toContain(heavy);
+    expect(networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" }))
+      .toEqual(expect.arrayContaining(["asn", "client_asn"]));
+    // A quality read of only the parts summaries lacked loads only those parts' columns.
+    const full = networkScanColumns("/api/network-quality", {})!;
+    const throughput = networkScanColumns("/api/network-quality", { quality_parts: ["throughput"] })!;
+    expect(throughput.toSorted()).toEqual(
+      ["timestamp", "ts_ms", "service_id", "elapsed", "time_elapsed_usec", "resp_bytes", "resp_body_size"].toSorted());
+    const allParts = networkScanColumns("/api/network-quality", { quality_parts: ["throughput", "region", "asn_client"] })!;
+    for (const heavy of ["as_name", "proto", "pop", "cache", "ttfb", "client_cwnd", "rtt_var"]) {
+      expect(full, heavy).toContain(heavy);
+      expect(allParts, heavy).not.toContain(heavy);
+    }
+    expect(networkScanColumns("/api/network-quality", { quality_parts: ["bogus"] })).toEqual(full);
     expect(networkScanColumns("/api/network/bundle", { sections: ["transport"], filters: { host: ["a.example"] } }))
       .toContain("host");
     expect(networkScanColumns("/api/network/bundle", { filters: "host" })).toBeNull();

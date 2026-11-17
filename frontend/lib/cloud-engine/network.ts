@@ -54,6 +54,12 @@ export interface NetworkQueryParams {
   map_asn?: string;
   region_country?: string;
   sections?: readonly string[];
+  /** Only these /network-quality parts, as `{ quality_parts }`: what summaries lacked (see `networkFromRollup`). */
+  quality_parts?: readonly QualityPart[];
+  /** The ASNs whose client-only loss and RTT variance the `asn_client` part reads. */
+  quality_asns?: readonly number[];
+  /** Set on the raw read for a summary answer's missing sections, which summaries must not answer again. */
+  network_residual?: boolean;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
   customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
   signal?: AbortSignal;
@@ -296,6 +302,8 @@ const POP_COLUMNS = ["pop", "fastly_pop"];
 const SCAN_COLUMNS = {
   health: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "city", "geo_city", "lat", "lon", ...RTT_COLUMNS,
     "ploss", "client_ploss", "status"],
+  // The map alone (`mapOnly`); a chosen map ASN adds the ASN columns (`networkScanColumns`).
+  map: ["city", "geo_city", ...COUNTRY_COLUMNS, "lat", "lon", ...RTT_COLUMNS, "ploss", "client_ploss", "status"],
   shielding: ["edge", "rid", "prid", "pop", "ttfb", "ottfb"],
   quality: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "proto", "protocol", ...POP_COLUMNS, "region", "geo_region",
     ...RTT_COLUMNS, "client_cwnd", "client_tcpi_rttvar", "client_ploss", "rtt_var", "tcpi_rtt_var",
@@ -309,6 +317,40 @@ const SCAN_COLUMNS = {
 export type NetworkScan = keyof typeof SCAN_COLUMNS;
 
 /**
+ * The /network-quality figures v3 summaries written before the `quality` rows
+ * lack: the average throughput, the region table and the client-only ASN loss
+ * and RTT variance. A raw read of only these returns `{ quality_parts }`.
+ */
+export const QUALITY_PARTS = ["throughput", "region", "asn_client"] as const;
+export type QualityPart = typeof QUALITY_PARTS[number];
+
+const QUALITY_PART_COLUMNS: Record<QualityPart, readonly string[]> = {
+  throughput: ["elapsed", "time_elapsed_usec", ...BYTES_COLUMNS],
+  region: [...COUNTRY_COLUMNS, "region", "geo_region", ...RTT_COLUMNS],
+  asn_client: [...ASN_COLUMNS, "client_tcpi_rttvar", "client_ploss"],
+};
+
+function qualityParts(value: unknown): QualityPart[] | null {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((part) => (QUALITY_PARTS as readonly unknown[]).includes(part)) ? value as QualityPart[] : null;
+}
+
+export type NetworkQualityParts = {
+  throughput?: { avg_throughput_mbps: number | null };
+  region?: { value: string; rtt_ms: number | null; reqs: number; label: string }[];
+  asn_client?: { asn: number; avg_rttvar_us: number | null; avg_ploss: number | null }[];
+};
+
+const MAP_SECTIONS = new Set(["buckets", "cities", "map_buckets"]);
+
+/** Sections that need only the map's buckets and cities (and maybe shielding): no core grouping sets. */
+function mapOnly(sections?: readonly string[]): boolean {
+  return Boolean(sections?.length) &&
+    sections!.every((section) => MAP_SECTIONS.has(section) || section === "shielding_analysis") &&
+    sections!.some((section) => section === "cities" || section === "map_buckets");
+}
+
+/**
  * The raw scans a /network read runs (see `handleNetworkRequest`), or null when
  * its section list isn't one: then it may run any of them.
  */
@@ -316,7 +358,7 @@ export function networkScans(path: string, sections: unknown): NetworkScan[] | n
   if (sections != null && !(Array.isArray(sections) && sections.every((section) => typeof section === "string"))) return null;
   const list = sections as readonly string[] | undefined;
   const health = (bundle: boolean): NetworkScan[] => !list?.length ? ["health", "shielding", "pop_health"]
-    : wantCore(list) ? ["health", ...wantShielding(list) ? ["shielding" as const] : []]
+    : wantCore(list) ? [mapOnly(list) ? "map" : "health", ...wantShielding(list) ? ["shielding" as const] : []]
     : !bundle || wantShielding(list) ? ["shielding"] : [];
   if (path === "/api/network-health") return health(false);
   if (path === "/api/network-quality") return ["quality"];
@@ -334,9 +376,12 @@ export function networkScanColumns(path: string, params: Record<string, unknown>
   if (filters != null && filters !== "" && (typeof filters !== "object" || Array.isArray(filters))) return null;
   const scans = networkScans(path, params.sections);
   const present = (value: unknown) => value != null && value !== "";
+  const parts = qualityParts(params.quality_parts);
   return [...new Set([
     "timestamp", "ts_ms", "service_id",
-    ...(scans ? scans.flatMap((scan) => SCAN_COLUMNS[scan]) : NETWORK_SCAN_COLUMNS),
+    ...(scans ? scans.flatMap((scan) => scan === "quality" && parts
+      ? parts.flatMap((part) => QUALITY_PART_COLUMNS[part]) : SCAN_COLUMNS[scan]) : NETWORK_SCAN_COLUMNS),
+    ...scans?.includes("map") && present(params.map_asn) && params.map_asn !== "all" ? ASN_COLUMNS : [],
     ...present(params.filter_country) ? COUNTRY_COLUMNS : [],
     ...present(params.filter_asn) ? ASN_COLUMNS : [],
     ...present(params.filter_pop) ? POP_COLUMNS : [],
@@ -395,6 +440,8 @@ async function queryNetworkBuckets(
   params: NetworkQueryParams,
   where: string,
   engine: Pick<DuckDBAnalyticalEngine, "executeSql">,
+  /** False groups buckets without ASNs, for the map alone (and its `map` projection). */
+  heatmap = true,
 ) {
   const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300))) * 1000;
   const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
@@ -404,7 +451,7 @@ async function queryNetworkBuckets(
   // The ASN heatmap and city map share one pass; with a map ASN chosen, only its rows make city groups.
   const rows = await engine.executeSql<Record<string, unknown>>(`WITH scoped AS (
       SELECT ${bucket} AS bucket_ms,
-        COALESCE(client_asn, asn, 0) AS asn_key,
+        ${heatmap ? "COALESCE(client_asn, asn, 0)" : "0"} AS asn_key,
         COALESCE(geo_city, city) AS city_key,
         COALESCE(geo_country, country) AS country_key,
         ${mapAsnFilter === null ? "1" : `CASE WHEN COALESCE(client_asn, asn, 0) = ${mapAsnFilter} THEN 1 END`} AS map_key,
@@ -466,7 +513,7 @@ async function queryNetworkBuckets(
   }
   return {
     buckets, cities, map_buckets: [...mapBuckets.values()],
-    heatmap: [...byAsn.values()].sort((a, b) => b.total_reqs - a.total_reqs).slice(0, topN),
+    heatmap: heatmap ? [...byAsn.values()].sort((a, b) => b.total_reqs - a.total_reqs).slice(0, topN) : [],
   };
 }
 
@@ -536,6 +583,17 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const missingTcpFields = await detectMissingTcpFields(engine);
   const where = buildWhereClause(params);
+  if (mapOnly(params.sections)) {
+    // The core tables' keys come back empty, as when there are no rows.
+    const bucketData = await queryNetworkBuckets(params, where, engine, false);
+    return {
+      ...emptyNetworkHealth(missingTcpFields),
+      has_data: bucketData.buckets.length > 0,
+      ...bucketData,
+      shielding_analysis: wantShielding(params.sections)
+        ? await queryNetworkShielding(params, where, engine) : undefined,
+    };
+  }
 
   // One pass for the summary and the country, ASN and metro tables; quantiles stay exact per grouping set.
   const coreRows = await engine.executeSql<Record<string, unknown>>(
@@ -727,6 +785,55 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
     metro_leaderboard,
     missing_tcp_fields: missingTcpFields,
   };
+}
+
+/**
+ * Only the named /network-quality parts, computed as `queryNetworkQuality` does
+ * and over only their own columns (`QUALITY_PART_COLUMNS`).
+ */
+async function queryNetworkQualityParts(
+  params: NetworkQueryParams,
+  parts: readonly QualityPart[],
+): Promise<NetworkQualityParts> {
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
+  const where = buildWhereClause(params);
+  const out: NetworkQualityParts = {};
+  if (parts.includes("throughput")) {
+    const [row] = await engine.executeSql<Record<string, unknown>>(`SELECT AVG(CASE WHEN COALESCE(time_elapsed_usec, elapsed) > 0
+        THEN (COALESCE(resp_body_size, resp_bytes, 0) * 8.0) / COALESCE(time_elapsed_usec, elapsed) END)::DOUBLE AS tp
+      FROM requests WHERE ${where}`, [], params.signal);
+    out.throughput = { avg_throughput_mbps: row?.tp == null ? null : Number(row.tp) };
+  }
+  if (parts.includes("region")) {
+    const regionCountry = String(params.region_country ?? "US").replaceAll("'", "''");
+    const rows = await engine.executeSql<Record<string, unknown>>(`SELECT
+        COALESCE(geo_region, region, 'Unknown') AS value,
+        AVG(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt)) / 1000.0 AS rtt_ms,
+        COUNT(*)::BIGINT AS reqs
+      FROM requests WHERE ${where} AND COALESCE(geo_country, country) = '${regionCountry}'
+      GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
+    out.region = rows.map((row) => ({
+      value: String(row.value), rtt_ms: row.rtt_ms == null ? null : Number(row.rtt_ms),
+      reqs: Number(row.reqs), label: String(row.value),
+    }));
+  }
+  if (parts.includes("asn_client")) {
+    const asns = (params.quality_asns ?? []).map(Number).filter(Number.isFinite).map(Math.floor);
+    const rows = asns.length ? await engine.executeSql<Record<string, unknown>>(`SELECT
+        COALESCE(client_asn, asn, 0)::BIGINT AS asn,
+        AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
+        AVG(client_ploss)::DOUBLE AS avg_ploss
+      FROM requests WHERE ${where} AND COALESCE(client_asn, asn, 0) IN (${asns.join(", ")})
+        AND (client_tcpi_rttvar IS NOT NULL OR client_ploss IS NOT NULL)
+      GROUP BY 1`, [], params.signal) : [];
+    out.asn_client = rows.map((row) => ({
+      asn: Number(row.asn),
+      avg_rttvar_us: row.avg_rttvar_us == null ? null : Number(row.avg_rttvar_us),
+      avg_ploss: row.avg_ploss == null ? null : Number(row.avg_ploss),
+    }));
+  }
+  return out;
 }
 
 export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
@@ -1055,7 +1162,8 @@ export async function handleNetworkRequest(
     return queryNetworkHealthSections(params);
   }
   if (path.includes("/api/network-quality")) {
-    return queryNetworkQuality(params);
+    const parts = qualityParts(params.quality_parts);
+    return parts ? { quality_parts: await queryNetworkQualityParts(params, parts) } : queryNetworkQuality(params);
   }
   if (path.includes("/api/network/pop-health")) {
     return queryPopHealth(params);

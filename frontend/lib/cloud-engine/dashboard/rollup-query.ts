@@ -30,8 +30,9 @@ export type RollupHists = {
  * them: `status5xx` is 500-599, `errors` is status >= 400 or 0, `cacheHits`
  * counts HIT and HIT-STALE, `rtt*` is the coalesced client RTT in µs and
  * `ploss*` the coalesced packet loss. Series rows carry no `errors`,
- * `cacheHits`, latency, origin or TCP sums beyond RTT and loss. The `transport`,
- * `origin` and `urls` groups carry their own subsets (see `Rollup.groups`).
+ * `cacheHits`, latency, origin or TCP sums beyond RTT and loss (`city` rows add
+ * coordinates). The `transport`, `origin`, `urls` and `quality` groups carry
+ * their own subsets (see `Rollup.groups`).
  */
 export type RollupAgg = {
   requests: number;
@@ -61,6 +62,9 @@ export type RollupAgg = {
   deliveryCount: number;
   elapsedSum: number;
   elapsedCount: number;
+  /** `quality` rows: response bits per elapsed µs, over rows with an elapsed above 0. */
+  throughputSum: number;
+  throughputCount: number;
   /** AS name for `asn` values (the smallest seen). */
   label: string | null;
   hists: RollupHists;
@@ -69,7 +73,10 @@ export type RollupAgg = {
 export type Rollup = {
   /** `dims` rows: dimension (pop, oip, edge, backend, country, region, asn, city, proto) → value → sums. */
   dims: Map<string, Map<string, RollupAgg>>;
-  /** `series5` rows: field (overall, proto, asn) → value → bucket start ms → sums. */
+  /**
+   * `series5` rows: field (overall, proto, asn, origin, city) → value → bucket start ms → sums.
+   * `origin` and `city` are newer than some summaries: check `present` before reading them.
+   */
   series: Map<string, Map<string, Map<number, RollupAgg>>>;
   /** The coarsest series bucket merged: 5 minutes, or an hour once a day bundle is in. */
   seriesStepMs: number;
@@ -86,21 +93,32 @@ export type Rollup = {
   overview?: RollupOverview;
   /** `assets` rows: JSON `[asset_type, cache, encoding]` → sums (absent before any assets row). */
   assets?: Map<string, RollupAsset>;
-  /** `transport`, `origin` and `urls` rows: group → field → value → sums; read them through `rollupGroup`. */
+  /** `transport`, `origin`, `urls` and `quality` rows: group → field → value → sums; read them through `rollupGroup`. */
   groups?: Map<string, Map<string, Map<string, RollupAgg>>>;
   /**
    * `group/field` with a `dim_totals` row in every merged file. Summaries written before a
    * group or field existed lack the row, so its data is unknown there, not zero.
    */
   present?: Set<string>;
+  /** `sample` rows: up to `SAMPLE_K` rows with a TTFB per file, by `sample_key`. */
+  samples?: RollupSample[];
+};
+
+/** One `sample` row: a raw row with a TTFB, picked by its hashed `key`. */
+export type RollupSample = {
+  key: bigint;
+  tsMs: number;
+  cache: string | null;
+  ttfbS: number;
+  rttUs: number | null;
 };
 
 /** Groups whose rows `decodeRollup` keeps in `Rollup.groups`. */
-const KEYED_GROUPS = new Set(["transport", "origin", "urls"]);
+const KEYED_GROUPS = new Set(["transport", "origin", "urls", "quality"]);
 
 /**
- * One field of a `transport`, `origin` or `urls` group, or null when some merged
- * summary predates it (raw must answer then).
+ * One field of a `transport`, `origin`, `urls` or `quality` group, or null when
+ * some merged summary predates it (raw must answer then).
  */
 export function rollupGroup(rollup: Rollup, group: string, field: string): Map<string, RollupAgg> | null {
   if (!rollup.present?.has(`${group}/${field}`)) return null;
@@ -216,6 +234,8 @@ const SUM_COLUMNS = {
   deliveryCount: "delivery_rate_count",
   elapsedSum: "elapsed_sum",
   elapsedCount: "elapsed_count",
+  throughputSum: "throughput_sum",
+  throughputCount: "throughput_count",
 } as const;
 type SumKey = keyof typeof SUM_COLUMNS;
 const SUM_KEYS = Object.keys(SUM_COLUMNS) as SumKey[];
@@ -285,6 +305,8 @@ export async function decodeRollup(
     "truncated",
     "label",
     "count",
+    "sample_key",
+    "ttfb_sum",
     ...sumNames,
     ...Object.values(WATERFALL_COLUMNS),
     ...Object.values(OVERVIEW_COLUMNS),
@@ -380,6 +402,21 @@ export async function decodeRollup(
       case "field_totals":
         if (truncated[i] === true) rollup.truncated.add(`all_fields/${name}`);
         break;
+      case "sample": {
+        const t = bucketMs(bucket[i]);
+        const ttfb = col("ttfb_sum")[i];
+        const key = col("sample_key")[i];
+        if (t === null || ttfb == null || key == null) break;
+        const rtt = col("rtt_sum")[i];
+        (rollup.samples ??= []).push({
+          key: typeof key === "bigint" ? key : BigInt(Math.trunc(num(key))),
+          tsMs: t,
+          cache: typeof value[i] === "string" ? (value[i] as string) : null,
+          ttfbS: num(ttfb),
+          rttUs: rtt == null ? null : num(rtt),
+        });
+        break;
+      }
       default:
         if (KEYED_GROUPS.has(String(group[i]))) {
           addKeyed(rollup.groups!, String(group[i]), name, String(value[i] ?? ""), read(i), false);
@@ -424,6 +461,7 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
         for (const [value, agg] of values) addKeyed(out.groups!, group, field, value, agg);
       }
     }
+    if (rollup.samples) (out.samples ??= []).push(...rollup.samples);
     if (rollup.waterfall) out.waterfall = addWaterfall(out.waterfall, rollup.waterfall);
     if (rollup.overview) out.overview = addSums(out.overview, rollup.overview, OVERVIEW_KEYS);
     if (rollup.assets) {

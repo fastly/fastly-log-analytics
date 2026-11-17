@@ -4,13 +4,18 @@ import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
   emptyNetworkHealth,
+  emptyNetworkQuality,
   emptyPopHealth,
   networkBundle,
+  normalizeProtocolBucket,
   parseEpochMs,
+  PROTOCOL_BUCKETS,
   roundTo,
   TCP_FIELDS,
   type MetroRow,
+  type NetworkQualityParts,
   type NetworkQueryParams,
+  type QualityPart,
 } from "./network";
 
 /**
@@ -28,6 +33,8 @@ export type NetworkRollupMeta = {
 };
 
 const HEALTH_SECTIONS = new Set(["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"]);
+/** The city map's sections, from the `series5` `city` rows (summaries before them leave it to raw). */
+const MAP_SECTIONS = new Set(["cities", "map_buckets"]);
 
 const HEALTH_APPROXIMATE = [
   "median_rtt_ms", "p95_rtt_ms", "rtt_med_us", "rtt_med_ms", "health_score",
@@ -42,11 +49,21 @@ const TRUNCATION_BOUNDS: Record<string, string[]> = {
   "dims/city": ["metro_leaderboard"],
   "dims/country": ["by_country"],
   "series5/asn": ["heatmap"],
+  "series5/city": ["cities", "map_buckets"],
+  "quality/asn": ["by_asn"],
+  "quality/region": ["by_region"],
 };
 
-/** True when every requested /network-health section can come from summaries. */
-export function canServeHealthFromRollup(sections: readonly string[] | undefined): boolean {
-  return Boolean(sections?.length) && sections!.every((section) => HEALTH_SECTIONS.has(section));
+const lowerBounds = (rollup: RollupResult["rollup"]) =>
+  [...new Set([...rollup.truncated].flatMap((group) => TRUNCATION_BOUNDS[group] ?? []))];
+
+/**
+ * True when every requested /network-health section can come from summaries:
+ * the core sections and the city map (for every ASN; one map ASN needs rows).
+ */
+export function canServeHealthFromRollup(sections: readonly string[] | undefined, mapAsn?: string): boolean {
+  return Boolean(sections?.length) && sections!.every((section) =>
+    HEALTH_SECTIONS.has(section) || MAP_SECTIONS.has(section) && (!mapAsn || mapAsn === "all"));
 }
 
 function meta(result: RollupResult, approximate: string[], lowerBound: string[]): NetworkRollupMeta {
@@ -131,8 +148,7 @@ export function networkHealthFromRollup(
   const overall = rebucketSeries(rollup, "overall", bucketMs);
   const asnSeries = rebucketSeries(rollup, "asn", bucketMs);
   if (!overall || !asnSeries) return null;
-  const lowerBound = [...new Set([...rollup.truncated].flatMap((group) => TRUNCATION_BOUNDS[group] ?? []))];
-  const rollupMeta = meta(result, HEALTH_APPROXIMATE, lowerBound);
+  const rollupMeta = meta(result, HEALTH_APPROXIMATE, lowerBounds(rollup));
   const missing = missingTcpFields(sumAggs(rollup.dims.get("country")?.values() ?? []));
   const total = stats(sumAggs(overall.get("")?.values() ?? []));
   if (total.reqs === 0) return { ...emptyNetworkHealth(missing), rollup: rollupMeta };
@@ -218,6 +234,268 @@ export function networkHealthFromRollup(
     missing_tcp_fields: missing,
     rollup: rollupMeta,
   };
+}
+
+/**
+ * The /network-health city map (`buckets`, `cities`, `map_buckets`) from the
+ * `series5` `city` rows, shaped like `queryNetworkBuckets`: counts, loss and 5xx
+ * shares are exact, coordinates are each cell's average, and RTT medians and
+ * health scores come from histograms. Cities beyond the summaries' top K are
+ * absent. Null when a summary predates the rows or the bucket is not a whole
+ * number of the summaries' steps.
+ */
+export function mapFromRollup(result: RollupResult, params: Pick<NetworkQueryParams, "bucket_seconds">) {
+  const { rollup } = result;
+  if (!rollup.present?.has("series5/city")) return null;
+  const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300))) * 1000;
+  const overall = rebucketSeries(rollup, "overall", bucketMs);
+  const series = rebucketSeries(rollup, "city", bucketMs);
+  if (!overall || !series) return null;
+  const buckets = [...overall.get("")?.keys() ?? []].sort((a, b) => a - b);
+  const bucketIndexes = new Map(buckets.map((t, index) => [t, index]));
+  const cells = [...series].flatMap(([key, values]) => [...values].map(([t, agg]) => ({ key, t, agg })))
+    .filter((cell) => cell.agg.requests > 0)
+    .sort((a, b) => a.t - b.t || b.agg.requests - a.agg.requests || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const cities: { name: string; lat: number | null; lon: number | null }[] = [];
+  const cityIndexes = new Map<string, number>();
+  const mapBuckets = new Map<number, { bucket: string; bucket_idx: number; cities: Record<string, unknown>[] }>();
+  for (const { key, t, agg } of cells) {
+    const [country, city] = JSON.parse(key) as [string | null, string];
+    if (!cityIndexes.has(key)) {
+      cityIndexes.set(key, cities.length);
+      const geo = (sum: number) => (agg.geoCount ? sum / agg.geoCount : null);
+      cities.push({ name: city, lat: geo(agg.latSum), lon: geo(agg.lonSum) });
+    }
+    const s = stats(agg);
+    const entry = mapBuckets.get(t) ??
+      { bucket: new Date(t).toISOString(), bucket_idx: bucketIndexes.get(t) ?? buckets.length, cities: [] };
+    entry.cities.push({
+      reqs: s.reqs,
+      rtt_med_us: s.medRttUs,
+      avg_ploss: s.avgPloss,
+      error_pct: s.errorPct,
+      health_score: s.medRttUs == null ? null : computeNetworkHealthScore(
+        s.medRttUs, Math.max(1, s.p10RttUs ?? 0), s.avgPloss ?? 0, s.errorPct,
+      ),
+      city_idx: cityIndexes.get(key),
+      country,
+    });
+    mapBuckets.set(t, entry);
+  }
+  return {
+    buckets: buckets.map((t) => new Date(t).toISOString()),
+    cities,
+    map_buckets: [...mapBuckets.values()],
+  };
+}
+
+/** /network-health from summaries: the core sections, the city map, or both. */
+function healthFromRollup(result: RollupResult, params: NetworkQueryParams) {
+  const sections = params.sections ?? [];
+  const wantsMap = sections.some((section) => MAP_SECTIONS.has(section));
+  const map = wantsMap ? mapFromRollup(result, params) : null;
+  if (wantsMap && !map) return null;
+  if (map && !sections.some((section) => HEALTH_SECTIONS.has(section) && section !== "buckets")) {
+    const missing = missingTcpFields(sumAggs(result.rollup.dims.get("country")?.values() ?? []));
+    return {
+      ...emptyNetworkHealth(missing),
+      has_data: map.buckets.length > 0,
+      ...map,
+      rollup: meta(result, HEALTH_APPROXIMATE, lowerBounds(result.rollup)),
+    };
+  }
+  const core = networkHealthFromRollup(result, params);
+  return core && map ? { ...core, cities: map.cities, map_buckets: map.map_buckets } : core;
+}
+
+const QUALITY_APPROXIMATE = ["scatter"];
+/** The raw scatter's row cap. */
+const SCATTER_LIMIT = 2000;
+
+/** /network-quality parts a summary answer lacked, which a raw read of only those must fill in. */
+export type NetworkPartial = {
+  network_partial: true;
+  answer: QualityAnswer;
+  residual: {
+    quality_parts: QualityPart[];
+    quality_asns?: number[];
+    /** The summaries' own range, so raw and summary figures cover the same rows. */
+    start_time: string;
+    end_time: string;
+  };
+};
+
+export function isNetworkPartial(value: unknown): value is NetworkPartial {
+  return typeof value === "object" && value !== null && (value as { network_partial?: unknown }).network_partial === true;
+}
+
+const avg = (sum: number, count: number) => (count ? sum / count : null);
+
+type QualityAnswer = NonNullable<ReturnType<typeof qualityAnswer>>["answer"];
+
+/** Null when the summaries hold no rows. */
+function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: NetworkRollupMeta) {
+  const { rollup } = result;
+  const total = sumAggs(rollup.series.get("overall")?.get("")?.values() ?? []);
+  const all = sumAggs(rollup.dims.get("country")?.values() ?? []);
+  const missing = missingTcpFields(all);
+  const overall = rollupGroup(rollup, "quality", "overall");
+  const regions = rollupGroup(rollup, "quality", "region");
+  const asnClient = rollupGroup(rollup, "quality", "asn");
+  const missingParts: QualityPart[] = [
+    ...overall ? [] : ["throughput" as const],
+    ...regions ? [] : ["region" as const],
+    ...asnClient ? [] : ["asn_client" as const],
+  ];
+  const popsCut = rollup.truncated.has("dims/pop");
+  if (total.requests === 0) return null;
+
+  const rttMs = (agg: RollupAgg) => roundTo((avg(agg.rttSum, agg.rttCount) ?? 0) / 1000, 2);
+  const by_country = ranked(rollup.dims.get("country"), 100).map(([country, agg]) => ({
+    value: country, label: country, rtt_ms: rttMs(agg), reqs: agg.requests,
+  }));
+  const by_asn = ranked(rollup.dims.get("asn"), 100).map(([asn, agg]) => {
+    const client = asnClient?.get(asn);
+    const row = {
+      asn: Number(asn),
+      as_name: agg.label ?? `AS${asn}`,
+      requests: agg.requests,
+      avg_rtt_ms: rttMs(agg),
+      avg_rttvar_ms: roundTo((avg(client?.rttvarSum ?? 0, client?.rttvarCount ?? 0) ?? 0) / 1000, 2),
+      avg_ploss_pct: roundTo((avg(client?.plossSum ?? 0, client?.plossCount ?? 0) ?? 0) * 100, 2),
+      avg_cwnd: roundTo(avg(agg.cwndSum, agg.cwndCount) ?? 0, 1),
+    };
+    return { ...row, value: asn, label: row.as_name, rtt_ms: row.avg_rtt_ms, reqs: row.requests };
+  });
+
+  const protoTotals = new Map<string, { requests: number; rttSum: number; rttCount: number }>(
+    PROTOCOL_BUCKETS.map((bucket) => [bucket, { requests: 0, rttSum: 0, rttCount: 0 }]),
+  );
+  for (const [proto, agg] of rollup.dims.get("proto") ?? []) {
+    const into = protoTotals.get(normalizeProtocolBucket(proto))!;
+    into.requests += agg.requests;
+    into.rttSum += agg.rttSum;
+    into.rttCount += agg.rttCount;
+  }
+  const protocol_distribution = PROTOCOL_BUCKETS.map((protocol) => {
+    const entry = protoTotals.get(protocol)!;
+    return {
+      protocol,
+      requests: entry.requests,
+      pct: roundTo((entry.requests * 100) / total.requests, 2),
+      avg_rtt_ms: entry.requests > 0 ? roundTo((avg(entry.rttSum, entry.rttCount) ?? 0) / 1000, 2) : 0,
+    };
+  });
+
+  const popRow = (pop: string, agg: Pick<RollupAgg, "requests" | "rttSum" | "rttCount">) => {
+    const us = avg(agg.rttSum, agg.rttCount);
+    return { pop, rtt_ms: us == null ? null : us / 1000, reqs: agg.requests, value: pop, label: pop };
+  };
+  const pops = [...rollup.dims.get("pop") ?? []].map(([pop, agg]) => popRow(pop, agg));
+  // Rows without a PoP: what the PoP rows leave of the total, unless some PoPs were cut.
+  const popped = sumAggs(rollup.dims.get("pop")?.values() ?? []);
+  if (!popsCut && total.requests > popped.requests) {
+    pops.push(popRow("Unknown", {
+      requests: total.requests - popped.requests,
+      rttSum: total.rttSum - popped.rttSum,
+      rttCount: total.rttCount - popped.rttCount,
+    }));
+  }
+  const by_pop = pops.sort((a, b) => b.reqs - a.reqs);
+
+  const by_region = regions ? [...regions].flatMap(([key, agg]) => {
+    const [country, region] = JSON.parse(key) as [string, string];
+    if (country !== regionCountry) return [];
+    const us = avg(agg.rttSum, agg.rttCount);
+    return [{ value: region, rtt_ms: us == null ? null : us / 1000, reqs: agg.requests, label: region }];
+  }).sort((a, b) => b.reqs - a.reqs) : [];
+
+  const scatter = (rollup.samples ?? [])
+    .filter((sample) => sample.rttUs != null)
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.tsMs - b.tsMs))
+    .slice(0, SCATTER_LIMIT)
+    .map((sample) => ({ rtt_ms: sample.rttUs! / 1000, ttfb_ms: sample.ttfbS * 1000, cache: sample.cache }));
+
+  const tp = overall?.get("");
+  return {
+    answer: {
+      available: total.rttCount > 0,
+      by_country,
+      by_pop,
+      countries: by_country.map((row) => row.value),
+      region_country: regionCountry,
+      summary: {
+        total_requests: total.requests,
+        avg_throughput_mbps: roundTo(avg(tp?.throughputSum ?? 0, tp?.throughputCount ?? 0) ?? 0, 2),
+        avg_cwnd: roundTo(avg(all.cwndSum, all.cwndCount) ?? 0, 1),
+        avg_rtt_ms: rttMs(total),
+        avg_rttvar_ms: roundTo((avg(all.rttvarSum, all.rttvarCount) ?? 0) / 1000, 2),
+        retrans_rate_pct: roundTo((all.retrans * 100) / total.requests, 2),
+      },
+      scatter,
+      by_region,
+      by_asn,
+      protocol_distribution,
+      missing_tcp_fields: missing,
+      rollup: rollupMeta,
+    },
+    missingParts,
+  };
+}
+
+/**
+ * /network-quality from summaries, shaped like `queryNetworkQuality`. Counts,
+ * averages and shares are exact; the scatter is a hashed sample of the rows
+ * with a TTFB (≈), and tables cut to a top K are lower bounds (≥). Summaries
+ * written before the `quality` rows lack the throughput, region table and
+ * client-only ASN loss and RTT variance: then this returns a `NetworkPartial`
+ * naming only those parts, for a raw read of just their columns.
+ */
+export function qualityFromRollup(result: RollupResult, params: NetworkQueryParams) {
+  const { rollup } = result;
+  const lowerBound = lowerBounds(rollup).filter((field) => ["by_asn", "by_country", "by_region"].includes(field));
+  if (rollup.truncated.has("dims/pop")) lowerBound.push("by_pop");
+  const rollupMeta = meta(result, QUALITY_APPROXIMATE, lowerBound);
+  const quality = qualityAnswer(result, String(params.region_country ?? "US"), rollupMeta);
+  if (!quality) {
+    const missing = missingTcpFields(sumAggs(rollup.dims.get("country")?.values() ?? []));
+    return { ...emptyNetworkQuality(missing), rollup: rollupMeta };
+  }
+  const { answer, missingParts } = quality;
+  if (!missingParts.length) return answer;
+  const partial: NetworkPartial = {
+    network_partial: true,
+    answer,
+    residual: {
+      quality_parts: missingParts,
+      ...missingParts.includes("asn_client") ? { quality_asns: answer.by_asn.map((row) => row.asn) } : {},
+      start_time: new Date(result.dataFromMs).toISOString(),
+      end_time: new Date(result.dataThroughMs).toISOString(),
+    },
+  };
+  return partial;
+}
+
+/** A partial summary answer with the raw read of its missing parts (`{ quality_parts }`) filled in. */
+export function mergeNetworkPartial(partial: NetworkPartial, raw: { quality_parts?: NetworkQualityParts }) {
+  const parts = raw.quality_parts ?? {};
+  const answer = { ...partial.answer, summary: { ...partial.answer.summary } };
+  if (parts.throughput && "avg_throughput_mbps" in answer.summary) {
+    answer.summary.avg_throughput_mbps = roundTo(parts.throughput.avg_throughput_mbps ?? 0, 2);
+  }
+  if (parts.region) answer.by_region = parts.region;
+  if (parts.asn_client && answer.by_asn) {
+    const byAsn = new Map(parts.asn_client.map((row) => [row.asn, row]));
+    answer.by_asn = answer.by_asn.map((row) => {
+      const client = byAsn.get(row.asn);
+      return {
+        ...row,
+        avg_rttvar_ms: roundTo((client?.avg_rttvar_us ?? 0) / 1000, 2),
+        avg_ploss_pct: roundTo((client?.avg_ploss ?? 0) * 100, 2),
+      };
+    });
+  }
+  return answer;
 }
 
 /**
@@ -310,7 +588,7 @@ export function transportFromRollup(result: RollupResult) {
 /**
  * True when every requested /network/bundle section can come from summaries:
  * the health core sections, the PoP table and transport. Quality, the map and
- * shielding need rows.
+ * shielding are read alone (/network-health, /network-quality).
  */
 function canServeBundleFromRollup(sections: readonly string[] | undefined): boolean {
   return Boolean(sections?.length) &&
@@ -319,19 +597,23 @@ function canServeBundleFromRollup(sections: readonly string[] | undefined): bool
 
 /** Whether summaries may answer this read at all, before any range or listing is resolved. */
 export function networkRollupEligible(path: string, params: NetworkQueryParams): boolean {
+  if (params.network_residual || params.quality_parts?.length) return false;
   if (params.filter_country || params.filter_pop ||
       params.filter_asn !== undefined && params.filter_asn !== "" ||
       Object.keys(params.filters ?? {}).length) return false;
   if (path === "/api/network/bundle") return canServeBundleFromRollup(params.sections);
-  return path === "/api/network-health" ? canServeHealthFromRollup(params.sections) : path === "/api/network/pop-health";
+  if (path === "/api/network-health") return canServeHealthFromRollup(params.sections, params.map_asn);
+  return path === "/api/network/pop-health" || path === "/api/network-quality";
 }
 
 /**
  * Answers a Cloud /network read from v3 summaries, or returns null when the raw
  * scan must: any filter (summaries hold no dimension crossed with another, so
  * even one PoP, country or ASN filter can't narrow the ASN, metro or PoP
- * tables), a section that needs rows, a bucket finer than the summaries, or a
- * range the summaries don't cover (see `queryRollup`).
+ * tables), a section that needs rows (shielding, or the map for one ASN), a
+ * bucket finer than the summaries, summaries older than the map rows, or a
+ * range the summaries don't cover (see `queryRollup`). /network-quality over
+ * summaries older than its `quality` rows returns a `NetworkPartial`.
  */
 export async function networkFromRollup(
   path: string,
@@ -340,7 +622,6 @@ export async function networkFromRollup(
   signal?: AbortSignal,
 ) {
   if (!networkRollupEligible(path, params)) return null;
-  const health = path === "/api/network-health";
   const fromMs = parseEpochMs(params.start_time);
   const toMs = parseEpochMs(params.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
@@ -355,5 +636,6 @@ export async function networkFromRollup(
     if (sections.includes("transport") && transport === null) return null;
     return networkBundle(core, null, sections.includes("pop_health") ? popHealthFromRollup(result) : null, transport);
   }
-  return health ? networkHealthFromRollup(result, params) : popHealthFromRollup(result);
+  if (path === "/api/network-quality") return qualityFromRollup(result, params);
+  return path === "/api/network-health" ? healthFromRollup(result, params) : popHealthFromRollup(result);
 }

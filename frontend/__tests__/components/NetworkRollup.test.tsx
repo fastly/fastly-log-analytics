@@ -1,8 +1,8 @@
 /**
  * @vitest-environment jsdom
  */
-import { renderWithQuery } from '@/__tests__/helpers/page-smoke'
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
+import { renderWithQuery, stubIntersectionObserver } from '@/__tests__/helpers/page-smoke'
+import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { server } from '@/__tests__/helpers/msw/handlers'
@@ -85,6 +85,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setCloudModeRuntime(false)
+  vi.unstubAllGlobals()
   cleanup()
 })
 
@@ -105,6 +106,19 @@ describe('NetworkClient on Cloud', () => {
     expect(screen.getByText('≥77')).toBeInTheDocument()
     expect(screen.getByText('Avg RTT').closest('div')?.parentElement?.textContent).not.toContain('≈')
     await waitFor(() => expect(screen.getAllByTestId('plot').some((plot) => plot.textContent?.includes('Score: ≈%{z}'))).toBe(true))
+  })
+
+  it('reads raw-only shielding only once its panel nears the viewport', async () => {
+    setCloudModeRuntime(true)
+    const observer = stubIntersectionObserver()
+    const sections = recordNetworkHealth(coreResponse(rollup([])))
+    renderWithQuery(<NetworkClient />, { withNuqs: true })
+
+    expect(await screen.findByText('1 cities')).toBeInTheDocument()
+    expect(sections).toEqual(expect.arrayContaining([ROLLUP_SECTIONS, MAP_SECTIONS]))
+    expect(sections).not.toContainEqual(['shielding_analysis'])
+    act(() => observer.fire(true))
+    await waitFor(() => expect(sections).toContainEqual(['shielding_analysis']))
   })
 
   it('keeps one raw core read, with no summary labels, when a filter is applied', async () => {

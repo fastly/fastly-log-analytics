@@ -28,6 +28,7 @@ const security: Answer = (path, params, source, signal) =>
 
 const ANSWERS: Record<string, Answer> = {
   "/api/network-health": network,
+  "/api/network-quality": network,
   "/api/network/pop-health": network,
   "/api/network/bundle": network,
   "/api/origin/aggregates": (path, params, source, signal) =>

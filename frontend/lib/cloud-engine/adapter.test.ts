@@ -528,6 +528,33 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(ensureCloudRange).not.toHaveBeenCalled();
   });
 
+  it("reads raw only for the quality parts a summary answer lacked, over the summaries' range, and merges them in", async () => {
+    const residual = {
+      quality_parts: ["throughput", "asn_client"], quality_asns: [13335],
+      start_time: "2026-11-05T01:00:00.000Z", end_time: "2026-11-05T23:00:00.000Z",
+    };
+    const answer = {
+      summary: { total_requests: 5, avg_throughput_mbps: 0 }, by_region: [{ value: "VA" }],
+      by_asn: [{ asn: 13335, avg_rttvar_ms: 9, avg_ploss_pct: 9 }],
+    };
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(networkFromRollup).mockClear().mockResolvedValueOnce({ network_partial: true, answer, residual } as never);
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network-quality", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ region_country: "US", filters: {} }),
+    }));
+    expect(res!.status).toBe(200);
+    expect(networkFromRollup).toHaveBeenCalledTimes(1);
+    const [from, to, , , options] = vi.mocked(ensureCloudRange).mock.calls[0];
+    expect([from, to]).toEqual([residual.start_time, residual.end_time]);
+    expect(options?.projection?.columns).toEqual(networkScanColumns("/api/network-quality", residual));
+    expect(options?.projection?.columns).not.toContain("region");
+    // The empty test engine has no rows, so the raw parts come back empty and zero the client-only figures.
+    expect(await res!.json()).toEqual({
+      ...answer, by_asn: [{ asn: 13335, avg_rttvar_ms: 0, avg_ploss_pct: 0 }],
+    });
+  });
+
   it("falls back to the raw /network scan when summaries can't answer or fail, but not when aborted", async () => {
     const health = (init: RequestInit = {}) => handleCloudAnalyticalRequest(new Request("http://localhost/api/network-health", {
       method: "POST", headers: { "content-type": "application/json" },

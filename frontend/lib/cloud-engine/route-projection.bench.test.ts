@@ -154,6 +154,10 @@ const NETWORK_PAGE: [string, Record<string, unknown>][] = [
     sections: ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets", "cities", "map_buckets"] }],
   ["/api/network-health", { bucket_seconds: 3600, top_n: 30, map_asn: "all", sections: ["shielding_analysis"] }],
   ["/api/network-quality", { region_country: "US" }],
+  // What the page reads raw when summaries predate the map and quality rows: the map alone and only the quality parts.
+  ["/api/network-health", { bucket_seconds: 3600, top_n: 30, map_asn: "all", sections: ["buckets", "cities", "map_buckets"] }],
+  ["/api/network-quality", { region_country: "US", quality_parts: ["throughput", "region", "asn_client"],
+    quality_asns: Array.from({ length: 100 }, (_, i) => 64500 + i) }],
   ["/api/network/pop-health", {}],
   ["/api/network/bundle", { sections: ["transport"], bucket_seconds: 300, top_n: 30, map_asn: "all", region_country: "US" }],
 ];

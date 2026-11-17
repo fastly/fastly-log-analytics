@@ -53,6 +53,9 @@ describe("answerFromRollup", () => {
   it.each([
     ["/api/network-health", health, source, networkFromRollup],
     ["/api/network/pop-health", range, source, networkFromRollup],
+    ["/api/network-health", { ...range, sections: ["buckets", "cities", "map_buckets"], map_asn: "all", bucket_seconds: 3600 },
+      source, networkFromRollup],
+    ["/api/network-quality", { ...range, region_country: "US" }, source, networkFromRollup],
     ["/api/network/bundle", { ...health, sections: ["summary", "pop_health"] }, source, networkFromRollup],
     ["/api/origin/aggregates", origin, originSource, originFromRollup],
     ["/api/performance/aggregates", performance, source, performanceFromRollup],
@@ -85,7 +88,8 @@ describe("answerFromRollup", () => {
   });
 
   it("leaves paths summaries don't answer to the raw scan", async () => {
-    expect(await answerFromRollup("/api/network-quality", health, source())).toBeNull();
+    expect(await answerFromRollup("/api/network-health", { ...health, sections: ["shielding_analysis"] }, source())).toBeNull();
+    expect(await answerFromRollup("/api/network/bundle", { ...health, sections: ["quality"] }, source())).toBeNull();
   });
 });
 

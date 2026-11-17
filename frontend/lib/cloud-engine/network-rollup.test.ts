@@ -15,12 +15,17 @@ import {
   fixturePage,
 } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
-import { handleNetworkRequest, queryNetworkHealth, queryPopHealth } from "./network";
+import { handleNetworkRequest, queryNetworkHealth, queryNetworkQuality, queryPopHealth } from "./network";
 import {
   canServeHealthFromRollup,
+  isNetworkPartial,
+  mapFromRollup,
+  mergeNetworkPartial,
   networkFromRollup,
   networkHealthFromRollup,
+  networkRollupEligible,
   popHealthFromRollup,
+  qualityFromRollup,
   transportFromRollup,
 } from "./network-rollup";
 
@@ -31,6 +36,7 @@ const RAW = fixtureFiles("raw");
 const WINDOWS = fixtureFiles("window");
 const HOURS = fixtureFiles("hour").filter((f) => f.key.includes("-c4-"));
 const SECTIONS = ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"];
+const MAP = ["buckets", "cities", "map_buckets"];
 
 async function rollupOf(files: ManifestFile[], stepMs = 300_000): Promise<RollupResult> {
   const parts = await Promise.all(files.map((f) => decodeRollup(BUFFERS[f.key], stepMs)));
@@ -46,6 +52,18 @@ const near = (actual: unknown, expected: number, rel = 0.1) => {
   expect(Math.abs(Number(actual) - expected)).toBeLessThanOrEqual(Math.abs(expected) * rel);
 };
 
+const withoutRows = (result: RollupResult, ...rows: string[]): RollupResult => {
+  const present = new Set(result.rollup.present);
+  for (const row of rows) present.delete(row);
+  return { ...result, rollup: { ...result.rollup, present } };
+};
+
+type MapAnswer = NonNullable<ReturnType<typeof mapFromRollup>>;
+/** Map cells keyed by bucket, country and city, since raw orders (and so indexes) equal counts arbitrarily. */
+const mapCells = (map: Pick<MapAnswer, "cities" | "map_buckets">) => new Map(map.map_buckets.flatMap((b) =>
+  b.cities.map(({ city_idx, ...c }) => [`${b.bucket}|${b.bucket_idx}|${c.country}|${map.cities[city_idx as number].name}`, c]),
+));
+
 const byKey = <T extends Record<string, unknown>>(rows: readonly T[], key: (row: T) => string) =>
   new Map(rows.map((row) => [key(row), row]));
 
@@ -56,6 +74,11 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
   let rawPops: Awaited<ReturnType<typeof queryPopHealth>>;
   let rawBundle: Record<string, unknown>;
   let rawTransport: Record<string, unknown>;
+  let rawMap: Awaited<ReturnType<typeof queryNetworkHealth>>;
+  type QualityAsn = { asn: number; avg_ploss_pct: number; avg_rttvar_ms: number };
+  let rawQuality: Awaited<ReturnType<typeof queryNetworkQuality>>;
+  const rawAsns = () => rawQuality.by_asn as QualityAsn[];
+  let rawParts: Record<string, unknown>;
 
   beforeAll(async () => {
     for (const file of RAW) {
@@ -71,6 +94,12 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
     rawTransport = (await handleNetworkRequest("/api/network/bundle", { ...params, sections: ["transport"] }) as {
       transport: Record<string, unknown>;
     }).transport;
+    rawMap = await queryNetworkHealth({ ...params, sections: [...SECTIONS, "cities", "map_buckets"] });
+    rawQuality = await queryNetworkQuality({ ...params, region_country: "US" });
+    rawParts = await handleNetworkRequest("/api/network-quality", {
+      ...params, region_country: "US", quality_parts: ["throughput", "region", "asn_client"],
+      quality_asns: rawAsns().map((row) => row.asn),
+    }) as Record<string, unknown>;
   }, 60_000);
 
   afterAll(async () => {
@@ -180,6 +209,105 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
       .toEqual(rawBundlePops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted());
   });
 
+  it("answers the map alone from a map-only raw pass exactly as the full pass does", async () => {
+    const only = await queryNetworkHealth({ engine: lease.readContext(), start_time: T0, end_time: T1, bucket_seconds: 900, sections: MAP });
+    expect(only.buckets).toEqual(rawMap.buckets);
+    expect(only.cities.toSorted((a, b) => a.name.localeCompare(b.name)))
+      .toEqual(rawMap.cities.toSorted((a, b) => a.name.localeCompare(b.name)));
+    expect(mapCells(only as unknown as MapAnswer)).toEqual(mapCells(rawMap as unknown as MapAnswer));
+    expect([only.heatmap, only.by_asn, only.summary.total_requests]).toEqual([[], [], 0]);
+    expect(only.has_data).toBe(true);
+  });
+
+  it("matches the raw city map's counts, loss and 5xx shares, with approximate RTT and coordinates", async () => {
+    for (const files of [WINDOWS, HOURS]) {
+      const map = mapFromRollup(await rollupOf(files), { bucket_seconds: 900 })!;
+      expect(map.buckets).toEqual(rawMap.buckets);
+      const got = mapCells(map);
+      const want = mapCells(rawMap as unknown as MapAnswer);
+      expect(want.size).toBeGreaterThan(20);
+      expect([...got.keys()].toSorted()).toEqual([...want.keys()].toSorted());
+      for (const [key, row] of want) {
+        const cell = got.get(key)!;
+        const exact = (c: Record<string, unknown>) =>
+          [c.reqs, c.error_pct, c.avg_ploss == null ? null : Number(Number(c.avg_ploss).toFixed(12)), c.country];
+        expect(exact(cell), key).toEqual(exact(row));
+        // Histogram medians of a handful of rows can land a bin away from the interpolated raw median.
+        if (row.rtt_med_us == null) expect(cell.rtt_med_us, key).toBeNull();
+        else if (Number(row.reqs) >= 20) near(cell.rtt_med_us, Number(row.rtt_med_us), 0.15);
+        else expect(cell.rtt_med_us, key).toEqual(expect.any(Number));
+      }
+      for (const city of rawMap.cities) {
+        const mine = map.cities.find((c) => c.name === city.name)!;
+        expect(mine.lat).toBeCloseTo(city.lat!, 9);
+        expect(mine.lon).toBeCloseTo(city.lon!, 9);
+      }
+      // Each bucket's cells come busiest first, like raw.
+      for (const bucket of map.map_buckets) {
+        const reqs = bucket.cities.map((c) => c.reqs as number);
+        expect(reqs).toEqual(reqs.toSorted((x, y) => y - x));
+      }
+    }
+  });
+
+  it("matches the raw quality tables and summary, with an approximate scatter", async () => {
+    const pick = (q: Record<string, unknown>) => {
+      const rows = (name: string, key: string) =>
+        (q[name] as Record<string, unknown>[]).map((row) => JSON.stringify(row, Object.keys(row).toSorted())).toSorted()
+          .map((row) => JSON.parse(row)).toSorted((a, b) => String(a[key]).localeCompare(String(b[key])));
+      return {
+        available: q.available,
+        summary: q.summary,
+        by_country: rows("by_country", "value"),
+        by_asn: rows("by_asn", "value"),
+        by_pop: rows("by_pop", "value"),
+        by_region: rows("by_region", "value"),
+        countries: (q.countries as string[]).toSorted(),
+        protocol_distribution: q.protocol_distribution,
+        region_country: q.region_country,
+      };
+    };
+    expect((rawQuality.by_region as unknown[]).length).toBeGreaterThan(1);
+    expect(rawQuality.summary.avg_throughput_mbps).toBeGreaterThan(0);
+    expect(rawAsns().some((row) => row.avg_ploss_pct > 0 && row.avg_rttvar_ms > 0)).toBe(true);
+    for (const [files, step] of [[WINDOWS, 300_000], [HOURS, 300_000], [fixtureFiles("day"), HOUR]] as const) {
+      const got = qualityFromRollup(await rollupOf([...files], step), { region_country: "US" }) as Record<string, unknown>;
+      expect(isNetworkPartial(got)).toBe(false);
+      expect(pick(got)).toEqual(pick(rawQuality as Record<string, unknown>));
+      // Summaries only report the TCP fields they count as missing.
+      expect(rawQuality.missing_tcp_fields).toEqual(expect.arrayContaining(got.missing_tcp_fields as string[]));
+      const scatter = got.scatter as { rtt_ms: number; ttfb_ms: number; cache: string }[];
+      expect(scatter.length).toBeGreaterThan(100);
+      expect(scatter.every((p) => p.rtt_ms > 0 && p.ttfb_ms >= 0 && typeof p.cache === "string")).toBe(true);
+      expect((got.rollup as { approximate: string[] }).approximate).toEqual(["scatter"]);
+    }
+  });
+
+  it("fills a summary answer that predates the quality rows from a raw read of only the missing parts", async () => {
+    const full = qualityFromRollup(await rollupOf(WINDOWS), { region_country: "US" });
+    for (const [rows, parts] of [
+      [["quality/overall"], ["throughput"]],
+      [["quality/region"], ["region"]],
+      [["quality/asn"], ["asn_client"]],
+      [["quality/overall", "quality/region", "quality/asn"], ["throughput", "region", "asn_client"]],
+    ] as const) {
+      const partial = qualityFromRollup(withoutRows(await rollupOf(WINDOWS), ...rows), { region_country: "US" });
+      if (!isNetworkPartial(partial)) throw new Error(`not partial: ${rows}`);
+      expect(partial.residual).toEqual({
+        quality_parts: parts,
+        ...parts.includes("asn_client" as never) ? { quality_asns: expect.any(Array) } : {},
+        start_time: new Date(T0).toISOString(),
+        end_time: new Date(T1).toISOString(),
+      });
+      const raw = await handleNetworkRequest("/api/network-quality", {
+        engine: lease.readContext(), region_country: "US", ...partial.residual,
+      });
+      expect(Object.keys(raw)).toEqual(["quality_parts"]);
+      expect(mergeNetworkPartial(partial, raw as never)).toEqual(full);
+    }
+    expect(Object.keys(rawParts.quality_parts as object).toSorted()).toEqual(["asn_client", "region", "throughput"]);
+  });
+
   it("matches the raw transport counts, bytes, loss, delivery rate and protocol shares, with approximate RTT", async () => {
     expect(rawTransport.has_transport_data).toBe(true);
     expect((rawTransport.protocol_distribution as unknown[]).length).toBeGreaterThan(2);
@@ -284,12 +412,14 @@ describe("popHealthFromRollup", () => {
 });
 
 describe("canServeHealthFromRollup", () => {
-  it("accepts only the rollup-served sections, never the map or shielding", () => {
+  it("accepts the rollup-served sections and the all-ASN map, never shielding or one ASN's map", () => {
     expect(canServeHealthFromRollup(SECTIONS)).toBe(true);
     expect(canServeHealthFromRollup(["summary"])).toBe(true);
-    expect(canServeHealthFromRollup([...SECTIONS, "cities"])).toBe(false);
-    expect(canServeHealthFromRollup(["map_buckets"])).toBe(false);
+    expect(canServeHealthFromRollup([...SECTIONS, "cities"])).toBe(true);
+    expect(canServeHealthFromRollup(MAP, "all")).toBe(true);
+    expect(canServeHealthFromRollup(MAP, "13335")).toBe(false);
     expect(canServeHealthFromRollup(["shielding_analysis"])).toBe(false);
+    expect(canServeHealthFromRollup([...MAP, "shielding_analysis"])).toBe(false);
     expect(canServeHealthFromRollup(undefined)).toBe(false);
     expect(canServeHealthFromRollup([])).toBe(false);
   });
@@ -322,6 +452,31 @@ describe("networkFromRollup", () => {
     expect(both.transport.total_requests).toBe(both.network_health.summary!.total_requests);
   });
 
+  it("answers the all-ASN map and quality from summaries without reading raw files", async () => {
+    const s = source();
+    const map = await networkFromRollup("/api/network-health", { ...health, sections: MAP, map_asn: "all", bucket_seconds: 3600 }, s) as
+      Record<string, unknown>;
+    expect(map).toMatchObject(mapFromRollup(await rollupOf(WINDOWS), { bucket_seconds: 3600 })!);
+    expect([map.heatmap, map.by_asn]).toEqual([[], []]);
+    const both = await networkFromRollup("/api/network-health", { ...health, sections: [...SECTIONS, "cities", "map_buckets"] }, s) as
+      Record<string, unknown>;
+    expect(both.cities).toEqual(mapFromRollup(await rollupOf(WINDOWS), {})!.cities);
+    expect((both.summary as { total_requests: number }).total_requests).toBeGreaterThan(0);
+    const quality = await networkFromRollup("/api/network-quality", { ...health, region_country: "US" }, s);
+    expect(quality).toEqual(qualityFromRollup(await rollupOf(WINDOWS), { region_country: "US" }));
+    expect(s.log.files.every((key) => WINDOWS.some((f) => f.key === key))).toBe(true);
+  });
+
+  it("leaves the map to raw when summaries predate its rows, and names only the missing quality parts", async () => {
+    const result = await rollupOf(WINDOWS);
+    expect(mapFromRollup(withoutRows(result, "series5/city"), {})).toBeNull();
+    expect(mapFromRollup(result, { bucket_seconds: 60 })).toBeNull();
+    expect(qualityFromRollup(withoutRows(result, "quality/region"), {})).toMatchObject({
+      network_partial: true, residual: { quality_parts: ["region"] },
+    });
+    expect(networkRollupEligible("/api/network-quality", { network_residual: true })).toBe(false);
+  });
+
   it("omits the open tail newer than the newest summary and says how far the data goes", async () => {
     const served = await networkFromRollup("/api/network-health", health, source(WINDOWS.slice(0, 7))) as {
       summary: { total_requests: number }; rollup: { data_through: string };
@@ -338,7 +493,8 @@ describe("networkFromRollup", () => {
       { ...health, filter_country: "US" },
       { ...health, filter_asn: 64512 },
       { ...health, filters: { proto: { values: ["2"], mode: "include" as const } } },
-      { ...health, sections: [...SECTIONS, "map_buckets"] },
+      { ...health, sections: [...MAP, "shielding_analysis"] },
+      { ...health, sections: MAP, map_asn: "13335" },
       { ...health, sections: undefined },
       { ...health, end_time: "not a time" },
     ]) {
@@ -346,8 +502,14 @@ describe("networkFromRollup", () => {
       expect(await networkFromRollup("/api/network-health", params, s), JSON.stringify(params)).toBeNull();
       expect(s.log.json).toEqual([]);
     }
-    expect(await networkFromRollup("/api/network-quality", health, source())).toBeNull();
-    // Quality needs per-row throughput.
+    for (const params of [
+      { ...health, filter_pop: "IAD" },
+      { ...health, network_residual: true },
+      { ...health, quality_parts: ["throughput" as const] },
+    ]) {
+      expect(await networkFromRollup("/api/network-quality", params, source()), JSON.stringify(params)).toBeNull();
+    }
+    // The bundle never carries quality or the map: the page reads them alone.
     for (const sections of [["quality"], ["transport", "quality"], ["map_buckets"], ["pop_health", "cities"], [], undefined]) {
       const s = source();
       expect(await networkFromRollup("/api/network/bundle", { ...health, sections }, s), String(sections)).toBeNull();
