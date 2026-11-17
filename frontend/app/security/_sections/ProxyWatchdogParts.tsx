@@ -377,7 +377,11 @@ export function TrafficQualityAndIspCards({
                   <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full ${
-                        label === 'High' ? 'bg-emerald-500' : label === 'Medium' ? 'bg-amber-500' : 'bg-rose-500'
+                        label === 'Direct Connection'
+                          ? 'bg-emerald-500'
+                          : label === 'WiFi / Mobile'
+                            ? 'bg-amber-500'
+                            : 'bg-rose-500'
                       }`}
                       style={{ width: `${val}%` }}
                     />

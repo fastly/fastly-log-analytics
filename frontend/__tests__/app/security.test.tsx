@@ -842,5 +842,23 @@ describe('SecurityClient, BotsSection, HeaderAnomaliesSection, NetworkSection & 
       expect(container.querySelectorAll('.\\[contain-intrinsic-size\\:140px\\]').length).toBeGreaterThanOrEqual(1)
       expect(container.querySelectorAll('.\\[contain-intrinsic-size\\:600px\\]').length).toBeGreaterThanOrEqual(1)
     })
+
+    it('colours traffic quality bars by connection type', () => {
+      const mockData = securityData({
+        traffic_quality: [
+          { label: 'Direct Connection', value: 50 },
+          { label: 'WiFi / Mobile', value: 33.3 },
+          { label: 'Active Tunnel / Proxy', value: 16.7 },
+        ],
+      })
+      render(<ProxyWatchdogSection data={mockData} isLoading={false} />)
+      const barColour = (label: string) => {
+        const row = screen.getByText(label).closest('.space-y-1')
+        return row?.querySelector('[style*="width"]')?.className.match(/bg-(emerald|amber|rose)-500/)?.[1]
+      }
+      expect(barColour('Direct Connection')).toBe('emerald')
+      expect(barColour('WiFi / Mobile')).toBe('amber')
+      expect(barColour('Active Tunnel / Proxy')).toBe('rose')
+    })
   })
 })
