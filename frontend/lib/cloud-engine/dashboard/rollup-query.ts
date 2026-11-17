@@ -66,7 +66,48 @@ export type Rollup = {
    * to its top K: kept counts there are lower bounds and cut values are absent.
    */
   truncated: Set<string>;
+  /** `overview` waterfall sums in ms over rows with both TTFB and elapsed (absent before any overview row). */
+  waterfall?: RollupWaterfall;
+  /** `all_fields` counts for `FIELD_COUNTS` fields: field → value → rows; a cut field is `fields/<field>` in `truncated`. */
+  fields?: Map<string, Map<string, number>>;
 };
+
+export type RollupWaterfall = {
+  count: number;
+  edgeProcessing: number;
+  originWait: number;
+  originDownload: number;
+  clientDownload: number;
+};
+
+const WATERFALL_COLUMNS = {
+  count: "waterfall_count",
+  edgeProcessing: "edge_processing_sum",
+  originWait: "origin_wait_sum",
+  originDownload: "origin_download_sum",
+  clientDownload: "client_download_sum",
+} as const;
+const WATERFALL_KEYS = Object.keys(WATERFALL_COLUMNS) as (keyof RollupWaterfall)[];
+
+/** The `all_fields` fields decoded into `Rollup.fields`; the rest stay unread to keep decodes small. */
+const FIELD_COUNTS = new Set(["ttl"]);
+
+function addWaterfall(into: RollupWaterfall | undefined, from: RollupWaterfall): RollupWaterfall {
+  const out = { ...(into ?? from) };
+  if (into) for (const key of WATERFALL_KEYS) out[key] += from[key];
+  return out;
+}
+
+function addFieldCounts(
+  into: Map<string, Map<string, number>>,
+  from: Map<string, Map<string, number>>,
+) {
+  for (const [field, values] of from) {
+    const target = into.get(field) ?? new Map<string, number>();
+    into.set(field, target);
+    for (const [value, count] of values) target.set(value, (target.get(value) ?? 0) + count);
+  }
+}
 
 const SUM_COLUMNS = {
   requests: "requests",
@@ -135,7 +176,7 @@ function bucketMs(value: unknown): number | null {
 }
 
 /**
- * Decodes the network groups of a v3 window summary or bundle, or returns null
+ * Decodes the rollup groups of a v3 window summary or bundle, or returns null
  * for any other format version so the caller reads raw Parquet instead.
  * `seriesStepMs` is the file's `series5` bucket: an hour for day bundles.
  */
@@ -156,7 +197,9 @@ export async function decodeRollup(
     "value",
     "truncated",
     "label",
+    "count",
     ...sumNames,
+    ...Object.values(WATERFALL_COLUMNS),
   ]);
   const binary = await readColumns(bytes, Object.values(HIST_COLUMNS), false);
   const col = (name: string) => columns.get(name) ?? [];
@@ -169,6 +212,7 @@ export async function decodeRollup(
     col("label"),
   ];
   const sums = SUM_KEYS.map((key) => [key, col(SUM_COLUMNS[key])] as const);
+  const count = col("count");
   const hists = HIST_KEYS.map(
     (key) => [key, binary.columns.get(HIST_COLUMNS[key]) ?? []] as const,
   );
@@ -216,6 +260,24 @@ export async function decodeRollup(
       case "dim_totals":
         if (truncated[i] === true) rollup.truncated.add(`${String(value[i])}/${name}`);
         break;
+      case "overview": {
+        const sums = {} as RollupWaterfall;
+        for (const key of WATERFALL_KEYS) sums[key] = num(col(WATERFALL_COLUMNS[key])[i]);
+        rollup.waterfall = addWaterfall(rollup.waterfall, sums);
+        break;
+      }
+      case "field_totals":
+        if (FIELD_COUNTS.has(name) && truncated[i] === true) rollup.truncated.add(`fields/${name}`);
+        break;
+      case "all_fields": {
+        if (!FIELD_COUNTS.has(name)) break;
+        const fields = (rollup.fields ??= new Map());
+        const values = fields.get(name) ?? new Map<string, number>();
+        fields.set(name, values);
+        const key = String(value[i] ?? "");
+        values.set(key, (values.get(key) ?? 0) + num(count[i]));
+        break;
+      }
     }
   }
   return rollup;
@@ -230,6 +292,8 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
     truncated: new Set(rollups.flatMap((r) => [...r.truncated])),
   };
   for (const rollup of rollups) {
+    if (rollup.waterfall) out.waterfall = addWaterfall(out.waterfall, rollup.waterfall);
+    if (rollup.fields) addFieldCounts((out.fields ??= new Map()), rollup.fields);
     for (const [dim, values] of rollup.dims) {
       const target = out.dims.get(dim) ?? new Map<string, RollupAgg>();
       out.dims.set(dim, target);

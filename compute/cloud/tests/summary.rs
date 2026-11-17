@@ -1343,6 +1343,59 @@ fn write_network_fixtures() {
     write_summary_fixtures("__fixtures__/network-summaries", &rows);
 }
 
+/// Writes `frontend/lib/cloud-engine/__fixtures__/origin-summaries/`: rows carrying the
+/// /origin and /performance columns (origin IP, status and timings, TTL, elapsed), with
+/// their summaries and bundles, for the rollup-vs-raw parity tests.
+/// Run with `cargo test --test summary -- --ignored write_origin_fixtures`.
+#[test]
+#[ignore = "regenerates the web /origin and /performance fixtures"]
+fn write_origin_fixtures() {
+    const TTLS: [f64; 9] = [0.0, 30.0, 59.5, 60.0, 300.0, 3600.0, 7200.0, 86_400.0, 1e6];
+    const OIPS: [&str; 6] = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "192.0.2.7", "-", "2001:db8::1"];
+    let rows: Vec<Value> = (0..1600i64)
+        .map(|i| {
+            let ms = BASE * 1000 + (i * 4_513) % (2 * 3600 * 1000);
+            let k = i as usize;
+            let cache = ["HIT", "MISS", "PASS", "HIT-STALE", "MISS"][k % 5];
+            let mut row = json!({
+                "timestamp": iso(ms),
+                "status": ([200, 200, 304, 404, 503, 500, 200][k % 7]),
+                "cache": cache,
+                "resp_bytes": 100 + i * 7,
+                "pop": (["IAD", "LHR", "NRT", "FRA", ""][(k / 3) % 5]),
+                "edge": i % 4 != 0,
+                "url": format!("/p/{}", i % 40),
+                "ttfb": 0.000_05 + 0.000_2 * ((i * 13) % 400) as f64,
+                "elapsed": 1_000 + (i * 97) % 300_000,
+            });
+            // Only origin fetches carry the origin columns, as on Fastly: HITs have none.
+            if !cache.starts_with("HIT") {
+                let ottfb = 1_500 + (i * 211) % 180_000;
+                row["oip"] = OIPS[(k / 2) % 6].into();
+                row["ost"] = ([200, 200, 503, 500, 404, 200, 302, 502][(k / 3) % 8]).into();
+                row["ottfb"] = ottfb.into();
+                if i % 6 != 0 {
+                    row["ottlb"] = (ottfb + (i * 53) % 90_000).into();
+                }
+            }
+            if i % 9 == 0 {
+                row["ttfb"] = Value::Null;
+            }
+            if i % 11 == 0 {
+                row["elapsed"] = Value::Null;
+            }
+            if i % 7 != 0 {
+                row["ttl"] = TTLS[k % 9].into();
+            }
+            if i % 401 == 7 {
+                row["timestamp"] = Value::Null;
+            }
+            row
+        })
+        .collect();
+    write_summary_fixtures("__fixtures__/origin-summaries", &rows);
+}
+
 /// Writes `frontend/lib/cloud-engine/{rel}/`: 15-minute raw windows of `rows`, their window
 /// summaries, hour bundles (and each hour's bundle without its last window), the day bundle
 /// and `index.json`.
