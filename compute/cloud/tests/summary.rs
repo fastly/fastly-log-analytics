@@ -1351,7 +1351,14 @@ fn write_network_fixtures() {
 #[ignore = "regenerates the web /origin and /performance fixtures"]
 fn write_origin_fixtures() {
     const TTLS: [f64; 9] = [0.0, 30.0, 59.5, 60.0, 300.0, 3600.0, 7200.0, 86_400.0, 1e6];
-    const OIPS: [&str; 6] = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "192.0.2.7", "-", "2001:db8::1"];
+    const OIPS: [&str; 6] = [
+        "10.0.0.1",
+        "10.0.0.2",
+        "10.0.0.3",
+        "192.0.2.7",
+        "-",
+        "2001:db8::1",
+    ];
     let rows: Vec<Value> = (0..1600i64)
         .map(|i| {
             let ms = BASE * 1000 + (i * 4_513) % (2 * 3600 * 1000);
