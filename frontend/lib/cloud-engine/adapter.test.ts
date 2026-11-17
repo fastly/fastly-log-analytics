@@ -18,6 +18,7 @@ import { networkFromRollup } from "./network-rollup";
 import { originFromRollup } from "./origin-rollup";
 import { performanceFromRollup } from "./performance-rollup";
 import { insightsBaselineFromRollup } from "./insights-rollup";
+import { securityFromRollup } from "./security-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
 
 vi.mock("./range-loader", async (importOriginal) => ({
@@ -38,6 +39,11 @@ vi.mock("./origin-rollup", async (importOriginal) => ({
 vi.mock("./performance-rollup", async (importOriginal) => ({
   ...await importOriginal<typeof import("./performance-rollup")>(),
   performanceFromRollup: vi.fn(async () => null),
+}));
+
+vi.mock("./security-rollup", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./security-rollup")>(),
+  securityFromRollup: vi.fn(async () => null),
 }));
 
 vi.mock("./insights-rollup", async (importOriginal) => ({
@@ -539,6 +545,33 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(vi.mocked(performanceFromRollup).mock.calls[0][1])
       .toMatchObject({ start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z" });
     expect(ensureCloudRange).not.toHaveBeenCalled();
+  });
+
+  it("answers unfiltered /security summary sections before any raw scan, and scans raw for the rest", async () => {
+    const post = (path: string, body: Record<string, unknown>) => handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify(body),
+    }));
+    const range = { start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z" };
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(securityFromRollup).mockClear().mockResolvedValue({ served: "security" } as never);
+    for (const path of ["/api/security/aggregates", "/api/security/bundle"]) {
+      const res = await post(path, { sections: ["tls_fingerprints", "ipv6_adoption"], filters: {}, ...range });
+      expect(await res!.json()).toEqual({ served: "security" });
+    }
+    const [path, params, source] = vi.mocked(securityFromRollup).mock.calls[0];
+    expect(path).toBe("/api/security/aggregates");
+    expect(params).toMatchObject({ sections: ["tls_fingerprints", "ipv6_adoption"], service_id: "svc-1", ...range });
+    expect(source.cacheScope).toContain("svc-1");
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(securityFromRollup).mockClear().mockResolvedValue(null);
+    await post("/api/security/aggregates", { sections: ["wellknown_bots", "proxies"], ...range });
+    await post("/api/security/aggregates", { sections: ["proxy_dist"], filters: { pop: { mode: "include", values: ["IAD"] } }, ...range });
+    expect(securityFromRollup).not.toHaveBeenCalled();
+    expect(ensureCloudRange).toHaveBeenCalledTimes(2);
+    vi.mocked(securityFromRollup).mockReset().mockResolvedValue(null);
   });
 
   it("falls back to the raw /origin and /performance scans when summaries can't answer or fail, but not when aborted", async () => {

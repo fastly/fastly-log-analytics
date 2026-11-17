@@ -17,6 +17,8 @@ import { networkFromRollup } from "./network-rollup";
 import { originFromRollup } from "./origin-rollup";
 import { performanceFromRollup } from "./performance-rollup";
 import { answerFromRollup } from "./rollup-answer";
+import { SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
+import { securityFromRollup } from "./security-rollup";
 
 vi.mock("./dashboard/sources", async (importOriginal) => ({
   ...await importOriginal<typeof import("./dashboard/sources")>(),
@@ -33,6 +35,7 @@ const health = { ...range, sections: ["summary", "leaderboard", "metro_leaderboa
 const origin = { ...range, bucket_minutes: 60, timeseries_metric: "ttlb", timeseries_percentile: "p95",
   ip_health_limit: 30, sections: ["ip_health", "timeseries"] };
 const performance = { ...range, sections: ["ttl_dist", "waterfall"] };
+const security = { ...range, bucket_seconds: 3600, sections: [...SECURITY_ROLLUP_SECTIONS] };
 const insights = { service_id: "example", window_size_hrs: 1, baseline_hours: 1, clamp_end: range.end_time };
 
 const source = (
@@ -53,6 +56,7 @@ describe("answerFromRollup", () => {
     ["/api/network/bundle", { ...health, sections: ["summary", "pop_health"] }, source, networkFromRollup],
     ["/api/origin/aggregates", origin, originSource, originFromRollup],
     ["/api/performance/aggregates", performance, source, performanceFromRollup],
+    ["/api/security/aggregates", security, source, securityFromRollup],
   ] as const)("answers %s as the section reader does, unchanged by structured cloning", async (path, params, make, direct) => {
     const answer = await answerFromRollup(path, params, make());
     expect(answer).not.toBeNull();

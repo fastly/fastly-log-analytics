@@ -1,4 +1,4 @@
-// Which /origin and /performance sections Cloud summaries can answer. Kept free of
+// Which /origin, /performance and /security sections Cloud summaries can answer. Kept free of
 // engine imports so page components can split their requests without loading them.
 
 /** Whether a filter body narrows anything; empty filter objects and value lists don't. */
@@ -36,3 +36,20 @@ export function originRollupSections(options: {
 
 /** The /performance sections summaries can answer exactly: the TTL histogram and the waterfall averages. */
 export const PERFORMANCE_ROLLUP_SECTIONS = ["ttl_dist", "waterfall"] as const;
+
+/**
+ * The /security sections summaries can answer: the constant NGWAF rows, TLS
+ * fingerprints and their coverage, the header-size, connection-reuse and proxy
+ * distributions, hourly IPv6 share and the verified-bot series.
+ */
+export const SECURITY_ROLLUP_SECTIONS = [
+  "ngwaf_verified_bots",
+  "ngwaf_verified_bots_ts",
+  "tls_fingerprints",
+  "fingerprint_coverage",
+  "req_size_dist",
+  "ipv6_adoption",
+  "proxy_dist",
+  "conn_reuse_dist",
+  "verified_bots_ts",
+] as const;

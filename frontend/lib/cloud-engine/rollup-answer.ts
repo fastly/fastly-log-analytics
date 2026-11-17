@@ -5,6 +5,7 @@ import type { NetworkQueryParams } from "./network";
 import { networkFromRollup } from "./network-rollup";
 import { originFromRollup, type OriginRollupBody } from "./origin-rollup";
 import { performanceFromRollup, type PerformanceRollupBody } from "./performance-rollup";
+import { securityFromRollup, type SecurityRollupBody } from "./security-rollup";
 
 export type RollupAnswerSource = Parameters<typeof networkFromRollup>[2];
 
@@ -20,6 +21,9 @@ const network: Answer = (path, params, source, signal) =>
 const performance: Answer = (path, params, source, signal) =>
   performanceFromRollup(path, params as PerformanceRollupBody, source, signal);
 
+const security: Answer = (path, params, source, signal) =>
+  securityFromRollup(path, params as SecurityRollupBody, source, signal);
+
 const ANSWERS: Record<string, Answer> = {
   "/api/network-health": network,
   "/api/network/pop-health": network,
@@ -28,6 +32,8 @@ const ANSWERS: Record<string, Answer> = {
     originFromRollup(path, params as OriginRollupBody, source, signal),
   "/api/performance": performance,
   "/api/performance/aggregates": performance,
+  "/api/security/aggregates": security,
+  "/api/security/bundle": security,
   // The adapter passes only unfiltered baselines; the window is read raw on the page.
   "/api/insights": async (_path, body, source, signal): Promise<RollupResult | null> => {
     const result = await insightsBaselineFromRollup(body as InsightsRequest, [], source, signal);
@@ -37,7 +43,7 @@ const ANSWERS: Record<string, Answer> = {
 
 /**
  * Answers one Cloud read from v3 summaries, or null when the raw scan must: the
- * response body for /network, /origin and /performance, or the /insights
+ * response body for /network, /origin, /performance and /security, or the /insights
  * baseline cut by `insightsBaselineRollup`. Every answer is plain data that
  * structured cloning keeps unchanged, so the dashboard engine worker runs this
  * off the page's main thread and the page falls back to it in-thread.

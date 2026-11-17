@@ -31,6 +31,7 @@ import { handleOriginRequest, originScanColumns } from "./origin";
 import { originRollupEligible } from "./origin-rollup";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { performanceRollupEligible } from "./performance-rollup";
+import { securityRollupEligible } from "./security-rollup";
 import {
   executeCloudQuery,
   getQueryPresets,
@@ -431,11 +432,13 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/origin/aggregates": { label: "/origin", eligible: originRollupEligible },
   "/api/performance": { label: "/performance", eligible: performanceRollupEligible },
   "/api/performance/aggregates": { label: "/performance", eligible: performanceRollupEligible },
+  "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible },
+  "/api/security/bundle": { label: "/security", eligible: securityRollupEligible },
 };
 
 /**
- * Serves the summary-backed sections of an unfiltered /origin or /performance
- * read like `cloudNetworkRollup`: over the raw scan's range and service, with
+ * Serves the summary-backed sections of an unfiltered /origin, /performance or
+ * /security read like `cloudNetworkRollup`: over the raw scan's range and service, with
  * null (or a summary failure) leaving the read to the raw scan.
  */
 async function cloudSectionRollup(request: Request, path: string, route: SectionRollup): Promise<Response | null> {
