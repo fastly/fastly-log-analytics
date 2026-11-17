@@ -29,6 +29,10 @@ const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
 const SECRET_PROPAGATION: &str = "secret_propagation";
 const SECRET_PROPAGATION_DELAY: Duration = Duration::from_secs(10);
 const SECRET_PROPAGATION_ATTEMPTS: u8 = 24;
+// A KV REST API read can fail briefly; a few waits keep that from failing the whole job.
+const STATE_READ: &str = "state_read";
+const STATE_READ_DELAY: Duration = Duration::from_secs(5);
+const STATE_READ_ATTEMPTS: u8 = 6;
 
 pub fn request_timeout(ceiling: Duration, elapsed: Duration) -> Duration {
     STEP_WALL_BUDGET
@@ -215,33 +219,53 @@ impl<'a, R: Runtime> Context<'a, R> {
         *self.confirmation.borrow_mut() = Some(Confirmation::Token(token.into()));
     }
     pub fn set_retry(&self, retry: Option<RetryState>) {
-        // A propagation wait ends when its delay elapses; the next run reads the secret again.
-        *self.retry.borrow_mut() = retry.filter(|retry| retry.operation != SECRET_PROPAGATION);
+        // These waits end when their delay elapses; the next run reads again rather than replaying.
+        *self.retry.borrow_mut() = retry
+            .filter(|retry| retry.operation != SECRET_PROPAGATION && retry.operation != STATE_READ);
     }
-    pub fn secret_propagation_retry(&self) -> RetryState {
+    fn wait_retry(
+        &self,
+        operation: &str,
+        delay: Duration,
+        attempts: u8,
+        reason: &str,
+    ) -> RetryState {
         let attempt = self
             .retry_attempts
             .borrow()
-            .get(SECRET_PROPAGATION)
+            .get(operation)
             .copied()
             .unwrap_or(0)
             .saturating_add(1);
         self.retry_attempts
             .borrow_mut()
-            .insert(SECRET_PROPAGATION.into(), attempt);
+            .insert(operation.into(), attempt);
         RetryState {
-            operation: SECRET_PROPAGATION.into(),
+            operation: operation.into(),
             attempt,
-            at: if attempt >= SECRET_PROPAGATION_ATTEMPTS {
+            at: if attempt >= attempts {
                 0
             } else {
-                self.runtime.now() + SECRET_PROPAGATION_DELAY.as_secs()
+                self.runtime.now() + delay.as_secs()
             },
-            reason: "credentials_pending".into(),
+            reason: reason.into(),
         }
     }
-    pub fn settle_secret_propagation(&self) {
-        self.retry_attempts.borrow_mut().remove(SECRET_PROPAGATION);
+    pub fn secret_propagation_retry(&self) -> RetryState {
+        self.wait_retry(
+            SECRET_PROPAGATION,
+            SECRET_PROPAGATION_DELAY,
+            SECRET_PROPAGATION_ATTEMPTS,
+            "credentials_pending",
+        )
+    }
+    pub fn state_read_retry(&self, reason: &str) -> RetryState {
+        self.wait_retry(STATE_READ, STATE_READ_DELAY, STATE_READ_ATTEMPTS, reason)
+    }
+    pub fn settle_waits(&self) {
+        let mut attempts = self.retry_attempts.borrow_mut();
+        attempts.remove(SECRET_PROPAGATION);
+        attempts.remove(STATE_READ);
     }
     pub fn retry(&self) -> Option<RetryState> {
         self.retry.borrow().clone()

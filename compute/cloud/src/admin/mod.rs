@@ -1305,11 +1305,17 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
         })
         .and_then(|current| run_step(context, &mut job, current));
     if result.is_ok() {
-        context.settle_secret_propagation();
+        context.settle_waits();
     }
     if let Err(mut failure) = result {
-        if failure.code == "credentials_pending" && failure.retry.is_none() {
-            failure.retry = Some(context.secret_propagation_retry());
+        if failure.retry.is_none() {
+            failure.retry = match failure.code {
+                "credentials_pending" => Some(context.secret_propagation_retry()),
+                "state_unavailable" | "state_propagating" => {
+                    Some(context.state_read_retry(failure.code))
+                }
+                _ => None,
+            };
         }
         job.retry = failure.retry;
         if job.retry.as_ref().is_some_and(|retry| retry.at > 0) {

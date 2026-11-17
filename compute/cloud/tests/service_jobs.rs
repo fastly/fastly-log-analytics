@@ -122,6 +122,9 @@ struct Platform {
     enable_status_cache: AtomicBool,
     metadata_reads: Mutex<Vec<String>>,
     cron_during_extents: Mutex<Option<Value>>,
+    /// Requests whose first fresh lease read fails, as a transient KV REST API error would.
+    failing_lease_reads: Mutex<u32>,
+    lease_read_failed: AtomicBool,
 }
 struct LateRequest {
     method: String,
@@ -162,6 +165,8 @@ impl Platform {
             enable_status_cache: AtomicBool::new(false),
             metadata_reads: Default::default(),
             cron_during_extents: Default::default(),
+            failing_lease_reads: Default::default(),
+            lease_read_failed: AtomicBool::new(false),
             api_delays: Mutex::new(Vec::new()),
             api_timeouts: Mutex::new(Vec::new()),
             fos_delays: Mutex::new(Vec::new()),
@@ -177,6 +182,7 @@ impl Platform {
     fn call(&self, method: &str, path: &str, value: Value) -> Response {
         ELAPSED_MS.with(|elapsed| elapsed.set(0));
         CALLS.with(|calls| calls.set(7));
+        self.lease_read_failed.store(false, Ordering::SeqCst);
         SECRETS.with(|secrets| {
             *secrets.borrow_mut() = BTreeSet::from(["front_key".into(), "session_key".into()])
         });
@@ -393,6 +399,14 @@ impl Runtime for Platform {
     fn admin_get_fresh(&self, key: &str, _: &str) -> Result<Option<Record>, String> {
         charge()?;
         record_kv("read_api", key);
+        if key.starts_with("reconcile_lock:") && !self.lease_read_failed.load(Ordering::SeqCst) {
+            let mut failing = self.failing_lease_reads.lock().unwrap();
+            if *failing > 0 {
+                *failing -= 1;
+                self.lease_read_failed.store(true, Ordering::SeqCst);
+                return Err("admin_state_confirmation_rejected".into());
+            }
+        }
         self.adapter.confirm(key)
     }
     fn admin_cas(
@@ -1098,6 +1112,50 @@ fn lost_activation_response_is_recovered_without_a_second_activation() {
             .count(),
         1
     );
+}
+
+fn reconcile_job_at_activate(platform: &Platform) -> Value {
+    platform.drain(platform.provision()["job"].clone());
+    let service = platform.service();
+    let job = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"],"cmcd":{"enabled":true,"mode":"query_string","version":1}}),
+    )["job"]
+        .clone();
+    platform.until(job, "activate")
+}
+
+#[test]
+fn a_transient_state_read_failure_schedules_a_retry_instead_of_failing_the_job() {
+    let platform = Platform::new();
+    let job = reconcile_job_at_activate(&platform);
+    *platform.failing_lease_reads.lock().unwrap() = 1;
+    let step = format!("/api/admin/jobs/{}/step", job["id"].as_str().unwrap());
+    let waiting = platform.json("POST", &step, json!({}))["job"].clone();
+    assert_eq!(waiting["status"], "pending", "{waiting}");
+    assert_eq!(waiting["retry_reason"], "state_unavailable");
+    assert_eq!(platform.drain(waiting)["status"], "complete");
+}
+
+#[test]
+fn a_state_read_that_keeps_failing_still_fails_the_job() {
+    let platform = Platform::new();
+    let job = reconcile_job_at_activate(&platform);
+    *platform.failing_lease_reads.lock().unwrap() = u32::MAX;
+    let step = format!("/api/admin/jobs/{}/step", job["id"].as_str().unwrap());
+    let mut job = job;
+    for _ in 0..50 {
+        if job["status"] == "failed" {
+            break;
+        }
+        if let Some(at) = job["retry_at"].as_u64() {
+            platform.clock.fetch_max(at, Ordering::SeqCst);
+        }
+        job = platform.json("POST", &step, json!({}))["job"].clone();
+    }
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error"], "state_unavailable");
 }
 
 #[test]
