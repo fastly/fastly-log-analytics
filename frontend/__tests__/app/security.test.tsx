@@ -493,7 +493,13 @@ describe('SecurityClient, BotsSection, HeaderAnomaliesSection, NetworkSection & 
         )
         expect(screen.getByText(pending)).toBeInTheDocument()
         expect(screen.getByTitle(title)).toHaveTextContent('3')
-        if (cloud) expect(screen.queryByText(/Check back soon/)).not.toBeInTheDocument()
+        if (cloud) {
+          expect(screen.queryByText(/Check back soon/)).not.toBeInTheDocument()
+          expect(screen.queryByText(/verifies them using FCrDNS/)).not.toBeInTheDocument()
+          expect(screen.getByText(/well-known User-Agent patterns.*can't verify them/)).toBeInTheDocument()
+        } else {
+          expect(screen.getByText(/verifies them using FCrDNS and CIDR matches/)).toBeInTheDocument()
+        }
       } finally {
         setCloudModeRuntime(false)
       }

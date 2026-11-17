@@ -54,7 +54,7 @@ function InfoBullets({
   intro,
   items,
 }: {
-  intro: string
+  intro: React.ReactNode
   items: { icon: React.ReactNode; label: string; text: React.ReactNode }[]
 }) {
   return (
@@ -76,7 +76,7 @@ function InfoBullets({
 
 const makeInfo = (
   title: string,
-  intro: string,
+  intro: React.ReactNode,
   items: [React.ComponentType<{ className?: string }>, string, string, React.ReactNode][],
 ) => ({
   title,
@@ -101,10 +101,16 @@ function PendingVerificationText() {
     : 'The reverse DNS lookup is still pending in the background. Check back soon.'
 }
 
+function WellknownBotsIntro() {
+  return isCloudMode()
+    ? "Detects bot traffic based on a bundled database of well-known User-Agent patterns. Cloud can't verify them: the browser can't run reverse-DNS checks and the database has no bot IP ranges."
+    : 'Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches.'
+}
+
 export const SECURITY_INFO = {
   wellknown_bots: makeInfo(
     'Well-Known Bots',
-    'Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches.',
+    <WellknownBotsIntro />,
     [
       [
         CheckCircle2,
