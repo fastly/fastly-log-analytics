@@ -24,7 +24,9 @@ import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from 
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
 import { networkFromRollup, networkRollupEligible } from "./network-rollup";
 import { handleOriginRequest, originScanColumns } from "./origin";
+import { originFromRollup, originRollupEligible } from "./origin-rollup";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
+import { performanceFromRollup, performanceRollupEligible } from "./performance-rollup";
 import {
   executeCloudQuery,
   getQueryPresets,
@@ -403,6 +405,52 @@ async function cloudNetworkRollup(request: Request, path: string): Promise<Respo
   }
 }
 
+type SectionRollup = {
+  label: string;
+  eligible: (path: string, params: Record<string, unknown>) => boolean;
+  answer: (path: string, params: Record<string, unknown>, source: ReturnType<typeof cloudFileSource>,
+    signal: AbortSignal) => Promise<unknown>;
+};
+
+const SECTION_ROLLUPS: Record<string, SectionRollup> = {
+  "/api/origin/aggregates": { label: "/origin", eligible: originRollupEligible, answer: originFromRollup },
+  "/api/performance": { label: "/performance", eligible: performanceRollupEligible, answer: performanceFromRollup },
+  "/api/performance/aggregates": {
+    label: "/performance", eligible: performanceRollupEligible, answer: performanceFromRollup,
+  },
+};
+
+/**
+ * Serves the summary-backed sections of an unfiltered /origin or /performance
+ * read like `cloudNetworkRollup`: over the raw scan's range and service, with
+ * null (or a summary failure) leaving the read to the raw scan.
+ */
+async function cloudSectionRollup(request: Request, path: string, route: SectionRollup): Promise<Response | null> {
+  const url = new URL(request.url);
+  const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : {};
+  const params = { ...Object.fromEntries(url.searchParams), ...body };
+  if (!route.eligible(path, params)) return null;
+  let end = String(params.end_time ?? params.end ?? "");
+  if (!end) {
+    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    if (!response.ok) return null;
+    end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+  }
+  const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
+  const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
+  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  try {
+    const answer = await route.answer(path, {
+      ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
+    }, cloudFileSource(serviceId), request.signal);
+    return answer ? jsonResponse(answer, request) : null;
+  } catch (error) {
+    if (request.signal.aborted) throw error;
+    console.warn(`flp: ${route.label} summaries failed; reading raw Parquet`, error);
+    return null;
+  }
+}
+
 async function prepareCloudScan(request: Request): Promise<Request> {
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
@@ -620,6 +668,11 @@ async function handleCloudRequest(
     }
     if (localScan && (path === "/api/network-health" || path === "/api/network/pop-health")) {
       const answer = await cloudNetworkRollup(request, path);
+      if (answer) return answer;
+    }
+    const sectionRollup = localScan ? SECTION_ROLLUPS[path] : undefined;
+    if (sectionRollup) {
+      const answer = await cloudSectionRollup(request, path, sectionRollup);
       if (answer) return answer;
     }
     if (localScan) {

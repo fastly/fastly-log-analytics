@@ -15,6 +15,8 @@ import { ASSETS_SCAN_COLUMNS } from "./assets";
 import { SESSIONS_SCAN_COLUMNS } from "./sessions";
 import { setCloudModeRuntime } from "./mode";
 import { networkFromRollup } from "./network-rollup";
+import { originFromRollup } from "./origin-rollup";
+import { performanceFromRollup } from "./performance-rollup";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -24,6 +26,16 @@ vi.mock("./range-loader", async (importOriginal) => ({
 vi.mock("./network-rollup", async (importOriginal) => ({
   ...await importOriginal<typeof import("./network-rollup")>(),
   networkFromRollup: vi.fn(async () => null),
+}));
+
+vi.mock("./origin-rollup", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./origin-rollup")>(),
+  originFromRollup: vi.fn(async () => null),
+}));
+
+vi.mock("./performance-rollup", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./performance-rollup")>(),
+  performanceFromRollup: vi.fn(async () => null),
 }));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
@@ -394,6 +406,68 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.mocked(networkFromRollup).mockClear();
     await health({ body: JSON.stringify({ sections: ["summary"], filter_pop: "IAD" }) });
     expect(networkFromRollup).not.toHaveBeenCalled();
+  });
+
+  it("answers unfiltered /origin and /performance sections from summaries before any raw scan, over the scan's range and service", async () => {
+    const post = (path: string, body: Record<string, unknown>) => handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify(body),
+    }));
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(originFromRollup).mockClear().mockResolvedValueOnce({ served: "origin" } as never);
+    const origin = await post("/api/origin/aggregates", { sections: ["ip_health"], filters: {} });
+    expect(await origin!.json()).toEqual({ served: "origin" });
+    const [path, params, source] = vi.mocked(originFromRollup).mock.calls[0];
+    expect(path).toBe("/api/origin/aggregates");
+    expect(params).toMatchObject({
+      sections: ["ip_health"], service_id: "svc-1",
+      start_time: "2026-11-05T00:00:00.000Z", end_time: "2026-11-06T00:00:00Z",
+    });
+    expect(source.cacheScope).toContain("svc-1");
+
+    vi.mocked(performanceFromRollup).mockClear().mockResolvedValueOnce({ served: "performance" } as never);
+    const perf = await post("/api/performance/aggregates", {
+      sections: ["waterfall"], start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z",
+    });
+    expect(await perf!.json()).toEqual({ served: "performance" });
+    expect(vi.mocked(performanceFromRollup).mock.calls[0][1])
+      .toMatchObject({ start_time: "2026-11-05T12:00:00Z", end_time: "2026-11-05T18:00:00Z" });
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the raw /origin and /performance scans when summaries can't answer or fail, but not when aborted", async () => {
+    const origin = (init: RequestInit = {}) => handleCloudAnalyticalRequest(new Request("http://localhost/api/origin/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sections: ["ip_health"] }), ...init,
+    }));
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(originFromRollup).mockClear().mockResolvedValueOnce(null);
+    expect((await origin())!.status).toBe(200);
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(performanceFromRollup).mockClear().mockRejectedValueOnce(new Error("truncated bundle"));
+    const perf = await handleCloudAnalyticalRequest(new Request("http://localhost/api/performance/aggregates", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sections: ["ttl_dist"] }),
+    }));
+    expect(perf!.status).toBe(200);
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("reading raw Parquet"), expect.any(Error));
+
+    const controller = new AbortController();
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(originFromRollup).mockClear().mockImplementationOnce(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    await expect(origin({ signal: controller.signal })).rejects.toBeDefined();
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(originFromRollup).mockClear();
+    await origin({ body: JSON.stringify({ sections: ["ip_health"], filters: { pop: { mode: "include", values: ["IAD"] } } }) });
+    expect(originFromRollup).not.toHaveBeenCalled();
   });
 
   it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
