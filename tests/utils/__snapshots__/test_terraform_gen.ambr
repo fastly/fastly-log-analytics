@@ -491,10 +491,10 @@
       Configuration is emitted as Terraform's JSON syntax (`.tf.json`). All Terraform commands (`init`, `fmt`, `validate`, `plan`, `apply`) accept it interchangeably with HCL.
       
       ## Files
-      - `versions.tf.json`: Terraform CLI floor + pinned major versions for the `aws` and `fastly` providers.
+      - `versions.tf.json`: Terraform CLI floor + pinned versions for the `aws` and `fastly` providers (`fastly` 10.3 or later in 10.x, the first release with `logging_fos`).
       - `fos.tf.json`: The Fastly Object Storage bucket resource (created via the AWS S3-compatible provider).
       - `cdn_proxy.tf.json`: A NEW Fastly Delivery service that fronts the FOS bucket for fast dashboard access.
-      - `logging_service.tf.json`: The logging endpoint and capture snippets for your existing service.
+      - `logging_service.tf.json`: The logging endpoint and capture snippets for your existing service. The endpoint is a native Fastly Object Storage endpoint (`logging_fos`): Fastly creates an access key limited to the bucket for it, so no keys are written here. A service that already logs through the S3-compatible endpoint keeps it as `logging_s3`, signed with your FOS access key.
       - `cdn_proxy.vcl`: The main VCL for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
       - `log_format.vcl`: The JSON log format string (loaded by `logging_service.tf.json`).
       - `cdn_snippets/`: VCL snippets for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
@@ -519,7 +519,7 @@
       ## Instructions
       1. Review `fos.tf.json` and ensure the `aws` provider above is correctly configured.
       2. `cdn_proxy.tf.json` creates a NEW Fastly service to accelerate your log reads.
-      3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_s3`, `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `SU3xxxxxxxxxxxxxx0000`.
+      3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_fos` (or `logging_s3`), `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `SU3xxxxxxxxxxxxxx0000`. Applying a `logging_fos` block needs a Fastly token with the Engineer role and access to all services, or Superuser.
       4. Run `terraform init` and `terraform apply` to deploy the changes.
   
     ''',
@@ -541,21 +541,18 @@
                   "name": "example.com"
                 }
               ],
-              "logging_s3": [
+              "logging_fos": [
                 {
                   "bucket_name": "${aws_s3_bucket.fos_bucket.bucket}",
                   "compression_codec": "zstd",
-                  "domain": "us-east-1.object.fastlystorage.app",
                   "format": "${file(\"${path.module}/log_format.vcl\")}",
                   "format_version": 2,
                   "message_type": "blank",
                   "name": "Fastly Log Analytics",
                   "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
                   "period": 60,
-                  "response_condition": "Log Sampling - fastly_log_analysis",
-                  "s3_access_key": "AKIATESTSTABLE",
-                  "s3_secret_key": "test-secret-stable",
-                  "timestamp_format": "%Y-%m-%dT%H:%M:%S.000"
+                  "region": "us-east-1",
+                  "response_condition": "Log Sampling - fastly_log_analysis"
                 }
               ],
               "name": "Logging Service",
@@ -601,7 +598,7 @@
             },
             "fastly": {
               "source": "fastly/fastly",
-              "version": "~> 5.0"
+              "version": "~> 10.3"
             }
           },
           "required_version": ">= 1.6"

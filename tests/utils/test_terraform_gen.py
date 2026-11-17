@@ -124,8 +124,9 @@ def test_versions_tf_pins_fastly_and_aws_providers_by_major():
     assert providers["aws"]["version"] == "~> 5.0", (
         f"expected '~> 5.0' on aws to gate major bumps; got {providers['aws']['version']!r}"
     )
-    assert providers["fastly"]["version"] == "~> 5.0", (
-        f"expected '~> 5.0' on fastly to gate major bumps; got {providers['fastly']['version']!r}"
+    # logging_fos first shipped in fastly/fastly 10.3.0.
+    assert providers["fastly"]["version"] == "~> 10.3", (
+        f"expected '~> 10.3' on fastly for logging_fos; got {providers['fastly']['version']!r}"
     )
     assert set(providers.keys()) == {"aws", "fastly"}
 
@@ -240,6 +241,45 @@ def test_output_differs_when_cfg_differs():
     assert out1["fos.tf.json"] != out2["fos.tf.json"]
     parsed = json.loads(out2["fos.tf.json"])
     assert parsed["resource"]["aws_s3_bucket"]["fos_bucket"]["bucket"] == "different-bucket"
+
+
+def _logging_service_block(out: dict[str, str]) -> dict:
+    return json.loads(out["logging_service.tf.json"])["resource"]["fastly_service_vcl"]["logging_service"]
+
+
+def test_new_install_exports_native_fos_endpoint_without_keys():
+    out = generate_terraform(_baseline_cfg(), "AKIA_EXPORT_KEY", "export-secret-value")
+    block = _logging_service_block(out)
+    assert "logging_s3" not in block
+    [endpoint] = block["logging_fos"]
+    assert endpoint["bucket_name"] == "${aws_s3_bucket.fos_bucket.bucket}"
+    assert endpoint["region"] == "us-east-1"
+    assert endpoint["path"].endswith("/") and endpoint["compression_codec"] == "zstd"
+    assert "AKIA_EXPORT_KEY" not in out["logging_service.tf.json"]
+    assert "export-secret-value" not in out["logging_service.tf.json"]
+    assert "logging_fos" in out["instructions"]
+
+
+def test_legacy_s3_endpoint_stays_s3_in_export(monkeypatch):
+    from backend.provision.declarative.models import LoggingEndpoint
+    from backend.utils import terraform_gen
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        terraform_gen,
+        "_fetch_logging_endpoints",
+        lambda sid, tok: (
+            seen.append((sid, tok))
+            or [LoggingEndpoint("Fastly Log Analytics", "s3", "/raw/", 60, "c", "%h", "none", "")]
+        ),
+    )
+    cfg = {**_baseline_cfg(), "token": "tok", "rum_enabled": True}
+    block = _logging_service_block(generate_terraform(cfg, "AKIA_EXPORT_KEY", "export-secret-value"))
+    assert seen == [("SU3xxxxxxxxxxxxxx0000", "tok")]
+    [legacy] = block["logging_s3"]
+    assert legacy["name"] == "Fastly Log Analytics"
+    assert legacy["s3_access_key"] == "AKIA_EXPORT_KEY"
+    assert [e["name"] for e in block["logging_fos"]] == ["Fastly RUM Logs"]
 
 
 # ── Custom field round trip ──────────────────────────────────────────────────
