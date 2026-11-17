@@ -23,6 +23,8 @@ import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from 
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, type NetworkQueryParams } from "./network";
 import { networkFromRollup, networkRollupEligible } from "./network-rollup";
+import { insightsBaselineFromRollup } from "./insights-rollup";
+import type { RollupResult } from "./dashboard/rollup-query";
 import { handleOriginRequest, originScanColumns } from "./origin";
 import { originFromRollup, originRollupEligible } from "./origin-rollup";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
@@ -353,10 +355,10 @@ const INSIGHT_BASELINE_LADDER_HOURS = [720, 168, 24, 1];
  * was applied. Speculative prefetches keep failing fast within their own budget.
  */
 async function prepareInsightsScan(request: Request): Promise<Request> {
-  if (request.method !== "POST" || new URL(request.url).pathname !== "/api/insights" ||
-      request.headers.get("x-flp-cloud-prefetch") === "1") {
-    return prepareCloudScan(request);
-  }
+  if (request.method !== "POST" || new URL(request.url).pathname !== "/api/insights") return prepareCloudScan(request);
+  const baseline = await cloudInsightsBaseline(request);
+  if (baseline) return prepareCloudScan(request, baseline);
+  if (request.headers.get("x-flp-cloud-prefetch") === "1") return prepareCloudScan(request);
   let current = request;
   for (;;) {
     try {
@@ -451,7 +453,37 @@ async function cloudSectionRollup(request: Request, path: string, route: Section
   }
 }
 
-async function prepareCloudScan(request: Request): Promise<Request> {
+/** /insights baselines served from v3 summaries, by the prepared request. */
+const insightBaselines = new WeakMap<Request, RollupResult>();
+
+/**
+ * Merges the v3 summaries for an /insights baseline over the range the raw
+ * scan would use, so only the window needs raw Parquet. Null (or a summary
+ * failure) leaves the baseline to the raw scan.
+ */
+async function cloudInsightsBaseline(request: Request): Promise<RollupResult | null> {
+  const body = await request.clone().json() as Record<string, unknown>;
+  const filters = parseFiltersPayload(body.filters as Parameters<typeof parseFiltersPayload>[0], undefined);
+  if (filters.length) return null;
+  let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
+  if (!end) {
+    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    if (!response.ok) return null;
+    end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+  }
+  const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
+  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  try {
+    return await insightsBaselineFromRollup({ ...body, clamp_end: end } as InsightsRequest, filters,
+      cloudFileSource(serviceId), request.signal);
+  } catch (error) {
+    if (request.signal.aborted) throw error;
+    console.warn("flp: /insights baseline summaries failed; reading raw Parquet", error);
+    return null;
+  }
+}
+
+async function prepareCloudScan(request: Request, insightBaseline?: RollupResult): Promise<Request> {
   const engine = getDuckDBEngine();
   const generation = await engine.beginRequest();
   generation.assertCurrent();
@@ -475,7 +507,7 @@ async function prepareCloudScan(request: Request): Promise<Request> {
   }
   const scoring = /\/scoring\//.test(url.pathname);
   const historyHours = url.pathname.startsWith("/api/insights")
-    ? Number(params.window_size_hrs ?? 24) + Number(params.baseline_hours ?? 168)
+    ? Number(params.window_size_hrs ?? 24) + (insightBaseline ? 0 : Number(params.baseline_hours ?? 168))
     : scoring ? Number(params.since_hours ?? (url.pathname.includes("/sessions/") ? Number(params.since_days ?? 30) * 24 : 24)) : 24;
   const start = String(params.start_time ?? params.start ?? token?.s ??
     new Date(Date.parse(end) - historyHours * 3_600_000).toISOString());
@@ -533,11 +565,13 @@ async function prepareCloudScan(request: Request): Promise<Request> {
     generation.assertCurrent();
     request.signal.throwIfAborted();
     if (request.method === "POST") {
-      return bindCloudReadContext(new Request(request, { body: JSON.stringify({ ...params,
+      const prepared = bindCloudReadContext(new Request(request, { body: JSON.stringify({ ...params,
         start_time: params.start_time ?? start, end_time: params.end_time ?? end,
         ...(serviceId ? { service_id: decodeURIComponent(String(serviceId)) } : {}),
         ...(url.pathname.startsWith("/api/insights") ? { clamp_end: end } : {}),
       }) }), read);
+      if (insightBaseline) insightBaselines.set(prepared, insightBaseline);
+      return prepared;
     }
     if (!url.searchParams.has("start_time")) url.searchParams.set("start_time", start);
     if (!url.searchParams.has("end_time")) url.searchParams.set("end_time", end);
@@ -1842,6 +1876,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       maskIps,
       filters: parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined),
       engine: read,
+      baseline: insightBaselines.get(request),
     });
     return jsonResponse(data, request);
   }

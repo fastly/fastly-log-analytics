@@ -17,6 +17,8 @@ import { setCloudModeRuntime } from "./mode";
 import { networkFromRollup } from "./network-rollup";
 import { originFromRollup } from "./origin-rollup";
 import { performanceFromRollup } from "./performance-rollup";
+import { insightsBaselineFromRollup } from "./insights-rollup";
+import { mergeRollups } from "./dashboard/rollup-query";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -36,6 +38,11 @@ vi.mock("./origin-rollup", async (importOriginal) => ({
 vi.mock("./performance-rollup", async (importOriginal) => ({
   ...await importOriginal<typeof import("./performance-rollup")>(),
   performanceFromRollup: vi.fn(async () => null),
+}));
+
+vi.mock("./insights-rollup", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./insights-rollup")>(),
+  insightsBaselineFromRollup: vi.fn(async () => null),
 }));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
@@ -468,6 +475,71 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.mocked(originFromRollup).mockClear();
     await origin({ body: JSON.stringify({ sections: ["ip_health"], filters: { pop: { mode: "include", values: ["IAD"] } } }) });
     expect(originFromRollup).not.toHaveBeenCalled();
+  });
+
+  it("reads only the Insights window raw when summaries answer its unfiltered baseline", async () => {
+    const hour = 3_600_000;
+    const end = Date.parse("2026-11-06T00:00:00Z");
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const insights = async (headers: Record<string, string> = {}) => {
+      vi.mocked(ensureCloudRange).mockClear();
+      vi.mocked(insightsBaselineFromRollup).mockClear().mockResolvedValueOnce({
+        rollup: mergeRollups([]), dataFromMs: end - 192 * hour, dataThroughMs: end - 25 * hour,
+      });
+      const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+        method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1", ...headers },
+        body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {} }),
+      }));
+      expect(res?.status).toBe(200);
+      return { json: await res!.json() as { rollup?: unknown }, range: vi.mocked(ensureCloudRange).mock.calls };
+    };
+
+    const served = await insights();
+    expect(served.json.rollup).toMatchObject({ data_from: iso(end - 192 * hour), data_through: iso(end - 25 * hour) });
+    expect(served.range).toHaveLength(1);
+    expect(served.range[0].slice(0, 2)).toEqual([iso(end - 24 * hour), "2026-11-06T00:00:00Z"]);
+    const [body, filters, source] = vi.mocked(insightsBaselineFromRollup).mock.calls[0];
+    expect(body).toMatchObject({ window_size_hrs: 24, baseline_hours: 168, clamp_end: "2026-11-06T00:00:00Z" });
+    expect(filters).toEqual([]);
+    expect(source.cacheScope).toContain("svc-1");
+
+    const prefetch = await insights({ "x-flp-cloud-prefetch": "1" });
+    expect(prefetch.range[0][0]).toBe(iso(end - 24 * hour));
+    expect(prefetch.range[0][4]?.projection?.maxBytes).toBeGreaterThan(0);
+  });
+
+  it("falls back to the raw Insights baseline when summaries can't answer or fail, but not when aborted", async () => {
+    const insights = (init: RequestInit = {}) => handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {} }), ...init,
+    }));
+    const rawStart = new Date(Date.parse("2026-11-06T00:00:00Z") - 192 * 3_600_000).toISOString();
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockResolvedValueOnce(null);
+    const unserved = await insights();
+    expect(await unserved!.json()).not.toHaveProperty("rollup");
+    expect(vi.mocked(ensureCloudRange).mock.calls.map(([start]) => start)).toEqual([rawStart]);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockRejectedValueOnce(new Error("truncated bundle"));
+    expect((await insights())!.status).toBe(200);
+    expect(vi.mocked(ensureCloudRange).mock.calls.map(([start]) => start)).toEqual([rawStart]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("reading raw Parquet"), expect.any(Error));
+
+    const controller = new AbortController();
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear().mockImplementationOnce(async () => {
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    await expect(insights({ signal: controller.signal })).rejects.toBeDefined();
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+
+    vi.mocked(insightsBaselineFromRollup).mockClear();
+    await insights({ body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168,
+      filters: { country: { mode: "include", values: ["US"] } } }) });
+    expect(vi.mocked(insightsBaselineFromRollup).mock.calls[0]?.[1]).not.toEqual([]);
   });
 
   it("loads /origin, /fastly-value, /assets-shield and /performance scans as their routes' column projections", async () => {
