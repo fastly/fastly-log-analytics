@@ -1675,7 +1675,6 @@ pub const ANALYTICS_SITE_ROUTES: &[&str] = &[
     "/admin/usage-log",
     "/admin/rum",
     "/admin/session-scoring",
-    "/admin/tick",
     "/logs",
     "/provision",
     "/log-fields",
@@ -1694,7 +1693,6 @@ pub fn is_admin_page_path(path: &str) -> bool {
             | "/admin/usage-log"
             | "/admin/rum"
             | "/admin/session-scoring"
-            | "/admin/tick"
             | "/provision"
             | "/log-fields"
             | "/services"
@@ -2822,13 +2820,6 @@ mod tests {
                     br: None,
                 },
                 Asset {
-                    path: "/admin/tick.html",
-                    content_type: "text/html; charset=utf-8",
-                    identity: Some(b"tick"),
-                    gzip: None,
-                    br: None,
-                },
-                Asset {
                     path: "/logs.html",
                     content_type: "text/html; charset=utf-8",
                     identity: Some(b"logs"),
@@ -2841,7 +2832,6 @@ mod tests {
                 "/admin",
                 "/admin.html",
                 "/admin.txt",
-                "/admin/tick",
                 "/logs",
                 "/logs?tab=cron",
                 "/api/admin/users",

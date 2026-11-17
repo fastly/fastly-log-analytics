@@ -598,7 +598,6 @@ fn admin_pages_redirect_anonymous_and_reject_analysts() {
         "/admin/usage-log",
         "/admin/rum",
         "/admin/session-scoring",
-        "/admin/tick",
         "/logs",
     ] {
         for path in [
@@ -648,6 +647,22 @@ fn analytics_site_routes_allowlist_covers_all_exported_pages() {
             ANALYTICS_SITE_ROUTES.contains(&route),
             "expected {route} in ANALYTICS_SITE_ROUTES"
         );
+    }
+}
+
+#[test]
+fn routes_without_an_exported_page_are_not_site_or_admin_pages() {
+    for route in ["/admin/tick"] {
+        assert!(
+            !ANALYTICS_SITE_ROUTES.contains(&route),
+            "{route} has no page but is in ANALYTICS_SITE_ROUTES"
+        );
+        for path in [route.to_string(), format!("{route}.html")] {
+            assert!(
+                !fastly_log_analytics::shell::is_admin_page_path(&path),
+                "{path} has no page but is an admin page path"
+            );
+        }
     }
 }
 
@@ -1362,13 +1377,6 @@ fn admin_pages_accept_head_requests_and_enforce_session_gate() {
             br: None,
         },
         Asset {
-            path: "/admin/tick.html",
-            content_type: "text/html; charset=utf-8",
-            identity: Some(b"tick"),
-            gzip: None,
-            br: None,
-        },
-        Asset {
             path: "/logs.html",
             content_type: "text/html; charset=utf-8",
             identity: Some(b"logs"),
@@ -1377,7 +1385,7 @@ fn admin_pages_accept_head_requests_and_enforce_session_gate() {
         },
     ];
     let shell = Shell::new(&h.platform, &h.store, &assets);
-    for path in ["/admin", "/admin/tick", "/logs", "/logs?tab=cron"] {
+    for path in ["/admin", "/logs", "/logs?tab=cron"] {
         let admin_res = shell.handle(&Request {
             method: "HEAD".into(),
             path: path.into(),

@@ -132,7 +132,7 @@ Native tests only; none is live evidence.
 
 ## TODOs
 
-- **Capacity (native simulation):** at 52 raw files per 60 s period with 1 s ticks, ingest, raw delete, every maintenance stage and the flush keep up, with every execution within 32 calls and 64 Core Cache operations, and raw objects consumed about 120 s after their period closes. Live confirmation is pending.
+- **Capacity (native simulation):** at 52 raw files per 60 s period with 1 s ticks, ingest, raw delete, every maintenance stage and the flush keep up, with every execution within 32 calls and 64 Core Cache operations, and raw objects consumed on the first tick after their period closes (`INGEST_GRACE_S` is 0; the ignored `tests/ingest.rs` soak measured an ingest latency of 1 s, maximum and mean). Live confirmation is pending.
 - **Code, spec and plan disagreements**
   - `grace_s` and `run_interval_s` are required at setup but never read (see Cadence above).
 
@@ -146,7 +146,7 @@ Native tests only; none is live evidence.
 
 **Wanted — not yet in a plan task (Drew 2026-10-30)**
 - KV operation, Core Cache replace and purge counters per tick are now built: every `cron_runs` row carries `kv_ops`, `cache_replaces` and `purges` (`StageRow::json`, `admin/mod.rs:1983-2010`). The `/usage` loader still returns `counters: {kv_ops: null, cache_replaces: null, purges: null}` (`frontend/lib/cloud-engine/usage/summary.ts:1284`), so `/usage` sums the logged values instead (`1033-1037`).
-- The other wanted items, log accounting/gap-heal and full_sync, are listed in [request-ingest.md](request-ingest.md). (The FLP `/admin/tick` per-tick budget and stage-health page was not carried into the shared frontend: the Cloud shell still treats `/admin/tick` as an admin path (`ANALYTICS_SITE_ROUTES` and its admin-path match in `shell.rs`), but `frontend/app/admin/` has no `tick` page. Clock health is the "Ingestion clock" system check on `/admin` and the Cron Runs tab on `/logs`. Quarantine inspection and purge is the `QuarantineSection` on `/admin`, `frontend/app/admin/page.tsx:45`.)
+- The other wanted items, log accounting/gap-heal and full_sync, are listed in [request-ingest.md](request-ingest.md). (The FLP `/admin/tick` per-tick budget and stage-health page was not carried into the shared frontend: `frontend/app/admin/` has no `tick` page, and the Cloud shell does not list `/admin/tick` in `ANALYTICS_SITE_ROUTES` or its admin-path match (`shell.rs`), so the path gets the 404 page. Clock health is the "Ingestion clock" system check on `/admin` and the Cron Runs tab on `/logs`. Quarantine inspection and purge is the `QuarantineSection` on `/admin`, `frontend/app/admin/page.tsx:45`.)
 
 **v3 parity**
 - Cadence: ingest follows v3's `sync_interval = max(5, log_period)` (`backend/provision/orchestrator.py:286`) on a 1 s clock; with `log_period` held to at least 60 s, the 5 s floor never applies. A separate configurable `run_interval_s` (from the FLP master plan's "Clock and pipeline settings") is not implemented: the Config Store key exists but is ignored.

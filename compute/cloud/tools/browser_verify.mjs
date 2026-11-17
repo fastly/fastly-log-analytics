@@ -25,7 +25,7 @@
  *     3. Benchmarks clean and filtered loads across fastly-log-analytics presets
  *        (1h, 3h, 6h, 12h, 24h; never 10m) and filter expressions (+field:value, -field:value).
  *     4. Sweeps all hosted pages and tabs (/dashboard, /logs + tabs, /admin,
- *        /admin/tick, /usage, /how-it-works, /cache, plus any active analytics routes
+ *        /usage, /how-it-works, /cache, plus any active analytics routes
  *        such as /origin, /security, /performance, etc. clean and filtered),
  *        recording load times, CLS/Web Vitals, API waterfalls, and asserting zero errors.
  *
@@ -2214,45 +2214,7 @@ export async function sweepPages(context, baseUrl, existingPage = null, queryTim
       };
     }
 
-    // 3. /admin/tick
-    {
-      let healthyText = "";
-      const res = await measureRouteWithTelemetry(
-        page,
-        `${baseUrl}/admin/tick`,
-        async (p) => {
-          await p
-            .getByRole("heading", { name: "Tick & Budget Health" })
-            .waitFor({ state: "visible", timeout: 30_000 });
-          await p
-            .getByRole("heading", {
-              name: /Stage Cadence, Budget Ceiling/i,
-            })
-            .waitFor({ state: "visible", timeout: 30_000 });
-          // Match only the summary line, not the "Error" column header or a badge.
-          const summaryLine = p
-            .getByText(
-              /^(\d+ Starved|\d+ Error|\d+ Catching up|All stages healthy)$/,
-            )
-            .first();
-          healthyText = await summaryLine
-            .waitFor({ state: "visible", timeout: 60_000 })
-            .then(() => summaryLine.textContent())
-            .catch(() => "");
-        },
-      );
-      pagesReport["/admin/tick"] = {
-        loadMs: res.loadMs,
-        uiHealth: res.uiHealth,
-        apiSummary: res.apiSummary,
-        summary: {
-          statusText: (healthyText || "").trim(),
-          starved: (healthyText || "").includes("Starved") ? "1" : "0",
-        },
-      };
-    }
-
-    // 4. /usage (clean and filtered with EXTENDED_PRESETS / FilterBar)
+    // 3. /usage (clean and filtered with EXTENDED_PRESETS / FilterBar)
     {
       const cleanUsage = await measureRouteWithTelemetry(
         page,
@@ -2285,7 +2247,7 @@ export async function sweepPages(context, baseUrl, existingPage = null, queryTim
       };
     }
 
-    // 5. /how-it-works
+    // 4. /how-it-works
     {
       const res = await measureRouteWithTelemetry(
         page,
@@ -2304,7 +2266,7 @@ export async function sweepPages(context, baseUrl, existingPage = null, queryTim
       };
     }
 
-    // 6. /cache
+    // 5. /cache
     {
       const res = await measureRouteWithTelemetry(
         page,
@@ -2329,7 +2291,7 @@ export async function sweepPages(context, baseUrl, existingPage = null, queryTim
       };
     }
 
-    // 7. Discover any additional deployed analytics pages from FILTER_BAR_ROUTE_PREFIXES
+    // 6. Discover any additional deployed analytics pages from FILTER_BAR_ROUTE_PREFIXES
     // (/origin, /security, /performance, /fastly-value, /network, /streaming, /rum, /sessions, /query)
     // via navigation links in the shell, and measure them both clean and filtered.
     const navHrefs = await page
@@ -2911,16 +2873,13 @@ export async function main(argv = process.argv) {
     const minRequestsMet =
       args.expectMinRequests <= 0 || observedTotal >= args.expectMinRequests;
     const waitRefetched = waitReloads.flatMap((r) => r.refetchedKeys);
-    const tickStarvedCount =
-      sweep.pages["/admin/tick"]?.summary?.starved ?? "0";
     const ok =
       minRequestsMet &&
       waitRefetched.length === 0 &&
       (incremental === null || incremental.ok) &&
       allConsoleErrors.length === 0 &&
       allPageErrors.length === 0 &&
-      allHttpErrors.length === 0 &&
-      tickStarvedCount === "0";
+      allHttpErrors.length === 0;
 
     const pagesCombined = {
       "/dashboard (cold)": {
