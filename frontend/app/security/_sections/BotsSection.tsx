@@ -3,7 +3,7 @@
 import React from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { QueryClientContext } from '@tanstack/react-query'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { queryKeys } from '@/lib/api'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
@@ -39,17 +39,17 @@ export type BotsSectionProps = {
   timezone: string
   commonTimeLayout: PlotlyLayout
   getFieldLabel: (id: string) => string
-  ngwafBotVisibility: VisibilityState
-  setNgwafBotVisibility: Dispatch<SetStateAction<VisibilityState>>
+  ngwafBotVisibility: ColumnVisibilityState
+  setNgwafBotVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onNgwafBotVisChange: (id: string, vis: boolean) => void
-  botVisibility: VisibilityState
-  setBotVisibility: Dispatch<SetStateAction<VisibilityState>>
+  botVisibility: ColumnVisibilityState
+  setBotVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onBotVisChange: (id: string, vis: boolean) => void
-  botEfficiencyVisibility?: VisibilityState
-  setBotEfficiencyVisibility?: Dispatch<SetStateAction<VisibilityState>>
+  botEfficiencyVisibility?: ColumnVisibilityState
+  setBotEfficiencyVisibility?: Dispatch<SetStateAction<ColumnVisibilityState>>
   onBotEfficiencyVisChange?: (id: string, vis: boolean) => void
-  fingerprintVisibility: VisibilityState
-  setFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
+  fingerprintVisibility: ColumnVisibilityState
+  setFingerprintVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onFingerprintVisChange: (id: string, vis: boolean) => void
 }
 

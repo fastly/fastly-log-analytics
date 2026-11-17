@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState } from 'react'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { Activity, Monitor, ShieldAlert, Terminal } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { DataTable, DataTableReadonly } from '@/components/DataTable'

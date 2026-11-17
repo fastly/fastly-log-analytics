@@ -2,7 +2,8 @@
 
 import React from 'react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { CHART_COLORS, useTimeseriesToTraces, formatCount, formatCountMaybe } from '@/lib/utils'
 import { useServiceQuery } from '@/hooks/useDashboardCards'
@@ -277,8 +278,8 @@ export type HeaderAnomaliesProps = {
   isFetching: boolean
   error: Error | null
   getFieldLabel: (id: string) => string
-  topIpVisibility: VisibilityState
-  setTopIpVisibility: Dispatch<SetStateAction<VisibilityState>>
+  topIpVisibility: ColumnVisibilityState
+  setTopIpVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onTopIpVisChange: (id: string, vis: boolean) => void
 }
 

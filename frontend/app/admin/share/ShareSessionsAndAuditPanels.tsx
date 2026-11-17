@@ -2,7 +2,8 @@
 
 import * as React from "react"
 import { useQuery } from "@tanstack/react-query"
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
+import { flexRender, useTable } from "@tanstack/react-table"
+import { basicTableFeatures, type BasicColumnDef } from "@/lib/table"
 import { ArrowDown, ArrowUp, ArrowUpDown, Loader2, Lock } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -85,7 +86,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     defaultDir: 'desc',
   })
 
-  const columns = React.useMemo<ColumnDef<ShareSession>[]>(
+  const columns = React.useMemo<BasicColumnDef<ShareSession>[]>(
     () => [
       {
         id: 'analyst',
@@ -148,7 +149,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     [lockoutsByIp, failuresByIp, busy],
   )
 
-  const table = useReactTable({ data: sorted, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: sorted, columns })
 
   return (
     <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-sessions-panel">
@@ -285,7 +286,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     defaultDir: 'desc',
   })
 
-  const auditColumns = React.useMemo<ColumnDef<AuditLog>[]>(
+  const auditColumns = React.useMemo<BasicColumnDef<AuditLog>[]>(
     () => [
       { id: 'timestamp', cell: ({ row }) => formatDeterministicUTC(row.original.timestamp) },
       { id: 'event_type', cell: ({ row }) => <Badge variant="outline" className="text-[10px]">{row.original.event_type}</Badge> },
@@ -295,7 +296,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     ],
     [],
   )
-  const auditTable = useReactTable({ data: sorted, columns: auditColumns, getCoreRowModel: getCoreRowModel() })
+  const auditTable = useTable({ features: basicTableFeatures, data: sorted, columns: auditColumns })
 
   return (
     <div className="space-y-3" data-testid="admin-share-audit-panel">

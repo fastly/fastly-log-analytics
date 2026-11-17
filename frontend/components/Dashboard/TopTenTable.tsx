@@ -1,7 +1,8 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { DashboardTableData } from '@/types/api'
 import { useFilterStore } from '@/stores/filterStore'
 import { Copy, Check, EyeOff, TrendingUp, TrendingDown, Search, Loader2, X } from 'lucide-react'
@@ -216,7 +217,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   const maxCount = useMemo(() => (topItems.length > 0 ? Math.max(...topItems.map((i) => i.count)) : 1), [topItems])
   const compareMap = useMemo(() => new Map(compareData?.top?.map((i) => [i.value, i.count]) || []), [compareData?.top])
 
-  const columns = useMemo<ColumnDef<TopTenItem>[]>(
+  const columns = useMemo<BasicColumnDef<TopTenItem>[]>(
     () => [
       {
         id: 'row',
@@ -302,7 +303,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     ],
     [field, compareMap, maxCount, filterBlocked, onRowClick],
   )
-  const table = useReactTable({ data: topItems, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: topItems, columns })
 
   if (!data || !data.top || data.top.length === 0) {
     let requiredGroupMessage = ''

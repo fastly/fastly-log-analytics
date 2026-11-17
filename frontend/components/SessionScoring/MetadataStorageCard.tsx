@@ -3,7 +3,8 @@
 import React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Database, Pencil, Trash2, X } from 'lucide-react'
-import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -71,7 +72,7 @@ function MetadataStorageTable({
   retention: StorageResponse['retention']
   dbBytes: number | null
 }) {
-  const columns = React.useMemo<ColumnDef<MetadataStorageRow>[]>(
+  const columns = React.useMemo<BasicColumnDef<MetadataStorageRow>[]>(
     () => [
       {
         id: 'table',
@@ -126,7 +127,7 @@ function MetadataStorageTable({
     ],
     [retention],
   )
-  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: rows, columns })
   return (
     <Table className="w-full text-sm">
       <TableHeader className="bg-muted/50">

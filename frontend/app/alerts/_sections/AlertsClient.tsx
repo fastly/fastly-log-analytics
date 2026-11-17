@@ -40,7 +40,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { showToast } from '@/lib/utils'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { ColumnVisibilityDropdown } from '@/components/DataTable'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
 import { AlertPreview } from './AlertPreview'
 import { CreateAlertForm } from './CreateAlertForm'
@@ -63,7 +63,7 @@ export default function AlertsClient() {
   const [deleteTarget, setDeleteTarget] = React.useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useQueryState('status', alertStatusParser)
   const { pendingDeleteIds, scheduleDelete } = useDeferredDeleteWithUndo()
-  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
+  const [columnVisibility, setColumnVisibility] = React.useState<ColumnVisibilityState>({})
   const { full } = useDateFormat()
 
   const [logSettingsIdle, setLogSettingsIdle] = React.useState(false)

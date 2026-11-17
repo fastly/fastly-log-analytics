@@ -3,7 +3,7 @@
 import React from 'react'
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import {
   DataTable,
   ColumnVisibilityDropdown,

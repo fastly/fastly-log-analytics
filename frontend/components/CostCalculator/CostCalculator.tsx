@@ -2,7 +2,8 @@
 
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { useRouter } from 'next/navigation'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { cn, buildServiceHref, formatBytes, formatUSD } from "@/lib/utils"
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
@@ -243,14 +244,14 @@ function OpsSectionsTable() {
     }
     return out
   }, [])
-  const columns = useMemo<ColumnDef<OpsSectionFlatRow>[]>(
+  const columns = useMemo<BasicColumnDef<OpsSectionFlatRow>[]>(
     () => [
       { id: 'label', cell: ({ row }) => (row.original.kind === 'header' ? row.original.title : row.original.label) },
       { id: 'value', cell: ({ row }) => (row.original.kind === 'row' ? row.original.value : null) },
     ],
     [],
   )
-  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data, columns })
   return (
     <Table scrollFocusable className='w-full text-xs text-muted-foreground'>
       <TableBody>

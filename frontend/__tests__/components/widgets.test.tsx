@@ -12,7 +12,7 @@ import { axe } from 'vitest-axe'
 import React, { type ComponentProps, type ReactNode } from 'react'
 import { renderToString } from 'react-dom/server'
 import * as bootstrapHooks from '@/hooks/useBootstrap'
-import type { CellContext, ColumnDef } from '@tanstack/react-table'
+import type { CellContext, ColumnDef } from '@/lib/table'
 import type { components } from '@/types/api.generated'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
 
@@ -1022,6 +1022,30 @@ describe('DataTable & DataTableReadonly', () => {
   it('has no axe-detectable a11y violations', async () => {
     const { container } = render(<DataTable columns={COLUMNS} data={DATA} hideToolbar />)
     expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('sorts locally via auto sort fns and filters via searchKey', async () => {
+    const user = userEvent.setup()
+    render(<DataTable columns={COLUMNS} data={[DATA[1], DATA[2], DATA[0]]} searchKey="name" />)
+    const names = () => screen.getAllByRole('row').slice(1).map((r) => within(r).queryByText(/^(alpha|beta|gamma)$/)?.textContent)
+    const header = (label: string) => screen.getByRole('button', { name: label }).closest('th')
+    await user.click(screen.getByRole('button', { name: 'Name' }))
+    expect(header('Name')?.getAttribute('aria-sort')).toBe('ascending')
+    expect(names()).toEqual(['alpha', 'beta', 'gamma'])
+    await user.click(screen.getByRole('button', { name: 'Status' }))
+    expect(header('Status')?.getAttribute('aria-sort')).toBe('descending')
+    expect(names()).toEqual(['gamma', 'beta', 'alpha'])
+    await user.type(screen.getByPlaceholderText('Filter name...'), 'ET')
+    expect(names()).toEqual(['beta'])
+  })
+
+  it('auto-sorts string columns case-insensitively and in natural order, as under react-table v8', async () => {
+    const user = userEvent.setup()
+    const rows: Row[] = [{ id: 1, name: 'item10', status: 200 }, { id: 2, name: 'Item2', status: 200 }, { id: 3, name: 'item1', status: 200 }]
+    render(<DataTable columns={COLUMNS} data={rows} hideToolbar />)
+    await user.click(screen.getByRole('button', { name: 'Name' }))
+    const names = screen.getAllByRole('row').slice(1).map((r) => within(r).queryByText(/^item\d+$/i)?.textContent)
+    expect(names).toEqual(['item1', 'Item2', 'item10'])
   })
 
   it('hands every row to virtualizer when showPagination={false} and pages at 50 by default', () => {

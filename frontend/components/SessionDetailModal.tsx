@@ -4,7 +4,7 @@ import React from 'react'
 import Link from 'next/link'
 import { useQuery } from '@tanstack/react-query'
 import { parseAsBoolean, useQueryState } from 'nuqs'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
 import { client, extractApiError, unwrapClient } from '@/lib/api'

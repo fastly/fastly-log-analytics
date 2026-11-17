@@ -2,7 +2,8 @@
 
 import * as React from "react"
 import { z } from "zod"
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
+import { flexRender, useTable } from "@tanstack/react-table"
+import { basicTableFeatures, type BasicColumnDef } from "@/lib/table"
 import { QRCodeCanvas } from "qrcode.react"
 import { Check, Copy, Eye, EyeOff, KeyRound, Loader2, Pencil, Plus, QrCode, Trash2 } from "lucide-react"
 
@@ -177,7 +178,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     void copy(buildShareCard(invite, status?.public_url ?? null, services))
   }
 
-  const inviteColumns: ColumnDef<Invite>[] = [
+  const inviteColumns: BasicColumnDef<Invite>[] = [
     {
       id: 'name',
       cell: ({ row }) => {
@@ -401,7 +402,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       },
     },
   ]
-  const inviteTable = useReactTable({ data: sorted, columns: inviteColumns, getCoreRowModel: getCoreRowModel() })
+  const inviteTable = useTable({ features: basicTableFeatures, data: sorted, columns: inviteColumns })
 
   return (
     <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-invites-panel">

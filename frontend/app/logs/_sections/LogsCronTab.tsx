@@ -10,7 +10,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { ConfirmDialog, HelpDialog } from '@/components/ui/confirm-dialog'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import type { components } from '@/types/api.generated'
 import type { CronRun } from './useLogsPageState'
 import {

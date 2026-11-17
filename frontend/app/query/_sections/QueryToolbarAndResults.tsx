@@ -1,7 +1,8 @@
 'use client'
 
 import React from 'react'
-import type { ColumnDef, SortingState } from '@tanstack/react-table'
+import type { SortingState } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useDateFormat } from '@/hooks/useSSE'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'

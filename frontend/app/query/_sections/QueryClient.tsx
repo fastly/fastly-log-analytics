@@ -4,7 +4,8 @@ import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallb
 import { parseAsString, parseAsStringLiteral, useQueryStates } from 'nuqs'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
-import type { ColumnDef, SortingState } from '@tanstack/react-table'
+import type { SortingState } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
 import {

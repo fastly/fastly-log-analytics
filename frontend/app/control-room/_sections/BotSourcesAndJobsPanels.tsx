@@ -8,7 +8,7 @@ import {
   Wifi,
   ExternalLink,
 } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useQuery } from '@tanstack/react-query'
 import type { components } from '@/types/api'
 import { Button } from '@/components/ui/button'

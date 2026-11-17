@@ -6,7 +6,8 @@ import { sql } from '@codemirror/lang-sql'
 import { keymap, EditorView } from '@codemirror/view'
 import { indentWithTab } from '@codemirror/commands'
 import { useTheme } from 'next-themes'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { useMounted } from '@/hooks/useBootstrap'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { Terminal, Activity, Bug, Filter, Code2, ChevronRight, Columns3 } from 'lucide-react'
@@ -159,7 +160,7 @@ interface SchemaBrowserProps {
 
 function SchemaBrowser({ tableName, schema, open, onOpenChange, onInsert }: SchemaBrowserProps) {
   const rows = useMemo(() => schema ?? [], [schema])
-  const columns = useMemo<ColumnDef<SchemaCol>[]>(
+  const columns = useMemo<BasicColumnDef<SchemaCol>[]>(
     () => [
       {
         id: 'column',
@@ -178,7 +179,7 @@ function SchemaBrowser({ tableName, schema, open, onOpenChange, onInsert }: Sche
     ],
     [onInsert],
   )
-  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: rows, columns })
 
   return (
     <aside

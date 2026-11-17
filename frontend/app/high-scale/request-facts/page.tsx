@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { AlertCircle, ArrowLeft, ArrowRight, Database, Filter, X } from 'lucide-react'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'

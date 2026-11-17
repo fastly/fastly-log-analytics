@@ -3,12 +3,8 @@
 import React from 'react'
 import { AlertTriangle, CheckCircle2, RotateCcw, Trash2 } from 'lucide-react'
 import { formatBytes, formatLocalDateTime } from '@/lib/utils'
-import {
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-  type ColumnDef,
-} from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import {
   Table,
   TableBody,
@@ -38,7 +34,7 @@ export function LedgerEntriesTable({
   onRetry: (entry: LedgerEntry) => Promise<void>
   onPurge: (entry: LedgerEntry) => Promise<void>
 }) {
-  const columns = React.useMemo<ColumnDef<LedgerEntry>[]>(
+  const columns = React.useMemo<BasicColumnDef<LedgerEntry>[]>(
     () => [
       {
         id: 'status',
@@ -188,11 +184,11 @@ export function LedgerEntriesTable({
     [actionBusyKey, onPurge, onRetry],
   )
 
-  const table = useReactTable({
+  const table = useTable({
+    features: basicTableFeatures,
     data: items,
     columns,
     getRowId: (row) => `${row.service_id}:${row.object_key}`,
-    getCoreRowModel: getCoreRowModel(),
   })
 
   return (

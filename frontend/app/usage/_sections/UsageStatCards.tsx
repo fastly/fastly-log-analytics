@@ -1,7 +1,8 @@
 'use client'
 
 import React, { useMemo } from 'react'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { Database, DollarSign, HardDrive, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatCard } from '@/components/ui/confirm-dialog'
@@ -33,16 +34,16 @@ export type BreakdownRow = {
   rowClassName?: string
 }
 
-const BREAKDOWN_COLUMNS: ColumnDef<BreakdownRow>[] = [
+const BREAKDOWN_COLUMNS: BasicColumnDef<BreakdownRow>[] = [
   { id: 'label', cell: ({ row }) => row.original.label },
   { id: 'value', cell: ({ row }) => <div className="text-right">{row.original.value}</div> },
 ]
 
 export function BreakdownTable({ rows }: { rows: BreakdownRow[] }) {
-  const table = useReactTable({
+  const table = useTable({
+    features: basicTableFeatures,
     data: rows,
     columns: BREAKDOWN_COLUMNS,
-    getCoreRowModel: getCoreRowModel(),
   })
   return (
     <Table className="mt-1 text-[11px] font-normal">

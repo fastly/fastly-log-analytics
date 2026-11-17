@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { ImageIcon, TrendingDown, Zap, Activity, DollarSign, Sparkles, ArrowRight } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly, FilterValueCell } from '@/components/DataTable'
 import { StatCard } from '@/components/ui/confirm-dialog'
 import { AnalyticsCard } from '@/components/AnalyticsCard'

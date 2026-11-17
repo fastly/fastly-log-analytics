@@ -2,7 +2,8 @@
 
 import React from 'react'
 import { Globe, MapPin, Server } from 'lucide-react'
-import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState, RowData } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import {
@@ -90,14 +91,14 @@ export interface LatencyHeatmapProps {
   popLatency: SectionQuery<OriginPopLatency>
   ipHealth: SectionQuery<OriginIpHealth>
   summary: SectionQuery<OriginSummary>
-  urlVisibility: VisibilityState
-  setUrlVisibility: (visibility: VisibilityState) => void
+  urlVisibility: ColumnVisibilityState
+  setUrlVisibility: (visibility: ColumnVisibilityState) => void
   onUrlVisChange: (id: string, visible: boolean) => void
-  popVisibility: VisibilityState
-  setPopVisibility: (visibility: VisibilityState) => void
+  popVisibility: ColumnVisibilityState
+  setPopVisibility: (visibility: ColumnVisibilityState) => void
   onPopVisChange: (id: string, visible: boolean) => void
-  ipVisibility: VisibilityState
-  setIpVisibility: (visibility: VisibilityState) => void
+  ipVisibility: ColumnVisibilityState
+  setIpVisibility: (visibility: ColumnVisibilityState) => void
   onIpVisChange: (id: string, visible: boolean) => void
 }
 
@@ -109,7 +110,7 @@ export function LatencyHeatmap({
 }: LatencyHeatmapProps) {
   const { isFieldActive } = useActiveLogFields()
 
-  const renderTableCard = <TRow,>(cfg: {
+  const renderTableCard = <TRow extends RowData>(cfg: {
     title: string
     icon: React.ReactNode
     query: {
@@ -122,8 +123,8 @@ export function LatencyHeatmap({
     help: string
     defaultApproxNote: string
     columnIds: string[]
-    visibility: VisibilityState
-    setVisibility: (v: VisibilityState) => void
+    visibility: ColumnVisibilityState
+    setVisibility: (v: ColumnVisibilityState) => void
     onVisChange: (id: string, visible: boolean) => void
     columns: ColumnDef<TRow>[]
     emptyMessage: string

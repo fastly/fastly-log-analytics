@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import {
   ColumnVisibilityDropdown,

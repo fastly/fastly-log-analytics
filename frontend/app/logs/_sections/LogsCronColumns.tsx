@@ -8,7 +8,7 @@ import { CopyButton } from '@/components/ui/confirm-dialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { LiveElapsed } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { DateTimeCell } from '@/components/DataTable'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import type { CronRun } from './useLogsPageState'
 import { CRON_DISPLAY_NAMES, CRON_EXPLANATIONS } from './LogsCronSchedule'
 

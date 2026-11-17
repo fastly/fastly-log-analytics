@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import type { ColumnDef, Row } from '@tanstack/react-table'
+import type { ColumnDef, Row } from '@/lib/table'
 import { ChevronDown, ChevronRight, X } from 'lucide-react'
 import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
@@ -343,7 +343,7 @@ export function ActiveTable({
     [onKill, cancellingQid, showService, showPool, onToggleGroup],
   )
   return (
-    <DataTable<ActiveOrPromotedRow, unknown>
+    <DataTable<ActiveOrPromotedRow>
       columns={columns}
       data={rows}
       onRowClick={onRowClick}
@@ -384,7 +384,7 @@ export function CompletedTable({
     [showMemory, showService, onToggleGroup],
   )
   return (
-    <DataTable<GroupedCompletedRow, unknown>
+    <DataTable<GroupedCompletedRow>
       columns={columns}
       data={rows}
       onRowClick={onRowClick}

@@ -2,7 +2,8 @@
 
 import React from 'react'
 import { formatLocalDateTime } from '@/lib/utils'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { RowData } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import type { components } from '@/types/api.generated'
@@ -10,7 +11,7 @@ import type { components } from '@/types/api.generated'
 export type InProcessScheduleEntry = components['schemas']['InProcessScheduleEntry']
 export type InProcessActiveRun = components['schemas']['InProcessActiveRun']
 
-export function makeCol<T>(
+export function makeCol<T extends RowData>(
   id: string,
   header: string,
   size: number,
