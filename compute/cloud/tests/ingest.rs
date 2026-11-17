@@ -8669,8 +8669,9 @@ mod simulation {
     /// `flush_max_age_s` (an hour, 30 buckets) when nothing else makes the flush due, plus the
     /// two buckets inside the read grace and the odd rollover or overflow key.
     const OUTBOX_BOUND: usize = 3600 / 120 + 6;
-    /// Period close to Parquet: the grace (`INGEST_GRACE_S` past the period start, so 120 s
-    /// past its close) and the next tick.
+    /// Period close until its raw objects are converted and deleted. Request ingest has no
+    /// grace (`INGEST_GRACE_S` is 0), so this is normally the first tick after the close (1 s
+    /// here); the bound is loose and fails only when a period waits about two minutes.
     const LATENCY_BOUND_S: i64 = 125;
 
     #[derive(Default)]
