@@ -41,6 +41,26 @@ describe("cloud loading progress", () => {
     expect(cloudLoadingStore.getSnapshot()).toBeNull();
   });
 
+  it("moves a waiting analysis to aggregation once its file read completes, not back to its start", () => {
+    const analysis = beginCloudLoading("files");
+    const read = beginCloudLoading("listing");
+    read.update({ stage: "files", progress: { ...progress, done: 4 } });
+    read.finish();
+    expect(cloudLoadingStore.getSnapshot()).toMatchObject({
+      stage: "files", progress: { phase: "aggregate", done: 4, downloadedBytes: 1024 },
+    });
+    analysis.finish();
+    expect(cloudLoadingStore.getSnapshot()).toBeNull();
+  });
+
+  it("keeps a waiting analysis at its start when its file read fails", () => {
+    beginCloudLoading("files");
+    const read = beginCloudLoading("files");
+    read.update({ progress });
+    read.finish(false);
+    expect(cloudLoadingStore.getSnapshot()).toMatchObject({ stage: "files", progress: null });
+  });
+
   it("sums unmeasured range reads across concurrent jobs", () => {
     beginCloudLoading("files").update({ progress: { ...progress, rangedFiles: 2 } });
     beginCloudLoading("files").update({ progress });

@@ -75,6 +75,12 @@ export function beginCloudLoading(
       if (!current) return;
       if (success && current.stage === "files") hasResults = true;
       jobs.delete(id);
+      // Analyses wait on their file read; once it lands they are aggregating, not starting over.
+      if (success && current.stage === "files" && current.progress) {
+        for (const [other, job] of jobs) {
+          if (job.stage === "files" && !job.progress) jobs.set(other, { ...job, progress: { ...current.progress, phase: "aggregate" } });
+        }
+      }
       publish();
     },
   };
