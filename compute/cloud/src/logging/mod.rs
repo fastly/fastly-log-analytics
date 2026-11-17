@@ -921,3 +921,62 @@ pub fn desired_conditions(state: &Value) -> Result<Value, String> {
     }
     Ok(json!(conditions))
 }
+
+fn header_names(vcl: &str, prefix: &str) -> std::collections::BTreeSet<String> {
+    let vcl = vcl.to_ascii_lowercase();
+    vcl.match_indices(prefix)
+        .map(|(at, _)| {
+            vcl[at + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The enabled log fields that read a request header Cloud's own capture VCL would set but
+/// none of `existing_vcl` (another install's snippet bodies) sets, so attach mode logs them
+/// blank or from a fallback.
+pub fn uncaptured_fields(state: &Value, existing_vcl: &[&str]) -> Result<Vec<String>, String> {
+    let ours: std::collections::BTreeSet<String> = desired_snippets(state)?
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|snippet| header_names(snippet["body"].as_str().unwrap_or(""), "set req.http."))
+        .collect();
+    let theirs: std::collections::BTreeSet<String> = existing_vcl
+        .iter()
+        .flat_map(|vcl| header_names(vcl, "set req.http."))
+        .collect();
+    let empty = json!({});
+    let config = effective_log_fields(state.get("log_fields").unwrap_or(&empty), false);
+    let enabled = catalog::resolve_enabled_fields(&config);
+    let mut reads: Vec<(String, String)> = catalog::data()["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|field| enabled.contains(text(field, "id", "")))
+        .filter_map(|field| {
+            catalog::logged_vcl(field).map(|vcl| (text(field, "id", "").to_owned(), vcl.to_owned()))
+        })
+        .collect();
+    for field in custom_fields(&config) {
+        let name = text(&field, "name", "").to_owned();
+        let expression = match text(&field, "collection_stage", "edge") {
+            "deliver" => text(&field, "vcl_log_expression", "").to_owned(),
+            "origin" => format!("req.http.x-fos-origin-data:{name}"),
+            _ => format!("req.http.x-fos-edge-data:{name}"),
+        };
+        reads.push((name, expression));
+    }
+    Ok(reads
+        .into_iter()
+        .filter(|(_, vcl)| {
+            header_names(vcl, "req.http.")
+                .iter()
+                .any(|header| ours.contains(header) && !theirs.contains(header))
+        })
+        .map(|(name, _)| name)
+        .collect())
+}

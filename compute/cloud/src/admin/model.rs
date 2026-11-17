@@ -69,7 +69,28 @@ pub struct Service {
     pub wire_format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_reset: Option<DataReset>,
+    #[serde(default, skip_serializing_if = "Capture::is_managed")]
+    pub capture: Capture,
 }
+
+/// Who owns the capture VCL. `Attached` reuses another install's capture snippets and
+/// manages only the owner marker, one endpoint and its response condition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Capture {
+    #[default]
+    Managed,
+    Attached,
+}
+
+impl Capture {
+    pub fn is_managed(&self) -> bool {
+        *self == Capture::Managed
+    }
+}
+
+pub const ATTACH_ENDPOINT: &str = "FLP Cloud Logs";
+pub const ATTACH_CONDITION: &str = "flp_cloud_log_condition";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -313,8 +334,8 @@ pub struct Provision {
     pub edge_only: bool,
     #[serde(default, deserialize_with = "deserialize_condition")]
     pub custom_condition: String,
-    #[serde(default = "endpoint", alias = "endpoint_name")]
-    pub logging_endpoint_name: String,
+    #[serde(default, alias = "endpoint_name")]
+    pub logging_endpoint_name: Option<String>,
     #[serde(default = "default_fields", deserialize_with = "deserialize_fields")]
     pub log_fields: Value,
     #[serde(default)]
@@ -359,9 +380,20 @@ pub struct Provision {
     pub wire_format: String,
     #[serde(default, rename = "service_name")]
     pub _service_name: Option<String>,
+    #[serde(default)]
+    pub capture: Capture,
 }
 
 impl Provision {
+    pub fn endpoint_name(&self) -> String {
+        self.logging_endpoint_name.clone().unwrap_or_else(|| {
+            match self.capture {
+                Capture::Managed => "Fastly Object Storage Logs",
+                Capture::Attached => ATTACH_ENDPOINT,
+            }
+            .into()
+        })
+    }
     pub fn effective_rum(&self) -> crate::logging::rum::Config {
         let mut rum = self.rum.clone();
         if let Some(enabled) = self.rum_enabled {
@@ -485,9 +517,6 @@ fn sample() -> u32 {
 fn yes() -> bool {
     true
 }
-fn endpoint() -> String {
-    "Fastly Object Storage Logs".into()
-}
 pub fn default_fields() -> Value {
     json!({"groups":["A","B","C","D","E","F","G","H","I","J","K","L","M"],"custom_fields":[],"field_overrides":{},"field_limits":{}})
 }
@@ -534,6 +563,7 @@ pub fn service_value(service: &Service, generation: &str) -> Value {
     value["capture_performance"] = json!(service.rum.capture_performance);
     value["capture_errors"] = json!(service.rum.capture_errors);
     value["capture_events"] = json!(service.rum.capture_events);
+    value["capture"] = json!(service.capture);
     value
 }
 

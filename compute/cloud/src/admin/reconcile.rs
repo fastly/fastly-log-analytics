@@ -16,6 +16,12 @@ pub fn managed_name(name: &str) -> bool {
         )
         || name.starts_with("flp-owner-")
 }
+/// Whether the active version holds another install's capture VCL for attach mode to log.
+pub fn capture_present(snippets: &[Value]) -> bool {
+    let has = |name: &str| snippets.iter().any(|v| v["name"] == name);
+    has("Fastly Log Analytics - vcl_recv") && has("Fastly Log Analytics - vcl_deliver")
+        || has("Fastly Log Analysis Capture")
+}
 pub fn active_version(
     context: &Context<'_, impl Runtime>,
     sid: &str,
@@ -76,7 +82,7 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
             .into();
         }
     }
-    let conditions = list(
+    let mut conditions = list(
         &crate::logging::desired_conditions(&state)
             .map_err(|_| Error::new(400, "invalid_logging_condition"))?,
     )?
@@ -108,6 +114,17 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     } else {
         vec![]
     };
+    if service.capture == Capture::Attached {
+        snippets.retain(|snippet| snippet["name"] == marker(service));
+        for endpoint in &mut endpoints {
+            endpoint["response_condition"] = ATTACH_CONDITION.into();
+        }
+        for condition in &mut conditions {
+            if condition["name"] == "log_analytics_condition" {
+                condition["name"] = ATTACH_CONDITION.into();
+            }
+        }
+    }
     Ok(BTreeMap::from([
         ("snippet".into(), snippets),
         ("logging/s3".into(), endpoints),
@@ -306,26 +323,29 @@ fn discover(
         )?;
         current.insert(resource.to_owned(), list(&value)?.clone());
     }
-    let rum_involved = service.rum.enabled
-        || service
-            .owned_endpoint_names
-            .contains(&service.rum.endpoint_name)
-        || job
-            .previous_endpoint_names
-            .contains(&service.rum.endpoint_name)
-        || current["condition"].iter().any(|v| {
-            matches!(
-                v["name"].as_str(),
-                Some("fastly_log_analytics_false" | "rum_log_condition")
-            )
-        })
-        || current["snippet"].iter().any(|v| {
-            v["content"]
-                .as_str()
-                .or_else(|| v["body"].as_str())
-                .unwrap_or("")
-                .contains("Section 1: RUM")
-        });
+    let attached = service.capture == Capture::Attached;
+    // Attach mode never reads or writes the other install's RUM backend and dictionary.
+    let rum_involved = !attached
+        && (service.rum.enabled
+            || service
+                .owned_endpoint_names
+                .contains(&service.rum.endpoint_name)
+            || job
+                .previous_endpoint_names
+                .contains(&service.rum.endpoint_name)
+            || current["condition"].iter().any(|v| {
+                matches!(
+                    v["name"].as_str(),
+                    Some("fastly_log_analytics_false" | "rum_log_condition")
+                )
+            })
+            || current["snippet"].iter().any(|v| {
+                v["content"]
+                    .as_str()
+                    .or_else(|| v["body"].as_str())
+                    .unwrap_or("")
+                    .contains("Section 1: RUM")
+            }));
     if rum_involved {
         for resource in ["backend", "dictionary"] {
             let value = context.api(
@@ -353,14 +373,19 @@ fn discover(
             && v["content"].as_str().or_else(|| v["body"].as_str())
                 == Some(&format!("# {}", resource_owner(service)))
     });
-    if !own_marker
+    if attached {
+        if job.kind != "teardown" && !capture_present(snippets) {
+            return Err(Error::new(409, "capture_vcl_missing"));
+        }
+    } else if !own_marker
         && snippets
             .iter()
             .any(|v| v["name"].as_str().is_some_and(managed_name))
     {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
-    if !own_marker
+    if !attached
+        && !own_marker
         && current["logging/s3"]
             .iter()
             .any(|v| v["name"].as_str().is_some_and(managed_name))
@@ -466,16 +491,22 @@ fn discover(
                     service.owned_endpoint_names.iter().any(|v| v == name)
                         || job.previous_endpoint_names.iter().any(|v| v == name)
                 } else if resource == "condition" {
-                    matches!(
-                        name,
-                        "log_analytics_condition"
-                            | "rum_log_condition"
-                            | "fastly_log_analytics_false"
-                    )
+                    if attached {
+                        name == ATTACH_CONDITION
+                    } else {
+                        matches!(
+                            name,
+                            "log_analytics_condition"
+                                | "rum_log_condition"
+                                | "fastly_log_analytics_false"
+                        )
+                    }
                 } else if resource == "backend" {
                     name == "fos_origin"
                 } else if resource == "dictionary" {
                     name == "fos_credentials"
+                } else if attached {
+                    name == marker(service)
                 } else {
                     managed_name(name)
                 };

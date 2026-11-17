@@ -6319,3 +6319,297 @@ fn cleanup_finishes_past_more_kept_queue_records_than_one_step_can_read() {
         assert!(!left.contains(key), "{key} survived");
     }
 }
+
+/// A service whose capture VCL, endpoint and condition another (High-Scale-style)
+/// install already manages: the same generator's resources, without a Cloud marker.
+fn other_install_resources(
+    drop_capture_line: Option<&str>,
+    rum: bool,
+) -> Vec<(&'static str, Value)> {
+    let other = Platform::new();
+    let started = other.json("POST","/api/admin/provision/execute",json!({
+        "token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-fixture-logs","fos_region":"us-east-1",
+        "rum_enabled":rum,
+        "log_fields":{"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}
+    }));
+    other.drain(started["job"].clone());
+    let mut seeded = Vec::new();
+    for resource in [
+        "snippet",
+        "logging/s3",
+        "condition",
+        "backend",
+        "dictionary",
+    ] {
+        for mut value in other.adapter.resources("fixtureService", resource) {
+            if value["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with("flp-owner-"))
+            {
+                continue;
+            }
+            if let (Some(drop), Some(content)) = (drop_capture_line, value["content"].as_str()) {
+                value["content"] = content
+                    .lines()
+                    .filter(|line| !line.contains(drop))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into();
+            }
+            seeded.push((resource, value));
+        }
+    }
+    seeded
+}
+
+fn seed_other_install(
+    platform: &Platform,
+    drop_capture_line: Option<&str>,
+    rum: bool,
+) -> Vec<(&'static str, Value)> {
+    let seeded = other_install_resources(drop_capture_line, rum);
+    for (resource, value) in &seeded {
+        platform
+            .adapter
+            .seed_resource("fixtureService", resource, value.clone());
+    }
+    seeded
+}
+
+fn attach_body(extra: Value) -> Value {
+    let mut body = json!({
+        "token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-attach-logs","fos_region":"us-east-1",
+        "capture":"attached",
+        "log_fields":{"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    body
+}
+
+fn error_code(response: &Response) -> String {
+    serde_json::from_slice::<Value>(&response.body).unwrap()["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned()
+}
+
+#[test]
+fn attach_mode_manages_only_its_marker_endpoint_and_condition() {
+    attach_alongside(false);
+}
+
+#[test]
+fn attach_mode_leaves_the_other_install_rum_backend_and_dictionary_alone() {
+    attach_alongside(true);
+}
+
+fn attach_alongside(other_has_rum: bool) {
+    let platform = Platform::new();
+    let seeded = seed_other_install(&platform, None, other_has_rum);
+    assert!(seeded
+        .iter()
+        .any(|(_, v)| v["name"] == "Fastly Object Storage Logs"));
+    assert_eq!(
+        seeded.iter().any(|(_, v)| v["name"] == "fos_origin"),
+        other_has_rum
+    );
+    let managed = platform.call(
+        "POST",
+        "/api/admin/provision/execute",
+        json!({"token":"fixture-token","service_id":"fixtureService","fos_bucket":"fos-attach-logs","fos_region":"us-east-1"}),
+    );
+    assert_eq!(managed.status, 409);
+    assert_eq!(error_code(&managed), "service_managed_by_other_install");
+
+    let validated = platform.json(
+        "POST",
+        "/api/admin/provision/validate",
+        json!({"token":"fixture-token","service_id":"fixtureService","capture":"attached",
+            "log_fields":{"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}}),
+    );
+    assert_eq!(
+        validated["capture"],
+        json!({"mode":"attached","missing_fields":[]})
+    );
+
+    let job = platform.json(
+        "POST",
+        "/api/admin/provision/execute",
+        attach_body(json!({})),
+    )["job"]
+        .clone();
+    assert_eq!(platform.drain(job)["status"], "complete");
+    let service = platform.service();
+    assert_eq!(service["service"]["capture"], "attached");
+    assert_eq!(
+        service["service"]["logging_endpoint_name"],
+        "FLP Cloud Logs"
+    );
+
+    for (resource, value) in &seeded {
+        let now = platform.adapter.resources("fixtureService", resource);
+        assert!(now.contains(value), "{resource} {} changed", value["name"]);
+    }
+    let names = |resource: &str| -> Vec<String> {
+        let mut names: Vec<String> = platform
+            .adapter
+            .resources("fixtureService", resource)
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .filter(|name| {
+                !seeded
+                    .iter()
+                    .any(|(r, v)| r == &resource && v["name"] == name.as_str())
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names("snippet"), ["flp-owner-fixtureApp"]);
+    assert_eq!(names("logging/s3"), ["FLP Cloud Logs"]);
+    assert_eq!(names("condition"), ["flp_cloud_log_condition"]);
+    let endpoint = platform
+        .adapter
+        .resources("fixtureService", "logging/s3")
+        .into_iter()
+        .find(|v| v["name"] == "FLP Cloud Logs")
+        .unwrap();
+    assert_eq!(endpoint["response_condition"], "flp_cloud_log_condition");
+    assert_eq!(endpoint["bucket_name"], "fos-attach-logs");
+    let conditions = platform.adapter.resources("fixtureService", "condition");
+    let statement =
+        |name: &str| conditions.iter().find(|v| v["name"] == name).unwrap()["statement"].clone();
+    if !other_has_rum {
+        assert_eq!(
+            statement("flp_cloud_log_condition"),
+            statement("log_analytics_condition")
+        );
+    }
+    let touched: Vec<_> = platform
+        .adapter
+        .calls()
+        .into_iter()
+        .filter(|(_, path)| {
+            path.starts_with("/service/fixtureService/")
+                && (path.contains("/backend") || path.contains("/dictionary"))
+        })
+        .collect();
+    assert!(touched.is_empty(), "{touched:?}");
+
+    let service = platform.service();
+    let again = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"]}),
+    );
+    assert_eq!(platform.drain(again["job"].clone())["changes"], json!([]));
+
+    let service = platform.service();
+    let result = platform.json("POST","/api/admin/provision/teardown",json!({
+        "service_id":"fixtureService","confirm_service_id":"fixtureService","token":"fixture-token",
+        "generation":service["generation"]
+    }));
+    let job = platform.drain(result["job"].clone());
+    let mut removed: Vec<_> = job["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["action"].as_str().unwrap().to_owned(),
+                c["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    removed.sort();
+    assert_eq!(
+        removed,
+        [
+            ("delete".to_owned(), "FLP Cloud Logs".to_owned()),
+            ("delete".to_owned(), "flp-owner-fixtureApp".to_owned()),
+            ("delete".to_owned(), "flp_cloud_log_condition".to_owned()),
+        ]
+    );
+    for resource in [
+        "snippet",
+        "logging/s3",
+        "condition",
+        "backend",
+        "dictionary",
+    ] {
+        let mut now = platform.adapter.resources("fixtureService", resource);
+        let mut before: Vec<Value> = seeded
+            .iter()
+            .filter(|(r, _)| *r == resource)
+            .map(|(_, v)| v.clone())
+            .collect();
+        now.sort_by_key(|v| v["name"].to_string());
+        before.sort_by_key(|v| v["name"].to_string());
+        assert_eq!(now, before, "{resource}");
+    }
+}
+
+#[test]
+fn attach_mode_requires_the_other_install_capture_vcl() {
+    let platform = Platform::new();
+    for path in [
+        "/api/admin/provision/validate",
+        "/api/admin/provision/execute",
+    ] {
+        let response = platform.call("POST", path, attach_body(json!({})));
+        assert_eq!(response.status, 409);
+        assert_eq!(error_code(&response), "capture_vcl_missing");
+    }
+    assert_eq!(platform.adapter.key_count(), 0);
+}
+
+#[test]
+fn attach_mode_rejects_rum_cmcd_and_reserved_endpoint_names() {
+    let platform = Platform::new();
+    seed_other_install(&platform, None, false);
+    for (extra, code) in [
+        (
+            json!({"rum_enabled":true}),
+            "rum_unavailable_in_attach_mode",
+        ),
+        (
+            json!({"cmcd":{"enabled":true}}),
+            "cmcd_unavailable_in_attach_mode",
+        ),
+        (
+            json!({"logging_endpoint_name":"Fastly RUM Logs"}),
+            "attach_endpoint_name_reserved",
+        ),
+        (
+            json!({"logging_endpoint_name":"My Fastly Log Analytics copy"}),
+            "attach_endpoint_name_reserved",
+        ),
+    ] {
+        let response = platform.call(
+            "POST",
+            "/api/admin/provision/execute",
+            attach_body(extra.clone()),
+        );
+        assert_eq!(response.status, 400, "{extra}");
+        assert_eq!(error_code(&response), code, "{extra}");
+    }
+    assert_eq!(platform.adapter.key_count(), 0);
+}
+
+#[test]
+fn attach_validation_reports_fields_the_existing_capture_vcl_never_sets() {
+    let platform = Platform::new();
+    seed_other_install(&platform, Some("x-fos-edge-data:srv_region"), false);
+    let validated = platform.json(
+        "POST",
+        "/api/admin/provision/validate",
+        json!({"token":"fixture-token","service_id":"fixtureService","capture":"attached",
+            "log_fields":{"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}}),
+    );
+    assert_eq!(
+        validated["capture"]["missing_fields"],
+        json!(["server_region"])
+    );
+}

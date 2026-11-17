@@ -239,7 +239,18 @@ fn route(
             let input: Value = body(request)?;
             let sid = required(&input, "service_id")?;
             let token = required(&input, "token")?;
-            let service = preflight(context, token, sid, input["logging_endpoint_name"].as_str())?;
+            let capture: Capture = match &input["capture"] {
+                Value::Null => Capture::Managed,
+                value => serde_json::from_value(value.clone())
+                    .map_err(|_| Error::new(400, "invalid_capture"))?,
+            };
+            let (service, snippets) = preflight(
+                context,
+                token,
+                sid,
+                input["logging_endpoint_name"].as_str(),
+                capture,
+            )?;
             if let Some(bucket) = input["fos_bucket"].as_str() {
                 if !valid_bucket(bucket) {
                     return Err(Error::new(400, "invalid_bucket"));
@@ -255,9 +266,23 @@ fn route(
                     return Err(Error::new(400, "invalid_prefix"));
                 }
             }
-            Ok(
-                json!({"valid":true,"service":{"id":sid,"name":service["name"]},"customer_id":service["customer_id"]}),
-            )
+            let mut result = json!({"valid":true,"service":{"id":sid,"name":service["name"]},"customer_id":service["customer_id"]});
+            if capture == Capture::Attached {
+                let fields = if input["log_fields"].is_object() {
+                    input["log_fields"].clone()
+                } else {
+                    default_fields()
+                };
+                let bodies: Vec<&str> = snippets
+                    .iter()
+                    .filter_map(|v| v["content"].as_str().or_else(|| v["body"].as_str()))
+                    .collect();
+                let missing =
+                    crate::logging::uncaptured_fields(&json!({"log_fields":fields}), &bodies)
+                        .map_err(|_| Error::new(400, "invalid_log_fields"))?;
+                result["capture"] = json!({"mode":"attached","missing_fields":missing});
+            }
+            Ok(result)
         }
         ("POST", ["api", "admin", "provision", "execute"] | ["api", "provision", "execute"]) => {
             provision(context, actor, body(request)?)
@@ -462,7 +487,8 @@ fn preflight(
     token: &str,
     sid: &str,
     endpoint: Option<&str>,
-) -> Result<Value, Error> {
+    capture: Capture,
+) -> Result<(Value, Vec<Value>), Error> {
     if !valid_service_id(sid) {
         return Err(Error::new(400, "invalid_service_id"));
     }
@@ -493,6 +519,8 @@ fn preflight(
     let owned_endpoints = local
         .as_ref()
         .and_then(|r| r.value["owned_endpoint_names"].as_array());
+    let attached = capture == Capture::Attached;
+    let mut snippets = Vec::new();
     for resource in ["snippet", "logging/s3", "condition"] {
         let current = context.api(
             "GET",
@@ -502,11 +530,12 @@ fn preflight(
         )?;
         for value in list(&current)? {
             let name = value["name"].as_str().unwrap_or("");
-            if endpoint.is_some() && resource == "snippet" && name == "CMCD Extraction" {
+            if !attached && endpoint.is_some() && resource == "snippet" && name == "CMCD Extraction"
+            {
                 return Err(Error::new(409, "resource_name_collision"));
             }
             if name.starts_with("flp-owner-") && name != own_marker
-                || !owned && reconcile::managed_name(name)
+                || !attached && !owned && reconcile::managed_name(name)
             {
                 return Err(Error::new(409, "service_managed_by_other_install"));
             }
@@ -516,8 +545,14 @@ fn preflight(
                 return Err(Error::new(409, "resource_name_collision"));
             }
         }
+        if resource == "snippet" {
+            snippets = list(&current)?.clone();
+        }
     }
-    Ok(service)
+    if attached && !reconcile::capture_present(&snippets) {
+        return Err(Error::new(409, "capture_vcl_missing"));
+    }
+    Ok((service, snippets))
 }
 
 fn check_generation(record: &Record, input: &Value) -> Result<(), Error> {
@@ -651,6 +686,28 @@ fn validate_service(
         > crate::ingest::MAX_WINDOWS_PER_OBJECT as u64
     {
         return Err(Error::new(400, "log_period_exceeds_window_capacity"));
+    }
+    if service.capture == Capture::Attached {
+        if service.rum.enabled {
+            return Err(Error::new(400, "rum_unavailable_in_attach_mode"));
+        }
+        if service.cmcd.enabled {
+            return Err(Error::new(400, "cmcd_unavailable_in_attach_mode"));
+        }
+        // Older installs find their endpoints by name or substring and would adopt or delete ours.
+        let name = service.logging_endpoint_name.to_ascii_lowercase();
+        if reconcile::managed_name(&service.logging_endpoint_name)
+            || [
+                "fastly log analytics",
+                "fastly log analysis",
+                "fastly object storage logs",
+                "fastly rum",
+            ]
+            .iter()
+            .any(|reserved| name.contains(reserved))
+        {
+            return Err(Error::new(400, "attach_endpoint_name_reserved"));
+        }
     }
     if service.rum.enabled {
         crate::logging::rum::validate_config(&service.rum)
@@ -959,17 +1016,19 @@ fn provision(
     if !input.logging_enabled && !rum.enabled {
         return Err(Error::new(400, "invalid_logging_settings"));
     }
-    let target = preflight(
+    let logging_endpoint_name = input.endpoint_name();
+    let (target, _) = preflight(
         context,
         &input.token,
         &input.service_id,
-        Some(&input.logging_endpoint_name),
+        Some(&logging_endpoint_name),
+        input.capture,
     )?;
     context.confirm_with_token(&input.token);
     let now = context.runtime.now();
     let mut owned_endpoint_names = Vec::new();
     if input.logging_enabled {
-        owned_endpoint_names.push(input.logging_endpoint_name.clone());
+        owned_endpoint_names.push(logging_endpoint_name.clone());
     }
     if rum.enabled && !owned_endpoint_names.contains(&rum.endpoint_name) {
         owned_endpoint_names.push(rum.endpoint_name.clone());
@@ -985,7 +1044,7 @@ fn provision(
         updated_at: now,
         config_version: 1,
         logging_enabled: input.logging_enabled,
-        logging_endpoint_name: input.logging_endpoint_name.clone(),
+        logging_endpoint_name,
         log_period: input.log_period,
         sample_rate: input.sample_rate,
         edge_only: input.edge_only,
@@ -1027,6 +1086,7 @@ fn provision(
         } else {
             input.wire_format
         },
+        capture: input.capture,
     };
     let previous: Option<Service> = context
         .get(&format!("svc:{}", input.service_id))?
@@ -1143,7 +1203,7 @@ fn teardown(
         return Err(Error::new(400, "typed_service_id_required"));
     }
     let token = required(&input, "token")?.to_owned();
-    preflight(context, &token, &sid, None)?;
+    preflight(context, &token, &sid, None, Capture::Managed)?;
     context.confirm_with_token(&token);
     let (record, mut service) = load_service(context, &sid)?;
     check_generation(&record, &input)?;
