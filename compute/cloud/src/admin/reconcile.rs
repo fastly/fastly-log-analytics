@@ -190,6 +190,15 @@ fn resource_body(resource: &str, value: &Value, service: &Service) -> Value {
             body["message_type"] = "blank".into();
             body
         }
+        // Fastly stores "0" when no priority is sent, which would never match the
+        // compared default of 10 and re-plan every condition on each reconcile.
+        "condition" => {
+            let mut body = value.clone();
+            if body["priority"].is_null() {
+                body["priority"] = "10".into();
+            }
+            body
+        }
         _ => value.clone(),
     }
 }

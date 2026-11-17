@@ -667,6 +667,15 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                     if resource=="dictionary" && body["id"].as_str().is_none() {
                         body["id"]=format!("dict-{sid}-{name}").into();
                     }
+                    // Like Fastly: a condition keeps its priority (a numeric string, "0" when new) unless one is sent.
+                    if resource=="condition" {
+                        let priority=match &body["priority"] {
+                            Value::Null=>values.get(&name).and_then(|v|v["priority"].as_str()).unwrap_or("0").to_owned(),
+                            Value::String(s)=>s.clone(),
+                            other=>other.to_string(),
+                        };
+                        body["priority"]=priority.into();
+                    }
                     values.insert(name,body.clone());Ok((200,body))
                 }
                 "DELETE"=>{if let Some(name)=name {values.remove(name);}Ok((204,json!({})))}
