@@ -6,6 +6,7 @@ import {
   type DuckDBAnalyticalEngine,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
+import { parseEpochMs, roundTo } from "./engine-utils";
 
 export const CWV_THRESHOLDS = {
   LCP: { good: 2500, poor: 4000 },
@@ -29,11 +30,6 @@ export interface RumQueryParams {
   filters?: FiltersPayload | string;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   signal?: AbortSignal;
-}
-
-function roundTo(val: number, decimals: number): number {
-  const factor = 10 ** decimals;
-  return Math.round(val * factor) / factor;
 }
 
 export function classifyCwvRating(
@@ -155,19 +151,6 @@ export function shapeRumEnvironments(
 }
 
 export const shape_rum_environments = shapeRumEnvironments;
-
-function parseEpochMs(val: string | number | undefined): number | null {
-  if (val === undefined || val === null || val === "") return null;
-  if (typeof val === "number") {
-    return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);
-  }
-  const num = Number(val);
-  if (Number.isFinite(num)) {
-    return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
-  }
-  const parsed = Date.parse(val);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 export class UnsupportedRumFilterError extends Error {
   constructor() {

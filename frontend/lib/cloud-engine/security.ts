@@ -11,8 +11,7 @@
  */
 
 import { sqlEscape } from "@/lib/sqlBuilder";
-import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
-import type { DashboardFilter } from "./dashboard/filters";
+import { getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import {
   BOT_UA_CLASSIFY_LIMIT,
   classifyUserAgentCounts,
@@ -27,8 +26,9 @@ import {
   type WellknownBotRow,
 } from "./bots/summarize";
 import { POP_COORDINATES, haversineKm } from "./origin";
-import { formatAsnLabel, type FilterSpec } from "./performance";
+import { buildBaseWhere, formatAsnLabel, type FilterSpec } from "./performance";
 import type { components } from "@/types/api";
+import { readJsonObjectBody, roundTo, toNum } from "./engine-utils";
 
 export type SecuritySectionName =
   | "tls_fingerprints"
@@ -259,21 +259,6 @@ export async function getSecurityEngineClient(context?: DuckDBReadContext): Prom
   };
 }
 
-function toNum(v: unknown, fallback = 0): number {
-  if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
-  if (typeof v === "bigint") return Number(v);
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  }
-  return fallback;
-}
-
-function roundTo(v: number, digits = 2): number {
-  const factor = 10 ** digits;
-  return Math.round(v * factor) / factor;
-}
-
 function toIsoTimestamp(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "number") return new Date(value).toISOString();
@@ -320,60 +305,6 @@ export function expandSecuritySections(
   return out.size > 0 ? out : new Set(ALL_SECURITY_SECTIONS);
 }
 
-function buildSecurityBaseWhere(
-  req: SecurityAggregatesRequest,
-  availableColumns?: ReadonlySet<string>,
-): { whereSql: string; params: unknown[] } {
-  const clauses: string[] = [];
-  const params: unknown[] = [];
-
-  if (req.start_time) {
-    const ms = Date.parse(req.start_time);
-    if (Number.isFinite(ms)) {
-      if (availableColumns?.has("ts_ms")) {
-        clauses.push(`"ts_ms" >= ${Math.floor(ms)}`);
-      } else {
-        clauses.push(`timestamp >= CAST('${sqlEscape(new Date(ms).toISOString())}' AS TIMESTAMPTZ)`);
-      }
-    }
-  }
-  if (req.end_time) {
-    const ms = Date.parse(req.end_time);
-    if (Number.isFinite(ms)) {
-      if (availableColumns?.has("ts_ms")) {
-        clauses.push(`"ts_ms" < ${Math.ceil(ms)}`);
-      } else {
-        clauses.push(`timestamp < CAST('${sqlEscape(new Date(ms).toISOString())}' AS TIMESTAMPTZ)`);
-      }
-    }
-  }
-  if (req.filters && typeof req.filters === "object") {
-    const dFilters: DashboardFilter[] = [];
-    for (const [rawKey, entry] of Object.entries(req.filters)) {
-      if (rawKey === "filter_mode" || !entry) continue;
-      const field = rawKey.replace(/_\d+$/, "");
-      if (Array.isArray(entry)) {
-        for (const v of entry) {
-          if (v) dFilters.push({ field, value: String(v), mode: "include" });
-        }
-      } else if (typeof entry === "object" && Array.isArray(entry.values)) {
-        const mode = entry.mode === "exclude" ? "exclude" : "include";
-        for (const v of entry.values) {
-          if (v) dFilters.push({ field, value: String(v), mode });
-        }
-      }
-    }
-    if (dFilters.length > 0) {
-      clauses.push(`(${compileFiltersToSql(dFilters, false, [], req.customColumnTypes)})`);
-    }
-  }
-
-  return {
-    whereSql: clauses.length > 0 ? clauses.join(" AND ") : "1=1",
-    params,
-  };
-}
-
 export function buildReqHeaderBucketCaseSql(colExpr = "h"): string {
   return `CASE
     WHEN ${colExpr} <= 256 THEN '0-256B'
@@ -408,7 +339,7 @@ export function buildSecurityTlsFingerprintsSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipCol = securityIpExpr(availableColumns);
   const sql = `
     SELECT
@@ -430,7 +361,7 @@ export function buildSecurityFingerprintCoverageSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const sql = `
     SELECT
       COUNT(*) AS total_rows,
@@ -445,7 +376,7 @@ export function buildSecurityReqSizeDistSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const bucketCase = buildReqHeaderBucketCaseSql("h");
   const sql = `
     SELECT
@@ -468,7 +399,7 @@ export function buildSecurityTopIpsHeaderSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipCol = securityIpExpr(availableColumns);
   const sql = `
     SELECT
@@ -492,7 +423,7 @@ export function buildSecurityTopUserAgentsSql(
   availableColumns?: ReadonlySet<string>,
   limit = BOT_UA_CLASSIFY_LIMIT,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const sql = `
     SELECT CAST(ua AS VARCHAR) AS ua, COUNT(*) AS cnt
     FROM logs
@@ -512,7 +443,7 @@ export function buildSecurityWellKnownBotPairsSql(
   botUserAgents: readonly string[],
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipCol = securityIpExpr(availableColumns);
   const inList = botUserAgents.map((ua) => `'${sqlEscape(ua)}'`).join(", ");
   const sql = `
@@ -536,7 +467,7 @@ export function buildSecurityBotEfficiencySql(
   req: SecurityAggregatesRequest,
   availableColumns: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipCol = securityIpExpr(availableColumns);
   const bytes = availableColumns.has("resp_bytes") ? "TRY_CAST(resp_bytes AS BIGINT)" : "0";
   const referer = availableColumns.has("referer") ? "COALESCE(CAST(referer AS VARCHAR), '')" : "''";
@@ -592,7 +523,7 @@ export function buildSecurityConnReuseDistSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const bucketCase = buildConnReuseBucketCaseSql("c");
   const sql = `
     SELECT
@@ -615,7 +546,7 @@ export function buildSecurityIpv6AdoptionSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipv6Expr = availableColumns?.has("is_ipv6")
     ? "LOWER(CAST(is_ipv6 AS VARCHAR)) IN ('1', 'true', 't', 'yes')"
     : "FALSE";
@@ -635,7 +566,7 @@ export function buildSecurityProxyDistSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const col = availableColumns?.has("proxy_type") ? "proxy_type" : "p_type";
   const sql = `
     SELECT
@@ -655,7 +586,7 @@ export function buildSecurityVerifiedBotsTsSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const bucketSeconds = Math.max(60, Math.trunc(toNum(req.bucket_seconds, 300)));
   const sql = `
     SELECT
@@ -676,7 +607,7 @@ export function buildSecurityProxiesSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const ipCol = securityIpExpr(availableColumns);
   const rttMinCol = availableColumns?.has("rtt_min")
     ? "COALESCE(rtt_min, tcpi_min_rtt)" : "tcpi_min_rtt";
@@ -705,7 +636,7 @@ export function buildSecurityThreatIntelSql(
   req: SecurityAggregatesRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildSecurityBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const hasJa3 = !availableColumns || availableColumns.has("ja3");
   const hasJa4 = !availableColumns || availableColumns.has("ja4");
   const fpExpr =
@@ -1222,17 +1153,7 @@ export async function executeSecurityThreatIntel(
 }
 
 async function parseSecurityRequest(req: Request, url: URL): Promise<SecurityAggregatesRequest> {
-  let body: Record<string, unknown> = {};
-  if (req.method === "POST") {
-    try {
-      const parsed = await req.clone().json();
-      if (parsed && typeof parsed === "object") {
-        body = parsed as Record<string, unknown>;
-      }
-    } catch {
-      body = {};
-    }
-  }
+  const body = await readJsonObjectBody(req);
   return {
     start_time: (body.start_time as string | undefined) ?? url.searchParams.get("start_time"),
     end_time: (body.end_time as string | undefined) ?? url.searchParams.get("end_time"),

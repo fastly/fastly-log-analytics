@@ -1,8 +1,6 @@
-type RunJob = (jobId: string, signal: AbortSignal) => Response;
+import { failure } from "./engine-utils";
 
-function failure(message: string, status = 502): Response {
-  return Response.json({ detail: { error: message } }, { status });
-}
+type RunJob = (jobId: string, signal: AbortSignal) => Response;
 
 export async function cloudRumMutation(request: Request, runJob: RunJob): Promise<Response | null> {
   const match = new URL(request.url).pathname.match(/^\/api\/services\/([^/]+)\/rum\/(enable|disable|upgrade|settings)$/);

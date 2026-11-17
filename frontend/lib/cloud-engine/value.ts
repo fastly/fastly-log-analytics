@@ -4,6 +4,7 @@ import {
   compileFiltersToSql, getDuckDBEngine, type DuckDBAnalyticalEngine, type DuckDBColumnType,
 } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
+import { roundTo } from "./engine-utils";
 
 export const IO_LARGE_IMAGE_THRESHOLD_BYTES = 51200;
 
@@ -24,11 +25,6 @@ export interface ValueQueryParams {
   chart_interval?: string;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   signal?: AbortSignal;
-}
-
-function roundTo(val: number, decimals = 2): number {
-  const factor = 10 ** decimals;
-  return Math.round(val * factor) / factor;
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -71,6 +67,7 @@ export function emptyValueSummary(): ValueSections {
   };
 }
 
+// Not the engine-utils parseEpochMs: a non-finite number here falls through to Date.parse and yields null, not NaN.
 function parseEpochMs(val: string | number | undefined): number | null {
   if (val === undefined || val === null || val === "") return null;
   const num = Number(val);

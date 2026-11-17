@@ -1,3 +1,5 @@
+import { failure } from "./engine-utils";
+
 // Cloud bridge for the per-service Log Settings modal. The modal speaks the
 // self-hosted routes (`/api/services/{id}/logging-settings`, `/log-fields`);
 // Cloud keeps the same values on the service record, edited through a
@@ -17,10 +19,6 @@ type CloudService = {
 };
 
 const ROUTE = /^\/api\/services\/([^/]+)\/(logging-settings|logging-settings\/update|log-fields)$/;
-
-function failure(message: string, status = 502): Response {
-  return Response.json({ detail: { error: message } }, { status });
-}
 
 async function readService(serviceId: string, signal: AbortSignal) {
   const response = await fetch(`/api/admin/services/${encodeURIComponent(serviceId)}`, { credentials: "include", signal });

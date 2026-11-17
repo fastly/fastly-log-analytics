@@ -6,6 +6,8 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { buildOriginShieldingAnalysisSql, enrichShieldingRouteWithPopDistance } from "./origin";
+import { parseEpochMs, roundTo } from "./engine-utils";
+export { parseEpochMs, roundTo };
 
 export const TCP_FIELDS = [
   "client_rtt_us",
@@ -67,11 +69,6 @@ export interface NetworkQueryParams {
 
 function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
-}
-
-export function roundTo(val: number, decimals: number): number {
-  const factor = 10 ** decimals;
-  return Math.round(val * factor) / factor;
 }
 
 /**
@@ -387,19 +384,6 @@ export function networkScanColumns(path: string, params: Record<string, unknown>
     ...present(params.filter_pop) ? POP_COLUMNS : [],
     ...filters && typeof filters === "object" ? Object.keys(filters) : [],
   ])];
-}
-
-export function parseEpochMs(val: string | number | undefined): number | null {
-  if (val === undefined || val === null || val === "") return null;
-  if (typeof val === "number") {
-    return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);
-  }
-  const num = Number(val);
-  if (Number.isFinite(num)) {
-    return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
-  }
-  const parsed = Date.parse(val);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function buildWhereClause(params: NetworkQueryParams): string {

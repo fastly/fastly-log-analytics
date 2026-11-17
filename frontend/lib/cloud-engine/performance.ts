@@ -14,6 +14,7 @@
 import { sqlEscape } from "@/lib/sqlBuilder";
 import { compileFiltersToSql, getDuckDBEngine, type DuckDBReadContext, type DuckDBColumnType } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
+import { readJsonObjectBody, roundTo, toNum } from "./engine-utils";
 
 export type PerformanceSectionName =
   | "top_urls"
@@ -187,21 +188,6 @@ export async function getPerformanceEngineClient(context?: DuckDBReadContext): P
   };
 }
 
-function toNum(v: unknown, fallback = 0): number {
-  if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
-  if (typeof v === "bigint") return Number(v);
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  }
-  return fallback;
-}
-
-function roundTo(v: number, digits = 2): number {
-  const factor = 10 ** digits;
-  return Math.round(v * factor) / factor;
-}
-
 function hasActiveFilters(filters: FilterSpec | null | undefined): boolean {
   if (!filters || typeof filters !== "object") return false;
   for (const [key, val] of Object.entries(filters)) {
@@ -242,8 +228,8 @@ export function resolveSortColumn(sortBy?: string | null): string {
   return SORT_COLUMNS[key] ?? SORT_COLUMNS.p99;
 }
 
-function buildPerformanceBaseWhere(
-  req: PerformanceRequest,
+export function buildBaseWhere(
+  req: Pick<PerformanceRequest, "start_time" | "end_time" | "filters" | "customColumnTypes">,
   availableColumns?: ReadonlySet<string>,
 ): { whereSql: string; params: unknown[] } {
   const clauses: string[] = [];
@@ -313,7 +299,7 @@ function buildPerfLatencyRankingSql(
   key: "url" | "asn",
   minRequests: number,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildPerformanceBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const sortColumn = resolveSortColumn(req.sort_by);
   const sql = `
     SELECT ${key}, req_count, avg_ms, q[1] AS p50_ms, q[2] AS p95_ms, q[3] AS p99_ms
@@ -358,7 +344,7 @@ export function buildPerfTtlDistSql(
   req: PerformanceRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildPerformanceBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const bucketCase = buildTtlBucketCaseSql("ttl_val");
   const sql = `
     SELECT
@@ -381,7 +367,7 @@ export function buildPerfWaterfallSql(
   req: PerformanceRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildPerformanceBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const hasOttfb = !availableColumns || availableColumns.has("ottfb");
   const hasOttlb = !availableColumns || availableColumns.has("ottlb");
   const ottfbExpr = hasOttfb ? "COALESCE(TRY_CAST(ottfb AS DOUBLE), 0.0) / 1000.0" : "0.0";
@@ -412,7 +398,7 @@ export function buildPerfScatterSql(
   req: PerformanceRequest,
   availableColumns?: ReadonlySet<string>,
 ): { sql: string; params: unknown[] } {
-  const { whereSql, params } = buildPerformanceBaseWhere(req, availableColumns);
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const cacheExpr = !availableColumns || availableColumns.has("cache") ? "COALESCE(CAST(cache AS VARCHAR), '')" : "''";
   const sql = `
     SELECT
@@ -615,17 +601,7 @@ export async function executePerformanceAggregates(
 }
 
 async function parsePerformanceRequest(req: Request, url: URL): Promise<PerformanceRequest> {
-  let body: Record<string, unknown> = {};
-  if (req.method === "POST") {
-    try {
-      const parsed = await req.clone().json();
-      if (parsed && typeof parsed === "object") {
-        body = parsed as Record<string, unknown>;
-      }
-    } catch {
-      body = {};
-    }
-  }
+  const body = await readJsonObjectBody(req);
   return {
     start_time: (body.start_time as string | undefined) ?? url.searchParams.get("start_time"),
     end_time: (body.end_time as string | undefined) ?? url.searchParams.get("end_time"),

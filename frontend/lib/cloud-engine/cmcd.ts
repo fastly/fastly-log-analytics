@@ -5,6 +5,7 @@ import {
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
+import { parseEpochMs, roundTo } from "./engine-utils";
 
 export const CMCD_COLUMNS = [
   "cmcd_sid",
@@ -71,11 +72,6 @@ export interface CmcdQueryParams {
   signal?: AbortSignal;
 }
 
-function roundTo(val: number, decimals: number): number {
-  const factor = 10 ** decimals;
-  return Math.round(val * factor) / factor;
-}
-
 export function classifySessionDurationBucket(durationSeconds: number): string {
   if (durationSeconds < 30) return "<30s";
   if (durationSeconds < 120) return "30s–2m";
@@ -122,19 +118,6 @@ export function emptyCmcdAggregates() {
 }
 
 export const empty_cmcd_aggregates = emptyCmcdAggregates;
-
-function parseEpochMs(val: string | number | undefined): number | null {
-  if (val === undefined || val === null || val === "") return null;
-  if (typeof val === "number") {
-    return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);
-  }
-  const num = Number(val);
-  if (Number.isFinite(num)) {
-    return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
-  }
-  const parsed = Date.parse(val);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 function buildCmcdWhere(params: CmcdQueryParams): string {
   const clauses: string[] = [

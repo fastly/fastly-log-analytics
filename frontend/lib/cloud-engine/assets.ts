@@ -6,6 +6,7 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import type { AssetsSection } from "./rollup-sections";
+import { parseEpochMs, roundTo } from "./engine-utils";
 
 export const LARGE_UNCOMPRESSED_THRESHOLD_BYTES = 10240; // 10 KB
 export const LOW_TTL_THRESHOLD_SECONDS = 3600; // 1 hour
@@ -39,11 +40,6 @@ export interface DimRowInput {
   sum_origin_ms?: number;
   origin_Count?: number;
   origin_count?: number;
-}
-
-function roundTo(val: number, decimals: number): number {
-  const factor = 10 ** decimals;
-  return Math.round(val * factor) / factor;
 }
 
 export function emptyAssetsAggregates() {
@@ -268,19 +264,6 @@ export function computeSummaryFromDims(
 }
 
 export const compute_summary_from_dims = computeSummaryFromDims;
-
-function parseEpochMs(val: string | number | undefined): number | null {
-  if (val === undefined || val === null || val === "") return null;
-  if (typeof val === "number") {
-    return val < 1e12 ? Math.floor(val * 1000) : Math.floor(val);
-  }
-  const num = Number(val);
-  if (Number.isFinite(num)) {
-    return num < 1e12 ? Math.floor(num * 1000) : Math.floor(num);
-  }
-  const parsed = Date.parse(val);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 const ALLOWED_FILTER_COLS = new Set([
   "asset_type",

@@ -1,3 +1,5 @@
+import { failure } from "./engine-utils";
+
 // Cloud bridge for the provisioning wizard's execute step. The wizard posts
 // the self-hosted body (CDN proxy, cron sync and flat `cmcd_*` keys, numeric
 // strings); Cloud's `Provision` input rejects unknown fields and reads the
@@ -6,10 +8,6 @@
 type RunJob = (jobId: string, signal: AbortSignal) => Response;
 
 const SELF_HOSTED_ONLY = new Set(["cdn_service_name", "cdn_service_id", "cdn_shield", "cdn_url", "cdn_prefix", "enable_cron_sync", "ngwaf_workspace_id"]);
-
-function failure(message: string, status = 502): Response {
-  return Response.json({ detail: { error: message } }, { status });
-}
 
 function optionalNumber(value: unknown): number | undefined {
   if (value === null || value === undefined || value === "") return undefined;

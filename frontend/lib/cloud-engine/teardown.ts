@@ -1,3 +1,5 @@
+import { failure } from "./engine-utils";
+
 // Cloud bridge for the admin Teardown dialog. The dialog posts the self-hosted
 // body (`remove_logging`, `remove_rum`, `remove_bucket`, `remove_cloud_files`,
 // `remove_cache`, `token`) and expects a progress stream; Cloud's teardown route
@@ -14,10 +16,6 @@ type SelfHostedTeardown = {
   remove_bucket?: unknown;
   remove_cloud_files?: unknown;
 };
-
-function failure(message: string, status = 502): Response {
-  return Response.json({ detail: { error: message } }, { status });
-}
 
 /** Maps the dialog's flags onto Cloud's `Teardown` options. */
 export function cloudTeardownOptions(input: SelfHostedTeardown) {

@@ -1,3 +1,5 @@
+import { failure } from "./engine-utils";
+
 // Cloud bridge for the admin Delete Data dialog. The dialog streams the
 // self-hosted route (`POST /api/admin/reset-logs?service_id=…`); Cloud runs
 // Delete Data as a job that the edge clock advances, so this starts the job
@@ -19,10 +21,6 @@ let pollMs = 5000;
 /** Test hook: how often the job status is read while streaming. */
 export function setDeleteDataPollInterval(ms: number): void {
   pollMs = ms;
-}
-
-function failure(message: string, status = 502): Response {
-  return Response.json({ detail: { error: message } }, { status });
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
