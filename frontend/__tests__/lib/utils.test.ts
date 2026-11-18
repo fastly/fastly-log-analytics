@@ -453,7 +453,7 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/services/:service_id/cron-settings', 'DELETE /api/services/:service_id/time-range', 'POST /api/services/:service_id/ngwaf-sync', 'PATCH /api/services/:service_id/custom-fields/:field_name',
   'DELETE /api/cron-runs/:log_id', 'POST /api/assets/aggregates', 'GET /api/assets/aggregates', 'POST /api/sharing/deploy-frontend', 'POST /api/sharing/teardown-frontend',
   'GET /api/high-scale/request-facts', 'POST /api/high-scale/request-facts', 'GET /api/network/pop-health', 'GET /api/security/threat-intel', 'GET /api/cron-runs/:run_id/stream',
-  'GET /api/log-extents/stream', 'GET /api/admin/events/stream', 'GET /api/usage/operations', 'GET /api/usage/bandwidth', 'GET /api/usage/log-activity', 'GET /api/usage/rum-breakdown', 'GET /api/usage/platform',
+  'GET /api/log-extents/stream', 'GET /api/admin/events/stream', 'GET /api/usage/operations', 'GET /api/usage/bandwidth', 'GET /api/usage/log-activity', 'GET /api/usage/rum-breakdown', 'GET /api/usage/platform', 'GET /api/usage/geography',
   'GET /api/admin/metric-history', 'GET /api/admin/storage-tree',
   'GET /api/admin/usage-log/export', 'GET /api/admin/slow-queries/count', 'GET /api/admin/slow-queries', 'GET /api/download-folder', 'GET /api/download', 'GET /api/download-all',
   'POST /api/provision/reconcile',

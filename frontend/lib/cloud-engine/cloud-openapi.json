@@ -3204,6 +3204,103 @@
         }
       }
     },
+    "/api/admin/usage/geography": {
+      "get": {
+        "operationId": "get__api_admin_usage_geography",
+        "summary": "Delivery traffic grouped by region or datacenter",
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive range start as an ISO 8601 timestamp"
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exclusive range end as an ISO 8601 timestamp"
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": ["region", "datacenter"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Independently observed delivery traffic grouped by location",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "source",
+                    "group_by",
+                    "data",
+                    "requests",
+                    "bandwidth_bytes"
+                  ],
+                  "properties": {
+                    "source": {
+                      "type": "string",
+                      "enum": ["fastly", "unavailable"]
+                    },
+                    "group_by": {
+                      "type": "string",
+                      "enum": ["region", "datacenter"]
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "location",
+                          "requests",
+                          "bandwidth_bytes",
+                          "request_share",
+                          "bandwidth_share"
+                        ],
+                        "properties": {
+                          "location": { "type": "string" },
+                          "requests": { "type": "integer" },
+                          "bandwidth_bytes": { "type": "integer" },
+                          "request_share": { "type": "number" },
+                          "bandwidth_share": { "type": "number" }
+                        }
+                      }
+                    },
+                    "requests": { "type": "integer" },
+                    "bandwidth_bytes": { "type": "integer" },
+                    "reason": { "type": ["string", "null"] }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/usage/reconcile-storage": {
       "post": {
         "operationId": "post__api_admin_usage_reconcile_storage",

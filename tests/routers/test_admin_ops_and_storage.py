@@ -1181,6 +1181,7 @@ def test_extract_fos_ops_and_fastly_api_helper(record, expected):
         to_epoch=20,
         metrics=("requests",),
         token="test-token",
+        group_by=None,
     )
     with patch("backend.core.fastly.client.fastly_platform_metrics") as cached_fetch:
         assert _fastly_api("svc1", "hour", 10, 20, ("requests",), "test-token")["data"] == []

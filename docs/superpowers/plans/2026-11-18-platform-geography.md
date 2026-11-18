@@ -292,4 +292,4 @@ git add docs/pages/usage-and-cost.md
 git commit -m "Document usage geography"
 ```
 
-Stop before any live deploy. The combined Cloud + Elevation run requires fresh explicit approval.
+Stop before any live deploy. The combined Cloud + High-Scale run requires fresh explicit approval.
