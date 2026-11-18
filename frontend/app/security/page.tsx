@@ -4,7 +4,11 @@ import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
 } from '@/lib/ssr/upstream'
-import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
+import {
+  resolveReportPageParams,
+  seedDehydratedState,
+  type ReportSearchParams,
+} from '@/lib/ssr/upstream'
 import SecurityClient from './_sections/SecurityClient'
 
 // Per-request RSC shell for /security. Pre-fetches the DEFAULT security
@@ -47,18 +51,9 @@ export const dynamic = 'force-dynamic'
 export default async function SecurityPage({
   searchParams,
 }: {
-  searchParams: Promise<{
-    service?: string | string[]
-    start_time?: string | string[]
-    end_time?: string | string[]
-    range?: string | string[]
-    filters?: string | string[]
-  }>
+  searchParams: Promise<ReportSearchParams>
 }) {
-  const params = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
-  const serviceId = await resolvePageServiceId(params)
-  const isDefaultView =
-    !params.start_time && !params.end_time && !params.range && !params.filters
+  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
 
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveSecurityDefaultKey + fetchSecurityServerSide both floor it).

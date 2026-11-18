@@ -402,6 +402,24 @@ export async function resolvePageServiceId(
   return resolveServerServiceId(params, bootstrap, options)
 }
 
+export type ReportSearchParams = {
+  service?: string | string[]
+  start_time?: string | string[]
+  end_time?: string | string[]
+  range?: string | string[]
+  filters?: string | string[]
+}
+
+export async function resolveReportPageParams(
+  searchParams: Promise<ReportSearchParams>,
+): Promise<{ serviceId: string | undefined; isDefaultView: boolean }> {
+  const params: ReportSearchParams = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
+  const serviceId = await resolvePageServiceId(params)
+  const isDefaultView =
+    !params.start_time && !params.end_time && !params.range && !params.filters
+  return { serviceId, isDefaultView }
+}
+
 // ── Admin Gateway SSR Fetchers ────────────────────────────────────────────────
 
 export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | null> {

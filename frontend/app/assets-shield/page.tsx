@@ -1,7 +1,12 @@
 import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchAssetsServerSide, resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
+import {
+  fetchAssetsServerSide,
+  resolveReportPageParams,
+  seedDehydratedState,
+  type ReportSearchParams,
+} from '@/lib/ssr/upstream'
 import AssetsClient from './_sections/AssetsClient'
 import AssetsLoading from './loading'
 
@@ -10,18 +15,9 @@ export const dynamic = 'force-dynamic'
 export default async function AssetsShieldPage({
   searchParams,
 }: {
-  searchParams: Promise<{
-    service?: string | string[]
-    start_time?: string | string[]
-    end_time?: string | string[]
-    range?: string | string[]
-    filters?: string | string[]
-  }>
+  searchParams: Promise<ReportSearchParams>
 }) {
-  const params = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
-  const serviceId = await resolvePageServiceId(params)
-  const isDefaultView =
-    !params.start_time && !params.end_time && !params.range && !params.filters
+  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
 
   return (
     <Suspense fallback={<AssetsLoading />}>
