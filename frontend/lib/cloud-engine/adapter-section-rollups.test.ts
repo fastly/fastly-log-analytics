@@ -66,7 +66,7 @@ describe("Cloud /assets and /fastly-value summary sections", () => {
     expect(ensureCloudRange).not.toHaveBeenCalled();
   });
 
-  it("adds Fastly's Stats API totals to an unfiltered overview answer, read alongside the summaries", async () => {
+  it("adds Fastly Platform Metrics totals to an unfiltered overview answer, read alongside summaries", async () => {
     const hour = Date.parse("2026-11-05T12:00:00Z");
     vi.mocked(fetch).mockImplementation(async (input) => String(input).includes("/api/admin/usage/service-stats")
       ? Response.json({

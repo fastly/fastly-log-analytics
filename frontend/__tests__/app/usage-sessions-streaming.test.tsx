@@ -341,7 +341,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
   })
 
-  test('Cloud cost card and Compute charts use one Fastly Stats API read for the range', async () => {
+  test('Cloud cost card and Compute charts use one Platform Metrics read for the range', async () => {
     setCloudModeRuntime(true)
     useMockAdminFetch = true
     mockGet.mockImplementation(async (path: string) => {
@@ -371,7 +371,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(vcpuTraces?.map((t) => [t.name, t.y])).toEqual([['App service', [2]], ['Worker service', [0.5]]])
   })
 
-  test('Cloud cost card falls back to the logged Compute figures when the Stats API is unavailable', async () => {
+  test('Cloud cost card falls back to logged Compute figures when Platform Metrics is unavailable', async () => {
     setCloudModeRuntime(true)
     useMockAdminFetch = true
     mockGet.mockImplementation(async (path: string) => {

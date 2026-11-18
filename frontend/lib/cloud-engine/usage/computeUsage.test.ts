@@ -101,7 +101,7 @@ describe("computeUsage", () => {
     });
   });
 
-  it("does not read the Stats API for a range longer than its 31-day limit", async () => {
+  it("does not read Platform Metrics for a range longer than its 31-day limit", async () => {
     const fetchBilling = vi.fn(async () => billing());
 
     const result = await computeUsage(
@@ -117,7 +117,7 @@ describe("computeUsage", () => {
     expect(fetchBilling).not.toHaveBeenCalled();
   });
 
-  it("reports the Stats API as unavailable instead of failing when the read fails", async () => {
+  it("reports Platform Metrics as unavailable instead of failing when the read fails", async () => {
     const fetchBilling = vi.fn(async () => {
       throw new Error("compute_billing_unavailable");
     });
@@ -141,7 +141,7 @@ describe("rollupComputeByDay", () => {
     billed_ms: 100 * n,
   });
 
-  it("sums hours into UTC days and adds no day the Stats API did not cover", () => {
+  it("sums hours into UTC days and adds no day Platform Metrics did not cover", () => {
     expect(
       rollupComputeByDay([
         point("2026-11-10T00:00:00.000Z", 1),

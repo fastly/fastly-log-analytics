@@ -186,7 +186,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     });
   });
 
-  it("answers /api/usage/compute from Fastly's Stats API without reading the usage logs", async () => {
+  it("answers /api/usage/compute from Platform Metrics without reading the usage logs", async () => {
     const from = Date.parse("2026-11-10T00:00:00Z");
     const to = from + 2 * 3_600_000;
     const fetchSummary = vi.spyOn(usage, "fetchUsageSummary");
@@ -241,7 +241,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       vi.spyOn(usage, "fetchUsageKind").mockResolvedValue([]);
     });
 
-    it("prices Compute, KV and secrets from Fastly's Stats API, shared with the Compute charts' read", async () => {
+    it("prices Compute, KV and secrets from Platform Metrics, shared with the Compute charts' read", async () => {
       const fetchBilling = vi.spyOn(usage, "fetchComputeBilling").mockResolvedValue(stats);
 
       await load("/api/usage/compute", 2 * 3_600_000);
@@ -254,7 +254,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       expect(line(body, "secrets")).toMatchObject({ source: "fastly", detail: "3 secrets × 0.1 days" });
     });
 
-    it("falls back to the logged lines when the Stats API fails", async () => {
+    it("falls back to the logged lines when Platform Metrics fails", async () => {
       vi.spyOn(usage, "fetchComputeBilling").mockRejectedValue(new Error("stats down"));
 
       const body = await load("/api/usage/current-storage", 2 * 3_600_000);
