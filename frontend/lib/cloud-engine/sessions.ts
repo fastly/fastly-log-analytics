@@ -20,6 +20,7 @@ import {
   type SessionsRangeLoader,
   type SessionsRead,
 } from "./sessions-window";
+import type { Schema } from "@/types/api";
 
 export const SESSIONS_INACTIVITY_GAP_SECONDS = 1800; // 30 * 60 seconds (INTERVAL 30 MINUTES)
 export const SESSIONS_MAX_WINDOW_DAYS = 7;
@@ -92,14 +93,7 @@ export interface SessionsListResponse {
   section_timings: { name: string; duration_ms: number }[];
 }
 
-export interface SessionDetailRequest {
-  service_id?: string;
-  session_token?: string;
-  ip?: string;
-  ja4?: string | null;
-  start_time?: string;
-  end_time?: string;
-}
+export type SessionDetailRequest = Schema<"SessionDetailRequest">;
 
 export interface SessionDetailResponse {
   data: Record<string, unknown>[];
