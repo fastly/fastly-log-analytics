@@ -128,7 +128,7 @@ export function getStepsForMode(
   config?: { logging_enabled?: boolean },
 ): { id: Step; label: string }[] {
   const steps: { id: Step; label: string }[] = [
-    { id: "mode", label: "Role" },
+    ...(isCloudMode() ? [] : [{ id: "mode" as const, label: "Role" }]),
     { id: "token", label: "Auth" },
     { id: "service", label: "Service" },
   ]

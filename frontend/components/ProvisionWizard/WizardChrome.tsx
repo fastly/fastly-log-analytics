@@ -145,7 +145,11 @@ export function WizardFooter({ s }: { s: WizardState }) {
 
   return (
     <DialogFooter className={panelDialogFooter}>
-      {!isDeploying && step !== "mode" && step !== "terraform" && !(step === "connect" && setupPhase === "done") && (
+      {!isDeploying &&
+        step !== "mode" &&
+        !(isCloudMode() && step === "token") &&
+        step !== "terraform" &&
+        !(step === "connect" && setupPhase === "done") && (
         <Button variant="ghost" className="mr-auto h-9 text-xs" onClick={handleBack}>
           <ChevronLeft className="h-4 w-4 mr-1" /> Back
         </Button>

@@ -179,11 +179,11 @@ describe('getStepsForMode', () => {
     expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
   })
 
-  it('drops the NGWAF step in Cloud mode, where the server has no NGWAF or CDN front', () => {
+  it('drops the NGWAF and mode steps in Cloud mode, where the server has no NGWAF or CDN front', () => {
     setCloudModeRuntime(true)
     try {
-      expect(ids('provision')).toEqual(['mode', 'token', 'service', 'features', 'storage', 'fields', 'execute'])
-      expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
+      expect(ids('provision')).toEqual(['token', 'service', 'features', 'storage', 'fields', 'execute'])
+      expect(ids('provision', { logging_enabled: false })).toEqual(['token', 'service', 'features', 'storage', 'execute'])
     } finally {
       setCloudModeRuntime(false)
     }
@@ -434,6 +434,46 @@ describe('ResumeBanner', () => {
     saveDraft(makeDraft({ currentStep: 'fields' }))
     renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
     expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
+  })
+})
+
+describe('ProvisionWizard — Cloud mode skips the mode step', () => {
+  afterEach(() => {
+    setCloudModeRuntime(false)
+    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
+  })
+
+  it('opens directly on the token step with provision mode pre-selected and no mode step in STEPS', () => {
+    setCloudModeRuntime(true)
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
+    expect(screen.getByText(/Enter Fastly API Token/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Select your role/i)).not.toBeInTheDocument()
+    expect(screen.getByText((_, el) => el?.textContent === 'Step 1 of 6')).toBeInTheDocument()
+  })
+
+  it('does not show the Back button on the token step in Cloud mode', () => {
+    setCloudModeRuntime(true)
+    render(<WizardFooter s={makeFooterState({ step: 'token', mode: 'provision' })} />)
+    expect(screen.queryByRole('button', { name: /back/i })).not.toBeInTheDocument()
+  })
+
+  it('shows ResumeBanner when pendingDraft exists in Cloud mode, and Start fresh resets to token', async () => {
+    setCloudModeRuntime(true)
+    const user = userEvent.setup()
+    saveDraft(makeDraft({ currentStep: 'fields' }))
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
+    expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
+    await user.click(screen.getByTestId('resume-banner-start-fresh'))
+    expect(screen.queryByText(/Resume previous wizard/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Enter Fastly API Token/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Select your role/i)).not.toBeInTheDocument()
+  })
+
+  it('starts on the mode step in non-Cloud mode', () => {
+    setCloudModeRuntime(false)
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
+    expect(screen.getByText(/Select your role/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Enter Fastly API Token/i)).not.toBeInTheDocument()
   })
 })
 

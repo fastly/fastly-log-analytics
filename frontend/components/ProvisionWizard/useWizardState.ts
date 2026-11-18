@@ -120,8 +120,8 @@ export function useWizardEffects(args: WizardEffectsArgs) {
 
   useEffect(() => {
     if (open && !pendingDraft) {
-      setStep("mode")
-      setMode(null)
+      setStep(isCloudMode() ? "token" : "mode")
+      setMode(isCloudMode() ? "provision" : null)
       setSearch("")
       setSelectedService(null)
       setIsDeploying(false)
@@ -198,8 +198,8 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const services = useServiceStore((s) => s.services)
   const { timezone } = useTimezoneStore()
   const queryClient = useQueryClient()
-  const [step, setStep] = useState<Step>("mode")
-  const [mode, setMode] = useState<WizardMode>(null)
+  const [step, setStep] = useState<Step>(() => (isCloudMode() ? "token" : "mode"))
+  const [mode, setMode] = useState<WizardMode>(() => (isCloudMode() ? "provision" : null))
   const [token, setToken] = useState("")
   const [submittedToken, setSubmittedToken] = useState("")
   const [prevOpenForToken, setPrevOpenForToken] = useState(open)

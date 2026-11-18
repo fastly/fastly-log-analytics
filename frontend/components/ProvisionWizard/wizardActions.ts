@@ -1,4 +1,5 @@
 import type { QueryClient } from '@tanstack/react-query'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { client, unwrapClient, queryKeys, adminFetch } from '@/lib/api'
 import { downloadBlob } from '@/lib/utils'
 import { SERVICE_DEFAULTS, effectiveLogPeriod } from '@/lib/serviceDefaults'
@@ -129,8 +130,8 @@ export function buildHandleModalClose(deps: ModalCloseDeps) {
         window.location.reload()
       } else {
         setTimeout(() => {
-          deps.setStep("mode")
-          deps.setMode(null)
+          deps.setStep(isCloudMode() ? "token" : "mode")
+          deps.setMode(isCloudMode() ? "provision" : null)
           deps.setSearch("")
           deps.setSelectedService(null)
           deps.setIsDeploying(false)
