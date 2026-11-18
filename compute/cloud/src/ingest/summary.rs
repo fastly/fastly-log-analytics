@@ -119,6 +119,30 @@ pub const DIMS: &[&str] = &[
     "pop", "oip", "edge", "backend", "country", "region", "asn", "city", "proto",
 ];
 
+/// Low-cardinality single-field filter dimensions written into `filtered_rollups`.
+pub const FILTERED_ROLLUP_FIELDS: [&str; 8] = [
+    "status",
+    "cache",
+    "pop",
+    "country",
+    "proto",
+    "method",
+    "content_type",
+    "edge",
+];
+
+pub fn filtered_rollup_cap(field: &str) -> usize {
+    match field {
+        "status" => 64,
+        "cache" | "proto" | "method" => 16,
+        "pop" => 200,
+        "country" => 250,
+        "content_type" => 100,
+        "edge" => 2,
+        _ => 16,
+    }
+}
+
 /// `{scope}processed/summary/{table}/`: a tree apart from the window files, so their readers'
 /// LIST caps and `window=` parsing never see summaries.
 pub fn summary_prefix(scope: &str, table: &str) -> String {
@@ -1098,6 +1122,114 @@ impl<'a> Dim<'a> {
 }
 
 #[derive(Default)]
+struct FilteredAgg {
+    requests: i64,
+    errors: i64,
+    s5: i64,
+    cache_hits: i64,
+    hit_requests: i64,
+    miss_requests: i64,
+    pass_requests: i64,
+    bytes: i64,
+    lat: (f64, i64),
+    ost5: i64,
+    ost: i64,
+    rtt: (i64, i64),
+    ploss: (f64, i64),
+    cwnd: (f64, i64),
+    rttvar: (f64, i64),
+    retrans: i64,
+    elapsed: (f64, i64),
+    delivery: (f64, i64),
+    hists: [Hist; 5],
+}
+
+impl FilteredAgg {
+    fn add(&mut self, n: &Net, cache: Option<&str>, elapsed: Option<i64>, delivery: Option<f64>) {
+        self.requests += 1;
+        self.errors += i64::from(n.status.is_some_and(|s| s >= 400 || s == 0));
+        self.s5 += i64::from(n.s5);
+        self.cache_hits += i64::from(n.hit);
+        self.hit_requests += i64::from(hit(cache));
+        self.miss_requests += i64::from(cache.is_some_and(|s| s.starts_with("MISS")));
+        self.pass_requests += i64::from(cache.is_some_and(|s| s.starts_with("PASS")));
+        self.bytes += n.bytes;
+        if let Some(l) = n.lat_us {
+            self.lat.0 += l;
+            self.lat.1 += 1;
+        }
+        if let Some(ost) = n.ost {
+            self.ost += 1;
+            self.ost5 += i64::from(ost >= 500);
+        }
+        if let Some(r) = n.rtt {
+            self.rtt.0 += r;
+            self.rtt.1 += 1;
+        }
+        if let Some(p) = n.ploss {
+            self.ploss.0 += p;
+            self.ploss.1 += 1;
+        }
+        if let Some(c) = n.cwnd {
+            self.cwnd.0 += c;
+            self.cwnd.1 += 1;
+        }
+        if let Some(v) = n.rttvar {
+            self.rttvar.0 += v;
+            self.rttvar.1 += 1;
+        }
+        self.retrans += i64::from(n.retrans);
+        if let Some(e) = elapsed {
+            self.elapsed.0 += e as f64;
+            self.elapsed.1 += 1;
+        }
+        if let Some(d) = delivery {
+            self.delivery.0 += d;
+            self.delivery.1 += 1;
+        }
+        add_lat(&mut self.hists, &n.lat, &[0, 1, 2, 3, 4]);
+    }
+
+    fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str) {
+        let blobs = self.hists.each_ref().map(Hist::to_bytes);
+        let mut row = vec![
+            (C::Bundle, V::S("filtered_rollups")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+            (C::Count, V::I(self.requests)),
+            (C::Errors, V::I(self.errors)),
+            (C::Status5xx, V::I(self.s5)),
+            (C::CacheHits, V::I(self.cache_hits)),
+            (C::HitRequests, V::I(self.hit_requests)),
+            (C::MissRequests, V::I(self.miss_requests)),
+            (C::PassRequests, V::I(self.pass_requests)),
+            (C::RespBytesSum, V::I(self.bytes)),
+            (C::LatUsSum, V::F(self.lat.0)),
+            (C::LatUsCount, V::I(self.lat.1)),
+            (C::Ost5xxCount, V::I(self.ost5)),
+            (C::OstTotalCount, V::I(self.ost)),
+            (C::RttSum, V::I(self.rtt.0)),
+            (C::RttCount, V::I(self.rtt.1)),
+            (C::PlossSum, V::F(self.ploss.0)),
+            (C::PlossCount, V::I(self.ploss.1)),
+            (C::CwndSum, V::F(self.cwnd.0)),
+            (C::CwndCount, V::I(self.cwnd.1)),
+            (C::RttvarSum, V::F(self.rttvar.0)),
+            (C::RttvarCount, V::I(self.rttvar.1)),
+            (C::RetransCount, V::I(self.retrans)),
+            (C::ElapsedSum, V::F(self.elapsed.0)),
+            (C::ElapsedCount, V::I(self.elapsed.1)),
+            (C::DeliveryRateSum, V::F(self.delivery.0)),
+            (C::DeliveryRateCount, V::I(self.delivery.1)),
+        ];
+        push_hists(&mut row, &HIST_COLS, &blobs);
+        out.push(&row);
+    }
+}
+
+#[derive(Default)]
 struct Series<'a> {
     requests: i64,
     s5: i64,
@@ -1831,7 +1963,14 @@ type SampleAt = (i64, i64, usize, usize);
 /// The v3 rows (`dims`, `series5`, `bins`, `assets`, `transport`, `origin`, `urls`, `quality`
 /// and their `dim_totals`) in one pass over the rows, which also picks the `sample` rows, returned
 /// in order for [`write_sample`] to write after the other groups.
-fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
+fn write_v3<'a>(
+    rows: &[Rows<'a>],
+    bucket: i64,
+    out: &mut Out,
+) -> (
+    Vec<SampleAt>,
+    [FastMap<Cow<'a, str>, FilteredAgg>; FILTERED_ROLLUP_FIELDS.len()],
+) {
     const FIELD_DIMS: [&str; 5] = ["pop", "oip", "edge", "backend", "region"];
     let mut dims: Vec<FastMap<DimKey, Dim>> = DIMS.iter().map(|_| FastMap::default()).collect();
     let dim_at = |name: &str| DIMS.iter().position(|d| *d == name).expect("a dim");
@@ -1863,10 +2002,19 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
     let mut quality = Quality::default();
     let mut quality_regions: FastMap<(&str, &str), Quality> = FastMap::default();
     let mut quality_asns: FastMap<i64, Quality> = FastMap::default();
+    let mut filtered: [FastMap<Cow<str>, FilteredAgg>; FILTERED_ROLLUP_FIELDS.len()] =
+        Default::default();
 
     for (at, r) in rows.iter().enumerate() {
         let c = &r.net;
         let field_cols = FIELD_DIMS.map(|d| FieldCol::resolve(r.batch, d));
+        let filter_cols = FILTERED_ROLLUP_FIELDS.map(|f| {
+            if f == "content_type" {
+                None
+            } else {
+                FieldCol::resolve(r.batch, f)
+            }
+        });
         let (url_col, asn_col, pop_col) = (
             FieldCol::resolve(r.batch, "url"),
             FieldCol::resolve(r.batch, "asn"),
@@ -2020,6 +2168,25 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
                 ))
                 .or_default()
                 .add(body, t_rtt, n.ploss, rate);
+            for (k, col) in filter_cols.iter().enumerate() {
+                if let Some(col) = col {
+                    col.for_each_key(i, true, |key| {
+                        filtered[k]
+                            .entry(key.render())
+                            .or_default()
+                            .add(&n, cache, elapsed, rate);
+                    });
+                }
+            }
+            if let Some(raw_ct) = c.content_type.get(i, true) {
+                let base = raw_ct.split(';').next().unwrap_or(raw_ct).trim();
+                if !base.is_empty() {
+                    filtered[6]
+                        .entry(ascii_case(base, false))
+                        .or_default()
+                        .add(&n, cache, elapsed, rate);
+                }
+            }
             if let Some(latency) = origin_lat {
                 let o = OriginRow {
                     lat: latency,
@@ -2278,7 +2445,22 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
         }
     }
 
-    sample.into_sorted_vec()
+    (sample.into_sorted_vec(), filtered)
+}
+
+fn write_filtered_rollups(
+    mut filtered: [FastMap<Cow<'_, str>, FilteredAgg>; FILTERED_ROLLUP_FIELDS.len()],
+    bucket: i64,
+    out: &mut Out,
+) {
+    for (k, &field) in FILTERED_ROLLUP_FIELDS.iter().enumerate() {
+        let map = std::mem::take(&mut filtered[k]);
+        let (kept, total, truncated) = top_untimed(map, |a| a.requests, filtered_rollup_cap(field));
+        push_total(out, bucket, "filtered_rollups", field, total, truncated);
+        for (value, agg) in &kept {
+            agg.push(out, bucket, field, value);
+        }
+    }
 }
 
 fn write_asset_urls(rows: &[Rows], bucket: i64, out: &mut Out) {
@@ -3270,12 +3452,13 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     }
     drop(sessions);
 
-    let sample = write_v3(&rows, bucket, &mut out);
+    let (sample, filtered) = write_v3(&rows, bucket, &mut out);
     write_ext(&rows, bucket, &mut out);
     write_insights(&rows, bucket, &mut out);
     write_asset_urls(&rows, bucket, &mut out);
     write_insights_lat_asn(&rows, bucket, &mut out);
     write_shield_routes(&rows, bucket, &mut out);
+    write_filtered_rollups(filtered, bucket, &mut out);
     write_sample(&rows, sample, &mut out);
 
     let batch = out.finish()?;

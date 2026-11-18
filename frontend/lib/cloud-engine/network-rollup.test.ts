@@ -624,4 +624,70 @@ describe("networkFromRollup", () => {
     expect(fullFallback.residual.start_time).toBe(span[0].start);
     expect(fullFallback.residual.end_time).toBe(span[2].end);
   });
+
+  it("serves filtered /api/network-health summary from filtered_rollups for hour-aligned single low-card filters", async () => {
+    const rttHist = new Histogram();
+    rttHist.min = 12_000;
+    rttHist.max = 12_000;
+    rttHist.buckets[45] = 4;
+    const rttBytes = rttHist.toBytes()!;
+    const hourStart = Math.floor(T0 / 3_600_000) * 3_600_000;
+    const hourEnd = hourStart + 3_600_000;
+    const t = new Date(hourStart);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["overview", "dim_totals", "filtered_rollups"], type: "STRING" },
+        { name: "bucket", data: [t, t, t], type: "TIMESTAMP" },
+        { name: "field", data: ["", "content_type", "content_type"], type: "STRING" },
+        { name: "value", data: ["", "filtered_rollups", "application/json"], type: "STRING" },
+        { name: "requests", data: [BigInt(10), BigInt(10), BigInt(4)], type: "INT64" },
+        { name: "errors", data: [null, null, BigInt(1)], type: "INT64" },
+        { name: "status_5xx", data: [null, null, BigInt(1)], type: "INT64" },
+        { name: "cache_hits", data: [null, null, BigInt(2)], type: "INT64" },
+        { name: "resp_bytes_sum", data: [null, null, BigInt(2048)], type: "INT64" },
+        { name: "rtt_sum", data: [null, null, BigInt(48_000)], type: "INT64" },
+        { name: "rtt_count", data: [null, null, BigInt(4)], type: "INT64" },
+        { name: "ploss_sum", data: [null, null, 0.04], type: "DOUBLE" },
+        { name: "ploss_count", data: [null, null, BigInt(4)], type: "INT64" },
+        { name: "cwnd_sum", data: [null, null, 40], type: "DOUBLE" },
+        { name: "cwnd_count", data: [null, null, BigInt(4)], type: "INT64" },
+        { name: "rttvar_sum", data: [null, null, 400], type: "DOUBLE" },
+        { name: "rttvar_count", data: [null, null, BigInt(4)], type: "INT64" },
+        { name: "retrans_count", data: [null, null, BigInt(0)], type: "INT64" },
+        { name: "truncated", data: [null, false, null], type: "BOOLEAN" },
+        { name: "rtt_hist", data: [null, null, rttBytes], type: "BYTE_ARRAY" },
+      ],
+    });
+    const hour = HOURS[0];
+    const s = source([hour], { [hour.key]: summaryBuf });
+    const params = {
+      start_time: hour.start,
+      end_time: hour.end,
+      sections: ["summary"],
+      filters: { content_type: { mode: "include" as const, values: ["Application/JSON; charset=utf-8"] } },
+    };
+    expect(networkRollupEligible("/api/network-health", params)).toBe(true);
+    const served = await networkFromRollup("/api/network-health", params, s) as {
+      has_data: boolean;
+      summary: { total_requests: number; avg_rtt_ms: number };
+      rollup: { approximate: string[]; lower_bound: string[] };
+    };
+    expect(served.has_data).toBe(true);
+    expect(served.summary.total_requests).toBe(4);
+    expect(served.summary.avg_rtt_ms).toBe(12);
+    expect(served.rollup.lower_bound).toEqual([]);
+
+    // Non-hour-aligned, multi-field, exclude, high-card, or non-summary sections must fall back.
+    expect(networkRollupEligible("/api/network-health", { ...params, start_time: new Date(hourStart + 60_000).toISOString() })).toBe(false);
+    expect(networkRollupEligible("/api/network-health", { ...params, sections: ["summary", "heatmap"] })).toBe(false);
+    expect(networkRollupEligible("/api/network-health", {
+      ...params,
+      filters: { content_type: { mode: "exclude" as const, values: ["text/html"] } },
+    })).toBe(false);
+    expect(networkRollupEligible("/api/network-health", {
+      ...params,
+      filters: { url: { mode: "include" as const, values: ["/foo"] } },
+    })).toBe(false);
+  });
 });

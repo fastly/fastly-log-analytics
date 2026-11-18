@@ -103,7 +103,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x08";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x09";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
 /// [`part_key`] objects, each at most the CDN read limit.
@@ -691,6 +691,40 @@ const SHIELD_ROUTES_COLS: &[(C, Op)] = &[
     (C::Errors, Sum),
 ];
 
+const FILTERED_ROLLUPS_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::Count, Sum),
+    (C::Errors, Sum),
+    (C::Status5xx, Sum),
+    (C::CacheHits, Sum),
+    (C::HitRequests, Sum),
+    (C::MissRequests, Sum),
+    (C::PassRequests, Sum),
+    (C::RespBytesSum, Sum),
+    (C::LatUsSum, Sum),
+    (C::LatUsCount, Sum),
+    (C::Ost5xxCount, Sum),
+    (C::OstTotalCount, Sum),
+    (C::RttSum, Sum),
+    (C::RttCount, Sum),
+    (C::PlossSum, Sum),
+    (C::PlossCount, Sum),
+    (C::CwndSum, Sum),
+    (C::CwndCount, Sum),
+    (C::RttvarSum, Sum),
+    (C::RttvarCount, Sum),
+    (C::RetransCount, Sum),
+    (C::ElapsedSum, Sum),
+    (C::ElapsedCount, Sum),
+    (C::DeliveryRateSum, Sum),
+    (C::DeliveryRateCount, Sum),
+    (C::TtfbHist, Merge),
+    (C::ElapsedHist, Merge),
+    (C::RttHist, Merge),
+    (C::OttfbHist, Merge),
+    (C::OttlbHist, Merge),
+];
+
 /// A bundle of `(field, value)` rows that sum per value (and, when `timed`, per bucket), cut to
 /// the values with the most requests (`cols[0]`) and counted in `dim_totals`.
 struct Group {
@@ -704,7 +738,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 19] = [
+const GROUPS: [Group; 20] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -838,6 +872,13 @@ const GROUPS: [Group; 19] = [
         fields: &["route"],
         gated: &["route"],
     },
+    Group {
+        name: "filtered_rollups",
+        cols: FILTERED_ROLLUPS_COLS,
+        timed: false,
+        fields: &summary::FILTERED_ROLLUP_FIELDS,
+        gated: &summary::FILTERED_ROLLUP_FIELDS,
+    },
 ];
 
 impl Group {
@@ -856,6 +897,7 @@ impl Group {
             ("ins_lat", "city") => summary::SERIES_CITY_K,
             ("ins_asn", _) => summary::INS_ASN_K,
             ("shield_routes", _) => summary::SHIELD_ROUTE_K,
+            ("filtered_rollups", field) => summary::filtered_rollup_cap(field),
             _ => summary::DIM_K,
         }
     }
@@ -1981,6 +2023,7 @@ impl Acc {
                 "ins_lat",
                 "ins_asn",
                 "shield_routes",
+                "filtered_rollups",
                 "sample",
             ],
             &mut groups_out,

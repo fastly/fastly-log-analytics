@@ -2651,6 +2651,119 @@ fn ins_asn_counts_proxy_and_hosting() {
 }
 
 #[test]
+fn filtered_rollups_counts_low_card_filters() {
+    let rows = vec![
+        json!({
+            "timestamp": iso(BASE * 1000),
+            "status": 200,
+            "cache": "HIT",
+            "pop": "IAD",
+            "country": "US",
+            "proto": "HTTP/2",
+            "method": "GET",
+            "content_type": "Application/JSON; charset=utf-8",
+            "edge": true,
+            "resp_bytes": 1000,
+            "ttfb": 0.010,
+            "elapsed": 25_000,
+            "tcp_rtt": 12_000,
+            "ottfb": 5_000,
+            "ottlb": 8_000,
+            "ost": 200,
+        }),
+        json!({
+            "timestamp": iso(BASE * 1000 + 1000),
+            "status": 503,
+            "cache": "MISS",
+            "pop": "LHR",
+            "country": "GB",
+            "proto": "HTTP/1.1",
+            "method": "POST",
+            "content_type": "text/html",
+            "edge": false,
+            "resp_bytes": 500,
+            "ttfb": 0.050,
+            "elapsed": 80_000,
+            "tcp_rtt": 30_000,
+            "ottfb": 40_000,
+            "ottlb": 60_000,
+            "ost": 502,
+        }),
+    ];
+    let b = custom_batch(&rows, &[("content_type", convert::Kind::Utf8)]);
+    let summary_rows = read(&summary::write_summary(&[&b], BASE).unwrap());
+
+    for field in summary::FILTERED_ROLLUP_FIELDS {
+        let total = summary_rows
+            .iter()
+            .find(|r| {
+                r["bundle"] == "dim_totals"
+                    && r["field"] == field
+                    && r["value"] == "filtered_rollups"
+            })
+            .unwrap_or_else(|| panic!("missing filtered_rollups dim_totals for {field}"));
+        assert_eq!(total["requests"], 2);
+        assert_eq!(total["truncated"], false);
+    }
+
+    let ct_json = summary_rows
+        .iter()
+        .find(|r| {
+            r["bundle"] == "filtered_rollups"
+                && r["field"] == "content_type"
+                && r["value"] == "application/json"
+        })
+        .expect("normalized content_type row");
+    assert_eq!(ct_json["requests"], 1);
+    assert_eq!(ct_json["count"], 1);
+    assert_eq!(ct_json["hit_requests"], 1);
+    assert_eq!(ct_json["cache_hits"], 1);
+    assert_eq!(ct_json["miss_requests"], 0);
+    assert_eq!(ct_json["resp_bytes_sum"], 1000);
+    assert_eq!(ct_json["ost_total_count"], 1);
+    assert_eq!(ct_json["ost_5xx_count"], 0);
+    assert!(hist_cell(ct_json, "ttfb_hist").is_some());
+    assert!(hist_cell(ct_json, "elapsed_hist").is_some());
+    assert!(hist_cell(ct_json, "rtt_hist").is_some());
+    assert!(hist_cell(ct_json, "ottfb_hist").is_some());
+    assert!(hist_cell(ct_json, "ottlb_hist").is_some());
+
+    let edge_false = summary_rows
+        .iter()
+        .find(|r| {
+            r["bundle"] == "filtered_rollups" && r["field"] == "edge" && r["value"] == "false"
+        })
+        .expect("edge=false row");
+    assert_eq!(edge_false["requests"], 1);
+    assert_eq!(edge_false["errors"], 1);
+    assert_eq!(edge_false["status_5xx"], 1);
+    assert_eq!(edge_false["miss_requests"], 1);
+    assert_eq!(edge_false["ost_5xx_count"], 1);
+
+    // Truncation test: 20 distinct methods > cap 16 -> truncated = true
+    let many: Vec<Value> = (0..20)
+        .map(|i| json!({"timestamp": iso(BASE * 1000 + i), "method": format!("M{i:02}")}))
+        .collect();
+    let mb = batch(&many);
+    let mrows = read(&summary::write_summary(&[&mb], BASE).unwrap());
+    let mtotal = mrows
+        .iter()
+        .find(|r| {
+            r["bundle"] == "dim_totals"
+                && r["field"] == "method"
+                && r["value"] == "filtered_rollups"
+        })
+        .expect("method dim_totals");
+    assert_eq!(mtotal["requests"], 20);
+    assert_eq!(mtotal["truncated"], true);
+    let kept = mrows
+        .iter()
+        .filter(|r| r["bundle"] == "filtered_rollups" && r["field"] == "method")
+        .count();
+    assert_eq!(kept, 16);
+}
+
+#[test]
 fn shield_routes_join_edge_rid_to_shield_prid_within_a_window() {
     let rows = vec![
         // One edge row joined to two shield rows (many-to-many), one with negative delta.

@@ -94,6 +94,7 @@ function scatter(result: RollupResult) {
 
 /** Whether summaries may answer this /performance read at all, before any range or listing is resolved. */
 export function performanceRollupEligible(path: string, body: PerformanceRollupBody): boolean {
+  // None of PERFORMANCE_ROLLUP_SECTIONS (waterfall, ttl_dist, top_urls, top_asns, scatter) are in filtered_rollups.
   if (!/^\/api\/performance(?:\/aggregates)?\/*$/.test(path) || hasFilterValues(body.filters)) return false;
   const servable = new Set<string>(PERFORMANCE_ROLLUP_SECTIONS);
   return Array.isArray(body.sections) && body.sections.length > 0 &&

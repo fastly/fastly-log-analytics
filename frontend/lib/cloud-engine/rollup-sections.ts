@@ -103,3 +103,64 @@ export function assetsRollupCacheFilter(filters: unknown): { mode: "include" | "
  * top-20 WAF signal, bot and format-pair counts lower bounds when a summary cut them (older summaries fall back).
  */
 export const VALUE_ROLLUP_SECTIONS = ["overview", "caching", "performance", "security", "bots", "network", "io"] as const;
+
+export const FILTERED_ROLLUP_FIELDS = [
+  "status",
+  "cache",
+  "pop",
+  "country",
+  "proto",
+  "method",
+  "content_type",
+  "edge",
+] as const;
+
+export type FilteredRollupField = (typeof FILTERED_ROLLUP_FIELDS)[number];
+export type FilteredRollupFilter = { field: FilteredRollupField; value: string };
+
+const FILTERED_ROLLUP_FIELD_SET = new Set<string>(FILTERED_ROLLUP_FIELDS);
+const HOUR_MS = 3_600_000;
+
+function parseRangeEpochMs(value: string | number | null | undefined): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? (value < 1e12 ? value * 1000 : value) : null;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const num = Number(value);
+  if (Number.isFinite(num)) return num < 1e12 ? num * 1000 : num;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Returns `{ field, value }` iff `customFilters` is empty, `filters` has one
+ * active field in `FILTERED_ROLLUP_FIELDS` with `mode === "include"` and one
+ * exact value, and (when `range` is provided) the time range aligns to whole
+ * hour buckets.
+ */
+export function singleLowCardFilter(
+  filters: unknown,
+  customFilters?: unknown,
+  range?: { start_time?: string | number | null; end_time?: string | number | null },
+): FilteredRollupFilter | null {
+  if (hasFilterValues(customFilters)) return null;
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return null;
+  const active = Object.entries(filters as Record<string, unknown>).filter(([key, spec]) =>
+    key !== "filter_mode" && hasFilterValues({ [key]: spec }));
+  if (active.length !== 1) return null;
+  const [field, spec] = active[0];
+  if (!FILTERED_ROLLUP_FIELD_SET.has(field)) return null;
+  const { mode, values } = (spec ?? {}) as { mode?: unknown; values?: unknown };
+  if (mode !== "include" || !Array.isArray(values) || values.length !== 1) return null;
+  const raw = values[0];
+  if (typeof raw !== "string" || raw === "" || raw.includes("*")) return null;
+  if (range) {
+    const fromMs = parseRangeEpochMs(range.start_time);
+    const toMs = parseRangeEpochMs(range.end_time);
+    if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+    if (fromMs % HOUR_MS !== 0 || toMs % HOUR_MS !== 0) return null;
+  }
+  if (field === "content_type") {
+    const normalized = raw.split(";")[0].trim().toLowerCase();
+    return normalized ? { field, value: normalized } : null;
+  }
+  return { field: field as FilteredRollupField, value: raw };
+}

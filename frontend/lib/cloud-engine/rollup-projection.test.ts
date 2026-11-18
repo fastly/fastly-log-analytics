@@ -108,6 +108,7 @@ const PAGES: Record<string, Page> = {
       network("/api/network-quality", { region_country: "US" }),
       network("/api/network/pop-health", {}),
       network("/api/network-health", { sections: ["shielding_analysis"] }),
+      network("/api/network/bundle", { sections: ["summary"], filters: { status: { mode: "include", values: ["200"] } } }),
     ],
   },
   origin: {
@@ -118,6 +119,7 @@ const PAGES: Record<string, Page> = {
       origin({ timeseries_metric: "ttfb", timeseries_percentile: "p50", split_by_leg: true, bucket_minutes: 5 }),
       origin({ slow_urls_min_requests: 1, slow_urls_limit: 100, sections: ["slow_urls", "summary"] }),
       (source, spec) => originFromRollup("/api/origin/shielding-analysis", { ...range, top_n: 30 } as OriginRollupBody, source, undefined, spec),
+      origin({ sections: ["summary"], filters: { status: { mode: "include", values: ["200"] } } }),
     ],
   },
   performance: {

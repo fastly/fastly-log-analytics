@@ -1,5 +1,5 @@
 import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
-import { queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
+import { emptyAgg, queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
@@ -19,6 +19,7 @@ import {
 } from "./network";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import { shieldingFromRollup } from "./origin-rollup";
+import { hasFilterValues, singleLowCardFilter, type FilteredRollupFilter } from "./rollup-sections";
 
 /**
  * How a response answered from v3 summaries differs from the raw scan: it
@@ -635,12 +636,77 @@ function canServeBundleFromRollup(sections: readonly string[] | undefined): bool
     sections!.every((section) => HEALTH_SECTIONS.has(section) || section === "pop_health" || section === "transport");
 }
 
+function hasAnyNetworkFilter(params: NetworkQueryParams): boolean {
+  return Boolean(
+    params.filter_country ||
+    params.filter_pop ||
+    (params.filter_asn !== undefined && params.filter_asn !== "") ||
+    hasFilterValues(params.filters),
+  );
+}
+
+function networkSingleFilter(params: NetworkQueryParams): FilteredRollupFilter | null {
+  if (params.filter_asn !== undefined && params.filter_asn !== "") return null;
+  const fromMs = parseEpochMs(params.start_time);
+  const toMs = parseEpochMs(params.end_time);
+  if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+  if (fromMs % 3_600_000 !== 0 || toMs % 3_600_000 !== 0) return null;
+  const hasFilters = hasFilterValues(params.filters);
+  if (params.filter_country && !params.filter_pop && !hasFilters) {
+    return { field: "country", value: params.filter_country };
+  }
+  if (params.filter_pop && !params.filter_country && !hasFilters) {
+    return { field: "pop", value: params.filter_pop };
+  }
+  if (!params.filter_country && !params.filter_pop) {
+    return singleLowCardFilter(params.filters, undefined, params);
+  }
+  return null;
+}
+
+function filteredNetworkHealthSummary(result: RollupResult, filter: FilteredRollupFilter) {
+  const group = rollupGroup(result.rollup, "filtered_rollups", filter.field);
+  if (!group) return null;
+  const isTruncated = result.rollup.truncated.has(`filtered_rollups/${filter.field}`);
+  const found = group.get(filter.value);
+  if (!found && isTruncated) return null;
+  const agg = found ?? emptyAgg();
+  const rollupMeta = meta(result, HEALTH_APPROXIMATE, isTruncated ? ["summary"] : []);
+  const missing = missingTcpFields(agg);
+  const total = stats(agg);
+  if (total.reqs === 0) return { ...emptyNetworkHealth(missing), rollup: rollupMeta };
+  const medRttUs = total.medRttUs ?? 0;
+  const avgPloss = total.avgPloss ?? 0;
+  const healthScore = total.medRttUs == null ? null : computeNetworkHealthScore(
+    medRttUs, Math.max(1, total.p10RttUs ?? medRttUs), avgPloss, total.errorPct,
+  );
+  return {
+    ...emptyNetworkHealth(missing),
+    has_data: true,
+    summary: {
+      total_requests: total.reqs,
+      total_reqs: total.reqs,
+      global_health_score: healthScore,
+      worst_asn: null,
+      worst_country: null,
+      avg_rtt_ms: roundTo((total.avgRttUs ?? 0) / 1000, 2),
+      median_rtt_ms: roundTo(medRttUs / 1000, 2),
+      p95_rtt_ms: roundTo((total.p95RttUs ?? 0) / 1000, 2),
+      avg_ploss_pct: roundTo(avgPloss <= 1 ? avgPloss * 100 : avgPloss, 2),
+      health_score: healthScore,
+    },
+    rollup: rollupMeta,
+  };
+}
+
 /** Whether summaries may answer this read at all, before any range or listing is resolved. */
 export function networkRollupEligible(path: string, params: NetworkQueryParams): boolean {
   if (params.network_residual || params.quality_parts?.length) return false;
-  if (params.filter_country || params.filter_pop ||
-      params.filter_asn !== undefined && params.filter_asn !== "" ||
-      Object.keys(params.filters ?? {}).length) return false;
+  if (hasAnyNetworkFilter(params)) {
+    if (path !== "/api/network/bundle" && path !== "/api/network-health") return false;
+    if (!params.sections?.length || !params.sections.every((s) => s === "summary")) return false;
+    return networkSingleFilter(params) !== null;
+  }
   if (path === "/api/network/bundle") return canServeBundleFromRollup(params.sections);
   if (path === "/api/network-health") return canServeHealthFromRollup(params.sections, params.map_asn);
   return path === "/api/network/pop-health" || path === "/api/network-quality";
@@ -651,7 +717,7 @@ export function networkRollupEligible(path: string, params: NetworkQueryParams):
  * so they share one projection per file.
  */
 export const NETWORK_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "quality", "transport", "sample", "shield_routes", "dim_totals"],
+  groups: ["dims", "series5", "quality", "transport", "sample", "shield_routes", "filtered_rollups", "dim_totals"],
   columns: [
     "label", "requests", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
     "ploss_count", "cwnd_sum", "cwnd_count", "rttvar_sum", "rttvar_count", "retrans_count", "lat_sum", "lon_sum",
@@ -662,12 +728,12 @@ export const NETWORK_SUMMARY_SPEC = defineSummarySpec({
 
 /**
  * Answers a Cloud /network read from v3 summaries, or returns null when the raw
- * scan must: any filter (summaries hold no dimension crossed with another, so
- * even one PoP, country or ASN filter can't narrow the ASN, metro or PoP
- * tables), a section that needs rows (shielding, or the map for one ASN), a
- * bucket finer than the summaries, summaries older than the map rows, or a
- * range the summaries don't cover (see `queryRollup`). /network-quality over
- * summaries older than its `quality` rows returns a `NetworkPartial`.
+ * scan must: unsupported filters (only hour-aligned single low-card filters on
+ * `summary` can use `filtered_rollups`), a section that needs rows (shielding,
+ * or the map for one ASN), a bucket finer than the summaries, summaries older
+ * than the map rows, or a range the summaries don't cover (see `queryRollup`).
+ * /network-quality over summaries older than its `quality` rows returns a
+ * `NetworkPartial`.
  */
 export async function networkFromRollup(
   path: string,
@@ -683,6 +749,13 @@ export async function networkFromRollup(
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   if (!result) return null;
+  if (hasAnyNetworkFilter(params)) {
+    const filter = networkSingleFilter(params);
+    if (!filter) return null;
+    const core = filteredNetworkHealthSummary(result, filter);
+    if (!core) return null;
+    return path === "/api/network/bundle" ? networkBundle(core, null, null, null) : core;
+  }
   if (path === "/api/network/bundle") {
     const sections = params.sections!;
     const wantsHealth = sections.some((section) => HEALTH_SECTIONS.has(section));

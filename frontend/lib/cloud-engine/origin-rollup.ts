@@ -1,6 +1,6 @@
 import type { Histogram } from "./dashboard/histogram";
 import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
-import { queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
+import { emptyAgg, queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import {
@@ -22,7 +22,7 @@ import {
   type OriginTimeseriesPoint,
   type OriginTimeseriesSection,
 } from "./origin";
-import { hasFilterValues, originRollupSections } from "./rollup-sections";
+import { hasFilterValues, originRollupSections, singleLowCardFilter, type FilteredRollupFilter } from "./rollup-sections";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
 export type OriginRollupBody = {
@@ -243,7 +243,13 @@ function ottlbSeries(result: RollupResult, bucketMinutes: number, percentile: st
 
 /** Whether summaries may answer this /origin read at all, before any range or listing is resolved. */
 export function originRollupEligible(path: string, body: OriginRollupBody): boolean {
-  if (hasFilterValues(body.filters, body.custom_filters)) return false;
+  if (hasFilterValues(body.filters, body.custom_filters)) {
+    if (path !== "/api/origin/aggregates") return false;
+    if (!Array.isArray(body.sections) || body.sections.length === 0 || !body.sections.every((s) => s === "summary")) {
+      return false;
+    }
+    return singleLowCardFilter(body.filters, body.custom_filters, body) !== null;
+  }
   if (path === "/api/origin/shielding-analysis") return true;
   if (path !== "/api/origin/aggregates") return false;
   const servable = new Set<string>(originRollupSections({
@@ -376,9 +382,51 @@ export function shieldingFromRollup(result: RollupResult, limit = 50) {
   };
 }
 
+function filteredOriginSummary(
+  result: RollupResult,
+  filter: FilteredRollupFilter,
+): (OriginAggregatesResponse & { rollup: NetworkRollupMeta }) | null {
+  const group = rollupGroup(result.rollup, "filtered_rollups", filter.field);
+  if (!group) return null;
+  const isTruncated = result.rollup.truncated.has(`filtered_rollups/${filter.field}`);
+  const found = group.get(filter.value);
+  if (!found && isTruncated) return null;
+  const agg = found ?? emptyAgg();
+  const out = emptyOriginAggregates();
+  const { ottfb, ottlb } = agg.hists;
+  out.summary = ottfb?.count()
+    ? shapeOriginSummaryRow({
+      total_misses: agg.missRequests,
+      total_passes: agg.passRequests,
+      ottfb_p50_ms: ms(ottfb, 0.5),
+      ottfb_p75_ms: ms(ottfb, 0.75),
+      ottfb_p95_ms: ms(ottfb, 0.95),
+      ottfb_p99_ms: ms(ottfb, 0.99),
+      ottlb_p50_ms: ms(ottlb, 0.5),
+      ottlb_p95_ms: ms(ottlb, 0.95),
+      cdn_overhead_p50_ms: null,
+      origin_error_rate: agg.ostTotal ? agg.ost5xx / agg.ostTotal : null,
+      obytes_p50: null,
+    })
+    : emptyOriginSummary();
+  out.has_data = out.summary.has_data;
+  return {
+    ...out,
+    rollup: {
+      data_from: new Date(result.dataFromMs).toISOString(),
+      data_through: new Date(result.dataThroughMs).toISOString(),
+      approximate: [
+        "summary.ottfb_p50_ms", "summary.ottfb_p75_ms", "summary.ottfb_p95_ms", "summary.ottfb_p99_ms",
+        "summary.ottlb_p50_ms", "summary.ottlb_p95_ms",
+      ],
+      lower_bound: isTruncated ? ["summary"] : [],
+    },
+  };
+}
+
 /** The summary groups and columns /origin reads. */
 export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "shield_routes", "dim_totals"],
+  groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "shield_routes", "filtered_rollups", "dim_totals"],
   columns: [
     "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
     "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
@@ -386,9 +434,10 @@ export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
 });
 
 /**
- * Answers an unfiltered Cloud /origin aggregates or shielding-analysis read from
- * v3 summaries, or returns null when the raw scan must: a filter, a section or
- * series option summaries don't hold, or a range they don't cover (see `queryRollup`).
+ * Answers a Cloud /origin aggregates or shielding-analysis read from
+ * v3 summaries, or returns null when the raw scan must: unsupported filters, a
+ * section or series option summaries don't hold, or a range they don't cover
+ * (see `queryRollup`).
  */
 export async function originFromRollup(
   path: string,
@@ -404,6 +453,10 @@ export async function originFromRollup(
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   if (!result) return null;
+  if (hasFilterValues(body.filters, body.custom_filters)) {
+    const filter = singleLowCardFilter(body.filters, body.custom_filters, body);
+    return filter ? filteredOriginSummary(result, filter) : null;
+  }
   if (path === "/api/origin/shielding-analysis") {
     const shielding = shieldingFromRollup(result, body.limit ?? 50);
     if (!shielding) return null;

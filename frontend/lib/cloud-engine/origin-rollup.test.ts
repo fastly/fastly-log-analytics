@@ -403,4 +403,60 @@ describe("originFromRollup", () => {
     expect(s.log.files).toEqual([win.key]);
     expect(originRollupEligible("/api/origin/shielding-analysis", { filters: { pop: { mode: "include", values: ["IAD"] } } })).toBe(false);
   });
+
+  it("serves filtered /api/origin/aggregates summary from filtered_rollups for hour-aligned single low-card filters", async () => {
+    const ottfbHist = new Histogram();
+    ottfbHist.min = 10_000;
+    ottfbHist.max = 10_000;
+    ottfbHist.buckets[44] = 3;
+    const ottlbHist = new Histogram();
+    ottlbHist.min = 20_000;
+    ottlbHist.max = 20_000;
+    ottlbHist.buckets[49] = 3;
+    const hourStart = Math.floor(T0 / 3_600_000) * 3_600_000;
+    const hourEnd = hourStart + 3_600_000;
+    const t = new Date(hourStart);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["overview", "dim_totals", "filtered_rollups"], type: "STRING" },
+        { name: "bucket", data: [t, t, t], type: "TIMESTAMP" },
+        { name: "field", data: ["", "pop", "pop"], type: "STRING" },
+        { name: "value", data: ["", "filtered_rollups", "IAD"], type: "STRING" },
+        { name: "requests", data: [BigInt(10), BigInt(10), BigInt(3)], type: "INT64" },
+        { name: "miss_requests", data: [null, null, BigInt(2)], type: "INT64" },
+        { name: "pass_requests", data: [null, null, BigInt(1)], type: "INT64" },
+        { name: "ost_5xx_count", data: [null, null, BigInt(1)], type: "INT64" },
+        { name: "ost_total_count", data: [null, null, BigInt(3)], type: "INT64" },
+        { name: "truncated", data: [null, false, null], type: "BOOLEAN" },
+        { name: "ottfb_hist", data: [null, null, ottfbHist.toBytes()!], type: "BYTE_ARRAY" },
+        { name: "ottlb_hist", data: [null, null, ottlbHist.toBytes()!], type: "BYTE_ARRAY" },
+      ],
+    });
+    const hour = HOURS[0];
+    const s = source([hour], { [hour.key]: summaryBuf });
+    const reqBody = {
+      start_time: hour.start,
+      end_time: hour.end,
+      sections: ["summary"],
+      filters: { pop: { mode: "include", values: ["IAD"] } },
+    };
+    expect(originRollupEligible("/api/origin/aggregates", reqBody)).toBe(true);
+    const served = await originFromRollup("/api/origin/aggregates", reqBody, s) as {
+      has_data: boolean;
+      summary: { total_misses: number; total_passes: number; origin_error_rate: number | null; ottfb_p50_ms: number | null };
+      rollup: { approximate: string[]; lower_bound: string[] };
+    };
+    expect(served.has_data).toBe(true);
+    expect(served.summary.total_misses).toBe(2);
+    expect(served.summary.total_passes).toBe(1);
+    expect(served.summary.origin_error_rate).toBeCloseTo(1 / 3);
+    expect(served.summary.ottfb_p50_ms).toBeGreaterThan(5);
+    expect(served.rollup.lower_bound).toEqual([]);
+
+    // Non-hour-aligned, multi-field, custom_filters, or non-summary sections must fall back.
+    expect(originRollupEligible("/api/origin/aggregates", { ...reqBody, start_time: hourStart + 60_000 })).toBe(false);
+    expect(originRollupEligible("/api/origin/aggregates", { ...reqBody, sections: ["summary", "slow_urls"] })).toBe(false);
+    expect(originRollupEligible("/api/origin/aggregates", { ...reqBody, custom_filters: [{ field: "x", value: "y" }] })).toBe(false);
+  });
 });

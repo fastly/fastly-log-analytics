@@ -229,5 +229,11 @@ describe("performanceFromRollup", () => {
         await performanceFromRollup("/api/performance/aggregates", params, source()), JSON.stringify(params)).toBeFalsy();
     }
     expect(performanceRollupEligible("/api/performance/other", body())).toBe(false);
+    expect(performanceRollupEligible("/api/performance/aggregates", body({
+      start_time: Math.floor(T0 / 3_600_000) * 3_600_000,
+      end_time: Math.floor(T0 / 3_600_000) * 3_600_000 + 3_600_000,
+      sections: ["waterfall"],
+      filters: { status: { mode: "include", values: ["200"] } },
+    }))).toBe(false);
   });
 });
