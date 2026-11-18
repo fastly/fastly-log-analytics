@@ -15,6 +15,7 @@ import {
   type PerfTtlDistItem,
 } from "./performance";
 import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from "./rollup-sections";
+import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
 export type PerformanceRollupBody = {
   start_time?: string | number | null;
@@ -159,6 +160,15 @@ export function performanceAggregatesFromRollup(
   };
 }
 
+/** The summary groups and columns /performance reads. */
+export const PERFORMANCE_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["overview", "urls", "all_fields", "field_totals", "sample", "dim_totals"],
+  columns: [
+    "count", "elapsed_sum", "elapsed_count", "elapsed_hist", "waterfall_count", "edge_processing_sum",
+    "origin_wait_sum", "origin_download_sum", "client_download_sum", "ttfb_sum", "sample_key", "elapsed_us",
+  ],
+});
+
 /**
  * Answers an unfiltered Cloud /performance read of the waterfall, TTL,
  * ranking and scatter sections from v3 summaries, or returns null when the raw
@@ -170,11 +180,13 @@ export async function performanceFromRollup(
   body: PerformanceRollupBody,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
+  /** Null reads whole files. */
+  spec: SummarySpec | null = PERFORMANCE_SUMMARY_SPEC,
 ) {
   if (!performanceRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal });
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   return result ? performanceAggregatesFromRollup(result, body) : null;
 }

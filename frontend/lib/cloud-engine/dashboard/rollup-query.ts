@@ -3,6 +3,9 @@ import type { FileSource } from "./engine";
 import { Histogram } from "./histogram";
 import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
 import {
+  readSummaryColumns, readSummaryProjection, type SummaryProjectionSource, type SummarySpec,
+} from "./summary-projection";
+import {
   SUMMARY_VERSION,
   planCoarsestFirst,
   planCompactsFromWindows,
@@ -102,6 +105,13 @@ export type Rollup = {
   present?: Set<string>;
   /** `sample` rows: up to `SAMPLE_K` rows with a TTFB per file, by `sample_key`. */
   samples?: RollupSample[];
+  /**
+   * The groups decoded, when a spec limited them (every group otherwise).
+   * Outside production, reading any other group throws rather than reading
+   * as "no rows" or "summary predates rows"; columns the spec left out read
+   * as NaN sums, null labels and null histograms.
+   */
+  loaded?: ReadonlySet<string>;
 };
 
 /** One `sample` row: a raw row with a TTFB, picked by its hashed `key`. */
@@ -122,6 +132,7 @@ const KEYED_GROUPS = new Set(["transport", "origin", "urls", "quality"]);
  * some merged summary predates it (raw must answer then).
  */
 export function rollupGroup(rollup: Rollup, group: string, field: string): Map<string, RollupAgg> | null {
+  assertLoaded(rollup.loaded, group);
   if (!rollup.present?.has(`${group}/${field}`)) return null;
   return rollup.groups?.get(group)?.get(field) ?? new Map();
 }
@@ -252,7 +263,8 @@ const HIST_COLUMNS = {
 } as const;
 const HIST_KEYS = Object.keys(HIST_COLUMNS) as (keyof RollupHists)[];
 
-function emptyAgg(): RollupAgg {
+/** An aggregate of no rows: zero sums, no label, no histograms. */
+export function emptyAgg(): RollupAgg {
   const agg = { label: null, hists: {} } as unknown as RollupAgg;
   for (const key of SUM_KEYS) agg[key] = 0;
   for (const key of HIST_KEYS) agg.hists[key] = null;
@@ -273,6 +285,11 @@ function addAgg(into: RollupAgg, from: RollupAgg) {
   }
 }
 
+/** Every row of a column a spec left out: NaN. */
+const SKIPPED: ArrayLike<unknown> = new Proxy({ length: 0 }, {
+  get: (_, property) => (property === "length" ? 0 : NaN),
+});
+
 const num = (value: unknown) =>
   typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : 0;
 
@@ -283,22 +300,130 @@ function bucketMs(value: unknown): number | null {
   return null;
 }
 
+const GUARDED = process.env.NODE_ENV !== "production";
+
+function assertLoaded(loaded: ReadonlySet<string> | undefined, group: string) {
+  if (GUARDED && loaded && !loaded.has(group)) throw new Error(`Summary group ${group} was not loaded`);
+}
+
+/** A container of a group the spec did not load: any read throws. */
+class UnloadedMap<K, V> extends Map<K, V> {
+  constructor(private readonly group: string) {
+    super();
+  }
+
+  private fail(): never {
+    throw new Error(`Summary group ${this.group} was not loaded`);
+  }
+
+  override get(): V | undefined {
+    return this.fail();
+  }
+
+  override has(): boolean {
+    return this.fail();
+  }
+
+  override get size(): number {
+    return this.fail();
+  }
+
+  override forEach(): void {
+    this.fail();
+  }
+
+  override entries(): MapIterator<[K, V]> {
+    return this.fail();
+  }
+
+  override keys(): MapIterator<K> {
+    return this.fail();
+  }
+
+  override values(): MapIterator<V> {
+    return this.fail();
+  }
+
+  override [Symbol.iterator](): MapIterator<[K, V]> {
+    return this.fail();
+  }
+}
+
+/** `group/field` keys: membership throws unless both the group and the group recording them were loaded. */
+class GuardedKeys extends Set<string> {
+  constructor(values: Iterable<string>, private readonly check: (key: string) => void) {
+    super(values);
+  }
+
+  override has(key: string): boolean {
+    this.check(key);
+    return super.has(key);
+  }
+}
+
+const groupOf = (key: string) => key.slice(0, key.indexOf("/"));
+
+/**
+ * Applies `loaded` to `rollup` (see `Rollup.loaded`). Guarded containers
+ * structured-clone as plain ones, and the guarded properties are not
+ * enumerable, so a posted rollup clones without throwing.
+ */
+function guard(rollup: Rollup, loaded: ReadonlySet<string> | undefined): Rollup {
+  if (!loaded) return rollup;
+  rollup.loaded = loaded;
+  if (!GUARDED) return rollup;
+  if (!loaded.has("dims")) rollup.dims = new UnloadedMap("dims");
+  if (!loaded.has("series5")) rollup.series = new UnloadedMap("series5");
+  if (!loaded.has("all_fields")) rollup.fields = new UnloadedMap("all_fields");
+  rollup.present = new GuardedKeys(rollup.present ?? [], (key) => {
+    assertLoaded(loaded, groupOf(key));
+    assertLoaded(loaded, "dim_totals");
+  });
+  rollup.truncated = new GuardedKeys(rollup.truncated, (key) => {
+    const group = groupOf(key);
+    assertLoaded(loaded, group);
+    assertLoaded(loaded, group === "all_fields" ? "field_totals" : "dim_totals");
+  });
+  const unloaded = (property: keyof Rollup, group: string) => {
+    if (loaded.has(group)) return;
+    Object.defineProperty(rollup, property, {
+      configurable: true,
+      enumerable: false,
+      get: () => assertLoaded(loaded, group),
+    });
+  };
+  unloaded("waterfall", "overview");
+  unloaded("overview", "overview");
+  unloaded("assets", "assets");
+  unloaded("samples", "sample");
+  return rollup;
+}
+
+/** A guarded property's value without tripping its guard (undefined when its group was not loaded). */
+const own = <K extends keyof Rollup>(rollup: Rollup, property: K): Rollup[K] | undefined => {
+  const descriptor = Object.getOwnPropertyDescriptor(rollup, property);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+};
+
 /**
  * Decodes the rollup groups of a v3 window summary or bundle, or returns null
  * for any other format version so the caller reads raw Parquet instead.
  * `seriesStepMs` is the file's `series5` bucket: an hour for day bundles.
  */
 export async function decodeRollup(
-  bytes: ArrayBuffer,
+  bytes: ArrayBuffer | readonly ArrayBuffer[],
   seriesStepMs: number,
+  /** Decode only these groups and columns (`parts` from `readSummaryProjection` may hold more). */
+  spec?: SummarySpec,
 ): Promise<Rollup | null> {
-  const version = parquetMetadata(bytes).key_value_metadata?.find(
+  const parts = Array.isArray(bytes) ? bytes : [bytes as ArrayBuffer];
+  const version = parquetMetadata(parts[0]).key_value_metadata?.find(
     (kv) => kv.key === "flp_summary",
   )?.value;
   if (version !== SUMMARY_VERSION) return null;
-  const { readColumns } = await import("./parquet");
   const sumNames = Object.values(SUM_COLUMNS);
-  const { rows, columns } = await readColumns(bytes, [...new Set([
+  const read = (names: string[]) => (spec ? names.filter((name) => spec.columns.has(name)) : names);
+  const { rows, columns } = await readSummaryColumns(parts, read([...new Set([
     "bundle",
     "bucket",
     "field",
@@ -313,9 +438,11 @@ export async function decodeRollup(
     ...Object.values(WATERFALL_COLUMNS),
     ...Object.values(OVERVIEW_COLUMNS),
     ...Object.values(ASSET_COLUMNS),
-  ])]);
-  const binary = await readColumns(bytes, Object.values(HIST_COLUMNS), false);
-  const col = (name: string) => columns.get(name) ?? [];
+  ])]));
+  const binary = await readSummaryColumns(parts, read(Object.values(HIST_COLUMNS)), false);
+  // A column the spec left out reads as NaN; one the file lacks (an older summary) as 0.
+  const skipped = (name: string) => spec !== undefined && !spec.columns.has(name);
+  const col = (name: string): ArrayLike<unknown> => columns.get(name) ?? (skipped(name) ? SKIPPED : []);
   const [group, bucket, field, value, truncated, label, count] = [
     col("bundle"),
     col("bucket"),
@@ -338,7 +465,8 @@ export async function decodeRollup(
     groups: new Map(),
     present: new Set(),
   };
-  const read = (i: number) => {
+  const groups = spec?.groups;
+  const readAgg = (i: number) => {
     const agg = emptyAgg();
     for (const [key, values] of sums) agg[key] = num(values[i]);
     agg.label = typeof label[i] === "string" ? (label[i] as string) : null;
@@ -350,14 +478,16 @@ export async function decodeRollup(
   };
   for (let i = 0; i < rows; i++) {
     const name = String(field[i] ?? "");
+    if (groups && (!groups.has(String(group[i]))
+      || group[i] === "dim_totals" && !groups.has(String(value[i])))) continue;
     switch (group[i]) {
       case "dims": {
         const values = rollup.dims.get(name) ?? new Map<string, RollupAgg>();
         rollup.dims.set(name, values);
         const key = String(value[i] ?? "");
         const agg = values.get(key);
-        if (agg) addAgg(agg, read(i));
-        else values.set(key, read(i));
+        if (agg) addAgg(agg, readAgg(i));
+        else values.set(key, readAgg(i));
         break;
       }
       case "series5": {
@@ -369,8 +499,8 @@ export async function decodeRollup(
         const buckets: Map<number, RollupAgg> = values.get(key) ?? new Map();
         values.set(key, buckets);
         const agg = buckets.get(t);
-        if (agg) addAgg(agg, read(i));
-        else buckets.set(t, read(i));
+        if (agg) addAgg(agg, readAgg(i));
+        else buckets.set(t, readAgg(i));
         break;
       }
       case "dim_totals":
@@ -423,11 +553,11 @@ export async function decodeRollup(
       }
       default:
         if (KEYED_GROUPS.has(String(group[i]))) {
-          addKeyed(rollup.groups!, String(group[i]), name, String(value[i] ?? ""), read(i), false);
+          addKeyed(rollup.groups!, String(group[i]), name, String(value[i] ?? ""), readAgg(i), false);
         }
     }
   }
-  return rollup;
+  return guard(rollup, groups);
 }
 
 function addKeyed(
@@ -458,22 +588,32 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
     groups: new Map(),
     present: new Set(rollups.length ? [...rollups[0].present ?? []] : []),
   };
+  const specced = rollups.flatMap((rollup) => (rollup.loaded ? [rollup.loaded] : []));
+  const loaded = specced.length
+    ? new Set([...specced[0]].filter((group) => specced.every((set) => set.has(group)))) : undefined;
+  const has = (rollup: Rollup, group: string) => !rollup.loaded || rollup.loaded.has(group);
   for (const rollup of rollups) {
-    for (const key of out.present!) if (!rollup.present?.has(key)) out.present!.delete(key);
+    for (const key of out.present!) {
+      if (!rollup.present || !Set.prototype.has.call(rollup.present, key)) out.present!.delete(key);
+    }
     for (const [group, fields] of rollup.groups ?? []) {
       for (const [field, values] of fields) {
         for (const [value, agg] of values) addKeyed(out.groups!, group, field, value, agg);
       }
     }
-    if (rollup.samples) (out.samples ??= []).push(...rollup.samples);
-    if (rollup.waterfall) out.waterfall = addWaterfall(out.waterfall, rollup.waterfall);
-    if (rollup.overview) out.overview = addSums(out.overview, rollup.overview, OVERVIEW_KEYS);
-    if (rollup.assets) {
-      const assets = (out.assets ??= new Map());
-      for (const [key, asset] of rollup.assets) assets.set(key, addSums(assets.get(key), asset, ASSET_KEYS));
+    const samples = own(rollup, "samples");
+    if (samples) (out.samples ??= []).push(...samples);
+    const waterfall = own(rollup, "waterfall");
+    if (waterfall) out.waterfall = addWaterfall(out.waterfall, waterfall);
+    const overview = own(rollup, "overview");
+    if (overview) out.overview = addSums(out.overview, overview, OVERVIEW_KEYS);
+    const assets = own(rollup, "assets");
+    if (assets) {
+      const into = (out.assets ??= new Map());
+      for (const [key, asset] of assets) into.set(key, addSums(into.get(key), asset, ASSET_KEYS));
     }
-    addFieldCounts(out.fields, rollup.fields);
-    for (const [dim, values] of rollup.dims) {
+    if (has(rollup, "all_fields")) addFieldCounts(out.fields, rollup.fields);
+    for (const [dim, values] of has(rollup, "dims") ? rollup.dims : []) {
       const target = out.dims.get(dim) ?? new Map<string, RollupAgg>();
       out.dims.set(dim, target);
       for (const [value, agg] of values) {
@@ -482,7 +622,7 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
         addAgg(into, agg);
       }
     }
-    for (const [field, values] of rollup.series) {
+    for (const [field, values] of has(rollup, "series5") ? rollup.series : []) {
       const target = out.series.get(field) ?? new Map();
       out.series.set(field, target);
       for (const [value, buckets] of values) {
@@ -496,7 +636,7 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
       }
     }
   }
-  return out;
+  return guard(out, loaded);
 }
 
 /**
@@ -596,7 +736,7 @@ export type RollupResult = {
   dataThroughMs: number;
 };
 
-type RollupSource = Pick<FileSource, "fetchJson" | "fetchFile" | "cacheScope">;
+type RollupSource = Pick<FileSource, "fetchJson"> & SummaryProjectionSource;
 
 const DECODED_LIMIT = 64;
 const decoded = new Map<string, Promise<Rollup | null>>();
@@ -605,8 +745,9 @@ const inflight = new Map<string, Promise<RollupResult | null>>();
 function decodeCached(
   source: RollupSource,
   file: ManifestFile,
+  spec: SummarySpec | undefined,
 ): Promise<Rollup | null> {
-  const key = `${source.cacheScope ?? "default"}|${file.key}`;
+  const key = `${source.cacheScope ?? "default"}|${file.key}|${spec?.id ?? "whole"}`;
   const hit = decoded.get(key);
   if (hit) {
     decoded.delete(key);
@@ -614,9 +755,9 @@ function decodeCached(
     return hit;
   }
   const step = file.key.includes("/day_bundle=") ? HOUR_MS : FIVE_MINUTES_MS;
-  const pending = source
-    .fetchFile(file.key)
-    .then(({ bytes }) => decodeRollup(bytes, step));
+  const pending = spec
+    ? readSummaryProjection(source, file, spec).then(({ parts }) => decodeRollup(parts, step, spec))
+    : source.fetchFile(file.key).then(({ bytes }) => decodeRollup(bytes, step));
   pending.catch(() => decoded.delete(key));
   decoded.set(key, pending);
   while (decoded.size > DECODED_LIMIT) {
@@ -629,17 +770,18 @@ function decodeCached(
  * Merges the v3 summaries that answer [fromMs, toMs) for the unfiltered data,
  * or returns null when raw Parquet must answer (no listing, a gap, a long open
  * tail or a file that is not v3). Concurrent calls for one range share a read,
- * and decoded files are kept for later ranges.
+ * and decoded files are kept for later ranges. With `spec`, only its groups
+ * and columns are read and decoded (see `Rollup.loaded`).
  */
 export function queryRollup(
   source: RollupSource,
-  range: { fromMs: number; toMs: number; signal?: AbortSignal },
+  range: { fromMs: number; toMs: number; signal?: AbortSignal; spec?: SummarySpec },
 ): Promise<RollupResult | null> {
-  const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}`;
+  const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}|${range.spec?.id ?? "whole"}`;
   let shared = inflight.get(key);
   if (!shared) {
     // Unsignalled: one caller leaving must not fail the others sharing the read.
-    shared = runRollup(source, range.fromMs, range.toMs).finally(() =>
+    shared = runRollup(source, range.fromMs, range.toMs, range.spec).finally(() =>
       inflight.delete(key),
     );
     inflight.set(key, shared);
@@ -660,6 +802,7 @@ async function runRollup(
   source: RollupSource,
   fromMs: number,
   toMs: number,
+  spec: SummarySpec | undefined,
 ): Promise<RollupResult | null> {
   const from = new Date(fromMs).toISOString();
   const to = new Date(toMs).toISOString();
@@ -671,7 +814,7 @@ async function runRollup(
   const plan = planRollup(raw.files, summaries.files, fromMs, toMs);
   if (!plan) return null;
   const parts = await Promise.all(
-    plan.files.map((use) => decodeCached(source, use.file)),
+    plan.files.map((use) => decodeCached(source, use.file, spec)),
   );
   if (parts.some((part) => part === null)) return null;
   return {

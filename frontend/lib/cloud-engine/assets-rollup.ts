@@ -4,6 +4,7 @@ import { queryRollup } from "./dashboard/rollup-query";
 import { parseEpochMs } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { ASSETS_ROLLUP_SECTIONS, assetsRollupCacheFilter } from "./rollup-sections";
+import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
 export type AssetsRollupBody = {
   start_time?: string | number | null;
@@ -94,6 +95,12 @@ export function assetsAggregatesFromRollup(result: RollupResult, body: AssetsRol
   };
 }
 
+/** The summary groups and columns /assets reads. */
+export const ASSETS_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["overview", "assets", "all_fields", "field_totals", "dim_totals"],
+  columns: ["requests", "resp_bytes_sum", "ttfb_sum", "origin_wait_sum", "origin_requests"],
+});
+
 /**
  * Answers a Cloud /assets read of the summary section, unfiltered or filtered
  * on cache status alone, from v3 summaries, or returns null when the raw scan
@@ -105,11 +112,13 @@ export async function assetsFromRollup(
   body: AssetsRollupBody,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
+  /** Null reads whole files. */
+  spec: SummarySpec | null = ASSETS_SUMMARY_SPEC,
 ) {
   if (!assetsRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal });
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   return result ? assetsAggregatesFromRollup(result, body) : null;
 }

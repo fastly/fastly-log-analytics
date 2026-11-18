@@ -17,6 +17,7 @@ import {
   type NetworkQueryParams,
   type QualityPart,
 } from "./network";
+import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
 /**
  * How a response answered from v3 summaries differs from the raw scan: it
@@ -607,6 +608,20 @@ export function networkRollupEligible(path: string, params: NetworkQueryParams):
 }
 
 /**
+ * The summary groups and columns /network reads: one spec for all its paths,
+ * so they share one projection per file.
+ */
+export const NETWORK_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["dims", "series5", "quality", "transport", "sample", "dim_totals"],
+  columns: [
+    "label", "requests", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
+    "ploss_count", "cwnd_sum", "cwnd_count", "rttvar_sum", "rttvar_count", "retrans_count", "lat_sum", "lon_sum",
+    "geo_count", "delivery_rate_sum", "delivery_rate_count", "throughput_sum", "throughput_count", "ttfb_sum",
+    "sample_key", "rtt_hist", "ttfb_hist",
+  ],
+});
+
+/**
  * Answers a Cloud /network read from v3 summaries, or returns null when the raw
  * scan must: any filter (summaries hold no dimension crossed with another, so
  * even one PoP, country or ASN filter can't narrow the ASN, metro or PoP
@@ -620,12 +635,14 @@ export async function networkFromRollup(
   params: NetworkQueryParams,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
+  /** Null reads whole files. */
+  spec: SummarySpec | null = NETWORK_SUMMARY_SPEC,
 ) {
   if (!networkRollupEligible(path, params)) return null;
   const fromMs = parseEpochMs(params.start_time);
   const toMs = parseEpochMs(params.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal });
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   if (!result) return null;
   if (path === "/api/network/bundle") {
     const sections = params.sections!;

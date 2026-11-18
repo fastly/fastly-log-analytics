@@ -1,7 +1,8 @@
 import type { DashboardFilter } from "./dashboard/filters";
-import { queryRollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
+import { emptyAgg, queryRollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
 import { resolveInsightWindow, type InsightsRequest } from "./insights";
 import type { NetworkRollupMeta } from "./network-rollup";
+import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
 /**
  * How an /insights response whose baseline came from v3 summaries differs from
@@ -56,6 +57,12 @@ const RATIO_DETECTORS = new Set(["cache_hit_cliff", "http3_fallback"]);
 
 const DIMENSIONS = ["country", "p_type", "method", "referer", "ua"] as const;
 
+/** The summary groups and columns the /insights baseline reads. */
+export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["dims", "series5", "all_fields", "field_totals", "dim_totals"],
+  columns: ["count", "requests", "errors"],
+});
+
 /**
  * Merges the v3 summaries for an unfiltered /insights baseline, the range
  * before the window, or returns null when the raw scan must cover it (filters,
@@ -66,10 +73,12 @@ export function insightsBaselineFromRollup(
   filters: readonly DashboardFilter[],
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
+  /** Null reads whole files. */
+  spec: SummarySpec | null = INSIGHTS_SUMMARY_SPEC,
 ): Promise<RollupResult | null> {
   if (filters.length) return Promise.resolve(null);
   const { start, windowStart } = resolveInsightWindow(body);
-  return queryRollup(source, { fromMs: start, toMs: windowStart, signal });
+  return queryRollup(source, { fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined });
 }
 
 type Row = Record<string, unknown>;
@@ -82,17 +91,15 @@ export type InsightScanRows = {
   scalar: Row[];
 };
 
-const NO_HISTS: RollupAgg["hists"] = { ttfb: null, elapsed: null, rtt: null, ottfb: null, ottlb: null, obytes: null, overhead: null };
-
 /**
  * A baseline rollup cut to what `rollupInsightsBaseline` reads (field counts,
- * city dims, the overall request series and truncation), without histograms,
+ * city request and error counts, the overall request series and truncation),
  * so the worker that merged it posts a small, plain-data copy to the page.
  */
 export function insightsBaselineRollup(result: RollupResult): RollupResult {
   const { rollup } = result;
   const bare = <K>(values: Map<K, RollupAgg>) =>
-    new Map([...values].map(([key, agg]) => [key, { ...agg, hists: { ...NO_HISTS } }]));
+    new Map([...values].map(([key, agg]) => [key, { ...emptyAgg(), requests: agg.requests, errors: agg.errors }]));
   const cities = rollup.dims.get("city");
   const overall = rollup.series.get("overall")?.get("");
   return {
@@ -102,7 +109,7 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
       series: new Map(overall ? [["overall", new Map([["", bare(overall)]])]] : []),
       seriesStepMs: rollup.seriesStepMs,
       fields: rollup.fields,
-      truncated: rollup.truncated,
+      truncated: new Set(Object.values(BASELINE_FIELDS).filter((key) => rollup.truncated.has(key))),
     },
   };
 }

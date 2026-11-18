@@ -4,6 +4,7 @@ import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { hasFilterValues, VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
 import { emptyValueSummary, type ValueQueryParams } from "./value";
+import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import type { LoggedHour } from "./value-stats";
 
 export type ValueRollupBody = Pick<ValueQueryParams, "start_time" | "end_time" | "chart_interval"> & {
@@ -166,6 +167,15 @@ export function valueSummaryFromRollup(
   return pick();
 }
 
+/** The summary groups and columns /fastly-value reads. */
+export const VALUE_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals"],
+  columns: [
+    "count", "requests", "total_bandwidth_bytes", "hit_elapsed_sum", "hit_elapsed_count", "miss_elapsed_sum",
+    "miss_elapsed_count",
+  ],
+});
+
 /**
  * Answers an unfiltered Cloud /fastly-value read of the overview and network
  * sections from v3 summaries, or returns null when the raw scan must: a
@@ -177,11 +187,13 @@ export async function valueFromRollup(
   body: ValueRollupBody,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
+  /** Null reads whole files. */
+  spec: SummarySpec | null = VALUE_SUMMARY_SPEC,
 ) {
   if (!valueRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal });
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   return result ? valueSummaryFromRollup(result, body) : null;
 }

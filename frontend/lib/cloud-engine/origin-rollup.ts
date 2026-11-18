@@ -22,6 +22,7 @@ import {
   type OriginTimeseriesSection,
 } from "./origin";
 import { hasFilterValues, originRollupSections } from "./rollup-sections";
+import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
 export type OriginRollupBody = {
   start_time?: string | number;
@@ -329,6 +330,15 @@ export function originAggregatesFromRollup(
   };
 }
 
+/** The summary groups and columns /origin reads. */
+export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "dim_totals"],
+  columns: [
+    "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
+    "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
+  ],
+});
+
 /**
  * Answers an unfiltered Cloud /origin aggregates read from v3 summaries, or
  * returns null when the raw scan must: a filter, a section or series option
@@ -339,11 +349,13 @@ export async function originFromRollup(
   body: OriginRollupBody,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
+  /** Null reads whole files. */
+  spec: SummarySpec | null = ORIGIN_SUMMARY_SPEC,
 ) {
   if (!originRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time);
   const toMs = parseEpochMs(body.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal });
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
   return result ? originAggregatesFromRollup(result, body) : null;
 }

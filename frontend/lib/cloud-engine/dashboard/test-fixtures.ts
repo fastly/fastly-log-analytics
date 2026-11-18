@@ -169,3 +169,26 @@ export function fixtureSource(
     },
   };
 }
+
+/**
+ * `source` with the browser source's range reads and derived-file cache over
+ * `buffers`, so summary projections run; `ranges` logs each read's key.
+ */
+export function projectingSource<S extends FileSource>(source: S, buffers: Record<string, ArrayBuffer>) {
+  const derived = new Map<string, { bytes: ArrayBuffer; meta: string }>();
+  const ranges: string[] = [];
+  return Object.assign(source, {
+    ranges,
+    async fetchRange(file: ManifestFile, start: number, end: number) {
+      ranges.push(file.key);
+      return buffers[file.key].slice(start, end);
+    },
+    async readDerivedFile(key: string, identity: string) {
+      const hit = derived.get(`${key}|${identity}`);
+      return hit ? { byteLength: hit.bytes.byteLength, meta: hit.meta, bytes: async () => hit.bytes.slice(0) } : null;
+    },
+    async writeDerivedFile(key: string, identity: string, bytes: ArrayBuffer, meta: string) {
+      derived.set(`${key}|${identity}`, { bytes: bytes.slice(0), meta });
+    },
+  });
+}
