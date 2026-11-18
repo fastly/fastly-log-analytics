@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { useQuery } from '@tanstack/react-query'
 import { parseAsBoolean, useQueryState } from 'nuqs'
 import type { ColumnDef } from '@/lib/table'
-import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
+import { Activity, AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
 import { client, extractApiError, unwrapClient } from '@/lib/api'
 import { useFieldLabel } from '@/hooks/useBootstrap'
@@ -18,7 +18,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { cn, buildSessionDashboardUrl, buildStreamDetailUrl, formatCount, formatCountMaybe } from '@/lib/utils'
+import { cn, buildSessionDashboardUrl, buildSessionDetailUrl, buildStreamDetailUrl, formatCount, formatCountMaybe } from '@/lib/utils'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { saveCloudSessionReference } from '@/lib/cloud-engine/session-reference'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingClient'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 
@@ -60,6 +62,31 @@ export interface SessionDetailProps {
   labels: LabelRow[]
   labelBySid: Map<string, LabelValue>
   onFlagged: () => void
+}
+
+function RequestTraceLink({ token, serviceId }: { token: string; serviceId: string | null }) {
+  const [reference] = React.useState(() => isCloudMode() ? crypto.randomUUID() : null)
+  const [storageFailed, setStorageFailed] = React.useState(false)
+  return (
+    <>
+      <Link
+        href={buildSessionDetailUrl(reference ?? token, serviceId, reference ? 'ref' : 'token')}
+        onClick={(event) => {
+          if (!reference) return
+          try {
+            saveCloudSessionReference(reference, token)
+          } catch {
+            event.preventDefault()
+            setStorageFailed(true)
+          }
+        }}
+        className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/20"
+      >
+        <Activity className="h-3 w-3" />Session Details<ExternalLink className="h-3 w-3" />
+      </Link>
+      {storageFailed && <span role="alert" className="text-xs text-destructive">Allow browser storage to open Session Details.</span>}
+    </>
+  )
 }
 
 export function SessionDetail({
@@ -157,6 +184,9 @@ export function SessionDetail({
               >
                 <Film className="h-3 w-3" />Stream Details<ExternalLink className="h-3 w-3" />
               </Link>
+            )}
+            {selectedSession && !selectedSession.is_streaming && selectedSession.session_token && (
+              <RequestTraceLink key={selectedSession.session_token} token={selectedSession.session_token} serviceId={activeServiceId} />
             )}
             {selectedSession?.flagged && <AlertTriangle className="h-4 w-4 text-yellow-500" />}
             {selectedSession?.edge_sid && (

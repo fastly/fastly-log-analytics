@@ -511,14 +511,14 @@ describe('ProvisionWizard — token submission (/api/provision/services)', () =>
     expect(getCalled).toBe(false)
   })
 
-  it('still calls GET /api/provision/services?token=... in non-Cloud mode', async () => {
+  it('sends the Fastly token in Authorization in non-Cloud mode', async () => {
     setCloudModeRuntime(false)
     const user = userEvent.setup()
-    let receivedQueryToken: string | null = null
+    let receivedAuthorization: string | null = null
     let postCalled = false
     server.use(
       http.get(`${API_BASE}/api/provision/services`, ({ request }) => {
-        receivedQueryToken = new URL(request.url).searchParams.get('token')
+        receivedAuthorization = request.headers.get('Authorization')
         return HttpResponse.json([{ id: 'svc-2', name: 'Local Svc', provisioned: false }])
       }),
       http.post(`${API_BASE}/api/provision/services`, () => {
@@ -533,7 +533,7 @@ describe('ProvisionWizard — token submission (/api/provision/services)', () =>
     await user.click(screen.getByRole('button', { name: /fetch services/i }))
 
     expect(await screen.findByText('Local Svc')).toBeInTheDocument()
-    expect(receivedQueryToken).toBe('tok-local-456')
+    expect(receivedAuthorization).toBe('Bearer tok-local-456')
     expect(postCalled).toBe(false)
   })
 })

@@ -1699,22 +1699,16 @@ def _make_usage_row(
 # ── POST /admin/pop-locations/refresh ──────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("url", "expected_status"),
-    [
-        ("/api/admin/pop-locations/refresh", 422),
-        ("/api/admin/pop-locations/refresh?token=   ", 400),
-    ],
-)
-def test_refresh_pop_locations_token_validation(client, url: str, expected_status: int):
-    """Missing ``token`` query param → 422; whitespace-only token → 400."""
-    assert client.post(url).status_code == expected_status
+def test_refresh_pop_locations_token_validation(client):
+    """The token must be supplied in the JSON body, never in the URL."""
+    assert client.post("/api/admin/pop-locations/refresh").status_code == 422
+    assert client.post("/api/admin/pop-locations/refresh", json={"token": "   "}).status_code == 422
 
 
 def test_refresh_pop_locations_502s_when_fetch_fails(client):
     """``fetch_pop_locations`` returning False → 502 mentioning the API key."""
     with patch("backend.utils.pop_utils.fetch_pop_locations", return_value=False):
-        resp = client.post("/api/admin/pop-locations/refresh?token=bad-key")
+        resp = client.post("/api/admin/pop-locations/refresh", json={"token": "bad-key"})
     assert resp.status_code == 502
     assert "api key" in resp.json()["detail"]["error"].lower()
 
@@ -1726,7 +1720,7 @@ def test_refresh_pop_locations_returns_refreshed_pops(client):
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
         patch("backend.utils.pop_utils.get_pop_locations", return_value=fake_pops),
     ):
-        resp = client.post("/api/admin/pop-locations/refresh?token=valid-key")
+        resp = client.post("/api/admin/pop-locations/refresh", json={"token": "valid-key"})
     assert resp.status_code == 200
     pops = resp.json()["pops"]
     assert len(pops) == 1 and pops[0]["code"] == "iad-va-us" and pops[0]["latitude"] == 38.94

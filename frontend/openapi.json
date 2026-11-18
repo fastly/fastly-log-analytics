@@ -19909,12 +19909,19 @@
         "operationId": "provision_list_services_api_provision_services_get",
         "parameters": [
           {
-            "name": "token",
-            "in": "query",
-            "required": true,
+            "name": "authorization",
+            "in": "header",
+            "required": false,
             "schema": {
-              "type": "string",
-              "title": "Token"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
             }
           }
         ],
@@ -21141,15 +21148,6 @@
         "operationId": "provision_check_config_api_provision_check_config_get",
         "parameters": [
           {
-            "name": "token",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Token"
-            }
-          },
-          {
             "name": "service_id",
             "in": "query",
             "required": false,
@@ -21181,6 +21179,22 @@
             "schema": {
               "type": "string",
               "title": "Bucket"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
             }
           }
         ],
@@ -21311,16 +21325,6 @@
                 }
               ],
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
             }
           },
           {
@@ -21460,16 +21464,6 @@
             "schema": {
               "type": "string",
               "title": "Service Id"
-            }
-          },
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "",
-              "title": "Token"
             }
           },
           {
@@ -26501,24 +26495,6 @@
         "summary": "Refresh Pop Locations",
         "description": "Refresh the POP locations cache from the Fastly API.",
         "operationId": "refresh_pop_locations_api_admin_pop_locations_refresh_post",
-        "parameters": [
-          {
-            "name": "token",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Token"
-            }
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {

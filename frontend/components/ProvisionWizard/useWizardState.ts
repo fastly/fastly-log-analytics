@@ -288,7 +288,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
         return payload.services ?? []
       }
       const { data, error } = await client.GET("/api/provision/services", {
-        params: { query: { token: submittedToken } },
+        headers: { Authorization: `Bearer ${submittedToken}` },
       })
       if (error) {
         const err = new Error(extractApiError(error)) as Error & { code?: string }

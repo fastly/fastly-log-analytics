@@ -58,6 +58,21 @@ provision_router = router
 _FASTLY_HTTP_ERROR_RE = re.compile(r"HTTP (\d+) ")
 
 
+def _require_bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_required", "message": "A Fastly API token is required."},
+        )
+    token = authorization[len("bearer ") :].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_required", "message": "A Fastly API token is required."},
+        )
+    return token
+
+
 def _invalidate_service_credentials(service_id: str) -> None:
     """Drop in-process FOS client cache for ``service_id``."""
     try:
@@ -89,11 +104,12 @@ def _check_domain_available(domain: str, timeout: int = 10) -> tuple[bool, str |
 
 
 @provision_router.get("/services", response_model=list[ProvisionService])
-def provision_list_services(token: str = Query(...)):
+def provision_list_services(authorization: str | None = Header(default=None)):
     from backend import config as svcconfig
     from backend.core.fastly.client import fastly
     from backend.provision.fos_setup import object_storage_enabled
 
+    token = _require_bearer_token(authorization)
     existing_ids = set(svcconfig.list_service_ids())
     try:
         services = fastly("GET", "/service", token=token)
@@ -806,12 +822,13 @@ def provision_ingest(payload: ProvisionConfigRequest):
 
 @provision_router.get("/check-config", response_model=ProvisionCheckConfigResponse, response_model_exclude_unset=True)
 def provision_check_config(
-    token: str = Query(...),
+    authorization: str | None = Header(default=None),
     service_id: str | None = Query(default=None),
     cdn_service_id: str = Query(...),
     bucket: str = Query(...),
 ):
     """Verify that both services are correctly configured for log analysis."""
+    token = _require_bearer_token(authorization)
     service_id = require_service_id(service_id)
     from backend.core.fastly.client import LOG_ENDPOINT_TYPES, fastly
 
@@ -912,7 +929,6 @@ def provision_check_config(
 
 def _require_ngwaf_token(
     service_id: str,
-    token: str,
     authorization: str | None,
     *,
     missing_message: str = "A Fastly API token is required.",
@@ -920,15 +936,7 @@ def _require_ngwaf_token(
     """Resolve and validate a caller-supplied Fastly token for NGWAF operations."""
     from backend.core.vcl_generator import validate_destructive_token
 
-    if authorization and authorization.lower().startswith("bearer "):
-        resolved = authorization[len("bearer ") :].strip()
-    else:
-        resolved = (token or "").strip()
-    if not resolved:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": "token_required", "message": missing_message},
-        )
+    resolved = _require_bearer_token(authorization)
     validate_destructive_token(resolved, service_id=service_id)
     return resolved
 
@@ -936,7 +944,6 @@ def _require_ngwaf_token(
 @provision_router.get("/ngwaf-workspaces", response_model=NgwafWorkspacesResponse, response_model_exclude_unset=True)
 def provision_ngwaf_workspaces(
     service_id: str | None = Query(default=None),
-    token: str = Query(default=""),
     authorization: str | None = Header(default=None),
 ):
     """List NGWAF workspaces for a service (requires validated Fastly token)."""
@@ -947,7 +954,6 @@ def provision_ngwaf_workspaces(
     service_id = require_service_id(service_id)
     token = _require_ngwaf_token(
         service_id,
-        token,
         authorization,
         missing_message="A Fastly API token is required to list NGWAF workspaces.",
     )
@@ -997,14 +1003,13 @@ def provision_ngwaf_workspaces(
 def provision_set_ngwaf_workspace(
     service_id: str,
     body: NgwafWorkspaceCreateRequest,
-    token: str = Query(default=""),
     authorization: str | None = Header(default=None),
 ):
     """Persist the NGWAF workspace ID for a service and reload the scheduler."""
     from backend.utils.router_utils import load_service_config, mutate_service_config
 
     load_service_config(service_id)
-    _require_ngwaf_token(service_id, token, authorization)
+    _require_ngwaf_token(service_id, authorization)
 
     workspace_id = (body.ngwaf_workspace_id or "").strip() or None
     mutate_service_config(service_id, lambda c: c.__setitem__("ngwaf_workspace_id", workspace_id))

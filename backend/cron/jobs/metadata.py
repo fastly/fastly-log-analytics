@@ -303,6 +303,20 @@ def get_cache_stats() -> dict:
 # ── Webhook notifications ────────────────────────────────────────────────────
 
 
+def _send_webhook(
+    destination: Any,
+    payload: dict,
+) -> httpx.Response:
+    url = destination if isinstance(destination, str) else destination.url
+    host = None if isinstance(destination, str) else destination.host
+    sni_hostname = None if isinstance(destination, str) else destination.sni_hostname
+    headers = {"Host": host} if host else None
+    extensions = {"sni_hostname": sni_hostname} if sni_hostname else {}
+    request = httpx.Request("POST", url, json=payload, headers=headers, extensions=extensions)
+    with httpx.Client(timeout=5, follow_redirects=False, trust_env=False) as client:
+        return client.send(request)
+
+
 @tenacity.retry(
     retry=tenacity.retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
     stop=tenacity.stop_after_attempt(3),
@@ -310,7 +324,10 @@ def get_cache_stats() -> dict:
     reraise=True,
 )
 def _post_json(url: str, payload: dict) -> None:
-    response = httpx.post(url, json=payload, timeout=5)
+    from backend.utils.webhook_url import validate_webhook_destination
+
+    destination = validate_webhook_destination(url)
+    response = _send_webhook(destination, payload)
     if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
         response.raise_for_status()
 

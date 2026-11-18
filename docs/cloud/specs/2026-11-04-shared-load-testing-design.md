@@ -1,7 +1,7 @@
 # fastly-log-analytics-load-testing: design
 
 Status: draft for review, 2026-11-04. It replaces the per-app harness plans in
-fastly-logs-parquet (FLP: `docs/superpowers/plans/2026-11-04-fdlt-load-harness.md`,
+fastly-logs-parquet (FLP: the shared load-testing design in this document,
 paused after Task 2) and fastly-log-analytics (FLA: branch
 `feat/fdlt-load-harness`, commits `c5877681..5d9c104f`).
 

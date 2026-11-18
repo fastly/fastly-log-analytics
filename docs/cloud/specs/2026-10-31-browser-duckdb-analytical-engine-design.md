@@ -3,7 +3,7 @@
 **Date:** 2026-10-31
 **Status:** Ready for implementation planning. All decisions confirmed (§8).
 **Target:** `app/` — Fastly Compute `flp` (`wasm32-wasip1`, `fastly = "=0.13.2"`), Next.js static export `app/web/`.
-**Master plan:** `docs/superpowers/plans/2026-10-28-fastly-log-analytics-shell-and-dashboard.md`.
+**Current location:** this design was carried into the maintained Cloud analytics implementation.
 **Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers in code spans are from when this was written, and links point at the current symbol. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository.
 
 ---

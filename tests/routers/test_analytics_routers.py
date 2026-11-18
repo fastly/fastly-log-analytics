@@ -1204,8 +1204,8 @@ EXPLICIT_SERVICE_ID_ROUTES = [
     ("DELETE", "/api/admin/slow-queries", None),
     ("GET", "/api/admin/clickhouse/status", None),
     ("GET", "/api/admin/ledger/quarantine", None),
-    ("GET", "/api/provision/check-config", {"token": "t", "cdn_service_id": "c", "bucket": "b"}),
-    ("GET", "/api/provision/ngwaf-workspaces", {"token": "t"}),
+    ("GET", "/api/provision/check-config", {"cdn_service_id": "c", "bucket": "b"}),
+    ("GET", "/api/provision/ngwaf-workspaces", None),
     ("GET", "/api/log-extents/stream", None),
     ("DELETE", "/api/alerts/alert-1", None),
     ("DELETE", "/api/views/view-1", None),
@@ -1240,7 +1240,8 @@ def bare_client(monkeypatch):
 
 @pytest.mark.parametrize(("method", "path", "params"), EXPLICIT_SERVICE_ID_ROUTES)
 def test_missing_service_id_is_400_service_id_required(bare_client, method, path, params) -> None:
-    resp = bare_client.request(method, path, params=params)
+    headers = {"Authorization": "Bearer test-token"} if path.startswith("/api/provision/") else None
+    resp = bare_client.request(method, path, params=params, headers=headers)
     assert resp.status_code == 400 and resp.json()["detail"] == {"error": "service_id_required"}
 
 

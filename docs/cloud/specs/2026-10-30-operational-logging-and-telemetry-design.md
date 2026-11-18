@@ -3,7 +3,7 @@
 **Date:** 2026-10-30 (revised after two code reviews the same day)
 **Status:** Ready for implementation planning. All decisions confirmed (§12).
 **Target:** `app/` — Fastly Compute `flp` (`wasm32-wasip1`, `fastly = "=0.13.2"`), `flp-front` VCL, Next.js static export `app/web/`.
-**Master plan:** `docs/superpowers/plans/2026-10-28-fastly-log-analytics-shell-and-dashboard.md`. Where this spec states no difference, follow it (and v3 through it). Stated differences are listed in §11.
+This spec records the operational-logging and telemetry contract. Differences from the product architecture are listed in §11.
 **Paths:** written in the former fastly-logs-parquet repository. Its `app/` is now `compute/cloud/` and its web app was merged into `frontend/` (engine code under `frontend/lib/cloud-engine/`). Paths below point at the current locations; line numbers are from when this was written. `app/web/` paths left as written were not carried into `frontend/`, and the plans and research this cites stayed in that repository. The public `/calculator` and `/how-it-works` pages were not carried over; `/usage` embeds the Cost Estimator.
 
 ---

@@ -176,6 +176,13 @@ import-contracts:
 gen-types:
 	cd frontend && npm run gen:types
 
+gen-cloud-types:
+	@tmp=$$(mktemp "$${TMPDIR:-/tmp}/cloud-api-generated.XXXXXX.ts") && \
+		trap 'rm -f "$$tmp"' EXIT && \
+		cd frontend && npx openapi-typescript lib/cloud-engine/cloud-openapi.json -o "$$tmp" && \
+		npx prettier --write "$$tmp" >/dev/null && \
+		cp "$$tmp" lib/cloud-engine/cloud-api.generated.ts
+
 openapi-types: gen-types
 
 test-frontend:
@@ -333,8 +340,8 @@ scorer-audit: compute-audit
 
 # OpenAPI type-drift guard (ci.yml frontend "Detect drift in generated
 # OpenAPI types"). Regenerates then fails if the tracked output changed.
-openapi-drift: gen-types
-	@cd frontend && git diff --exit-code types/api.generated.ts openapi.json \
+openapi-drift: gen-types gen-cloud-types
+	@cd frontend && git diff --exit-code types/api.generated.ts openapi.json lib/cloud-engine/cloud-api.generated.ts \
 		|| { echo "OpenAPI types out of sync — run 'make gen-types' and commit." >&2; exit 1; }
 
 # Perf gate AS CI RUNS IT: emit latest.json from synthetic load, then compare

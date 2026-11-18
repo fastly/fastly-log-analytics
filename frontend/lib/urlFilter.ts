@@ -29,6 +29,10 @@ export function buildStreamDetailUrl(token: string, serviceId?: string | null): 
   return serviceId ? `${base}&service=${encodeURIComponent(serviceId)}` : base
 }
 
+export function buildSessionDetailUrl(reference: string, serviceId?: string | null, parameter: 'token' | 'ref' = 'token'): string {
+  return buildServiceHref(`/sessions/detail?${parameter}=${encodeURIComponent(reference)}`, serviceId)
+}
+
 export function buildSessionDashboardUrl(
   serviceId: string | null | undefined,
   filterKey: string,

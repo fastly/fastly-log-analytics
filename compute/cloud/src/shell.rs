@@ -1680,6 +1680,7 @@ pub const ANALYTICS_SITE_ROUTES: &[&str] = &[
     "/rum",
     "/streaming",
     "/sessions",
+    "/sessions/detail",
     "/sessions/stream",
     "/query",
     "/insights",

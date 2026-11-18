@@ -1747,6 +1747,8 @@ def test_error_row_has_zero_counters_run_id_and_no_log_output():
 
 # ── Merged from test_webhook_senders.py ──────────────────────────────────────────────
 
+import socket
+
 import httpx
 import pytest
 import tenacity
@@ -1762,6 +1764,10 @@ class TestWebhookSenders:
     @pytest.fixture(autouse=True)
     def _no_backoff(self, monkeypatch):
         monkeypatch.setattr(tenacity.nap.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            "backend.utils.webhook_url.validate_webhook_destination",
+            lambda url: url,
+        )
 
     def test_old_names_still_exist_and_share_the_json_sender(self):
         assert metadata._post_alert_webhook is metadata._post_json
@@ -1772,34 +1778,34 @@ class TestWebhookSenders:
         seen = []
         codes = iter([503, 502, 200])
 
-        def fake_post(url, json=None, timeout=None):
-            seen.append((url, json, timeout))
+        def fake_post(destination, payload):
+            seen.append((destination, payload))
             return _response(next(codes))
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(metadata, "_send_webhook", fake_post)
         metadata._post_alert_webhook("https://hook.example/x", {"a": 1})
         assert len(seen) == 3
-        assert seen[0] == ("https://hook.example/x", {"a": 1}, 5)
+        assert seen[0] == ("https://hook.example/x", {"a": 1})
 
     def test_does_not_retry_a_4xx(self, monkeypatch):
         calls = []
 
-        def fake_post(url, json=None, timeout=None):
-            calls.append(url)
+        def fake_post(destination, _payload):
+            calls.append(destination)
             return _response(400)
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(metadata, "_send_webhook", fake_post)
         metadata._post_slack_notification("https://hook.example/x", {"text": "hi"})
         assert len(calls) == 1
 
     def test_gives_up_after_three_attempts_and_reraises(self, monkeypatch):
         calls = []
 
-        def fake_post(url, json=None, timeout=None):
-            calls.append(url)
+        def fake_post(destination, _payload):
+            calls.append(destination)
             return _response(503)
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(metadata, "_send_webhook", fake_post)
         with pytest.raises(httpx.HTTPStatusError):
             metadata._post_slack_notification("https://hook.example/x", {})
         assert len(calls) == 3
@@ -1807,14 +1813,39 @@ class TestWebhookSenders:
     def test_pagerduty_builds_payload_and_is_not_double_retried(self, monkeypatch):
         bodies = []
 
-        def fake_post(url, json=None, timeout=None):
-            bodies.append(json)
+        def fake_post(_destination, payload):
+            bodies.append(payload)
             return _response(503)
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(metadata, "_send_webhook", fake_post)
         with pytest.raises(httpx.HTTPStatusError):
             metadata._post_pagerduty_notification("https://pd.example/e", "HighErr", "error_rate", "> 5%", "svc")
         assert len(bodies) == 3
         assert bodies[0]["event_action"] == "trigger"
         assert bodies[0]["payload"]["summary"] == "Alert HighErr triggered on svc: error_rate > 5%"
         assert bodies[0]["payload"]["component"] == "error_rate"
+
+    def test_rejects_hostnames_resolving_to_private_addresses(self, monkeypatch):
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            "backend.utils.webhook_url.socket.getaddrinfo",
+            lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))],
+        )
+        from backend.utils.webhook_url import validate_webhook_destination
+
+        with pytest.raises(ValueError, match="restricted_webhook_address"):
+            validate_webhook_destination("https://public-looking.example/hook")
+
+    def test_pins_resolved_public_address_while_preserving_host_and_sni(self, monkeypatch):
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            "backend.utils.webhook_url.socket.getaddrinfo",
+            lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))],
+        )
+        from backend.utils.webhook_url import validate_webhook_destination
+
+        destination = validate_webhook_destination("https://hook.example:8443/path")
+
+        assert destination.url == "https://1.1.1.1:8443/path"
+        assert destination.host == "hook.example:8443"
+        assert destination.sni_hostname == "hook.example"

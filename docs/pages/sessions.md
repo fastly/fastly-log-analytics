@@ -16,8 +16,16 @@ Shared range and filter parameters (see [dashboard.md](dashboard.md)) plus `flag
 
 - Controls: flagged-only, streaming-only, minimum requests, minimum 4xx %.
 - Sessions table (newest first): IP, country, started, requests, unique URLs, ASN, 4xx%, median RTT, JA4, edge/shield, user agent, a streaming icon, and a Flag action. Optional columns appear only if the underlying fields are logged (`has_rtt`, `has_ja4`, `has_edge`, `has_edge_sid`, `has_cmcd`).
-- Row click opens the session inspector dialog with summary fields and the session's individual request rows; streaming sessions link to `/sessions/stream?token=...` ([sessions-stream.md](sessions-stream.md)).
+- Row click opens the session inspector dialog. **Session Details** opens `/sessions/detail` for non-media sessions; **Stream Details** opens `/sessions/stream?token=...` for streaming sessions ([sessions-stream.md](sessions-stream.md)).
 - Flagging records a scoring label through `/api/services/{service_id}/scoring/labels` (see [admin/session-scoring.md](admin/session-scoring.md)); labelled sessions show their label.
+
+## Request trace
+
+The non-media detail page uses the same detail query as the inspector. High-Scale links carry a sealed session token. Cloud links use a tab-local reference so the URL does not expose client identifiers; reopen the page from Sessions if the link is unavailable in a different tab.
+
+The timeline separates edge, shield, and unspecified hops. Select a finding to filter the records to HTTP errors, the first failure and subsequent responses on its request target, or the slowest observed request. A later 2xx is ordered by request start time; it does not prove recovery or a client retry.
+
+Counts and timings describe the returned records, not necessarily the entire session. The page warns when the 500-request limit is reached and distinguishes missing HTTP status data from a trace with no observed HTTP errors.
 
 ## Opaque session tokens
 

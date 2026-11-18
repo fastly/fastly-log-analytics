@@ -4398,10 +4398,11 @@ export interface operations {
         };
         content: {
           "application/json": {
+            /** @enum {string} */
             source: "fastly" | "partial" | "unavailable";
-            storage: Record<string, unknown>;
-            compute: Record<string, unknown>;
-            ngwaf: Record<string, unknown>;
+            storage: Record<string, never>;
+            compute: Record<string, never>;
+            ngwaf: Record<string, never>;
           };
         };
       };
@@ -4423,7 +4424,6 @@ export interface operations {
         start: string;
         /** @description Exclusive range end as an ISO 8601 timestamp */
         end: string;
-        /** @enum {string} */
         group_by: "region" | "datacenter";
       };
       header?: never;
@@ -4439,7 +4439,9 @@ export interface operations {
         };
         content: {
           "application/json": {
+            /** @enum {string} */
             source: "fastly" | "unavailable";
+            /** @enum {string} */
             group_by: "region" | "datacenter";
             data: {
               location: string;

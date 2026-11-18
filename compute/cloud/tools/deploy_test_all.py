@@ -17,7 +17,7 @@ Preflight rejects absent or mixed configured service identities before deploymen
 3. Confirm active versions and VCL configuration across compute, worker, front,
    and the monitored VCL service.
 4. Run one shared-tool deploy-check stage (fastly-log-analytics-load-testing
-   `lt deploy-check`, configured by fastly-lt.toml) and require it to pass.
+   `lt deploy-check`, configured by --lt-config/LT_CONFIG) and require it to pass.
 5. Confirm natural 1s-dispatcher execution of request_ingest & raw_delete, force-verify
    retention_sweep, storage_reconcile, log_compact, and log_flush, and check Compute
    resource budgets, platform_errors, and quarantine.
@@ -2554,6 +2554,12 @@ def main() -> int:
     parser.add_argument("--target-url", default=DEFAULT_TEST_DOMAIN)
     parser.add_argument("--log-period", type=int, default=DEFAULT_LOG_PERIOD_S)
     parser.add_argument(
+        "--lt-config",
+        type=Path,
+        default=None,
+        help="Private fdt.load config. Required unless --no-traffic is set.",
+    )
+    parser.add_argument(
         "--lt-repo",
         type=Path,
         default=DEFAULT_LT_REPO,
@@ -2671,11 +2677,12 @@ def main() -> int:
             s4: dict[str, Any] | None = None
             expect_min_requests = 0
             if not args.no_traffic:
-                lt_config = (
-                    (root / "compute/cloud/fastly-lt.toml")
-                    if (root / "compute/cloud/fastly-lt.toml").is_file()
-                    else (root / "fastly-lt.toml")
-                )
+                lt_config = args.lt_config or (Path(os.environ["LT_CONFIG"]) if os.environ.get("LT_CONFIG") else None)
+                if lt_config is None:
+                    raise RuntimeError("--lt-config or LT_CONFIG is required when traffic is enabled")
+                lt_config = lt_config.expanduser().resolve()
+                if not lt_config.is_file():
+                    raise RuntimeError(f"load-test config not found: {lt_config}")
                 s4 = step_4_deploy_check(
                     work_dir,
                     config=lt_config,

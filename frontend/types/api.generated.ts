@@ -31454,10 +31454,10 @@ export interface operations {
     };
     provision_list_services_api_provision_services_get: {
         parameters: {
-            query: {
-                token: string;
+            query?: never;
+            header?: {
+                authorization?: string | null;
             };
-            header?: never;
             path?: never;
             cookie?: never;
         };
@@ -32502,12 +32502,13 @@ export interface operations {
     provision_check_config_api_provision_check_config_get: {
         parameters: {
             query: {
-                token: string;
                 service_id?: string | null;
                 cdn_service_id: string;
                 bucket: string;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -32609,7 +32610,6 @@ export interface operations {
         parameters: {
             query?: {
                 service_id?: string | null;
-                token?: string;
             };
             header?: {
                 authorization?: string | null;
@@ -32713,9 +32713,7 @@ export interface operations {
     };
     provision_set_ngwaf_workspace_api_provision_services__service_id__ngwaf_workspace_patch: {
         parameters: {
-            query?: {
-                token?: string;
-            };
+            query?: never;
             header?: {
                 authorization?: string | null;
             };
@@ -35818,9 +35816,7 @@ export interface operations {
     };
     refresh_pop_locations_api_admin_pop_locations_refresh_post: {
         parameters: {
-            query?: {
-                token?: string | null;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;

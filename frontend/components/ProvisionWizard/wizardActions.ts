@@ -341,9 +341,9 @@ export async function runCheckConfig(args: CheckConfigArgs) {
   try {
     const data = await unwrapClient(
       client.GET("/api/provision/check-config", {
+        headers: { Authorization: `Bearer ${token}` },
         params: {
           query: {
-            token,
             service_id: selectedService.id,
             cdn_service_id: selectedCdnService.id,
             bucket: config.fos_bucket_name,

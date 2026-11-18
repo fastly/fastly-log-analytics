@@ -1,0 +1,23 @@
+app = "flp"
+install = "replace-with-install-name"
+checkout = "."
+base_url = "https://replace-with-app-domain.example"
+destination = "replace-with-load-test-destination.example"
+estimator = "frontend/lib/cloud-engine/usage/estimate.ts"
+total_selector = '[data-testid="total-requests"]'
+scenarios_file = "/path/to/private/fdlt/scenarios.toml"
+
+[services]
+monitored = "replace-with-monitored-service-id"
+app = "replace-with-compute-app-service-id"
+worker = "replace-with-worker-service-id"
+front = "replace-with-front-service-id"
+
+[fastly_token]
+env = "FASTLY_API_KEY"
+
+[settings]
+state_dir = "~/.flp-state/replace-with-install-name"
+env_file = ".env"
+log_endpoint_name = "Fastly Object Storage Logs"
+raw_bucket = "replace-with-private-bucket"

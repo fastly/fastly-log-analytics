@@ -686,6 +686,7 @@ fn analytics_site_routes_allowlist_covers_all_exported_pages() {
         "/rum",
         "/streaming",
         "/sessions",
+        "/sessions/detail",
         "/sessions/stream",
         "/query",
         "/insights",

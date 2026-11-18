@@ -177,8 +177,12 @@ export function AppLayout({
   React.useEffect(() => {
     if (isLoading) return
     if (needsSignIn) {
-      if (typeof window !== 'undefined') window.location.replace('/share-login')
-      else React.startTransition(() => router.replace('/share-login'))
+      if (typeof window !== 'undefined') {
+        const target = pathname === '/sessions/detail'
+          ? `/share-login?${new URLSearchParams({ return: pathname + window.location.search })}`
+          : '/share-login'
+        window.location.replace(target)
+      } else React.startTransition(() => router.replace('/share-login'))
       return
     }
     if (analystBlocked) {

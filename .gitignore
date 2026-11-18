@@ -22,10 +22,6 @@ dist/
 .claude/
 .agents/
 .trail/
-!.trail/
-.trail/*
-!.trail/learnings/
-!.trail/learnings/**
 gemini.md
 SYSTEM.md
 DEPLOYMENT.md
@@ -33,10 +29,8 @@ local-docs/*
 pending-docs/*
 .superpowers/
 docs/superpowers/
-!docs/superpowers/
-docs/superpowers/*
-!docs/superpowers/plans/
-!docs/superpowers/plans/**
+fastly-lt.toml
+compute/cloud/fastly-lt.toml
 docs/plans/
 node_modules/
 .coverage

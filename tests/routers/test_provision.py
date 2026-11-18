@@ -748,7 +748,8 @@ def test_set_ngwaf_workspace_saves_body_and_ignores_query_param():
         patch("backend.core.log_fields.validate_destructive_token") as mock_validate,
     ):
         resp = _client().patch(
-            "/api/provision/services/svc123/ngwaf-workspace?token=test-stored-key",
+            "/api/provision/services/svc123/ngwaf-workspace",
+            headers={"Authorization": "Bearer test-stored-key"},
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
         assert resp.status_code == 200
@@ -758,7 +759,8 @@ def test_set_ngwaf_workspace_saves_body_and_ignores_query_param():
 
         saved.clear()
         resp2 = _client().patch(
-            "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc&token=test-stored-key",
+            "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc",
+            headers={"Authorization": "Bearer test-stored-key"},
             json={},
         )
         assert resp2.status_code == 200
@@ -789,8 +791,10 @@ def test_set_ngwaf_workspace_auth_rejections(query, cfg_key, fastly_effect, expe
         patch("backend.provision._sync_crontab"),
         patch("backend.core.log_fields.fastly", **fastly_kw),
     ):
+        headers = {"Authorization": f"Bearer {query.removeprefix('?token=')}"} if query else None
         resp = _client().patch(
-            f"/api/provision/services/svc123/ngwaf-workspace{query}",
+            "/api/provision/services/svc123/ngwaf-workspace",
+            headers=headers,
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
     assert resp.status_code == 401
@@ -807,7 +811,8 @@ def test_ngwaf_workspaces_listing_variants():
     ):
         r_ro = _client().get(
             "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc123", "token": "stored-read-only-token"},
+            params={"service_id": "svc123"},
+            headers={"Authorization": "Bearer stored-read-only-token"},
         )
         assert r_ro.status_code == 401
         assert r_ro.json()["detail"]["error"] == "insufficient_scope"
@@ -833,7 +838,11 @@ def test_ngwaf_workspaces_listing_variants():
         ),
         patch("backend.core.log_fields.validate_destructive_token") as mock_val,
     ):
-        r_data = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        r_data = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
         assert r_data.status_code == 200
         assert r_data.json()["workspaces"][0] == {"id": "ws-1", "name": "Prod"}
         mock_val.assert_called_once_with("tok", service_id="svc")
@@ -854,7 +863,11 @@ def test_ngwaf_workspaces_listing_variants():
         ),
         patch("backend.core.log_fields.validate_destructive_token"),
     ):
-        r_old = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        r_old = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
         assert r_old.json()["workspaces"][0]["name"] == "OldShape"
 
     with (
@@ -863,7 +876,11 @@ def test_ngwaf_workspaces_listing_variants():
         patch("backend.provision.fastly", return_value={"id": "tok-id", "name": "automation"}),
         patch("backend.core.log_fields.validate_destructive_token"),
     ):
-        r_empty = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        r_empty = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
         assert r_empty.json()["workspaces"] == []
         assert "automation" in r_empty.json()["error_hint"].lower()
 
@@ -879,7 +896,11 @@ def test_ngwaf_workspaces_listing_variants():
         patch("urllib.request.urlopen", side_effect=err_401),
         patch("backend.core.log_fields.validate_destructive_token"),
     ):
-        r_401 = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "bad-tok"})
+        r_401 = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer bad-tok"},
+        )
         assert r_401.status_code == 400
         assert r_401.json()["detail"]["error"] == "ngwaf_token_invalid"
 
@@ -900,18 +921,18 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
         patch("backend.core.fastly.client.fastly", return_value=fake_services),
         patch("backend.provision.fos_setup.object_storage_enabled", return_value=True),
     ):
-        resp = _client().get("/api/provision/services?token=tok")
+        resp = _client().get("/api/provision/services", headers={"Authorization": "Bearer tok"})
         assert resp.status_code == 200
         assert {s["id"]: s["provisioned"] for s in resp.json()} == {"svc-existing": True, "svc-new": False}
 
-    assert _client().get("/api/provision/services").status_code == 422
+    assert _client().get("/api/provision/services").status_code == 401
 
     with (
         patch("backend.core.fastly.client.fastly", return_value=fake_services[:1]),
         patch("backend.provision.fos_setup.object_storage_enabled", return_value=False),
         patch("backend.config.list_service_ids", return_value=[]),
     ):
-        r_no_os = _client().get("/api/provision/services", params={"token": "tok"})
+        r_no_os = _client().get("/api/provision/services", headers={"Authorization": "Bearer tok"})
         assert r_no_os.status_code == 400
         assert r_no_os.json()["detail"]["error"] == "object_storage_not_enabled"
 
@@ -923,7 +944,7 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
             side_effect=lambda *a, **k: probe_called.append(True) or False,
         ),
     ):
-        r_bad = _client().get("/api/provision/services", params={"token": "bad"})
+        r_bad = _client().get("/api/provision/services", headers={"Authorization": "Bearer bad"})
         assert r_bad.status_code == 400
         assert r_bad.json()["detail"]["error"] == "list_services_failed"
         assert probe_called == []
@@ -1313,7 +1334,8 @@ def test_provision_execute_dns_fallback_and_faro_version_threading():
 
 # ─── /api/provision/check-config ─────────────────────────────────────────────
 
-_CHECK_PARAMS = {"token": "t", "service_id": "log-svc", "cdn_service_id": "cdn-svc", "bucket": "b"}
+_CHECK_PARAMS = {"service_id": "log-svc", "cdn_service_id": "cdn-svc", "bucket": "b"}
+_CHECK_HEADERS = {"Authorization": "Bearer t"}
 _REQUIRED_SNIPPETS = [
     "Fastly Log Analysis Capture",
     "Fastly Log Analysis Miss",
@@ -1375,7 +1397,7 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_no_ep):
-        body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert body["logging_service"]["ok"] is False
         assert "No logging endpoint" in body["logging_service"]["details"]
 
@@ -1388,7 +1410,7 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=[{"name": "cdn-swr-shield-disable"}],
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_missing_snip):
-        res = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert "missing CORE snippets" in res["logging_service"]["details"]
         assert res["cdn_service"]["ok"] is False
         assert "cdn-no-cache-404" in res["cdn_service"]["details"]
@@ -1402,7 +1424,7 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_full):
-        res_full = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res_full = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert res_full["logging_service"]["ok"] is True
         assert "3 origin metric snippets" in res_full["logging_service"]["details"]
         assert res_full["cdn_service"]["ok"] is True
@@ -1418,7 +1440,11 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_fos):
-        assert _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()["logging_service"]["ok"]
+        assert (
+            _client()
+            .get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS)
+            .json()["logging_service"]["ok"]
+        )
 
     # 4. No response condition warns + CDN missing dicts/backend
     side_warn = _check_config_fastly_router(
@@ -1429,7 +1455,7 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=[],
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_warn):
-        res_warn = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res_warn = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert res_warn["logging_service"]["ok"] is True
         assert "no response condition" in res_warn["logging_service"]["details"].lower()
         assert res_warn["cdn_service"]["ok"] is False
@@ -1437,7 +1463,7 @@ def test_check_config_logging_and_cdn_permutations():
 
     # 5. Logging & CDN exceptions captured in details
     with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("Fastly 503")):
-        res_err = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res_err = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert "Fastly 503" in res_err["logging_service"]["details"]
         assert "Fastly 503" in res_err["cdn_service"]["details"]
 
