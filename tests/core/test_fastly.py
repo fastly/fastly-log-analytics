@@ -61,10 +61,16 @@ def _fake_resp(body: bytes = b'{"ok": true}') -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("granularity", "path_granularity"),
-    [("minute", "minutely"), ("hour", "hourly"), ("day", "daily")],
+    ("granularity", "path_granularity", "timestamp", "expected_start_time"),
+    [
+        ("minute", "minutely", "2026-07-23T10:00:00Z", 1784800800),
+        ("hour", "hourly", "2026-07-23T10:00:00Z", 1784800800),
+        ("day", "daily", "2026-07-23T00:00:00Z", 1784764800),
+    ],
 )
-def test_platform_metrics_maps_granularity_and_queries_entities(granularity, path_granularity):
+def test_platform_metrics_maps_granularity_and_queries_entities(
+    granularity, path_granularity, timestamp, expected_start_time
+):
     calls = []
 
     def fake_fastly(method, path, **kwargs):
@@ -72,7 +78,7 @@ def test_platform_metrics_maps_granularity_and_queries_entities(granularity, pat
         return {
             "data": [
                 {
-                    "timestamp": "2026-07-23T10:00:00Z",
+                    "timestamp": timestamp,
                     "requests": 12,
                     "edge_requests": 7,
                 }
@@ -109,14 +115,27 @@ def test_platform_metrics_maps_granularity_and_queries_entities(granularity, pat
         "status": "success",
         "data": [
             {
-                "timestamp": "2026-07-23T10:00:00Z",
-                "start_time": 1784800800,
+                "timestamp": timestamp,
+                "start_time": expected_start_time,
                 "requests": 12,
                 "edge_requests": 7,
             }
         ],
         "meta": {"total": 1},
     }
+
+
+def test_platform_metrics_works_in_mock_mode():
+    with patch.object(fastly_client, "is_mock_mode", return_value=True):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc-1",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="mock-token",
+        )
+    assert result == {"status": "success", "data": [], "meta": {}}
 
 
 def test_platform_metrics_queries_aggregate_and_keeps_sparse_records_sparse():

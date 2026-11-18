@@ -16,6 +16,7 @@ import tenacity
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 from backend.core.catalog import _opt_int
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.runtime_modes import mock_mode_enabled
 
 logger = logging.getLogger(__name__)
@@ -758,6 +759,9 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
         if method == "GET":
             return {"data": []}
 
+    if method == "GET" and path.startswith("/metrics/v2/platform/"):
+        return {"data": [], "meta": {}}
+
     return {"ok": True}
 
 
@@ -995,13 +999,10 @@ def fastly_platform_metrics(
             timestamp = record.get("timestamp")
             if not isinstance(timestamp, str) or not _RFC3339_RE.fullmatch(timestamp):
                 raise RuntimeError("Platform Metrics returned a malformed timestamp")
-            try:
-                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise RuntimeError("Platform Metrics returned a malformed timestamp") from exc
-            if parsed.tzinfo is None:
+            parsed = parse_iso_utc(timestamp)
+            if parsed is None:
                 raise RuntimeError("Platform Metrics returned a malformed timestamp")
-            epoch = int(parsed.astimezone(UTC).timestamp())
+            epoch = int(parsed.timestamp())
             if epoch < first_bucket or epoch > last_bucket:
                 raise RuntimeError("Platform Metrics returned an out-of-window timestamp")
             if epoch in timestamps:

@@ -990,7 +990,7 @@ def _run_log_accounting(log_accounting_client, svc_id: str, counts: list[tuple[i
         )
     con.commit()
     fastly_payload = {
-        "data": [{"start_time": int(b.timestamp()), "requests": fastly_rc} for b, _, fastly_rc in buckets]
+        "data": [{"timestamp": b.strftime("%Y-%m-%dT%H:%M:%SZ"), "requests": fastly_rc} for b, _, fastly_rc in buckets]
     }
     with (
         patch("backend.config.get_fastly_api_key", return_value="fake-api-key"),
