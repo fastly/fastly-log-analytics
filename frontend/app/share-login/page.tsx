@@ -264,6 +264,8 @@ export function ShareLoginForm() {
   const [cloudDisplayName, setCloudDisplayName] = React.useState('')
   const [cloudSetupCode, setCloudSetupCode] = React.useState('')
   const [cloudSetupAccepted, setCloudSetupAccepted] = React.useState(false)
+  const isCloudSetupStep2 =
+    !cloudSetupComplete && (cloudSetupAccepted || cloudSetupQuery.data?.accepted === true)
 
   const handleCloudPasskeySignIn = async () => {
     setError(null)
@@ -342,19 +344,21 @@ export function ShareLoginForm() {
             </form>
           ) : (
             <div className="space-y-2">
-              <Button
-                type="button"
-                variant="default"
-                className="w-full"
-                disabled={busy}
-                onClick={() => { void handleCloudPasskeySignIn() }}
-                data-testid="cloud-passkey-signin-button"
-              >
-                {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                Sign in with Passkey
-              </Button>
+              {!isCloudSetupStep2 && (
+                <Button
+                  type="button"
+                  variant="default"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() => { void handleCloudPasskeySignIn() }}
+                  data-testid="cloud-passkey-signin-button"
+                >
+                  {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  Sign in with Passkey
+                </Button>
+              )}
               {!cloudSetupComplete && (
-                !(cloudSetupAccepted || cloudSetupQuery.data?.accepted) ? (
+                !isCloudSetupStep2 ? (
                   <form onSubmit={handleCloudSetupAccept} className="space-y-2 pt-2 border-t border-border/60">
                     <Input
                       value={cloudSetupCode}
@@ -367,7 +371,7 @@ export function ShareLoginForm() {
                     </Button>
                   </form>
                 ) : (
-                  <form onSubmit={handleCloudPasskeyRegister} className="space-y-2 pt-2 border-t border-border/60">
+                  <form onSubmit={handleCloudPasskeyRegister} className="space-y-2">
                     <Input
                       value={cloudDisplayName}
                       onChange={(e) => setCloudDisplayName(e.target.value)}
