@@ -2277,8 +2277,9 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
 }
 
 fn write_asset_urls(rows: &[Rows], bucket: i64, out: &mut Out) {
-    let mut large: FastMap<(Cow<str>, Cow<str>, Cow<str>), AssetUrl> = FastMap::default();
-    let mut low: FastMap<(Cow<str>, Cow<str>, Cow<str>), AssetUrl> = FastMap::default();
+    type AssetUrlKey<'a> = (Cow<'a, str>, Cow<'a, str>, Cow<'a, str>);
+    let mut large: FastMap<AssetUrlKey<'_>, AssetUrl> = FastMap::default();
+    let mut low: FastMap<AssetUrlKey<'_>, AssetUrl> = FastMap::default();
     for r in rows {
         let c = &r.net;
         for i in r.live() {
