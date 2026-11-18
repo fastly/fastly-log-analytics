@@ -1,15 +1,20 @@
 // @vitest-environment node
+import { parquetMetadata } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import { Hll } from "./dashboard/hll";
 import type { ManifestFile } from "./dashboard/manifest";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
-import { fixtureSource } from "./dashboard/test-fixtures";
+import { withSummaryLayout } from "./dashboard/summary-layout-fixture";
+import { defineSummarySpec, summaryProjectionLimits, type SummarySpec } from "./dashboard/summary-projection";
+import { fixtureSource, projectingSource } from "./dashboard/test-fixtures";
 import { SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
 import { executeSecurityAggregates, type SecurityAggregatesResponse, type SecuritySectionName } from "./security";
 import {
   decodeSecuritySummary,
+  SECURITY_SUMMARY_SPEC,
+  SECURITY_TLS_SUMMARY_SPEC,
   type SecurityRollup,
   securityAggregatesFromRollup,
   securityFromRollup,
@@ -376,5 +381,94 @@ describe("securityFromRollup", () => {
     for (const path of ["/api/security/proxies", "/api/security/threat-intel", "/api/security/top-bots"]) {
       expect(securityRollupEligible(path, body())).toBe(false);
     }
+  });
+});
+
+describe("securityFromRollup on projected summaries", () => {
+  const LIMITS = { ...summaryProjectionLimits };
+  // The fixtures are a few KiB and mostly footer, which a projection would otherwise read whole.
+  beforeAll(() => Object.assign(summaryProjectionLimits, { wholeBelowBytes: 0, wholeAboveShare: Infinity }));
+  afterAll(() => Object.assign(summaryProjectionLimits, LIMITS));
+
+  const NO_TLS = SECTIONS.filter((section) => section !== "tls_fingerprints");
+  // One window's bins cut to their top K, so `dim_totals` is read.
+  const CUT = { ...SYNTH, [RUST_WINDOWS[0].key]: summaryParquet(WINDOW_ROWS[0], { binsCut: true }) };
+  type Listing = { listed: ManifestFile[]; buffers: Record<string, ArrayBuffer> };
+  const listing = async (list: ManifestFile[], layout: boolean, buffers = CUT): Promise<Listing> => {
+    const out = { ...buffers };
+    const listed = await Promise.all(list.map(async (file) => {
+      if (layout) out[file.key] = await withSummaryLayout(buffers[file.key]);
+      return { ...file, size: out[file.key].byteLength };
+    }));
+    return { listed, buffers: out };
+  };
+  const ANSWERS = [
+    { path: PATH, body: body() },
+    { path: PATH, body: body({ sections: NO_TLS }) },
+    { path: "/api/security/bundle", body: body({ sections: SECTIONS.filter((x) => x !== "ipv6_adoption"), bucket_seconds: 3600 }) },
+    { path: PATH, body: body({ sections: ["tls_fingerprints"] }) },
+  ];
+  const run = async ({ listed, buffers }: Listing, path: string, params: ReturnType<typeof body>, spec?: SummarySpec | null) => {
+    const source = projectingSource(fixtureSource([fixturePage(RUST_RAW)], buffers, { json: [], files: [] }, [fixturePage(listed)]), buffers);
+    // The column names of each stored projection; these files fit the footer probe, so ranges can't tell.
+    const projections: string[][] = [];
+    const write = source.writeDerivedFile;
+    source.writeDerivedFile = async (key, identity, bytes, meta) => {
+      const lengths = (JSON.parse(meta) as { parts?: number[] }).parts;
+      let offset = 0;
+      for (const length of lengths ?? []) {
+        projections.push(parquetMetadata(bytes.slice(offset, (offset += length))).schema.slice(1).map((f) => f.name));
+      }
+      return write(key, identity, bytes, meta);
+    };
+    const value = await securityFromRollup(path, params, source, undefined, spec);
+    return { value, files: source.log.files, projections };
+  };
+
+  it.each([false, true])("answers as from whole files, reading the IP sketches only for the TLS fingerprints (layout %s)", async (layout) => {
+    for (const list of [[...RUST_WINDOWS, ...RUST_DAY], RUST_HOURS]) {
+      const files = await listing(list, layout);
+      for (const { path, body: params } of ANSWERS) {
+        const whole = await run(files, path, params, null);
+        expect(whole.value, JSON.stringify(params.sections)).not.toBeNull();
+        const projected = await run(files, path, params);
+        expect(projected.value, JSON.stringify(params.sections)).toEqual(whole.value);
+        expect(projected.files).toEqual([]);
+        expect(projected.projections.length).toBeGreaterThan(0);
+        expect(projected.projections.some((columns) => columns.includes("ip_sketch")), JSON.stringify(params.sections))
+          .toBe(params.sections.includes("tls_fingerprints"));
+      }
+    }
+  });
+
+  it.each([
+    ["with", SECURITY_TLS_SUMMARY_SPEC, SECTIONS],
+    ["without", SECURITY_SUMMARY_SPEC, NO_TLS],
+  ] as const)("needs every group and column of its spec %s the TLS fingerprints", async (_name, spec, sections) => {
+    const files = await listing(RUST_WINDOWS, false);
+    const whole = await run(files, PATH, body({ sections }), null);
+    const only = Object.fromEntries([...spec.only].map(([column, of]) => [column, [...of]]));
+    const BASE = new Set(["bundle", "bucket", "field", "value", "truncated"]);
+    const reduced = [
+      ...[...spec.groups].map((group) => [`group ${group}`, defineSummarySpec({
+        groups: [...spec.groups].filter((g) => g !== group), columns: [...spec.columns], only,
+      })] as const),
+      ...[...spec.columns].filter((column) => !BASE.has(column)).map((column) => [`column ${column}`, defineSummarySpec({
+        groups: [...spec.groups],
+        columns: [...spec.columns].filter((c) => c !== column),
+        only: Object.fromEntries(Object.entries(only).filter(([c]) => c !== column)),
+      })] as const),
+    ];
+    const unchanged: string[] = [];
+    for (const [name, without] of reduced) {
+      const got = await run(files, PATH, body({ sections }), without).catch((error) => ({ value: String(error) }));
+      try {
+        expect(got.value).toEqual(whole.value);
+        unchanged.push(name);
+      } catch {
+        // Changed, as it must.
+      }
+    }
+    expect(unchanged).toEqual([]);
   });
 });

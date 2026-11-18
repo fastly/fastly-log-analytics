@@ -4,6 +4,13 @@ import { Hll } from "./dashboard/hll";
 import { fetchManifest, type ManifestFile } from "./dashboard/manifest";
 import { planRollup } from "./dashboard/rollup-query";
 import { SUMMARY_VERSION } from "./dashboard/summaries";
+import {
+  defineSummarySpec,
+  readSummaryColumns,
+  readSummaryProjection,
+  type SummaryProjectionSource,
+  type SummarySpec,
+} from "./dashboard/summary-projection";
 import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { hasFilterValues, SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
@@ -25,7 +32,7 @@ export type SecurityRollupBody = {
   sections?: readonly string[] | null;
 };
 
-type Source = Pick<FileSource, "fetchJson" | "fetchFile" | "cacheScope">;
+type Source = Pick<FileSource, "fetchJson"> & SummaryProjectionSource;
 
 const FIVE_MINUTES_MS = 300_000;
 const HOUR_MS = 3_600_000;
@@ -33,6 +40,19 @@ const TLS = "tls_ciphers_sha";
 /** The `all_fields` values the sections read; others are skipped while decoding. */
 const FIELDS = new Set([TLS, "conn_requests", "p_type", "is_ipv6"]);
 const IPV6_TRUE = new Set(["1", "true", "t", "yes"]);
+
+const GROUPS = ["overview", "time_series", "bins", "dim_totals", "field_totals", "all_fields"];
+/** The summary groups and columns /security reads without the TLS fingerprints. */
+export const SECURITY_SUMMARY_SPEC = defineSummarySpec({ groups: GROUPS, columns: ["count", "requests"] });
+/** And with them, whose IP counts merge the `all_fields_ip` sketches. */
+export const SECURITY_TLS_SUMMARY_SPEC = defineSummarySpec({
+  groups: [...GROUPS, "all_fields_ip"],
+  columns: ["count", "requests", "ip_sketch"],
+  only: { ip_sketch: ["all_fields_ip"] },
+});
+
+const securitySummarySpec = (sections: readonly string[] | null | undefined) =>
+  expandSecuritySections(sections).has("tls_fingerprints") ? SECURITY_TLS_SUMMARY_SPEC : SECURITY_SUMMARY_SPEC;
 
 /** The security rows of one v3 window summary or bundle. */
 type SecuritySummary = {
@@ -58,15 +78,25 @@ function bucketMs(value: unknown): number | null {
   return null;
 }
 
-/** Decodes the rows /security reads from a v3 summary, or null for another format version. */
-export async function decodeSecuritySummary(bytes: ArrayBuffer): Promise<SecuritySummary | null> {
-  const version = parquetMetadata(bytes).key_value_metadata?.find((kv) => kv.key === "flp_summary")?.value;
+/**
+ * Decodes the rows /security reads from a v3 summary (whole, or the parts of
+ * a projection; with `spec`, only its groups and columns), or null for another
+ * format version.
+ */
+export async function decodeSecuritySummary(
+  data: ArrayBuffer | readonly ArrayBuffer[],
+  spec?: SummarySpec,
+): Promise<SecuritySummary | null> {
+  const parts: readonly ArrayBuffer[] = Array.isArray(data) ? data : [data as ArrayBuffer];
+  const version = parquetMetadata(parts[0]).key_value_metadata?.find((kv) => kv.key === "flp_summary")?.value;
   if (version !== SUMMARY_VERSION) return null;
-  const { readColumns } = await import("./dashboard/parquet");
-  const { rows, columns } = await readColumns(bytes, [
+  const reads = (column: string) => !spec || spec.columns.has(column);
+  const { rows, columns } = await readSummaryColumns(parts, [
     "bundle", "bucket", "field", "value", "truncated", "count", "requests",
-  ]);
-  const sketches = (await readColumns(bytes, ["ip_sketch"], false)).columns.get("ip_sketch") ?? [];
+  ].filter(reads));
+  const sketches = reads("ip_sketch")
+    ? (await readSummaryColumns(parts, ["ip_sketch"], false)).columns.get("ip_sketch") ?? []
+    : [];
   const col = (name: string) => columns.get(name) ?? [];
   const [group, bucket, field, value, truncated, count, requests] =
     ["bundle", "bucket", "field", "value", "truncated", "count", "requests"].map(col);
@@ -74,6 +104,7 @@ export async function decodeSecuritySummary(bytes: ArrayBuffer): Promise<Securit
     requests: 0, minutes: [], bins: new Map(), binsCut: new Set(), fields: new Map(), totals: new Map(), sketches: new Map(),
   };
   for (let i = 0; i < rows; i++) {
+    if (spec && !spec.groups.has(group[i] as string)) continue;
     const name = String(field[i] ?? "");
     switch (group[i]) {
       case "overview":
@@ -133,15 +164,18 @@ export async function decodeSecuritySummary(bytes: ArrayBuffer): Promise<Securit
 const DECODED_LIMIT = 64;
 const decoded = new Map<string, Promise<SecuritySummary | null>>();
 
-function decodeCached(source: Source, file: ManifestFile): Promise<SecuritySummary | null> {
-  const key = `${source.cacheScope ?? "default"}|${file.key}`;
+/** `file` decoded for `spec`, or whole when null. */
+function decodeCached(source: Source, file: ManifestFile, spec: SummarySpec | null): Promise<SecuritySummary | null> {
+  const key = `${source.cacheScope ?? "default"}|${file.key}|${spec?.id ?? "whole"}`;
   const hit = decoded.get(key);
   if (hit) {
     decoded.delete(key);
     decoded.set(key, hit);
     return hit;
   }
-  const pending = source.fetchFile(file.key).then(({ bytes }) => decodeSecuritySummary(bytes));
+  const pending = spec
+    ? readSummaryProjection(source, file, spec).then(({ parts }) => decodeSecuritySummary(parts, spec))
+    : source.fetchFile(file.key).then(({ bytes }) => decodeSecuritySummary(bytes));
   pending.catch(() => decoded.delete(key));
   decoded.set(key, pending);
   while (decoded.size > DECODED_LIMIT) decoded.delete(decoded.keys().next().value!);
@@ -163,9 +197,9 @@ const isDayBundle = (key: string) => key.includes("/day_bundle=");
  */
 export async function querySecurityRollup(
   source: Source,
-  range: { fromMs: number; toMs: number; hourly: boolean; signal?: AbortSignal },
+  range: { fromMs: number; toMs: number; hourly: boolean; signal?: AbortSignal; spec?: SummarySpec | null },
 ): Promise<SecurityRollup | null> {
-  const { fromMs, toMs, hourly, signal } = range;
+  const { fromMs, toMs, hourly, signal, spec = SECURITY_TLS_SUMMARY_SPEC } = range;
   const from = new Date(fromMs).toISOString();
   const to = new Date(toMs).toISOString();
   const [raw, summaries] = await Promise.all([
@@ -176,7 +210,7 @@ export async function querySecurityRollup(
   const usable = hourly ? summaries.files.filter((file) => !isDayBundle(file.key)) : summaries.files;
   const plan = planRollup(raw.files, usable, fromMs, toMs);
   if (!plan) return null;
-  const parts = await Promise.all(plan.files.map((use) => decodeCached(source, use.file)));
+  const parts = await Promise.all(plan.files.map((use) => decodeCached(source, use.file, spec)));
   signal?.throwIfAborted();
   if (parts.some((part) => part === null)) return null;
   return {
@@ -409,19 +443,22 @@ export function securityRollupEligible(path: string, body: SecurityRollupBody): 
  * Answers an unfiltered Cloud /security aggregates read of the summary-backed
  * sections, or returns null when the raw scan must: a filter, a row-level
  * section (well-known bots, bot efficiency, header outliers, proxies), a range
- * the summaries don't cover, or a section they can't answer exactly.
+ * the summaries don't cover, or a section they can't answer exactly. Reads
+ * only the summary columns and groups the sections use (`spec`; null reads
+ * whole files).
  */
 export async function securityFromRollup(
   path: string,
   body: SecurityRollupBody,
   source: Source,
   signal?: AbortSignal,
+  spec: SummarySpec | null = securitySummarySpec(body.sections),
 ) {
   if (!securityRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const hourly = expandSecuritySections(body.sections).has("ipv6_adoption");
-  const rollup = await querySecurityRollup(source, { fromMs, toMs, hourly, signal });
+  const rollup = await querySecurityRollup(source, { fromMs, toMs, hourly, signal, spec });
   return rollup ? securityAggregatesFromRollup(rollup, body) : null;
 }
