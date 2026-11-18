@@ -10320,6 +10320,154 @@ mod summary_bundles {
         }
         panic!("the rotation never reached summary_bundle");
     }
+
+    fn assert_w6_layout(bytes: &[u8]) {
+        use arrow_array::StringArray;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use std::collections::BTreeSet;
+
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes.to_vec())).unwrap();
+        let meta = builder.metadata().clone();
+        let kv = meta
+            .file_metadata()
+            .key_value_metadata()
+            .expect("kv metadata");
+        let summary_ver = kv
+            .iter()
+            .find(|e| e.key == "flp_summary")
+            .and_then(|e| e.value.as_deref());
+        assert_eq!(summary_ver, Some("3"));
+
+        let layout_raw = kv
+            .iter()
+            .find(|e| e.key == "flp_summary_layout")
+            .and_then(|e| e.value.as_deref())
+            .expect("flp_summary_layout kv metadata");
+        let layout: Value = serde_json::from_str(layout_raw).expect("valid layout json");
+        assert_eq!(layout["v"], 1);
+        let rg_entries = layout["rg"].as_array().expect("rg array");
+        assert_eq!(
+            rg_entries.len(),
+            meta.num_row_groups(),
+            "layout entries must match row group count"
+        );
+        assert!(meta.num_row_groups() > 1, "expected multiple row groups");
+
+        let mut seen_groups = BTreeSet::new();
+        let mut total_rows = 0usize;
+        for (rg_idx, rg_entry) in rg_entries.iter().enumerate() {
+            let declared: BTreeSet<String> = rg_entry
+                .as_array()
+                .expect("entry array")
+                .iter()
+                .map(|v| v.as_str().expect("group string").to_owned())
+                .collect();
+            assert!(
+                !declared.is_empty(),
+                "row group {rg_idx} has empty layout entry"
+            );
+
+            let rg_meta = meta.row_group(rg_idx);
+            assert!(rg_meta.num_rows() > 0, "row group {rg_idx} is empty");
+            total_rows += rg_meta.num_rows() as usize;
+
+            for col in rg_meta.columns() {
+                let name = col.column_descr().name();
+                if matches!(name, "bundle" | "bucket" | "field") {
+                    assert!(
+                        col.statistics().is_some(),
+                        "row group {rg_idx} column {name} must keep statistics"
+                    );
+                } else {
+                    assert!(
+                        col.statistics().is_none(),
+                        "row group {rg_idx} column {name} must drop statistics"
+                    );
+                }
+            }
+
+            let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes.to_vec()))
+                .unwrap()
+                .with_row_groups(vec![rg_idx])
+                .build()
+                .unwrap();
+            let mut actual_groups = BTreeSet::new();
+            for batch in reader {
+                let batch = batch.unwrap();
+                let bundles = batch
+                    .column_by_name("bundle")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let values = batch
+                    .column_by_name("value")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                for row in 0..batch.num_rows() {
+                    let b = bundles.value(row);
+                    let g = if b == "dim_totals" {
+                        values.value(row)
+                    } else {
+                        b
+                    };
+                    actual_groups.insert(g.to_owned());
+                }
+            }
+            for g in &actual_groups {
+                assert!(
+                    declared.contains(g),
+                    "row group {rg_idx} contains undeclared group {g} (declared: {declared:?})"
+                );
+                assert!(
+                    seen_groups.insert(g.clone()),
+                    "group {g} appears in multiple row groups"
+                );
+            }
+        }
+        assert_eq!(
+            total_rows,
+            meta.file_metadata().num_rows() as usize,
+            "row group counts sum to file rows"
+        );
+    }
+
+    #[test]
+    fn hour_bundle_has_one_row_group_per_bundle_value() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        watermark(&fake, BASE + 3 * HOUR);
+        seed_hour(&fake, BASE, 11);
+        settle(&fake);
+        let key = one_of(&fake, "hour_bundle=");
+        let bytes = fake.bucket.borrow()[&key].clone();
+        assert_w6_layout(&bytes);
+    }
+
+    #[test]
+    fn layout_kv_matches_the_footer() {
+        let fake = Fake::new(BASE + 3 * HOUR);
+        watermark(&fake, BASE + 3 * HOUR);
+        seed_hour(&fake, BASE, 11);
+        settle(&fake);
+        let key = one_of(&fake, "hour_bundle=");
+        let bytes = fake.bucket.borrow()[&key].clone();
+        assert_w6_layout(&bytes);
+    }
+
+    #[test]
+    fn day_bundle_layout_survives_refold() {
+        let fake = Fake::new(BASE + 17 * HOUR);
+        watermark(&fake, BASE + 17 * HOUR);
+        seed_hour(&fake, BASE, 6);
+        seed_hour(&fake, BASE + HOUR, 2);
+        settle(&fake);
+        let day = one_of(&fake, "day_bundle=");
+        let bytes = fake.bucket.borrow()[&day].clone();
+        assert_w6_layout(&bytes);
+    }
 }
 
 /// Native decode cost per decompressed MB, for comparing converter changes (wasm differs).

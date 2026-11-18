@@ -13,7 +13,7 @@ use parquet::{
     basic::{Compression, Encoding, ZstdLevel},
     file::{
         metadata::{KeyValue, SortingColumn},
-        properties::WriterProperties,
+        properties::{EnabledStatistics, WriterProperties},
     },
     schema::types::ColumnPath,
 };
@@ -1065,6 +1065,7 @@ pub(crate) fn write_sorted(
         &sorted.iter().collect::<Vec<_>>(),
         metadata,
         Some(sorting),
+        false,
     )
 }
 
@@ -1263,7 +1264,16 @@ pub(crate) fn write_with_metadata(
     batches: &[&RecordBatch],
     metadata: Vec<KeyValue>,
 ) -> Result<Vec<u8>, String> {
-    write_with(schema, batches, metadata, None)
+    write_with(schema, batches, metadata, None, false)
+}
+
+/// Summary bundle output: one row group per batch, lean stats on `bundle`, `bucket` and `field`.
+pub(crate) fn write_summary_batches(
+    schema: SchemaRef,
+    batches: &[&RecordBatch],
+    metadata: Vec<KeyValue>,
+) -> Result<Vec<u8>, String> {
+    write_with(schema, batches, metadata, None, true)
 }
 
 fn write_with(
@@ -1271,6 +1281,7 @@ fn write_with(
     batches: &[&RecordBatch],
     metadata: Vec<KeyValue>,
     sorting: Option<Vec<SortingColumn>>,
+    lean_summary_stats: bool,
 ) -> Result<Vec<u8>, String> {
     let level = ZstdLevel::try_new(1).map_err(|_| "parquet_zstd_level")?;
     let mut builder = WriterProperties::builder()
@@ -1279,6 +1290,13 @@ fn write_with(
         .set_statistics_truncate_length(Some(64))
         .set_key_value_metadata(Some(metadata))
         .set_sorting_columns(sorting);
+    if lean_summary_stats {
+        builder = builder.set_statistics_enabled(EnabledStatistics::None);
+        for name in ["bundle", "bucket", "field"] {
+            builder = builder
+                .set_column_statistics_enabled(ColumnPath::from(name), EnabledStatistics::Chunk);
+        }
+    }
     for field in schema.fields() {
         let name = field.name().as_str();
         let path = ColumnPath::from(name);
@@ -1303,7 +1321,13 @@ fn write_with(
     let mut writer =
         ArrowWriter::try_new(Vec::new(), schema, Some(properties)).map_err(|_| "parquet_writer")?;
     for batch in batches {
+        if lean_summary_stats && batch.num_rows() == 0 {
+            continue;
+        }
         writer.write(batch).map_err(|_| "parquet_write")?;
+        if lean_summary_stats {
+            writer.flush().map_err(|_| "parquet_flush")?;
+        }
     }
     writer.into_inner().map_err(|_| "parquet_finish".into())
 }

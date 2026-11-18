@@ -1652,6 +1652,20 @@ impl Acc {
         let fin = unit.is_some();
         let top_k = unit.map(Unit::top_k);
         let mut out = Out::new();
+        let mut groups_out: Vec<arrow_array::RecordBatch> = Vec::new();
+        let mut layout_rg: Vec<&'static [&'static str]> = Vec::new();
+        let flush_group = |out: &mut Out,
+                           groups: &'static [&'static str],
+                           groups_out: &mut Vec<arrow_array::RecordBatch>,
+                           layout_rg: &mut Vec<&'static [&'static str]>|
+         -> Result<(), String> {
+            if !out.is_empty() {
+                let batch = std::mem::replace(out, Out::new()).finish()?;
+                groups_out.push(batch);
+                layout_rg.push(groups);
+            }
+            Ok(())
+        };
         let row = |out: &mut Out, head: &[(C, V<'_>)], cols: &[(C, Op)], cells: &[Cell]| {
             let blobs: Vec<Option<Vec<u8>>> = cells
                 .iter()
@@ -1710,6 +1724,12 @@ impl Acc {
                 cells,
             );
         }
+        flush_group(
+            &mut out,
+            &["overview", "time_series"],
+            &mut groups_out,
+            &mut layout_rg,
+        )?;
         let ordered = |names: Vec<&String>, known: &[&str]| -> Vec<String> {
             let mut out: Vec<String> = known
                 .iter()
@@ -1773,6 +1793,12 @@ impl Acc {
                 ]);
             }
         }
+        flush_group(
+            &mut out,
+            &["field_totals", "all_fields", "all_fields_ip"],
+            &mut groups_out,
+            &mut layout_rg,
+        )?;
         let mut sessions: Vec<(&SessionKey, &Vec<Cell>)> = self.sessions.iter().collect();
         sessions.sort_unstable_by(|a, b| {
             int(&b.1[SESSION_REQS])
@@ -1793,6 +1819,7 @@ impl Acc {
                 cells,
             );
         }
+        flush_group(&mut out, &["sessions"], &mut groups_out, &mut layout_rg)?;
         for (group, fields) in GROUPS.iter().zip(&self.groups) {
             for field in ordered(fields.keys().collect(), group.fields) {
                 let acc = &fields[&field];
@@ -1827,6 +1854,18 @@ impl Acc {
                     }
                 }
             }
+            match group.name {
+                "dims" => flush_group(&mut out, &["dims"], &mut groups_out, &mut layout_rg)?,
+                "series5" => flush_group(&mut out, &["series5"], &mut groups_out, &mut layout_rg)?,
+                "origin" => flush_group(
+                    &mut out,
+                    &["bins", "assets", "transport", "origin"],
+                    &mut groups_out,
+                    &mut layout_rg,
+                )?,
+                "urls" => flush_group(&mut out, &["urls"], &mut groups_out, &mut layout_rg)?,
+                _ => {}
+            }
         }
         let mut sample: Vec<&SampleRow> = self.sample.iter().collect();
         sample.sort_by_key(|r| (r.0, r.1));
@@ -1842,10 +1881,25 @@ impl Acc {
                 cells,
             );
         }
-        let batch = out.finish()?;
-        super::convert::write_with_metadata(
+        flush_group(
+            &mut out,
+            &[
+                "quality",
+                "header_ip",
+                "bot_ua",
+                "tls_fp",
+                "value",
+                "proxy",
+                "sample",
+            ],
+            &mut groups_out,
+            &mut layout_rg,
+        )?;
+        let batch_refs: Vec<&arrow_array::RecordBatch> = groups_out.iter().collect();
+        let layout_json = serde_json::json!({ "v": 1, "rg": layout_rg }).to_string();
+        super::convert::write_summary_batches(
             summary::schema(),
-            &[&batch],
+            &batch_refs,
             vec![
                 KeyValue::new(
                     "flp_summary".into(),
@@ -1863,6 +1917,7 @@ impl Acc {
                         format!("{label}_partial")
                     },
                 ),
+                KeyValue::new("flp_summary_layout".into(), layout_json),
             ],
         )
     }

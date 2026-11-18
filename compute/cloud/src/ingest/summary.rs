@@ -401,6 +401,10 @@ impl Out {
         self.rows += 1;
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
     pub(super) fn finish(mut self) -> Result<RecordBatch, String> {
         for (col, len) in self.cols.iter_mut().zip(self.lens) {
             col.append_nulls(self.rows - len);

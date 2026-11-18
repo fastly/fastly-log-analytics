@@ -135,6 +135,12 @@ fn time<T>(mut f: impl FnMut() -> T) -> (T, Duration) {
     (out.expect("ran"), best)
 }
 
+fn footer_len(bytes: &[u8]) -> usize {
+    assert!(bytes.len() >= 8 && &bytes[bytes.len() - 4..] == b"PAR1");
+    let len = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
+    len as usize + 8
+}
+
 #[test]
 #[ignore = "measurement; run with --release --ignored --nocapture"]
 fn summary_window_and_bundle_cost() {
@@ -160,21 +166,29 @@ fn summary_window_and_bundle_cost() {
     let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
     let window_bytes: usize = windows.iter().map(Vec::len).sum();
     let (hour, merge) = time(|| bundle::merge(&refs, BASE, Unit::Hour).unwrap());
+    let hour_footer = footer_len(&hour);
     let hours: Vec<Vec<u8>> = (0..24).map(|_| hour.clone()).collect();
     let hour_refs: Vec<&[u8]> = hours.iter().map(Vec::as_slice).collect();
     let (day, day_merge) = time(|| bundle::merge(&hour_refs, BASE, Unit::Day).unwrap());
     println!(
         "summary {}: window write {:.1} ms avg ({} rows), window {} B avg; \
-         hour merge of {SOURCES} {:.1} ms -> {} B; day merge of 24 hours {:.1} ms -> {} B",
+         hour merge of {SOURCES} {:.1} ms -> {} B (footer {} B); day merge of 24 hours {:.1} ms -> {} B",
         summary::SUMMARY_VERSION,
         write.as_secs_f64() * 1000.0 / SOURCES as f64,
         per_window,
         window_bytes / SOURCES,
         merge.as_secs_f64() * 1000.0,
         hour.len(),
+        hour_footer,
         day_merge.as_secs_f64() * 1000.0,
         day.len(),
     );
+    if per_window <= 800 {
+        assert!(
+            hour_footer <= 60 * 1024,
+            "hour footer {hour_footer} B > 60 KiB"
+        );
+    }
     // The stage checks VCPU_STOP_MS (700 ms of Wasm vCPU) between sources. A full batch of
     // windows should fit one execution with room for Wasm's slowdown and the write, and one hour
     // bundle fold must fit the 300 ms left under Compute's 1,000 ms limit; a day whose 24 hours
