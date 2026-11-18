@@ -1281,6 +1281,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/header-badge": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Header Badge
+     * @description Latest log time and row totals for the header, for every signed-in role. The analyst-safe slice of /api/sync-status, without cron or audit history.
+     */
+    get: operations["get__api_header_badge"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/cron-runs": {
     parameters: {
       query?: never;
@@ -1699,10 +1719,87 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/views/{service_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Saved filter views of the active service, shared by every signed-in user */
+    get: operations["get__api_views_service_id"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/views/": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Create a saved view, or replace the one whose id the body names */
+    post: operations["post__api_views"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/views/{view_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** Delete a saved view of the active service */
+    delete: operations["delete__api_views_view_id"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    SavedView: {
+      id?: string | null;
+      service_id: string;
+      name: string;
+      filters_json: string;
+      time_range_type?: string | null;
+      start_time?: string | null;
+      end_time?: string | null;
+      page?: string | null;
+      created_at?: string | null;
+    };
+    SavedViewRecord: {
+      id: string;
+      service_id: string;
+      name: string;
+      filters_json: string;
+      time_range_type?: string | null;
+      start_time?: string | null;
+      end_time?: string | null;
+      page?: string | null;
+      created_at?: string | null;
+    };
+    ViewSaveResponse: {
+      id: string;
+      status: string;
+    };
     ProcessedFile: {
       key: string;
       start: string;
@@ -1916,7 +2013,7 @@ export interface components {
        * @default managed
        * @enum {string}
        */
-      capture?: "managed" | "attached";
+      capture: "managed" | "attached";
       cmcd?: components["schemas"]["CmcdConfig"];
       rum?: components["schemas"]["RumConfig"];
       service_name?: string;
@@ -1960,6 +2057,8 @@ export interface components {
       updated_at?: number;
       config_version?: number;
       log_fields: components["schemas"]["CaptureFields"];
+      /** @description Listing only: resolved catalog field ids in id order, then enabled custom field names. Virtual fields are never listed. */
+      active_log_field_ids?: string[];
       logging_enabled: boolean;
       logging_endpoint_name: string;
       log_period: number;
@@ -2557,6 +2656,15 @@ export interface components {
       action: string;
       target: string;
       details: string;
+    };
+    HeaderBadgeResponse: {
+      configured: boolean;
+      request: {
+        [key: string]: unknown;
+      } | null;
+      rum: {
+        [key: string]: unknown;
+      } | null;
     };
     CronRunsResponse: {
       configured: boolean;
@@ -3578,6 +3686,35 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MutationResult"];
+        };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  get__api_header_badge: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Success */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HeaderBadgeResponse"];
         };
       };
       /** @description Request rejected */
@@ -4663,6 +4800,103 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["RunningVersions"];
         };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  get__api_views_service_id: {
+    parameters: {
+      query?: {
+        limit?: number;
+      };
+      header?: never;
+      path: {
+        service_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Saved views */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SavedViewRecord"][];
+        };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  post__api_views: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SavedView"];
+      };
+    };
+    responses: {
+      /** @description Created */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViewSaveResponse"];
+        };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  delete__api_views_view_id: {
+    parameters: {
+      query?: {
+        service_id?: string;
+      };
+      header?: never;
+      path: {
+        view_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Deleted */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Request rejected */
       default: {
