@@ -71,9 +71,9 @@ def _fetch_io_stats(
     end_time: str | None,
     timer: SectionTimer,
 ) -> dict[str, Any] | None:
-    """Fetch Image Optimizer metrics from the Fastly Historical Stats API."""
+    """Fetch Image Optimizer metrics from Fastly Platform Metrics."""
     from backend.config import get_fastly_api_key, get_fastly_logging_service_id
-    from backend.core.fastly.client import fastly
+    from backend.core.fastly.client import fastly_platform_metrics
     from backend.utils.date_utils import parse_iso_utc
 
     cdn_svc = get_fastly_logging_service_id(service_id)
@@ -87,21 +87,36 @@ def _fetch_io_stats(
 
     start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     end_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    path = f"/stats/service/{cdn_svc}?by=day&from={int(start_dt.timestamp())}&to={int(end_dt.timestamp())}"
+    from_s, to_s = int(start_dt.timestamp()), int(end_dt.timestamp())
+    metrics = (
+        "requests",
+        _IO_TRANSFORM_FIELD,
+        _IO_RESP_BYTES_FIELD,
+        _IO_SHIELD_BYTES_FIELD,
+        *_IO_FORMAT_FIELDS.values(),
+    )
+    cache_key = (cdn_svc, "day", from_s, to_s, metrics)
 
-    cached = _IO_STATS_CACHE.get(path)
+    cached = _IO_STATS_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     _t = time.perf_counter()
     try:
-        payload = fastly("GET", path, token=api_key)
+        payload = fastly_platform_metrics(
+            entity_id=cdn_svc,
+            granularity="day",
+            from_epoch=from_s,
+            to_epoch=to_s,
+            metrics=metrics,
+            token=api_key,
+        )
     except Exception:
         logger.debug("IO stats fetch failed for %s", cdn_svc, exc_info=True)
         return None
     timer.mark("io_stats_fetch", _t)
 
-    _IO_STATS_CACHE[path] = payload
+    _IO_STATS_CACHE[cache_key] = payload
     return payload
 
 
@@ -147,7 +162,7 @@ def fetch_fastly_reported(
     now: datetime | None = None,
     coverage_end: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Fastly Historical Stats totals for the whole closed UTC hours of the range, or None when unavailable."""
+    """Fastly Platform Metrics totals for the whole closed UTC hours of the range, or None when unavailable."""
     from backend import config
     from backend.core.fastly import client
     from backend.utils.date_utils import parse_iso_utc
@@ -174,15 +189,34 @@ def fetch_fastly_reported(
     edge_only = bool(prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False))
     sample_rate = min(100, max(1, int(100 if sample_raw is None else sample_raw)))
 
-    path = f"/stats/service/{cdn_svc}?by=hour&from={from_s}&to={to_s}"
-    payload = _FASTLY_REPORTED_CACHE.get(path)
+    metrics = (
+        "requests",
+        "resp_body_bytes",
+        "resp_header_bytes",
+        "hits",
+        "edge_requests",
+        "edge_resp_body_bytes",
+        "edge_resp_header_bytes",
+        "edge_hit_requests",
+    )
+    cache_key = (cdn_svc, "hour", from_s, to_s, metrics)
+    payload = _FASTLY_REPORTED_CACHE.get(cache_key)
     if payload is None:
         try:
-            payload = client.fastly("GET", path, token=api_key, timeout=8, max_retries=1)
+            payload = client.fastly_platform_metrics(
+                entity_id=cdn_svc,
+                granularity="hour",
+                from_epoch=from_s,
+                to_epoch=to_s,
+                metrics=metrics,
+                token=api_key,
+                timeout=8,
+                max_retries=1,
+            )
         except Exception:
             logger.debug("Fastly-reported stats fetch failed for %s", cdn_svc, exc_info=True)
             return None
-        _FASTLY_REPORTED_CACHE[path] = payload
+        _FASTLY_REPORTED_CACHE[cache_key] = payload
     records = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(records, list):
         return None

@@ -21,6 +21,93 @@ const SECRET_BUNDLE_KEY: &str = "flp_bundle";
 const CONFIG_BUNDLE_KEY: &str = "flp_config_bundle";
 const MAX_RAW_SECRET_READS: u32 = 24;
 
+fn platform_metrics_time(timestamp: u64) -> Result<String, String> {
+    let timestamp = i64::try_from(timestamp).map_err(|_| "platform_metrics_time_invalid")?;
+    time::OffsetDateTime::from_unix_timestamp(timestamp)
+        .map_err(|_| "platform_metrics_time_invalid")?
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| "platform_metrics_time_invalid".into())
+}
+
+fn fetch_platform_metrics(
+    service_id: &str,
+    from: u64,
+    to: u64,
+    metrics: &[&str],
+    mut fetch: impl FnMut(&str, &str) -> Result<crate::admin::ApiResponse, String>,
+) -> Result<Value, String> {
+    if metrics.is_empty() {
+        return Err("platform_metrics_fields_empty".into());
+    }
+    let path = format!(
+        "/metrics/v2/platform/entities/{}/hourly",
+        crate::admin::transport::encode(service_id)
+    );
+    let base_query = format!(
+        "from={}&to={}&metric={}&limit=10000",
+        platform_metrics_time(from)?,
+        platform_metrics_time(to)?,
+        metrics.join(",")
+    );
+    let mut cursor = None::<String>;
+    let mut cursors = BTreeSet::new();
+    let mut timestamps = BTreeSet::new();
+    let mut rows = Vec::new();
+    let first_hour = from - from % 3_600;
+    let last_hour = (to - 1) - (to - 1) % 3_600;
+    loop {
+        let query = cursor.as_ref().map_or_else(
+            || base_query.clone(),
+            |next| {
+                format!(
+                    "{base_query}&cursor={}",
+                    crate::admin::transport::encode(next)
+                )
+            },
+        );
+        let response = fetch(&path, &query)?;
+        if response.status != 200 {
+            return Err(format!("platform_metrics_status_{}", response.status));
+        }
+        let page = response.body["data"]
+            .as_array()
+            .ok_or("platform_metrics_shape")?;
+        for row in page {
+            let timestamp = row["timestamp"]
+                .as_str()
+                .ok_or("platform_metrics_timestamp_invalid")?;
+            let parsed = time::OffsetDateTime::parse(
+                timestamp,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .map_err(|_| "platform_metrics_timestamp_invalid")?;
+            let start = u64::try_from(parsed.unix_timestamp())
+                .map_err(|_| "platform_metrics_timestamp_invalid")?;
+            if start % 3_600 != 0 || start < first_hour || start > last_hour {
+                return Err("platform_metrics_timestamp_out_of_window".into());
+            }
+            if !timestamps.insert(start) {
+                return Err("platform_metrics_duplicate_timestamp".into());
+            }
+            rows.push(row.clone());
+        }
+        cursor = match response.body.get("next_cursor") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(next)) if !next.is_empty() && cursors.insert(next.clone()) => {
+                Some(next.clone())
+            }
+            Some(Value::String(_)) => {
+                return Err("platform_metrics_pagination_loop".into());
+            }
+            Some(_) => return Err("platform_metrics_pagination_invalid".into()),
+        };
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(json!({"data": rows}))
+}
+
 pub struct FastlyRuntime {
     config: Option<ConfigStore>,
     secrets: SecretStore,
@@ -1307,47 +1394,50 @@ impl Runtime for FastlyRuntime {
     }
     fn compute_billing(&self, from: u64, to: u64) -> Result<Value, String> {
         let token = self.secret("fastly_token")?.ok_or("missing_api_token")?;
-        let query = format!("from={from}&to={to}&by=hour");
         let mut services = Vec::new();
         for (role, key) in [("app", "flp_service_id"), ("worker", "worker_service_id")] {
             let id = self.required(key)?;
             let mut service = json!({"role": role, "service_id": id});
+            let body = fetch_platform_metrics(
+                &id,
+                from,
+                to,
+                &crate::telemetry::usage::BILLING_FIELDS,
+                |path, query| {
+                    self.admin_api(crate::admin::ApiRequest {
+                        method: "GET",
+                        path,
+                        query,
+                        token: &token,
+                        body: None,
+                        timeout: FASTLY_API_TIMEOUT,
+                    })
+                },
+            )?;
             for field in crate::telemetry::usage::BILLING_FIELDS {
-                let response = self.admin_api(crate::admin::ApiRequest {
-                    method: "GET",
-                    path: &format!(
-                        "/stats/service/{}/field/{field}",
-                        crate::admin::transport::encode(&id)
-                    ),
-                    query: &query,
-                    token: &token,
-                    body: None,
-                    timeout: FASTLY_API_TIMEOUT,
-                })?;
-                if response.status != 200 {
-                    return Err(format!("stats_api_status_{}", response.status));
-                }
-                crate::telemetry::usage::record_billing_field(&mut service, field, &response.body)?;
+                crate::telemetry::usage::record_billing_field(&mut service, field, &body)?;
             }
             services.push(service);
         }
         if let Some(front_id) = self.config("front_service_id")?.filter(|s| !s.is_empty()) {
-            let response = self.admin_api(crate::admin::ApiRequest {
-                method: "GET",
-                path: &format!(
-                    "/stats/service/{}/field/bandwidth",
-                    crate::admin::transport::encode(&front_id)
-                ),
-                query: &query,
-                token: &token,
-                body: None,
-                timeout: FASTLY_API_TIMEOUT,
+            let fields = [
+                "bandwidth",
+                "requests",
+                "kv_store_class_a_operations",
+                "kv_store_class_b_operations",
+            ];
+            let body = fetch_platform_metrics(&front_id, from, to, &fields, |path, query| {
+                self.admin_api(crate::admin::ApiRequest {
+                    method: "GET",
+                    path,
+                    query,
+                    token: &token,
+                    body: None,
+                    timeout: FASTLY_API_TIMEOUT,
+                })
             })?;
-            if response.status != 200 {
-                return Err(format!("stats_api_status_{}", response.status));
-            }
             let (total, first, last, buckets) =
-                crate::telemetry::usage::stats_field_buckets(&response.body, "bandwidth")?;
+                crate::telemetry::usage::stats_field_buckets(&body, "bandwidth")?;
             let mut service = json!({
                 "role": "front",
                 "service_id": front_id,
@@ -1357,26 +1447,12 @@ impl Runtime for FastlyRuntime {
                 "covered_to": last.map(|start| start + 3600),
             });
             for field in crate::telemetry::usage::FRONT_BILLING_FIELDS {
-                let response = self.admin_api(crate::admin::ApiRequest {
-                    method: "GET",
-                    path: &format!(
-                        "/stats/service/{}/field/{field}",
-                        crate::admin::transport::encode(&front_id)
-                    ),
-                    query: &query,
-                    token: &token,
-                    body: None,
-                    timeout: FASTLY_API_TIMEOUT,
-                })?;
-                if response.status != 200 {
-                    return Err(format!("stats_api_status_{}", response.status));
-                }
                 if matches!(
                     field,
                     "kv_store_class_a_operations" | "kv_store_class_b_operations"
                 ) {
                     let (total, _, _, buckets) =
-                        crate::telemetry::usage::stats_field_buckets(&response.body, field)?;
+                        crate::telemetry::usage::stats_field_buckets(&body, field)?;
                     let bucket_key = if field == "kv_store_class_a_operations" {
                         "kv_class_a_buckets"
                     } else {
@@ -1385,10 +1461,9 @@ impl Runtime for FastlyRuntime {
                     service[field] = total.into();
                     service[bucket_key] = buckets.into();
                 } else {
-                    service[field] =
-                        crate::telemetry::usage::sum_stats_field(&response.body, field)?
-                            .0
-                            .into();
+                    service[field] = crate::telemetry::usage::sum_stats_field(&body, field)?
+                        .0
+                        .into();
                 }
             }
             services.push(service);
@@ -1402,25 +1477,25 @@ impl Runtime for FastlyRuntime {
     }
     fn logged_traffic(&self, service_id: &str, from: u64, to: u64) -> Result<Value, String> {
         let token = self.secret("fastly_token")?.ok_or("missing_api_token")?;
-        let query = format!("from={from}&to={to}&by=hour");
         let mut days = std::collections::BTreeMap::<u64, serde_json::Map<String, Value>>::new();
+        let body = fetch_platform_metrics(
+            service_id,
+            from,
+            to,
+            &crate::telemetry::usage::TRAFFIC_FIELDS,
+            |path, query| {
+                self.admin_api(crate::admin::ApiRequest {
+                    method: "GET",
+                    path,
+                    query,
+                    token: &token,
+                    body: None,
+                    timeout: FASTLY_API_TIMEOUT,
+                })
+            },
+        )?;
         for field in crate::telemetry::usage::TRAFFIC_FIELDS {
-            let response = self.admin_api(crate::admin::ApiRequest {
-                method: "GET",
-                path: &format!(
-                    "/stats/service/{}/field/{field}",
-                    crate::admin::transport::encode(service_id)
-                ),
-                query: &query,
-                token: &token,
-                body: None,
-                timeout: FASTLY_API_TIMEOUT,
-            })?;
-            if response.status != 200 {
-                return Err(format!("stats_api_status_{}", response.status));
-            }
-            let (_, _, _, buckets) =
-                crate::telemetry::usage::stats_field_buckets(&response.body, field)?;
+            let (_, _, _, buckets) = crate::telemetry::usage::stats_field_buckets(&body, field)?;
             for (day, total) in crate::telemetry::usage::daily_totals(&buckets, field) {
                 let entry = days.entry(day).or_default();
                 entry.insert("day".into(), day.into());
@@ -1440,25 +1515,19 @@ impl Runtime for FastlyRuntime {
         fields: &[&str],
     ) -> Result<Value, String> {
         let token = self.secret("fastly_token")?.ok_or("missing_api_token")?;
-        let query = format!("from={from}&to={to}&by=hour");
         let mut hours = std::collections::BTreeMap::<u64, serde_json::Map<String, Value>>::new();
-        for field in fields {
-            let response = self.admin_api(crate::admin::ApiRequest {
+        let body = fetch_platform_metrics(service_id, from, to, fields, |path, query| {
+            self.admin_api(crate::admin::ApiRequest {
                 method: "GET",
-                path: &format!(
-                    "/stats/service/{}/field/{field}",
-                    crate::admin::transport::encode(service_id)
-                ),
-                query: &query,
+                path,
+                query,
                 token: &token,
                 body: None,
                 timeout: FASTLY_API_TIMEOUT,
-            })?;
-            if response.status != 200 {
-                return Err(format!("stats_api_status_{}", response.status));
-            }
-            let (_, _, _, buckets) =
-                crate::telemetry::usage::stats_field_buckets(&response.body, field)?;
+            })
+        })?;
+        for field in fields {
+            let (_, _, _, buckets) = crate::telemetry::usage::stats_field_buckets(&body, field)?;
             for bucket in buckets {
                 if let Some(start) = bucket["start_time"].as_u64() {
                     let entry = hours.entry(start).or_default();
@@ -2408,4 +2477,96 @@ pub fn worker(request: &crate::http::Request, runtime: &FastlyRuntime) -> crate:
     crate::http::Response::new(200, data.to_string())
         .header("content-type", "application/json")
         .private()
+}
+
+#[cfg(test)]
+mod platform_metrics_tests {
+    use super::fetch_platform_metrics;
+    use serde_json::json;
+    use std::cell::RefCell;
+
+    fn response(body: serde_json::Value) -> crate::admin::ApiResponse {
+        crate::admin::ApiResponse {
+            status: 200,
+            body,
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn batches_metrics_and_follows_top_level_pagination() {
+        let calls = RefCell::new(Vec::new());
+        let mut page = 0;
+        let body = fetch_platform_metrics(
+            "service/id",
+            0,
+            3_600,
+            &["requests", "bandwidth"],
+            |path, query| {
+                calls.borrow_mut().push((path.to_owned(), query.to_owned()));
+                page += 1;
+                if page == 1 {
+                    Ok(response(json!({
+                        "data": [{"timestamp": "1970-01-01T00:00:00Z", "requests": 2}],
+                        "next_cursor": "page/2",
+                    })))
+                } else {
+                    Ok(response(json!({
+                        "data": [{"timestamp": "1970-01-01T01:00:00Z", "bandwidth": 4}],
+                        "next_cursor": null,
+                    })))
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            calls.into_inner(),
+            [
+                (
+                    "/metrics/v2/platform/entities/service%2Fid/hourly".to_owned(),
+                    "from=1970-01-01T00:00:00Z&to=1970-01-01T01:00:00Z&metric=requests,bandwidth&limit=10000".to_owned(),
+                ),
+                (
+                    "/metrics/v2/platform/entities/service%2Fid/hourly".to_owned(),
+                    "from=1970-01-01T00:00:00Z&to=1970-01-01T01:00:00Z&metric=requests,bandwidth&limit=10000&cursor=page%2F2".to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_non_string_pagination_cursors() {
+        let result = fetch_platform_metrics("svc", 0, 3_600, &["requests"], |_, _| {
+            Ok(response(json!({"data": [], "next_cursor": 7})))
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_window_and_duplicate_timestamps() {
+        for data in [
+            json!([{"timestamp": "1970-01-01T01:00:00Z", "requests": 1}]),
+            json!([
+                {"timestamp": "1970-01-01T00:00:00Z", "requests": 1},
+                {"timestamp": "1970-01-01T00:00:00+00:00", "requests": 2},
+            ]),
+        ] {
+            let result = fetch_platform_metrics("svc", 30, 3_600, &["requests"], |_, _| {
+                Ok(response(json!({"data": data})))
+            });
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_repeated_pagination_cursors() {
+        let result = fetch_platform_metrics("svc", 0, 3_600, &["requests"], |_, _| {
+            Ok(response(json!({"data": [], "next_cursor": "same"})))
+        });
+
+        assert_eq!(result.unwrap_err(), "platform_metrics_pagination_loop");
+    }
 }

@@ -252,28 +252,33 @@ def test_reconcile_fastly_stats_guards_and_fetch():
     }
     fetched: list = []
 
-    def _fake_fastly(method, path, body=None, *, token, **_kw):
-        fetched.append((method, path, token))
+    def _fake_platform_metrics(**kw):
+        fetched.append(kw)
         return payload
 
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=True),
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("backend.core.metadata.get_latest_reconciliation_ts", return_value=None),
-        patch("backend.core.fastly.client.fastly", side_effect=_fake_fastly),
+        patch("backend.core.fastly.client.fastly_platform_metrics", side_effect=_fake_platform_metrics),
         patch("backend.core.metadata.reconcile_fastly_stats", return_value=2) as mock_recon,
     ):
         assert reconcile_fastly_stats({"name": "svc", "logging_service_id": "lsi"}, hours_back=2) == 2
 
-    assert len(fetched) == 1 and fetched[0][0] == "GET" and fetched[0][2] == "tok"
-    assert fetched[0][1].startswith("/stats/aggregate?by=hour&from=")
+    assert len(fetched) == 1
+    assert fetched[0]["entity_id"] is None and fetched[0]["granularity"] == "hour"
+    assert fetched[0]["token"] == "tok"
+    assert fetched[0]["metrics"] == (
+        "object_storage_class_a_operations_count",
+        "object_storage_class_b_operations_count",
+    )
     assert [(h["class_a"], h["class_b"]) for h in mock_recon.call_args.args[1]] == [(7, 3), (2, 1)]
 
     with (
         patch("backend.config.is_usage_logging_enabled", return_value=True),
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("backend.core.metadata.get_latest_reconciliation_ts", return_value=None),
-        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 500")),
+        patch("backend.core.fastly.client.fastly_platform_metrics", side_effect=RuntimeError("HTTP 500")),
     ):
         assert reconcile_fastly_stats({"name": "svc", "logging_service_id": "lsi"}) == 0
 

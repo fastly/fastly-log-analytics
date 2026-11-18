@@ -60,17 +60,17 @@ def test_no_reported_hours_in_window_is_none() -> None:
 
 @pytest.fixture
 def stats_env(monkeypatch):
-    calls: list[tuple[str, dict]] = []
+    calls: list[dict] = []
     payload: dict = {"status": "success", "data": [_rec(H10, **ALL_NODES), _rec(H11, **ALL_NODES)]}
 
-    def fake_fastly(method, path, body=None, **kw):
-        calls.append((path, kw))
+    def fake_platform_metrics(**kw):
+        calls.append(kw)
         if isinstance(payload.get("raise"), Exception):
             raise payload["raise"]
         return payload
 
     cfg = {"service_id": "logsvc", "fastly_api_key": "tok", "provisioning": {"sample_rate": 50, "edge_only": False}}
-    monkeypatch.setattr("backend.core.fastly.client.fastly", fake_fastly)
+    monkeypatch.setattr("backend.core.fastly.client.fastly_platform_metrics", fake_platform_metrics)
     monkeypatch.setattr("backend.config.load_config", lambda sid: cfg)
     monkeypatch.setattr("backend.config.get_fastly_api_key", lambda sid=None: cfg.get("fastly_api_key", ""))
     monkeypatch.setattr("backend.config.get_fastly_logging_service_id", lambda sid=None: cfg.get("service_id", ""))
@@ -86,8 +86,11 @@ def test_fetch_asks_for_whole_closed_hours_once_and_caches(stats_env) -> None:
     out = fetch_fastly_reported(*args, now=now)
     assert out is not None and (out["requests"], out["sample_rate"]) == (2000, 50)
     assert len(calls) == 1
-    path, kw = calls[0]
-    assert path == f"/stats/service/logsvc?by=hour&from={H10}&to={H12}"
+    kw = calls[0]
+    assert kw["entity_id"] == "logsvc"
+    assert kw["granularity"] == "hour"
+    assert (kw["from_epoch"], kw["to_epoch"]) == (H10, H12)
+    assert set(kw["metrics"]) == set(ALL_NODES)
     assert kw["token"] == "tok" and kw["timeout"] <= 10 and kw["max_retries"] <= 1
     assert fetch_fastly_reported(*args, now=now) == out
     assert len(calls) == 1
@@ -100,7 +103,7 @@ def test_fetch_clips_to_log_coverage(stats_env) -> None:
     out = fetch_fastly_reported(
         "svc", "2026-07-23T10:00:00Z", "2026-07-23T13:20:00Z", now=now, coverage_end=coverage_end
     )
-    assert calls[0][0].endswith(f"from={H10}&to={H11}")
+    assert (calls[0]["from_epoch"], calls[0]["to_epoch"]) == (H10, H11)
     assert out is not None and out["window_end"] == "2026-07-23T11:00:00Z"
 
 

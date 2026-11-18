@@ -41,16 +41,19 @@ def _fetch_fastly_request_counts(
     logging_svc_id: str, api_key: str, from_ts: int, to_ts: int, by: str, edge_only: bool = False
 ) -> dict[str, int]:
     """Return bucket_iso → Fastly ``requests`` (or ``edge_requests`` if edge_only) count."""
-    from backend.core.fastly.client import StatsResponse, fastly
+    from backend.core.fastly.client import StatsResponse, fastly_platform_metrics
 
     cache_key = (logging_svc_id, from_ts, to_ts, by, edge_only)
     cached: dict[str, int] | None = _FASTLY_COUNTS_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    payload = fastly(
-        "GET",
-        f"/stats/service/{logging_svc_id}?by={by}&from={from_ts}&to={to_ts}",
+    payload = fastly_platform_metrics(
+        entity_id=logging_svc_id,
+        granularity=by,
+        from_epoch=from_ts,
+        to_epoch=to_ts,
+        metrics=("requests", "edge_requests"),
         token=api_key,
     )
 
@@ -60,7 +63,7 @@ def _fetch_fastly_request_counts(
         if r.start_time is None:
             continue
         bucket = datetime.fromtimestamp(r.start_time, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
-        out[bucket] = out.get(bucket, 0) + ((r.edge_requests if edge_only else r.requests) or r.requests)
+        out[bucket] = out.get(bucket, 0) + (r.edge_requests if edge_only else r.requests)
     _FASTLY_COUNTS_CACHE[cache_key] = out
     return out
 

@@ -4,7 +4,7 @@ use crate::auth::settings::UsageLogging;
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
 };
 
 const MAX_SIZES: usize = 4096;
@@ -263,8 +263,8 @@ pub const FRONT_BILLING_FIELDS: [&str; 3] = [
     "kv_store_class_b_operations",
 ];
 
-/// Sums one `/stats/service/<id>/field/<field>` response, returning the total and the first and
-/// last bucket start times (unix s) it covered.
+/// Sums one Platform Metrics response, returning the total and the first and last bucket start
+/// times (unix s) it covered.
 pub fn sum_stats_field(
     body: &Value,
     field: &str,
@@ -296,24 +296,31 @@ pub fn record_billing_field(service: &mut Value, field: &str, body: &Value) -> R
     Ok(())
 }
 
-/// Sums one `/stats/service/<id>/field/<field>` response and returns `(total, first, last, buckets)`
-/// where each bucket has `{"start_time": u64, "<field>": f64}`.
+/// Sums one Platform Metrics response and returns `(total, first, last, buckets)` where each bucket
+/// has `{"start_time": u64, "<field>": f64}`.
 pub fn stats_field_buckets(body: &Value, field: &str) -> Result<StatsBuckets, String> {
-    if body["status"] != "success" {
-        return Err("stats_api_failed".into());
-    }
-    let rows = body["data"].as_array().ok_or("stats_api_shape")?;
+    let rows = body["data"].as_array().ok_or("platform_metrics_shape")?;
     let mut total = 0.0;
     let (mut first, mut last) = (None::<u64>, None::<u64>);
+    let mut starts = BTreeSet::new();
     let mut buckets = Vec::with_capacity(rows.len());
     for row in rows {
+        let timestamp = row["timestamp"]
+            .as_str()
+            .ok_or("platform_metrics_timestamp_invalid")?;
+        let timestamp =
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| "platform_metrics_timestamp_invalid")?;
+        let start = u64::try_from(timestamp.unix_timestamp())
+            .map_err(|_| "platform_metrics_timestamp_invalid")?;
+        if !starts.insert(start) {
+            return Err("platform_metrics_duplicate_timestamp".into());
+        }
         let value = row[field].as_f64().unwrap_or(0.0);
         total += value;
-        if let Some(start) = row["start_time"].as_u64() {
-            first = Some(first.map_or(start, |f| f.min(start)));
-            last = Some(last.map_or(start, |l| l.max(start)));
-            buckets.push(json!({"start_time": start, field: value}));
-        }
+        first = Some(first.map_or(start, |f| f.min(start)));
+        last = Some(last.map_or(start, |l| l.max(start)));
+        buckets.push(json!({"start_time": start, field: value}));
     }
     Ok((total, first, last, buckets))
 }
@@ -329,10 +336,10 @@ mod billing_tests {
         let hour = 1_793_469_600u64;
         let mut service = json!({"role": "app", "service_id": "svc"});
         for field in BILLING_FIELDS {
-            let body = json!({"status": "success", "data": [
-                {"start_time": hour, field: 2.0},
-                {"start_time": hour + 3_600, field: 3.0},
-            ]});
+            let body = json!({"data": [
+                {"timestamp": "2026-10-31T18:00:00Z", field: 2.0},
+                {"timestamp": "2026-10-31T19:00:00Z", field: 3.0},
+            ], "next_cursor": null});
             record_billing_field(&mut service, field, &body).unwrap();
         }
         for field in BILLING_FIELDS {
@@ -399,16 +406,16 @@ mod billing_tests {
 
     #[test]
     fn sums_a_stats_field_and_reports_the_covered_buckets() {
-        let body = json!({"status": "success", "data": [
-            {"compute_requests": 35, "start_time": 1_793_469_600u64},
-            {"compute_requests": 30, "start_time": 1_793_473_200u64},
-            {"start_time": 1_793_476_800u64},
+        let body = json!({"data": [
+            {"compute_requests": 35, "timestamp": "2026-10-31T18:00:00Z"},
+            {"compute_requests": 30, "timestamp": "2026-10-31T19:00:00Z"},
+            {"timestamp": "2026-10-31T20:00:00Z"},
         ]});
         assert_eq!(
             sum_stats_field(&body, "compute_requests").unwrap(),
             (65.0, Some(1_793_469_600), Some(1_793_476_800))
         );
-        let ms = json!({"status": "success", "data": [{"compute_execution_time_ms": 1.25, "start_time": 1}]});
+        let ms = json!({"data": [{"compute_execution_time_ms": 1.25, "timestamp": "1970-01-01T00:00:01Z"}]});
         assert_eq!(
             sum_stats_field(&ms, "compute_execution_time_ms").unwrap().0,
             1.25
@@ -431,9 +438,23 @@ mod billing_tests {
     }
 
     #[test]
-    fn rejects_a_failed_stats_response() {
-        let body = json!({"status": "error", "msg": "bad", "data": []});
+    fn rejects_malformed_platform_rows() {
+        assert!(sum_stats_field(
+            &json!({"data": [
+                {"timestamp": "not-a-time", "compute_requests": 1}
+            ]}),
+            "compute_requests"
+        )
+        .is_err());
+        assert!(sum_stats_field(&json!({"next_cursor": null}), "compute_requests").is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_platform_timestamps() {
+        let body = json!({"data": [
+            {"timestamp": "2026-10-31T18:00:00Z", "compute_requests": 1},
+            {"timestamp": "2026-10-31T18:00:00+00:00", "compute_requests": 2},
+        ]});
         assert!(sum_stats_field(&body, "compute_requests").is_err());
-        assert!(sum_stats_field(&json!({"status": "success"}), "compute_requests").is_err());
     }
 }

@@ -23,6 +23,7 @@ import io
 import json
 import os
 import urllib.error
+import urllib.parse
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,6 +58,234 @@ def _fake_resp(body: bytes = b'{"ok": true}') -> MagicMock:
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+@pytest.mark.parametrize(
+    ("granularity", "path_granularity"),
+    [("minute", "minutely"), ("hour", "hourly"), ("day", "daily")],
+)
+def test_platform_metrics_maps_granularity_and_queries_entities(granularity, path_granularity):
+    calls = []
+
+    def fake_fastly(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {
+            "data": [
+                {
+                    "timestamp": "2026-07-23T10:00:00Z",
+                    "requests": 12,
+                    "edge_requests": 7,
+                }
+            ],
+            "meta": {"total": 1},
+        }
+
+    with patch.object(fastly_client, "fastly", side_effect=fake_fastly):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc/entity",
+            granularity=granularity,
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests", "edge_requests"),
+            token="sentinel-platform-token",
+        )
+
+    method, path, kwargs = calls[0]
+    parsed = urllib.parse.urlsplit(path)
+    assert method == "GET"
+    assert parsed.path == f"/metrics/v2/platform/entities/svc%2Fentity/{path_granularity}"
+    assert urllib.parse.parse_qs(parsed.query) == {
+        "from": ["2026-07-23T10:00:00Z"],
+        "to": ["2026-07-23T11:00:00Z"],
+        "metric": ["requests,edge_requests"],
+        "limit": ["10000"],
+    }
+    assert kwargs == {
+        "token": "sentinel-platform-token",
+        "timeout": 30,
+        "max_retries": 3,
+    }
+    assert result == {
+        "status": "success",
+        "data": [
+            {
+                "timestamp": "2026-07-23T10:00:00Z",
+                "start_time": 1784800800,
+                "requests": 12,
+                "edge_requests": 7,
+            }
+        ],
+        "meta": {"total": 1},
+    }
+
+
+def test_platform_metrics_queries_aggregate_and_keeps_sparse_records_sparse():
+    calls = []
+    with patch.object(
+        fastly_client,
+        "fastly",
+        side_effect=lambda method, path, **kwargs: (
+            calls.append(path) or {"data": [{"timestamp": "2026-07-23T10:05:00+00:00", "requests": 3}]}
+        ),
+    ):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id=None,
+            granularity="minutely",
+            from_epoch=1784801100,
+            to_epoch=1784801160,
+            metrics=("requests", "edge_requests"),
+            token="token",
+            timeout=8,
+            max_retries=1,
+        )
+
+    assert urllib.parse.urlsplit(calls[0]).path == "/metrics/v2/platform/aggregate/minutely"
+    assert result["data"] == [
+        {
+            "timestamp": "2026-07-23T10:05:00+00:00",
+            "start_time": 1784801100,
+            "requests": 3,
+        }
+    ]
+
+
+def test_platform_metrics_accepts_buckets_overlapping_partial_window():
+    with patch.object(
+        fastly_client,
+        "fastly",
+        return_value={
+            "data": [
+                {"timestamp": "2026-07-23T10:00:00Z", "requests": 1},
+                {"timestamp": "2026-07-23T10:01:00Z", "requests": 2},
+            ]
+        },
+    ):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="minute",
+            from_epoch=1784800830,
+            to_epoch=1784800890,
+            metrics=("requests",),
+            token="token",
+        )
+
+    assert [row["start_time"] for row in result["data"]] == [1784800800, 1784800860]
+
+
+def test_platform_metrics_follows_top_level_cursor_until_omitted():
+    paths = []
+    pages = iter(
+        [
+            {
+                "data": [{"timestamp": "2026-07-23T10:00:00Z", "requests": 1}],
+                "next_cursor": "page-2",
+                "meta": {"region": "all"},
+            },
+            {
+                "data": [{"timestamp": "2026-07-23T10:01:00Z", "requests": 2}],
+                "meta": {"region": "all", "complete": True},
+            },
+        ]
+    )
+
+    def fake_fastly(method, path, **kwargs):
+        paths.append(path)
+        return next(pages)
+
+    with patch.object(fastly_client, "fastly", side_effect=fake_fastly):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="minute",
+            from_epoch=1784800800,
+            to_epoch=1784800920,
+            metrics=("requests",),
+            token="token",
+        )
+
+    assert len(result["data"]) == 2
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(paths[1]).query)["cursor"] == ["page-2"]
+    assert result["meta"] == {"region": "all", "complete": True}
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "not-a-time",
+        "2026-07-23T10:00:00",
+        "2026-07-23 10:00:00Z",
+        "2026-07-23T09:59:59Z",
+        "2026-07-23T11:00:00Z",
+    ],
+)
+def test_platform_metrics_rejects_malformed_and_out_of_window_timestamps_without_leaking_token(timestamp):
+    token = "sentinel-do-not-log"
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            return_value={"data": [{"timestamp": timestamp, "requests": 1}]},
+        ),
+        pytest.raises(RuntimeError) as exc,
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token=token,
+        )
+
+    assert token not in str(exc.value)
+
+
+def test_platform_metrics_rejects_duplicate_timestamps_across_pages():
+    pages = iter(
+        [
+            {
+                "data": [{"timestamp": "2026-07-23T10:00:00Z", "requests": 1}],
+                "next_cursor": "page-2",
+            },
+            {"data": [{"timestamp": "2026-07-23T10:00:00Z", "requests": 2}]},
+        ]
+    )
+    with (
+        patch.object(fastly_client, "fastly", side_effect=lambda *args, **kwargs: next(pages)),
+        pytest.raises(RuntimeError, match="duplicate"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="token",
+        )
+
+
+def test_platform_metrics_rejects_repeated_cursor_without_exposing_it():
+    cursor = "sentinel-cursor"
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            side_effect=[
+                {"data": [], "next_cursor": cursor},
+                {"data": [], "next_cursor": cursor},
+            ],
+        ),
+        pytest.raises(RuntimeError, match="repeated cursor") as exc,
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="token",
+        )
+
+    assert cursor not in str(exc.value)
 
 
 def test_fastly_returns_parsed_json_on_success():

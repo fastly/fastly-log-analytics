@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 import tenacity
@@ -911,6 +912,116 @@ def fastly_rt(path, *, token, max_retries=0, timeout=10):
     )
 
 
+_PLATFORM_GRANULARITIES = {
+    "minute": "minutely",
+    "minutely": "minutely",
+    "hour": "hourly",
+    "hourly": "hourly",
+    "day": "daily",
+    "daily": "daily",
+}
+_RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+
+
+def fastly_platform_metrics(
+    *,
+    entity_id: str | None,
+    granularity: str,
+    from_epoch: int,
+    to_epoch: int,
+    metrics: tuple[str, ...] | list[str],
+    token: str,
+    max_retries: int = 3,
+    timeout: float = 30,
+) -> dict[str, Any]:
+    """Fetch and normalize all pages from Fastly Platform Metrics."""
+    try:
+        platform_granularity = _PLATFORM_GRANULARITIES[granularity]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Platform Metrics granularity: {granularity}") from exc
+    if not metrics:
+        raise ValueError("Platform Metrics requires at least one metric")
+    if to_epoch <= from_epoch:
+        raise ValueError("Platform Metrics end must be after start")
+
+    if entity_id is None:
+        endpoint = f"/metrics/v2/platform/aggregate/{platform_granularity}"
+    else:
+        endpoint = f"/metrics/v2/platform/entities/{urllib.parse.quote(entity_id, safe='')}/{platform_granularity}"
+
+    from_time = datetime.fromtimestamp(from_epoch, tz=UTC)
+    to_time = datetime.fromtimestamp(to_epoch, tz=UTC)
+    bucket_seconds = {"minutely": 60, "hourly": 3600, "daily": 86400}[platform_granularity]
+    first_bucket = from_epoch - from_epoch % bucket_seconds
+    last_bucket = ((to_epoch - 1) // bucket_seconds) * bucket_seconds
+    params = {
+        "from": from_time.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "to": to_time.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "metric": ",".join(metrics),
+        "limit": "10000",
+    }
+    records: list[dict[str, Any]] = []
+    timestamps: set[int] = set()
+    cursors: set[str] = set()
+    cursor: str | None = None
+    meta: dict[str, Any] = {}
+
+    while True:
+        page_params = dict(params)
+        if cursor is not None:
+            page_params["cursor"] = cursor
+        query = urllib.parse.urlencode(page_params, quote_via=urllib.parse.quote, safe=",")
+        page = fastly(
+            "GET",
+            f"{endpoint}?{query}",
+            token=token,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
+        if not isinstance(page, dict):
+            raise RuntimeError("Platform Metrics returned a malformed response")
+        page_records = page.get("data")
+        if not isinstance(page_records, list):
+            raise RuntimeError("Platform Metrics returned malformed data")
+        page_meta = page.get("meta")
+        if page_meta is not None:
+            if not isinstance(page_meta, dict):
+                raise RuntimeError("Platform Metrics returned malformed metadata")
+            meta.update(page_meta)
+
+        for record in page_records:
+            if not isinstance(record, dict):
+                raise RuntimeError("Platform Metrics returned a malformed record")
+            timestamp = record.get("timestamp")
+            if not isinstance(timestamp, str) or not _RFC3339_RE.fullmatch(timestamp):
+                raise RuntimeError("Platform Metrics returned a malformed timestamp")
+            try:
+                parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise RuntimeError("Platform Metrics returned a malformed timestamp") from exc
+            if parsed.tzinfo is None:
+                raise RuntimeError("Platform Metrics returned a malformed timestamp")
+            epoch = int(parsed.astimezone(UTC).timestamp())
+            if epoch < first_bucket or epoch > last_bucket:
+                raise RuntimeError("Platform Metrics returned an out-of-window timestamp")
+            if epoch in timestamps:
+                raise RuntimeError("Platform Metrics returned a duplicate timestamp")
+            timestamps.add(epoch)
+            records.append({**record, "start_time": epoch})
+
+        next_cursor = page.get("next_cursor")
+        if next_cursor is None or next_cursor == "":
+            break
+        if not isinstance(next_cursor, str):
+            raise RuntimeError("Platform Metrics returned a malformed cursor")
+        if next_cursor in cursors:
+            raise RuntimeError("Platform Metrics returned a repeated cursor")
+        cursors.add(next_cursor)
+        cursor = next_cursor
+
+    return {"status": "success", "data": records, "meta": meta}
+
+
 PageStyle = Literal["cursor", "page", "link"]
 
 
@@ -1006,7 +1117,7 @@ class _Tolerant(BaseModel):
 
 
 class StatsRecord(_Tolerant):
-    """One bucket of ``/stats/service/{id}`` or ``/stats/aggregate``."""
+    """One normalized Platform Metrics time bucket."""
 
     start_time: OptInt = None
     requests: Count = 0

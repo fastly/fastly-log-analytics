@@ -5,10 +5,43 @@ import pytest
 from backend.repositories.utils.response_shaping import SectionTimer
 from backend.repositories.value import (
     _build_io_metrics,
+    _fetch_io_stats,
     _io_monthly_cost,
     _shape_caching_and_overview_buckets,
     _shape_raw_network_buckets,
 )
+
+
+def test_fetch_io_stats_uses_platform_metrics_and_requests_every_consumer_field(monkeypatch) -> None:
+    from backend.repositories import value
+
+    calls = []
+    monkeypatch.setattr("backend.config.get_fastly_api_key", lambda *_args: "token")
+    monkeypatch.setattr("backend.config.get_fastly_logging_service_id", lambda *_args: "cdn-svc")
+    monkeypatch.setattr(
+        "backend.core.fastly.client.fastly_platform_metrics",
+        lambda **kwargs: calls.append(kwargs) or {"status": "success", "data": [], "meta": {}},
+    )
+    value._IO_STATS_CACHE.clear()
+
+    _fetch_io_stats("service", "2026-07-23T01:00:00Z", "2026-07-23T02:00:00Z", SectionTimer())
+
+    assert calls[0]["entity_id"] == "cdn-svc"
+    assert calls[0]["granularity"] == "day"
+    assert set(calls[0]["metrics"]) == {
+        "requests",
+        "imgopto",
+        "imgopto_resp_body_bytes",
+        "imgopto_shield_resp_body_bytes",
+        "imgopto_webp_count",
+        "imgopto_avif_count",
+        "imgopto_jpeg_count",
+        "imgopto_png_count",
+        "imgopto_gif_count",
+        "imgopto_jpegxl_count",
+        "imgopto_svg_count",
+        "imgopto_mp4_count",
+    }
 
 
 @pytest.mark.parametrize(

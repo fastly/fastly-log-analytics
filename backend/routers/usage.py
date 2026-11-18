@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -49,20 +50,36 @@ _CacheRegistry.register("routers.usage._PREFILL_META_CACHE", _PREFILL_META_CACHE
 _CacheRegistry.register("routers.usage._RUM_BREAKDOWN_CACHE", _RUM_BREAKDOWN_CACHE)
 
 
-def _fastly_api(path: str, api_key: str) -> dict[str, Any]:
-    """Thin wrapper delegating to the central Fastly client with TTL caching."""
-    from backend.core.fastly.client import fastly
+def _fastly_api(
+    entity_id: str | None,
+    granularity: str,
+    from_epoch: int,
+    to_epoch: int,
+    metrics: tuple[str, ...],
+    api_key: str,
+) -> dict[str, Any]:
+    """Fetch Platform Metrics through the central client with TTL caching."""
+    from backend.core.fastly.client import fastly_platform_metrics
 
-    cached = _FASTLY_STATS_CACHE.get(path)
+    token_scope = sha256(api_key.encode()).hexdigest()[:16]
+    cache_key = (entity_id, granularity, from_epoch, to_epoch, metrics, token_scope)
+    cached = _FASTLY_STATS_CACHE.get(cache_key)
     if cached is not None:
         return dict(cached)
-    response = fastly("GET", path, token=api_key)
-    _FASTLY_STATS_CACHE[path] = response
+    response = fastly_platform_metrics(
+        entity_id=entity_id,
+        granularity=granularity,
+        from_epoch=from_epoch,
+        to_epoch=to_epoch,
+        metrics=metrics,
+        token=api_key,
+    )
+    _FASTLY_STATS_CACHE[cache_key] = response
     return dict(response)
 
 
 def _extract_fos_ops(record: dict[str, Any]) -> tuple[int, int]:
-    """Read Class A / Class B counts from a Fastly /stats/aggregate record."""
+    """Read Class A / Class B counts from a Fastly Platform Metrics record."""
     from backend.core.fastly.client import StatsRecord
 
     return StatsRecord.model_validate(record).fos_ops()
@@ -292,10 +309,22 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
             try:
                 if svc_id:
                     return await asyncio.to_thread(
-                        _fastly_api, f"/stats/service/{svc_id}?by={by}&from={from_ts}&to={to_ts}", api_key
+                        _fastly_api,
+                        svc_id,
+                        by,
+                        from_ts,
+                        to_ts,
+                        ("requests", "edge_requests"),
+                        api_key,
                     )
                 return await asyncio.to_thread(
-                    _fastly_api, f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key
+                    _fastly_api,
+                    None,
+                    by,
+                    from_ts,
+                    to_ts,
+                    ("requests", "edge_requests"),
+                    api_key,
                 )
             except Exception:
                 return None
@@ -634,7 +663,17 @@ def usage_operations(
             agg[date_str]["class_b"] += class_b
 
     try:
-        payload = _fastly_api(f"/stats/aggregate?by={by}&from={from_ts}&to={to_ts}", api_key)
+        payload = _fastly_api(
+            None,
+            by,
+            from_ts,
+            to_ts,
+            (
+                "object_storage_class_a_operations_count",
+                "object_storage_class_b_operations_count",
+            ),
+            api_key,
+        )
         _accumulate(payload.get("data", []))
     except Exception as e:
         raise_internal(logger, e, code="fastly_stats_aggregate_failed", status=502)
@@ -650,7 +689,7 @@ def usage_operations(
     if clamped_from_sub_hour:
         note += (
             f" The chart interval you selected ({requested_by}) is finer than the Fastly "
-            "Historical Stats API supports for /stats/aggregate — granularity is forced to "
+            "Platform Metrics API supports for account-wide queries — granularity is forced to "
             "hourly minimum (the API is account-wide and prohibitively slow at sub-hour)."
         )
     resp: UsageOperationsResponse = UsageOperationsResponse.with_telemetry(
@@ -697,7 +736,14 @@ def usage_bandwidth(
 
     if cdn_svc:
         try:
-            payload = _fastly_api(f"/stats/service/{cdn_svc}?by={by}&from={from_ts}&to={to_ts}", api_key)
+            payload = _fastly_api(
+                cdn_svc,
+                by,
+                from_ts,
+                to_ts,
+                ("bandwidth", "requests"),
+                api_key,
+            )
             _merge(payload)
         except Exception as e:
             raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
@@ -743,12 +789,20 @@ def usage_log_activity(
         end_dt = parse_window_str_to_dt(end_str)
         from_ts = int(start_dt.timestamp())
         to_ts = int(end_dt.timestamp())
-        stats_path = f"/stats/service/{logging_svc}?by={by}&from={from_ts}&to={to_ts}"
         ctx_repo = contextvars.copy_context()
         ctx_api = contextvars.copy_context()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             fut_repo = pool.submit(ctx_repo.run, _get_log_activity, source, start_str, end_str, by)
-            fut_api = pool.submit(ctx_api.run, _fastly_api, stats_path, str(api_key))
+            fut_api = pool.submit(
+                ctx_api.run,
+                _fastly_api,
+                logging_svc,
+                by,
+                from_ts,
+                to_ts,
+                ("requests", *FASTLY_LOG_FIELDS),
+                str(api_key),
+            )
             res = fut_repo.result()
             try:
                 payload = fut_api.result()

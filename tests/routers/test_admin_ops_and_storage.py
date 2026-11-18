@@ -1161,16 +1161,57 @@ _FOS_OPS_CASES = [
 
 @pytest.mark.parametrize(("record", "expected"), _FOS_OPS_CASES)
 def test_extract_fos_ops_and_fastly_api_helper(record, expected):
+    from backend.routers import usage
+
+    usage._FASTLY_STATS_CACHE.clear()
     assert _extract_fos_ops(record) == expected
-    fake_resp = MagicMock()
-    fake_resp.read.return_value = b'{"data": []}'
-    fake_resp.__enter__ = lambda s: s
-    fake_resp.__exit__ = MagicMock(return_value=False)
-    with patch("urllib.request.urlopen", return_value=fake_resp) as mock_open:
-        assert _fastly_api("/services/svc1/details", "test-token") == {"data": []}
-    req = mock_open.call_args[0][0]
-    assert req.full_url == "https://api.fastly.com/services/svc1/details"
-    assert req.get_header("Fastly-key") == "test-token"
+    with patch(
+        "backend.core.fastly.client.fastly_platform_metrics",
+        return_value={"status": "success", "data": [], "meta": {}},
+    ) as fetch:
+        assert _fastly_api("svc1", "hour", 10, 20, ("requests",), "test-token") == {
+            "status": "success",
+            "data": [],
+            "meta": {},
+        }
+    fetch.assert_called_once_with(
+        entity_id="svc1",
+        granularity="hour",
+        from_epoch=10,
+        to_epoch=20,
+        metrics=("requests",),
+        token="test-token",
+    )
+    with patch("backend.core.fastly.client.fastly_platform_metrics") as cached_fetch:
+        assert _fastly_api("svc1", "hour", 10, 20, ("requests",), "test-token")["data"] == []
+    cached_fetch.assert_not_called()
+
+
+def test_fastly_request_counts_selects_platform_request_metrics_and_defaults_sparse_fields():
+    from backend.routers.admin import log_accounting
+
+    log_accounting._FASTLY_COUNTS_CACHE.clear()
+    with patch(
+        "backend.core.fastly.client.fastly_platform_metrics",
+        return_value={
+            "status": "success",
+            "data": [{"timestamp": "2026-07-23T10:00:00Z", "start_time": 1784800800, "requests": 9}],
+            "meta": {},
+        },
+    ) as fetch:
+        result = log_accounting._fetch_fastly_request_counts(
+            "logging-svc", "token", 1784800800, 1784804400, "hour", edge_only=True
+        )
+
+    fetch.assert_called_once_with(
+        entity_id="logging-svc",
+        granularity="hour",
+        from_epoch=1784800800,
+        to_epoch=1784804400,
+        metrics=("requests", "edge_requests"),
+        token="token",
+    )
+    assert result == {"2026-07-23T10": 0}
 
 
 def test_usage_prefill_operations_and_rum_breakdown(client, tmp_path, monkeypatch):

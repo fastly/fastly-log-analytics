@@ -20,8 +20,8 @@ def test_prefill_measures_selected_logging_service_without_inventing_missing_edg
     if edge is not None:
         row["edge_requests"] = edge
 
-    def stats(path, api_key):
-        if "/stats/service/selected-service?" in path:
+    def stats(entity_id, granularity, from_ts, to_ts, metrics, api_key):
+        if entity_id == "selected-service":
             return {"data": [row]}
         return {"data": [{"start_time": 1767225600, "requests": 50, "edge_requests": 0}]}
 
@@ -38,3 +38,67 @@ def test_prefill_measures_selected_logging_service_without_inventing_missing_edg
     result = asyncio.run(usage.prefill(source))
     assert result.requests_per_day == requests
     assert result.edge_requests_per_day == edge
+
+
+def test_usage_historical_consumers_select_platform_metrics_fields(monkeypatch):
+    source = {
+        "name": "svc",
+        "service_id": "svc",
+        "logging_service_id": "logging-svc",
+        "cdn_service_id": "cdn-svc",
+    }
+    calls = []
+
+    def stats(*args):
+        calls.append(args)
+        metrics = args[4]
+        if "object_storage_class_a_operations_count" in metrics:
+            return {
+                "data": [
+                    {
+                        "start_time": 1767225600,
+                        "object_storage_class_a_operations_count": 5,
+                        "object_storage_class_b_operations_count": 2,
+                    }
+                ]
+            }
+        return {"data": [{"start_time": 1767225600, "requests": 9, "bandwidth": 99, "log": 7}]}
+
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda service_id: "test-token")
+    monkeypatch.setattr(usage, "api_key_or_mock", lambda key: key)
+    monkeypatch.setattr(usage, "_fastly_api", stats)
+    monkeypatch.setattr(
+        usage,
+        "_get_log_activity",
+        lambda *_args: {"data": [], "total_rows": 0, "total_bytes": 0, "granularity": "hour"},
+    )
+
+    ops = usage.usage_operations(
+        start="2026-01-01T00:00:00Z",
+        end="2026-01-01T02:00:00Z",
+        by="hour",
+        source=source,
+    )
+    bandwidth = usage.usage_bandwidth(
+        start="2026-01-01T00:00:00Z",
+        end="2026-01-01T02:00:00Z",
+        by="hour",
+        source=source,
+    )
+    usage.usage_log_activity(
+        source=source,
+        start="2026-01-01T00:00:00Z",
+        end="2026-01-01T02:00:00Z",
+        by="hour",
+    )
+
+    assert ops.total_class_a == 5 and ops.total_class_b == 2
+    assert bandwidth.total_bytes == 99
+    assert calls[0][0] is None
+    assert calls[0][4] == (
+        "object_storage_class_a_operations_count",
+        "object_storage_class_b_operations_count",
+    )
+    assert calls[1][0] == "cdn-svc" and calls[1][4] == ("bandwidth", "requests")
+    assert calls[2][0] == "logging-svc"
+    assert calls[2][4] == ("requests", *fastly_client.FASTLY_LOG_FIELDS)

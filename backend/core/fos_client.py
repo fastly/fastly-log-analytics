@@ -703,7 +703,7 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
         return 0
     try:
         from backend.core import metadata as metadata_db
-        from backend.core.fastly.client import StatsResponse, fastly
+        from backend.core.fastly.client import StatsResponse, fastly_platform_metrics
 
         now_dt = datetime.now(UTC)
         if latest_recon := metadata_db.get_latest_reconciliation_ts(service_id):
@@ -715,8 +715,18 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
             int((now - timedelta(hours=hours_back)).timestamp()),
             int((now + timedelta(hours=1)).timestamp()),
         )
-        payload = fastly(
-            "GET", f"/stats/aggregate?by=hour&from={from_ts}&to={to_ts}", token=api_key, max_retries=0, timeout=30
+        payload = fastly_platform_metrics(
+            entity_id=None,
+            granularity="hour",
+            from_epoch=from_ts,
+            to_epoch=to_ts,
+            metrics=(
+                "object_storage_class_a_operations_count",
+                "object_storage_class_b_operations_count",
+            ),
+            token=api_key,
+            max_retries=0,
+            timeout=30,
         )
         hourly = [
             {
