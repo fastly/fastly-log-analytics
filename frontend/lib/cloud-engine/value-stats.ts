@@ -15,7 +15,7 @@ const MAX_SPAN_MS = 31 * 86_400_000;
 /** How long a Stats answer (or its failure) is reused; Fastly reports an hour about 15 minutes after it ends. */
 const CACHE_TTL_MS = 300_000;
 /** How long a summaries answer waits on a slower Stats read before it goes without the comparison. */
-const STATS_GRACE_MS = 1_500;
+const STATS_GRACE_MS = 5_000;
 
 const cache = new Map<string, { at: number; stats: Promise<ServiceStats | null> }>();
 

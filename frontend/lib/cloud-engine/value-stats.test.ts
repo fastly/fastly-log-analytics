@@ -101,6 +101,17 @@ describe("valueStatsDecorator", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("waits up to 5s for a slower Compute Stats read before dropping the comparison", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementation(() => new Promise((resolve) => {
+      setTimeout(() => resolve(Response.json(stats([[H0, 100, 1000, 80], [H0 + HOUR, 100, 1000, 90]]))), 2_500);
+    }));
+    const pending = valueStatsDecorator(start, end, params)(answer());
+    await vi.advanceTimersByTimeAsync(2_500);
+    const out = await pending as Record<string, unknown>;
+    expect(out.fastly_reported).toMatchObject({ requests: 200, logged_requests: 185 });
+  });
+
   it("doesn't hold the answer for a slow Stats read", async () => {
     vi.useFakeTimers();
     fetchMock.mockReturnValue(new Promise(() => {}));
