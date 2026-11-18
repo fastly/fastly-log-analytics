@@ -6,6 +6,7 @@ use crate::{
     checks::{self, CheckApi, CheckProbe, Environment},
     setup::SetupStores,
     shell::{CoreCacheEntry, CoreCacheError, KvPage, Runtime},
+    telemetry::usage::fetch_platform_metrics,
 };
 use base64::Engine as _;
 use fastly::{ConfigStore, KVStore, Request, SecretStore};
@@ -20,94 +21,6 @@ use std::{
 const SECRET_BUNDLE_KEY: &str = "flp_bundle";
 const CONFIG_BUNDLE_KEY: &str = "flp_config_bundle";
 const MAX_RAW_SECRET_READS: u32 = 24;
-
-fn platform_metrics_time(timestamp: u64) -> Result<String, String> {
-    let timestamp = i64::try_from(timestamp).map_err(|_| "platform_metrics_time_invalid")?;
-    time::OffsetDateTime::from_unix_timestamp(timestamp)
-        .map_err(|_| "platform_metrics_time_invalid")?
-        .format(&time::format_description::well_known::Rfc3339)
-        .map_err(|_| "platform_metrics_time_invalid".into())
-}
-
-fn fetch_platform_metrics(
-    service_id: &str,
-    from: u64,
-    to: u64,
-    metrics: &[&str],
-    mut fetch: impl FnMut(&str, &str) -> Result<crate::admin::ApiResponse, String>,
-) -> Result<Value, String> {
-    if metrics.is_empty() {
-        return Err("platform_metrics_fields_empty".into());
-    }
-    let path = format!(
-        "/metrics/v2/platform/entities/{}/hourly",
-        crate::admin::transport::encode(service_id)
-    );
-    let base_query = format!(
-        "from={}&to={}&metric={}&limit=10000",
-        platform_metrics_time(from)?,
-        platform_metrics_time(to)?,
-        metrics.join(",")
-    );
-    let mut cursor = None::<String>;
-    let mut cursors = BTreeSet::new();
-    let mut timestamps = BTreeSet::new();
-    let mut rows = Vec::new();
-    let first_hour = from - from % 3_600;
-    let last_hour = (to - 1) - (to - 1) % 3_600;
-    loop {
-        let query = cursor.as_ref().map_or_else(
-            || base_query.clone(),
-            |next| {
-                format!(
-                    "{base_query}&cursor={}",
-                    crate::admin::transport::encode(next)
-                )
-            },
-        );
-        let response = fetch(&path, &query)?;
-        if response.status != 200 {
-            return Err(format!("platform_metrics_status_{}", response.status));
-        }
-        let page = response.body["data"]
-            .as_array()
-            .ok_or("platform_metrics_shape")?;
-        for row in page {
-            let timestamp = row["timestamp"]
-                .as_str()
-                .ok_or("platform_metrics_timestamp_invalid")?;
-            let parsed = time::OffsetDateTime::parse(
-                timestamp,
-                &time::format_description::well_known::Rfc3339,
-            )
-            .map_err(|_| "platform_metrics_timestamp_invalid")?;
-            let start = u64::try_from(parsed.unix_timestamp())
-                .map_err(|_| "platform_metrics_timestamp_invalid")?;
-            if start % 3_600 != 0 || start < first_hour || start > last_hour {
-                return Err("platform_metrics_timestamp_out_of_window".into());
-            }
-            if !timestamps.insert(start) {
-                return Err("platform_metrics_duplicate_timestamp".into());
-            }
-            rows.push(row.clone());
-        }
-        cursor = match response.body.get("next_cursor") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(next)) if !next.is_empty() && cursors.insert(next.clone()) => {
-                Some(next.clone())
-            }
-            Some(Value::String(_)) => {
-                return Err("platform_metrics_pagination_loop".into());
-            }
-            Some(_) => return Err("platform_metrics_pagination_invalid".into()),
-        };
-        if cursor.is_none() {
-            break;
-        }
-    }
-    Ok(json!({"data": rows}))
-}
-
 pub struct FastlyRuntime {
     config: Option<ConfigStore>,
     secrets: SecretStore,

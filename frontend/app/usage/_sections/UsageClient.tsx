@@ -32,6 +32,7 @@ import {
   type BreakdownRow,
   type StorageUsageData,
 } from './UsageStatCards'
+import { PlatformUsageCards } from './PlatformUsageCards'
 
 export {
   FosOperationsHelp,
@@ -223,6 +224,25 @@ export function UsagePageContent({
 
   const cloudMode = isCloudMode()
 
+  const {
+    data: platform,
+    isLoading: loadingPlatform,
+  } = useQuery({
+    queryKey: ['usage', 'platform', activeServiceId, startTime, endTime],
+    queryFn: async ({ signal }) => {
+      return unwrapClient(
+        client.GET('/api/usage/platform', {
+          signal,
+          params: { query: { start: startTime ?? undefined, end: endTime ?? undefined } },
+        }),
+      )
+    },
+    enabled: isReady,
+    staleTime: 60_000,
+  })
+  const observedStorageGbHours =
+    platform?.storage.status === 'ok' ? platform.storage.gb_hours ?? null : null
+
   // One Stats API read per range, shared by the cost card and both Compute charts.
   const {
     data: compute,
@@ -271,6 +291,8 @@ export function UsagePageContent({
 
   return (
     <>
+      <PlatformUsageCards data={platform} loading={loadingPlatform} cloudMode={cloudMode} />
+
       <UsageStatCards
         storage={storage}
         loadingStorage={loadingStorage}
@@ -290,6 +312,7 @@ export function UsagePageContent({
         activeServiceId={activeServiceId}
         onNavigateToAdmin={(href) => router.push(href)}
         compute={compute}
+        platformStorage={platform?.storage}
       />
 
       <UsageChartsGrid
@@ -340,9 +363,18 @@ export function UsagePageContent({
               <SkeletonGrid count={4} height="36px" className="rounded-md" />
             </div>
           ) : cloudMode ? (
-            <CloudCostCalculator key={activeServiceId} prefillData={cloudPrefill} rates={prefillRates} />
+            <CloudCostCalculator
+              key={activeServiceId}
+              prefillData={cloudPrefill}
+              rates={prefillRates}
+              observedStorageGbHours={observedStorageGbHours}
+            />
           ) : (
-            <CostCalculator prefillData={prefill ?? undefined} prefillNote={prefillNote} />
+            <CostCalculator
+              prefillData={prefill ?? undefined}
+              prefillNote={prefillNote}
+              observedStorageGbHours={observedStorageGbHours}
+            />
           )}
         </AnalyticsCard>
       </div>

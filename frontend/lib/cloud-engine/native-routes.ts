@@ -53,6 +53,7 @@ export const NATIVE_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ["POST", "/api/admin/logs/backfill"],
   ["GET", "/api/admin/usage/logged-traffic"],
   ["GET", "/api/admin/usage/compute-billing"],
+  ["GET", "/api/admin/usage/platform"],
   ["POST", "/api/admin/usage/reconcile-storage"],
   ["GET", "/api/admin/usage/service-stats"],
   ["GET,PATCH", "/api/admin/operational-logging"],

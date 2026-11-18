@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from backend.models.common.base import BaseResponse, PassthroughModel
@@ -173,6 +175,51 @@ class PrefillRatesResponse(_PrefillRatesBase):
     Omits ``requests_per_day`` / ``edge_requests_per_day`` (Fastly stats)
     and ``edge_ratio`` (ClickHouse) since those gate on the lazy /prefill call.
     """
+
+
+PlatformSourceStatus = Literal["ok", "not_configured", "unavailable"]
+
+
+class PlatformStorageUsage(BaseModel):
+    status: PlatformSourceStatus
+    scope: Literal["account"]
+    observed_at: str | None = None
+    bytes: int | None = None
+    buckets: int | None = None
+    gb_hours: float | None = None
+    reason: str | None = None
+
+
+class PlatformComputeUsage(BaseModel):
+    status: PlatformSourceStatus
+    scope: Literal["app_and_worker"] | None = None
+    requests: int = 0
+    billed_time_ms: float = 0
+    backend_errors: int = 0
+    cache_operations: int = 0
+    sandboxes: int = 0
+    resource_errors: int = 0
+    reason: str | None = None
+
+
+class PlatformNgwafUsage(BaseModel):
+    status: PlatformSourceStatus
+    scope: Literal["workspace"] | None = None
+    total: int = 0
+    allowed: int = 0
+    blocked: int = 0
+    challenged: int = 0
+    logged: int = 0
+    timeout: int = 0
+    unknown: int = 0
+    reason: str | None = None
+
+
+class PlatformUsageResponse(BaseResponse):
+    source: Literal["fastly", "partial", "unavailable"]
+    storage: PlatformStorageUsage
+    compute: PlatformComputeUsage
+    ngwaf: PlatformNgwafUsage
 
 
 class CurrentStorageResponse(BaseResponse):

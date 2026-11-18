@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -19,6 +19,10 @@ from backend.high_scale._common import visible_publication_fence_sql
 from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.admin import (
     CurrentStorageResponse,
+    PlatformComputeUsage,
+    PlatformNgwafUsage,
+    PlatformStorageUsage,
+    PlatformUsageResponse,
     PrefillRatesResponse,
     PrefillResponse,
     RumBreakdownPoint,
@@ -49,6 +53,20 @@ _CacheRegistry.register("routers.usage._STORAGE_INSPECTION_CACHE", _STORAGE_INSP
 _CacheRegistry.register("routers.usage._PREFILL_META_CACHE", _PREFILL_META_CACHE)
 _CacheRegistry.register("routers.usage._RUM_BREAKDOWN_CACHE", _RUM_BREAKDOWN_CACHE)
 
+STORAGE_PLATFORM_METRICS = (
+    "object_storage_buckets_count",
+    "object_storage_bytes_count",
+)
+NGWAF_PLATFORM_METRICS = (
+    "ngwaf_requests_total_count",
+    "ngwaf_requests_allowed_count",
+    "ngwaf_requests_blocked_count",
+    "ngwaf_requests_challenged_count",
+    "ngwaf_requests_logged_count",
+    "ngwaf_requests_timeout_count",
+    "ngwaf_requests_unknown_count",
+)
+
 
 def _fastly_api(
     entity_id: str | None,
@@ -76,6 +94,62 @@ def _fastly_api(
     )
     _FASTLY_STATS_CACHE[cache_key] = response
     return dict(response)
+
+
+def _platform_storage(records: list[dict[str, Any]], from_epoch: int, to_epoch: int) -> PlatformStorageUsage:
+    bytes_by_day = sorted(
+        (int(row["start_time"]), int(row["object_storage_bytes_count"]))
+        for row in records
+        if row.get("start_time") is not None and row.get("object_storage_bytes_count") is not None
+    )
+    if not bytes_by_day:
+        return PlatformStorageUsage(status="unavailable", scope="account", reason="no_data")
+
+    gb_hours = 0.0
+    for index, (start, value) in enumerate(bytes_by_day):
+        end = bytes_by_day[index + 1][0] if index + 1 < len(bytes_by_day) else to_epoch
+        overlap = max(0, min(end, to_epoch) - max(start, from_epoch))
+        gb_hours += value / 1024**3 * overlap / 3600
+
+    bucket_rows = sorted(
+        (int(row["start_time"]), int(row["object_storage_buckets_count"]))
+        for row in records
+        if row.get("start_time") is not None and row.get("object_storage_buckets_count") is not None
+    )
+    observed_at, latest_bytes = bytes_by_day[-1]
+    return PlatformStorageUsage(
+        status="ok",
+        scope="account",
+        observed_at=datetime.fromtimestamp(observed_at, UTC).isoformat().replace("+00:00", "Z"),
+        bytes=latest_bytes,
+        buckets=bucket_rows[-1][1] if bucket_rows else None,
+        gb_hours=gb_hours,
+    )
+
+
+def _platform_ngwaf(records: list[dict[str, Any]]) -> PlatformNgwafUsage:
+    if not records:
+        return PlatformNgwafUsage(status="unavailable", scope="workspace", reason="no_data")
+
+    totals = {
+        name.removeprefix("ngwaf_requests_").removesuffix("_count"): sum(
+            int(row[name]) for row in records if row.get(name) is not None
+        )
+        for name in NGWAF_PLATFORM_METRICS
+    }
+    if not any(row.get(metric) is not None for row in records for metric in NGWAF_PLATFORM_METRICS):
+        return PlatformNgwafUsage(status="unavailable", scope="workspace", reason="no_data")
+    return PlatformNgwafUsage(
+        status="ok",
+        scope="workspace",
+        total=totals["total"],
+        allowed=totals["allowed"],
+        blocked=totals["blocked"],
+        challenged=totals["challenged"],
+        logged=totals["logged"],
+        timeout=totals["timeout"],
+        unknown=totals["unknown"],
+    )
 
 
 def _extract_fos_ops(record: dict[str, Any]) -> tuple[int, int]:
@@ -611,6 +685,88 @@ def usage_current_storage(
         return resp
     except Exception as e:
         raise_internal(logger, e, code="usage_storage_failed")
+
+
+@usage_router.get("/platform", response_model=PlatformUsageResponse)
+@query_errors()
+def platform_usage(
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    source: dict[str, Any] = Depends(get_source),
+) -> PlatformUsageResponse:
+    from backend import config as svcconfig
+
+    _, _, from_epoch, to_epoch = window_to_epoch(start, end)
+    service_id = str(source.get("service_id") or "")
+    workspace_id = svcconfig.get_ngwaf_workspace_id(service_id)
+    token = api_key_or_mock(get_fastly_api_key(str(source.get("logging_service_id") or service_id)))
+
+    compute = PlatformComputeUsage(status="not_configured")
+    if not token:
+        storage = PlatformStorageUsage(status="unavailable", scope="account", reason="missing_token")
+        ngwaf = PlatformNgwafUsage(
+            status="unavailable" if workspace_id else "not_configured",
+            scope="workspace" if workspace_id else None,
+            reason="missing_token" if workspace_id else None,
+        )
+    else:
+        try:
+            storage_payload = _fastly_api(
+                None,
+                "day",
+                from_epoch,
+                to_epoch,
+                STORAGE_PLATFORM_METRICS,
+                token,
+            )
+        except Exception:
+            storage = PlatformStorageUsage(status="unavailable", scope="account", reason="request_failed")
+        else:
+            try:
+                storage = _platform_storage(storage_payload.get("data", []), from_epoch, to_epoch)
+            except Exception:
+                storage = PlatformStorageUsage(status="unavailable", scope="account", reason="invalid_data")
+
+        if not workspace_id:
+            ngwaf = PlatformNgwafUsage(status="not_configured")
+        else:
+            try:
+                ngwaf_payload = _fastly_api(
+                    workspace_id,
+                    "day",
+                    from_epoch,
+                    to_epoch,
+                    NGWAF_PLATFORM_METRICS,
+                    token,
+                )
+            except Exception:
+                ngwaf = PlatformNgwafUsage(
+                    status="unavailable",
+                    scope="workspace",
+                    reason="request_failed",
+                )
+            else:
+                try:
+                    ngwaf = _platform_ngwaf(ngwaf_payload.get("data", []))
+                except Exception:
+                    ngwaf = PlatformNgwafUsage(
+                        status="unavailable",
+                        scope="workspace",
+                        reason="invalid_data",
+                    )
+
+    statuses = (storage.status, ngwaf.status)
+    source_status: Literal["fastly", "partial", "unavailable"]
+    if "ok" in statuses:
+        source_status = "partial" if "unavailable" in statuses else "fastly"
+    else:
+        source_status = "unavailable"
+    return PlatformUsageResponse(
+        source=source_status,
+        storage=storage,
+        compute=compute,
+        ngwaf=ngwaf,
+    )
 
 
 @usage_router.get("/operations", response_model=UsageOperationsResponse)

@@ -307,6 +307,28 @@ def test_platform_metrics_rejects_repeated_cursor_without_exposing_it():
     assert cursor not in str(exc.value)
 
 
+def test_platform_metrics_bounds_unique_cursor_pages(monkeypatch):
+    monkeypatch.setattr(fastly_client, "_PLATFORM_METRICS_MAX_PAGES", 2)
+    pages = iter(
+        [
+            {"data": [], "next_cursor": "page-2"},
+            {"data": [], "next_cursor": "page-3"},
+        ]
+    )
+    with (
+        patch.object(fastly_client, "fastly", side_effect=lambda *args, **kwargs: next(pages)),
+        pytest.raises(RuntimeError, match="page limit"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="token",
+        )
+
+
 def test_fastly_returns_parsed_json_on_success():
     with patch("urllib.request.urlopen", return_value=_fake_resp(b'{"data": [1, 2]}')):
         out = fastly_client.fastly("GET", "/services", token="tkn")

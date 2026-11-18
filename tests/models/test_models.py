@@ -33,6 +33,7 @@ from backend.high_scale.insights import insights_endpoint as hs_insights_endpoin
 from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.security import security_aggregates as hs_security_aggregates
 from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
+from backend.models.admin import PlatformUsageResponse
 from backend.models.analytics import (
     CmcdAggregatesResponse,
     CmcdRequest,
@@ -196,6 +197,38 @@ def test_stats_record_and_response_validation():
     assert coerced.requests == 0 and coerced.edge_requests == 0 and coerced.start_time is None
     assert StatsResponse.model_validate({}).data == [] and StatsResponse.model_validate({"data": None}).data == []
     assert StatsResponse.model_validate({"data": [{"requests": 5}], "meta": {"to": 1}}).data[0].requests == 5
+
+
+def test_platform_usage_response_preserves_unavailable_and_measured_sections():
+    parsed = PlatformUsageResponse.model_validate(
+        {
+            "source": "partial",
+            "storage": {
+                "status": "ok",
+                "scope": "account",
+                "observed_at": "2026-11-18T00:00:00Z",
+                "bytes": 1073741824,
+                "buckets": 3,
+                "gb_hours": 24.0,
+            },
+            "compute": {"status": "not_configured"},
+            "ngwaf": {
+                "status": "ok",
+                "scope": "workspace",
+                "total": 100,
+                "allowed": 80,
+                "blocked": 10,
+                "challenged": 5,
+                "logged": 3,
+                "timeout": 1,
+                "unknown": 1,
+            },
+        }
+    )
+    assert parsed.storage.status == "ok"
+    assert parsed.storage.bytes == 1073741824
+    assert parsed.compute.status == "not_configured"
+    assert parsed.ngwaf.blocked == 10
 
 
 @pytest.mark.parametrize("payload", [{}, {"object_storage": None}, {"object_storage": "bad"}])

@@ -53,6 +53,28 @@ vi.mock("./insights-rollup", async (importOriginal) => ({
 }));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
+  it("answers /api/usage/platform from the Cloud admin route unchanged", async () => {
+    const payload = {
+      source: "partial",
+      storage: { status: "ok", scope: "account", bytes: 2048 },
+      compute: { status: "ok", scope: "app_and_worker", requests: 7 },
+      ngwaf: { status: "not_configured" },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await handleCloudAnalyticalRequest(new Request(
+      "http://localhost/api/usage/platform?from=1763424000000&to=1763510400000",
+    ));
+
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/admin/usage/platform?from=1763424000000&to=1763510400000"),
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
   it.each(["analytics", "live-events"])("returns an explicit client error for unsupported RUM %s filters", async (route) => {
     const filters = JSON.stringify({ unknown_field: { mode: "include", values: ["offline-value"] } });
     const response = await handleCloudAnalyticalRequest(new Request(

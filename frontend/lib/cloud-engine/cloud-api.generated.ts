@@ -1532,6 +1532,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/admin/usage/platform": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Observed Fastly Platform storage, Compute and NGWAF usage */
+    get: operations["get__api_admin_usage_platform"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/admin/usage/reconcile-storage": {
     parameters: {
       query?: never;
@@ -4329,6 +4346,45 @@ export interface operations {
               /** @description Secrets in the install's store (first 200) */
               secrets: number;
             };
+          };
+        };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  get__api_admin_usage_platform: {
+    parameters: {
+      query: {
+        /** @description Unix ms */
+        from: number;
+        /** @description Unix ms; at most 31 days after from */
+        to: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Independently observed Platform metrics */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            source: "fastly" | "partial" | "unavailable";
+            storage: Record<string, unknown>;
+            compute: Record<string, unknown>;
+            ngwaf: Record<string, unknown>;
           };
         };
       };

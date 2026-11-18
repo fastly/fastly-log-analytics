@@ -118,6 +118,14 @@ impl Installed {
 }
 
 pub fn handle(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
+    if let Some(("/api/admin/usage/platform", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return platform_usage(runtime, query);
+        }
+    }
+    if request.method == "GET" && request.path == "/api/admin/usage/platform" {
+        return platform_usage(runtime, "");
+    }
     if let Some(("/api/admin/usage/compute-billing", query)) = request.path.split_once('?') {
         if request.method == "GET" {
             return compute_billing(runtime, query);
@@ -466,6 +474,25 @@ fn note_sweep(
 
 /// Most hours one billing read may cover: 31 days of hourly buckets per field.
 const BILLING_MAX_SPAN_S: u64 = 31 * 86_400;
+
+fn platform_usage(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+    };
+    let (Some(from), Some(to)) = (param("from"), param("to")) else {
+        return fail(400, "invalid_range");
+    };
+    let (from, to) = (from / 1000, to.div_ceil(1000));
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    done(
+        crate::telemetry::usage::platform_usage(runtime, from, to),
+        None,
+    )
+}
 
 /// Fastly's billed Compute usage for `from`..`to` (epoch ms), to reconcile the logged counts.
 fn compute_billing(runtime: &impl Runtime, query: &str) -> Outcome {

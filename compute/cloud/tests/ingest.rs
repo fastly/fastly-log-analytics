@@ -83,6 +83,9 @@ struct Fake {
     range_reads: RefCell<Vec<(String, u64, usize)>>,
     source_bytes: Cell<u64>,
     api_calls: RefCell<Vec<(String, String)>>,
+    api_queries: RefCell<Vec<(String, String)>>,
+    api_responses: RefCell<std::collections::VecDeque<(u16, Value)>>,
+    config_overrides: RefCell<BTreeMap<String, Option<String>>>,
     /// Status every Fastly API call answers with.
     api_status: Cell<u16>,
     kv_reads: RefCell<Vec<String>>,
@@ -222,6 +225,9 @@ impl Fake {
             range_reads: Default::default(),
             source_bytes: Cell::new(0),
             api_calls: Default::default(),
+            api_queries: Default::default(),
+            api_responses: Default::default(),
+            config_overrides: Default::default(),
             api_status: Cell::new(200),
             kv_reads: Default::default(),
             seq: Default::default(),
@@ -391,6 +397,9 @@ impl SetupStores for Fake {
 
 impl Runtime for Fake {
     fn config(&self, name: &str) -> Result<Option<String>, String> {
+        if let Some(value) = self.config_overrides.borrow().get(name) {
+            return Ok(value.clone());
+        }
         Ok(if name == "window_s" {
             self.window.borrow().clone()
         } else if name == "dev_telemetry" {
@@ -931,9 +940,17 @@ impl Runtime for Fake {
         self.api_calls
             .borrow_mut()
             .push((request.method.into(), request.path.into()));
+        self.api_queries
+            .borrow_mut()
+            .push((request.path.into(), request.query.into()));
+        let (status, body) = self
+            .api_responses
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| (self.api_status.get(), json!({"status": "ok"})));
         Ok(fastly_log_analytics::admin::ApiResponse {
-            status: self.api_status.get(),
-            body: json!({"status": "ok"}),
+            status,
+            body,
             retry_after: None,
         })
     }
@@ -6990,6 +7007,202 @@ fn service_stats_rejects_bad_ranges_and_needs_an_installed_service() {
             "{path}"
         );
     }
+}
+
+#[test]
+fn platform_usage_fetches_all_sections_independently_without_leaking_identifiers() {
+    let fake = Fake::new(BASE);
+    fake.config_overrides.borrow_mut().extend([
+        ("flp_service_id".into(), Some("app-private-id".into())),
+        ("worker_service_id".into(), Some("worker-private-id".into())),
+        (
+            "ngwaf_workspace_id".into(),
+            Some("workspace-private-id".into()),
+        ),
+    ]);
+    fake.api_responses.borrow_mut().extend([
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "object_storage_bytes_count": 1_073_741_824,
+                "object_storage_buckets_count": 2
+            }], "next_cursor": null}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 2,
+                "compute_request_time_billed_ms": 50,
+                "compute_service_bereq_error": 1,
+                "compute_cache_operations_count": 3,
+                "compute_sandboxes": 4,
+                "compute_service_resource_limits_error": 5
+            }], "next_cursor": null}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 7,
+                "compute_request_time_billed_ms": 100,
+                "compute_service_bereq_error": 6,
+                "compute_cache_operations_count": 8,
+                "compute_sandboxes": 9,
+                "compute_service_resource_limits_error": 10
+            }], "next_cursor": null}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "ngwaf_requests_total_count": 20,
+                "ngwaf_requests_allowed_count": 11,
+                "ngwaf_requests_blocked_count": 3,
+                "ngwaf_requests_challenged_count": 2,
+                "ngwaf_requests_logged_count": 2,
+                "ngwaf_requests_timeout_count": 1,
+                "ngwaf_requests_unknown_count": 1
+            }], "next_cursor": null}),
+        ),
+    ]);
+
+    let (status, body, audit) = logs_call(
+        &fake,
+        "GET",
+        "/api/admin/usage/platform?from=0&to=3600000",
+        Value::Null,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert!(audit.is_none());
+    assert_eq!(body["source"], "fastly");
+    assert_eq!(body["storage"]["bytes"], 1_073_741_824u64);
+    assert_eq!(body["compute"]["requests"], 9);
+    assert_eq!(body["compute"]["resource_errors"], 15);
+    assert_eq!(body["ngwaf"]["blocked"], 3);
+    let wire = body.to_string();
+    assert!(!wire.contains("private-id"));
+    assert!(!wire.contains("fos-secret"));
+    assert!(!wire.contains("next_cursor"));
+    let queries = fake.api_queries.borrow();
+    assert_eq!(queries.len(), 4);
+    assert!(queries[0].0.contains("/aggregate/daily"));
+    assert!(queries[1].0.contains("/entities/app-private-id/hourly"));
+    assert!(queries[2].0.contains("/entities/worker-private-id/hourly"));
+    assert!(queries[3]
+        .0
+        .contains("/entities/workspace-private-id/hourly"));
+    assert!(queries[1].1.contains("compute_requests"));
+    assert!(queries[1].1.contains("compute_service_bereq_error"));
+}
+
+#[test]
+fn platform_usage_reports_not_configured_ngwaf_without_fetching_it() {
+    let fake = Fake::new(BASE);
+    fake.config_overrides
+        .borrow_mut()
+        .insert("ngwaf_workspace_id".into(), None);
+    fake.api_responses.borrow_mut().extend([
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "object_storage_bytes_count": 1
+            }]}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 1,
+                "compute_request_time_billed_ms": 50
+            }]}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 2,
+                "compute_request_time_billed_ms": 100
+            }]}),
+        ),
+    ]);
+
+    let (status, body, _) = logs_call(
+        &fake,
+        "GET",
+        "/api/admin/usage/platform?from=0&to=3600000",
+        Value::Null,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["source"], "fastly");
+    assert_eq!(body["ngwaf"]["status"], "not_configured");
+    assert_eq!(fake.api_queries.borrow().len(), 3);
+}
+
+#[test]
+fn platform_usage_keeps_compute_after_a_storage_source_failure() {
+    let fake = Fake::new(BASE);
+    fake.config_overrides
+        .borrow_mut()
+        .insert("ngwaf_workspace_id".into(), None);
+    fake.api_responses.borrow_mut().extend([
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-02T00:00:00Z",
+                "object_storage_bytes_count": 1
+            }]}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 1,
+                "compute_request_time_billed_ms": 50
+            }]}),
+        ),
+        (
+            200,
+            json!({"data": [{
+                "timestamp": "1970-01-01T00:00:00Z",
+                "compute_requests": 2,
+                "compute_request_time_billed_ms": 100
+            }]}),
+        ),
+    ]);
+
+    let (status, body, _) = logs_call(
+        &fake,
+        "GET",
+        "/api/admin/usage/platform?from=0&to=3600000",
+        Value::Null,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["source"], "partial");
+    assert_eq!(body["storage"]["status"], "unavailable");
+    assert_eq!(body["compute"]["status"], "ok");
+    assert_eq!(body["compute"]["requests"], 3);
+    assert_eq!(fake.api_queries.borrow().len(), 3);
+}
+
+#[test]
+fn platform_usage_rejects_bad_ranges_before_making_platform_calls() {
+    let fake = Fake::new(BASE);
+
+    for path in [
+        "/api/admin/usage/platform?from=0",
+        "/api/admin/usage/platform?from=1000&to=1000",
+        "/api/admin/usage/platform?from=0&to=2764800000",
+    ] {
+        let (status, body, _) = logs_call(&fake, "GET", path, Value::Null);
+        assert_eq!((status, &body["error"]), (400, &json!("invalid_range")));
+    }
+    assert!(fake.api_queries.borrow().is_empty());
 }
 
 #[test]

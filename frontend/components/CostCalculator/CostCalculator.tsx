@@ -361,9 +361,34 @@ export function Pricing({ s, setZone }: PricingProps) {
 interface ResultsProps {
   s: CalcState
   r: CalcResults
+  observedStorageGbHours?: number | null
 }
 
-export function Results({ s, r }: ResultsProps) {
+export function Results({ s, r, observedStorageGbHours }: ResultsProps) {
+  const observedStorageGbMonths = observedStorageGbHours == null
+    ? null
+    : observedStorageGbHours / 720
+  const observedStorageCost = observedStorageGbMonths == null
+    ? null
+    : observedStorageGbMonths * s.rateStorage
+  const displayedResult = observedStorageCost == null
+    ? r
+    : {
+        ...r,
+        costStorage: observedStorageCost,
+        totalCost: r.totalCost - r.costStorage + observedStorageCost,
+        storageTiers: [{
+          label: 'Fastly Platform (account-wide)',
+          gbMonths: observedStorageGbMonths ?? 0,
+          flagged: false,
+        }],
+      }
+  const storageTierDetail = displayedResult.storageTiers
+    .map((tier) => {
+      const value = observedStorageCost == null ? Math.max(0.001, tier.gbMonths) : tier.gbMonths
+      return `${tier.label}: ${value.toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`
+    })
+    .join(' · ')
   return (
     <div className='bg-muted/30 border rounded-lg p-5'>
       <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4'>Monthly Estimate Breakdown</h3>
@@ -380,8 +405,8 @@ export function Results({ s, r }: ResultsProps) {
         />
         <ResultRow
           label='Storage (GB-months billed)'
-          detail={r.storageTiers.map(t => `${t.label}: ${Math.max(0.001, t.gbMonths).toFixed(3)} GB-mo${t.flagged ? '*' : ''}`).join(' · ')}
-          cost={formatUSD(r.costStorage)}
+          detail={storageTierDetail}
+          cost={formatUSD(displayedResult.costStorage)}
         />
         <ResultRow
           label='CDN Egress'
@@ -397,10 +422,16 @@ export function Results({ s, r }: ResultsProps) {
         )}
         <ResultRow
           label='Total Estimated Monthly Cost'
-          cost={formatUSD(r.totalCost)}
+          cost={formatUSD(displayedResult.totalCost)}
           highlight
         />
       </div>
+
+      {observedStorageCost != null && (
+        <div className="mt-3 text-xs text-muted-foreground">
+          Measured · Fastly Platform (account-wide)
+        </div>
+      )}
 
       <div className='mt-5 pt-4 border-t border-border/40'>
         <h4 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Volume Estimates</h4>
@@ -434,9 +465,10 @@ export function Results({ s, r }: ResultsProps) {
 interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
+  observedStorageGbHours?: number | null
 }
 
-export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps) {
+export function CostCalculator({ prefillData, prefillNote, observedStorageGbHours }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
@@ -464,7 +496,7 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
         </div>
       </div>
 
-      <Results s={s} r={r} />
+      <Results s={s} r={r} observedStorageGbHours={observedStorageGbHours} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>
         * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Storage is billed in GB-hours;

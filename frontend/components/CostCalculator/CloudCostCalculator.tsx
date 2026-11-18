@@ -41,9 +41,10 @@ const RATE_ROWS: [keyof EstimateRates, string][] = [
   ['secret_rate_per_month', 'Secret Store ($/secret-month)'],
 ]
 
-export function CloudCostCalculator({ prefillData, rates: configuredRates }: {
+export function CloudCostCalculator({ prefillData, rates: configuredRates, observedStorageGbHours }: {
   prefillData?: Partial<MeasuredEstimate>
   rates?: Partial<Record<keyof EstimateRates, number | null>>
+  observedStorageGbHours?: number | null
 }) {
   const [edits, setEdits] = useState<Partial<EstimateInputs>>({})
   const inputs = { ...DEFAULT_INPUTS, ...prefillData?.inputs, ...edits }
@@ -57,6 +58,24 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates }: {
   const result = estimateMonthly(inputs, units, rates, prefillData?.compaction, {
     relay: prefillData?.relay ?? 0,
   })
+  const observedStorageGbMonths = observedStorageGbHours == null
+    ? null
+    : observedStorageGbHours / 720
+  const observedStorageCost = observedStorageGbMonths == null
+    ? null
+    : observedStorageGbMonths * rates.storage_rate_per_gb_month
+  const resultLines = observedStorageCost == null
+    ? result.lines
+    : result.lines.map((line) => line.id === 'storage'
+      ? {
+          ...line,
+          detail: `Measured · Fastly Platform (account-wide) · ${(observedStorageGbMonths ?? 0).toFixed(2)} GB-months`,
+          usd: observedStorageCost,
+        }
+      : line)
+  const resultTotal = observedStorageCost == null
+    ? result.total
+    : result.total - (result.lines.find((line) => line.id === 'storage')?.usd ?? 0) + observedStorageCost
   const set = (key: keyof EstimateInputs) => (value: number | boolean) =>
     setEdits((current) => ({ ...current, [key]: value }))
   const inputRow = ([key, label]: [keyof EstimateInputs, string]) => (
@@ -106,10 +125,10 @@ export function CloudCostCalculator({ prefillData, rates: configuredRates }: {
       </div>
       <div className="bg-muted/30 border rounded-lg p-5">
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4">Monthly Estimate Breakdown</h3>
-        {result.lines.map((line) => (
+        {resultLines.map((line) => (
           <ResultRow key={line.id} label={line.label} detail={line.detail} cost={formatUSD(line.usd)} />
         ))}
-        <ResultRow label="Total Estimated Monthly Cost" cost={formatUSD(result.total)} highlight />
+        <ResultRow label="Total Estimated Monthly Cost" cost={formatUSD(resultTotal)} highlight />
       </div>
     </div>
   )

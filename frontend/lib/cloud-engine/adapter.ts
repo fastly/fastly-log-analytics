@@ -889,6 +889,23 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   const { pathname, searchParams } = url;
   const method = (request.method || "GET").toUpperCase();
 
+  if (pathname === "/api/usage/platform" && method === "GET") {
+    const adminUrl = new URL("/api/admin/usage/platform", url);
+    const from = searchParams.get("from") ?? searchParams.get("start");
+    const to = searchParams.get("to") ?? searchParams.get("end");
+    const fromMs = from !== null && /^\d+$/.test(from) ? from : Date.parse(from ?? "");
+    const toMs = to !== null && /^\d+$/.test(to) ? to : Date.parse(to ?? "");
+    if (Number.isFinite(Number(fromMs)) && Number.isFinite(Number(toMs))) {
+      adminUrl.searchParams.set("from", String(fromMs));
+      adminUrl.searchParams.set("to", String(toMs));
+    }
+    return fetch(adminUrl.pathname + adminUrl.search, {
+      headers: request.headers,
+      signal: request.signal,
+      credentials: "include",
+    });
+  }
+
   // Fold per-file Compute telemetry into the query beacon
   if (pathname === "/api/file" || pathname === "/api/files") {
     try {

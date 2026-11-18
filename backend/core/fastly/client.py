@@ -925,6 +925,7 @@ _PLATFORM_GRANULARITIES = {
     "daily": "daily",
 }
 _RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+_PLATFORM_METRICS_MAX_PAGES = 1000
 
 
 def fastly_platform_metrics(
@@ -970,7 +971,7 @@ def fastly_platform_metrics(
     cursor: str | None = None
     meta: dict[str, Any] = {}
 
-    while True:
+    for _ in range(_PLATFORM_METRICS_MAX_PAGES):
         page_params = dict(params)
         if cursor is not None:
             page_params["cursor"] = cursor
@@ -1019,6 +1020,8 @@ def fastly_platform_metrics(
             raise RuntimeError("Platform Metrics returned a repeated cursor")
         cursors.add(next_cursor)
         cursor = next_cursor
+    else:
+        raise RuntimeError("Platform Metrics pagination exceeded the page limit")
 
     return {"status": "success", "data": records, "meta": meta}
 

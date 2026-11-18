@@ -2191,6 +2191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/usage/platform": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Platform Usage */
+        get: operations["platform_usage_api_usage_platform_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/usage/operations": {
         parameters: {
             query?: never;
@@ -13848,6 +13865,149 @@ export interface components {
             mask_ips: boolean;
         } & {
             [key: string]: unknown;
+        };
+        /** PlatformComputeUsage */
+        PlatformComputeUsage: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "not_configured" | "unavailable";
+            /** Scope */
+            scope?: "app_and_worker" | null;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /**
+             * Billed Time Ms
+             * @default 0
+             */
+            billed_time_ms: number;
+            /**
+             * Backend Errors
+             * @default 0
+             */
+            backend_errors: number;
+            /**
+             * Cache Operations
+             * @default 0
+             */
+            cache_operations: number;
+            /**
+             * Sandboxes
+             * @default 0
+             */
+            sandboxes: number;
+            /**
+             * Resource Errors
+             * @default 0
+             */
+            resource_errors: number;
+            /** Reason */
+            reason?: string | null;
+        };
+        /** PlatformNgwafUsage */
+        PlatformNgwafUsage: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "not_configured" | "unavailable";
+            /** Scope */
+            scope?: "workspace" | null;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+            /**
+             * Allowed
+             * @default 0
+             */
+            allowed: number;
+            /**
+             * Blocked
+             * @default 0
+             */
+            blocked: number;
+            /**
+             * Challenged
+             * @default 0
+             */
+            challenged: number;
+            /**
+             * Logged
+             * @default 0
+             */
+            logged: number;
+            /**
+             * Timeout
+             * @default 0
+             */
+            timeout: number;
+            /**
+             * Unknown
+             * @default 0
+             */
+            unknown: number;
+            /** Reason */
+            reason?: string | null;
+        };
+        /** PlatformStorageUsage */
+        PlatformStorageUsage: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "not_configured" | "unavailable";
+            /**
+             * Scope
+             * @constant
+             */
+            scope: "account";
+            /** Observed At */
+            observed_at?: string | null;
+            /** Bytes */
+            bytes?: number | null;
+            /** Buckets */
+            buckets?: number | null;
+            /** Gb Hours */
+            gb_hours?: number | null;
+            /** Reason */
+            reason?: string | null;
+        };
+        /** PlatformUsageResponse */
+        PlatformUsageResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
+            /** Section Timings */
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "fastly" | "partial" | "unavailable";
+            storage: components["schemas"]["PlatformStorageUsage"];
+            compute: components["schemas"]["PlatformComputeUsage"];
+            ngwaf: components["schemas"]["PlatformNgwafUsage"];
         };
         /** PopHealthItem */
         PopHealthItem: {
@@ -33251,6 +33411,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CurrentStorageResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    platform_usage_api_usage_platform_get: {
+        parameters: {
+            query?: {
+                start?: string;
+                end?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformUsageResponse"];
                 };
             };
             /** @description Bad request */
