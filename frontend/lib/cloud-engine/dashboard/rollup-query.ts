@@ -112,7 +112,55 @@ export type Rollup = {
    * as NaN sums, null labels and null histograms.
    */
   loaded?: ReadonlySet<string>;
+  /** `value` rows: field → value → UTC day start ms → sums (absent before any value row). */
+  value?: Map<string, Map<string, Map<number, RollupValue>>>;
+  /** `value` `dim_totals` counts: field → requests over every value, kept or cut. */
+  valueTotals?: Map<string, number>;
 };
+
+/**
+ * One /fastly-value `value` row: requests, plus per field the body bytes over rows with a body
+ * (`cache`, `io`), elapsed µs over rows with one (`cache`), Image Optimizer bytes (`io_both`)
+ * and input/output ratios over rows with output bytes (`io_pair`).
+ */
+export type RollupValue = {
+  requests: number;
+  respBytes: number;
+  bytesCount: number;
+  elapsedSum: number;
+  elapsedCount: number;
+  ioIn: number;
+  ioOut: number;
+  ratioSum: number;
+  ratioCount: number;
+};
+
+const VALUE_COLUMNS = {
+  requests: "requests",
+  respBytes: "resp_bytes_sum",
+  bytesCount: "count",
+  elapsedSum: "elapsed_sum",
+  elapsedCount: "elapsed_count",
+  ioIn: "io_in_sum",
+  ioOut: "io_out_sum",
+  ratioSum: "ratio_sum",
+  ratioCount: "ratio_count",
+} as const;
+const VALUE_KEYS = Object.keys(VALUE_COLUMNS) as (keyof RollupValue)[];
+
+function addValue(
+  into: Map<string, Map<string, Map<number, RollupValue>>>,
+  field: string,
+  value: string,
+  day: number,
+  sums: RollupValue,
+) {
+  const values = into.get(field) ?? new Map<string, Map<number, RollupValue>>();
+  into.set(field, values);
+  const days = values.get(value) ?? new Map<number, RollupValue>();
+  values.set(value, days);
+  days.set(day, addSums(days.get(day), sums, VALUE_KEYS));
+}
 
 /** One `sample` row: a raw row with a TTFB, picked by its hashed `key`. */
 export type RollupSample = {
@@ -384,18 +432,20 @@ function guard(rollup: Rollup, loaded: ReadonlySet<string> | undefined): Rollup 
     assertLoaded(loaded, group);
     assertLoaded(loaded, group === "all_fields" ? "field_totals" : "dim_totals");
   });
-  const unloaded = (property: keyof Rollup, group: string) => {
-    if (loaded.has(group)) return;
+  const unloaded = (property: keyof Rollup, ...needs: string[]) => {
+    if (needs.every((group) => loaded.has(group))) return;
     Object.defineProperty(rollup, property, {
       configurable: true,
       enumerable: false,
-      get: () => assertLoaded(loaded, group),
+      get: () => needs.forEach((group) => assertLoaded(loaded, group)),
     });
   };
   unloaded("waterfall", "overview");
   unloaded("overview", "overview");
   unloaded("assets", "assets");
   unloaded("samples", "sample");
+  unloaded("value", "value");
+  unloaded("valueTotals", "value", "dim_totals");
   return rollup;
 }
 
@@ -438,6 +488,7 @@ export async function decodeRollup(
     ...Object.values(WATERFALL_COLUMNS),
     ...Object.values(OVERVIEW_COLUMNS),
     ...Object.values(ASSET_COLUMNS),
+    ...Object.values(VALUE_COLUMNS),
   ])]));
   const binary = await readSummaryColumns(parts, read(Object.values(HIST_COLUMNS)), false);
   // A column the spec left out reads as NaN; one the file lacks (an older summary) as 0.
@@ -506,7 +557,19 @@ export async function decodeRollup(
       case "dim_totals":
         rollup.present!.add(`${String(value[i])}/${name}`);
         if (truncated[i] === true) rollup.truncated.add(`${String(value[i])}/${name}`);
+        if (value[i] === "value") {
+          const totals = (rollup.valueTotals ??= new Map());
+          totals.set(name, (totals.get(name) ?? 0) + num(col("requests")[i]));
+        }
         break;
+      case "value": {
+        const t = bucketMs(bucket[i]);
+        if (t === null) return null;
+        const sums = {} as RollupValue;
+        for (const key of VALUE_KEYS) sums[key] = num(col(VALUE_COLUMNS[key])[i]);
+        addValue((rollup.value ??= new Map()), name, String(value[i] ?? ""), t, sums);
+        break;
+      }
       case "overview": {
         const sums = {} as RollupWaterfall;
         for (const key of WATERFALL_KEYS) sums[key] = num(col(WATERFALL_COLUMNS[key])[i]);
@@ -603,6 +666,15 @@ export function mergeRollups(rollups: readonly Rollup[]): Rollup {
     }
     const samples = own(rollup, "samples");
     if (samples) (out.samples ??= []).push(...samples);
+    for (const [field, values] of own(rollup, "value") ?? []) {
+      for (const [value, days] of values) {
+        for (const [day, sums] of days) addValue((out.value ??= new Map()), field, value, day, sums);
+      }
+    }
+    for (const [field, n] of own(rollup, "valueTotals") ?? []) {
+      const totals = (out.valueTotals ??= new Map());
+      totals.set(field, (totals.get(field) ?? 0) + n);
+    }
     const waterfall = own(rollup, "waterfall");
     if (waterfall) out.waterfall = addWaterfall(out.waterfall, waterfall);
     const overview = own(rollup, "overview");

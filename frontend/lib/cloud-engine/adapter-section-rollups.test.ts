@@ -94,7 +94,8 @@ describe("Cloud /assets and /fastly-value summary sections", () => {
 
     vi.mocked(valueFromRollup).mockClear();
     vi.mocked(ensureCloudRange).mockClear();
-    expect((await post("/api/value/summary", { sections: ["caching"] }))!.status).toBe(200);
+    expect((await post("/api/value/summary", { sections: ["caching"], filters: { cache: { mode: "include", values: ["HIT"] } } }))!.status)
+      .toBe(200);
     expect(valueFromRollup).not.toHaveBeenCalled();
     const columns = vi.mocked(ensureCloudRange).mock.calls[0][4]?.projection?.columns;
     expect(columns).toEqual(expect.arrayContaining(["cache", "resp_bytes", "edge"]));

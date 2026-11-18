@@ -60,6 +60,7 @@ describe("answerFromRollup", () => {
     ["/api/origin/aggregates", origin, originSource, originFromRollup],
     ["/api/performance/aggregates", performance, source, performanceFromRollup],
     ["/api/security/aggregates", security, source, securityFromRollup],
+    ["/api/security/threat-intel", range, source, securityFromRollup],
   ] as const)("answers %s as the section reader does, unchanged by structured cloning", async (path, params, make, direct) => {
     const answer = await answerFromRollup(path, params, make());
     expect(answer).not.toBeNull();

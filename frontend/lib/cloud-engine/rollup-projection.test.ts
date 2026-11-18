@@ -4,7 +4,7 @@ import { ASSETS_SUMMARY_SPEC, assetsFromRollup, type AssetsRollupBody } from "./
 import type { ManifestFile } from "./dashboard/manifest";
 import { decodeRollup, mergeRollups, rollupGroup } from "./dashboard/rollup-query";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
-import { withSummaryLayout } from "./dashboard/summary-layout-fixture";
+import { editSummaryRows, withSummaryLayout } from "./dashboard/summary-layout-fixture";
 import {
   defineSummarySpec, readSummaryColumns, readSummaryProjection, summaryProjectionLimits, type SummarySpec,
 } from "./dashboard/summary-projection";
@@ -17,6 +17,10 @@ import { NETWORK_SUMMARY_SPEC, networkFromRollup } from "./network-rollup";
 import { ORIGIN_SUMMARY_SPEC, originFromRollup, type OriginRollupBody } from "./origin-rollup";
 import { PERFORMANCE_SUMMARY_SPEC, performanceFromRollup, type PerformanceRollupBody } from "./performance-rollup";
 import type { RollupAnswerSource } from "./rollup-answer";
+import { SECURITY_ROLLUP_SECTIONS, VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
+import {
+  SECURITY_THREAT_INTEL_SUMMARY_SPEC, securityFromRollup, type SecurityRollupBody, securitySummarySpec,
+} from "./security-rollup";
 import { VALUE_SUMMARY_SPEC, valueFromRollup, type ValueRollupBody } from "./value-rollup";
 
 const HOUR = 3_600_000;
@@ -27,15 +31,29 @@ const FIXTURES = {
   network: loadSummaryFixtures("network-summaries"),
   origin: loadSummaryFixtures("origin-summaries"),
   dashboard: loadSummaryFixtures("../dashboard/__fixtures__/summaries"),
+  securityValue: loadSummaryFixtures("security-value-summaries"),
+  preValue: loadSummaryFixtures("network-summaries"),
 };
 type FixtureName = keyof typeof FIXTURES;
+/** Summary rows as written before the `value` group, for the reads that fall back without it. */
+const EDITS: Partial<Record<FixtureName, (rows: Record<string, unknown>[]) => Record<string, unknown>[]>> = {
+  preValue: (rows) => rows.filter((row) => row.bundle !== "value" && !(row.bundle === "dim_totals" && row.value === "value")),
+};
 
 type Answer = (source: RollupAnswerSource, spec: SummarySpec | null) => Promise<unknown>;
 /**
  * `inert`: columns the page reads that every fixture leaves null or zero in the
  * named groups, so no answer here can tell them missing; the test checks that.
+ * `elsewhere`: spec groups or columns (as the needs test names them) only rows
+ * no fixture here holds can show missing, each shown by its own test.
  */
-type Page = { spec: SummarySpec; fixtures: FixtureName[]; answers: Answer[]; inert?: Record<string, string[]> };
+type Page = {
+  spec: SummarySpec;
+  fixtures: FixtureName[];
+  answers: Answer[];
+  inert?: Record<string, string[]>;
+  elsewhere?: string[];
+};
 
 const HEALTH = ["summary", "leaderboard", "metro_leaderboard", "heatmap", "buckets"];
 const network = (path: string, params: Record<string, unknown>): Answer => (source, spec) =>
@@ -57,6 +75,9 @@ const value = (body: Partial<ValueRollupBody>): Answer => (source, spec) =>
   valueFromRollup("/api/value/summary", {
     ...range, sections: ["overview", "network"], chart_interval: "1 day", ...body,
   } as ValueRollupBody, source, undefined, spec);
+const security = (path: string, body: Partial<SecurityRollupBody> = {}): Answer => (source, spec) =>
+  securityFromRollup(path, { ...range, ...body }, source, undefined, spec);
+const SECURITY_ALL = { sections: [...SECURITY_ROLLUP_SECTIONS], bucket_seconds: 3600 };
 const insights: Answer = async (source, spec) => {
   const body = { service_id: "example", window_size_hrs: 1, baseline_hours: 1, clamp_end: new Date(T1).toISOString() };
   vi.useFakeTimers({ toFake: ["Date"], now: T1 });
@@ -107,8 +128,27 @@ const PAGES: Record<string, Page> = {
   },
   value: {
     spec: VALUE_SUMMARY_SPEC,
-    fixtures: ["network", "origin"],
-    answers: [value({}), value({ chart_interval: "1 hour" } as Partial<ValueRollupBody>)],
+    fixtures: ["network", "origin", "securityValue", "preValue"],
+    answers: [
+      value({}),
+      value({ chart_interval: "1 hour" } as Partial<ValueRollupBody>),
+      value({ sections: [...VALUE_ROLLUP_SECTIONS] }),
+    ],
+  },
+  security: {
+    spec: securitySummarySpec(SECURITY_ROLLUP_SECTIONS),
+    fixtures: ["securityValue"],
+    answers: [
+      security("/api/security/aggregates", SECURITY_ALL),
+      security("/api/security/bundle", { ...SECURITY_ALL, mask_ips: true }),
+    ],
+  },
+  threatIntel: {
+    spec: SECURITY_THREAT_INTEL_SUMMARY_SPEC,
+    fixtures: ["securityValue"],
+    answers: [security("/api/security/threat-intel")],
+    // WAF rule and bot columns; see security-rollup.test.ts "reads the field totals ...".
+    elsewhere: ["group field_totals"],
   },
   insights: { spec: INSIGHTS_SUMMARY_SPEC, fixtures: ["network", "dashboard"], answers: [insights] },
 };
@@ -126,9 +166,11 @@ async function listing(name: FixtureName, set: "window" | "hour", layout: boolea
   }
   const chosen = set === "window" ? fixture.files("window") : [...hours.values()];
   const buffers = { ...fixture.buffers };
+  const edit = EDITS[name];
   const summaries = await Promise.all(chosen.map(async (file) => {
-    if (!layout) return file;
-    buffers[file.key] = await withSummaryLayout(fixture.buffers[file.key]);
+    if (!layout && !edit) return file;
+    const bytes = edit ? await editSummaryRows(fixture.buffers[file.key], edit) : fixture.buffers[file.key];
+    buffers[file.key] = layout ? await withSummaryLayout(bytes) : bytes;
     return { ...file, size: buffers[file.key].byteLength };
   }));
   return { raw: fixture.files("raw"), summaries, buffers };
@@ -170,8 +212,8 @@ beforeAll(async () => {
       for (const layout of [false, true]) LISTINGS[`${name}/${set}/${layout ? "layout" : "legacy"}`] = await listing(name, set, layout);
     }
   }
-  // The fixtures are a few KiB, which a projection would otherwise read whole.
-  Object.assign(summaryProjectionLimits, { wholeBelowBytes: 0, wholeAboveShare: 1 });
+  // The fixtures are a few KiB and mostly footer, which a projection would otherwise read whole.
+  Object.assign(summaryProjectionLimits, { wholeBelowBytes: 0, wholeAboveShare: Infinity });
 }, 120_000);
 const LIMITS = { ...summaryProjectionLimits };
 afterAll(() => Object.assign(summaryProjectionLimits, LIMITS));
@@ -213,7 +255,8 @@ describe.each(Object.entries(PAGES))("%s from projected summaries", (_name, page
         }),
       })),
     ];
-    for (const { name } of reduced) differs[name] = false;
+    for (const { name } of reduced) differs[name] = page.elsewhere?.includes(name) ?? false;
+    expect((page.elsewhere ?? []).filter((name) => !(name in differs))).toEqual([]);
     for (const fixture of page.fixtures) {
       for (const set of ["window", "hour"]) {
         const listing = LISTINGS[`${fixture}/${set}/legacy`];

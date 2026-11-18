@@ -2,23 +2,30 @@
 import { parquetMetadata } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
+import { type DuckDBReadContext, DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import { Hll } from "./dashboard/hll";
 import type { ManifestFile } from "./dashboard/manifest";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
-import { withSummaryLayout } from "./dashboard/summary-layout-fixture";
+import { editSummaryRows, withSummaryLayout } from "./dashboard/summary-layout-fixture";
 import { defineSummarySpec, summaryProjectionLimits, type SummarySpec } from "./dashboard/summary-projection";
 import { fixtureSource, projectingSource } from "./dashboard/test-fixtures";
 import { SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
-import { executeSecurityAggregates, type SecurityAggregatesResponse, type SecuritySectionName } from "./security";
+import {
+  executeSecurityAggregates,
+  executeSecurityThreatIntel,
+  type SecurityAggregatesResponse,
+  type SecuritySectionName,
+} from "./security";
 import {
   decodeSecuritySummary,
   SECURITY_SUMMARY_SPEC,
+  SECURITY_THREAT_INTEL_SUMMARY_SPEC,
   SECURITY_TLS_SUMMARY_SPEC,
   type SecurityRollup,
   securityAggregatesFromRollup,
   securityFromRollup,
   securityRollupEligible,
+  threatIntelFromRollup,
 } from "./security-rollup";
 
 const HOUR = 3_600_000;
@@ -203,10 +210,16 @@ async function rollupOf(list: ManifestFile[], buffers = SYNTH): Promise<Security
   return { files, dataFromMs: T0, dataThroughMs: T1 };
 }
 
-const SECTIONS = [...SECURITY_ROLLUP_SECTIONS];
+/** The sections the `all_fields`, `bins` and `time_series` rows answer, which these synthetic summaries carry. */
+const SECTIONS: SecuritySectionName[] = [
+  "ngwaf_verified_bots", "ngwaf_verified_bots_ts", "tls_fingerprints", "fingerprint_coverage", "req_size_dist",
+  "ipv6_adoption", "proxy_dist", "conn_reuse_dist", "verified_bots_ts",
+];
+/** The sections the Rust-written `header_ip`, `bot_ua`, `proxy` rows and the `ua` and `_ref_stem` fields answer. */
+const ROW_SECTIONS: SecuritySectionName[] = ["top_ips_header", "wellknown_bots", "bot_efficiency", "top_bots", "proxies"];
 const body = (extra: Record<string, unknown> = {}) => ({ start_time: START, end_time: END, sections: SECTIONS, ...extra });
 
-async function rawAnswer(buffers: Record<string, ArrayBuffer>, raw: ManifestFile[], sections: string[], bucketSeconds = 300) {
+async function withRaw<T>(buffers: Record<string, ArrayBuffer>, raw: ManifestFile[], run: (read: DuckDBReadContext) => Promise<T>) {
   const engine = new ParquetEngine();
   const lease = engine.lease([]);
   try {
@@ -214,13 +227,17 @@ async function rawAnswer(buffers: Record<string, ArrayBuffer>, raw: ManifestFile
       await lease.ingestFile(file.key, `${file.key}.parquet`, buffers[file.key], undefined, undefined, "request", { deferView: true });
     }
     await lease.publishView();
-    return await executeSecurityAggregates({
-      start_time: START, end_time: END, bucket_seconds: bucketSeconds, sections: sections as SecuritySectionName[],
-    }, lease.readContext());
+    return await run(lease.readContext());
   } finally {
     lease.release();
     await engine.reset();
   }
+}
+
+function rawAnswer(buffers: Record<string, ArrayBuffer>, raw: ManifestFile[], sections: string[], bucketSeconds = 300, maskIps = false) {
+  return withRaw(buffers, raw, (read) => executeSecurityAggregates({
+    start_time: START, end_time: END, bucket_seconds: bucketSeconds, sections: sections as SecuritySectionName[], mask_ips: maskIps,
+  }, read));
 }
 
 /** Raw and rollup answers agree exactly, but fingerprint IP counts within HLL error. */
@@ -253,7 +270,7 @@ describe("security rollup vs raw DuckDB over the same rows", () => {
 
   it("matches every summary-backed section from windows and hour bundles", async () => {
     for (const list of [RUST_WINDOWS, RUST_HOURS]) {
-      expectParity(securityAggregatesFromRollup(await rollupOf(list), body({ bucket_seconds: 3600 })), want);
+      expectParity(await securityAggregatesFromRollup(await rollupOf(list), body({ bucket_seconds: 3600 })), want);
     }
   });
 
@@ -261,26 +278,26 @@ describe("security rollup vs raw DuckDB over the same rows", () => {
     const day = await rollupOf(RUST_DAY);
     const { ipv6_adoption: _, ...rest } = want;
     const sections = SECTIONS.filter((s) => s !== "ipv6_adoption");
-    expectParity(securityAggregatesFromRollup(day, body({ sections, bucket_seconds: 3600 })), rest);
-    expect(securityAggregatesFromRollup(day, body())).toBeNull();
+    expectParity(await securityAggregatesFromRollup(day, body({ sections, bucket_seconds: 3600 })), rest);
+    expect(await securityAggregatesFromRollup(day, body())).toBeNull();
   });
 
   it("matches the 5-minute verified-bot series from windows and refuses buckets the summaries can't tile", async () => {
     const raw = await rawAnswer(SYNTH, RUST_RAW, ["verified_bots_ts"], 600);
     const windows = await rollupOf(RUST_WINDOWS);
-    expect(securityAggregatesFromRollup(windows, body({ sections: ["verified_bots_ts"], bucket_seconds: 600 }))?.verified_bots_ts)
+    expect((await securityAggregatesFromRollup(windows, body({ sections: ["verified_bots_ts"], bucket_seconds: 600 })))?.verified_bots_ts)
       .toEqual(raw.verified_bots_ts);
     for (const bucket of [450, 7 * 3600]) {
-      expect(securityAggregatesFromRollup(windows, body({ sections: ["verified_bots_ts"], bucket_seconds: bucket }))).toBeNull();
+      expect(await securityAggregatesFromRollup(windows, body({ sections: ["verified_bots_ts"], bucket_seconds: bucket }))).toBeNull();
     }
-    expect(securityAggregatesFromRollup(await rollupOf(RUST_DAY), body({ sections: ["verified_bots_ts"], bucket_seconds: 600 })))
+    expect(await securityAggregatesFromRollup(await rollupOf(RUST_DAY), body({ sections: ["verified_bots_ts"], bucket_seconds: 600 })))
       .toBeNull();
   });
 });
 
 describe("securityAggregatesFromRollup", () => {
   it("marks fingerprint IP counts approximate, and nothing a lower bound when no field was cut", async () => {
-    const out = securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body());
+    const out = await securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body());
     expect(out?.rollup).toEqual({
       data_from: START, data_through: END, approximate: ["tls_fingerprints.ip_count"], lower_bound: [],
     });
@@ -290,14 +307,14 @@ describe("securityAggregatesFromRollup", () => {
     const noEmpty = WINDOW_ROWS[0].map((r) => (r.tls === "" ? { ...r, tls: null } : r));
     const cut = { [RUST_WINDOWS[0].key]: summaryParquet(noEmpty, { topK: 3, binsCut: true }) };
     const rollup = await rollupOf(RUST_WINDOWS, { ...SYNTH, ...cut });
-    expect(securityAggregatesFromRollup(rollup, body())).toBeNull();
+    expect(await securityAggregatesFromRollup(rollup, body())).toBeNull();
     const sections = SECTIONS.filter((s) => s !== "tls_fingerprints" && s !== "fingerprint_coverage");
-    expect(securityAggregatesFromRollup(rollup, body({ sections }))?.rollup.lower_bound)
+    expect((await securityAggregatesFromRollup(rollup, body({ sections })))?.rollup.lower_bound)
       .toEqual(["req_size_dist", "conn_reuse_dist", "proxy_dist"]);
     // tls_ciphers_sha keeps '' among its top 3 when '' is common enough.
     const rows = WINDOW_ROWS[0].map((r, i) => ({ ...r, tls: i % 3 === 0 ? "" : r.tls }));
     const keptEmpty = await rollupOf([RUST_WINDOWS[0]], { [RUST_WINDOWS[0].key]: summaryParquet(rows, { topK: 3 }) });
-    expect(securityAggregatesFromRollup(keptEmpty, body({ sections: ["tls_fingerprints"] }))?.rollup.lower_bound)
+    expect((await securityAggregatesFromRollup(keptEmpty, body({ sections: ["tls_fingerprints"] })))?.rollup.lower_bound)
       .toEqual(["tls_fingerprints.request_count"]);
   });
 
@@ -305,25 +322,25 @@ describe("securityAggregatesFromRollup", () => {
     for (const [field, section] of [["proxy_type", "proxy_dist"], ["client_ip", "tls_fingerprints"]]) {
       const custom = { [RUST_WINDOWS[2].key]: summaryParquet(WINDOW_ROWS[2], { customFields: [field] }) };
       const rollup = await rollupOf(RUST_WINDOWS, { ...SYNTH, ...custom });
-      expect(securityAggregatesFromRollup(rollup, body({ sections: [section] })), field).toBeNull();
-      expect(securityAggregatesFromRollup(rollup, body({ sections: ["req_size_dist"] }))).not.toBeNull();
+      expect(await securityAggregatesFromRollup(rollup, body({ sections: [section] })), field).toBeNull();
+      expect(await securityAggregatesFromRollup(rollup, body({ sections: ["req_size_dist"] }))).not.toBeNull();
     }
   });
 
   it("refuses the IPv6 share when a window's requests span two hours", async () => {
     const rows = WINDOW_ROWS[3].map((r, i) => (i === 0 ? { ...r, ts: T0 + HOUR + 60_000 } : r));
     const rollup = await rollupOf(RUST_WINDOWS, { ...SYNTH, [RUST_WINDOWS[3].key]: summaryParquet(rows) });
-    expect(securityAggregatesFromRollup(rollup, body({ sections: ["ipv6_adoption"] }))).toBeNull();
+    expect(await securityAggregatesFromRollup(rollup, body({ sections: ["ipv6_adoption"] }))).toBeNull();
   });
 
   it("refuses a connection count that isn't a plain integer", async () => {
     const rows = WINDOW_ROWS[1].map((r, i) => (i === 0 ? { ...r, conn: 2.5 } : r));
     const rollup = await rollupOf(RUST_WINDOWS, { ...SYNTH, [RUST_WINDOWS[1].key]: summaryParquet(rows) });
-    expect(securityAggregatesFromRollup(rollup, body({ sections: ["conn_reuse_dist"] }))).toBeNull();
+    expect(await securityAggregatesFromRollup(rollup, body({ sections: ["conn_reuse_dist"] }))).toBeNull();
   });
 
   it("answers only the requested sections, with their raw companions", async () => {
-    const out = securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body({ sections: ["tls_fingerprints", "ngwaf_verified_bots"] }));
+    const out = await securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body({ sections: ["tls_fingerprints", "ngwaf_verified_bots"] }));
     expect(Object.keys(out!).sort()).toEqual([
       "fingerprint_coverage", "ngwaf_configured", "ngwaf_verified_bots", "ngwaf_verified_bots_ts", "rollup", "tls_fingerprints",
     ]);
@@ -335,7 +352,7 @@ describe("IPv6 share from Rust-written summaries", () => {
     const want = await rawAnswer(RUST.buffers, RUST_RAW, ["ipv6_adoption"]);
     expect(want.ipv6_adoption).toHaveLength(2);
     for (const list of [RUST_WINDOWS, RUST_HOURS]) {
-      const got = securityAggregatesFromRollup(await rollupOf(list, RUST.buffers), body({ sections: ["ipv6_adoption"] }));
+      const got = await securityAggregatesFromRollup(await rollupOf(list, RUST.buffers), body({ sections: ["ipv6_adoption"] }));
       expect(got?.ipv6_adoption).toEqual(want.ipv6_adoption);
     }
     const dayOnly = fixtureSource([fixturePage(RUST_RAW)], RUST.buffers, { json: [], files: [] }, [fixturePage(RUST_DAY)]);
@@ -352,7 +369,7 @@ describe("securityFromRollup", () => {
   it("answers unfiltered reads from summaries alone, without day bundles when IPv6 is asked", async () => {
     const s = source();
     const served = await securityFromRollup(PATH, body(), s);
-    expect(served).toEqual(securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body()));
+    expect(served).toEqual(await securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body()));
     expect(s.log.files.sort()).toEqual(RUST_WINDOWS.map((f) => f.key).sort());
     const noIpv6 = source();
     const sections = SECTIONS.filter((x) => x !== "ipv6_adoption");
@@ -361,15 +378,11 @@ describe("securityFromRollup", () => {
     expect(noIpv6.log.files).toEqual(RUST_DAY.map((f) => f.key));
   });
 
-  it("leaves filtered reads, row-level sections, unnamed sections, bad ranges and other routes to the raw scan", async () => {
+  it("leaves filtered reads, unknown or unnamed sections, bad ranges and other routes to the raw scan", async () => {
     for (const params of [
       body({ filters: { pop: { values: ["IAD"], mode: "include" } } }),
       body({ filters: { country: ["US"] } }),
-      body({ sections: [...SECTIONS, "wellknown_bots"] }),
-      body({ sections: ["bot_efficiency"] }),
-      body({ sections: ["top_ips_header"] }),
-      body({ sections: ["proxies"] }),
-      body({ sections: ["top_bots"] }),
+      body({ sections: [...SECTIONS, "unknown"] }),
       body({ sections: undefined }),
       body({ sections: [] }),
       body({ start_time: undefined }),
@@ -378,9 +391,225 @@ describe("securityFromRollup", () => {
       expect(securityRollupEligible(PATH, params) && await securityFromRollup(PATH, params, source()), JSON.stringify(params))
         .toBeFalsy();
     }
-    for (const path of ["/api/security/proxies", "/api/security/threat-intel", "/api/security/top-bots"]) {
+    for (const path of ["/api/security/proxies", "/api/security/top-bots", "/api/security/proxies/export"]) {
       expect(securityRollupEligible(path, body())).toBe(false);
     }
+    expect(securityRollupEligible("/api/security/threat-intel", { start_time: START, end_time: END })).toBe(true);
+    expect(securityRollupEligible("/api/security/threat-intel", body({ filters: { pop: { values: ["IAD"] } } }))).toBe(false);
+  });
+});
+
+/** Rust-written summaries of rows with user agents, referers, header sizes, RTT minimums, JA3/JA4 and countries. */
+const SV = loadSummaryFixtures("security-value-summaries");
+const SV_RAW = SV.files("raw");
+const SV_LISTS: [string, ManifestFile[]][] = [
+  ["windows", SV.files("window")],
+  ["hours", SV.files("hour", (e) => e.key.includes("-c4-"))],
+  ["day", SV.files("day")],
+];
+
+type Summary = SecurityRollup["files"][number]["summary"];
+
+/** The rollup with its first file's totals and group sets copied and patched. */
+function patchFirst(rollup: SecurityRollup, patch: (summary: Summary) => void): SecurityRollup {
+  return {
+    ...rollup,
+    files: rollup.files.map(({ key, summary }, i) => {
+      if (i > 0) return { key, summary };
+      const copy = { ...summary, totals: new Map(summary.totals), groups: new Set(summary.groups),
+        groupsCut: new Set(summary.groupsCut) };
+      patch(copy);
+      return { key, summary: copy };
+    }),
+  };
+}
+
+const byKey = <T>(rows: T[] | undefined, key: (row: T) => string) =>
+  [...rows ?? []].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+
+/** Rows ordered by value, so ties a raw `ORDER BY ... LIMIT` breaks arbitrarily compare equal. */
+function rowSections(out: SecurityAggregatesResponse) {
+  return {
+    wellknown_bots: byKey(out.wellknown_bots, (r) => r.id),
+    bot_efficiency: byKey(out.bot_efficiency, (r) => r.bot_name)
+      .map(({ referrals: _r, requests_per_referral: _q, bytes_per_referral: _b, ...rest }) => rest),
+    bots: byKey(out.bots, (r) => r.id),
+    ngwaf_bots: out.ngwaf_bots,
+    active_proxies_count: out.active_proxies_count,
+    tunnel_requests_count: out.tunnel_requests_count,
+    distance_mismatches_count: out.distance_mismatches_count,
+    traffic_quality: byKey(out.traffic_quality, (r) => r.label),
+    suspicious_isps: byKey(out.suspicious_isps, (r) => `${r.isp}|${r.asn}`),
+    // Clients past the first 100 by risk then distance are cut, so ties there keep either row.
+    active_clients: (out.active_clients ?? []).map((r) => `${r.risk_level}|${r.distance_km}`).sort(),
+  };
+}
+
+/** The top header IPs agree on their sizes, and on the IPs above the last (possibly tied) size. */
+function expectTopIps(got: SecurityAggregatesResponse["top_ips_header"], want: SecurityAggregatesResponse["top_ips_header"]) {
+  expect(got!.map((r) => r.max_header)).toEqual(want!.map((r) => r.max_header));
+  const last = want!.at(-1)!.max_header;
+  const above = (rows: typeof want) => rows!.filter((r) => r.max_header > last).map((r) => r.ip).sort();
+  expect(above(got)).toEqual(above(want));
+}
+
+describe("security row sections vs raw DuckDB over the same rows", () => {
+  let want: SecurityAggregatesResponse;
+  let masked: SecurityAggregatesResponse;
+  beforeAll(async () => {
+    want = await rawAnswer(SV.buffers, SV_RAW, ROW_SECTIONS);
+    masked = await rawAnswer(SV.buffers, SV_RAW, ["top_ips_header", "proxies"], 300, true);
+  }, 60_000);
+
+  it("covers every row section with data, so a parity check can fail", () => {
+    expect(want.top_ips_header).toHaveLength(10);
+    expect(want.wellknown_bots!.length).toBeGreaterThan(2);
+    expect(want.bot_efficiency!.length).toBeGreaterThan(1);
+    expect(want.bot_efficiency!.some((r) => r.referrals > 0)).toBe(true);
+    expect(want.bots!.length).toBeGreaterThan(2);
+    expect(want.active_clients!.length).toBeGreaterThan(0);
+    expect(want.suspicious_isps!.length).toBeGreaterThan(0);
+    expect(masked.top_ips_header![0].ip).toMatch(/\.xxx$/);
+  });
+
+  it("matches every row section from windows, hour and day bundles, referrals within sketch error", async () => {
+    for (const [label, list] of SV_LISTS) {
+      const got = (await securityAggregatesFromRollup(await rollupOf(list, SV.buffers), body({ sections: ROW_SECTIONS })))!;
+      expect(got, label).not.toBeNull();
+      expectTopIps(got.top_ips_header, want.top_ips_header);
+      // A day bundle keeps 300 of the RTT rows; raw reads 5,000 of them, here every one.
+      const { active_proxies_count: _a, tunnel_requests_count: _t, distance_mismatches_count: _d, traffic_quality: _q,
+        suspicious_isps: _s, active_clients: _c, ...counts } = rowSections(got);
+      const { active_proxies_count: _A, tunnel_requests_count: _T, distance_mismatches_count: _D, traffic_quality: _Q,
+        suspicious_isps: _S, active_clients: _C, ...wantCounts } = rowSections(want);
+      expect(counts, label).toEqual(wantCounts);
+      if (label === "day") {
+        expect(got.rollup.approximate, label).toEqual(["bot_efficiency.referrals", "proxies"]);
+        expect(got.tunnel_requests_count!).toBeLessThanOrEqual(want.tunnel_requests_count!);
+      } else {
+        expect(rowSections(got), label).toEqual(rowSections(want));
+        expect(got.rollup.approximate, label).toEqual(["bot_efficiency.referrals"]);
+      }
+      expect(got.rollup.lower_bound, label).toEqual([]);
+      const referrals = (out: SecurityAggregatesResponse) => byKey(out.bot_efficiency, (r) => r.bot_name).map((r) => r.referrals);
+      referrals(got).forEach((n, i) => expect(Math.abs(n - referrals(want)[i]), label).toBeLessThanOrEqual(1));
+    }
+  });
+
+  it("masks IPs as the raw scan does", async () => {
+    const [, windows] = SV_LISTS[0];
+    const got = (await securityAggregatesFromRollup(await rollupOf(windows, SV.buffers),
+      body({ sections: ["top_ips_header", "proxies"], mask_ips: true })))!;
+    expectTopIps(got.top_ips_header, masked.top_ips_header);
+    expect(rowSections(got).active_clients).toEqual(rowSections(masked).active_clients);
+    expect(new Set(got.active_clients!.map((r) => r.ip.replace(/\.xxx$/, "")))).toEqual(
+      new Set(masked.active_clients!.map((r) => r.ip.replace(/\.xxx$/, ""))));
+  });
+
+  it("marks cut user agents lower bounds, and leaves custom client_ip and summaries without the rows to the raw scan", async () => {
+    const result = await rollupOf(SV_LISTS[0][1], SV.buffers);
+    const files = (patch: (summary: Summary) => void) => patchFirst(result, patch);
+    const cut = files((s) => {
+      s.groupsCut.add("bot_ua/ua");
+      s.totals.set("ua", { ...s.totals.get("ua")!, truncated: true });
+    });
+    expect((await securityAggregatesFromRollup(cut, body({ sections: ROW_SECTIONS })))!.rollup.lower_bound)
+      .toEqual(["wellknown_bots", "bot_efficiency", "top_bots"]);
+    const clientIp = files((s) => s.totals.set("client_ip", { count: 1, truncated: false }));
+    for (const section of ["top_ips_header", "wellknown_bots", "bot_efficiency", "proxies"]) {
+      expect(await securityAggregatesFromRollup(clientIp, body({ sections: [section] })), section).toBeNull();
+    }
+    expect(await securityAggregatesFromRollup(clientIp, body({ sections: ["top_bots"] }))).not.toBeNull();
+    for (const [group, section] of [
+      ["header_ip/ip", "top_ips_header"], ["bot_ua/ua", "wellknown_bots"], ["bot_ua/ua", "bot_efficiency"],
+      ["proxy/sample", "proxies"],
+    ]) {
+      expect(await securityAggregatesFromRollup(files((s) => s.groups.delete(group)), body({ sections: [section] })), group)
+        .toBeNull();
+    }
+    expect(await securityAggregatesFromRollup(files((s) => s.totals.delete("_ref_stem")), body({ sections: ["bot_efficiency"] })))
+      .toBeNull();
+  });
+});
+
+describe("threat intel from summaries", () => {
+  let want: Awaited<ReturnType<typeof executeSecurityThreatIntel>>;
+  /** Each fingerprint's countries with the most requests, any of which `MODE` may pick. */
+  const modes = new Map<string, string[]>();
+  beforeAll(async () => {
+    want = await withRaw(SV.buffers, SV_RAW, async (read) => {
+      const rows = await read.querySql(`
+        WITH c AS (
+          SELECT COALESCE(NULLIF(CAST(ja3 AS VARCHAR), ''), NULLIF(CAST(ja4 AS VARCHAR), '')) AS fp,
+                 CAST(country AS VARCHAR) AS country, COUNT(*) AS n
+          FROM logs WHERE country IS NOT NULL GROUP BY 1, 2)
+        SELECT fp, country FROM c WHERE fp IS NOT NULL
+          AND n = (SELECT MAX(n) FROM c AS d WHERE d.fp = c.fp)`);
+      for (const r of rows) modes.set(String(r.fp), [...modes.get(String(r.fp)) ?? [], String(r.country || "Unknown")]);
+      return executeSecurityThreatIntel({ start_time: START, end_time: END }, read);
+    });
+  }, 60_000);
+
+  /** Rows by fingerprint, each country checked against the tied modes and then dropped. */
+  const sorted = (rows: typeof want.data) => byKey(rows, (r) => r.tls_fingerprint).map(({ top_country, ...rest }) => {
+    expect(modes.get(rest.tls_fingerprint) ?? ["Unknown"], rest.tls_fingerprint).toContain(top_country);
+    return rest;
+  });
+
+  it("matches raw from windows, hour and day bundles", async () => {
+    expect(want.data.length).toBeGreaterThan(3);
+    expect(want.data.some((r) => r.is_anonymized_proxy)).toBe(true);
+    expect(want.data.some((r) => !r.is_anonymized_proxy)).toBe(true);
+    expect(new Set(want.data.map((r) => r.top_country)).size).toBeGreaterThan(1);
+    expect([...modes.values()].some((tied) => tied.length === 1)).toBe(true);
+    for (const [label, list] of SV_LISTS) {
+      const got = threatIntelFromRollup(await rollupOf(list, SV.buffers))!;
+      expect(sorted(got.data), label).toEqual(sorted(want.data));
+      expect(got.rollup, label).toEqual({ data_from: START, data_through: END, approximate: [], lower_bound: [] });
+    }
+  });
+
+  it("marks cut fingerprints and countries, and leaves WAF rule, bot columns and older summaries to the raw scan", async () => {
+    const result = await rollupOf(SV_LISTS[0][1], SV.buffers);
+    const first = (patch: (summary: Summary) => void) => patchFirst(result, patch);
+    expect(threatIntelFromRollup(first((s) => {
+      s.groupsCut.add("tls_fp/fp");
+      s.groupsCut.add("tls_fp/fp_country");
+    }))!.rollup).toMatchObject({ approximate: ["threat_intel.top_country"], lower_bound: ["threat_intel.requests"] });
+    for (const field of ["waf_logged_rules", "waf_blocked_rules", "is_bot"]) {
+      expect(threatIntelFromRollup(first((s) => s.totals.set(field, { count: 0, truncated: false }))), field).toBeNull();
+    }
+    expect(threatIntelFromRollup(first((s) => s.groups.delete("tls_fp/fp_country")))).toBeNull();
+  });
+
+  it("reads the field totals that name WAF rule columns, which no fixture has, to leave them to the raw scan", async () => {
+    const list = SV_LISTS[0][1];
+    const buffers = { ...SV.buffers };
+    for (const file of list) {
+      buffers[file.key] = await editSummaryRows(SV.buffers[file.key], (rows) => {
+        const total = rows.find((row) => row.bundle === "field_totals");
+        if (!total) throw new Error(`${file.key} has no field totals`);
+        return [...rows, { ...total, field: "waf_logged_rules" }];
+      });
+    }
+    const listed = list.map((file) => ({ ...file, size: buffers[file.key].byteLength }));
+    const read = (spec: SummarySpec) => {
+      const source = fixtureSource([fixturePage(SV_RAW)], buffers, { json: [], files: [] }, [fixturePage(listed)]);
+      return securityFromRollup("/api/security/threat-intel", { start_time: START, end_time: END },
+        projectingSource(source, buffers), undefined, spec);
+    };
+    expect(await read(SECURITY_THREAT_INTEL_SUMMARY_SPEC)).toBeNull();
+    expect(await read(defineSummarySpec({ groups: ["tls_fp", "dim_totals"], columns: ["count", "requests"] }))).not.toBeNull();
+  });
+
+  it("answers the page's unfiltered read from summaries without raw files", async () => {
+    const s = fixtureSource([fixturePage(SV_RAW)], SV.buffers, { json: [], files: [] }, [fixturePage(SV_LISTS[0][1])]);
+    const served = await securityFromRollup("/api/security/threat-intel", { start_time: START, end_time: END }, s);
+    expect(served).toEqual(threatIntelFromRollup(await rollupOf(SV_LISTS[0][1], SV.buffers)));
+    expect(s.log.files.every((key) => SV_LISTS[0][1].some((f) => f.key === key))).toBe(true);
+    const all = await securityFromRollup(PATH, body({ sections: [...SECURITY_ROLLUP_SECTIONS], bucket_seconds: 3600 }), s);
+    expect(all).not.toBeNull();
+    expect(s.log.files.every((key) => SV_LISTS[0][1].some((f) => f.key === key))).toBe(true);
   });
 });
 

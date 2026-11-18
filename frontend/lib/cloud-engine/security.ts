@@ -1168,13 +1168,18 @@ async function parseSecurityRequest(req: Request, url: URL): Promise<SecurityAgg
           : 300,
     filters: (body.filters as FilterSpec | undefined) ?? null,
     sections: Array.isArray(body.sections) ? (body.sections as SecuritySectionName[]) : null,
-    mask_ips: Boolean(
-      body.mask_ips ||
-        url.searchParams.get("mask_ips") === "1" ||
-        req.headers.get("x-mask-ips") === "1" ||
-        req.headers.get("x-session-role") === "analyst-no-pii",
-    ),
+    mask_ips: securityMaskIps(req, url, body),
   };
+}
+
+/** Whether a /security read masks client IPs: by its body, query or the analyst headers. */
+export function securityMaskIps(req: Request, url: URL, body: Record<string, unknown>): boolean {
+  return Boolean(
+    body.mask_ips ||
+      url.searchParams.get("mask_ips") === "1" ||
+      req.headers.get("x-mask-ips") === "1" ||
+      req.headers.get("x-session-role") === "analyst-no-pii",
+  );
 }
 
 /**

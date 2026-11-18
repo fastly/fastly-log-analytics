@@ -17,6 +17,8 @@ const FIXTURES = {
   network: loadSummaryFixtures("network-summaries"),
   origin: loadSummaryFixtures("origin-summaries"),
   dashboard: loadSummaryFixtures("../dashboard/__fixtures__/summaries"),
+  // Bot names, WAF signals, Image Optimizer formats and bytes, SYNTH/ERROR/'' cache states, shield rows.
+  securityValue: loadSummaryFixtures("security-value-summaries"),
 };
 type Fixture = keyof typeof FIXTURES;
 
@@ -25,13 +27,36 @@ async function rollupOf(fixture: Fixture, list: ManifestFile[], stepMs = 300_000
   return { rollup: mergeRollups(parts.map((p) => p!)), dataFromMs: T0, dataThroughMs: T1 };
 }
 
+const ALL_SECTIONS = ["overview", "caching", "performance", "security", "bots", "network", "io"] as const;
+
 const body = (extra: Record<string, unknown> = {}) => ({
   start_time: new Date(T0).toISOString(),
   end_time: new Date(T1).toISOString(),
-  sections: ["overview", "network"] as ("overview" | "network")[],
+  sections: ["overview", "network"] as (typeof ALL_SECTIONS)[number][],
   chart_interval: "1 day",
   ...extra,
 });
+
+type Summary = Awaited<ReturnType<typeof queryValueSummary>>;
+
+/**
+ * A summary with the parts that may differ from the raw scan set aside: the p99 latency (an
+ * estimate, checked apart), latency averages' last float bits, and the order of tied counts.
+ */
+function comparable(summary: Summary) {
+  const out = structuredClone(summary);
+  const byCount = <T extends { count: number }>(rows: T[] | undefined, key: (row: T) => string) =>
+    rows?.sort((a, b) => b.count - a.count || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+  if (out.performance) {
+    out.performance.p99_latency_ms = null;
+    for (const point of out.performance.latency_time_series ?? []) point.value = Number(point.value.toFixed(6));
+  }
+  byCount(out.security?.top_waf_signals, (row) => String(row.signal));
+  byCount(out.bots?.top_bots, (row) => String(row.name));
+  byCount(out.io?.format_distribution, (row) => row.format);
+  byCount(out.io?.io_format_conversion_pairs, (row) => `${row.input_format}|${row.output_format}`);
+  return out;
+}
 
 const bundles = (fixture: Fixture) => {
   const { files } = FIXTURES[fixture];
@@ -105,14 +130,83 @@ describe("value rollup vs raw DuckDB over the same rows", () => {
     expect((await raw("origin", body())).overview!.cache_acceleration_factor).toBeGreaterThan(0);
   });
 
-  it("leaves the overview to the raw scan when a cache state's case or variant isn't in the summaries' latency sums", async () => {
-    const result = await rollupOf("dashboard", FIXTURES.dashboard.files("window"));
+  it("matches every raw section from the per-day value rows, with the p99 latency estimated", async () => {
+    for (const fixture of Object.keys(FIXTURES) as Fixture[]) {
+      const params = body({ sections: [...ALL_SECTIONS] });
+      const want = await raw(fixture, params);
+      for (const [list, step] of bundles(fixture)) {
+        const label = `${fixture} ${list[0].key}`;
+        const got = valueSummaryFromRollup(await rollupOf(fixture, [...list], step), params);
+        expect(got, label).not.toBeNull();
+        const { rollup: meta, ...sections } = got!;
+        expect(comparable(sections), label).toEqual(comparable(want));
+        expect(meta.lower_bound, label).toEqual([]);
+        const p99 = want.performance!.p99_latency_ms;
+        if (p99 == null) {
+          expect(sections.performance!.p99_latency_ms, label).toBeNull();
+          expect(meta.approximate, label).toEqual([]);
+        } else {
+          expect(meta.approximate, label).toEqual(["performance.p99_latency_ms"]);
+          expect(Math.abs(sections.performance!.p99_latency_ms! - p99) / p99, label).toBeLessThan(0.1);
+        }
+      }
+    }
+    const want = await raw("securityValue", body({ sections: [...ALL_SECTIONS] }));
+    expect(want.caching!.shield_effectiveness_pct).not.toBeNull();
+    expect(want.caching!.cache_state_time_series!.map((p) => p.category)).toContain("OTHER");
+    expect(want.performance!.latency_time_series!.length).toBeGreaterThan(1);
+    expect(want.performance!.p99_latency_ms).not.toBeNull();
+    expect(want.security!.top_waf_signals!.length).toBeGreaterThan(2);
+    expect(want.bots!.top_bots!.length).toBeGreaterThan(1);
+    expect(want.io!.io_format_conversion_pairs!.some((pair) => pair.avg_ratio !== null)).toBe(true);
+    expect(want.io!.format_distribution!.length).toBeGreaterThan(1);
+    expect(want.io!.io_actual_compression_ratio).not.toBeNull();
+    expect(want.io!.io_shield_bandwidth_bytes).not.toBeNull();
+  });
+
+  it("leaves day-series sections to the raw scan on a chart interval under a day", async () => {
+    const result = await rollupOf("securityValue", FIXTURES.securityValue.files("window"));
+    for (const section of ["caching", "performance", "io"] as const) {
+      expect(valueSummaryFromRollup(result, body({ sections: [section], chart_interval: "1 hour" })), section).toBeNull();
+    }
+    for (const section of ["security", "bots"] as const) {
+      expect(valueSummaryFromRollup(result, body({ sections: [section], chart_interval: "1 hour" })), section).not.toBeNull();
+    }
+  });
+
+  it("marks cut top lists as lower bounds and leaves summaries without value rows to the raw scan", async () => {
+    const result = await rollupOf("securityValue", FIXTURES.securityValue.files("window"));
+    const { rollup } = result;
+    const with_ = (patch: Partial<typeof rollup>) => ({ ...result, rollup: { ...rollup, ...patch } });
+    const cut = new Set(["value/waf_signal", "value/bot_name", "value/io_pair"]);
+    expect(valueSummaryFromRollup(with_({ truncated: cut }), body({ sections: ["security", "bots", "io"] }))!.rollup.lower_bound)
+      .toEqual(["security.top_waf_signals", "bots.top_bots", "io.io_format_conversion_pairs"]);
+    for (const field of ["cache", "io"]) {
+      expect(valueSummaryFromRollup(with_({ truncated: new Set([`value/${field}`]) }), body({ sections: ["caching"] })), field)
+        .toBeNull();
+    }
+    expect(valueSummaryFromRollup(with_({ truncated: new Set(["all_fields/io_output_format"]) }), body({ sections: ["io"] })))
+      .toBeNull();
+    const old = new Set([...rollup.present!].filter((key) => !key.startsWith("value/")));
+    for (const section of ["caching", "performance", "security", "bots", "io"] as const) {
+      expect(valueSummaryFromRollup(with_({ present: old }), body({ sections: [section] })), section).toBeNull();
+    }
+    for (const alias of ["fastly_is_shield", "is_bot", "ngwaf_bot_name", "ofmt", "content_type"]) {
+      const aliased = new Map([...rollup.fields, [alias, new Map([["x", 1]])]]);
+      expect(valueSummaryFromRollup(with_({ fields: aliased }), body({ sections: ["bots"] })), alias).toBeNull();
+    }
+  });
+
+  it("leaves the overview to the raw scan in summaries without value rows when a cache state's case or variant isn't in the overview row's latency sums", async () => {
+    const full = await rollupOf("dashboard", FIXTURES.dashboard.files("window"));
+    const present = new Set([...full.rollup.present!].filter((key) => !key.startsWith("value/")));
+    const result = { ...full, rollup: { ...full.rollup, present } };
     expect(valueSummaryFromRollup(result, body())).toBeNull();
     expect(valueSummaryFromRollup(result, body({ sections: ["network"] }))).not.toBeNull();
     const variant = await rollupOf("origin", FIXTURES.origin.files("window"));
     const cache = new Map(variant.rollup.fields.get("cache"));
     cache.set("MISS-CLUSTER", 1);
-    expect(valueSummaryFromRollup({ ...variant, rollup: { ...variant.rollup, fields: new Map([["cache", cache]]) } }, body()))
+    expect(valueSummaryFromRollup({ ...variant, rollup: { ...variant.rollup, present, fields: new Map([["cache", cache]]) } }, body()))
       .toBeNull();
   });
 });
@@ -127,10 +221,13 @@ describe("valueSummaryFromRollup", () => {
       expect(valueSummaryFromRollup(with_({ truncated: new Set([cut]) }), body({ sections: ["network"] })), cut).toBeNull();
       expect(valueSummaryFromRollup(with_({ truncated: new Set([cut]) }), body({ sections: ["overview"] })), cut).not.toBeNull();
     }
-    expect(valueSummaryFromRollup(with_({ truncated: new Set(["all_fields/cache"]) }), body({ sections: ["overview"] }))).toBeNull();
+    const old = new Set([...rollup.present!].filter((key) => !key.startsWith("value/")));
+    expect(valueSummaryFromRollup(with_({ truncated: new Set(["all_fields/cache"]) }), body({ sections: ["overview"] }))).not.toBeNull();
+    expect(valueSummaryFromRollup(with_({ present: old, truncated: new Set(["all_fields/cache"]) }), body({ sections: ["overview"] })))
+      .toBeNull();
     const aliased = new Map([...rollup.fields, ["protocol", new Map([["HTTP/2", 1]])]]);
     expect(valueSummaryFromRollup(with_({ fields: aliased }), body())).toBeNull();
-    expect(valueSummaryFromRollup(with_({ overview: { ...rollup.overview!, totalBandwidth: 0 } }), body({ sections: ["overview"] })))
+    expect(valueSummaryFromRollup(with_({ present: old, overview: { ...rollup.overview!, totalBandwidth: 0 } }), body({ sections: ["overview"] })))
       .toBeNull();
     expect(valueSummaryFromRollup(with_({ overview: undefined }), body())).toBeNull();
   });
@@ -162,10 +259,12 @@ describe("valueFromRollup", () => {
   const { buffers, files } = FIXTURES.network;
   const source = () => fixtureSource([fixturePage(files("raw"))], buffers, { json: [], files: [] }, [fixturePage(files("window"))]);
 
-  it("answers the overview and network sections from summaries without reading raw files", async () => {
+  it("answers every section from summaries without reading raw files", async () => {
     const s = source();
-    const served = await valueFromRollup("/api/value/summary", body(), s);
-    expect(served).toEqual(valueSummaryFromRollup(await rollupOf("network", files("window")), body()));
+    const all = body({ sections: [...ALL_SECTIONS] });
+    const served = await valueFromRollup("/api/value/summary", all, s);
+    expect(served).toEqual(valueSummaryFromRollup(await rollupOf("network", files("window")), all));
+    expect(served).not.toBeNull();
     expect(s.log.files.every((key) => files("window").some((f) => f.key === key))).toBe(true);
   });
 
@@ -173,8 +272,8 @@ describe("valueFromRollup", () => {
     for (const params of [
       body({ filters: { pop: { values: ["IAD"], mode: "include" } } }),
       body({ custom_filters: { tenant: { values: ["a"], mode: "include" } } }),
-      body({ sections: ["overview", "caching"] }),
-      body({ sections: ["performance"] }),
+      body({ sections: ["overview", "caching"], chart_interval: "1 hour" }),
+      body({ sections: ["overview", "assets" as "overview"] }),
       body({ sections: undefined }),
       body({ sections: [] }),
       body({ start_time: undefined }),

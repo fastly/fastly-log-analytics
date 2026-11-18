@@ -37,6 +37,7 @@ const ANSWERS: Record<string, Answer> = {
   "/api/performance/aggregates": performance,
   "/api/security/aggregates": security,
   "/api/security/bundle": security,
+  "/api/security/threat-intel": security,
   "/api/assets/aggregates": (path, params, source, signal) =>
     assetsFromRollup(path, params as AssetsRollupBody, source, signal),
   "/api/value/summary": (path, params, source, signal) =>

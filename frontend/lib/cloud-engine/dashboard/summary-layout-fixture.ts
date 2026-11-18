@@ -46,7 +46,7 @@ export async function withSummaryLayout(
   }
   if (!layout) {
     return parquetWriteBuffer({
-    statisticsTruncateLength: 64,
+      statisticsTruncateLength: 64,
       schema: metadata.schema,
       rowGroupSize: text.length,
       kvMetadata: (metadata.key_value_metadata ?? []).map(({ key, value }) => ({ key, value: value ?? "" })),
@@ -76,5 +76,28 @@ export async function withSummaryLayout(
       name,
       data: order.map((i) => (binary.has(name) ? raw[i][name] : text[i][name]) ?? null),
     })),
+  });
+}
+
+/**
+ * Rewrites one v3 summary with `edit` applied to its rows (binary columns as
+ * bytes), keeping its schema and key-value metadata, as one row group.
+ */
+export async function editSummaryRows(
+  source: ArrayBuffer,
+  edit: (rows: Record<string, unknown>[]) => Record<string, unknown>[],
+): Promise<ArrayBuffer> {
+  const metadata = parquetMetadata(source);
+  const fields = metadata.schema.slice(1);
+  const binary = fields.filter((f) => f.type === "BYTE_ARRAY" && !f.converted_type && !f.logical_type).map((f) => f.name);
+  const text = await parquetReadObjects({ file: source, compressors });
+  const raw = await parquetReadObjects({ file: source, columns: binary, compressors, utf8: false });
+  const rows = edit(text.map((row, i) => ({ ...row, ...raw[i] })));
+  return parquetWriteBuffer({
+    statisticsTruncateLength: 64,
+    schema: metadata.schema,
+    rowGroupSize: rows.length,
+    kvMetadata: (metadata.key_value_metadata ?? []).map(({ key, value }) => ({ key, value: value ?? "" })),
+    columnData: fields.map(({ name }) => ({ name, data: rows.map((row) => row[name] ?? null) })),
   });
 }

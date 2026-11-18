@@ -848,7 +848,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(ensureCloudRange).not.toHaveBeenCalled();
   });
 
-  it("answers unfiltered /security summary sections before any raw scan, and scans raw for the rest", async () => {
+  it("answers unfiltered /security sections and threat intel from summaries before any raw scan, masked as the raw scan masks", async () => {
     const post = (path: string, body: Record<string, unknown>) => handleCloudAnalyticalRequest(new Request(`http://localhost${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-service-id": "svc-1" },
@@ -867,8 +867,25 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(source.cacheScope).toContain("svc-1");
     expect(ensureCloudRange).not.toHaveBeenCalled();
 
+    vi.mocked(securityFromRollup).mockClear();
+    const intel = await handleCloudAnalyticalRequest(new Request(
+      `http://localhost/api/security/threat-intel?start_time=${range.start_time}&end_time=${range.end_time}`,
+      { headers: { "x-service-id": "svc-1" } },
+    ));
+    expect(await intel!.json()).toEqual({ served: "security" });
+    expect(vi.mocked(securityFromRollup).mock.calls[0].slice(0, 2))
+      .toEqual(["/api/security/threat-intel", { ...range, service_id: "svc-1", mask_ips: false }]);
+
+    // The raw scan masks IPs by header too, so the summaries must.
     vi.mocked(securityFromRollup).mockClear().mockResolvedValue(null);
-    await post("/api/security/aggregates", { sections: ["wellknown_bots", "proxies"], ...range });
+    await handleCloudAnalyticalRequest(new Request("http://localhost/api/security/aggregates", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-session-role": "analyst-no-pii" },
+      body: JSON.stringify({ sections: ["wellknown_bots", "proxies"], ...range }),
+    }));
+    expect(vi.mocked(securityFromRollup).mock.calls[0][1]).toMatchObject({ mask_ips: true });
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
+    vi.mocked(securityFromRollup).mockClear();
     await post("/api/security/aggregates", { sections: ["proxy_dist"], filters: { pop: { mode: "include", values: ["IAD"] } }, ...range });
     expect(securityFromRollup).not.toHaveBeenCalled();
     expect(ensureCloudRange).toHaveBeenCalledTimes(2);

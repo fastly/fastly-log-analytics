@@ -64,7 +64,7 @@ import {
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
-import { handleSecurityRequest, securityScanColumns, threatIntelScanColumns } from "./security";
+import { handleSecurityRequest, securityMaskIps, securityScanColumns, threatIntelScanColumns } from "./security";
 import { shareAuditRows } from "./share-audit";
 import {
   handleSessionsDetail,
@@ -452,6 +452,7 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/performance/aggregates": { label: "/performance", eligible: performanceRollupEligible },
   "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible },
   "/api/security/bundle": { label: "/security", eligible: securityRollupEligible },
+  "/api/security/threat-intel": { label: "/security", eligible: securityRollupEligible },
   "/api/assets/aggregates": { label: "/assets", eligible: assetsRollupEligible },
   "/api/value/summary": { label: "/fastly-value", eligible: valueRollupEligible, decorate: valueStatsDecorator },
 };
@@ -465,7 +466,8 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
 async function cloudSectionRollup(request: Request, path: string, route: SectionRollup): Promise<Response | null> {
   const url = new URL(request.url);
   const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : {};
-  const params = { ...Object.fromEntries(url.searchParams), ...body };
+  const params: Record<string, unknown> = { ...Object.fromEntries(url.searchParams), ...body };
+  if (route.label === "/security") params.mask_ips = securityMaskIps(request, url, body);
   if (!route.eligible(path, params)) return null;
   let end = String(params.end_time ?? params.end ?? "");
   if (!end) {

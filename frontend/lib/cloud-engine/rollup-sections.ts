@@ -48,7 +48,11 @@ export const PERFORMANCE_ROLLUP_SECTIONS = ["ttl_dist", "waterfall", "top_urls",
 /**
  * The /security sections summaries can answer: the constant NGWAF rows, TLS
  * fingerprints and their coverage, the header-size, connection-reuse and proxy
- * distributions, hourly IPv6 share and the verified-bot series.
+ * distributions, hourly IPv6 share, the verified-bot series, the top IPs by
+ * header size, well-known and top bots, bot efficiency (referrals estimated)
+ * and Proxy Watchdog (from a sample of RTT rows once a range holds more than
+ * the summaries keep). Summaries older than the bot, header and proxy rows
+ * leave those sections to the raw scan.
  */
 export const SECURITY_ROLLUP_SECTIONS = [
   "ngwaf_verified_bots",
@@ -60,6 +64,11 @@ export const SECURITY_ROLLUP_SECTIONS = [
   "proxy_dist",
   "conn_reuse_dist",
   "verified_bots_ts",
+  "top_ips_header",
+  "wellknown_bots",
+  "bot_efficiency",
+  "top_bots",
+  "proxies",
 ] as const;
 
 /** The /assets sections; `summary` covers the totals, the three breakdowns and `missing_fields`. */
@@ -89,5 +98,8 @@ export function assetsRollupCacheFilter(filters: unknown): { mode: "include" | "
   return { mode, values: values as string[] };
 }
 
-/** The /fastly-value sections summaries answer exactly, unfiltered: the overview cards and the network adoption figures. */
-export const VALUE_ROLLUP_SECTIONS = ["overview", "network"] as const;
+/**
+ * The /fastly-value sections summaries answer unfiltered: every one, with the p99 latency estimated and the
+ * top-20 WAF signal, bot and format-pair counts lower bounds when a summary cut them (older summaries fall back).
+ */
+export const VALUE_ROLLUP_SECTIONS = ["overview", "caching", "performance", "security", "bots", "network", "io"] as const;
