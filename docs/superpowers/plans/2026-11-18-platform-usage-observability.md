@@ -573,4 +573,4 @@ git add docs/pages/usage-and-cost.md
 git commit -m "Document measured Platform usage sources"
 ```
 
-Review the accumulated rc3 diff, fix all Critical/Important findings, then stop before any live deployment. A combined Cloud + Elevation deploy/test requires a fresh explicit approval for that run.
+Review the accumulated rc3 diff, fix all Critical/Important findings, then stop before any live deployment. A combined Cloud + High-Scale deploy/test requires a fresh explicit approval for that run.

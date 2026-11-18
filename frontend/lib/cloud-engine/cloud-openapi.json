@@ -3140,6 +3140,70 @@
         }
       }
     },
+    "/api/admin/usage/platform": {
+      "get": {
+        "operationId": "get__api_admin_usage_platform",
+        "summary": "Observed Fastly Platform storage, Compute and NGWAF usage",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Unix ms"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Unix ms; at most 31 days after from"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Independently observed Platform metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["source", "storage", "compute", "ngwaf"],
+                  "properties": {
+                    "source": {
+                      "type": "string",
+                      "enum": ["fastly", "partial", "unavailable"]
+                    },
+                    "storage": {
+                      "type": "object"
+                    },
+                    "compute": {
+                      "type": "object"
+                    },
+                    "ngwaf": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/usage/reconcile-storage": {
       "post": {
         "operationId": "post__api_admin_usage_reconcile_storage",

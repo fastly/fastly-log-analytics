@@ -424,12 +424,12 @@ pub const PLATFORM_NGWAF_FIELDS: [&str; 7] = [
     "ngwaf_requests_unknown_count",
 ];
 
-fn platform_rows<'a>(
-    body: &'a Value,
+fn platform_rows(
+    body: &Value,
     from: u64,
     to: u64,
     bucket_seconds: u64,
-) -> Result<Vec<(u64, &'a Value)>, String> {
+) -> Result<Vec<(u64, &Value)>, String> {
     if from >= to {
         return Err("platform_metrics_range_invalid".into());
     }
