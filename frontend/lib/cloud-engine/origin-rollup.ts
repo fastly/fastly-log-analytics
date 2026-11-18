@@ -362,10 +362,11 @@ export function shieldingFromRollup(result: RollupResult, limit = 50) {
   const rows = byReqs.filter((r) => keep.has(r));
   const total_routes = routes.size;
   const truncated = total_routes > rows.length || result.rollup.truncated.has("shield_routes/route");
+  const totalReqs = [...(result.rollup.dims.get("country")?.values() ?? [])].reduce((sum, a) => sum + a.requests, 0);
   return {
     has_data: rows.length > 0,
     requires_fields: [] as string[],
-    edge_only: rows.length === 0 && (result.rollup.overview?.requests ?? 0) > 0,
+    edge_only: rows.length === 0 && totalReqs > 0,
     rows,
     total_routes,
     truncated,
@@ -379,7 +380,7 @@ export function shieldingFromRollup(result: RollupResult, limit = 50) {
 export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
   groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "shield_routes", "dim_totals"],
   columns: [
-    "count", "requests", "errors", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
+    "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
     "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
   ],
 });

@@ -2839,6 +2839,18 @@ fn write_network_fixtures() {
             if i % 401 == 7 {
                 row["timestamp"] = Value::Null;
             }
+            if i < 40 {
+                let pair = i / 2;
+                let is_edge = i % 2 == 0;
+                row["edge"] = is_edge.into();
+                if is_edge {
+                    row["rid"] = format!("shield-{pair}").into();
+                    row["ttfb"] = if pair == 0 { 0.01 } else { 0.05 }.into();
+                } else {
+                    row["prid"] = format!("shield-{pair}").into();
+                    row["ttfb"] = if pair == 0 { 0.03 } else { 0.02 }.into();
+                }
+            }
             row
         })
         .collect();
@@ -2910,6 +2922,18 @@ fn write_origin_fixtures() {
             }
             if i % 401 == 7 {
                 row["timestamp"] = Value::Null;
+            }
+            if i < 40 {
+                let pair = i / 2;
+                let is_edge = i % 2 == 0;
+                row["edge"] = is_edge.into();
+                if is_edge {
+                    row["rid"] = format!("shield-{pair}").into();
+                    row["ottfb"] = if pair == 0 { 10_000 } else { 50_000 }.into();
+                } else {
+                    row["prid"] = format!("shield-{pair}").into();
+                    row["ottfb"] = if pair == 0 { 30_000 } else { 20_000 }.into();
+                }
             }
             row
         })

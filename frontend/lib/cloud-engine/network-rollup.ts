@@ -640,7 +640,7 @@ export function networkRollupEligible(path: string, params: NetworkQueryParams):
 export const NETWORK_SUMMARY_SPEC = defineSummarySpec({
   groups: ["dims", "series5", "quality", "transport", "sample", "shield_routes", "dim_totals"],
   columns: [
-    "label", "requests", "errors", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
+    "label", "requests", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
     "ploss_count", "cwnd_sum", "cwnd_count", "rttvar_sum", "rttvar_count", "retrans_count", "lat_sum", "lon_sum",
     "geo_count", "delivery_rate_sum", "delivery_rate_count", "throughput_sum", "throughput_count", "ttfb_sum",
     "sample_key", "rtt_hist", "ttfb_hist", "overhead_hist",
