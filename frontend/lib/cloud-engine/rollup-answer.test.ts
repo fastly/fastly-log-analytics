@@ -94,7 +94,7 @@ describe("answerFromRollup", () => {
   });
 
   it("leaves paths summaries don't answer to the raw scan", async () => {
-    expect(await answerFromRollup("/api/network-health", { ...health, sections: ["shielding_analysis"] }, source())).toBeNull();
+    expect(await answerFromRollup("/api/network-health", { ...health, filter_country: "US" }, source())).toBeNull();
     expect(await answerFromRollup("/api/network/bundle", { ...health, sections: ["quality"] }, source())).toBeNull();
   });
 });
