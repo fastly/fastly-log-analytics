@@ -24,6 +24,7 @@ fn state() -> MemoryStore {
                 revoked: false,
                 created_by: "setup".into(),
                 created_at: 1,
+                last_login_at: None,
             },
         );
     }

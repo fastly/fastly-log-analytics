@@ -1316,8 +1316,18 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 Ok(json_response(json!({"users":users})))
             }
             ("GET", "/api/admin/invites") => {
-                let invites: Result<Vec<_>, _> =
-                    auth.invites(&actor.id)?.iter().map(invite_json).collect();
+                let (users, invites) = auth.directory(&actor.id)?;
+                let invites: Result<Vec<_>, _> = invites
+                    .iter()
+                    .map(|invite| {
+                        let last_login_at = invite
+                            .user_id
+                            .as_ref()
+                            .and_then(|id| users.iter().find(|user| &user.id == id))
+                            .and_then(|user| user.last_login_at);
+                        invite_json(invite, last_login_at)
+                    })
+                    .collect();
                 Ok(json_response(json!({"invites":invites?})))
             }
             ("POST", "/api/admin/invites") => {
@@ -1331,7 +1341,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     self.runtime.random().map_err(storage)?,
                 )?;
                 Ok(json_response(
-                    json!({"invite":invite_json(&invite)?,"token":token}),
+                    json!({"invite":invite_json(&invite, None)?,"token":token}),
                 ))
             }
             ("GET", "/api/admin/versions") => {
@@ -1766,10 +1776,12 @@ fn user_json(user: &User) -> Value {
         .filter(|credential| !credential.revoked)
         .map(|credential| json!({"id":credential.id}))
         .collect();
-    json!({"id":user.id,"display_name":user.display_name,"role":user.role,"revoked":user.revoked,"passkeys":passkeys})
+    json!({"id":user.id,"display_name":user.display_name,"role":user.role,"revoked":user.revoked,"passkeys":passkeys,
+        "created_at":crate::admin::rfc3339_from_secs(user.created_at),
+        "last_login_at":user.last_login_at.map(crate::admin::rfc3339_from_secs)})
 }
 
-fn invite_json(invite: &Invite) -> Result<Value, AuthError> {
+fn invite_json(invite: &Invite, last_login_at: Option<u64>) -> Result<Value, AuthError> {
     let expires = time::OffsetDateTime::from_unix_timestamp(
         i64::try_from(invite.expires_at).map_err(|_| AuthError::Storage)?,
     )
@@ -1777,7 +1789,9 @@ fn invite_json(invite: &Invite) -> Result<Value, AuthError> {
     .format(&time::format_description::well_known::Rfc3339)
     .map_err(|_| AuthError::Storage)?;
     Ok(
-        json!({"id":invite.id,"display_name":invite.display_name,"role":invite.role,"expires_at":expires,"revoked":invite.revoked,"used":invite.used}),
+        json!({"id":invite.id,"display_name":invite.display_name,"role":invite.role,"expires_at":expires,"revoked":invite.revoked,"used":invite.used,
+            "accepted_at":invite.accepted_at.map(crate::admin::rfc3339_from_secs),"user_id":invite.user_id,
+            "last_login_at":last_login_at.map(crate::admin::rfc3339_from_secs)}),
     )
 }
 
@@ -1948,6 +1962,54 @@ mod tests {
     use super::*;
     use crate::state::MemoryStore;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn share_listings_report_creation_acceptance_and_login_times() {
+        let user = User {
+            id: "u".into(),
+            display_name: "Guest".into(),
+            role: Role::Analyst,
+            credentials: vec![],
+            revoked: false,
+            created_by: "admin".into(),
+            created_at: 1_700_000_000,
+            last_login_at: Some(1_700_000_600),
+        };
+        let value = user_json(&user);
+        assert_eq!(value["created_at"], "2023-11-14T22:13:20Z");
+        assert_eq!(value["last_login_at"], "2023-11-14T22:23:20Z");
+        let never = User {
+            last_login_at: None,
+            ..user
+        };
+        assert!(user_json(&never)["last_login_at"].is_null());
+
+        let invite = Invite {
+            id: "i".into(),
+            display_name: "Guest".into(),
+            role: Role::Analyst,
+            expires_at: 1_700_100_000,
+            revoked: false,
+            used: true,
+            created_by: "admin".into(),
+            accepted_at: Some(1_700_000_000),
+            user_id: Some("u".into()),
+        };
+        let value = invite_json(&invite, Some(1_700_000_600)).unwrap();
+        assert_eq!(value["accepted_at"], "2023-11-14T22:13:20Z");
+        assert_eq!(value["user_id"], "u");
+        assert_eq!(value["last_login_at"], "2023-11-14T22:23:20Z");
+        let pending = Invite {
+            used: false,
+            accepted_at: None,
+            user_id: None,
+            ..invite
+        };
+        let value = invite_json(&pending, None).unwrap();
+        for field in ["accepted_at", "user_id", "last_login_at"] {
+            assert!(value[field].is_null(), "{field}");
+        }
+    }
 
     #[test]
     fn analyst_services_keep_safe_field_metadata_without_management_secrets() {
@@ -2735,6 +2797,7 @@ mod tests {
                 revoked: false,
                 created_by: "setup".into(),
                 created_at: 99,
+                last_login_at: None,
             },
         );
         assert!(state.compare_and_swap(None, &completed).unwrap());
@@ -2810,6 +2873,7 @@ mod tests {
                         revoked: false,
                         created_by: "setup".into(),
                         created_at: 99,
+                        last_login_at: None,
                     },
                 );
                 assert!(state.compare_and_swap(None, &initial).unwrap());

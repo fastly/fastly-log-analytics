@@ -317,6 +317,7 @@ mod tests {
                 revoked: false,
                 created_by: "setup".to_owned(),
                 created_at: 1,
+                last_login_at: None,
             },
         );
         assert!(store.compare_and_swap(None, &initial).unwrap());

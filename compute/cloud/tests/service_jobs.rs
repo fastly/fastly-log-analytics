@@ -1355,6 +1355,7 @@ fn shell_enforces_roles_front_auth_origin_and_json_for_all_provision_aliases() {
             revoked: false,
             created_by: "test".into(),
             created_at: platform.now(),
+            last_login_at: None,
         };
         let mut state = AuthState::default();
         state.users.insert(user.id.clone(), user.clone());
@@ -2421,6 +2422,7 @@ fn metadata_status_fresh_bypasses_cache_and_reads_one_post_extents_cron_snapshot
         revoked: false,
         created_by: "setup".into(),
         created_at: platform.now(),
+        last_login_at: None,
     };
     let mut state = AuthState::default();
     state.users.insert(user.id.clone(), user.clone());
@@ -2628,6 +2630,7 @@ fn shield_ticks_manual_trigger_fos_manifest_and_audit_logs_end_to_end() {
         revoked: false,
         created_by: "setup".into(),
         created_at: platform.now(),
+        last_login_at: None,
     };
     let mut auth_state = AuthState::default();
     auth_state.users.insert(user.id.clone(), user.clone());
@@ -4621,6 +4624,7 @@ fn shell_post(
                 revoked: false,
                 created_by: "test".into(),
                 created_at: platform.now(),
+                last_login_at: None,
             },
         );
         assert!(store.compare_and_swap(None, &state).unwrap());

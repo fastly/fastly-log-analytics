@@ -75,6 +75,8 @@ pub struct User {
     pub revoked: bool,
     pub created_by: String,
     pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_login_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +88,10 @@ pub struct Invite {
     pub revoked: bool,
     pub used: bool,
     pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -512,6 +518,7 @@ impl<'a, S: StateStore> AuthService<'a, S> {
                 revoked: false,
                 created_by,
                 created_at: now,
+                last_login_at: Some(now),
             };
             match authority {
                 RegistrationAuthority::Setup { .. } => {
@@ -519,11 +526,13 @@ impl<'a, S: StateStore> AuthService<'a, S> {
                     state.setup_grants.clear();
                 }
                 RegistrationAuthority::Invite { invite_hash } => {
-                    state
+                    let invite = state
                         .invites
                         .get_mut(&invite_hash)
-                        .ok_or(Error::Unauthorized)?
-                        .used = true;
+                        .ok_or(Error::Unauthorized)?;
+                    invite.used = true;
+                    invite.accepted_at = Some(now);
+                    invite.user_id = Some(user.id.clone());
                 }
             }
             state.users.insert(user.id.clone(), user.clone());
@@ -586,6 +595,7 @@ impl<'a, S: StateStore> AuthService<'a, S> {
                 &self.config.origin,
                 &self.config.rp_id,
             )?;
+            user.last_login_at = Some(now);
             let user = user.clone();
             audit(state, &user.id, "login", &user.id, ip, now);
             self.signed_in(user, state.policy_version, now)
@@ -627,19 +637,21 @@ impl<'a, S: StateStore> AuthService<'a, S> {
     }
 
     pub fn users(&self, actor: &str) -> Result<Vec<User>, Error> {
-        let state = self.store.load()?.state;
-        admin(&state, actor)?;
-        Ok(state.users.values().cloned().collect())
+        Ok(self.directory(actor)?.0)
     }
     pub fn invites(&self, actor: &str) -> Result<Vec<Invite>, Error> {
-        let state = self.store.load()?.state;
+        Ok(self.directory(actor)?.1)
+    }
+    /// Users and unrevoked invites from one load, with login history filled in for
+    /// records saved before it was tracked. Read-only: nothing derived is written back.
+    pub fn directory(&self, actor: &str) -> Result<(Vec<User>, Vec<Invite>), Error> {
+        let mut state = self.store.load()?.state;
         admin(&state, actor)?;
-        Ok(state
-            .invites
-            .values()
-            .filter(|i| !i.revoked)
-            .cloned()
-            .collect())
+        backfill_history(&mut state);
+        Ok((
+            state.users.into_values().collect(),
+            state.invites.into_values().filter(|i| !i.revoked).collect(),
+        ))
     }
     pub fn audit_entries(&self) -> Result<Vec<AuditEntry>, Error> {
         let state = self.store.load()?.state;
@@ -680,6 +692,8 @@ impl<'a, S: StateStore> AuthService<'a, S> {
                 revoked: false,
                 used: false,
                 created_by: actor.into(),
+                accepted_at: None,
+                user_id: None,
             };
             state.invites.insert(id.clone(), invite.clone());
             audit(state, actor, "invite_created", &id, ip, now);
@@ -882,6 +896,48 @@ fn valid_invite<'a>(state: &'a AuthState, id: &str, now: u64) -> Result<&'a Invi
         .get(id)
         .filter(|i| !i.revoked && !i.used && i.expires_at > now)
         .ok_or(Error::Unauthorized)
+}
+fn backfill_history(state: &mut AuthState) {
+    let mut logins = BTreeMap::<&str, u64>::new();
+    for entry in state.recent_audit.iter().chain(&state.audit) {
+        if entry.action == "login" || entry.action == "user_registered" {
+            let time = logins.entry(&entry.target).or_default();
+            *time = (*time).max(entry.time);
+        }
+    }
+    for user in state.users.values_mut() {
+        if user.last_login_at.is_none() {
+            user.last_login_at = logins.get(user.id.as_str()).copied();
+        }
+    }
+    let linked: BTreeSet<String> = state
+        .invites
+        .values()
+        .filter_map(|i| i.user_id.clone())
+        .collect();
+    for invite in state.invites.values_mut() {
+        if invite.used && invite.user_id.is_none() {
+            // Registration copies these from the invite while it is valid; link only an unambiguous match.
+            let issued = invite.expires_at.saturating_sub(INVITE_TTL);
+            let mut matches = state.users.values().filter(|u| {
+                !linked.contains(&u.id)
+                    && u.display_name == invite.display_name
+                    && u.role == invite.role
+                    && u.created_by == invite.created_by
+                    && (issued..invite.expires_at).contains(&u.created_at)
+            });
+            if let (Some(user), None) = (matches.next(), matches.next()) {
+                invite.user_id = Some(user.id.clone());
+            }
+        }
+        if invite.accepted_at.is_none() {
+            invite.accepted_at = invite
+                .user_id
+                .as_ref()
+                .and_then(|id| state.users.get(id))
+                .map(|u| u.created_at);
+        }
+    }
 }
 fn audit(state: &mut AuthState, actor: &str, action: &str, target: &str, ip: &str, now: u64) {
     state.audit.push(AuditEntry {

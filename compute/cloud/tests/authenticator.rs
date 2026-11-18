@@ -4,11 +4,13 @@ use fastly_log_analytics::auth::webauthn::BrowserResponse;
 use fastly_log_analytics::auth::{
     webauthn, AuthConfig, AuthService, BrowserCredential, Error, Role, SignedIn,
 };
-use fastly_log_analytics::state::{MemoryStore, StateStore};
+use fastly_log_analytics::state::projection::{Kv, KvRecord, ProjectedStore};
+use fastly_log_analytics::state::{MemoryStore, StateError, StateStore};
 use p256::ecdsa::signature::Signer;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Barrier};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Barrier, Mutex};
 
 const ORIGIN: &str = "https://logs.example.com";
 const RP: &str = "logs.example.com";
@@ -155,7 +157,12 @@ impl Authenticator {
 fn config() -> AuthConfig {
     AuthConfig::new(ORIGIN, vec![42; 32], Some(("owner-code", 900))).unwrap()
 }
-fn signup(store: &MemoryStore, config: &AuthConfig, auth: &Authenticator, seed: u8) -> SignedIn {
+fn signup<S: StateStore>(
+    store: &S,
+    config: &AuthConfig,
+    auth: &Authenticator,
+    seed: u8,
+) -> SignedIn {
     let service = AuthService::new(store, config);
     let grant = service
         .accept_setup("owner-code", "owner", 100, [seed; 32])
@@ -823,4 +830,222 @@ fn standard_browser_json_preserves_the_client_data_json_acronym() {
         auth.id()
     );
     assert!(serde_json::to_value(decoded).unwrap()["response"]["clientDataJSON"].is_string());
+}
+
+#[derive(Clone, Default)]
+struct KvMemory(Arc<Mutex<(u64, BTreeMap<String, KvRecord>)>>);
+impl Kv for KvMemory {
+    fn get(&self, key: &str) -> Result<Option<KvRecord>, StateError> {
+        Ok(self.0.lock().unwrap().1.get(key).cloned())
+    }
+    fn put(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        value: &[u8],
+        revision: Option<u64>,
+    ) -> Result<bool, StateError> {
+        let mut inner = self.0.lock().unwrap();
+        if inner.1.get(key).map(|r| r.generation.as_str()) != expected {
+            return Ok(false);
+        }
+        inner.0 += 1;
+        let generation = inner.0.to_string();
+        inner.1.insert(
+            key.into(),
+            KvRecord {
+                generation,
+                value: value.to_vec(),
+                revision,
+            },
+        );
+        Ok(true)
+    }
+}
+
+fn redeem_invite<S: StateStore>(
+    service: &AuthService<'_, S>,
+    owner: &str,
+    name: &str,
+    auth: &Authenticator,
+    seed: u8,
+    now: u64,
+) -> (String, SignedIn) {
+    let (invite, token) = service
+        .create_invite(owner, name, Role::Analyst, "owner", now - 1, [seed; 32])
+        .unwrap();
+    let options = service
+        .registration_options(None, Some(&token), name, "guest", now, [seed + 1; 32])
+        .unwrap();
+    let response = auth.registration(
+        options.public_key["challenge"].as_str().unwrap(),
+        ORIGIN,
+        RP,
+        false,
+    );
+    let signed = service
+        .finish_registration(&options.challenge_id, &response, "guest", now)
+        .unwrap();
+    (invite.id, signed)
+}
+
+fn sign_in<S: StateStore>(
+    service: &AuthService<'_, S>,
+    auth: &Authenticator,
+    count: u32,
+    seed: u8,
+    now: u64,
+) -> SignedIn {
+    let options = service.login_options("device", now, [seed; 32]).unwrap();
+    let assertion = auth.assertion(options.public_key["challenge"].as_str().unwrap(), count);
+    service
+        .finish_login(&options.challenge_id, &assertion, "device", now)
+        .unwrap()
+}
+
+#[test]
+fn registration_and_each_sign_in_record_login_times_and_link_the_invite() {
+    let store = MemoryStore::default();
+    let cfg = config();
+    let owner_auth = Authenticator::new(false, 17);
+    let owner = signup(&store, &cfg, &owner_auth, 1);
+    assert_eq!(owner.user.last_login_at, Some(102));
+    let service = AuthService::new(&store, &cfg);
+    let (invite_id, guest) = redeem_invite(
+        &service,
+        &owner.user.id,
+        "Guest",
+        &Authenticator::new(true, 18),
+        80,
+        112,
+    );
+    assert_eq!(guest.user.last_login_at, Some(112));
+    let invite = store.load().unwrap().state.invites[&invite_id].clone();
+    assert_eq!(invite.accepted_at, Some(112));
+    assert_eq!(invite.user_id.as_deref(), Some(guest.user.id.as_str()));
+
+    sign_in(&service, &owner_auth, 1, 82, 140);
+    let users = store.load().unwrap().state.users;
+    assert_eq!(users[&owner.user.id].last_login_at, Some(140));
+    assert_eq!(users[&guest.user.id].last_login_at, Some(112));
+}
+
+#[test]
+fn a_second_device_sign_in_records_the_time_without_ending_the_first_session() {
+    let kv = KvMemory::default();
+    let cfg = config();
+    let at = |now| ProjectedStore::new(kv.clone(), now);
+    let auth = Authenticator::new(false, 15);
+    let grant = AuthService::new(&at(100), &cfg)
+        .accept_setup("owner-code", "owner", 100, [60; 32])
+        .unwrap();
+    let options = AuthService::new(&at(101), &cfg)
+        .registration_options(Some(&grant), None, "Owner", "owner", 101, [61; 32])
+        .unwrap();
+    let credential = auth.registration(
+        options.public_key["challenge"].as_str().unwrap(),
+        ORIGIN,
+        RP,
+        true,
+    );
+    let owner = AuthService::new(&at(102), &cfg)
+        .finish_registration(&options.challenge_id, &credential, "owner", 102)
+        .unwrap();
+
+    // A synced passkey reports a zero counter, so only the login time changes the user.
+    let device_a = sign_in(&AuthService::new(&at(200), &cfg), &auth, 0, 62, 200);
+    let device_b = sign_in(&AuthService::new(&at(300), &cfg), &auth, 0, 63, 300);
+    assert_eq!(device_a.user.last_login_at, Some(200));
+    assert_eq!(device_b.user.last_login_at, Some(300));
+
+    let check = at(301);
+    let service = AuthService::new(&check, &cfg);
+    assert_eq!(
+        service
+            .authenticate(&device_a.cookie, 301)
+            .unwrap()
+            .last_login_at,
+        Some(300)
+    );
+    assert_eq!(
+        service.authenticate(&device_b.cookie, 301).unwrap().id,
+        owner.user.id
+    );
+    let materialized: fastly_log_analytics::auth::User = serde_json::from_slice(
+        &kv.get(&format!("user:{}", owner.user.id))
+            .unwrap()
+            .unwrap()
+            .value,
+    )
+    .unwrap();
+    assert_eq!(materialized.last_login_at, Some(300));
+}
+
+#[test]
+fn records_saved_before_login_tracking_derive_times_from_history_without_writing() {
+    let store = MemoryStore::default();
+    let cfg = config();
+    let owner = signup(&store, &cfg, &Authenticator::new(false, 16), 1);
+    let service = AuthService::new(&store, &cfg);
+    let guest_auth = Authenticator::new(true, 19);
+    let (guest_invite, guest) =
+        redeem_invite(&service, &owner.user.id, "Guest", &guest_auth, 70, 110);
+    let (_, twin_a) = redeem_invite(
+        &service,
+        &owner.user.id,
+        "Twin",
+        &Authenticator::new(true, 20),
+        72,
+        120,
+    );
+    redeem_invite(
+        &service,
+        &owner.user.id,
+        "Twin",
+        &Authenticator::new(true, 21),
+        74,
+        121,
+    );
+    sign_in(&service, &guest_auth, 0, 76, 130);
+
+    let mut legacy = store.load().unwrap();
+    for user in legacy.state.users.values_mut() {
+        user.last_login_at = None;
+    }
+    for invite in legacy.state.invites.values_mut() {
+        invite.accepted_at = None;
+        invite.user_id = None;
+    }
+    assert!(store
+        .compare_and_swap(legacy.generation.as_deref(), &legacy.state)
+        .unwrap());
+    let stripped = store.load().unwrap().generation;
+
+    let users = service.users(&owner.user.id).unwrap();
+    let login = |id: &str| users.iter().find(|u| u.id == id).unwrap().last_login_at;
+    assert_eq!(login(&owner.user.id), Some(102));
+    assert_eq!(login(&guest.user.id), Some(130));
+    assert_eq!(login(&twin_a.user.id), Some(120));
+
+    let invites = service.invites(&owner.user.id).unwrap();
+    let guest_entry = invites.iter().find(|i| i.id == guest_invite).unwrap();
+    assert_eq!(guest_entry.user_id.as_deref(), Some(guest.user.id.as_str()));
+    assert_eq!(guest_entry.accepted_at, Some(110));
+    let twins: Vec<_> = invites
+        .iter()
+        .filter(|i| i.display_name == "Twin")
+        .collect();
+    assert_eq!(twins.len(), 2);
+    assert!(twins
+        .iter()
+        .all(|i| i.user_id.is_none() && i.accepted_at.is_none()));
+
+    let stored = store.load().unwrap();
+    assert_eq!(stored.generation, stripped);
+    assert!(stored
+        .state
+        .users
+        .values()
+        .all(|u| u.last_login_at.is_none()));
+    assert!(stored.state.invites.values().all(|i| i.user_id.is_none()));
 }

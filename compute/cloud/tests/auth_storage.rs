@@ -54,6 +54,7 @@ fn user() -> User {
         revoked: false,
         created_by: "setup".into(),
         created_at: 1,
+        last_login_at: None,
     }
 }
 fn initial(kv: KvMemory) -> ProjectedStore<KvMemory> {
@@ -471,6 +472,8 @@ fn expired_invites_prune_without_burning_projection_kv_budget() {
                     revoked: false,
                     used: false,
                     created_by: "one".into(),
+                    accepted_at: None,
+                    user_id: None,
                 },
             );
         }
@@ -490,6 +493,8 @@ fn expired_invites_prune_without_burning_projection_kv_budget() {
             revoked: false,
             used: true,
             created_by: "one".into(),
+            accepted_at: None,
+            user_id: None,
         },
     );
     assert!(store
@@ -504,4 +509,28 @@ fn expired_invites_prune_without_burning_projection_kv_budget() {
     let after = later.load().unwrap().state;
     assert_eq!(after.invites.len(), 1);
     assert!(after.invites.contains_key("active-used"));
+}
+
+#[test]
+fn state_saved_before_login_tracking_still_loads_and_keeps_its_record_shape() {
+    let legacy = serde_json::json!({
+        "users": {"one": {"id":"one","display_name":"Owner","role":"admin","credentials":[],
+            "revoked":false,"created_by":"setup","created_at":1}},
+        "invites": {"i": {"id":"i","display_name":"Guest","role":"analyst","expires_at":500,
+            "revoked":false,"used":true,"created_by":"one"}},
+        "challenges": {}, "setup": {"hash_generation":"","failures":0,"spent":false},
+        "setup_grants": {}, "rates": {}, "audit": [], "policy_version": 0
+    });
+    let state: AuthState = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(state.users["one"].last_login_at, None);
+    assert_eq!(state.invites["i"].accepted_at, None);
+    assert_eq!(state.invites["i"].user_id, None);
+    assert_eq!(
+        serde_json::to_value(&state.users["one"]).unwrap(),
+        legacy["users"]["one"]
+    );
+    assert_eq!(
+        serde_json::to_value(&state.invites["i"]).unwrap(),
+        legacy["invites"]["i"]
+    );
 }

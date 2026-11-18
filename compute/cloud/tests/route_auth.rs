@@ -258,6 +258,7 @@ fn user(id: &str, role: Role, now: u64) -> User {
         revoked: false,
         created_by: "test".into(),
         created_at: now,
+        last_login_at: None,
     }
 }
 
@@ -567,6 +568,53 @@ fn anonymous_expired_and_tampered_sessions_get_401_everywhere() {
             assert_eq!(status, 401, "{method} {path} ({class:?}) as {session}");
         }
     }
+}
+
+#[test]
+fn admin_invites_report_acceptance_and_the_linked_users_last_sign_in() {
+    let h = Harness::new();
+    let now = h.platform.now();
+    let mut current = h.store.load().unwrap();
+    current
+        .state
+        .users
+        .get_mut("u-analyst")
+        .unwrap()
+        .last_login_at = Some(now - 60);
+    current.state.invites.insert(
+        "i".into(),
+        auth::Invite {
+            id: "i".into(),
+            display_name: "u-analyst".into(),
+            role: Role::Analyst,
+            expires_at: now + 3600,
+            revoked: false,
+            used: true,
+            created_by: "u-admin".into(),
+            accepted_at: Some(now - 120),
+            user_id: Some("u-analyst".into()),
+        },
+    );
+    assert!(h
+        .store
+        .compare_and_swap(current.generation.as_deref(), &current.state)
+        .unwrap());
+
+    let body: Value =
+        serde_json::from_slice(&h.send("GET", "/api/admin/invites", "admin").body).unwrap();
+    let invite = &body["invites"][0];
+    assert_eq!(invite["user_id"], "u-analyst");
+    assert_eq!(invite["accepted_at"], admin::rfc3339_from_secs(now - 120));
+    assert_eq!(invite["last_login_at"], admin::rfc3339_from_secs(now - 60));
+
+    let body: Value =
+        serde_json::from_slice(&h.send("GET", "/api/admin/users", "admin").body).unwrap();
+    let users = body["users"].as_array().unwrap();
+    let analyst = users.iter().find(|u| u["id"] == "u-analyst").unwrap();
+    assert_eq!(analyst["created_at"], admin::rfc3339_from_secs(now));
+    assert_eq!(analyst["last_login_at"], admin::rfc3339_from_secs(now - 60));
+    let admin_user = users.iter().find(|u| u["id"] == "u-admin").unwrap();
+    assert!(admin_user["last_login_at"].is_null());
 }
 
 #[test]
