@@ -171,8 +171,8 @@ export function valueSummaryFromRollup(
 export const VALUE_SUMMARY_SPEC = defineSummarySpec({
   groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals"],
   columns: [
-    "count", "requests", "total_bandwidth_bytes", "hit_elapsed_sum", "hit_elapsed_count", "miss_elapsed_sum",
-    "miss_elapsed_count",
+    "count", "requests", "resp_bytes_sum", "total_bandwidth_bytes", "hit_elapsed_sum", "hit_elapsed_count",
+    "miss_elapsed_sum", "miss_elapsed_count",
   ],
 });
 
