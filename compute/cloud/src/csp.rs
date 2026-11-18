@@ -87,7 +87,8 @@ pub fn script_hash(body: &[u8]) -> String {
 
 /// Enforced policy. Inline scripts are allowed only by hash; DuckDB needs `'wasm-unsafe-eval'`
 /// (never plain unsafe-eval). DuckDB's parquet extension is served from `/duckdb/`, so nothing
-/// connects to a third-party origin.
+/// connects to a third-party origin. `connect-src blob:` lets DuckDB's worker fetch its module
+/// from the `blob:` URL of the copy the page keeps in Cache Storage.
 pub fn policy(script_hashes: &[&str]) -> String {
     let mut script_src = String::from("'self' 'wasm-unsafe-eval'");
     for hash in script_hashes {
@@ -95,7 +96,7 @@ pub fn policy(script_hashes: &[&str]) -> String {
     }
     format!(
         "default-src 'self'; script-src {script_src}; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; \
+         img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; \
          worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; \
          form-action 'self'; object-src 'none'"
     )
@@ -138,7 +139,8 @@ mod tests {
             "default-src 'self'",
             "style-src 'self' 'unsafe-inline'",
             "worker-src 'self' blob:",
-            "connect-src 'self';",
+            // DuckDB's worker instantiates its module from a cached copy's blob: URL.
+            "connect-src 'self' blob:;",
             "frame-ancestors 'none'",
             "base-uri 'self'",
             "object-src 'none'",

@@ -5,7 +5,7 @@ import { createBrowserBackend, DuckDBAnalyticalEngine } from "./duckdb";
 type MockReader = AsyncIterable<never> & { schema: { fields: never[] } };
 const state = vi.hoisted(() => ({
   fail: "", cleanupFails: false, factories: 0, terminations: 0,
-  queries: [] as string[],
+  queries: [] as string[], modules: [] as string[],
   send: null as ((sql: string) => Promise<MockReader>) | null,
   terminate: null as (() => Promise<void>) | null,
 }));
@@ -22,7 +22,10 @@ vi.mock("@duckdb/duckdb-wasm", () => ({
       state.factories++;
       if (state.fail === "constructor") throw new Error("synthetic constructor failure");
     }
-    async instantiate() { if (state.fail === "instantiate") throw new Error("synthetic instantiate failure"); }
+    async instantiate(module: string) {
+      state.modules.push(module);
+      if (state.fail === "instantiate") throw new Error("synthetic instantiate failure");
+    }
     async open() { if (state.fail === "open") throw new Error("synthetic open failure"); }
     async connect() {
       if (state.fail === "connect") throw new Error("synthetic connect failure");
@@ -49,7 +52,7 @@ vi.mock("@duckdb/duckdb-wasm", () => ({
 beforeEach(() => {
   Object.assign(state, {
     fail: "", cleanupFails: false, factories: 0, terminations: 0,
-    queries: [], send: null, terminate: null,
+    queries: [], modules: [], send: null, terminate: null,
   });
   vi.stubGlobal("Worker", class { terminate() { state.terminations++; } });
 });
@@ -208,5 +211,45 @@ describe("owned browser backend initialization", () => {
     state.cleanupFails = false;
     await expect(engine.beginRequest()).rejects.toThrow(/cleanup failed.*replacement was not started/);
     expect(state.factories).toBe(1);
+  });
+});
+
+describe("DuckDB module reuse across tabs", () => {
+  it("downloads the module once and instantiates every later backend from the Cache Storage copy", async () => {
+    const stored = new Map<string, Map<string, Response>>();
+    vi.stubGlobal("caches", {
+      open: async (name: string) => {
+        const entries = stored.get(name) ?? new Map<string, Response>();
+        stored.set(name, entries);
+        return {
+          match: async (url: string) => entries.get(url)?.clone(),
+          put: async (url: string, response: Response) => { entries.set(url, response); },
+        };
+      },
+      keys: async () => [...stored.keys()],
+      delete: async (name: string) => stored.delete(name),
+    });
+    const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+    const read = globalThis.fetch;
+    const fetches = vi.fn(async () => new Response(bytes.slice(), { headers: { "content-type": "application/wasm" } }));
+    vi.stubGlobal("fetch", fetches);
+    const revoked: string[] = [];
+    const revoke = URL.revokeObjectURL;
+    URL.revokeObjectURL = (url: string) => { revoked.push(url); };
+    try {
+      // Each tab's query worker builds its own backend.
+      for (let tab = 0; tab < 2; tab++) await (await createBrowserBackend()).dispose();
+      expect(fetches).toHaveBeenCalledTimes(1);
+      expect(state.modules).toHaveLength(2);
+      for (const url of state.modules) {
+        expect(url).toMatch(/^blob:/);
+        const response = await read(url);
+        expect(response.headers.get("content-type")).toBe("application/wasm");
+        expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+      }
+      expect(revoked).toEqual(state.modules);
+    } finally {
+      URL.revokeObjectURL = revoke;
+    }
   });
 });
