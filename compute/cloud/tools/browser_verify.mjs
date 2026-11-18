@@ -2042,21 +2042,27 @@ async function sweepUnifiedPages(context, baseUrl, appDir, queryTimeoutMs) {
         const needsFreshQuery = analytical.has(route) || adminData.has(route) || streamDetail && Boolean(streamDetailUrl);
         const label = `${route}${query.includes("f=") ? " (filtered)" : ""}`;
         const url = streamDetail && streamDetailUrl ? streamDetailUrl : `${baseUrl}${route}${compatibleDashboardQuery(query)}`;
+        let waitReadiness = null;
         const result = await measureRouteWithTelemetry(page, url, async p => {
           if (needsFreshQuery) {
-            await waitForCloudReport(p, queryTimeoutMs, label);
+            waitReadiness = await waitForCloudReport(p, queryTimeoutMs, label);
             if (streamDetail) await p.getByTestId("stream-detail-client").waitFor({ state: "visible", timeout: 30_000 });
           } else if (streamDetail) {
             await p.getByTestId("stream-detail-parameter-required").waitFor({ state: "visible", timeout: 30_000 });
           } else {
             await p.getByRole("heading").first().waitFor({ state: "visible", timeout: 30_000 });
           }
-          if (!needsFreshQuery) await waitForCloudIdle(p, queryTimeoutMs, label);
+          if (!needsFreshQuery) waitReadiness = await waitForCloudIdle(p, queryTimeoutMs, label);
         });
         if (!result.deployed || result.status < 200 || result.status >= 400) {
           throw new Error(`Unified route unavailable: ${route}`);
         }
-        const readiness = await page.evaluate(() => window.__flaCloudReadiness?.snapshot() ?? null);
+        let readiness = await page.evaluate(() => window.__flaCloudReadiness?.snapshot() ?? null);
+        if (readiness?.pending && !readiness?.errors && waitReadiness) {
+          readiness = needsFreshQuery
+            ? await waitForCloudReport(page, queryTimeoutMs, label)
+            : await waitForCloudIdle(page, queryTimeoutMs, label);
+        }
         if (needsFreshQuery && !readiness?.ready) throw new Error(`Fresh query incomplete: ${route}`);
         if (readiness?.pending || readiness?.errors || result.uiHealth?.errorBannerTexts?.length) {
           throw new Error(`Unified route has pending or failed work: ${route}`);

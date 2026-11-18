@@ -1411,3 +1411,65 @@ test("a symlinked script path still runs main, so it never exits 0 without a rep
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("unified sweep re-waits once when a background refresh starts after waitForCloudReport settles, and still fails on errors or timeouts", async () => {
+  const { chromium } = await import(pathToFileURL(PLAYWRIGHT_PATH).href);
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const scenario of ["refresh-succeeds", "refresh-errors", "refresh-hangs"]) {
+      const context = await browser.newContext();
+      await context.addInitScript(cloudReadiness.CLOUD_READINESS_INIT_SCRIPT);
+      await context.route("https://offline.invalid/**", async route => {
+        const pathname = new URL(route.request().url()).pathname;
+        const section = fixtureQuerySection(pathname);
+        const insightsScript = pathname === "/insights" ? `
+          window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{
+            id:2,section:'api./api/files',route:location.pathname,search:location.search,state:'success',totalRows:42
+          }}));
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{
+              id:3,section:'api./api/files',route:location.pathname,search:location.search,state:'pending'
+            }}));
+            ${scenario === "refresh-hangs" ? "" : `setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{
+                id:3,section:'api./api/files',route:location.pathname,search:location.search,
+                state:${JSON.stringify(scenario === "refresh-errors" ? "error" : "success")},
+                error:${JSON.stringify(scenario === "refresh-errors" ? "background /api/files refresh failed" : null)},
+                totalRows:42
+              }}));
+            }, 120);`}
+          }, 15);
+        ` : "";
+        await route.fulfill({ contentType: "text/html", body: `<!doctype html><h1>Immediate heading</h1>
+          ${pathname === "/sessions/stream" ? '<div role="status" data-testid="stream-detail-parameter-required">No session token</div>' : ""}
+          <script>
+            window.dispatchEvent(new CustomEvent('fla:cloud-query',{detail:{
+              id:1,section:${JSON.stringify(section)},route:location.pathname,search:location.search,state:'success',totalRows:42
+            }}));
+            ${insightsScript}
+          </script>` });
+      });
+      try {
+        if (scenario === "refresh-succeeds") {
+          const result = await sweepPages(context, "https://offline.invalid", null, 500);
+          assert.equal(result.pages["/insights"].readiness.ready, true);
+          assert.equal(result.pages["/insights"].readiness.pending, 0);
+        } else if (scenario === "refresh-errors") {
+          await assert.rejects(
+            sweepPages(context, "https://offline.invalid", null, 500),
+            /background \/api\/files refresh failed|Unified route has pending or failed work: \/insights/,
+          );
+        } else {
+          await assert.rejects(
+            sweepPages(context, "https://offline.invalid", null, 250),
+            /Timed out after 250ms.*\/insights/,
+          );
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
