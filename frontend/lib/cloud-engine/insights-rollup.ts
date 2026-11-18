@@ -22,14 +22,11 @@ export type InsightsBaselineSource = {
 };
 
 /**
- * Detectors that need a breakdown the summaries do not keep (per-URL status,
- * cache state and latency; per-IP auth paths and 404s; per-city and per-PoP
- * latency; per-ASN proxy type). Content discovery is window-only but its
- * baseline 404 count is per IP too.
+ * Detectors that need a breakdown pre-batch-2 summaries do not keep; kept as an
+ * empty set now that `ins_url`, `ins_ip`, `ins_lat`, and `ins_asn` cover all
+ * baseline detectors (pre-batch-2 ranges still defer via `insightsDeferredDetectors`).
  */
-export const INSIGHTS_DEFERRED: ReadonlySet<string> = new Set([
-  "city_latency_regressions", "pop_latency_regression", "asn_hosting_shift",
-]);
+export const INSIGHTS_DEFERRED: ReadonlySet<string> = new Set();
 
 const INS_URL_DETECTORS = [
   "error_spikes", "cache_collapse", "cacheability_regression", "latency_regression",
@@ -45,6 +42,9 @@ export function insightsDeferredDetectors(rollup: Rollup): ReadonlySet<string> {
   if (!rollupGroup(rollup, "ins_ip", "ip")) {
     for (const id of INS_IP_DETECTORS) out.add(id);
   }
+  if (!rollupGroup(rollup, "ins_lat", "city")) out.add("city_latency_regressions");
+  if (!rollupGroup(rollup, "ins_lat", "pop")) out.add("pop_latency_regression");
+  if (!rollupGroup(rollup, "ins_asn", "asn")) out.add("asn_hosting_shift");
   return out;
 }
 
@@ -70,18 +70,22 @@ const BASELINE_FIELDS: Record<string, string> = {
   cacheability_regression: "ins_url/url",
   credential_enumeration: "ins_ip/ip",
   content_discovery: "ins_ip/ip",
+  city_latency_regressions: "ins_lat/city",
+  pop_latency_regression: "ins_lat/pop",
+  asn_hosting_shift: "ins_asn/asn",
 };
 
 /** Ratios of two cut counts are estimates rather than bounds. */
 const RATIO_DETECTORS = new Set([
   "cache_hit_cliff", "http3_fallback", "error_spikes", "cache_collapse", "cacheability_regression",
+  "asn_hosting_shift",
 ]);
 
 const DIMENSIONS = ["country", "p_type", "method", "referer", "ua"] as const;
 
 /** The summary groups and columns the /insights baseline reads. */
 export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "all_fields", "field_totals", "dim_totals", "urls", "ins_url", "ins_ip"],
+  groups: ["dims", "series5", "all_fields", "field_totals", "dim_totals", "urls", "ins_url", "ins_ip", "ins_lat", "ins_asn"],
   columns: [
     "count", "requests", "errors",
     "status_5xx", "hit_requests", "miss_requests", "pass_requests",
@@ -116,6 +120,7 @@ export type InsightScanRows = {
   city: Row[];
   dimension: Row[];
   asn: Row[];
+  geo?: Row[];
   scalar: Row[];
 };
 
@@ -134,6 +139,9 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
   const insUrl = rollup.groups?.get("ins_url")?.get("url");
   const urls = rollup.groups?.get("urls")?.get("url");
   const insIp = rollup.groups?.get("ins_ip")?.get("ip");
+  const insLatCity = rollup.groups?.get("ins_lat")?.get("city");
+  const insLatPop = rollup.groups?.get("ins_lat")?.get("pop");
+  const insAsn = rollup.groups?.get("ins_asn")?.get("asn");
   const groups = new Map<string, Map<string, Map<string, RollupAgg>>>();
   if (insUrl) {
     groups.set("ins_url", new Map([["url", new Map([...insUrl].map(([k, a]) => [k, {
@@ -160,8 +168,27 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
       count: a.count,
     }]))]]));
   }
+  if (insLatCity || insLatPop) {
+    const latFields = new Map<string, Map<string, RollupAgg>>();
+    const copyLat = (values: Map<string, RollupAgg>) => new Map([...values].map(([k, a]) => [k, {
+      ...emptyAgg(),
+      elapsedCount: a.elapsedCount,
+      hists: { ...emptyAgg().hists, elapsed: a.hists.elapsed },
+    }]));
+    if (insLatCity) latFields.set("city", copyLat(insLatCity));
+    if (insLatPop) latFields.set("pop", copyLat(insLatPop));
+    groups.set("ins_lat", latFields);
+  }
+  if (insAsn) {
+    groups.set("ins_asn", new Map([["asn", new Map([...insAsn].map(([k, a]) => [k, {
+      ...emptyAgg(),
+      requests: a.requests,
+      count: a.count,
+    }]))]]));
+  }
   const present = new Set(
-    ["ins_url/url", "urls/url", "ins_ip/ip"].filter((key) => rollup.present?.has(key)),
+    ["ins_url/url", "urls/url", "ins_ip/ip", "ins_lat/city", "ins_lat/pop", "ins_asn/asn"]
+      .filter((key) => rollup.present?.has(key)),
   );
   return {
     ...result,
@@ -198,9 +225,20 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
   for (const agg of rollup.series.get("overall")?.get("")?.values() ?? []) baselineRequests += agg.requests;
 
   const cities = rollup.dims.get("city");
+  const insLatCity = rollupGroup(rollup, "ins_lat", "city");
+  const p95Ms = (agg: RollupAgg | undefined) => {
+    const q95 = agg && agg.elapsedCount > 0 ? (agg.hists.elapsed?.quantile(0.95) ?? null) : null;
+    return q95 == null ? null : q95 / 1000;
+  };
   const city = rows.city.map((row) => {
     const agg = cities?.get(JSON.stringify([row.country == null ? "Unknown" : String(row.country), String(row.city)]));
-    return { ...row, b_cnt: agg?.requests ?? 0, b_errors_4xx: agg?.errors ?? 0 };
+    const latAgg = insLatCity?.get(JSON.stringify([String(row.city), row.region ?? null, row.country ?? null]));
+    return {
+      ...row,
+      b_cnt: agg?.requests ?? 0,
+      b_errors_4xx: agg?.errors ?? 0,
+      ...(insLatCity ? { b_lat_total: latAgg?.elapsedCount ?? 0, b_p95: p95Ms(latAgg) } : {}),
+    };
   });
 
   const dimension: Row[] = [];
@@ -224,7 +262,23 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
   }
 
   const asnCounts = fields("asn");
-  const asn = rows.asn.map((row) => ({ ...row, b_cnt: row.asn == null ? 0 : asnCounts.get(String(row.asn)) ?? 0 }));
+  const insAsn = rollupGroup(rollup, "ins_asn", "asn");
+  const asn = rows.asn.map((row) => {
+    const key = row.asn == null ? null : String(row.asn);
+    const hosting = key == null ? undefined : insAsn?.get(key);
+    return {
+      ...row,
+      b_cnt: key == null ? 0 : asnCounts.get(key) ?? 0,
+      ...(insAsn ? { b_proxy_total: hosting?.requests ?? 0, b_hosting: hosting?.count ?? 0 } : {}),
+    };
+  });
+
+  const insLatPop = rollupGroup(rollup, "ins_lat", "pop");
+  const geo = rows.geo?.map((row) => {
+    if (!insLatPop || !row.pop) return row;
+    const agg = insLatPop.get(String(row.pop));
+    return { ...row, b_lat_total: agg?.elapsedCount ?? 0, b_p95: p95Ms(agg) };
+  });
 
   const sum = (counts: Map<string, number>, pred: (value: string) => boolean) =>
     [...counts].reduce((total, [value, n]) => total + (pred(value) ? n : 0), 0);
@@ -271,14 +325,16 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
 
   const deferred = insightsDeferredDetectors(rollup);
   const approximate = new Set(ALWAYS_APPROXIMATE);
-  if (!deferred.has("latency_regression")) approximate.add("latency_regression");
+  for (const id of ["latency_regression", "city_latency_regressions", "pop_latency_regression"]) {
+    if (!deferred.has(id)) approximate.add(id);
+  }
   const lowerBound = new Set<string>();
   for (const [id, group] of Object.entries(BASELINE_FIELDS)) {
     if (deferred.has(id) || !rollup.truncated.has(group) || approximate.has(id)) continue;
     (RATIO_DETECTORS.has(id) ? approximate : lowerBound).add(id);
   }
   return {
-    rows: { url, ip, city, dimension, asn, scalar },
+    rows: { url, ip, city, dimension, asn, ...(geo ? { geo } : {}), scalar },
     baselineRequests,
     source: { approximate, lowerBound, deferred },
     meta: {

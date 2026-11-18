@@ -132,8 +132,8 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     const ids = raw.insights.map((c) => c.id);
     const deferredSet = insightsDeferredDetectors(baseline.rollup);
     const deferred = ids.filter((id) => deferredSet.has(id));
-    expect(deferred).toEqual(expect.arrayContaining(["content_discovery", "error_spikes"]));
-    expect(rolled.deferred_detectors).toEqual(deferred);
+    expect(deferred).toEqual([]);
+    expect(rolled.deferred_detectors).toEqual([]);
     expect(ids).toEqual(expect.arrayContaining(["city_surges", "new_country_traffic", "asn_concentration", "cache_hit_cliff"]));
     const strip = (items: { baseline_val: number; baseline_label?: string }[], dropBaseline: boolean) =>
       items.map(({ baseline_label: _, baseline_val, ...rest }) => (dropBaseline ? rest : { ...rest, baseline_val }));
@@ -163,7 +163,15 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     };
     const { meta, source } = rollupInsightsBaseline(truncated, { city: [], dimension: [], asn: [], scalar: [] });
     expect(meta.lower_bound).toEqual(["ua_monoculture"]);
-    expect(meta.approximate.toSorted()).toEqual(["cache_hit_cliff", "city_error_spikes", "city_surges", "new_city_traffic"]);
+    expect(meta.approximate.toSorted()).toEqual([
+      "cache_hit_cliff",
+      "city_error_spikes",
+      "city_latency_regressions",
+      "city_surges",
+      "latency_regression",
+      "new_city_traffic",
+      "pop_latency_regression",
+    ]);
 
     const ua = await handleInsights(body, {
       now: new Date(T1),
@@ -321,6 +329,7 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
       now: new Date(T1),
       availableColumns: new Set(["ip", "url", "status"]),
       availableHistoryHours: 1,
+      urlAggregateRows: [],
       ipSecurityRows: rows.ip,
       windowTotalRequests: 40,
       baselineTotalRequests: 100,
@@ -349,6 +358,7 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
       now: new Date(T1),
       availableColumns: new Set(["ip", "url", "status"]),
       availableHistoryHours: 1,
+      urlAggregateRows: [],
       ipSecurityRows: truncRes.rows.ip,
       windowTotalRequests: 40,
       baselineTotalRequests: 100,
@@ -356,6 +366,111 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     });
     expect(truncEnv.insights.find((c) => c.id === "credential_enumeration")!.items).toMatchObject([
       { label: "9.9.9.9", baseline_val: 0, baseline_label: "≥ baseline" },
+    ]);
+  });
+
+  it("city and pop latency regressions from ins_lat", async () => {
+    const base = await baselineRollup();
+    const h = new Histogram();
+    h.min = 50_000;
+    h.max = 50_000;
+    h.buckets[BOUNDS.findIndex((b) => b > 50_000) - 1] = 60; // 50 ms
+
+    const insLatCity = new Map([
+      [JSON.stringify(["Springfield", "IL", "US"]), { ...emptyAgg(), requests: 60, elapsedCount: 60, hists: { ...emptyAgg().hists, elapsed: h } }],
+    ]);
+    const insLatPop = new Map([
+      ["ORD", { ...emptyAgg(), requests: 60, elapsedCount: 60, hists: { ...emptyAgg().hists, elapsed: h } }],
+    ]);
+    const covered: RollupResult = {
+      ...base,
+      rollup: {
+        ...base.rollup,
+        groups: new Map([
+          ["ins_lat", new Map([["city", insLatCity], ["pop", insLatPop]])],
+        ]),
+        present: new Set([...(base.rollup.present ?? []), "ins_lat/city", "ins_lat/pop"]),
+      },
+    };
+    const cityRows = [
+      { city: "Springfield", region: "IL", country: "US", w_cnt: 20, w_errors_4xx: 0, w_lat_total: 20, w_p95: 700 },
+      { city: "Springfield", region: "MO", country: "US", w_cnt: 20, w_errors_4xx: 0, w_lat_total: 20, w_p95: 700 },
+    ];
+    const geoRows = [
+      { pop: "ORD", server_region: null, metro: null, w_lat_total: 30, w_p95: 250 },
+      { pop: null, server_region: "US-Central", metro: null, w_lat_total: 30, w_p95: 250 },
+    ];
+
+    const { rows, source, meta } = rollupInsightsBaseline(covered, {
+      city: cityRows,
+      dimension: [],
+      asn: [],
+      geo: geoRows,
+      scalar: [],
+    });
+
+    expect(source.deferred.has("city_latency_regressions")).toBe(false);
+    expect(source.deferred.has("pop_latency_regression")).toBe(false);
+    expect(meta.approximate).toEqual(expect.arrayContaining(["city_latency_regressions", "pop_latency_regression"]));
+
+    const env = await handleInsights(body, {
+      now: new Date(T1),
+      availableColumns: new Set(["city", "region", "country", "pop", "elapsed"]),
+      availableHistoryHours: 1,
+      cityAggregateRows: rows.city,
+      dimensionAggregateRows: rows.dimension,
+      geoLatencyRows: rows.geo,
+      windowTotalRequests: 40,
+      baselineTotalRequests: 120,
+      baselineSource: source,
+    });
+    expect(env.insights.find((c) => c.id === "city_latency_regressions")!.items).toMatchObject([
+      { label: "Springfield, IL, US", baseline_label: "≈ baseline" },
+    ]);
+    expect(env.insights.find((c) => c.id === "pop_latency_regression")!.items).toMatchObject([
+      { label: "ORD", baseline_label: "≈ baseline" },
+    ]);
+  });
+
+  it("asn_hosting_shift from ins_asn", async () => {
+    const base = await baselineRollup();
+    const insAsnMap = new Map([
+      ["15169", { ...emptyAgg(), requests: 100, count: 5 }],
+    ]);
+    const covered: RollupResult = {
+      ...base,
+      rollup: {
+        ...base.rollup,
+        groups: new Map([["ins_asn", new Map([["asn", insAsnMap]])]]),
+        present: new Set([...(base.rollup.present ?? []), "ins_asn/asn"]),
+      },
+    };
+    const asnRows = [
+      { asn: 15169, w_cnt: 80, w_proxy_total: 60, w_hosting: 48 },
+    ];
+
+    const { rows, source, meta } = rollupInsightsBaseline(covered, {
+      city: [],
+      dimension: [],
+      asn: asnRows,
+      scalar: [],
+    });
+
+    expect(source.deferred.has("asn_hosting_shift")).toBe(false);
+    expect(meta.approximate).not.toContain("asn_hosting_shift");
+
+    const env = await handleInsights(body, {
+      now: new Date(T1),
+      availableColumns: new Set(["asn", "p_type"]),
+      availableHistoryHours: 1,
+      asnAggregateRows: rows.asn,
+      dimensionAggregateRows: rows.dimension,
+      windowTotalRequests: 80,
+      baselineTotalRequests: 100,
+      baselineSource: source,
+    });
+    expect(env.insights.find((c) => c.id === "asn_hosting_shift")!.items).toMatchObject([
+      { label: "AS15169", current_val: 80, baseline_val: 5 },
     ]);
   });
 });

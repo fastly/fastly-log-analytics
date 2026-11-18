@@ -38,6 +38,7 @@ pub const SESSION_K: usize = 2000;
 pub const DIM_K: usize = 2000;
 pub const INS_URL_K: usize = 500;
 pub const INS_IP_K: usize = 500;
+pub const INS_ASN_K: usize = 500;
 pub const ASSET_URL_K: usize = 500;
 /// ASNs kept in `series5` per window and hour bundle: 4x the 30 a day bundle writes.
 pub const SERIES_ASN_K: usize = 120;
@@ -880,6 +881,7 @@ struct NetCols<'a> {
     proxy_rtt: Num<'a>,
     pop: Str<'a>,
     plain_city: Str<'a>,
+    plain_region: Str<'a>,
     plain_url: Str<'a>,
     referer: Str<'a>,
     ja3: Str<'a>,
@@ -966,6 +968,7 @@ impl<'a> NetCols<'a> {
             proxy_rtt: Num::new(batch, &[("tcp_rtt", 1.0), ("tcpi_rtt", 1.0)]),
             pop: Str::new(batch, &["pop"]),
             plain_city: Str::new(batch, &["city"]),
+            plain_region: Str::new(batch, &["region"]),
             plain_url: Str::new(batch, &["url"]),
             referer: Str::new(batch, &["referer"]),
             ja3: Str::new(batch, &["ja3"]),
@@ -2819,6 +2822,110 @@ fn write_insights(rows: &[Rows], bucket: i64, out: &mut Out) {
     }
 }
 
+#[derive(Default)]
+struct InsLatAgg {
+    requests: i64,
+    elapsed: Hist,
+}
+
+impl InsLatAgg {
+    fn add(&mut self, elapsed: Option<(i64, u8)>) {
+        self.requests += 1;
+        if let Some((v, slot)) = elapsed {
+            self.elapsed.add_slot(v, slot);
+        }
+    }
+
+    fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str) {
+        let blobs = [self.elapsed.to_bytes()];
+        let mut row = vec![
+            (C::Bundle, V::S("ins_lat")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+            (C::ElapsedCount, V::I(self.elapsed.count() as i64)),
+        ];
+        push_hists(&mut row, &[C::ElapsedHist], &blobs);
+        out.push(&row);
+    }
+}
+
+#[derive(Default)]
+struct InsAsnAgg {
+    requests: i64,
+    hosting: i64,
+}
+
+/// The /insights latency and ASN hosting baseline rows (`ins_lat` and `ins_asn`), appended after
+/// `asset_urls` in [`GROUPS`] order.
+fn write_insights_lat_asn(rows: &[Rows], bucket: i64, out: &mut Out) {
+    let mut cities: FastMap<(&str, Option<&str>, Option<&str>), InsLatAgg> = FastMap::default();
+    let mut pops: FastMap<Cow<str>, InsLatAgg> = FastMap::default();
+    let mut asns: FastMap<Cow<str>, InsAsnAgg> = FastMap::default();
+    for r in rows {
+        let asn_col = FieldCol::resolve(r.batch, "asn");
+        for i in r.live() {
+            let elapsed_lat = lat(get_i(r.elapsed, i));
+            if let Some(city) = r.net.plain_city.get(i, true) {
+                let region = r.net.plain_region.get(i, false);
+                let country = get_s(r.country, i);
+                cities
+                    .entry((city, region, country))
+                    .or_default()
+                    .add(elapsed_lat);
+            }
+            if let Some(pop) = r.net.pop.get(i, true) {
+                pops.entry(Cow::Borrowed(pop)).or_default().add(elapsed_lat);
+            }
+            if let Some(col) = &asn_col {
+                if let Some(p_type) = r.net.p_type.get(i, true) {
+                    let hosting = i64::from(p_type == "hosting");
+                    col.for_each_key(i, false, |key| {
+                        let a = asns.entry(key.render()).or_default();
+                        a.requests += 1;
+                        a.hosting += hosting;
+                    });
+                }
+            }
+        }
+    }
+
+    let cities_json: FastMap<Cow<str>, InsLatAgg> = cities
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                Cow::Owned(serde_json::to_string(&k).expect("strings serialize")),
+                v,
+            )
+        })
+        .collect();
+    let (kept_cities, total, truncated) = top_untimed(cities_json, |x| x.requests, SERIES_CITY_K);
+    push_total(out, bucket, "ins_lat", "city", total, truncated);
+    for (value, x) in &kept_cities {
+        x.push(out, bucket, "city", value);
+    }
+
+    let (kept_pops, total, truncated) = top_untimed(pops, |x| x.requests, DIM_K);
+    push_total(out, bucket, "ins_lat", "pop", total, truncated);
+    for (value, x) in &kept_pops {
+        x.push(out, bucket, "pop", value);
+    }
+
+    let (kept_asns, total, truncated) = top_untimed(asns, |x| x.requests, INS_ASN_K);
+    push_total(out, bucket, "ins_asn", "asn", total, truncated);
+    for (value, x) in &kept_asns {
+        out.push(&[
+            (C::Bundle, V::S("ins_asn")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("asn")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(x.requests)),
+            (C::Count, V::I(x.hosting)),
+        ]);
+    }
+}
+
 /// Builds the summary for the rows of one window `[start, end)` (seconds). Deterministic: the
 /// same batches in the same order give the same bytes. Heap: one field's value map at a time
 /// (about rows x 48 bytes plus 4 bytes per IP row), plus at most `IP_TOP_K` sketches per field
@@ -3092,6 +3199,7 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     write_ext(&rows, bucket, &mut out);
     write_insights(&rows, bucket, &mut out);
     write_asset_urls(&rows, bucket, &mut out);
+    write_insights_lat_asn(&rows, bucket, &mut out);
     write_sample(&rows, sample, &mut out);
 
     let batch = out.finish()?;

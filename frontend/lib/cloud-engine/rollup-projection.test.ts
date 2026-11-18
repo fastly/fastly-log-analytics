@@ -92,7 +92,8 @@ const insights: Answer = async (source, spec) => {
   const asn = [...(result.rollup.fields.get("asn")?.keys() ?? [])].map((value) => ({ asn: value }));
   const url = [...(result.rollup.groups?.get("ins_url")?.get("url")?.keys() ?? [])].map((value) => ({ url: value }));
   const ip = [...(result.rollup.groups?.get("ins_ip")?.get("ip")?.keys() ?? [])].map((value) => ({ ip: value }));
-  return rollupInsightsBaseline(insightsBaselineRollup(result), { url, ip, city, dimension: [], asn, scalar: [{}] });
+  const geo = [...(result.rollup.groups?.get("ins_lat")?.get("pop")?.keys() ?? [])].map((value) => ({ pop: value }));
+  return rollupInsightsBaseline(insightsBaselineRollup(result), { url, ip, city, dimension: [], asn, geo, scalar: [{}] });
 };
 
 const PAGES: Record<string, Page> = {

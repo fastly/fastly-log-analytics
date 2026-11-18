@@ -101,7 +101,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x06";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x07";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
 /// [`part_key`] objects, each at most the CDN read limit.
@@ -645,6 +645,17 @@ const INS_URL_COLS: &[(C, Op)] = &[
 /// `Requests` = `Errors + Count`.
 const INS_IP_COLS: &[(C, Op)] = &[(C::Requests, Sum), (C::Errors, Sum), (C::Count, Sum)];
 
+/// `ins_lat` (`city` and `pop` fields): /insights latency regression baselines (`ElapsedHist` in µs).
+const INS_LAT_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::ElapsedCount, Sum),
+    (C::ElapsedHist, Merge),
+];
+
+/// `ins_asn` (`asn` field): `Requests` = rows with non-empty `p_type`, `Count` =
+/// `p_type == "hosting"`.
+const INS_ASN_COLS: &[(C, Op)] = &[(C::Requests, Sum), (C::Count, Sum)];
+
 /// A bundle of `(field, value)` rows that sum per value (and, when `timed`, per bucket), cut to
 /// the values with the most requests (`cols[0]`) and counted in `dim_totals`.
 struct Group {
@@ -658,7 +669,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 16] = [
+const GROUPS: [Group; 18] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -771,6 +782,20 @@ const GROUPS: [Group; 16] = [
         fields: &["large", "low_ttl"],
         gated: &["large", "low_ttl"],
     },
+    Group {
+        name: "ins_lat",
+        cols: INS_LAT_COLS,
+        timed: false,
+        fields: &["city", "pop"],
+        gated: &["city", "pop"],
+    },
+    Group {
+        name: "ins_asn",
+        cols: INS_ASN_COLS,
+        timed: false,
+        fields: &["asn"],
+        gated: &["asn"],
+    },
 ];
 
 impl Group {
@@ -786,6 +811,8 @@ impl Group {
             ("proxy", _) => summary::SAMPLE_K,
             ("ins_url", _) => summary::INS_URL_K,
             ("ins_ip", _) => summary::INS_IP_K,
+            ("ins_lat", "city") => summary::SERIES_CITY_K,
+            ("ins_asn", _) => summary::INS_ASN_K,
             _ => summary::DIM_K,
         }
     }
@@ -798,6 +825,7 @@ impl Group {
             Unit::Day if self.name == "series5" && field == "asn" => SERIES_ASN_TOP_K,
             Unit::Day if self.name == "series5" && field == "city" => SERIES_CITY_TOP_K,
             Unit::Day if self.name == "proxy" => summary::SAMPLE_K,
+            Unit::Day if self.name == "ins_lat" => self.keep(field),
             Unit::Day => self.keep(field).min(DAY_TOP_K),
         }
     }
@@ -1907,6 +1935,8 @@ impl Acc {
                 "ins_url",
                 "ins_ip",
                 "asset_urls",
+                "ins_lat",
+                "ins_asn",
                 "sample",
             ],
             &mut groups_out,

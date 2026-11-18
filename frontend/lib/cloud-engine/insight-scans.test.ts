@@ -173,7 +173,7 @@ describe("local Parquet insight scans", () => {
 
   it("evaluates the deferred detectors from their own column projection exactly as the full scan", async () => {
     await seedRichHistory();
-    const deferred = [...INSIGHTS_DEFERRED];
+    const deferred = ["city_latency_regressions", "pop_latency_regression", "asn_hosting_shift"];
     const full = await queryCloudInsights(body, options);
     const columns = insightScanColumns([], deferred);
     for (const unneeded of ["ua", "referer", "method", "transport"]) expect(columns).not.toContain(unneeded);

@@ -2564,6 +2564,92 @@ fn ins_ip_counts_denied_auth_and_404_per_ip() {
     assert_eq!(row["count"], 1);
 }
 
+#[test]
+fn ins_lat_keys_city_by_region_and_country() {
+    let rows = vec![
+        json!({"timestamp": iso(BASE * 1000), "city": "Springfield", "region": "IL", "country": "US", "pop": "ORD", "elapsed": 20_000}),
+        json!({"timestamp": iso(BASE * 1000 + 1), "city": "Springfield", "region": "MO", "country": "US", "pop": "ORD", "elapsed": 40_000}),
+        json!({"timestamp": iso(BASE * 1000 + 2), "city": "Springfield", "region": Value::Null, "country": Value::Null, "pop": "DFW", "elapsed": 30_000}),
+        json!({"timestamp": iso(BASE * 1000 + 3), "city": "", "region": "IL", "country": "US", "pop": "", "elapsed": 50_000}),
+        json!({"timestamp": iso(BASE * 1000 + 4), "city": Value::Null, "region": "IL", "country": "US", "pop": Value::Null, "elapsed": 60_000}),
+    ];
+    let b = batch(&rows);
+    let summary_rows = read(&summary::write_summary(&[&b], BASE).unwrap());
+
+    let city_total = summary_rows
+        .iter()
+        .find(|r| r["bundle"] == "dim_totals" && r["field"] == "city" && r["value"] == "ins_lat")
+        .expect("ins_lat city dim_totals row");
+    assert_eq!(city_total["requests"], 3);
+    assert_eq!(city_total["truncated"], false);
+
+    let city_rows: Vec<&Map<String, Value>> = summary_rows
+        .iter()
+        .filter(|r| r["bundle"] == "ins_lat" && r["field"] == "city")
+        .collect();
+    assert_eq!(city_rows.len(), 3);
+    let keys: std::collections::BTreeSet<&str> = city_rows
+        .iter()
+        .map(|r| r["value"].as_str().unwrap())
+        .collect();
+    assert!(keys.contains(r#"["Springfield","IL","US"]"#));
+    assert!(keys.contains(r#"["Springfield","MO","US"]"#));
+    assert!(keys.contains(r#"["Springfield",null,null]"#));
+    for r in &city_rows {
+        assert_eq!(r["requests"], 1);
+        assert_eq!(r["elapsed_count"], 1);
+    }
+
+    let pop_total = summary_rows
+        .iter()
+        .find(|r| r["bundle"] == "dim_totals" && r["field"] == "pop" && r["value"] == "ins_lat")
+        .expect("ins_lat pop dim_totals row");
+    assert_eq!(pop_total["requests"], 3);
+    assert_eq!(pop_total["truncated"], false);
+
+    let pop_rows: Vec<&Map<String, Value>> = summary_rows
+        .iter()
+        .filter(|r| r["bundle"] == "ins_lat" && r["field"] == "pop")
+        .collect();
+    assert_eq!(pop_rows.len(), 2);
+    let ord = pop_rows.iter().find(|r| r["value"] == "ORD").unwrap();
+    assert_eq!(ord["requests"], 2);
+    assert_eq!(ord["elapsed_count"], 2);
+    let dfw = pop_rows.iter().find(|r| r["value"] == "DFW").unwrap();
+    assert_eq!(dfw["requests"], 1);
+    assert_eq!(dfw["elapsed_count"], 1);
+}
+
+#[test]
+fn ins_asn_counts_proxy_and_hosting() {
+    let rows = vec![
+        json!({"timestamp": iso(BASE * 1000), "asn": 15169, "p_type": "hosting"}),
+        json!({"timestamp": iso(BASE * 1000 + 1), "asn": 15169, "p_type": "HOSTING"}),
+        json!({"timestamp": iso(BASE * 1000 + 2), "asn": 15169, "p_type": ""}),
+        json!({"timestamp": iso(BASE * 1000 + 3), "asn": 15169, "p_type": Value::Null}),
+        json!({"timestamp": iso(BASE * 1000 + 4), "asn": 13335, "p_type": ""}),
+        json!({"timestamp": iso(BASE * 1000 + 5), "asn": Value::Null, "p_type": "hosting"}),
+    ];
+    let b = batch(&rows);
+    let summary_rows = read(&summary::write_summary(&[&b], BASE).unwrap());
+    let total = summary_rows
+        .iter()
+        .find(|r| r["bundle"] == "dim_totals" && r["field"] == "asn" && r["value"] == "ins_asn")
+        .expect("ins_asn dim_totals row");
+    assert_eq!(total["requests"], 2);
+    assert_eq!(total["truncated"], false);
+
+    let asn_rows: Vec<&Map<String, Value>> = summary_rows
+        .iter()
+        .filter(|r| r["bundle"] == "ins_asn" && r["field"] == "asn")
+        .collect();
+    assert_eq!(asn_rows.len(), 1);
+    let row = asn_rows[0];
+    assert_eq!(row["value"], "15169");
+    assert_eq!(row["requests"], 2);
+    assert_eq!(row["count"], 1);
+}
+
 /// Writes `frontend/lib/cloud-engine/dashboard/__fixtures__/summaries/`: raw window Parquet,
 /// their window summaries, hour and day bundles and `index.json`, for the dashboard's
 /// summary-vs-raw tests.

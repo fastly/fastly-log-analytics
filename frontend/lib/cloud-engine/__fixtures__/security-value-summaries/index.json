@@ -14,7 +14,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800000000-1800000900-p1s0-n204.parquet",
     "kind": "window",
     "rows": 204,
-    "size": 51745,
+    "size": 52748,
     "sources": 1,
     "start": 1800000000
   },
@@ -33,7 +33,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800000900-1800001800-p1s0-n199.parquet",
     "kind": "window",
     "rows": 199,
-    "size": 51071,
+    "size": 52006,
     "sources": 1,
     "start": 1800000900
   },
@@ -52,7 +52,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800001800-1800002700-p1s0-n200.parquet",
     "kind": "window",
     "rows": 200,
-    "size": 50815,
+    "size": 51772,
     "sources": 1,
     "start": 1800001800
   },
@@ -71,7 +71,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=08/summary=1800002700-1800003600-p1s0-n199.parquet",
     "kind": "window",
     "rows": 199,
-    "size": 50943,
+    "size": 51883,
     "sources": 1,
     "start": 1800002700
   },
@@ -90,7 +90,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800003600-1800004500-p1s0-n200.parquet",
     "kind": "window",
     "rows": 200,
-    "size": 50828,
+    "size": 51788,
     "sources": 1,
     "start": 1800003600
   },
@@ -109,7 +109,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800004500-1800005400-p1s0-n199.parquet",
     "kind": "window",
     "rows": 199,
-    "size": 50730,
+    "size": 51675,
     "sources": 1,
     "start": 1800004500
   },
@@ -128,7 +128,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800005400-1800006300-p1s0-n199.parquet",
     "kind": "window",
     "rows": 199,
-    "size": 50851,
+    "size": 51808,
     "sources": 1,
     "start": 1800005400
   },
@@ -147,7 +147,7 @@
     "key": "processed/summary/request/year=2027/month=01/day=15/hour=09/summary=1800006300-1800007200-p1s0-n200.parquet",
     "kind": "window",
     "rows": 200,
-    "size": 50663,
+    "size": 51623,
     "sources": 1,
     "start": 1800006300
   },
@@ -157,7 +157,7 @@
     "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=08-c4-n802-hc5eae4c07a2da79c.parquet",
     "kind": "hour",
     "rows": 802,
-    "size": 65714,
+    "size": 140066,
     "sources": 4,
     "start": 1800000000
   },
@@ -168,7 +168,7 @@
     "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=08-c3-n603-h6f68a2014fdd1f4f.parquet",
     "kind": "hour",
     "rows": 603,
-    "size": 62395,
+    "size": 136736,
     "sources": 3,
     "start": 1800000000
   },
@@ -178,7 +178,7 @@
     "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=09-c4-n798-h71377c093bda4c2d.parquet",
     "kind": "hour",
     "rows": 798,
-    "size": 64049,
+    "size": 138436,
     "sources": 4,
     "start": 1800003600
   },
@@ -189,7 +189,7 @@
     "key": "processed/summary_bundle/request/year=2027/month=01/day=15/hour_bundle=09-c3-n598-h2bed9d9201ad46ff.parquet",
     "kind": "hour",
     "rows": 598,
-    "size": 61184,
+    "size": 135348,
     "sources": 3,
     "start": 1800003600
   },
@@ -199,7 +199,7 @@
     "key": "processed/summary_bundle/request/year=2027/month=01/day=15/day_bundle=c2-n1600-h8f528b2c4a9f39e6.parquet",
     "kind": "day",
     "rows": 1600,
-    "size": 61298,
+    "size": 135774,
     "sources": 8,
     "start": 1799971200
   }

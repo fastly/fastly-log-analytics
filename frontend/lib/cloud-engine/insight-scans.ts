@@ -114,7 +114,7 @@ export async function queryCloudInsights(
     scan(INSIGHT_SCANS.asn), scan(INSIGHT_SCANS.geo), scan(INSIGHT_SCANS.scalar),
   ]);
   const summarized = options.baseline && rollupInsightsBaseline(options.baseline, {
-    url: urlRows, ip: ipRows, city: cityRows, dimension: dimensionRows, asn: asnRows, scalar: scalarRows,
+    url: urlRows, ip: ipRows, city: cityRows, dimension: dimensionRows, asn: asnRows, geo: geoRows, scalar: scalarRows,
   });
   const envelope = await handleInsights(body, {
     now: new Date(end),
@@ -126,7 +126,7 @@ export async function queryCloudInsights(
     cityAggregateRows: summarized?.rows.city ?? cityRows,
     dimensionAggregateRows: summarized?.rows.dimension ?? dimensionRows,
     asnAggregateRows: summarized?.rows.asn ?? asnRows,
-    geoLatencyRows: geoRows,
+    geoLatencyRows: summarized?.rows.geo ?? geoRows,
     scalarAggregateRows: summarized?.rows.scalar ?? scalarRows,
     windowTotalRequests: Number(totals[0]?.requests ?? 0),
     baselineTotalRequests: summarized?.baselineRequests ?? Number(totals[0]?.baseline_requests ?? 0),
