@@ -151,6 +151,31 @@ export interface StorageSectionProps {
   config: ProvisionConfig
   selectedServiceId?: string
   update: <K extends keyof StorageStepFormValues>(key: K, val: StorageStepFormValues[K]) => void
+  updateMany?: (patch: Partial<StorageStepFormValues>) => void
+}
+
+export const LOG_CONDITION_PRESETS = [
+  { id: "all", label: "All requests", condition: "" },
+  {
+    id: "sample_plus_errors",
+    label: "Sample plus all errors",
+    condition: "resp.status >= 400 || randombool(10, 100)",
+  },
+  { id: "errors_only", label: "Errors only (4xx & 5xx)", condition: "resp.status >= 400" },
+  { id: "server_errors_only", label: "Server errors only (5xx)", condition: "resp.status >= 500" },
+  {
+    id: "page_loads_only",
+    label: "Page loads only (exclude static assets)",
+    condition: 'req.url.ext !~ "^(?i)(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|webp|avif|map)$"',
+  },
+] as const
+
+export type LogConditionPresetId = (typeof LOG_CONDITION_PRESETS)[number]["id"] | "custom"
+
+export function matchLogConditionPreset(condition: string): LogConditionPresetId {
+  const trimmed = condition.trim()
+  const match = LOG_CONDITION_PRESETS.find((p) => p.condition === trimmed)
+  return match ? match.id : "custom"
 }
 
 export function renderRumPeriodField(
@@ -178,8 +203,32 @@ export function renderRumPeriodField(
   )
 }
 
-export function LoggingSetupSection({ config, update }: StorageSectionProps) {
+export function LoggingSetupSection({ config, update, updateMany }: StorageSectionProps) {
   const isLogging = config.logging_enabled !== false
+  const [customConditionMode, setCustomConditionMode] = React.useState(
+    () => matchLogConditionPreset(config.custom_condition) === "custom",
+  )
+  const selectedPreset = customConditionMode ? "custom" : matchLogConditionPreset(config.custom_condition)
+
+  const handlePresetChange = (value: string | null) => {
+    if (!value) return
+    if (value === "custom") {
+      setCustomConditionMode(true)
+      return
+    }
+    const preset = LOG_CONDITION_PRESETS.find((p) => p.id === value)
+    if (!preset) return
+    setCustomConditionMode(false)
+    if (preset.id === "sample_plus_errors") {
+      if (updateMany) {
+        updateMany({ custom_condition: preset.condition, sample_rate: 100 })
+      } else {
+        update("custom_condition", preset.condition)
+      }
+    } else {
+      update("custom_condition", preset.condition)
+    }
+  }
   const fosRegionField = (
     <div className="space-y-1.5">
       <LabelWithInfo
@@ -284,19 +333,54 @@ export function LoggingSetupSection({ config, update }: StorageSectionProps) {
               />
             </div>
           </div>
-          <div className="space-y-1.5">
-            <LabelWithInfo
-              htmlFor="customCondition"
-              label="Optional Log Condition"
-              info="An additional VCL condition to filter logs (e.g., req.url !~ '\.(jpg|png)$'). The expression will be wrapped in parentheses and added to the logging condition logic."
-            />
-            <Input
-              id="customCondition"
-              placeholder="e.g. std.tolower(req.url) !~ '\.(jpg|png|css|js)$'"
-              value={config.custom_condition}
-              onChange={(e) => update("custom_condition", e.target.value)}
-              className="h-9 font-mono text-xs"
-            />
+          <div className="space-y-2">
+            <div className="space-y-1.5">
+              <LabelWithInfo
+                htmlFor="logConditionPreset"
+                label="Log Condition"
+                info="Filter which requests are logged using a preset or a custom VCL expression. Combined with Sample Rate and Edge Only using && in log_analytics_condition."
+              />
+              <Select value={selectedPreset} onValueChange={handlePresetChange}>
+                <SelectTrigger id="logConditionPreset" aria-label="Log Condition" className="h-9 w-full">
+                  <SelectValue>
+                    {(val) =>
+                      val === "custom"
+                        ? "Custom"
+                        : LOG_CONDITION_PRESETS.find((p) => p.id === val)?.label || String(val)
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {LOG_CONDITION_PRESETS.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="custom">Custom</SelectItem>
+                </SelectContent>
+              </Select>
+              {selectedPreset !== "custom" && config.custom_condition && (
+                <p className="text-[11px] font-mono text-muted-foreground break-all">
+                  {config.custom_condition}
+                </p>
+              )}
+            </div>
+            {selectedPreset === "custom" && (
+              <div className="space-y-1.5">
+                <LabelWithInfo
+                  htmlFor="customCondition"
+                  label="Custom VCL Condition"
+                  info="An additional VCL condition to filter logs (e.g., req.url !~ '\.(jpg|png)$'). The expression will be wrapped in parentheses and added to the logging condition logic."
+                />
+                <Input
+                  id="customCondition"
+                  placeholder='e.g. req.url.path ~ "^/api/"'
+                  value={config.custom_condition}
+                  onChange={(e) => update("custom_condition", e.target.value)}
+                  className="h-9 font-mono text-xs"
+                />
+              </div>
+            )}
           </div>
         </>
       ) : (
