@@ -652,8 +652,8 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     }));
     expect(insights?.projection?.columns).toEqual(expect.arrayContaining(["url", "status", "transport", "host"]));
     expect(insights?.projection?.maxBytes).toBeUndefined();
-    expect((await options("/api/insight-availability"))?.projection?.columns)
-      .toEqual(insightScanColumns([]));
+    // Availability needs only the files' schemas, which a projection keeps whole.
+    expect((await options("/api/insight-availability"))?.projection?.columns).toEqual(["timestamp", "ts_ms"]);
     expect((await options("/api/insights/cache-collapse-detail", post({ url: "/a", window_size_hrs: 24, baseline_hours: 168 })))
       ?.projection?.columns).toEqual(insightScanColumns([]));
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))

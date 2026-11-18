@@ -29,6 +29,12 @@ export const INSIGHT_SCAN_COLUMNS = [
   "country", "p_type", "method", "referer", "ua", "pop", "server_region", "metro", "asn", "transport",
 ] as const;
 
+/**
+ * What an availability read loads: it needs only the files' schemas, which a
+ * column-projected load keeps whole, so no column beyond the timestamps.
+ */
+export const INSIGHT_AVAILABILITY_COLUMNS: readonly string[] = ["timestamp", "ts_ms"];
+
 /** Each coalesced scan, the columns its SQL reads, and the detectors it serves. */
 const INSIGHT_SCANS = {
   url: { build: _coalesced_url_aggregates, columns: ["url", "status", "cache", "elapsed", "resp_bytes"],

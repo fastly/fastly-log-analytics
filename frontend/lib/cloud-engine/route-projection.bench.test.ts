@@ -1,7 +1,8 @@
 // @vitest-environment node
-// Opt-in measurement of the bytes /origin, /fastly-value, /assets-shield, /network, /performance and a filtered
-// /dashboard load per cold scan, whole files against their column projections, over 720k rows of Cloud-shaped Parquet
-// (40 ZSTD files over 24h, under the 64 MiB whole-file budget), and of the projected results' exactness. Run with FLP_ROUTE_BENCH=1.
+// Opt-in measurement of the bytes /origin, /fastly-value, /assets-shield, /network, /performance, the /insights detector
+// availability and a filtered /dashboard load per cold scan, whole files against their column projections, over 720k rows
+// of Cloud-shaped Parquet (40 ZSTD files over 24h, under the 64 MiB whole-file budget), and of the projected results'
+// exactness. Run with FLP_ROUTE_BENCH=1.
 import { describe, expect, it } from "vitest";
 import { DuckDBAnalyticalEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import { Aggregator } from "./dashboard/engine";
@@ -12,6 +13,8 @@ import {
   assembleProjectedParquet, FOOTER_PROBE_BYTES, fetchProjectedRanges, planParquetProjection, readParquetFooter,
 } from "./dashboard/parquet-projection";
 import { assetsScanColumns, handleAssetsRequest } from "./assets";
+import { INSIGHT_AVAILABILITY_COLUMNS } from "./insight-scans";
+import { handleInsightAvailability } from "./insights";
 import { handleNetworkRequest, networkScanColumns } from "./network";
 import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
@@ -189,6 +192,10 @@ const ROUTES: Route[] = [
     name: `/network ${path} ${JSON.stringify(params.sections ?? [])}`, columns: networkScanColumns(path, params),
     run: (read) => handleNetworkRequest(path, { ...RANGE, ...params, engine: read } as never),
   })),
+  {
+    name: "/insights availability", columns: [...INSIGHT_AVAILABILITY_COLUMNS],
+    run: async (read) => handleInsightAvailability(undefined, await read.getPresentColumns()),
+  },
   {
     name: "/performance", columns: performanceScanColumns({}),
     run: async (read) => (await handlePerformanceRequest(new Request("http://localhost/api/performance/aggregates", {

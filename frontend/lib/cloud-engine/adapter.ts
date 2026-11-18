@@ -22,7 +22,7 @@ import {
   type CacheCollapseDetailRequest,
   type InsightsRequest,
 } from "./insights";
-import { insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
+import { INSIGHT_AVAILABILITY_COLUMNS, insightScanColumns, queryCloudInsights, queryCloudCacheCollapse } from "./insight-scans";
 import { CLOUD_SCORING_SCAN_ROUTES, cloudScoringRead, scoringScanColumns } from "./scoring-reads";
 import { handleNetworkRequest, networkScanColumns, networkScans, type NetworkQueryParams } from "./network";
 import { isNetworkPartial, mergeNetworkPartial, networkRollupEligible } from "./network-rollup";
@@ -661,7 +661,8 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
     sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: serviceId ? decodeURIComponent(String(serviceId)) : undefined, customFields,
     ...insights ? { projection: {
-      columns: insightScanColumns(filters, detectors),
+      columns: url.pathname === "/api/insight-availability" ? INSIGHT_AVAILABILITY_COLUMNS
+        : insightScanColumns(filters, detectors),
       ...request.headers.get("x-flp-cloud-prefetch") === "1" ? { maxBytes: PREFETCH_PROJECTION_BYTES } : {},
       // A detector follow-up reuses the window its summary pass already loaded with every insight column.
       ...detectors && url.pathname === "/api/insights" ? { wider: {
