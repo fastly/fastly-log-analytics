@@ -134,6 +134,7 @@ export function TokenStep({ s }: { s: WizardState }) {
           <Input
             id="token"
             type="password"
+            autoFocus
             value={s.token}
             onChange={(e) => s.setToken(e.target.value.trim())}
             placeholder=""
