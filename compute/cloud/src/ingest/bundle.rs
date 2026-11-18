@@ -23,7 +23,8 @@
 //! Merge: sums add, min/max keep min/max, HLL sketches max-merge, `sessions` merge by
 //! `(ip, ja4)`, `time_series` sums per minute and `overview` keeps one row per hour. Sources fold
 //! one at a time in name order and the state is cut after each fold to `summary::TOP_K` values per
-//! field (sketches for the top `summary::IP_TOP_K`), `SESSION_K` sessions and `DIM_K` values per
+//! field (sketches for the top `summary::IP_TOP_K`, only for `summary::IP_SKETCH_FIELDS`; older
+//! sources' other sketches are dropped), `SESSION_K` sessions and `DIM_K` values per
 //! dim, so a build resumed from a partial gives the same bytes as one that never stopped. The
 //! bundle keeps the top [`HOUR_TOP_K`]/[`DAY_TOP_K`] values per field by `(count desc, value
 //! asc)`; `field_totals.truncated` marks any field that lost values.
@@ -39,7 +40,10 @@
 //! (`transport`, `origin`, `urls`, `quality` and `series5` `origin` and `city`) are written only
 //! when every source
 //! carried their `dim_totals` row, so a bundle over older windows lacks them and readers fall
-//! back to raw. `sample` keeps the
+//! back to raw. The /security and /fastly-value groups (`header_ip` keeps the max per IP,
+//! `bot_ua`, `tls_fp` and per-day `value` sum, `proxy` keeps one row per sample key and its
+//! `summary::SAMPLE_K` smallest) are gated the same way, as is the `_ref_stem` field, a
+//! non-catalog field. `sample` keeps the
 //! `summary::SAMPLE_K` rows with the smallest `sample_key`. A source of another summary version
 //! makes the bundle `mixed`, which readers treat as unknown.
 
@@ -97,7 +101,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x03";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x05";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
 /// [`part_key`] objects, each at most the CDN read limit.
@@ -580,6 +584,40 @@ const ASSET_COLS: &[(C, Op)] = &[
     (C::OriginRequests, Sum),
 ];
 
+const HEADER_IP_COLS: &[(C, Op)] = &[(C::ValueMax, Max)];
+
+const BOT_UA_COLS: &[(C, Op)] = &[(C::RespBytesSum, Sum), (C::Requests, Sum), (C::Count, Sum)];
+
+const TLS_FP_COLS: &[(C, Op)] = &[(C::Requests, Sum), (C::Count, Sum)];
+
+const VALUE_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::RespBytesSum, Sum),
+    (C::Count, Sum),
+    (C::ElapsedSum, Sum),
+    (C::ElapsedCount, Sum),
+    (C::IoInSum, Sum),
+    (C::IoOutSum, Sum),
+    (C::RatioSum, Sum),
+    (C::RatioCount, Sum),
+];
+
+/// One row per sample key (`value`); `requests` is always 1, so ranking keeps the smallest keys.
+/// Floats have no `Min`, so they keep the first source's value, like the strings' `Min` keeps
+/// one of equal rows.
+const PROXY_COLS: &[(C, Op)] = &[
+    (C::Requests, Min),
+    (C::Ip, Min),
+    (C::Asn, Min),
+    (C::RttMin, Min),
+    (C::TcpRtt, Min),
+    (C::LatSum, Min),
+    (C::LonSum, Min),
+    (C::Pop, Min),
+    (C::Country, Min),
+    (C::Label, Min),
+];
+
 const SAMPLE_COLS: &[(C, Op)] = &[
     (C::Value, Min),
     (C::TtfbSum, Sum),
@@ -600,7 +638,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 8] = [
+const GROUPS: [Group; 13] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -657,6 +695,41 @@ const GROUPS: [Group; 8] = [
         fields: &["overall", "asn", "region"],
         gated: &["overall", "asn", "region"],
     },
+    Group {
+        name: "header_ip",
+        cols: HEADER_IP_COLS,
+        timed: false,
+        fields: &["ip"],
+        gated: &["ip"],
+    },
+    Group {
+        name: "bot_ua",
+        cols: BOT_UA_COLS,
+        timed: false,
+        fields: &["ua"],
+        gated: &["ua"],
+    },
+    Group {
+        name: "tls_fp",
+        cols: TLS_FP_COLS,
+        timed: false,
+        fields: &["fp", "fp_country"],
+        gated: &["fp", "fp_country"],
+    },
+    Group {
+        name: "value",
+        cols: VALUE_COLS,
+        timed: true,
+        fields: &summary::VALUE_FIELDS,
+        gated: &summary::VALUE_FIELDS,
+    },
+    Group {
+        name: "proxy",
+        cols: PROXY_COLS,
+        timed: false,
+        fields: &["sample"],
+        gated: &["sample"],
+    },
 ];
 
 impl Group {
@@ -665,6 +738,10 @@ impl Group {
         match (self.name, field) {
             ("series5", "asn") => summary::SERIES_ASN_K,
             ("series5", "city") => summary::SERIES_CITY_K,
+            ("header_ip", _) => summary::HEADER_IP_K,
+            ("tls_fp", _) => summary::TLS_FP_K,
+            ("value", field) => summary::value_keep(field),
+            ("proxy", _) => summary::SAMPLE_K,
             _ => summary::DIM_K,
         }
     }
@@ -676,7 +753,8 @@ impl Group {
             Unit::Hour => self.keep(field),
             Unit::Day if self.name == "series5" && field == "asn" => SERIES_ASN_TOP_K,
             Unit::Day if self.name == "series5" && field == "city" => SERIES_CITY_TOP_K,
-            Unit::Day => DAY_TOP_K,
+            Unit::Day if self.name == "proxy" => summary::SAMPLE_K,
+            Unit::Day => self.keep(field).min(DAY_TOP_K),
         }
     }
 }
@@ -912,7 +990,7 @@ struct Acc {
     fields: BTreeMap<String, FieldAcc>,
     sessions: HashMap<SessionKey, Vec<Cell>>,
     /// Per [`GROUPS`] entry, per field.
-    groups: [BTreeMap<String, GroupAcc>; 8],
+    groups: [BTreeMap<String, GroupAcc>; GROUPS.len()],
     /// The lowest [`summary::SAMPLE_K`] sample rows, by `(key, timestamp)`.
     sample: Vec<SampleRow>,
     /// A source of another summary version was folded in: the bundle is written as `mixed`,
@@ -1094,6 +1172,9 @@ impl Acc {
                 }
             }
             Some("all_fields_ip") => {
+                if !summary::IP_SKETCH_FIELDS.contains(&f_str) {
+                    return;
+                }
                 let acc = self.field_acc(f_str);
                 let v = if let Some(v) = acc.values.get_mut(v_str) {
                     v

@@ -73,6 +73,7 @@ fn fixture() -> Vec<Value> {
                 "tcp_rtt": if i % 6 == 0 { Value::Null } else { (i % 50).into() },
                 "edge": i % 4 != 0,
                 "ua": format!("ua{}", i % 5),
+                "tls_ciphers_sha": format!("c{}", i % 3),
                 "pop": pop,
                 "ost": ost,
                 "ploss": (i % 10) as f64 / 100.0,
@@ -343,7 +344,8 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
     }
     let fields = bundle(&out, "all_fields");
     let totals = bundle(&out, "field_totals");
-    assert_eq!(totals.len(), summary::FIELDS.len());
+    // The catalog fields and the referral stems.
+    assert_eq!(totals.len(), summary::FIELDS.len() + 1);
     for (field, values) in &expected {
         let got: BTreeMap<String, i64> = fields
             .iter()
@@ -364,13 +366,20 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
     assert!(expected["pop"].contains_key("") && expected["age"].contains_key("0.5"));
     assert!(expected["waf_sig_ind"].keys().eq(["a", "b", "c"]));
 
-    // all_fields_ip: exact distinct IPs per value and the sketch of exactly those IPs.
+    // all_fields_ip: only the fields a page reads sketches of, with exact distinct IPs per
+    // value and the sketch of exactly those IPs.
     let ip_rows = bundle(&out, "all_fields_ip");
-    for row in ip_rows.iter().filter(|r| r["field"] == "country") {
+    assert!(
+        ip_rows
+            .iter()
+            .all(|r| summary::IP_SKETCH_FIELDS.contains(&r["field"].as_str().unwrap())),
+        "unread sketches"
+    );
+    for row in ip_rows.iter().filter(|r| r["field"] == "tls_ciphers_sha") {
         let value = row["value"].as_str().unwrap();
         let ips: BTreeSet<&str> = rows
             .iter()
-            .filter(|r| s(r, "country") == Some(value))
+            .filter(|r| s(r, "tls_ciphers_sha") == Some(value))
             .filter_map(|r| s(r, "ip"))
             .collect();
         let mut hll = Hll::default();
@@ -381,7 +390,10 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
         assert_eq!(row["sample_capped"], false);
     }
     assert_eq!(
-        ip_rows.iter().filter(|r| r["field"] == "country").count(),
+        ip_rows
+            .iter()
+            .filter(|r| r["field"] == "tls_ciphers_sha")
+            .count(),
         3
     );
 
@@ -610,9 +622,9 @@ fn custom_columns_are_summarized_but_system_columns_are_not() {
         BTreeMap::from([("false".into(), 3), ("true".into(), 3)])
     );
     assert_eq!(values("ratio"), BTreeMap::from([("0.5".into(), 6)]));
-    assert!(bundle(&out, "all_fields_ip")
+    assert!(!bundle(&out, "all_fields_ip")
         .iter()
-        .any(|r| r["field"] == "tenant" && r["value"] == "acme"));
+        .any(|r| r["field"] == "tenant"));
 }
 
 #[test]
@@ -645,6 +657,90 @@ fn bundles_keep_a_custom_field_only_when_every_source_summarized_it() {
     assert_eq!(total(&mixed, "url"), Some(0), "catalog fields are kept");
     let day = bundle::merge(&[&full, &mixed], BASE, bundle::Unit::Day).unwrap();
     assert_eq!(total(&day, "tenant"), None);
+}
+
+/// `bytes` with its `all_fields_ip` rows relabelled to `field`, like a summary from before
+/// sketches were limited to [`summary::IP_SKETCH_FIELDS`].
+fn with_sketches_for(bytes: &[u8], field: &str) -> Vec<u8> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes)).unwrap();
+    let kv = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    let schema = builder.schema().clone();
+    let props = parquet::file::properties::WriterProperties::builder()
+        .set_key_value_metadata(kv)
+        .build();
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(Vec::new(), schema.clone(), Some(props)).unwrap();
+    for batch in builder.build().unwrap() {
+        let batch = batch.unwrap();
+        let col = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .clone()
+        };
+        let (name, fields) = (col("bundle"), col("field"));
+        let relabelled: StringArray = (0..batch.num_rows())
+            .map(|i| {
+                if name.value(i) == "all_fields_ip" {
+                    Some(field.to_owned())
+                } else {
+                    (!fields.is_null(i)).then(|| fields.value(i).to_owned())
+                }
+            })
+            .collect();
+        let at = schema.index_of("field").unwrap();
+        let mut columns = batch.columns().to_vec();
+        columns[at] = std::sync::Arc::new(relabelled);
+        writer
+            .write(&RecordBatch::try_new(schema.clone(), columns).unwrap())
+            .unwrap();
+    }
+    writer.into_inner().unwrap()
+}
+
+#[test]
+fn bundles_keep_only_the_ip_sketches_a_page_reads() {
+    use fastly_log_analytics::ingest::bundle::{self as bundles, Unit};
+    let w1 = summary::write_summary(&[&batch(&fixture())], BASE).unwrap();
+    let sketched = |out: &[Map<String, Value>]| -> BTreeSet<String> {
+        bundle(out, "all_fields_ip")
+            .into_iter()
+            .map(|r| r["field"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        sketched(&read(&w1)),
+        BTreeSet::from(["tls_ciphers_sha".to_owned()])
+    );
+    let old = with_sketches_for(&w1, "country");
+    assert_eq!(
+        sketched(&read(&old)),
+        BTreeSet::from(["country".to_owned()])
+    );
+    let hour = read(&bundles::merge(&[&old, &w1], BASE, Unit::Hour).unwrap());
+    assert_eq!(
+        sketched(&hour),
+        BTreeSet::from(["tls_ciphers_sha".to_owned()])
+    );
+    let tls = |out: &[Map<String, Value>]| -> Vec<(String, i64)> {
+        bundle(out, "all_fields_ip")
+            .into_iter()
+            .map(|r| {
+                (
+                    r["value"].as_str().unwrap().to_owned(),
+                    r["count"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(tls(&hour), tls(&read(&w1)));
 }
 
 #[test]
@@ -1251,11 +1347,20 @@ fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
         ("origin", "pop"),
         ("urls", "asn"),
         ("series5", "origin"),
+        ("header_ip", "ip"),
+        ("bot_ua", "ua"),
+        ("tls_fp", "fp"),
+        ("tls_fp", "fp_country"),
+        ("value", "cache"),
+        ("value", "io_pair"),
+        ("proxy", "sample"),
     ] {
         let (_, total) = group_rows(&out, group, field);
         let want = match (group, field) {
-            ("origin", _) | ("urls", "asn") => 0,
-            _ => rows.len() as i64,
+            ("transport", _) | ("urls", "url") | ("series5", _) | ("value", "cache") => {
+                rows.len() as i64
+            }
+            _ => 0,
         };
         assert_eq!(total["requests"], want, "{group}/{field}");
         assert_eq!(total["truncated"], false, "{group}/{field}");
@@ -1487,10 +1592,20 @@ fn without_new_rows(bytes: &[u8]) -> Vec<u8> {
             } else {
                 name.value(i)
             };
-            matches!(g, "transport" | "origin" | "urls" | "quality")
-                || (g == "series5"
-                    && !field.is_null(i)
-                    && matches!(field.value(i), "origin" | "city"))
+            let f = (!field.is_null(i)).then(|| field.value(i));
+            matches!(
+                g,
+                "transport"
+                    | "origin"
+                    | "urls"
+                    | "quality"
+                    | "header_ip"
+                    | "bot_ua"
+                    | "tls_fp"
+                    | "value"
+                    | "proxy"
+            ) || (g == "series5" && matches!(f, Some("origin" | "city")))
+                || f == Some(summary::REF_STEM)
         };
         let mut start = None;
         for i in 0..=batch.num_rows() {
@@ -1512,8 +1627,8 @@ fn without_new_rows(bytes: &[u8]) -> Vec<u8> {
 fn bundles_drop_new_rows_unless_every_source_has_them() {
     use fastly_log_analytics::ingest::bundle::{self as bundles, Unit};
     let (b1, b2) = (
-        batch(&fixture_v3(0, 400)),
-        batch(&fixture_v3(WINDOW * 1000, 500)),
+        batch(&fixture_sv(0, 400)),
+        batch(&fixture_sv(WINDOW * 1000, 500)),
     );
     let w1 = summary::write_summary(&[&b1], BASE).unwrap();
     let w2 = summary::write_summary(&[&b2], BASE + WINDOW).unwrap();
@@ -1532,18 +1647,47 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
                 )
             })
             .filter(|(g, f)| {
-                matches!(g.as_str(), "transport" | "origin" | "urls" | "quality")
-                    || (g == "series5" && matches!(f.as_str(), "origin" | "city"))
+                matches!(
+                    g.as_str(),
+                    "transport"
+                        | "origin"
+                        | "urls"
+                        | "quality"
+                        | "header_ip"
+                        | "bot_ua"
+                        | "tls_fp"
+                        | "value"
+                        | "proxy"
+                ) || (g == "series5" && matches!(f.as_str(), "origin" | "city"))
             })
             .collect()
     };
+    let stems = |out: &[Map<String, Value>]| {
+        ["all_fields", "field_totals"]
+            .into_iter()
+            .flat_map(|b| bundle(out, b))
+            .filter(|r| r["field"] == summary::REF_STEM)
+            .count()
+    };
     let both = read(&bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap());
-    assert_eq!(new_fields(&both).len(), 12);
+    assert_eq!(new_fields(&both).len(), 24);
+    assert!(stems(&both) > 1);
 
     let mixed_bytes = bundles::merge(&[&old, &w2], BASE, Unit::Hour).unwrap();
     let mixed = read(&mixed_bytes);
     assert!(new_fields(&mixed).is_empty());
-    for name in ["transport", "origin", "urls", "quality"] {
+    assert_eq!(stems(&mixed), 0);
+    for name in [
+        "transport",
+        "origin",
+        "urls",
+        "quality",
+        "header_ip",
+        "bot_ua",
+        "tls_fp",
+        "value",
+        "proxy",
+    ] {
         assert!(bundle(&mixed, name).is_empty(), "{name}");
     }
     assert!(!bundle(&mixed, "series5")
@@ -1562,8 +1706,10 @@ fn bundles_drop_new_rows_unless_every_source_has_them() {
     let full_hour = bundles::merge(&[&w1, &w2], BASE, Unit::Hour).unwrap();
     let day = read(&bundles::merge(&[&mixed_bytes, &full_hour], BASE, Unit::Day).unwrap());
     assert!(new_fields(&day).is_empty());
+    assert_eq!(stems(&day), 0);
     let day = read(&bundles::merge(&[&full_hour], BASE, Unit::Day).unwrap());
-    assert_eq!(new_fields(&day).len(), 12);
+    assert_eq!(new_fields(&day).len(), 24);
+    assert_eq!(stems(&day), stems(&both));
 }
 
 #[test]
@@ -1643,8 +1789,8 @@ fn same_rows(a: &Map<String, Value>, b: &Map<String, Value>, what: &str) {
 #[test]
 fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
     use fastly_log_analytics::ingest::bundle::{self as bundles, Unit};
-    let first = fixture_v3(0, 400);
-    let second = fixture_v3(WINDOW * 1000, 500);
+    let first = fixture_sv(0, 400);
+    let second = fixture_sv(WINDOW * 1000, 500);
     let (b1, b2) = (batch(&first), batch(&second));
     let whole = read(&summary::write_summary(&[&b1, &b2], BASE).unwrap());
     let w1 = summary::write_summary(&[&b1], BASE).unwrap();
@@ -1660,6 +1806,11 @@ fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
         "transport",
         "origin",
         "urls",
+        "header_ip",
+        "bot_ua",
+        "tls_fp",
+        "value",
+        "proxy",
         "dim_totals",
     ] {
         let (a, b) = (keyed(&whole, name), keyed(&hour, name));
@@ -1688,6 +1839,15 @@ fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
     };
     assert_eq!(sample(&hour), sample(&whole));
     assert_eq!(sample(&hour).len(), summary::SAMPLE_K);
+    let stems = |out: &[Map<String, Value>]| -> BTreeMap<String, Value> {
+        bundle(out, "all_fields")
+            .into_iter()
+            .filter(|r| r["field"] == summary::REF_STEM)
+            .map(|r| (r["value"].as_str().unwrap().to_owned(), r["count"].clone()))
+            .collect()
+    };
+    assert!(!stems(&hour).is_empty());
+    assert_eq!(stems(&hour), stems(&whole));
 
     // A day bundle keeps hour buckets for the timed rows.
     let day = read(&bundles::merge(&[&hour_bytes], BASE, Unit::Day).unwrap());
@@ -1712,6 +1872,463 @@ fn hour_bundles_merge_v3_rows_like_one_window_over_all_rows() {
     );
     assert_eq!(hist_cell(overall[0], "ttfb_hist"), Some(both));
     assert_eq!(sample(&day), sample(&hour));
+}
+
+/// `fixture_v3` rows with the /security and /fastly-value columns: IPs (some missing or ''),
+/// human, bot and fetcher agents, referrals, TLS fingerprints, proxy types, bot names, Image
+/// Optimizer formats and bytes (an output of 0), RTT minimums (some with a TCP RTT, for tunnel,
+/// WiFi and direct rows) and every cache class.
+fn fixture_sv(offset_ms: i64, n: i64) -> Vec<Value> {
+    let uas = [
+        Value::from("Mozilla/5.0"),
+        "Googlebot/2.1".into(),
+        "ChatGPT-User/1.0".into(),
+        "perplexity-user".into(),
+        "".into(),
+        "curl claude-externalfetcher".into(),
+        "HeadlessChrome".into(),
+        Value::Null,
+    ];
+    let referers = [
+        Value::from("https://www.example.com/a"),
+        "http://news.site.org/x".into(),
+        "-".into(),
+        "".into(),
+        Value::Null,
+        "HTTPS://Foo.Bar:443/".into(),
+    ];
+    let mut rows = fixture_v3(offset_ms, n);
+    for (k, row) in rows.iter_mut().enumerate() {
+        if k % 11 != 0 {
+            row["ip"] = if k % 23 == 1 {
+                "".into()
+            } else {
+                format!("10.1.0.{}", k % 37).into()
+            };
+        }
+        row["ua"] = uas[k % uas.len()].clone();
+        row["referer"] = referers[k % referers.len()].clone();
+        match k % 5 {
+            0 => row["ja3"] = format!("ja3-{}", k % 7).into(),
+            1 => row["ja3"] = "".into(),
+            _ => {}
+        }
+        if k % 3 != 2 {
+            row["ja4"] = format!("t13d{}", k % 4).into();
+        }
+        if k % 4 != 3 {
+            row["p_type"] = ["", "VPN", "TOR"][k % 3].into();
+        }
+        if k % 6 != 5 {
+            row["_bot_name"] = ["", "googlebot", "bingbot"][k % 3].into();
+        }
+        if k % 4 == 1 {
+            row["io_input_format"] = ["jpeg", "png", ""][k / 4 % 3].into();
+            row["io_output_format"] = ["webp", "avif", ""][k / 12 % 3].into();
+            row["io_input_bytes"] = (10_000 + k * 31).into();
+            row["io_output_bytes"] = if k % 24 == 1 { 0 } else { 2_000 + k * 7 }.into();
+        }
+        if k % 3 == 0 {
+            row["rtt_min"] = (50 + k % 90).into();
+            if k % 2 == 0 {
+                row["tcp_rtt"] = (400 + (k % 7) * 600).into();
+            }
+        }
+        match k % 9 {
+            0 => row["cache"] = "SYNTH".into(),
+            3 => row["cache"] = "".into(),
+            4 => row["cache"] = "ERROR".into(),
+            6 => row["cache"] = Value::Null,
+            _ => {}
+        }
+        if k % 7 == 0 {
+            row["waf_sig"] = "a, b,,c".into();
+        }
+    }
+    rows
+}
+
+type Want = BTreeMap<(String, String, String, i64), Map<String, Value>>;
+
+/// The expected row of `group`/`field`/`value` at `bucket`, created empty.
+fn want_row<'a>(
+    want: &'a mut Want,
+    group: &str,
+    field: &str,
+    value: &str,
+    bucket: i64,
+) -> &'a mut Map<String, Value> {
+    want.entry((group.into(), field.into(), value.into(), bucket))
+        .or_insert_with(|| {
+            let mut m = Map::new();
+            m.insert("bundle".into(), group.into());
+            m.insert("bucket".into(), bucket.into());
+            m.insert("field".into(), field.into());
+            m.insert("value".into(), value.into());
+            m
+        })
+}
+
+/// Adds `v` to `row[col]`, as an integer when both are.
+fn add_to(row: &mut Map<String, Value>, col: &str, v: Value) {
+    let sum = match (row.get(col), &v) {
+        (None, _) => v,
+        (Some(Value::Number(a)), Value::Number(b)) if a.is_i64() && b.is_i64() => {
+            (a.as_i64().unwrap() + b.as_i64().unwrap()).into()
+        }
+        (Some(a), b) => (a.as_f64().unwrap() + b.as_f64().unwrap()).into(),
+    };
+    row.insert(col.into(), sum);
+}
+
+fn same_map(a: &Map<String, Value>, b: &Map<String, Value>, what: &str) {
+    let keys = |m: &Map<String, Value>| m.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(keys(a), keys(b), "{what}");
+    for (k, v) in a {
+        match (v, &b[k]) {
+            (Value::Number(_), Value::Number(y)) => close(v, y.as_f64().unwrap()),
+            (x, y) => assert_eq!(x, y, "{what} {k}"),
+        }
+    }
+}
+
+/// /fastly-value's cache class.
+fn value_class(cache: Option<&str>) -> &'static str {
+    let upper = cache.unwrap_or("").to_uppercase();
+    match ["HIT", "MISS", "PASS", "SYNTH"]
+        .into_iter()
+        .find(|p| upper.starts_with(p))
+    {
+        Some(p) => p,
+        None if upper.is_empty() => "",
+        None => "OTHER",
+    }
+}
+
+fn non_empty<'a>(r: &'a Value, key: &str) -> Option<&'a str> {
+    s(r, key).filter(|v| !v.is_empty())
+}
+
+/// The /security and /fastly-value rows and their `dim_totals` the brute-force way.
+fn security_value_want(rows: &[Value], bucket: i64) -> (Want, BTreeMap<(String, String), i64>) {
+    let mut want = Want::new();
+    let mut totals: BTreeMap<(String, String), i64> = BTreeMap::new();
+    let mut total = |g: &str, f: &str, n: i64| {
+        *totals.entry((g.into(), f.into())).or_default() += n;
+    };
+    for (g, f) in [
+        ("header_ip", "ip"),
+        ("bot_ua", "ua"),
+        ("tls_fp", "fp"),
+        ("tls_fp", "fp_country"),
+        ("proxy", "sample"),
+    ]
+    .into_iter()
+    .chain(summary::VALUE_FIELDS.iter().map(|f| ("value", *f)))
+    {
+        total(g, f, 0);
+    }
+    for r in rows {
+        let ts = ts_ms(r);
+        let day = ts.div_euclid(86_400_000) * 86_400_000;
+        let ip = non_empty(r, "ip");
+        if let (Some(ip), Some(h)) = (ip, i(r, "req_header_bytes")) {
+            total("header_ip", "ip", 1);
+            let row = want_row(&mut want, "header_ip", "ip", ip, bucket);
+            let max = i(&Value::Object(row.clone()), "value_max").unwrap_or(i64::MIN);
+            row.insert("value_max".into(), max.max(h).into());
+        }
+        if let Some(ua) = non_empty(r, "ua") {
+            total("bot_ua", "ua", 1);
+            let row = want_row(&mut want, "bot_ua", "ua", ua, bucket);
+            add_to(row, "resp_bytes_sum", i(r, "resp_bytes").unwrap().into());
+            add_to(row, "requests", 1.into());
+            add_to(row, "count", i64::from(ip.is_some()).into());
+        }
+        if let Some(fp) = non_empty(r, "ja3").or_else(|| non_empty(r, "ja4")) {
+            total("tls_fp", "fp", 1);
+            let row = want_row(&mut want, "tls_fp", "fp", fp, bucket);
+            add_to(row, "requests", 1.into());
+            add_to(
+                row,
+                "count",
+                i64::from(non_empty(r, "p_type").is_some()).into(),
+            );
+            if let Some(country) = s(r, "country") {
+                total("tls_fp", "fp_country", 1);
+                let key = json!([fp, country]).to_string();
+                let row = want_row(&mut want, "tls_fp", "fp_country", &key, bucket);
+                add_to(row, "requests", 1.into());
+            }
+        }
+
+        let mut value = |field: &str, v: &str, cols: &[(&str, Value)]| {
+            total("value", field, 1);
+            let row = want_row(&mut want, "value", field, v, day);
+            add_to(row, "requests", 1.into());
+            for (col, n) in cols {
+                add_to(row, col, n.clone());
+            }
+        };
+        let class = value_class(s(r, "cache"));
+        let bytes = i(r, "resp_bytes").unwrap();
+        value(
+            "cache",
+            class,
+            &[
+                ("resp_bytes_sum", bytes.into()),
+                ("count", 1.into()),
+                ("elapsed_sum", (i(r, "elapsed").unwrap() as f64).into()),
+                ("elapsed_count", 1.into()),
+            ],
+        );
+        let edge = r.get("edge").and_then(Value::as_bool);
+        if edge == Some(false) {
+            value("shield", class, &[]);
+        }
+        let output = non_empty(r, "io_output_format");
+        if output.is_some() {
+            let leg = edge.map_or("", |e| if e { "true" } else { "false" });
+            value(
+                "io",
+                leg,
+                &[("resp_bytes_sum", bytes.into()), ("count", 1.into())],
+            );
+        }
+        let io = i(r, "io_input_bytes").zip(i(r, "io_output_bytes"));
+        if let Some((a, b)) = io {
+            value(
+                "io_both",
+                "",
+                &[("io_in_sum", a.into()), ("io_out_sum", b.into())],
+            );
+        }
+        if let Some(name) = non_empty(r, "_bot_name") {
+            value("bot_name", name, &[]);
+        }
+        for token in s(r, "waf_sig").unwrap_or("").split(',') {
+            if !token.is_empty() {
+                value("waf_signal", token, &[]);
+            }
+        }
+        if let (Some(input), Some(output)) = (non_empty(r, "io_input_format"), output) {
+            let ratio = io
+                .filter(|(_, b)| *b != 0)
+                .map(|(a, b)| a as f64 / b as f64);
+            value(
+                "io_pair",
+                &json!([input, output]).to_string(),
+                &[
+                    ("ratio_sum", ratio.unwrap_or(0.0).into()),
+                    ("ratio_count", i64::from(ratio.is_some()).into()),
+                ],
+            );
+        }
+
+        if let Some(rtt) = i(r, "rtt_min") {
+            total("proxy", "sample", 1);
+            let key = format!("{:019}", fnv(s(r, "rid").unwrap()));
+            let row = want_row(&mut want, "proxy", "sample", &key, bucket);
+            row.insert("requests".into(), 1.into());
+            row.insert("rtt_min".into(), (rtt as f64).into());
+            for (col, from) in [
+                ("ip", "ip"),
+                ("asn", "asn"),
+                ("tcp_rtt", "tcp_rtt"),
+                ("lat_sum", "lat"),
+                ("lon_sum", "lon"),
+                ("pop", "pop"),
+                ("country", "country"),
+                ("label", "city"),
+            ] {
+                match r.get(from) {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Number(n)) if col != "asn" => {
+                        row.insert(col.into(), n.as_f64().unwrap().into());
+                    }
+                    Some(v) => {
+                        row.insert(col.into(), v.clone());
+                    }
+                }
+            }
+        }
+    }
+    (want, totals)
+}
+
+#[test]
+fn security_and_value_rows_match_a_brute_force_computation() {
+    let rows = fixture_sv(0, 400);
+    let out = read(&summary::write_summary(&[&batch(&rows)], BASE).unwrap());
+    let (want, totals) = security_value_want(&rows, BASE * 1000);
+    let groups = ["header_ip", "bot_ua", "tls_fp", "value", "proxy"];
+    let got: Want = out
+        .iter()
+        .filter(|r| groups.contains(&r["bundle"].as_str().unwrap()))
+        .map(|r| {
+            let key = (
+                r["bundle"].as_str().unwrap().to_owned(),
+                r["field"].as_str().unwrap().to_owned(),
+                r["value"].as_str().unwrap().to_owned(),
+                r["bucket"].as_i64().unwrap(),
+            );
+            (key, r.clone())
+        })
+        .collect();
+    assert_eq!(
+        got.keys().collect::<Vec<_>>(),
+        want.keys().collect::<Vec<_>>()
+    );
+    for (key, row) in &want {
+        same_map(&got[key], row, &format!("{key:?}"));
+    }
+    for g in groups {
+        assert!(got.keys().any(|k| k.0 == g), "{g} has rows");
+    }
+    let got_totals: BTreeMap<(String, String), i64> = bundle(&out, "dim_totals")
+        .into_iter()
+        .filter(|r| groups.contains(&r["value"].as_str().unwrap()))
+        .map(|r| {
+            assert_eq!(r["truncated"], false);
+            (
+                (
+                    r["value"].as_str().unwrap().to_owned(),
+                    r["field"].as_str().unwrap().to_owned(),
+                ),
+                r["requests"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got_totals, totals);
+
+    // Referral stems are an all_fields field, with the catalog fields' IP counts.
+    let mut stems: BTreeMap<String, i64> = BTreeMap::new();
+    for r in &rows {
+        if let Some(stem) = summary::ref_stem(s(r, "ip"), s(r, "ua"), s(r, "referer")) {
+            *stems.entry(stem).or_default() += 1;
+        }
+    }
+    assert!(stems.len() >= 4, "{stems:?}");
+    let got: BTreeMap<String, i64> = bundle(&out, "all_fields")
+        .into_iter()
+        .filter(|r| r["field"] == summary::REF_STEM)
+        .map(|r| {
+            (
+                r["value"].as_str().unwrap().to_owned(),
+                r["count"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, stems);
+    let total = bundle(&out, "field_totals")
+        .into_iter()
+        .find(|r| r["field"] == summary::REF_STEM)
+        .unwrap();
+    assert_eq!(total["count"], stems.values().sum::<i64>());
+}
+
+#[test]
+fn referral_stems_follow_the_raw_regexes() {
+    let ip = Some("10.0.0.1");
+    for (ua, referer, want) in [
+        ("Mozilla", "https://www.example.com/a", Some("example")),
+        ("Mozilla", "http://news.site.org/x", Some("news")),
+        ("Mozilla", "-", None),
+        ("Mozilla", "", None),
+        ("ChatGPT-User/1.0", "", Some("chatgpt")),
+        ("perplexity-user", "-", Some("perplexity")),
+        ("Googlebot", "https://g.com/", None),
+        ("HeadlessChrome", "https://g.com/", None),
+        ("Mozilla", "https://www./", Some("www")),
+        ("Mozilla", "HTTPS://Foo.Bar:443/", Some("foo")),
+        ("Mozilla", "ftp://x https://y.z/", Some("y")),
+        ("Mozilla", "https:///nohost http://late.io", Some("late")),
+        ("x -user", "https://r.com", Some("r")),
+        ("abc-userx", "", Some("abc")),
+        ("a.b-externalfetcher", "", Some("b")),
+        ("-user", "", None),
+        ("Mozilla", "https://www.ex ample.com", Some("ex")),
+        ("Mozilla", "https://wwwx.com", Some("wwwx")),
+        ("Mozilla", "http://www.:8080", Some("www")),
+        ("Mozilla", "no scheme here", None),
+        ("MeinBot-User", "https://x.com", None),
+    ] {
+        assert_eq!(
+            summary::ref_stem(ip, Some(ua), Some(referer)).as_deref(),
+            want,
+            "{ua:?} {referer:?}"
+        );
+    }
+    for ip in [None, Some("")] {
+        assert_eq!(
+            summary::ref_stem(ip, Some("Mozilla"), Some("https://a.com")),
+            None
+        );
+    }
+    assert_eq!(
+        summary::ref_stem(ip, None, Some("https://a.com")).as_deref(),
+        Some("a")
+    );
+}
+
+#[test]
+fn security_and_value_groups_cut_to_their_top_k() {
+    let header_k = summary::HEADER_IP_K as i64;
+    let mut rows: Vec<Value> = (0..header_k + 20)
+        .map(|n| {
+            json!({
+                "timestamp": iso(BASE * 1000 + n),
+                "ip": format!("10.2.{}.{}", n / 256, n % 256),
+                "req_header_bytes": 100 + n * 10,
+                "rid": format!("r{n}"),
+                "rtt_min": 5,
+                "_bot_name": format!("bot{n:04}"),
+            })
+        })
+        .collect();
+    let extra = summary::SAMPLE_K as i64 + summary::VALUE_TOP_K as i64;
+    rows.extend((0..extra).map(|n| {
+        json!({
+            "timestamp": iso(BASE * 1000 + n),
+            "rid": format!("s{n}"),
+            "rtt_min": 7,
+            "_bot_name": if n < 50 { "bot0000".to_owned() } else { format!("bot{n:04}") },
+        })
+    }));
+    let out = read(&summary::write_summary(&[&batch(&rows)], BASE).unwrap());
+
+    let (ips, total) = group_rows(&out, "header_ip", "ip");
+    assert_eq!(total["requests"], header_k + 20);
+    assert_eq!(total["truncated"], true);
+    let kept: BTreeSet<i64> = ips
+        .values()
+        .map(|r| r["value_max"].as_i64().unwrap())
+        .collect();
+    assert_eq!(kept, (20..header_k + 20).map(|n| 100 + n * 10).collect());
+
+    let (sample, total) = group_rows(&out, "proxy", "sample");
+    assert_eq!(total["requests"], rows.len() as i64);
+    assert_eq!(total["truncated"], true);
+    let mut keys: Vec<i64> = rows.iter().map(|r| fnv(s(r, "rid").unwrap())).collect();
+    keys.sort_unstable();
+    keys.truncate(summary::SAMPLE_K);
+    assert_eq!(
+        sample.keys().cloned().collect::<Vec<_>>(),
+        keys.iter().map(|k| format!("{k:019}")).collect::<Vec<_>>()
+    );
+
+    let bots: Vec<&Map<String, Value>> = bundle(&out, "value")
+        .into_iter()
+        .filter(|r| r["field"] == "bot_name")
+        .collect();
+    assert_eq!(bots.len(), summary::VALUE_TOP_K);
+    assert_eq!(bots[0]["value"], "bot0000");
+    let total = bundle(&out, "dim_totals")
+        .into_iter()
+        .find(|r| r["value"] == "value" && r["field"] == "bot_name")
+        .unwrap();
+    assert_eq!(total["requests"], rows.len() as i64);
+    assert_eq!(total["truncated"], true);
 }
 
 #[test]
@@ -1997,6 +2614,23 @@ fn write_origin_fixtures() {
         })
         .collect();
     write_summary_fixtures("__fixtures__/origin-summaries", &rows, &[]);
+}
+
+/// Writes `frontend/lib/cloud-engine/__fixtures__/security-value-summaries/`: rows carrying the
+/// /security and /fastly-value columns (user agents, referers, TLS fingerprints, proxy types, bot
+/// names, image-optimizer bytes, RTTs, WAF signals) over two hours, with their summaries and
+/// bundles, for the rollup-vs-raw parity tests.
+/// Run with `cargo test --test summary -- --ignored write_security_value_fixtures`.
+#[test]
+#[ignore = "regenerates the web /security and /fastly-value fixtures"]
+fn write_security_value_fixtures() {
+    let mut rows = fixture_sv(0, 1600);
+    for (i, row) in rows.iter_mut().enumerate() {
+        let ms = BASE * 1000 + (i as i64 * 4_513) % (2 * 3600 * 1000);
+        row["timestamp"] = iso(ms).into();
+        row["rid"] = format!("sv-{i}").into();
+    }
+    write_summary_fixtures("__fixtures__/security-value-summaries", &rows, &[]);
 }
 
 /// Writes `frontend/lib/cloud-engine/{rel}/`: 15-minute raw windows of `rows`, their window

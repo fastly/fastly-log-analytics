@@ -97,6 +97,21 @@ fn rows(seed: u64, start: i64, n: usize) -> Vec<Value> {
                     [r.skewed(3) as usize]
                     .into();
             }
+            if r.next().is_multiple_of(2) {
+                row["rtt_min"] = (100 + r.skewed(200_000)).into();
+                row["ja3"] = format!("ja3-{}", r.skewed(400)).into();
+                row["p_type"] = ["", "", "", "VPN", "TOR"][r.skewed(5) as usize].into();
+            }
+            if r.next().is_multiple_of(4) {
+                row["referer"] = format!("https://www.site{}.com/p", r.skewed(60)).into();
+                row["_bot_name"] = format!("bot-{}", r.skewed(40)).into();
+            }
+            if r.next().is_multiple_of(10) {
+                row["io_input_format"] = r.pick(&["jpeg", "png", "gif"]).into();
+                row["io_output_format"] = r.pick(&["webp", "avif", "jpeg"]).into();
+                row["io_input_bytes"] = (10_000 + r.skewed(500_000)).into();
+                row["io_output_bytes"] = (5_000 + r.skewed(200_000)).into();
+            }
             row
         })
         .collect()

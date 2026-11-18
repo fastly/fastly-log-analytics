@@ -2,7 +2,7 @@
 //!
 //! One long-format file per window, rows tagged by `bundle`. Shapes and definitions mirror the
 //! fla v3 hourly rollups (`backend/core/rollups/` at 2c75f058): `time_series`, `overview`,
-//! `all_fields` (+ `field_totals`), `all_fields_ip`, `sessions` and additive `dims`, plus the
+//! `all_fields` (+ `field_totals`), `all_fields_ip` (only for [`IP_SKETCH_FIELDS`]), `sessions` and additive `dims`, plus the
 //! Cloud-only `transport`, `origin`, `urls` and `quality` groups and `series5` `origin` and
 //! `city` fields (/network transport, quality and map, /origin and /performance rankings), which
 //! always write their `dim_totals` rows as a presence mark. Every
@@ -43,6 +43,20 @@ pub const SERIES_ASN_K: usize = 120;
 pub const SERIES_CITY_K: usize = 200;
 /// `sample` rows per window and bundle.
 pub const SAMPLE_K: usize = 300;
+/// `header_ip` IPs kept per window and bundle by largest request header: max-merged, the top 10
+/// /security shows stay exact.
+pub const HEADER_IP_K: usize = 100;
+/// `tls_fp` fingerprints and `[fingerprint, country]` pairs kept per window and bundle
+/// (/security threat intel shows 50 fingerprints).
+pub const TLS_FP_K: usize = 500;
+/// `value` bot names, WAF signals and Image Optimizer format pairs kept per window and bundle
+/// (/fastly-value shows 20 of each).
+pub const VALUE_TOP_K: usize = 200;
+/// The `all_fields` field of /security bot efficiency's referral stems (see [`ref_stem`]).
+pub const REF_STEM: &str = "_ref_stem";
+/// The fields whose `all_fields_ip` distinct-IP sketches a page reads: /security's TLS
+/// fingerprints and bot efficiency's referral stems. Others would be unread bytes.
+pub const IP_SKETCH_FIELDS: [&str; 2] = ["tls_ciphers_sha", REF_STEM];
 /// `series5` and `bins` bucket width in windows and hour bundles; day bundles use an hour.
 pub const SERIES_STEP_MS: i64 = 300_000;
 pub use super::hll::{P as HLL_P, VERSION as HLL_VERSION};
@@ -224,6 +238,14 @@ columns! {
     OverheadHist = ("overhead_hist", Bin),
     ThroughputSum = ("throughput_sum", F64),
     ThroughputCount = ("throughput_count", I64),
+    ValueMax = ("value_max", I64),
+    IoInSum = ("io_in_sum", I64),
+    IoOutSum = ("io_out_sum", I64),
+    RatioSum = ("ratio_sum", F64),
+    RatioCount = ("ratio_count", I64),
+    RttMin = ("rtt_min", F64),
+    TcpRtt = ("tcp_rtt", F64),
+    Pop = ("pop", Utf8),
 }
 
 /// The histogram columns, in [`Lat`] order.
@@ -842,6 +864,21 @@ struct NetCols<'a> {
     client_ploss: Num<'a>,
     client_rttvar: Num<'a>,
     tp_elapsed: Num<'a>,
+    /// /security proxies' `COALESCE(rtt_min, tcpi_min_rtt)` and `COALESCE(tcp_rtt, tcpi_rtt)`,
+    /// and the plain columns its rows and threat intel read.
+    rtt_min: Num<'a>,
+    proxy_rtt: Num<'a>,
+    pop: Str<'a>,
+    plain_city: Str<'a>,
+    referer: Str<'a>,
+    ja3: Str<'a>,
+    p_type: Str<'a>,
+    /// /fastly-value's bot name and Image Optimizer columns.
+    bot_name: Str<'a>,
+    in_format: Str<'a>,
+    out_format: Str<'a>,
+    io_in: Num<'a>,
+    io_out: Num<'a>,
 }
 
 impl<'a> NetCols<'a> {
@@ -913,6 +950,18 @@ impl<'a> NetCols<'a> {
             client_ploss: Num::new(batch, &[("client_ploss", 1.0)]),
             client_rttvar: Num::new(batch, &[("client_tcpi_rttvar", 1.0)]),
             tp_elapsed: Num::new(batch, &[("time_elapsed_usec", 1.0), ("elapsed", 1.0)]),
+            rtt_min: Num::new(batch, &[("rtt_min", 1.0), ("tcpi_min_rtt", 1.0)]),
+            proxy_rtt: Num::new(batch, &[("tcp_rtt", 1.0), ("tcpi_rtt", 1.0)]),
+            pop: Str::new(batch, &["pop"]),
+            plain_city: Str::new(batch, &["city"]),
+            referer: Str::new(batch, &["referer"]),
+            ja3: Str::new(batch, &["ja3"]),
+            p_type: Str::new(batch, &["p_type"]),
+            bot_name: Str::new(batch, &["_bot_name"]),
+            in_format: Str::new(batch, &["io_input_format"]),
+            out_format: Str::new(batch, &["io_output_format"]),
+            io_in: Num::new(batch, &[("io_input_bytes", 1.0)]),
+            io_out: Num::new(batch, &[("io_output_bytes", 1.0)]),
         }
     }
 }
@@ -1435,6 +1484,136 @@ fn verified_bot(sig: &str) -> Option<Cow<'_, str>> {
     })
 }
 
+/// `s` lowercased like DuckDB's `lower`, borrowed when it already is.
+fn lower(s: &str) -> Cow<'_, str> {
+    if s.is_ascii() {
+        ascii_case(s, false)
+    } else {
+        Cow::Owned(s.to_lowercase())
+    }
+}
+
+/// /security bot efficiency's user agents that never count as human referrals.
+const NOT_HUMAN: [&str; 9] = [
+    "bot",
+    "crawler",
+    "spider",
+    "slurp",
+    "archiver",
+    "scraper",
+    "externalagent",
+    "extended",
+    "headless",
+];
+
+/// `regexp_extract(ua_l, '([a-z0-9]+)-(?:user|externalfetcher)', 1)`: the first run of
+/// `[a-z0-9]` followed by `-user` or `-externalfetcher`, else ''.
+fn agent_stem(ua_l: &str) -> &str {
+    let b = ua_l.as_bytes();
+    let word = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let mut i = 0;
+    while i < b.len() {
+        if !word(b[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && word(b[i]) {
+            i += 1;
+        }
+        if b[i..].starts_with(b"-user") || b[i..].starts_with(b"-externalfetcher") {
+            return &ua_l[start..i];
+        }
+    }
+    ""
+}
+
+/// `regexp_extract(ref_l, 'https?://(?:www\.)?([^/.:;\s]+)', 1)` (RE2, leftmost first): the host's
+/// first label after the first `http://` or `https://` that has one, `www.` skipped when a label
+/// follows it, else ''.
+fn referer_stem(ref_l: &str) -> &str {
+    let b = ref_l.as_bytes();
+    let label = |from: usize| {
+        let end = b[from..]
+            .iter()
+            .position(|c| {
+                matches!(
+                    c,
+                    b'/' | b'.' | b':' | b';' | b' ' | b'\t' | b'\n' | 0x0c | b'\r'
+                )
+            })
+            .map_or(b.len(), |n| from + n);
+        &ref_l[from..end]
+    };
+    for p in 0..b.len() {
+        let after = if b[p..].starts_with(b"https://") {
+            p + 8
+        } else if b[p..].starts_with(b"http://") {
+            p + 7
+        } else {
+            continue;
+        };
+        if b[after..].starts_with(b"www.") {
+            let stem = label(after + 4);
+            if !stem.is_empty() {
+                return stem;
+            }
+        }
+        let stem = label(after);
+        if !stem.is_empty() {
+            return stem;
+        }
+    }
+    ""
+}
+
+/// /security bot efficiency's referral stem of one row (`buildSecurityBotEfficiencySql`
+/// `ref_extracted`), or `None` when the row is left out: no IP, no referral (a referer other than
+/// '' and '-', or an agent naming `-user` or `-externalfetcher`), a non-human agent, or no stem.
+pub fn ref_stem(ip: Option<&str>, ua: Option<&str>, referer: Option<&str>) -> Option<String> {
+    if ip.unwrap_or("").is_empty() {
+        return None;
+    }
+    let ua_l = lower(ua.unwrap_or(""));
+    let referer = referer.unwrap_or("");
+    let fetcher = ua_l.contains("-user") || ua_l.contains("-externalfetcher");
+    if (!fetcher && matches!(referer, "" | "-")) || NOT_HUMAN.iter().any(|w| ua_l.contains(w)) {
+        return None;
+    }
+    let stem = Some(agent_stem(&ua_l))
+        .filter(|s| fetcher && !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| referer_stem(&lower(referer)).to_owned());
+    (!stem.is_empty()).then_some(stem)
+}
+
+/// The live rows of one batch with a [`ref_stem`], and their stems.
+fn ref_stems(r: &Rows) -> Vec<(usize, String)> {
+    let referer = &r.net.referer;
+    r.live()
+        .filter_map(|i| {
+            let stem = ref_stem(get_s(r.ip, i), get_s(r.ua, i), referer.get(i, false))?;
+            Some((i, stem))
+        })
+        .collect()
+}
+
+/// /fastly-value's cache class of `UPPER(COALESCE(NULLIF(cache_status, ''), cache, ''))`: `HIT`,
+/// `MISS`, `PASS` or `SYNTH` by prefix, '' when empty, else `OTHER`.
+fn cache_class(cache: &str) -> &'static str {
+    const CLASSES: [&str; 4] = ["HIT", "MISS", "PASS", "SYNTH"];
+    if cache.is_empty() {
+        return "";
+    }
+    let found = if cache.is_ascii() {
+        CLASSES.into_iter().find(|p| starts_with_ci(cache, p))
+    } else {
+        let upper = cache.to_uppercase();
+        CLASSES.into_iter().find(|p| upper.starts_with(p))
+    };
+    found.unwrap_or("OTHER")
+}
+
 /// The sample order: FNV-1a 64 of the request id (or of the row's timestamp, URL, IP and
 /// position), halved to fit an `i64`.
 fn sample_key(
@@ -1472,6 +1651,18 @@ struct FieldAgg {
     count: i64,
     ip_rows: i64,
     ips: Vec<u32>,
+}
+
+#[inline]
+fn count_key<'a>(aggs: &mut FastMap<Key<'a>, FieldAgg>, key: Key<'a>, ip_id: u32) {
+    let agg = aggs.entry(key).or_default();
+    agg.count += 1;
+    if ip_id != NO_IP {
+        agg.ip_rows += 1;
+        if agg.ips.last() != Some(&ip_id) {
+            agg.ips.push(ip_id);
+        }
+    }
 }
 
 fn sketch_ids(ids: &mut Vec<u32>, entries: &[u32]) -> (Hll, u64) {
@@ -1604,9 +1795,13 @@ fn series_row<'b>(out: &mut Out, bucket: i64, field: &str, value: &str, s: &Seri
     out.push(&row);
 }
 
-/// The v3 rows (`dims`, `series5`, `bins`, `assets`, `sample` and their `dim_totals`) in one
-/// pass over the rows.
-fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
+/// `(sample_key, timestamp, batch, row)` of a `sample` row.
+type SampleAt = (i64, i64, usize, usize);
+
+/// The v3 rows (`dims`, `series5`, `bins`, `assets`, `transport`, `origin`, `urls`, `quality`
+/// and their `dim_totals`) in one pass over the rows, which also picks the `sample` rows, returned
+/// in order for [`write_sample`] to write after the other groups.
+fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
     const FIELD_DIMS: [&str; 5] = ["pop", "oip", "edge", "backend", "region"];
     let mut dims: Vec<FastMap<DimKey, Dim>> = DIMS.iter().map(|_| FastMap::default()).collect();
     let dim_at = |name: &str| DIMS.iter().position(|d| *d == name).expect("a dim");
@@ -1624,7 +1819,7 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
     let mut bot_bins: FastMap<(i64, Cow<str>), i64> = FastMap::default();
     let mut assets: FastMap<(&str, Cow<str>, Cow<str>), Asset> = FastMap::default();
     // Max-heap of the smallest sample keys: (key, ts, batch, row).
-    let mut sample: std::collections::BinaryHeap<(i64, i64, usize, usize)> =
+    let mut sample: std::collections::BinaryHeap<SampleAt> =
         std::collections::BinaryHeap::with_capacity(SAMPLE_K + 1);
     let mut transport = Transport::default();
     let mut by_transport: FastMap<Cow<str>, Transport> = FastMap::default();
@@ -2053,7 +2248,11 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
         }
     }
 
-    for (key, ts, at, i) in sample.into_sorted_vec() {
+    sample.into_sorted_vec()
+}
+
+fn write_sample(rows: &[Rows], sample: Vec<SampleAt>, out: &mut Out) {
+    for (key, ts, at, i) in sample {
         let r = &rows[at];
         out.push(&[
             (C::Bundle, V::S("sample")),
@@ -2066,6 +2265,321 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) {
                 r.net.rtt.get(i).map_or(V::Null, |v| V::I(v.round() as i64)),
             ),
             (C::SampleKey, V::I(key)),
+        ]);
+    }
+}
+
+/// The `value` fields, in write order.
+pub const VALUE_FIELDS: [&str; 7] = [
+    "cache",
+    "shield",
+    "io",
+    "io_both",
+    "bot_name",
+    "waf_signal",
+    "io_pair",
+];
+
+/// Values kept per `value` field per window and bundle.
+pub(super) fn value_keep(field: &str) -> usize {
+    match field {
+        "bot_name" | "waf_signal" | "io_pair" => VALUE_TOP_K,
+        _ => DIM_K,
+    }
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// A `bot_ua` or `tls_fp` value: requests, response bytes and the requests with an IP (`bot_ua`)
+/// or a proxy type (`tls_fp`).
+#[derive(Default)]
+struct Tally {
+    requests: i64,
+    bytes: i64,
+    count: i64,
+}
+
+/// A `value` row: one value of a /fastly-value field on one UTC day.
+#[derive(Default)]
+struct ValueAgg {
+    requests: i64,
+    bytes: (i64, i64),
+    elapsed: (f64, i64),
+    io: (i64, i64),
+    ratio: (f64, i64),
+}
+
+impl ValueAgg {
+    fn add_body(&mut self, body: Option<f64>) {
+        self.requests += 1;
+        if let Some(b) = body {
+            self.bytes.0 += b as i64;
+            self.bytes.1 += 1;
+        }
+    }
+
+    fn push(&self, out: &mut Out, day: i64, field: &str, value: &str) {
+        let mut row = vec![
+            (C::Bundle, V::S("value")),
+            (C::Bucket, V::I(day)),
+            (C::FieldName, V::S(field)),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(self.requests)),
+        ];
+        match field {
+            "cache" => row.extend([
+                (C::RespBytesSum, V::I(self.bytes.0)),
+                (C::Count, V::I(self.bytes.1)),
+                (C::ElapsedSum, V::F(self.elapsed.0)),
+                (C::ElapsedCount, V::I(self.elapsed.1)),
+            ]),
+            "io" => row.extend([
+                (C::RespBytesSum, V::I(self.bytes.0)),
+                (C::Count, V::I(self.bytes.1)),
+            ]),
+            "io_both" => row.extend([
+                (C::IoInSum, V::I(self.io.0)),
+                (C::IoOutSum, V::I(self.io.1)),
+            ]),
+            "io_pair" => row.extend([
+                (C::RatioSum, V::F(self.ratio.0)),
+                (C::RatioCount, V::I(self.ratio.1)),
+            ]),
+            _ => {}
+        }
+        out.push(&row);
+    }
+}
+
+/// The /security and /fastly-value rows in one pass over the rows, each with its `dim_totals`:
+/// - `header_ip` `ip`: the largest request header (`value_max`) per non-empty IP, top
+///   [`HEADER_IP_K`] (/security top IPs by header size);
+/// - `bot_ua` `ua`: response bytes, requests and requests with a non-empty IP per non-empty user
+///   agent, top [`DIM_K`] by bytes (/security bot efficiency and well-known bots);
+/// - `tls_fp` `fp`: requests and proxied requests per `COALESCE(NULLIF(ja3, ''), NULLIF(ja4, ''))`,
+///   and `fp_country` the requests per JSON `[fp, country]`, each top [`TLS_FP_K`] (/security
+///   threat intel);
+/// - `value`: per UTC day, [`VALUE_FIELDS`] (/fastly-value caching, performance, security, bots
+///   and Image Optimizer);
+/// - `proxy` `sample`: the [`SAMPLE_K`] rows with an RTT minimum and the smallest `sample_key`
+///   (the zero-padded value), with /security proxies' columns.
+fn write_ext(rows: &[Rows], bucket: i64, out: &mut Out) {
+    let mut header_ips: FastMap<Cow<str>, i64> = FastMap::default();
+    let mut header_rows = 0i64;
+    let mut uas: FastMap<Cow<str>, Tally> = FastMap::default();
+    let mut fps: FastMap<Cow<str>, Tally> = FastMap::default();
+    let mut fp_countries: FastMap<(&str, &str), Tally> = FastMap::default();
+    let mut values: [FastMap<(i64, Cow<str>), ValueAgg>; 7] = Default::default();
+    let mut pairs: FastMap<(i64, &str, &str), ValueAgg> = FastMap::default();
+    let mut proxy: std::collections::BinaryHeap<(i64, usize, usize)> =
+        std::collections::BinaryHeap::with_capacity(SAMPLE_K + 1);
+    let mut proxy_rows = 0i64;
+    for (at, r) in rows.iter().enumerate() {
+        let c = &r.net;
+        for i in r.live() {
+            let day = r.ts.value(i).div_euclid(DAY_MS) * DAY_MS;
+            let ip = get_s(r.ip, i).filter(|s| !s.is_empty());
+            if let (Some(ip), Some(h)) = (ip, c.header.get(i)) {
+                header_rows += 1;
+                let h = h as i64;
+                header_ips
+                    .entry(Cow::Borrowed(ip))
+                    .and_modify(|m| *m = (*m).max(h))
+                    .or_insert(h);
+            }
+            if let Some(ua) = get_s(r.ua, i).filter(|s| !s.is_empty()) {
+                let t = uas.entry(Cow::Borrowed(ua)).or_default();
+                t.requests += 1;
+                t.bytes += get_i(r.resp_bytes, i).unwrap_or(0);
+                t.count += i64::from(ip.is_some());
+            }
+            let fp = c
+                .ja3
+                .get(i, true)
+                .or_else(|| get_s(r.ja4, i).filter(|s| !s.is_empty()));
+            if let Some(fp) = fp {
+                let t = fps.entry(Cow::Borrowed(fp)).or_default();
+                t.requests += 1;
+                t.count += i64::from(c.p_type.get(i, true).is_some());
+                if let Some(country) = get_s(r.country, i) {
+                    fp_countries.entry((fp, country)).or_default().requests += 1;
+                }
+            }
+
+            let class = c.cache.get(i, true).map_or("", cache_class);
+            let body = c.body.get(i);
+            let edge = get_b(r.edge, i);
+            let v = values[0].entry((day, Cow::Borrowed(class))).or_default();
+            v.add_body(body);
+            if let Some(e) = c.tp_elapsed.get(i) {
+                v.elapsed.0 += e;
+                v.elapsed.1 += 1;
+            }
+            if edge == Some(false) {
+                values[1]
+                    .entry((day, Cow::Borrowed(class)))
+                    .or_default()
+                    .requests += 1;
+            }
+            let out_format = c.out_format.get(i, true);
+            if out_format.is_some() {
+                values[2]
+                    .entry((day, Cow::Borrowed(leg(edge))))
+                    .or_default()
+                    .add_body(body);
+            }
+            let io = c.io_in.get(i).zip(c.io_out.get(i));
+            if let Some((io_in, io_out)) = io {
+                let v = values[3].entry((day, Cow::Borrowed(""))).or_default();
+                v.requests += 1;
+                v.io.0 += io_in as i64;
+                v.io.1 += io_out as i64;
+            }
+            if let Some(name) = c.bot_name.get(i, true) {
+                values[4]
+                    .entry((day, Cow::Borrowed(name)))
+                    .or_default()
+                    .requests += 1;
+            }
+            if let Some(sig) = get_s(c.waf_sig, i) {
+                for signal in sig.split(',').filter(|s| !s.is_empty()) {
+                    values[5]
+                        .entry((day, Cow::Borrowed(signal)))
+                        .or_default()
+                        .requests += 1;
+                }
+            }
+            if let (Some(input), Some(output)) = (c.in_format.get(i, true), out_format) {
+                let v = pairs.entry((day, input, output)).or_default();
+                v.requests += 1;
+                if let Some((io_in, io_out)) = io.filter(|(_, o)| *o != 0.0) {
+                    v.ratio.0 += io_in / io_out;
+                    v.ratio.1 += 1;
+                }
+            }
+
+            if c.rtt_min.get(i).is_some() {
+                proxy_rows += 1;
+                let key = sample_key(
+                    c.req_id.get(i, false),
+                    r.ts.value(i),
+                    c.url.get(i, false),
+                    get_s(r.ip, i),
+                    i,
+                );
+                let entry = (key, at, i);
+                if proxy.len() < SAMPLE_K {
+                    proxy.push(entry);
+                } else if proxy.peek().is_some_and(|top| entry < *top) {
+                    proxy.pop();
+                    proxy.push(entry);
+                }
+            }
+        }
+    }
+
+    let (kept, _, truncated) = top_untimed(header_ips, |m| *m, HEADER_IP_K);
+    push_total(out, bucket, "header_ip", "ip", header_rows, truncated);
+    for (ip, max) in &kept {
+        out.push(&[
+            (C::Bundle, V::S("header_ip")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("ip")),
+            (C::Value, V::S(ip)),
+            (C::ValueMax, V::I(*max)),
+        ]);
+    }
+    drop(kept);
+
+    let total = uas.values().map(|t| t.requests).sum();
+    let (kept, _, truncated) = top_untimed(uas, |t| t.bytes, DIM_K);
+    push_total(out, bucket, "bot_ua", "ua", total, truncated);
+    for (ua, t) in &kept {
+        out.push(&[
+            (C::Bundle, V::S("bot_ua")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("ua")),
+            (C::Value, V::S(ua)),
+            (C::RespBytesSum, V::I(t.bytes)),
+            (C::Requests, V::I(t.requests)),
+            (C::Count, V::I(t.count)),
+        ]);
+    }
+    drop(kept);
+
+    let countries: FastMap<Cow<str>, Tally> = fp_countries
+        .into_iter()
+        .map(|(key, t)| {
+            let key = serde_json::to_string(&key).expect("strings serialize");
+            (Cow::Owned(key), t)
+        })
+        .collect();
+    for (field, map) in [("fp", fps), ("fp_country", countries)] {
+        let (kept, total, truncated) = top_untimed(map, |t| t.requests, TLS_FP_K);
+        push_total(out, bucket, "tls_fp", field, total, truncated);
+        for (value, t) in &kept {
+            let count = if field == "fp" {
+                V::I(t.count)
+            } else {
+                V::Null
+            };
+            out.push(&[
+                (C::Bundle, V::S("tls_fp")),
+                (C::Bucket, V::I(bucket)),
+                (C::FieldName, V::S(field)),
+                (C::Value, V::S(value)),
+                (C::Requests, V::I(t.requests)),
+                (C::Count, count),
+            ]);
+        }
+    }
+
+    values[6] = pairs
+        .into_iter()
+        .map(|((day, input, output), v)| {
+            let key = serde_json::to_string(&(input, output)).expect("strings serialize");
+            ((day, Cow::Owned(key)), v)
+        })
+        .collect();
+    for (field, map) in VALUE_FIELDS.iter().zip(values) {
+        let (kept, total, truncated) = top_timed(map, |v| v.requests, value_keep(field));
+        push_total(out, bucket, "value", field, total, truncated);
+        for (day, value, v) in &kept {
+            v.push(out, *day, field, value);
+        }
+    }
+
+    push_total(
+        out,
+        bucket,
+        "proxy",
+        "sample",
+        proxy_rows,
+        proxy_rows > SAMPLE_K as i64,
+    );
+    let mut last = None;
+    for (key, at, i) in proxy.into_sorted_vec() {
+        // Rows sharing a key (a repeated request id) are one row, as a bundle merges them.
+        if last.replace(key) == Some(key) {
+            continue;
+        }
+        let (r, c) = (&rows[at], &rows[at].net);
+        let num = |v: Option<f64>| v.map_or(V::Null, V::F);
+        out.push(&[
+            (C::Bundle, V::S("proxy")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("sample")),
+            (C::Value, V::S(&format!("{key:019}"))),
+            (C::Requests, V::I(1)),
+            (C::Ip, opt_s(get_s(r.ip, i))),
+            (C::Asn, get_i(r.asn, i).map_or(V::Null, V::I)),
+            (C::RttMin, num(c.rtt_min.get(i))),
+            (C::TcpRtt, num(c.proxy_rtt.get(i))),
+            (C::LatSum, num(c.lat.get(i))),
+            (C::LonSum, num(c.lon.get(i))),
+            (C::Pop, opt_s(c.pop.get(i, false))),
+            (C::Country, opt_s(get_s(r.country, i))),
+            (C::Label, opt_s(c.plain_city.get(i, false))),
         ]);
     }
 }
@@ -2214,28 +2728,26 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     drop(minutes);
 
     let custom = custom_fields(batches);
+    let stems: Vec<Vec<(usize, String)>> = rows.iter().map(ref_stems).collect();
+    let mut extra: Vec<&str> = custom.iter().map(String::as_str).collect();
+    extra.push(REF_STEM);
+    extra.sort_unstable();
     let mut aggs: FastMap<Key, FieldAgg> = FastMap::default();
-    for field in FIELDS
-        .iter()
-        .copied()
-        .chain(custom.iter().map(String::as_str))
-    {
-        for r in &rows {
+    for field in FIELDS.iter().copied().chain(extra) {
+        let sketched = IP_SKETCH_FIELDS.contains(&field);
+        for (r, stems) in rows.iter().zip(&stems) {
+            if field == REF_STEM {
+                for (i, stem) in stems {
+                    count_key(&mut aggs, Key::S(stem), r.ip_id[*i]);
+                }
+                continue;
+            }
             let Some(col) = FieldCol::resolve(r.batch, field) else {
                 continue;
             };
             for i in r.live() {
-                let ip_id = r.ip_id[i];
-                col.for_each_key(i, false, |key| {
-                    let agg = aggs.entry(key).or_default();
-                    agg.count += 1;
-                    if ip_id != NO_IP {
-                        agg.ip_rows += 1;
-                        if agg.ips.last() != Some(&ip_id) {
-                            agg.ips.push(ip_id);
-                        }
-                    }
-                });
+                let ip_id = if sketched { r.ip_id[i] } else { NO_IP };
+                col.for_each_key(i, false, |key| count_key(&mut aggs, key, ip_id));
             }
         }
         let total: i64 = aggs.values().map(|a| a.count).sum();
@@ -2341,7 +2853,9 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     }
     drop(sessions);
 
-    write_v3(&rows, bucket, &mut out);
+    let sample = write_v3(&rows, bucket, &mut out);
+    write_ext(&rows, bucket, &mut out);
+    write_sample(&rows, sample, &mut out);
 
     let batch = out.finish()?;
     convert::encode_record_batch(
