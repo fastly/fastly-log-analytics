@@ -2367,7 +2367,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 let body = acc.write(job.start, Some(job.unit), job.unit.label())?;
                 (Some(final_key.to_owned()), vec![body], true)
             }
-            None if (job.final_key.is_some() || need_partial) && done > resumed => {
+            None if (job.final_key.is_some() || need_partial || need_open) && done > resumed => {
                 let objects = pack_partial(&acc.encode_partial(), CDN_READ_LIMIT)?;
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);

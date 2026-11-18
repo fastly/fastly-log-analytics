@@ -10507,7 +10507,13 @@ mod summary_bundles {
         settle(&fake);
         let first_open = one_of(&fake, "open_bundle=");
         assert_eq!(bundle::parse_name(&first_open).unwrap().count, 8);
-        assert!(fake.keys(WINDOWS).iter().all(|k| !k.contains("partial=")));
+        for key in fake
+            .keys(WINDOWS)
+            .into_iter()
+            .filter(|k| k.contains("partial="))
+        {
+            fake.bucket.borrow_mut().remove(&key);
+        }
 
         for m in 8..14 {
             window(&fake, BASE + m * 60, (m * 100) as u32, 100);
