@@ -24,20 +24,30 @@ pub(crate) fn fetch_platform_metrics(
     from: u64,
     to: u64,
     metrics: &[&str],
+    group_by: Option<&str>,
     fetch: impl FnMut(&str, &str) -> Result<crate::admin::ApiResponse, String>,
 ) -> Result<Value, String> {
-    fetch_platform_entity_metrics(service_id, "hourly", from, to, metrics, fetch)
+    fetch_platform_entity_metrics(service_id, "hourly", from, to, metrics, group_by, fetch)
 }
 
-fn fetch_platform_entity_metrics(
+pub(crate) fn fetch_platform_entity_metrics(
     entity_id: &str,
     granularity: &str,
     from: u64,
     to: u64,
     metrics: &[&str],
+    group_by: Option<&str>,
     fetch: impl FnMut(&str, &str) -> Result<crate::admin::ApiResponse, String>,
 ) -> Result<Value, String> {
-    fetch_platform_metrics_inner(Some(entity_id), granularity, from, to, metrics, fetch)
+    fetch_platform_metrics_inner(
+        Some(entity_id),
+        granularity,
+        from,
+        to,
+        metrics,
+        group_by,
+        fetch,
+    )
 }
 
 fn fetch_platform_aggregate_metrics(
@@ -47,7 +57,7 @@ fn fetch_platform_aggregate_metrics(
     metrics: &[&str],
     fetch: impl FnMut(&str, &str) -> Result<crate::admin::ApiResponse, String>,
 ) -> Result<Value, String> {
-    fetch_platform_metrics_inner(None, granularity, from, to, metrics, fetch)
+    fetch_platform_metrics_inner(None, granularity, from, to, metrics, None, fetch)
 }
 
 fn fetch_platform_metrics_inner(
@@ -56,6 +66,7 @@ fn fetch_platform_metrics_inner(
     from: u64,
     to: u64,
     metrics: &[&str],
+    group_by: Option<&str>,
     mut fetch: impl FnMut(&str, &str) -> Result<crate::admin::ApiResponse, String>,
 ) -> Result<Value, String> {
     if metrics.is_empty() {
@@ -69,6 +80,9 @@ fn fetch_platform_metrics_inner(
         "daily" => 86_400,
         _ => return Err("platform_metrics_granularity_invalid".into()),
     };
+    if group_by.is_some_and(|group_by| !matches!(group_by, "region" | "datacenter")) {
+        return Err("platform_metrics_group_invalid".into());
+    }
     let path = entity_id.map_or_else(
         || format!("/metrics/v2/platform/aggregate/{granularity}"),
         |entity_id| {
@@ -78,15 +92,20 @@ fn fetch_platform_metrics_inner(
             )
         },
     );
-    let base_query = format!(
-        "from={}&to={}&metric={}&limit=10000",
+    let mut base_query = format!(
+        "from={}&to={}&metric={}",
         platform_metrics_time(from)?,
         platform_metrics_time(to)?,
         metrics.join(",")
     );
+    if let Some(group_by) = group_by {
+        base_query.push_str("&group_by=");
+        base_query.push_str(group_by);
+    }
+    base_query.push_str("&limit=10000");
     let mut cursor = None::<String>;
     let mut cursors = BTreeSet::new();
-    let mut timestamps = BTreeSet::new();
+    let mut row_keys = BTreeSet::new();
     let mut rows = Vec::new();
     let first_bucket = from - from % bucket_seconds;
     let last_bucket = (to - 1) - (to - 1) % bucket_seconds;
@@ -123,7 +142,17 @@ fn fetch_platform_metrics_inner(
             if start % bucket_seconds != 0 || start < first_bucket || start > last_bucket {
                 return Err("platform_metrics_timestamp_out_of_window".into());
             }
-            if !timestamps.insert(start) {
+            let group = match group_by {
+                Some(group_by) => Some(
+                    row.get(group_by)
+                        .and_then(Value::as_str)
+                        .filter(|group| !group.trim().is_empty())
+                        .ok_or("platform_metrics_group_missing")?
+                        .to_owned(),
+                ),
+                None => None,
+            };
+            if !row_keys.insert((start, group)) {
                 return Err("platform_metrics_duplicate_timestamp".into());
             }
             rows.push(row.clone());
@@ -759,6 +788,104 @@ pub fn platform_ngwaf(body: &Value, from: u64, to: u64) -> Result<Value, String>
     }))
 }
 
+pub fn platform_geography(
+    body: &Value,
+    from: u64,
+    to: u64,
+    group_by: &str,
+) -> Result<Value, String> {
+    if !matches!(group_by, "region" | "datacenter") {
+        return Err("platform_metrics_group_invalid".into());
+    }
+    if from >= to {
+        return Err("platform_metrics_range_invalid".into());
+    }
+    let rows = body["data"].as_array().ok_or("platform_metrics_shape")?;
+    let first = from - from % 86_400;
+    let last = (to - 1) - (to - 1) % 86_400;
+    let mut locations = BTreeMap::<String, (u64, u64)>::new();
+    let mut groups = BTreeSet::new();
+    for row in rows {
+        let timestamp = row["timestamp"]
+            .as_str()
+            .ok_or("platform_metrics_timestamp_invalid")?;
+        let parsed =
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .map_err(|_| "platform_metrics_timestamp_invalid")?;
+        let start = u64::try_from(parsed.unix_timestamp())
+            .map_err(|_| "platform_metrics_timestamp_invalid")?;
+        if start % 86_400 != 0 || start < first || start > last {
+            return Err("platform_metrics_timestamp_out_of_window".into());
+        }
+        let location = row
+            .get(group_by)
+            .and_then(Value::as_str)
+            .filter(|location| !location.trim().is_empty())
+            .ok_or("platform_metrics_group_missing")?;
+        if !groups.insert((start, location.to_owned())) {
+            return Err("platform_metrics_duplicate_timestamp".into());
+        }
+        let entry = locations.entry(location.to_owned()).or_default();
+        entry.0 = entry
+            .0
+            .checked_add(platform_count(row, "requests")?.unwrap_or(0))
+            .ok_or("platform_metrics_value_invalid")?;
+        entry.1 = entry
+            .1
+            .checked_add(platform_count(row, "bandwidth")?.unwrap_or(0))
+            .ok_or("platform_metrics_value_invalid")?;
+    }
+    if locations.is_empty() {
+        return Err("platform_metrics_geography_empty".into());
+    }
+    let (requests, bandwidth_bytes) = locations.values().try_fold(
+        (0u64, 0u64),
+        |(requests, bandwidth), (location_requests, location_bandwidth)| {
+            Ok::<_, String>((
+                requests
+                    .checked_add(*location_requests)
+                    .ok_or("platform_metrics_value_invalid")?,
+                bandwidth
+                    .checked_add(*location_bandwidth)
+                    .ok_or("platform_metrics_value_invalid")?,
+            ))
+        },
+    )?;
+    let mut data = locations
+        .into_iter()
+        .map(|(location, (location_requests, location_bandwidth))| {
+            json!({
+                "location": location,
+                "requests": location_requests,
+                "bandwidth_bytes": location_bandwidth,
+                "request_share": if requests == 0 {
+                    0.0
+                } else {
+                    location_requests as f64 / requests as f64
+                },
+                "bandwidth_share": if bandwidth_bytes == 0 {
+                    0.0
+                } else {
+                    location_bandwidth as f64 / bandwidth_bytes as f64
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    data.sort_by(|left, right| {
+        right["requests"]
+            .as_u64()
+            .cmp(&left["requests"].as_u64())
+            .then_with(|| left["location"].as_str().cmp(&right["location"].as_str()))
+    });
+    Ok(json!({
+        "source": "fastly",
+        "group_by": group_by,
+        "requests": requests,
+        "bandwidth_bytes": bandwidth_bytes,
+        "data": data,
+    }))
+}
+
 pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Value {
     let token = runtime
         .secret("fastly_token")
@@ -808,6 +935,7 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
                     from,
                     to,
                     &PLATFORM_COMPUTE_FIELDS,
+                    None,
                     |path, query| fetch(path, query, token),
                 )
             })
@@ -824,6 +952,7 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
                 from,
                 to,
                 &PLATFORM_NGWAF_FIELDS,
+                None,
                 |path, query| fetch(path, query, token),
             )
             .and_then(|body| platform_ngwaf(&body, from, to))
@@ -834,6 +963,58 @@ pub(crate) fn platform_usage(runtime: &impl Runtime, from: u64, to: u64) -> Valu
     };
 
     build_platform_usage_response(storage, compute, ngwaf)
+}
+
+pub(crate) fn platform_geography_usage(
+    runtime: &impl Runtime,
+    from: u64,
+    to: u64,
+    group_by: &str,
+) -> Value {
+    let unavailable = |reason| {
+        json!({
+            "source": "unavailable",
+            "group_by": group_by,
+            "requests": 0,
+            "bandwidth_bytes": 0,
+            "data": [],
+            "reason": reason,
+        })
+    };
+    let token = match runtime.secret("fastly_token") {
+        Ok(Some(token)) if !token.is_empty() => token,
+        _ => return unavailable("missing_token"),
+    };
+    let service_id = match runtime.config("front_service_id") {
+        Ok(Some(service_id)) if !service_id.is_empty() => service_id,
+        _ => return unavailable("not_configured"),
+    };
+    let body = match fetch_platform_entity_metrics(
+        &service_id,
+        "daily",
+        from,
+        to,
+        &["requests", "bandwidth"],
+        Some(group_by),
+        |path, query| {
+            runtime.admin_api(crate::admin::ApiRequest {
+                method: "GET",
+                path,
+                query,
+                token: &token,
+                body: None,
+                timeout: FASTLY_API_TIMEOUT,
+            })
+        },
+    ) {
+        Ok(body) => body,
+        Err(_) => return unavailable("request_failed"),
+    };
+    match platform_geography(&body, from, to, group_by) {
+        Ok(geography) => geography,
+        Err(error) if error == "platform_metrics_geography_empty" => unavailable("no_data"),
+        Err(_) => unavailable("invalid_data"),
+    }
 }
 
 /// Sums one Platform Metrics response, returning the total and the first and last bucket start
@@ -902,13 +1083,81 @@ pub fn stats_field_buckets(body: &Value, field: &str) -> Result<StatsBuckets, St
 mod billing_tests {
     use super::{
         build_platform_usage_response, daily_totals, fetch_platform_aggregate_metrics,
-        fetch_platform_entity_metrics, platform_compute, platform_ngwaf, platform_storage,
-        record_billing_field, sum_stats_field, UsageAgg, BILLING_FIELDS,
+        fetch_platform_entity_metrics, platform_compute, platform_geography, platform_ngwaf,
+        platform_storage, record_billing_field, sum_stats_field, UsageAgg, BILLING_FIELDS,
     };
     use crate::admin::ApiResponse;
     use crate::auth::settings::UsageLogging;
     use serde_json::json;
     use std::cell::Cell;
+
+    #[test]
+    fn geography_sums_regions_and_shares() {
+        let from = 1_794_355_200;
+        let out = platform_geography(
+            &json!({"data": [
+                {"timestamp":"2026-11-11T00:00:00Z","region":"europe","requests":7,"bandwidth":700},
+                {"timestamp":"2026-11-11T00:00:00Z","region":"usa","requests":3,"bandwidth":300},
+                {"timestamp":"2026-11-12T00:00:00Z","region":"europe","requests":3,"bandwidth":100}
+            ]}),
+            from,
+            from + 2 * 86_400,
+            "region",
+        )
+        .unwrap();
+
+        assert_eq!(out["requests"], 10 + 3);
+        assert_eq!(out["bandwidth_bytes"], 1_100);
+        assert_eq!(out["data"][0]["location"], "europe");
+        assert_eq!(out["data"][0]["request_share"], 10.0 / 13.0);
+        assert_eq!(out["data"][1]["bandwidth_share"], 300.0 / 1_100.0);
+    }
+
+    #[test]
+    fn geography_sums_datacenters_and_rejects_invalid_groups_and_rows() {
+        let from = 1_794_355_200;
+        assert_eq!(
+            platform_geography(
+                &json!({"data": [
+                    {"timestamp":"2026-11-11T00:00:00Z","datacenter":"IAD","requests":2,"bandwidth":9}
+                ]}),
+                from,
+                from + 86_400,
+                "datacenter",
+            )
+            .unwrap()["data"][0]["location"],
+            "IAD"
+        );
+
+        for (body, group_by) in [
+            (
+                json!({"data": [{"timestamp":"2026-11-11T00:00:00Z","requests":1}]}),
+                "region",
+            ),
+            (
+                json!({"data": [
+                    {"timestamp":"2026-11-11T00:00:00Z","region":"IAD","requests":1},
+                    {"timestamp":"2026-11-11T00:00:00+00:00","region":"IAD","requests":1}
+                ]}),
+                "region",
+            ),
+            (
+                json!({"data": [
+                    {"timestamp":"2026-11-11T00:00:00Z","region":"IAD","requests":-1}
+                ]}),
+                "region",
+            ),
+            (
+                json!({"data": [
+                    {"timestamp":"2026-11-10T00:00:00Z","region":"IAD","requests":1}
+                ]}),
+                "region",
+            ),
+            (json!({"data": []}), "country"),
+        ] {
+            assert!(platform_geography(&body, from, from + 86_400, group_by).is_err());
+        }
+    }
 
     #[test]
     fn keeps_the_hourly_buckets_of_every_compute_and_kv_billing_field() {
@@ -1207,6 +1456,7 @@ mod billing_tests {
             0,
             3_600,
             &["compute_requests"],
+            None,
             |_, _| {
                 calls.set(calls.get() + 1);
                 Ok(ApiResponse {
@@ -1233,6 +1483,7 @@ mod billing_tests {
             0,
             18_000,
             &["compute_requests"],
+            None,
             |_, _| {
                 calls.set(calls.get() + 1);
                 Ok(ApiResponse {

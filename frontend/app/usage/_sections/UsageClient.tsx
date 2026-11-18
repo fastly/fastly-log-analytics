@@ -33,6 +33,7 @@ import {
   type StorageUsageData,
 } from './UsageStatCards'
 import { PlatformUsageCards } from './PlatformUsageCards'
+import { GeographyCard } from './GeographyCard'
 
 export {
   FosOperationsHelp,
@@ -292,6 +293,13 @@ export function UsagePageContent({
   return (
     <>
       <PlatformUsageCards data={platform} loading={loadingPlatform} cloudMode={cloudMode} />
+
+      <GeographyCard
+        activeServiceId={activeServiceId}
+        startTime={startTime}
+        endTime={endTime}
+        enabled={isReady}
+      />
 
       <UsageStatCards
         storage={storage}

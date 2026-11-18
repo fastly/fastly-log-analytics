@@ -222,6 +222,23 @@ class PlatformUsageResponse(BaseResponse):
     ngwaf: PlatformNgwafUsage
 
 
+class PlatformGeographyPoint(BaseModel):
+    location: str
+    requests: int
+    bandwidth_bytes: int
+    request_share: float
+    bandwidth_share: float
+
+
+class PlatformGeographyResponse(BaseResponse):
+    source: Literal["fastly", "unavailable"]
+    group_by: Literal["region", "datacenter"]
+    data: list[PlatformGeographyPoint]
+    requests: int = 0
+    bandwidth_bytes: int = 0
+    reason: str | None = None
+
+
 class CurrentStorageResponse(BaseResponse):
     live_bytes: int
     live_files: int

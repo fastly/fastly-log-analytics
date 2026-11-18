@@ -40,12 +40,15 @@ All routes are in [`backend/routers/usage.py`](../../backend/routers/usage.py), 
 | `GET /api/usage/log-activity` | Processed log activity over time. |
 | `GET /api/usage/rum-breakdown` | RUM operations breakdown. |
 | `GET /api/usage/platform` | Observed Object Storage, Compute, and NGWAF usage from Fastly Platform Metrics. |
+| `GET /api/usage/geography` | Delivery-service request and bandwidth totals grouped by region or datacenter. |
 
 Operation reconciliation and usage charts use Fastly Platform Metrics with the service's stored token. Local operation attribution comes from the PostgreSQL `usage_log` and `usage_log_hourly_summary` tables, where every FOS call is attributed by process context. Rates and the billing zone are managed with `GET`/`PATCH /api/admin/usage-logging` ([`backend/routers/admin/admin_queries.py`](../../backend/routers/admin/admin_queries.py)); the per-operation ledger page is [admin/usage-log.md](admin/usage-log.md).
 
 When Platform Metrics is available, its Object Storage byte and bucket gauges are the authoritative Fastly-observed source for the period storage cost and estimator prefill. The bytes are a gauge, so the UI uses the latest account-wide snapshot and integrates daily snapshots into GB-hours; it never sums gauge points as counters. Local FOS inventory remains visible as an install-scoped comparison and is used only when the Platform query is unavailable. The account-wide scope can make this measured total include storage outside the selected install.
 
 Cloud also shows measured Compute requests, billed request time, backend/cache/resource totals for its app and worker services. When an NGWAF workspace is configured, the page shows its allowed, blocked, challenged, logged, timeout, and unknown request counters. These optional sections fail independently; unavailable metrics do not replace real zero values with modeled data or make the rest of the page fail.
+
+The Traffic Geography card uses daily Platform Metrics counters for the same delivery service as the bandwidth chart. It defaults to region and fetches datacenter detail only after that toggle is selected. Group totals and shares are informational: they never feed the storage, operation, egress, Compute, or estimator cost totals.
 
 High-Scale estimator traffic comes from the selected monitored logging service, not the separate archive-delivery CDN service. Missing Fastly edge-request counters remain unavailable; an explicit zero remains measured zero.
 

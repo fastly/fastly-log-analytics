@@ -168,6 +168,110 @@ def test_platform_metrics_queries_aggregate_and_keeps_sparse_records_sparse():
     ]
 
 
+def test_platform_metrics_adds_supported_group_by_and_preserves_group():
+    with patch.object(
+        fastly_client,
+        "fastly",
+        return_value={"data": [{"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 3}]},
+    ) as fetch:
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(fetch.call_args.args[1]).query)
+    assert query["group_by"] == ["region"]
+    assert result["data"][0]["region"] == "europe"
+
+
+def test_platform_metrics_rejects_unsupported_group_by():
+    with pytest.raises(ValueError, match="Unsupported Platform Metrics group_by"):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="service",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("group", [None, "", "   ", 42])
+def test_platform_metrics_rejects_missing_or_invalid_group(group):
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            return_value={"data": [{"timestamp": "2026-07-23T00:00:00Z", "region": group, "requests": 3}]},
+        ),
+        pytest.raises(RuntimeError, match="group"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+
+def test_platform_metrics_allows_same_timestamp_for_distinct_groups():
+    with patch.object(
+        fastly_client,
+        "fastly",
+        return_value={
+            "data": [
+                {"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 3},
+                {"timestamp": "2026-07-23T00:00:00Z", "region": "usa", "requests": 2},
+            ]
+        },
+    ):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+    assert [row["region"] for row in result["data"]] == ["europe", "usa"]
+
+
+def test_platform_metrics_rejects_duplicate_timestamp_and_group():
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            return_value={
+                "data": [
+                    {"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 3},
+                    {"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 2},
+                ]
+            },
+        ),
+        pytest.raises(RuntimeError, match="duplicate"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+
 def test_platform_metrics_accepts_buckets_overlapping_partial_window():
     with patch.object(
         fastly_client,

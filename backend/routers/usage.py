@@ -20,6 +20,8 @@ from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.admin import (
     CurrentStorageResponse,
     PlatformComputeUsage,
+    PlatformGeographyPoint,
+    PlatformGeographyResponse,
     PlatformNgwafUsage,
     PlatformStorageUsage,
     PlatformUsageResponse,
@@ -75,12 +77,13 @@ def _fastly_api(
     to_epoch: int,
     metrics: tuple[str, ...],
     api_key: str,
+    group_by: Literal["region", "datacenter"] | None = None,
 ) -> dict[str, Any]:
     """Fetch Platform Metrics through the central client with TTL caching."""
     from backend.core.fastly.client import fastly_platform_metrics
 
     token_scope = sha256(api_key.encode()).hexdigest()[:16]
-    cache_key = (entity_id, granularity, from_epoch, to_epoch, metrics, token_scope)
+    cache_key = (entity_id, granularity, from_epoch, to_epoch, metrics, group_by, token_scope)
     cached = _FASTLY_STATS_CACHE.get(cache_key)
     if cached is not None:
         return dict(cached)
@@ -91,6 +94,7 @@ def _fastly_api(
         to_epoch=to_epoch,
         metrics=metrics,
         token=api_key,
+        group_by=group_by,
     )
     _FASTLY_STATS_CACHE[cache_key] = response
     return dict(response)
@@ -766,6 +770,102 @@ def platform_usage(
         storage=storage,
         compute=compute,
         ngwaf=ngwaf,
+    )
+
+
+@usage_router.get("/geography", response_model=PlatformGeographyResponse)
+@query_errors()
+def geography(
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    group_by: Literal["region", "datacenter"] = Query(default="region"),
+    source: dict[str, Any] = Depends(get_source),
+) -> PlatformGeographyResponse:
+    entity_id = str(source.get("cdn_service_id") or "").strip()
+    if not entity_id:
+        return PlatformGeographyResponse(
+            source="unavailable",
+            group_by=group_by,
+            data=[],
+            reason="not_configured",
+        )
+
+    token_service_id = str(source.get("logging_service_id") or source.get("service_id") or entity_id).strip()
+    token = api_key_or_mock(get_fastly_api_key(token_service_id))
+    if not token:
+        return PlatformGeographyResponse(
+            source="unavailable",
+            group_by=group_by,
+            data=[],
+            reason="missing_token",
+        )
+
+    _, _, from_epoch, to_epoch = window_to_epoch(start, end)
+    try:
+        payload = _fastly_api(
+            entity_id,
+            "day",
+            from_epoch,
+            to_epoch,
+            ("requests", "bandwidth"),
+            token,
+            group_by,
+        )
+        records = payload.get("data")
+        if not isinstance(records, list):
+            raise ValueError("invalid geography data")
+        if not records:
+            return PlatformGeographyResponse(
+                source="unavailable",
+                group_by=group_by,
+                data=[],
+                reason="no_data",
+            )
+
+        groups: dict[str, dict[str, int]] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("invalid geography row")
+            location = record.get(group_by)
+            if not isinstance(location, str) or not location.strip():
+                raise ValueError("invalid geography group")
+            values = groups.setdefault(location, {"requests": 0, "bandwidth_bytes": 0})
+            values["requests"] += int(record.get("requests") or 0)
+            values["bandwidth_bytes"] += int(record.get("bandwidth") or 0)
+    except (TypeError, ValueError):
+        return PlatformGeographyResponse(
+            source="unavailable",
+            group_by=group_by,
+            data=[],
+            reason="invalid_data",
+        )
+    except Exception:
+        return PlatformGeographyResponse(
+            source="unavailable",
+            group_by=group_by,
+            data=[],
+            reason="request_failed",
+        )
+
+    total_requests = sum(values["requests"] for values in groups.values())
+    total_bandwidth = sum(values["bandwidth_bytes"] for values in groups.values())
+    points = [
+        PlatformGeographyPoint(
+            location=location,
+            requests=values["requests"],
+            bandwidth_bytes=values["bandwidth_bytes"],
+            request_share=values["requests"] / total_requests if total_requests else 0.0,
+            bandwidth_share=values["bandwidth_bytes"] / total_bandwidth if total_bandwidth else 0.0,
+        )
+        for location, values in groups.items()
+    ]
+    points.sort(key=lambda point: (-point.requests, point.location))
+    return PlatformGeographyResponse(
+        source="fastly",
+        group_by=group_by,
+        data=points,
+        requests=total_requests,
+        bandwidth_bytes=total_bandwidth,
     )
 
 

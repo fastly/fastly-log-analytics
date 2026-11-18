@@ -53,6 +53,29 @@ vi.mock("./insights-rollup", async (importOriginal) => ({
 }));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
+  it("passes geography bounds and grouping to the Cloud admin route unchanged", async () => {
+    const payload = {
+      source: "fastly",
+      group_by: "datacenter",
+      data: [],
+      requests: 0,
+      bandwidth_bytes: 0,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(payload));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await handleCloudAnalyticalRequest(new Request(
+      "http://localhost/api/usage/geography?start=2026-11-01T00%3A00%3A00.000Z&end=2026-11-02T00%3A00%3A00.000Z&group_by=datacenter",
+    ));
+
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/usage/geography?start=2026-11-01T00%3A00%3A00.000Z&end=2026-11-02T00%3A00%3A00.000Z&group_by=datacenter",
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
   it("answers /api/usage/platform from the Cloud admin route unchanged", async () => {
     const payload = {
       source: "partial",

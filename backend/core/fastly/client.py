@@ -936,6 +936,7 @@ def fastly_platform_metrics(
     to_epoch: int,
     metrics: tuple[str, ...] | list[str],
     token: str,
+    group_by: Literal["region", "datacenter"] | None = None,
     max_retries: int = 3,
     timeout: float = 30,
 ) -> dict[str, Any]:
@@ -948,6 +949,8 @@ def fastly_platform_metrics(
         raise ValueError("Platform Metrics requires at least one metric")
     if to_epoch <= from_epoch:
         raise ValueError("Platform Metrics end must be after start")
+    if group_by is not None and group_by not in ("region", "datacenter"):
+        raise ValueError("Unsupported Platform Metrics group_by")
 
     if entity_id is None:
         endpoint = f"/metrics/v2/platform/aggregate/{platform_granularity}"
@@ -965,8 +968,10 @@ def fastly_platform_metrics(
         "metric": ",".join(metrics),
         "limit": "10000",
     }
+    if group_by is not None:
+        params["group_by"] = group_by
     records: list[dict[str, Any]] = []
-    timestamps: set[int] = set()
+    identities: set[tuple[int, str | None]] = set()
     cursors: set[str] = set()
     cursor: str | None = None
     meta: dict[str, Any] = {}
@@ -1006,9 +1011,16 @@ def fastly_platform_metrics(
             epoch = int(parsed.timestamp())
             if epoch < first_bucket or epoch > last_bucket:
                 raise RuntimeError("Platform Metrics returned an out-of-window timestamp")
-            if epoch in timestamps:
-                raise RuntimeError("Platform Metrics returned a duplicate timestamp")
-            timestamps.add(epoch)
+            group: str | None = None
+            if group_by is not None:
+                group_value = record.get(group_by)
+                if not isinstance(group_value, str) or not group_value.strip():
+                    raise RuntimeError(f"Platform Metrics returned a malformed {group_by} group")
+                group = group_value
+            identity = (epoch, group)
+            if identity in identities:
+                raise RuntimeError("Platform Metrics returned a duplicate timestamp and group")
+            identities.add(identity)
             records.append({**record, "start_time": epoch})
 
         next_cursor = page.get("next_cursor")

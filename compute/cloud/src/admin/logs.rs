@@ -118,6 +118,14 @@ impl Installed {
 }
 
 pub fn handle(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
+    if let Some(("/api/admin/usage/geography", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return geography(runtime, query);
+        }
+    }
+    if request.method == "GET" && request.path == "/api/admin/usage/geography" {
+        return geography(runtime, "");
+    }
     if let Some(("/api/admin/usage/platform", query)) = request.path.split_once('?') {
         if request.method == "GET" {
             return platform_usage(runtime, query);
@@ -474,6 +482,45 @@ fn note_sweep(
 
 /// Most hours one billing read may cover: 31 days of hourly buckets per field.
 const BILLING_MAX_SPAN_S: u64 = 31 * 86_400;
+
+fn geography(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+    };
+    let group_by = param("group_by").unwrap_or_else(|| "region".into());
+    if !matches!(group_by.as_str(), "region" | "datacenter") {
+        return fail(400, "invalid_group");
+    }
+    let parse_time = |value: String| {
+        if value.chars().all(|character| character.is_ascii_digit()) {
+            return value
+                .parse::<u64>()
+                .ok()
+                .map(|milliseconds| (milliseconds / 1000, milliseconds % 1000 != 0));
+        }
+        time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .and_then(|timestamp| u64::try_from(timestamp.unix_timestamp()).ok())
+            .map(|seconds| (seconds, false))
+    };
+    let start = param("start").or_else(|| param("from"));
+    let end = param("end").or_else(|| param("to"));
+    let (Some((from, _)), Some((to, to_remainder))) =
+        (start.and_then(parse_time), end.and_then(parse_time))
+    else {
+        return fail(400, "invalid_range");
+    };
+    let to = to.saturating_add(u64::from(to_remainder));
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    done(
+        crate::telemetry::usage::platform_geography_usage(runtime, from, to, &group_by),
+        None,
+    )
+}
 
 fn platform_usage(runtime: &impl Runtime, query: &str) -> Outcome {
     let param = |name: &str| {

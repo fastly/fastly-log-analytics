@@ -889,6 +889,18 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   const { pathname, searchParams } = url;
   const method = (request.method || "GET").toUpperCase();
 
+  if (pathname === "/api/usage/geography" && method === "GET") {
+    const adminParams = new URLSearchParams();
+    for (const key of ["start", "end", "group_by"] as const) {
+      for (const value of searchParams.getAll(key)) adminParams.append(key, value);
+    }
+    return fetch(`/api/admin/usage/geography?${adminParams}`, {
+      headers: request.headers,
+      signal: request.signal,
+      credentials: "include",
+    });
+  }
+
   if (pathname === "/api/usage/platform" && method === "GET") {
     const adminUrl = new URL("/api/admin/usage/platform", url);
     const from = searchParams.get("from") ?? searchParams.get("start");

@@ -7206,6 +7206,110 @@ fn platform_usage_rejects_bad_ranges_before_making_platform_calls() {
 }
 
 #[test]
+fn geography_fetches_daily_region_metrics_once_from_the_front_service() {
+    let fake = Fake::new(BASE);
+    fake.config_overrides
+        .borrow_mut()
+        .insert("front_service_id".into(), Some("front-private-id".into()));
+    fake.api_responses.borrow_mut().push_back((
+        200,
+        json!({"data": [
+            {"timestamp":"1970-01-01T00:00:00Z","region":"europe","requests":7,"bandwidth":700},
+            {"timestamp":"1970-01-01T00:00:00Z","region":"usa","requests":3,"bandwidth":300}
+        ]}),
+    ));
+
+    let (status, body, audit) = logs_call(
+        &fake,
+        "GET",
+        "/api/admin/usage/geography?start=0&end=86400000&group_by=region",
+        Value::Null,
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert!(audit.is_none());
+    assert_eq!(body["source"], "fastly");
+    assert_eq!(body["requests"], 10);
+    assert_eq!(body["bandwidth_bytes"], 1_000);
+    assert_eq!(body["data"][0]["location"], "europe");
+    let calls = fake.api_queries.borrow();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.contains("/entities/front-private-id/daily"));
+    assert!(calls[0].1.contains("metric=requests,bandwidth"));
+    assert!(calls[0].1.contains("group_by=region"));
+    assert!(!body.to_string().contains("front-private-id"));
+}
+
+#[test]
+fn geography_defaults_to_region_and_rejects_bad_group_without_fetching() {
+    let fake = Fake::new(BASE);
+    fake.config_overrides
+        .borrow_mut()
+        .insert("front_service_id".into(), Some("front-id".into()));
+    fake.api_responses.borrow_mut().push_back((
+        200,
+        json!({"data": [{
+            "timestamp":"1970-01-01T00:00:00Z","region":"europe","requests":1,"bandwidth":2
+        }]}),
+    ));
+
+    let (status, body, _) = logs_call(
+        &fake,
+        "GET",
+        "/api/admin/usage/geography?start=0&end=86400000&group_by=country",
+        Value::Null,
+    );
+    assert_eq!(
+        (status, body["error"].clone()),
+        (400, json!("invalid_group"))
+    );
+    assert!(fake.api_queries.borrow().is_empty());
+
+    assert_eq!(
+        logs_call(
+            &fake,
+            "GET",
+            "/api/admin/usage/geography?start=0&end=86400000",
+            Value::Null,
+        )
+        .0,
+        200
+    );
+    assert!(fake.api_queries.borrow()[0].1.contains("group_by=region"));
+}
+
+#[test]
+fn geography_sanitizes_unavailable_sources_and_parser_failures() {
+    for configured in [false, true] {
+        let fake = Fake::new(BASE);
+        if configured {
+            fake.config_overrides
+                .borrow_mut()
+                .insert("front_service_id".into(), Some("front-private-id".into()));
+            fake.api_responses.borrow_mut().push_back((
+                200,
+                json!({"data": [{"timestamp":"bad","region":"secret-location"}],
+                    "next_cursor":"secret-cursor"}),
+            ));
+        }
+
+        let (status, body, _) = logs_call(
+            &fake,
+            "GET",
+            "/api/admin/usage/geography?start=0&end=86400000&group_by=datacenter",
+            Value::Null,
+        );
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["source"], "unavailable");
+        assert_eq!(body["data"], json!([]));
+        let wire = body.to_string();
+        assert!(!wire.contains("private-id"));
+        assert!(!wire.contains("secret-location"));
+        assert!(!wire.contains("secret-cursor"));
+    }
+}
+
+#[test]
 fn logs_endpoints_get_and_patch_settings_with_an_audit_note() {
     let fake = Fake::new(BASE);
     let (status, body, audit) =

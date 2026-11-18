@@ -1549,6 +1549,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/admin/usage/geography": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Delivery traffic grouped by region or datacenter */
+    get: operations["get__api_admin_usage_geography"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/admin/usage/reconcile-storage": {
     parameters: {
       query?: never;
@@ -4385,6 +4402,55 @@ export interface operations {
             storage: Record<string, unknown>;
             compute: Record<string, unknown>;
             ngwaf: Record<string, unknown>;
+          };
+        };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  get__api_admin_usage_geography: {
+    parameters: {
+      query: {
+        /** @description Inclusive range start as an ISO 8601 timestamp */
+        start: string;
+        /** @description Exclusive range end as an ISO 8601 timestamp */
+        end: string;
+        /** @enum {string} */
+        group_by: "region" | "datacenter";
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Independently observed delivery traffic grouped by location */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            source: "fastly" | "unavailable";
+            group_by: "region" | "datacenter";
+            data: {
+              location: string;
+              requests: number;
+              bandwidth_bytes: number;
+              request_share: number;
+              bandwidth_share: number;
+            }[];
+            requests: number;
+            bandwidth_bytes: number;
+            reason?: string | null;
           };
         };
       };

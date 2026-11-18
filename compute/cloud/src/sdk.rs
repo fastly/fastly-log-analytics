@@ -1316,6 +1316,7 @@ impl Runtime for FastlyRuntime {
                 from,
                 to,
                 &crate::telemetry::usage::BILLING_FIELDS,
+                None,
                 |path, query| {
                     self.admin_api(crate::admin::ApiRequest {
                         method: "GET",
@@ -1339,16 +1340,17 @@ impl Runtime for FastlyRuntime {
                 "kv_store_class_a_operations",
                 "kv_store_class_b_operations",
             ];
-            let body = fetch_platform_metrics(&front_id, from, to, &fields, |path, query| {
-                self.admin_api(crate::admin::ApiRequest {
-                    method: "GET",
-                    path,
-                    query,
-                    token: &token,
-                    body: None,
-                    timeout: FASTLY_API_TIMEOUT,
-                })
-            })?;
+            let body =
+                fetch_platform_metrics(&front_id, from, to, &fields, None, |path, query| {
+                    self.admin_api(crate::admin::ApiRequest {
+                        method: "GET",
+                        path,
+                        query,
+                        token: &token,
+                        body: None,
+                        timeout: FASTLY_API_TIMEOUT,
+                    })
+                })?;
             let (total, first, last, buckets) =
                 crate::telemetry::usage::stats_field_buckets(&body, "bandwidth")?;
             let mut service = json!({
@@ -1396,6 +1398,7 @@ impl Runtime for FastlyRuntime {
             from,
             to,
             &crate::telemetry::usage::TRAFFIC_FIELDS,
+            None,
             |path, query| {
                 self.admin_api(crate::admin::ApiRequest {
                     method: "GET",
@@ -1429,7 +1432,7 @@ impl Runtime for FastlyRuntime {
     ) -> Result<Value, String> {
         let token = self.secret("fastly_token")?.ok_or("missing_api_token")?;
         let mut hours = std::collections::BTreeMap::<u64, serde_json::Map<String, Value>>::new();
-        let body = fetch_platform_metrics(service_id, from, to, fields, |path, query| {
+        let body = fetch_platform_metrics(service_id, from, to, fields, None, |path, query| {
             self.admin_api(crate::admin::ApiRequest {
                 method: "GET",
                 path,
@@ -2415,6 +2418,7 @@ mod platform_metrics_tests {
             0,
             3_600,
             &["requests", "bandwidth"],
+            None,
             |path, query| {
                 calls.borrow_mut().push((path.to_owned(), query.to_owned()));
                 page += 1;
@@ -2451,7 +2455,7 @@ mod platform_metrics_tests {
 
     #[test]
     fn rejects_non_string_pagination_cursors() {
-        let result = fetch_platform_metrics("svc", 0, 3_600, &["requests"], |_, _| {
+        let result = fetch_platform_metrics("svc", 0, 3_600, &["requests"], None, |_, _| {
             Ok(response(json!({"data": [], "next_cursor": 7})))
         });
 
@@ -2467,7 +2471,7 @@ mod platform_metrics_tests {
                 {"timestamp": "1970-01-01T00:00:00+00:00", "requests": 2},
             ]),
         ] {
-            let result = fetch_platform_metrics("svc", 30, 3_600, &["requests"], |_, _| {
+            let result = fetch_platform_metrics("svc", 30, 3_600, &["requests"], None, |_, _| {
                 Ok(response(json!({"data": data})))
             });
             assert!(result.is_err());
@@ -2476,7 +2480,7 @@ mod platform_metrics_tests {
 
     #[test]
     fn rejects_repeated_pagination_cursors() {
-        let result = fetch_platform_metrics("svc", 0, 3_600, &["requests"], |_, _| {
+        let result = fetch_platform_metrics("svc", 0, 3_600, &["requests"], None, |_, _| {
             Ok(response(json!({"data": [], "next_cursor": "same"})))
         });
 
