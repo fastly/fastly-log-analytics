@@ -60,7 +60,6 @@ export function emptyAssetsAggregates() {
   };
 }
 
-export const empty_assets_aggregates = emptyAssetsAggregates;
 
 const SECTION_KEYS: Record<AssetsSection, readonly string[]> = {
   summary: ["missing_fields", "summary", "asset_type_breakdown", "cache_performance", "compression_performance"],
@@ -263,7 +262,6 @@ export function computeSummaryFromDims(
   };
 }
 
-export const compute_summary_from_dims = computeSummaryFromDims;
 
 const ALLOWED_FILTER_COLS = new Set([
   "asset_type",

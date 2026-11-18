@@ -117,7 +117,6 @@ export function emptyCmcdAggregates() {
   };
 }
 
-export const empty_cmcd_aggregates = emptyCmcdAggregates;
 
 function buildCmcdWhere(params: CmcdQueryParams): string {
   const clauses: string[] = [

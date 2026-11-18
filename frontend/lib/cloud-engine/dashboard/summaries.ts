@@ -692,6 +692,3 @@ export async function decodeSummary(
     ipSketch,
   };
 }
-
-export const readSummaryParquet = decodeSummary;
-export const readSummaryBundleParquet = decodeSummary;

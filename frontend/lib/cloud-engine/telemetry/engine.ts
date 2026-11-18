@@ -365,7 +365,6 @@ export async function readLogs(
   };
 }
 
-export const runOpsLogQuery = readLogs;
 
 export interface IngestEventRow {
   event_id: string;

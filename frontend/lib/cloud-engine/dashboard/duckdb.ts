@@ -1427,5 +1427,4 @@ export function getDuckDBEngine(): DuckDBAnalyticalEngine {
   return singletonEngine;
 }
 
-export const runDuckDbDashboard = getDuckDBEngine;
 export { DuckDBAnalyticalEngine as DashboardDuckDBEngine };

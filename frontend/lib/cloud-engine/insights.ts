@@ -441,7 +441,6 @@ export function build_insights_envelope(
   };
 }
 
-export const buildInsightsEnvelope = build_insights_envelope;
 
 export interface InsightAvailabilityEntry extends InsightDefinitionMeta {
   available: boolean;

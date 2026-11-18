@@ -24,7 +24,6 @@ import type { Schema } from "@/types/api";
 
 export const SESSIONS_INACTIVITY_GAP_SECONDS = 1800; // 30 * 60 seconds (INTERVAL 30 MINUTES)
 export const SESSIONS_MAX_WINDOW_DAYS = 7;
-export const MAX_SESSIONS_WINDOW_DAYS = SESSIONS_MAX_WINDOW_DAYS;
 export const SESSIONS_DEFAULT_MIN_REQS_FLAG = 1000;
 export const SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG = 20.0;
 

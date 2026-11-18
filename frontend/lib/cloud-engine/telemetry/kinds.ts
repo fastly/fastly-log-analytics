@@ -8,7 +8,6 @@ export const OPS_KINDS = [
   "platform_errors",
 ] as const;
 
-export const LOG_KINDS = OPS_KINDS;
 
 export type OpsKind = (typeof OPS_KINDS)[number];
 

@@ -365,6 +365,3 @@ export function estimateRollupBytes(rollup: FileRollup): number {
     (rollup.edgeRollup ? estimateDataBytes(rollup.edgeRollup) : 0)
   );
 }
-
-export const encodeRollupBinary = encodeRollup;
-export const decodeRollupBinary = decodeRollup;

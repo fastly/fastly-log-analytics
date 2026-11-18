@@ -123,7 +123,6 @@ export function computeNetworkHealthScore(
   return roundTo(clamp(composite, 0, 100), 1);
 }
 
-export const compute_network_health_score = computeNetworkHealthScore;
 
 /**
  * Collapses duplicate (city, country) rows in the metro leaderboard by
@@ -189,7 +188,6 @@ export function deduplicateMetroLeaderboard(
     .slice(0, 200);
 }
 
-export const deduplicate_metro_leaderboard = deduplicateMetroLeaderboard;
 
 export function normalizeProtocolBucket(raw: unknown): string {
   const val = String(raw ?? "").trim().toUpperCase();

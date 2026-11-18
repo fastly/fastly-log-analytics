@@ -93,7 +93,6 @@ export function emptyRumAnalytics() {
   };
 }
 
-export const empty_rum_analytics = emptyRumAnalytics;
 
 export function shapeRumEnvironments(
   envRows:
@@ -150,7 +149,6 @@ export function shapeRumEnvironments(
   return result;
 }
 
-export const shape_rum_environments = shapeRumEnvironments;
 
 export class UnsupportedRumFilterError extends Error {
   constructor() {
