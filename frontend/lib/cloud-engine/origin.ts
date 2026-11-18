@@ -2,6 +2,7 @@ import { quoteIdent, sqlEscape } from "@/lib/sqlBuilder";
 import { getDuckDBEngine, type DuckDBColumnType, type DuckDBReadContext } from "./dashboard/duckdb";
 import { compileFiltersToSql } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
+import type { Schema } from "@/types/api";
 
 export type OriginSectionName =
   | "summary"
@@ -23,105 +24,31 @@ export type OriginDrilldownDimension =
   | "pop"
   | "oip";
 
-export interface OriginSummarySection {
-  has_data: boolean;
-  total_misses: number | null;
-  total_passes: number | null;
-  ottfb_p50_ms: number | null;
-  ottfb_p75_ms: number | null;
-  ottfb_p95_ms: number | null;
-  ottfb_p99_ms: number | null;
-  ottlb_p50_ms: number | null;
-  ottlb_p95_ms: number | null;
-  cdn_overhead_p50_ms: number | null;
-  origin_error_rate: number | null;
-  obytes_p50: number | null;
-  _approx?: boolean;
-  _approx_note?: string;
-}
+export type OriginSummarySection = Schema<"OriginSummarySection">;
 
-export interface OriginTimeseriesPoint {
-  time: string;
-  miss_count: number;
-  value: number | null;
-  edge?: boolean | null;
-}
+export type OriginTimeseriesPoint = Schema<"OriginTimeseriesPoint">;
 
-export interface OriginTimeseriesSection {
-  has_data: boolean;
-  series: OriginTimeseriesPoint[];
-  _approx?: boolean;
-}
+export type OriginTimeseriesSection = Schema<"OriginTimeseriesSection">;
 
-export interface OriginSlowUrlRow {
-  url: string;
-  requests: number;
-  p50_ms: number | null;
-  p95_ms: number | null;
-  p99_ms: number | null;
-}
+export type OriginSlowUrlRow = Schema<"OriginSlowUrlRow">;
 
-export interface OriginSlowUrlsSection {
-  has_data: boolean;
-  rows: OriginSlowUrlRow[];
-  _approx?: boolean;
-}
+export type OriginSlowUrlsSection = Schema<"OriginSlowUrlsSection">;
 
-export interface OriginStatusCodeRow {
-  status: number;
-  count: number;
-  pct: number | null;
-}
+export type OriginStatusCodeRow = Schema<"OriginStatusCodeRow">;
 
-export interface OriginStatusCodesSection {
-  has_data: boolean;
-  rows: OriginStatusCodeRow[];
-  _approx?: boolean;
-}
+export type OriginStatusCodesSection = Schema<"OriginStatusCodesSection">;
 
-export interface OriginPathRow {
-  edge: boolean | null;
-  requests: number;
-  p50_ms: number | null;
-  p95_ms: number | null;
-}
+export type OriginPathRow = Schema<"OriginPathRow">;
 
-export interface OriginPathBreakdownSection {
-  has_data: boolean;
-  shielding_detected: boolean;
-  rows: OriginPathRow[];
-  _approx?: boolean;
-}
+export type OriginPathBreakdownSection = Schema<"OriginPathBreakdownSection">;
 
-export interface OriginPopLatencyRow {
-  pop: string;
-  requests: number;
-  p50_ms: number | null;
-  p95_ms: number | null;
-  elevated: boolean;
-}
+export type OriginPopLatencyRow = Schema<"OriginPopLatencyRow">;
 
-export interface OriginPopLatencySection {
-  has_data: boolean;
-  requires_group_c: boolean;
-  median_p95_ms?: number | null;
-  rows: OriginPopLatencyRow[];
-  _approx?: boolean;
-}
+export type OriginPopLatencySection = Schema<"OriginPopLatencySection">;
 
-export interface OriginIpHealthRow {
-  oip: string;
-  requests: number;
-  p50_ms: number | null;
-  p95_ms: number | null;
-  error_pct: number | null;
-}
+export type OriginIpHealthRow = Schema<"OriginIpHealthRow">;
 
-export interface OriginIpHealthSection {
-  has_data: boolean;
-  rows: OriginIpHealthRow[];
-  _approx?: boolean;
-}
+export type OriginIpHealthSection = Schema<"OriginIpHealthSection">;
 
 export interface OriginAggregatesResponse {
   has_data: boolean;
@@ -164,15 +91,7 @@ export interface OriginShieldingAnalysisResponse {
   error: boolean;
 }
 
-export interface OriginDrilldownRow {
-  key: string;
-  requests: number;
-  p50_ms: number | null;
-  p95_ms: number | null;
-  p99_ms: number | null;
-  error_rate: number;
-  bytes: number | null;
-}
+export type OriginDrilldownRow = Schema<"OriginDrilldownRow">;
 
 export interface OriginDrilldownResponse {
   has_data: boolean;
