@@ -24,7 +24,7 @@ export async function cloudRumMutation(request: Request, runJob: RunJob): Promis
     return failure("version_required", 400);
   }
   const path = `/api/admin/services/${serviceId}`;
-  const current = await fetch(path, { credentials: "include", signal: request.signal });
+  const current = await fetch(new URL(path, request.url), { credentials: "include", signal: request.signal });
   if (!current.ok) return current;
   const { service, generation } = await current.json() as {
     service?: { rum?: Record<string, unknown> };

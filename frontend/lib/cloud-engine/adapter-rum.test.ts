@@ -89,6 +89,26 @@ describe("Cloud RUM native lifecycle bridge", () => {
     });
   });
 
+  it("uses the public window origin for native RUM requests", async () => {
+    vi.stubGlobal("window", { location: { origin: "https://rum.example.test" } });
+    const fetch = nativeApi();
+    const response = await cloudStreamFetch("/api/services/svc-1/rum/enable", {
+      method: "POST",
+      body: "{}",
+    });
+    await response.text();
+
+    const nativeRequests = fetch.mock.calls
+      .map(([input]) => input instanceof Request ? input.url : input instanceof URL ? input.toString() : null)
+      .filter((input): input is string => input !== null);
+    expect(nativeRequests).toHaveLength(2);
+    expect(nativeRequests.every((url) => url.startsWith("https://rum.example.test/"))).toBe(true);
+    expect(nativeRequests).toEqual([
+      "https://rum.example.test/api/admin/services/svc-1",
+      "https://rum.example.test/api/admin/services/svc-1/reconcile",
+    ]);
+  });
+
   it("does not convert body-read failures into JSON validation errors", async () => {
     const fetch = nativeApi();
     const request = new Request("http://localhost/api/services/svc-1/rum/settings", { method: "POST", body: "{}" });

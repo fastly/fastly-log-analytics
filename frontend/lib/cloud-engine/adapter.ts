@@ -2175,7 +2175,7 @@ export async function cloudStreamFetch(
       : input instanceof URL
         ? input.toString()
         : input.url;
-  const url = new URL(rawUrl, "http://localhost");
+  const url = new URL(rawUrl, typeof window === "undefined" ? "http://localhost" : window.location.origin);
   const { pathname } = url;
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
   const localRequest = () => input instanceof Request
