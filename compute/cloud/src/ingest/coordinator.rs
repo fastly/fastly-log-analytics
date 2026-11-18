@@ -1777,11 +1777,16 @@ fn valid_result(
                 .iter()
                 .all(|o| outputs.contains(o.key.as_str()))
         })
-        && (result.summaries.is_empty() || result.summaries.len() == result.outputs.len())
+        && (result.summaries.is_empty()
+            || (plan.stream == super::rum::STREAM && result.summaries.len() <= result.outputs.len())
+            || result.summaries.len() == result.outputs.len())
         && result.summaries.iter().all(|output| {
-            output
-                .key
-                .starts_with(&summary::summary_prefix(scope, &plan.table))
+            let prefix = if plan.stream == super::rum::STREAM {
+                super::rum_summary::prefix(scope)
+            } else {
+                summary::summary_prefix(scope, &plan.table)
+            };
+            output.key.starts_with(&prefix)
                 && output.key.contains(&token)
                 && output.md5.len() == 32
         })

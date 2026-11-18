@@ -1,6 +1,9 @@
 // @vitest-environment node
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { describe, expect, it } from "vitest";
+import { Histogram } from "./dashboard/histogram";
+import { Hll } from "./dashboard/hll";
+import type { RumRollupSource } from "./rum-rollup";
 import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/test-fixtures";
 import { cloudRumAnalytics } from "./rum-wire";
 import {
@@ -235,5 +238,249 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
     });
     expect(live).toHaveProperty("events");
     await engine.reset();
+  });
+
+  it("analytics from rum_summary equal raw on the fixture", async () => {
+    const T0 = 1_800_000_000_000;
+    const T1 = T0 + 300_000;
+    const vitals = [
+      ...Array.from({ length: 10 }, (_, i) => ({
+        ts: T0 + (i + 1) * 1000, metric: "LCP", val: 1500 + i * 350, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: `s${i % 3 + 1}`,
+      })),
+      { ts: T0 + 14_000, metric: "LCP", val: 2500, path: "/home", browser: "Safari", os: "iOS", device: "mobile", cid: "s3" },
+      { ts: T0 + 15_000, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      { ts: T0 + 15_100, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      { ts: T0 + 15_200, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      { ts: T0 + 15_300, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      { ts: T0 + 15_400, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      { ts: T0 + 15_500, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      { ts: T0 + 15_600, metric: "CLS", val: 0, path: "/home", browser: "Chrome", os: "macOS", device: "desktop", cid: "s1" },
+      ...Array.from({ length: 14 }, (_, i) => ({
+        ts: T0 + 16_000 + i * 100, metric: "CLS", val: Number((0.02 * (i + 1)).toFixed(2)), path: i === 0 ? "/only-one" : "/slow", browser: "Firefox", os: "Linux", device: "desktop", cid: "s4",
+      })),
+      { ts: T0 + 19_000, metric: "INP", val: 150, path: "/slow", browser: "Firefox", os: "Linux", device: "desktop", cid: "s4" },
+      { ts: T0 + 20_000, metric: "FCP", val: 1200, path: "/slow", browser: "Firefox", os: "Linux", device: "desktop", cid: "s4" },
+      { ts: T0 + 21_000, metric: "TTFB", val: 400, path: "/slow", browser: "Firefox", os: "Linux", device: "desktop", cid: null },
+    ];
+    const errors = [
+      { ts: T0 + 10_000, msg: "TypeError: null", file: "app.js", line: 20, col: 5, cid: "s2" },
+      { ts: T0 + 12_000, msg: "TypeError: null", file: "app.js", line: 10, col: 3, cid: "s3" },
+      { ts: T0 + 15_000, msg: "RangeError", file: "lib.js", line: 1, col: 1, cid: "s2" },
+    ];
+
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      const vitalValues = vitals.map((v) =>
+        `('r', epoch_ms(${v.ts})::TIMESTAMPTZ, ${v.ts}, '${v.metric}', ${v.val}, '${v.path}', '${v.browser}', '${v.os}', '${v.device}', ${v.cid ? `'${v.cid}'` : "NULL"})`
+      ).join(", ");
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, "timestamp", ts_ms, metric_name, metric_value, page_url, browser_name, os_name, device_type, session_id)
+        VALUES ${vitalValues}`);
+      const errorValues = errors.map((e) =>
+        `('e', epoch_ms(${e.ts})::TIMESTAMPTZ, ${e.ts}, '${e.msg}', '${e.file}', ${e.line}, ${e.col}, '${e.cid}')`
+      ).join(", ");
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, "timestamp", ts_ms, error_message, filename, lineno, colno, session_id)
+        VALUES ${errorValues}`);
+
+      const raw = await queryRumAnalytics({ engine, start_time: T0, end_time: T1 });
+
+      // Build the matching rum_summary Parquet buffer
+      const addHist = (h: Histogram, v: number) => {
+        const clamped = Math.max(-(2 ** 52 - 1), Math.min(2 ** 52 - 1, Math.round(v)));
+        h.min = Math.min(h.min, clamped);
+        h.max = Math.max(h.max, clamped);
+        if (clamped < 100) h.under++;
+        else if (clamped >= 60_000_000) h.over++;
+        else {
+          let lo = 0, hi = 128;
+          while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            const bound = Math.round(100 * 600000 ** (mid / 128));
+            if (bound <= clamped) lo = mid + 1;
+            else hi = mid;
+          }
+          h.buckets[lo - 1]++;
+        }
+      };
+
+      const rows: {
+        kind: string; bucket: bigint | null; key: string | null; count: bigint | null;
+        good: bigint | null; poor: bigint | null; value_hist: Uint8Array | null;
+        lcp_hist: Uint8Array | null; cls_hist: Uint8Array | null; inp_hist: Uint8Array | null;
+        cid_hll: Uint8Array | null; msg_hll: Uint8Array | null;
+        min_line: bigint | null; min_col: bigint | null; last_ts: bigint | null; truncated: boolean | null;
+      }[] = [];
+
+      const byMetric = new Map<string, { count: number; good: number; poor: number; hist: Histogram }>();
+      const byPage = new Map<string, { count: number; lcp: Histogram; cls: Histogram; inp: Histogram }>();
+      const byEnv = new Map<string, number>();
+      const vHll = new Hll();
+      const thresholds: Record<string, [number, number]> = {
+        LCP: [2500, 4000], CLS: [0.1, 0.25], INP: [200, 500], FCP: [1800, 3000], TTFB: [800, 1800],
+      };
+
+      for (const v of vitals) {
+        if (v.cid) vHll.add(v.cid);
+        const m = byMetric.get(v.metric) ?? { count: 0, good: 0, poor: 0, hist: new Histogram() };
+        m.count++;
+        const [g, p] = thresholds[v.metric];
+        if (v.val <= g) m.good++;
+        if (v.val > p) m.poor++;
+        addHist(m.hist, v.val * (v.metric === "CLS" ? 1_000_000 : 1_000));
+        byMetric.set(v.metric, m);
+
+        const pg = byPage.get(v.path) ?? { count: 0, lcp: new Histogram(), cls: new Histogram(), inp: new Histogram() };
+        pg.count++;
+        if (v.metric === "LCP") addHist(pg.lcp, v.val * 1_000);
+        if (v.metric === "CLS") addHist(pg.cls, v.val * 1_000_000);
+        if (v.metric === "INP") addHist(pg.inp, v.val * 1_000);
+        byPage.set(v.path, pg);
+
+        for (const [dim, val] of [["browser", v.browser], ["os", v.os], ["device", v.device]] as const) {
+          const k = JSON.stringify([dim, val]);
+          byEnv.set(k, (byEnv.get(k) ?? 0) + 1);
+        }
+      }
+
+      for (const [name, m] of byMetric) {
+        rows.push({
+          kind: "metric", bucket: BigInt(T0), key: name, count: BigInt(m.count),
+          good: BigInt(m.good), poor: BigInt(m.poor), value_hist: m.hist.toBytes(),
+          lcp_hist: null, cls_hist: null, inp_hist: null, cid_hll: null, msg_hll: null,
+          min_line: null, min_col: null, last_ts: null, truncated: null,
+        });
+      }
+      rows.push({
+        kind: "vitals_total", bucket: BigInt(T0), key: null, count: BigInt(vitals.length),
+        good: null, poor: null, value_hist: null, lcp_hist: null, cls_hist: null, inp_hist: null,
+        cid_hll: vHll.toBytes(), msg_hll: null, min_line: null, min_col: null, last_ts: null, truncated: null,
+      });
+      for (const [path, pg] of byPage) {
+        rows.push({
+          kind: "page", bucket: null, key: path, count: BigInt(pg.count),
+          good: null, poor: null, value_hist: null,
+          lcp_hist: pg.lcp.toBytes(), cls_hist: pg.cls.toBytes(), inp_hist: pg.inp.toBytes(),
+          cid_hll: null, msg_hll: null, min_line: null, min_col: null, last_ts: null, truncated: false,
+        });
+      }
+      for (const [k, cnt] of byEnv) {
+        rows.push({
+          kind: "env", bucket: null, key: k, count: BigInt(cnt),
+          good: null, poor: null, value_hist: null, lcp_hist: null, cls_hist: null, inp_hist: null,
+          cid_hll: null, msg_hll: null, min_line: null, min_col: null, last_ts: null, truncated: false,
+        });
+      }
+
+      const eCidHll = new Hll();
+      const eMsgHll = new Hll();
+      const byErr = new Map<string, { count: number; minLine: number; minCol: number; lastTs: number; hll: Hll }>();
+      for (const e of errors) {
+        eCidHll.add(e.cid);
+        eMsgHll.add(e.msg);
+        const k = JSON.stringify([e.msg, e.file]);
+        const cur = byErr.get(k) ?? { count: 0, minLine: e.line, minCol: e.col, lastTs: e.ts, hll: new Hll() };
+        cur.count++;
+        cur.minLine = Math.min(cur.minLine, e.line);
+        cur.minCol = Math.min(cur.minCol, e.col);
+        cur.lastTs = Math.max(cur.lastTs, e.ts);
+        cur.hll.add(e.cid);
+        byErr.set(k, cur);
+      }
+      rows.push({
+        kind: "errors_total", bucket: BigInt(T0), key: null, count: BigInt(errors.length),
+        good: null, poor: null, value_hist: null, lcp_hist: null, cls_hist: null, inp_hist: null,
+        cid_hll: eCidHll.toBytes(), msg_hll: eMsgHll.toBytes(), min_line: null, min_col: null, last_ts: null, truncated: null,
+      });
+      for (const [k, er] of byErr) {
+        rows.push({
+          kind: "error", bucket: null, key: k, count: BigInt(er.count),
+          good: null, poor: null, value_hist: null, lcp_hist: null, cls_hist: null, inp_hist: null,
+          cid_hll: er.hll.toBytes(), msg_hll: null, min_line: BigInt(er.minLine), min_col: BigInt(er.minCol),
+          last_ts: BigInt(er.lastTs), truncated: false,
+        });
+      }
+
+      const summaryBytes = parquetWriteBuffer({
+        columnData: [
+          { name: "kind", type: "STRING", data: rows.map((r) => r.kind) },
+          { name: "bucket", type: "INT64", data: rows.map((r) => r.bucket) },
+          { name: "key", type: "STRING", data: rows.map((r) => r.key) },
+          { name: "count", type: "INT64", data: rows.map((r) => r.count) },
+          { name: "good", type: "INT64", data: rows.map((r) => r.good) },
+          { name: "poor", type: "INT64", data: rows.map((r) => r.poor) },
+          { name: "value_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.value_hist) },
+          { name: "lcp_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.lcp_hist) },
+          { name: "cls_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.cls_hist) },
+          { name: "inp_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.inp_hist) },
+          { name: "cid_hll", type: "BYTE_ARRAY", data: rows.map((r) => r.cid_hll) },
+          { name: "msg_hll", type: "BYTE_ARRAY", data: rows.map((r) => r.msg_hll) },
+          { name: "min_line", type: "INT64", data: rows.map((r) => r.min_line) },
+          { name: "min_col", type: "INT64", data: rows.map((r) => r.min_col) },
+          { name: "last_ts", type: "INT64", data: rows.map((r) => r.last_ts) },
+          { name: "truncated", type: "BOOLEAN", data: rows.map((r) => r.truncated) },
+        ],
+        kvMetadata: [{ key: "flp_rum_summary", value: "1" }],
+      });
+
+      const rawKey = `processed/rum/client_vitals/year=2027/month=01/day=15/hour=08/window=${T0 / 1000}-${T1 / 1000}-p1s0-n9.parquet`;
+      const sumKey = `processed/rum/summary/year=2027/month=01/day=15/hour=08/summary=${T0 / 1000}-${T1 / 1000}-p1s0-n12.parquet`;
+      const rollupSource: RumRollupSource = {
+        async fetchJson(url) {
+          const view = new URL(url, "http://localhost").searchParams.get("view");
+          if (view === "summary") {
+            return {
+              files: [{ key: sumKey, start: new Date(T0).toISOString(), end: new Date(T1).toISOString(), size: summaryBytes.byteLength, rows: rows.length }],
+              next_cursor: null,
+              complete: true,
+            };
+          }
+          return {
+            files: [{ key: rawKey, start: new Date(T0).toISOString(), end: new Date(T1).toISOString(), size: 100, rows: vitals.length }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile(key) {
+          expect(key).toBe(sumKey);
+          return { bytes: summaryBytes, cached: false };
+        },
+      };
+
+      const sortEnv = (e: typeof raw.environments) => ({
+        browsers: [...e.browsers].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+        os: [...e.os].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+        devices: [...e.devices].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+        connections: [...e.connections].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+      });
+
+      const rolled = await queryRumAnalytics({ start_time: T0, end_time: T1, rollupSource });
+      expect(rolled.no_data).toBe(false);
+      expect(rolled.summary).toEqual(raw.summary);
+      expect(sortEnv(rolled.environments)).toEqual(sortEnv(raw.environments));
+      expect(rolled.error_summary).toEqual(raw.error_summary);
+      expect(rolled.top_errors).toEqual(raw.top_errors);
+
+      for (const name of ["LCP", "CLS", "INP", "FCP", "TTFB"] as const) {
+        expect(rolled.metrics[name].count).toBe(raw.metrics[name].count);
+        expect(rolled.metrics[name].good_pct).toBe(raw.metrics[name].good_pct);
+        expect(rolled.metrics[name].needs_improvement_pct).toBe(raw.metrics[name].needs_improvement_pct);
+        expect(rolled.metrics[name].poor_pct).toBe(raw.metrics[name].poor_pct);
+        for (const q of ["p50", "p75", "p95"] as const) {
+          const want = raw.metrics[name][q];
+          const got = rolled.metrics[name][q];
+          expect(Math.abs(got - want)).toBeLessThanOrEqual(Math.max(want * 0.08, name === "CLS" ? 0.02 : 2));
+        }
+      }
+
+      expect(rolled.worst_pages.map((p) => [p.page_url, p.sample_count]))
+        .toEqual(raw.worst_pages.map((p) => [p.page_url, p.sample_count]));
+
+      // Filtered queries bypass rum_summary and hit raw DuckDB
+      const filtered = await queryRumAnalytics({ engine, start_time: T0, end_time: T1, rollupSource, country: "US" });
+      expect(filtered.no_data).toBe(true);
+    } finally {
+      await engine.reset();
+    }
   });
 });

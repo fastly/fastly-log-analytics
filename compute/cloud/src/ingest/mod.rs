@@ -34,6 +34,7 @@ pub mod hll;
 pub mod listing;
 pub mod retention;
 pub mod rum;
+pub mod rum_summary;
 mod source_index;
 pub mod storage;
 pub mod summary;

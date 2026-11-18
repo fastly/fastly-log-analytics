@@ -7,6 +7,7 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { queryRumFromRollup, rumRollupEligible, type RumRollupSource } from "./rum-rollup";
 
 export const CWV_THRESHOLDS = {
   LCP: { good: 2500, poor: 4000 },
@@ -29,6 +30,7 @@ export interface RumQueryParams {
   limit?: number;
   filters?: FiltersPayload | string;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
+  rollupSource?: RumRollupSource;
   signal?: AbortSignal;
 }
 
@@ -217,6 +219,10 @@ export function buildRumWhere(
 }
 
 export async function queryRumAnalytics(params: RumQueryParams = {}) {
+  if (params.rollupSource && rumRollupEligible(params)) {
+    const rolled = await queryRumFromRollup(params.rollupSource, params);
+    if (rolled) return rolled;
+  }
   const engine = params.engine ?? getDuckDBEngine().readContext();
   const where = buildRumWhere(params);
   const errorWhere = buildRumWhere(params, "client_errors");

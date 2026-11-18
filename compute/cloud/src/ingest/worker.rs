@@ -492,9 +492,17 @@ fn convert_shard<R: Runtime>(
         }
         object_windows.push(windows);
     }
-    // `window_room` counts two PUTs per window; a RUM file is one.
-    let puts_per_file = if rum { 1 } else { 2 };
-    if by_window.len() * puts_per_file > 2 * window_room(shard.keys.len() + retry.used() as usize) {
+    let rum_summaries = super::rum_summary::prefix(&shard.prefix);
+    // `window_room` counts two PUTs per window; a RUM window writes data files plus one summary.
+    let mut rum_window_rows: BTreeMap<i64, u64> = BTreeMap::new();
+    for (&(_, start), batches) in &by_window {
+        if rum {
+            let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+            *rum_window_rows.entry(start).or_default() += rows;
+        }
+    }
+    let total_puts = by_window.len() + if rum { rum_window_rows.len() } else { by_window.len() };
+    if total_puts > 2 * window_room(shard.keys.len() + retry.used() as usize) {
         return Ok(Done::Split);
     }
     let token = run_token(&shard.plan_id, &shard.shard);
@@ -506,12 +514,21 @@ fn convert_shard<R: Runtime>(
         let summary = (!rum).then(|| summary::summary_key(&summaries, start, end, &token, rows));
         keys.insert((table, start), (key, summary, rows));
     }
+    let rum_summary_keys: BTreeMap<i64, (String, u64)> = rum_window_rows
+        .into_iter()
+        .map(|(start, rows)| {
+            let end = start + shard.window_s;
+            let key = super::rum_summary::key(&rum_summaries, start, end, &token, rows);
+            (start, (key, rows))
+        })
+        .collect();
     let manifest = manifest_key(&shard.prefix, &shard.plan_id, &shard.shard);
     let intent = json!({
         "plan_id": shard.plan_id, "shard": shard.shard, "attempt": shard.attempt,
         "keys": keys
             .values()
             .flat_map(|(key, summary, _)| std::iter::once(key).chain(summary))
+            .chain(rum_summary_keys.values().map(|(key, _)| key))
             .collect::<Vec<_>>(),
     });
     let may_put = || {
@@ -527,48 +544,84 @@ fn convert_shard<R: Runtime>(
     store.put_verified_retrying(&manifest, intent.to_string().into_bytes(), Some(&retry))?;
     let mut outputs = BTreeMap::new();
     let mut summary_outputs = Vec::new();
-    while let Some((start, batches)) = by_window.pop_first() {
-        let batches: Vec<&RecordBatch> = batches.iter().collect();
-        may_put()?;
-        let (key, summary_key, rows) = &keys[&start];
-        let bytes = convert::write_parquet(&batches)?;
-        let metadata = super::file_metadata::from_parquet(&bytes)?;
-        let size = bytes.len() as u64;
-        let parts = bytes.len().div_ceil(PART_BYTES);
-        let after = usize::from(summary_key.is_some()) + puts_per_file * by_window.len() + 1;
-        let md5 = if parts > 1 && runtime.admin_remaining_calls() as usize >= parts + 2 + after {
-            put_parts(store, key, bytes, &may_put)?
-        } else {
-            store.put_verified_retrying(key, bytes, Some(&retry))?
-        };
-        outputs.insert(
-            start,
-            Output {
-                key: key.clone(),
-                rows: *rows,
+    let starts: std::collections::BTreeSet<i64> = by_window.keys().map(|&(_, s)| s).collect();
+    let mut remaining_puts = total_puts;
+    for window_start in starts {
+        let mut vitals_batches = Vec::new();
+        let mut errors_batches = Vec::new();
+        for table in 0..tables.len() {
+            let Some(batches) = by_window.remove(&(table, window_start)) else {
+                continue;
+            };
+            let batch_refs: Vec<&RecordBatch> = batches.iter().collect();
+            may_put()?;
+            let (key, summary_key, rows) = &keys[&(table, window_start)];
+            let bytes = convert::write_parquet(&batch_refs)?;
+            let metadata = super::file_metadata::from_parquet(&bytes)?;
+            let size = bytes.len() as u64;
+            let parts = bytes.len().div_ceil(PART_BYTES);
+            remaining_puts = remaining_puts.saturating_sub(1);
+            let after = remaining_puts + 1;
+            let md5 = if parts > 1 && runtime.admin_remaining_calls() as usize >= parts + 2 + after {
+                put_parts(store, key, bytes, &may_put)?
+            } else {
+                store.put_verified_retrying(key, bytes, Some(&retry))?
+            };
+            outputs.insert(
+                (table, window_start),
+                Output {
+                    key: key.clone(),
+                    rows: *rows,
+                    bytes: size,
+                    md5,
+                    metadata,
+                },
+            );
+            if let Some(summary_key) = summary_key {
+                may_put()?;
+                let vcpu = runtime.vcpu_ms();
+                let bytes = summary::write_summary(&batch_refs, window_start);
+                summary_vcpu.set(summary_vcpu.get() + runtime.vcpu_ms().saturating_sub(vcpu));
+                let bytes = bytes?;
+                let size = bytes.len() as u64;
+                remaining_puts = remaining_puts.saturating_sub(1);
+                let md5 = store.put_verified_retrying(summary_key, bytes, Some(&retry))?;
+                summary_outputs.push(Output {
+                    key: summary_key.clone(),
+                    rows: *rows,
+                    bytes: size,
+                    md5,
+                    metadata: None,
+                });
+            }
+            if rum {
+                if table == 0 {
+                    vitals_batches = batches;
+                } else {
+                    errors_batches = batches;
+                }
+            }
+        }
+        if let Some((rum_summary_key, rum_rows)) = rum_summary_keys.get(&window_start) {
+            may_put()?;
+            let vcpu = runtime.vcpu_ms();
+            let vitals_refs: Vec<&RecordBatch> = vitals_batches.iter().collect();
+            let errors_refs: Vec<&RecordBatch> = errors_batches.iter().collect();
+            let bytes =
+                super::rum_summary::write_summary(&vitals_refs, &errors_refs, window_start);
+            summary_vcpu.set(summary_vcpu.get() + runtime.vcpu_ms().saturating_sub(vcpu));
+            let bytes = bytes?;
+            let size = bytes.len() as u64;
+            remaining_puts = remaining_puts.saturating_sub(1);
+            let md5 = store.put_verified_retrying(rum_summary_key, bytes, Some(&retry))?;
+            summary_outputs.push(Output {
+                key: rum_summary_key.clone(),
+                rows: *rum_rows,
                 bytes: size,
                 md5,
-                metadata,
-            },
-        );
-        let Some(summary_key) = summary_key else {
-            continue;
-        };
-        may_put()?;
-        let vcpu = runtime.vcpu_ms();
-        let start = start.1;
-        let bytes = summary::write_summary(&batches, start);
-        summary_vcpu.set(summary_vcpu.get() + runtime.vcpu_ms().saturating_sub(vcpu));
-        let bytes = bytes?;
-        let size = bytes.len() as u64;
-        let md5 = store.put_verified_retrying(summary_key, bytes, Some(&retry))?;
-        summary_outputs.push(Output {
-            key: summary_key.clone(),
-            rows: *rows,
-            bytes: size,
-            md5,
-            metadata: None,
-        });
+                metadata: None,
+            });
+        }
     }
     let objects = loaded
         .iter()
