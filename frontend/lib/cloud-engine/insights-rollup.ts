@@ -1,4 +1,5 @@
 import type { DashboardFilter } from "./dashboard/filters";
+import { Histogram } from "./dashboard/histogram";
 import { emptyAgg, queryRollup, rollupGroup, type Rollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
 import { resolveInsightWindow, type InsightsRequest } from "./insights";
 import type { NetworkRollupMeta } from "./network-rollup";
@@ -153,12 +154,16 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
       passRequests: a.passRequests,
     }]))]]));
   }
-  if (urls) {
-    groups.set("urls", new Map([["url", new Map([...urls].map(([k, a]) => [k, {
+  const copyElapsed = (values: Map<string, RollupAgg>) => new Map([...values].map(([k, a]) => {
+    const bytes = a.hists.elapsed?.toBytes();
+    return [k, {
       ...emptyAgg(),
       elapsedCount: a.elapsedCount,
-      hists: { ...emptyAgg().hists, elapsed: a.hists.elapsed },
-    }]))]]));
+      ...(bytes ? { elapsedHist: bytes } : {}),
+    }];
+  }));
+  if (urls) {
+    groups.set("urls", new Map([["url", copyElapsed(urls)]]));
   }
   if (insIp) {
     groups.set("ins_ip", new Map([["ip", new Map([...insIp].map(([k, a]) => [k, {
@@ -170,13 +175,8 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
   }
   if (insLatCity || insLatPop) {
     const latFields = new Map<string, Map<string, RollupAgg>>();
-    const copyLat = (values: Map<string, RollupAgg>) => new Map([...values].map(([k, a]) => [k, {
-      ...emptyAgg(),
-      elapsedCount: a.elapsedCount,
-      hists: { ...emptyAgg().hists, elapsed: a.hists.elapsed },
-    }]));
-    if (insLatCity) latFields.set("city", copyLat(insLatCity));
-    if (insLatPop) latFields.set("pop", copyLat(insLatPop));
+    if (insLatCity) latFields.set("city", copyElapsed(insLatCity));
+    if (insLatPop) latFields.set("pop", copyElapsed(insLatPop));
     groups.set("ins_lat", latFields);
   }
   if (insAsn) {
@@ -227,7 +227,10 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
   const cities = rollup.dims.get("city");
   const insLatCity = rollupGroup(rollup, "ins_lat", "city");
   const p95Ms = (agg: RollupAgg | undefined) => {
-    const q95 = agg && agg.elapsedCount > 0 ? (agg.hists.elapsed?.quantile(0.95) ?? null) : null;
+    const hist = agg && agg.elapsedCount > 0
+      ? (agg.hists.elapsed ?? (agg.elapsedHist ? Histogram.fromBytes(agg.elapsedHist) : null))
+      : null;
+    const q95 = hist?.quantile(0.95) ?? null;
     return q95 == null ? null : q95 / 1000;
   };
   const city = rows.city.map((row) => {
@@ -300,8 +303,6 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
     const key = row.url == null ? null : String(row.url);
     const ins = key == null ? undefined : insUrl.get(key);
     const u = key == null ? undefined : urls.get(key);
-    const q95 = u && u.elapsedCount > 0 ? (u.hists.elapsed?.quantile(0.95) ?? null) : null;
-    const p95 = q95 == null ? null : q95 / 1000;
     return {
       ...row,
       b_total: ins?.requests ?? 0,
@@ -310,7 +311,7 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
       b_miss: ins?.missRequests ?? 0,
       b_pass: ins?.passRequests ?? 0,
       b_lat_total: u?.elapsedCount ?? 0,
-      b_p95: p95,
+      b_p95: p95Ms(u),
       ...(insUrlTruncated && !ins ? { b_ins_url_absent: true } : {}),
     };
   });

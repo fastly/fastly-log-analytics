@@ -73,6 +73,8 @@ export type RollupAgg = {
   /** AS name for `asn` values (the smallest seen). */
   label: string | null;
   hists: RollupHists;
+  /** Clone-safe serialized `hists.elapsed` used when `insightsBaselineRollup` crosses a worker boundary. */
+  elapsedHist?: Uint8Array | null;
 };
 
 export type Rollup = {

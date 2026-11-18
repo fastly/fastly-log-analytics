@@ -79,13 +79,18 @@ describe("answerFromRollup", () => {
     expect(answer).toStrictEqual(insightsBaselineRollup(full));
     const [city] = full.rollup.dims.get("city")!.keys();
     const [country, name] = JSON.parse(city) as [string, string];
+    const [pop] = full.rollup.groups?.get("ins_lat")?.get("pop")?.keys() ?? [];
+    const [urlKey] = full.rollup.groups?.get("urls")?.get("url")?.keys() ?? [];
     const rows = {
-      city: [{ country, city: name, w_cnt: 3 }],
+      ...(urlKey ? { url: [{ url: urlKey, w_total: 3, w_5xx: 0, w_hits: 1, w_miss: 1, w_pass: 1, w_lat_total: 3 }] } : {}),
+      city: [{ country, city: name, region: null, w_cnt: 3 }],
       dimension: [{ dimension: "ua", ua: "curl", w_cnt: 2 }, { dimension: "ua", ua: null, w_cnt: 1 }],
       asn: [{ asn: "13335", w_cnt: 1 }],
+      ...(pop ? { geo: [{ pop, w_lat_total: 3 }] } : {}),
       scalar: [{ w_cnt: 3 }],
     };
     expect(rollupInsightsBaseline(answer, rows)).toStrictEqual(rollupInsightsBaseline(full, rows));
+    expect(rollupInsightsBaseline(structuredClone(answer), rows)).toStrictEqual(rollupInsightsBaseline(full, rows));
   });
 
   it("leaves paths summaries don't answer to the raw scan", async () => {

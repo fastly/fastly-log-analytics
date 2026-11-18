@@ -18,7 +18,7 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
-import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -472,5 +472,47 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(env.insights.find((c) => c.id === "asn_hosting_shift")!.items).toMatchObject([
       { label: "AS15169", current_val: 80, baseline_val: 5 },
     ]);
+  });
+
+  it("keeps urls and ins_lat elapsed histograms clone-safe across structuredClone", async () => {
+    const base = await baselineRollup();
+    const h = new Histogram();
+    h.min = 50_000;
+    h.max = 50_000;
+    h.buckets[BOUNDS.findIndex((b) => b > 50_000) - 1] = 25;
+
+    const covered: RollupResult = {
+      ...base,
+      rollup: {
+        ...base.rollup,
+        groups: new Map([
+          ["ins_url", new Map([["url", new Map([["/slow", { ...emptyAgg(), requests: 25 }]])]])],
+          ["urls", new Map([["url", new Map([["/slow", { ...emptyAgg(), elapsedCount: 25, hists: { ...emptyAgg().hists, elapsed: h } }]])]])],
+          ["ins_lat", new Map([
+            ["city", new Map([[JSON.stringify(["Springfield", "IL", "US"]), { ...emptyAgg(), elapsedCount: 25, hists: { ...emptyAgg().hists, elapsed: h } }]])],
+            ["pop", new Map([["ORD", { ...emptyAgg(), elapsedCount: 25, hists: { ...emptyAgg().hists, elapsed: h } }]])],
+          ])],
+        ]),
+        present: new Set([...(base.rollup.present ?? []), "ins_url/url", "urls/url", "ins_lat/city", "ins_lat/pop"]),
+      },
+    };
+    const cut = insightsBaselineRollup(covered);
+    const cloned = structuredClone(cut);
+    expect(cloned).toStrictEqual(cut);
+
+    const rows = {
+      url: [{ url: "/slow", w_total: 10, w_5xx: 0, w_hits: 0, w_miss: 0, w_pass: 0, w_lat_total: 10 }],
+      city: [{ city: "Springfield", region: "IL", country: "US", w_cnt: 10, w_errors_4xx: 0 }],
+      dimension: [],
+      asn: [],
+      geo: [{ pop: "ORD", w_lat_total: 10 }],
+      scalar: [],
+    };
+    const fromCloned = rollupInsightsBaseline(cloned, rows);
+    const fromFull = rollupInsightsBaseline(covered, rows);
+    expect(fromCloned).toStrictEqual(fromFull);
+    expect(fromCloned.rows.url?.[0].b_p95).toBeGreaterThan(0);
+    expect(fromCloned.rows.city[0].b_p95).toBeGreaterThan(0);
+    expect(fromCloned.rows.geo?.[0].b_p95).toBeGreaterThan(0);
   });
 });
