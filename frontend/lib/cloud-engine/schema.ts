@@ -1,6 +1,7 @@
 import { parquetMetadata, parquetReadObjects } from "hyparquet";
 import { compressors } from "hyparquet-compressors";
 import { readParquetRows } from "./dashboard/parquet";
+import type { Schema } from "@/types/api";
 
 export { readParquetRows };
 
@@ -17,13 +18,7 @@ export type CatalogInput = {
   fields: readonly CatalogFieldInput[];
 };
 
-export type SchemaColumn = {
-  name: string;
-  type: string;
-  catalogType: string;
-  label?: string;
-  description?: string;
-};
+export type SchemaColumn = Schema<"SchemaColumn">;
 
 export type ColumnStats = {
   populated: number;
