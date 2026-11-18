@@ -50,29 +50,34 @@ Both installs use the same classification and the same row shapes (`WellknownBot
 
 ### Cloud summaries
 
-With no filter values, Cloud answers part of the WAF Activity tab from the v3 summary files. The rest is read from raw Parquet. The page makes two requests. The summary request covers `ngwaf_verified_bots`, `ngwaf_verified_bots_ts`, `tls_fingerprints`, `fingerprint_coverage`, `req_size_dist`, `ipv6_adoption`, `proxy_dist` and `conn_reuse_dist`. The raw request covers `wellknown_bots`, `bot_efficiency`, `top_ips_header` and `proxies`. Summary cards paint without waiting for the raw scan, and a "Data through" note gives the end of the summarized data. [`frontend/lib/cloud-engine/security-rollup.ts`](../../frontend/lib/cloud-engine/security-rollup.ts) builds these answers. `verified_bots_ts` can also be served from summaries when `bucket_seconds` is a whole multiple of the files' step and divides a day.
+With no filter values, Cloud answers every /security section from the v3 summary files. [`frontend/lib/cloud-engine/security-rollup.ts`](../../frontend/lib/cloud-engine/security-rollup.ts) builds the answers. The WAF Activity tab makes two requests:
+
+- The distributions request covers `ngwaf_verified_bots`, `ngwaf_verified_bots_ts`, `tls_fingerprints`, `fingerprint_coverage`, `req_size_dist`, `ipv6_adoption`, `proxy_dist` and `conn_reuse_dist`.
+- The row request covers `wellknown_bots`, `bot_efficiency`, `top_ips_header` and `proxies`, which also feed Proxy Watchdog.
+
+The row request is read from raw Parquet when the summaries predate the `header_ip`, `bot_ua` and `proxy` rows. The distribution cards paint without waiting for it. A "Data through" note gives the end of the summarized data on WAF Activity, Threat Intelligence and Proxy Watchdog. `verified_bots_ts` can also be served from summaries when `bucket_seconds` is a whole multiple of the files' step and divides a day. `top_bots` (asked for by `/api/security/bundle`) is classified in the browser from the summaries' top 2,000 user agents, so the bot catalog stays in one place. Threat Intelligence reads the `tls_fp` rows.
 
 Summaries return the raw response's shapes and values, with these exceptions:
 
 - Fingerprint `ip_count` merges HLL sketches, so it is marked ≈.
-- Values whose summary top-K or histogram was cut are lower bounds, marked ≥: fingerprint `request_count`, request-header size, proxy type, connection reuse and `verified_bots_ts`.
+- Bot efficiency referrals merge HLL sketches of the IPs each referrer stem sends, so the bot-efficiency card titles add "≈ referrals".
+- Values whose summary top-K or histogram was cut are lower bounds, marked ≥: fingerprint `request_count`, request-header size, proxy type, connection reuse, `verified_bots_ts`, well-known bots, bot efficiency, `top_bots` and threat-intel requests.
+- Threat-intel top country is marked ≈ when the per-fingerprint country list was cut. Ties go to the alphabetically first country, where the raw `MODE` picks any.
+- Proxy Watchdog reads a sample of up to 300 RTT rows per summary file. Once a range holds more than the raw scan's 5,000 rows, or any file's sample was cut, the tab is marked ≈.
+- Oversized headers keep every IP's largest header in each file, so they are exact.
+- Well-known bots count each user agent's distinct IPs rather than the busiest 10,000 `(ua, ip)` pairs, and their IPs show as unique counts without per-IP samples.
+- Threat intel shows no WAF rules or bot share, as on the raw Cloud scan, where those columns are absent.
 
 Cloud falls back to the raw scan when any of these holds:
 
 - A filter has values.
-- A summary file is missing or incomplete.
-- `client_ip` or `proxy_type` is a custom field.
+- A summary file is missing or incomplete, or predates the rows a section needs.
+- `client_ip` or `proxy_type` is a custom field (`client_ip` also sends the row sections raw), or `waf_logged_rules`, `waf_blocked_rules` or `is_bot` is (threat intel).
 - The empty value is missing from a truncated `tls_ciphers_sha` list.
 - A connection count isn't an integer.
 - IPv6 is requested and a file spans more than one UTC hour (or only day bundles cover the range).
 
-The remaining sections stay on the raw scan because summaries lack the data they need:
-
-- **Well-known bots:** the (UA, IP) pairs and the full top-5,000 UA list. Bundles keep 500 user agents.
-- **Bot efficiency:** response bytes per UA and the IPs each referrer sends.
-- **Oversized headers:** the largest header size per IP.
-- **Proxy Watchdog and the export:** per-row RTT, location, POP and ASN.
-- **Threat intel:** the cross-tab of fingerprint, country, WAF, bot and proxy.
+The summaries keep the per-value distinct-IP sketches only for `tls_ciphers_sha` and the referrer stem; nothing reads the others.
 
 ## Tests
 

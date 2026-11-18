@@ -58,9 +58,11 @@ Logged response bytes of cache hits: an estimate of what origin would have sent 
 
 ## Cloud
 
-Cloud answers `POST /api/value/summary` in the browser. With no filter, `overview` and `network` are served from v3 summaries and read apart from the other sections, so the Network tab reads only summaries and the Summary tab paints its overview and protocol cards while `caching` scans raw (the Origin Offload and Bandwidth Saved (est.) cards show loading until then). "Data through" shows above the tabs. A filter keeps one raw read per tab.
+Cloud answers `POST /api/value/summary` in the browser. With no filter, every section is served from v3 summaries in one request per tab, with no raw scan; "Data through" shows above the tabs. A filter keeps one raw read per tab.
 
-Counts come from the summaries' per-field value counts and the overview row's bytes and HIT/MISS latency sums; the protocol series rebuckets the 5-minute protocol series. The read falls back to the raw scan when a needed field (`cache`, `proto`, `tls`, `is_ipv6`) is cut to its top K or holds non-ASCII values, a custom field shadows one the raw scan reads, a `HIT`-prefixed cache state other than `HIT`, `HIT-STALE` or `HIT-CLUSTER` or a `MISS`-prefixed one other than `MISS` is logged, the byte total is zero, the protocol series is cut or can't be rebucketed to the chart interval, or the range isn't covered by bundles. `caching`, `performance`, `security`, `bots` and `io` always scan raw: they need per-bucket prefix-matched cache counts, exact p99, WAF and bot fields and per-format image bytes that summaries don't hold. The raw scan projects only the columns its requested sections read.
+Counts come from the summaries' per-field value counts and their per-day `value` rows. Those rows split requests by cache class and shield (with bytes, latency and image figures) and hold the WAF signal, bot name and image format-pair lists. The protocol series rebuckets the 5-minute protocol series. P99 latency comes from the elapsed-time histogram and is marked ≈; top WAF signals, top bots and format conversions are marked ≥ when their list was cut. WAF decisions, verified bots, image content types and URL-level opportunities aren't in Cloud logs, so they read as the raw scan's empty values.
+
+The read falls back to the raw scan when a section's `value` rows are missing (summaries written before them), a needed field is cut to its top K or holds non-ASCII values, a custom field shadows one the raw scan reads, the byte total is zero, a day series is asked for at another chart interval, the protocol series is cut or can't be rebucketed to the chart interval, or the range isn't covered by bundles. The raw scan projects only the columns its requested sections read.
 
 ## Tests
 
