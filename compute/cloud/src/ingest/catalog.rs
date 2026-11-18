@@ -44,6 +44,8 @@ pub struct Head {
     #[serde(default)]
     pub hour_bundles: BTreeMap<i64, Reference>,
     #[serde(default)]
+    pub open_bundles: BTreeMap<i64, Reference>,
+    #[serde(default)]
     pub day_bundles: BTreeMap<i64, Reference>,
     #[serde(default)]
     pub bundle_retired: BTreeMap<String, u64>,
@@ -161,6 +163,13 @@ pub fn file_bounds(key: &str) -> Option<(i64, i64)> {
             super::bundle::NameKind::Hour => {
                 let start = date + i64::from(name.unit) * 3600;
                 Some((start, start + 3600))
+            }
+            super::bundle::NameKind::Open => {
+                let start = date + i64::from(name.unit) * 3600;
+                let end = name
+                    .end_ms
+                    .map_or(start + 3600, |ms| (ms + 999).div_euclid(1000).max(start));
+                Some((start, end))
             }
             super::bundle::NameKind::Day => Some((date, date + 86_400)),
             super::bundle::NameKind::Partial => None,
@@ -918,6 +927,7 @@ pub fn retire_reserving<R: Runtime>(store: &Store<'_, R>, reserve: u32) -> Resul
         }
     }
     catalog.hour_bundles.retain(|hour, _| *hour >= cutoff);
+    catalog.open_bundles.retain(|hour, _| *hour >= cutoff);
     catalog.day_bundles.retain(|day, _| *day >= cutoff);
     catalog
         .bundle_retired

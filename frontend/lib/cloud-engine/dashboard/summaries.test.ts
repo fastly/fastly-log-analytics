@@ -323,6 +323,77 @@ describe("summary readers", () => {
     expect(plannedDayWithCompact.raw).toEqual([]);
   });
 
+  it("plan uses the open bundle and only later windows", () => {
+    const windows09 = pick("window", (e) => e.start >= HOUR_09).sort(
+      (a, b) => Date.parse(a.start) - Date.parse(b.start),
+    );
+    expect(windows09).toHaveLength(4);
+    const covered = windows09.slice(0, 3);
+    const later = windows09.slice(3);
+    const endMs = Date.parse(covered[covered.length - 1].end);
+    const rows = covered.reduce((sum, w) => sum + w.rows, 0);
+    const fp = fingerprint(
+      covered.map((w) => w.key.slice(w.key.lastIndexOf("/") + 1)).sort(),
+    )
+      .toString(16)
+      .padStart(16, "0");
+    const openKey = `processed/summary_bundle/request/year=2027/month=01/day=15/open_bundle=09-${endMs}-c${covered.length}-n${rows}-h${fp}.parquet`;
+    const openFile: ManifestFile = {
+      key: openKey,
+      start: covered[0].start,
+      end: covered[covered.length - 1].end,
+      size: 1024,
+      rows,
+      kind: "hour",
+      sources: covered.length,
+    };
+    const plan = planSummaries(
+      RAW,
+      [openFile, ...windows09],
+      HOUR_09 * 1000,
+      (HOUR_09 + 3600) * 1000,
+    );
+    expect(plan.summaries.map((s) => s.file.key)).toEqual([
+      openKey,
+      ...later.map((w) => w.key),
+    ]);
+    expect(plan.summaries.map((s) => s.covers.length)).toEqual([3, 1]);
+    expect(
+      plan.raw.filter((f) => Date.parse(f.start) >= HOUR_09 * 1000),
+    ).toEqual([]);
+  });
+
+  it("fingerprint mismatch falls back to windows", () => {
+    const windows09 = pick("window", (e) => e.start >= HOUR_09).sort(
+      (a, b) => Date.parse(a.start) - Date.parse(b.start),
+    );
+    const covered = windows09.slice(0, 3);
+    const endMs = Date.parse(covered[covered.length - 1].end);
+    const rows = covered.reduce((sum, w) => sum + w.rows, 0);
+    const openKey = `processed/summary_bundle/request/year=2027/month=01/day=15/open_bundle=09-${endMs}-c${covered.length}-n${rows}-h0000000000000000.parquet`;
+    const badOpenFile: ManifestFile = {
+      key: openKey,
+      start: covered[0].start,
+      end: covered[covered.length - 1].end,
+      size: 1024,
+      rows,
+      kind: "hour",
+      sources: covered.length,
+    };
+    const plan = planSummaries(
+      RAW,
+      [badOpenFile, ...windows09],
+      HOUR_09 * 1000,
+      (HOUR_09 + 3600) * 1000,
+    );
+    expect(plan.summaries.map((s) => s.file.key)).toEqual(
+      windows09.map((w) => w.key),
+    );
+    expect(
+      plan.raw.filter((f) => Date.parse(f.start) >= HOUR_09 * 1000),
+    ).toEqual([]);
+  });
+
   it("merges the Rust IP sketches into what TS builds from the raw IPs", async () => {
     const day = await decodeSummary(BUFFERS[pick("day")[0].key], 0, 4e12);
     const hll = new Hll();

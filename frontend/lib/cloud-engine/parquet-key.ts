@@ -133,6 +133,23 @@ export function parseParquetPartitionWindow(
     );
     return Number.isFinite(startMs) ? [startMs, startMs + 3_600_000] : null;
   }
+  const openBundle = key.match(
+    /\/year=(\d{4})\/month=(\d{2})\/day=(\d{2})\/open_bundle=(\d{2})-(\d+)-[^/]+\.parquet$/,
+  );
+  if (openBundle) {
+    const startMs = Date.UTC(
+      Number(openBundle[1]),
+      Number(openBundle[2]) - 1,
+      Number(openBundle[3]),
+      Number(openBundle[4]),
+    );
+    const endMs = Number(openBundle[5]);
+    return Number.isFinite(startMs) &&
+      Number.isFinite(endMs) &&
+      endMs >= startMs
+      ? [startMs, endMs]
+      : null;
+  }
   const dayBundle = key.match(
     /\/year=(\d{4})\/month=(\d{2})\/day=(\d{2})\/day_bundle=[^/]+\.parquet$/,
   );

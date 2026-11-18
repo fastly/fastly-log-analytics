@@ -115,9 +115,16 @@ pub fn publish<R: Runtime>(
     }
     let digest = hex::encode(Sha256::digest(&body));
     let key = format!("{}processed/_catalog/{digest}.json", scope(store.service));
-    let is_day = coverage.end - coverage.start == 86_400;
+    let is_open = super::super::bundle::parse_name(&coverage.file.key)
+        .is_some_and(|n| n.kind == super::super::bundle::NameKind::Open);
+    let is_day = !is_open && coverage.end - coverage.start == 86_400;
+    if is_open && root.hour_bundles.contains_key(&coverage.start) {
+        return Err("catalog_bundle_not_active".into());
+    }
     let previous = if is_day {
         &root.day_bundles
+    } else if is_open {
+        &root.open_bundles
     } else {
         &root.hour_bundles
     };
@@ -168,17 +175,29 @@ pub fn publish<R: Runtime>(
     };
     let manifest_key = put(store, &manifest)?;
     let reference = Reference { key, generation };
+    let grace = if is_open {
+        super::super::bundle::RETIRE_GRACE_S as u64
+    } else {
+        super::super::compaction::DELETE_GRACE_S
+    };
     if let Some(old) = replaced {
-        root.bundle_retired.insert(
-            old.file.key,
-            runtime
-                .now()
-                .saturating_add(super::super::compaction::DELETE_GRACE_S),
-        );
+        root.bundle_retired
+            .insert(old.file.key, runtime.now().saturating_add(grace));
     }
     if is_day {
         root.day_bundles.insert(coverage.start, reference);
+    } else if is_open {
+        root.open_bundles.insert(coverage.start, reference);
     } else {
+        if let Some(open_ref) = root.open_bundles.remove(&coverage.start) {
+            let open_cov = load(store, &open_ref)?;
+            root.bundle_retired.insert(
+                open_cov.file.key,
+                runtime
+                    .now()
+                    .saturating_add(super::super::bundle::RETIRE_GRACE_S as u64),
+            );
+        }
         root.hour_bundles.insert(coverage.start, reference);
     }
     root.generation = generation;

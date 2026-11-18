@@ -264,6 +264,8 @@ const WINDOW_SUMMARY =
   /(?:^|\/)processed\/summary\/request\/(year=\d+\/month=\d+\/day=\d+\/hour=\d{2}\/)summary=([^/]+)\.parquet$/;
 const HOUR_BUNDLE =
   /(?:^|\/)processed\/summary_bundle\/request\/(?:sha256=[0-9a-f]{64}\/)?(year=\d+\/month=\d+\/day=\d+\/)hour_bundle=(\d{2})-(c(\d+)-n(\d+)-h[0-9a-f]{16}\.parquet)$/;
+const OPEN_BUNDLE =
+  /(?:^|\/)processed\/summary_bundle\/request\/(?:sha256=[0-9a-f]{64}\/)?(year=\d+\/month=\d+\/day=\d+\/)open_bundle=(\d{2})-(\d+)-(c(\d+)-n(\d+)-h[0-9a-f]{16}\.parquet)$/;
 const DAY_BUNDLE =
   /(?:^|\/)processed\/summary_bundle\/request\/(?:sha256=[0-9a-f]{64}\/)?(year=\d+\/month=\d+\/day=\d+\/)day_bundle=(c(\d+)-n(\d+)-h[0-9a-f]{16}\.parquet)$/;
 
@@ -357,6 +359,32 @@ export function planSummaries(
       windows.reduce((sum, w) => sum + w.rows, 0),
     );
 
+  const openBundles = byKind(OPEN_BUNDLE).sort(
+    (a, b) =>
+      Number(b.match[3]) - Number(a.match[3]) ||
+      Number(b.match[5]) - Number(a.match[5]),
+  );
+  for (const { file, match } of openBundles) {
+    const endMs = Number(match[3]);
+    const windows = unclaimed(
+      (w) =>
+        w.day === match[1] &&
+        w.hour === match[2] &&
+        Date.parse(w.file.end) <= endMs,
+    );
+    if (windows.length === 0) continue;
+    const list = windows.map(([, w]) => w);
+    const rows = list.reduce((sum, w) => sum + w.rows, 0);
+    if (rows !== Number(match[6])) continue;
+    const hasCompact = list.some((w) => w.compacted);
+    const matchesOpen = hasCompact
+      ? !partialHours.has(`${match[1]}hour=${match[2]}/`) &&
+        list.reduce((sum, w) => sum + w.sources, 0) <= Number(match[5])
+      : hourBundleName(list) === match[4];
+    if (matchesOpen) {
+      claim(file, windows);
+    }
+  }
   for (const { file, match } of byKind(WINDOW_SUMMARY)) {
     const id = `${match[1]}${match[2]}`;
     if (interior.has(id) && !claimed.has(id)) {
@@ -420,15 +448,18 @@ export function planCoarsestFirst(
 ): { summaries: SummaryUse[]; raw: ManifestFile[] } {
   const days = summaryFiles.filter((f) => f.key.includes("/day_bundle="));
   const hours = summaryFiles.filter((f) => f.key.includes("/hour_bundle="));
+  const open = summaryFiles.filter((f) => f.key.includes("/open_bundle="));
   const windows = summaryFiles.filter((f) => f.key.includes("/summary="));
   const p1 = planSummaries(rawFiles, days, fromMs, toMs);
   const p2 = planSummaries(p1.raw, hours, fromMs, toMs);
-  const p3 = planSummaries(p2.raw, windows, fromMs, toMs);
+  const p2b = planSummaries(p2.raw, open, fromMs, toMs);
+  const p3 = planSummaries(p2b.raw, windows, fromMs, toMs);
   const p4 = planSummaries(p3.raw, summaryFiles, fromMs, toMs);
   return {
     summaries: [
       ...p1.summaries,
       ...p2.summaries,
+      ...p2b.summaries,
       ...p3.summaries,
       ...p4.summaries,
     ],

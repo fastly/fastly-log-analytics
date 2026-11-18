@@ -10468,6 +10468,70 @@ mod summary_bundles {
         let bytes = fake.bucket.borrow()[&day].clone();
         assert_w6_layout(&bytes);
     }
+
+    #[test]
+    fn open_bundle_equals_hour_bundle_of_its_windows() {
+        let fake = Fake::new(BASE + 30 * 60);
+        watermark(&fake, BASE + 30 * 60);
+        for m in 0..8 {
+            window(&fake, BASE + m * 30, (m * 10) as u32, 5);
+        }
+        settle(&fake);
+        let open_key = one_of(&fake, "open_bundle=");
+        let name = bundle::parse_name(&open_key).unwrap();
+        assert_eq!(name.kind, bundle::NameKind::Open);
+        assert_eq!((name.unit, name.count), (8, 8));
+        assert_eq!(name.end_ms, Some((BASE + 7 * 30 + 60) * 1000));
+        let sources: Vec<Vec<u8>> = fake
+            .keys(WINDOWS)
+            .into_iter()
+            .filter(|k| k.contains("/summary="))
+            .map(|k| fake.bucket.borrow()[&k].clone())
+            .collect();
+        let refs: Vec<&[u8]> = sources.iter().map(Vec::as_slice).collect();
+        let one_shot = bundle::merge(&refs, BASE, bundle::Unit::Hour).unwrap();
+        let bytes = fake.bucket.borrow()[&open_key].clone();
+        assert_eq!(bytes, one_shot);
+        assert_w6_layout(&bytes);
+        let view = summary_view(&fake, BASE, BASE + HOUR, 30);
+        assert_eq!(view, vec![("hour".into(), open_key, 40)]);
+    }
+
+    #[test]
+    fn open_bundle_never_seeds_a_resume() {
+        let fake = Fake::new(BASE + 30 * 60);
+        watermark(&fake, BASE + 30 * 60);
+        for m in 0..8 {
+            window(&fake, BASE + m * 60, (m * 100) as u32, 100);
+        }
+        settle(&fake);
+        let first_open = one_of(&fake, "open_bundle=");
+        assert_eq!(bundle::parse_name(&first_open).unwrap().count, 8);
+        assert!(fake.keys(WINDOWS).iter().all(|k| !k.contains("partial=")));
+
+        for m in 8..14 {
+            window(&fake, BASE + m * 60, (m * 100) as u32, 100);
+        }
+        fake.now.set((BASE + 2 * HOUR) as u64);
+        watermark(&fake, BASE + 2 * HOUR);
+        settle(&fake);
+
+        let closed_key = one_of(&fake, "hour_bundle=");
+        let sources: Vec<Vec<u8>> = fake
+            .keys(WINDOWS)
+            .into_iter()
+            .filter(|k| k.contains("/summary="))
+            .map(|k| fake.bucket.borrow()[&k].clone())
+            .collect();
+        let refs: Vec<&[u8]> = sources.iter().map(Vec::as_slice).collect();
+        let one_shot = bundle::merge(&refs, BASE, bundle::Unit::Hour).unwrap();
+        assert_eq!(fake.bucket.borrow()[&closed_key], one_shot);
+
+        fake.now
+            .set((BASE + 2 * HOUR + bundle::RETIRE_GRACE_S + 1) as u64);
+        settle(&fake);
+        assert!(of(&fake, "open_bundle=").is_empty());
+    }
 }
 
 /// Native decode cost per decompressed MB, for comparing converter changes (wasm differs).

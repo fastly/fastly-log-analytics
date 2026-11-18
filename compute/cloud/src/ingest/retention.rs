@@ -588,7 +588,10 @@ fn folder_end(key: &str, prefix: &str) -> Option<i64> {
     {
         return Some(start + DAY_S);
     }
-    let hour: i64 = match next.strip_prefix("hour_bundle=") {
+    let hour: i64 = match next
+        .strip_prefix("hour_bundle=")
+        .or_else(|| next.strip_prefix("open_bundle="))
+    {
         Some(name) => name.get(..2)?.parse().ok()?,
         None => next.strip_prefix("hour=")?.parse().ok()?,
     };

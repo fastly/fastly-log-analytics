@@ -38,6 +38,8 @@ struct State {
     #[serde(default)]
     hour_bundles: BTreeMap<i64, Reference>,
     #[serde(default)]
+    open_bundles: BTreeMap<i64, Reference>,
+    #[serde(default)]
     day_bundles: BTreeMap<i64, Reference>,
     #[serde(default)]
     day_hours: BTreeMap<i64, Reference>,
@@ -93,7 +95,7 @@ pub fn entry(file: &Output, generation: u64) -> Value {
     }
     if let Some(name) = crate::ingest::bundle::parse_name(&file.key) {
         value["kind"] = match name.kind {
-            crate::ingest::bundle::NameKind::Hour => "hour",
+            crate::ingest::bundle::NameKind::Hour | crate::ingest::bundle::NameKind::Open => "hour",
             crate::ingest::bundle::NameKind::Day => "day",
             crate::ingest::bundle::NameKind::Partial => return value,
         }
@@ -183,9 +185,16 @@ fn upcoming(
         let current = index == state.hour;
         let selected = if state.summary || include_summaries {
             state.day_hours.get(hour).or_else(|| {
-                (summary_bounds.0 <= *hour && summary_bounds.1 >= hour + 3600)
-                    .then(|| state.hour_bundles.get(hour))
-                    .flatten()
+                if summary_bounds.0 <= *hour && summary_bounds.1 >= hour + 3600 {
+                    state.hour_bundles.get(hour)
+                } else {
+                    None
+                }
+                .or_else(|| {
+                    (summary_bounds.0 <= *hour)
+                        .then(|| state.open_bundles.get(hour))
+                        .flatten()
+                })
             })
         } else {
             None
@@ -355,12 +364,21 @@ pub fn pinned_page_precise<R: Runtime>(
         let hour = state.hours[state.hour].0;
         if (summary || include_summaries) && !state.summary_ready {
             let day_covered = state.day_hours.contains_key(&hour);
+            let mut is_open = false;
             let selected = state.day_hours.get(&hour).or_else(|| {
                 if summary_bounds.0 <= hour && summary_bounds.1 >= hour + 3600 {
                     state.hour_bundles.get(&hour)
                 } else {
                     None
                 }
+                .or_else(|| {
+                    if summary_bounds.0 <= hour {
+                        is_open = true;
+                        state.open_bundles.get(&hour)
+                    } else {
+                        None
+                    }
+                })
             });
             state.covered_windows.clear();
             if let Some(reference) = selected {
@@ -375,15 +393,20 @@ pub fn pinned_page_precise<R: Runtime>(
                     || upcoming(&state, include_summaries, summary_bounds),
                 )?;
                 let coverage = bundles::parse(&bytes)?;
-                state.covered_windows = coverage.windows;
-                if !day_covered {
-                    if summary {
-                        files.push(entry(&coverage.file, state.generation));
-                    } else {
-                        summaries.push(entry(&coverage.file, state.generation));
-                    }
-                    if files.len() >= FILES_PAGE || summaries.len() >= FILES_PAGE {
-                        break;
+                let open_fits = !is_open
+                    || file_bounds(&coverage.file.key)
+                        .is_some_and(|(_, end)| summary_bounds.1 >= end);
+                if open_fits {
+                    state.covered_windows = coverage.windows;
+                    if !day_covered {
+                        if summary {
+                            files.push(entry(&coverage.file, state.generation));
+                        } else {
+                            summaries.push(entry(&coverage.file, state.generation));
+                        }
+                        if files.len() >= FILES_PAGE || summaries.len() >= FILES_PAGE {
+                            break;
+                        }
                     }
                 }
             }
@@ -531,6 +554,7 @@ fn initial(root: Head, service: String, from: i64, to: i64, summary: bool, now: 
         created: now,
         days,
         hour_bundles: root.hour_bundles,
+        open_bundles: root.open_bundles,
         day_bundles: root.day_bundles,
         ..Default::default()
     }

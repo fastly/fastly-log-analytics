@@ -79,6 +79,8 @@ pub const SERIES_CITY_TOP_K: usize = 50;
 pub const MAX_SOURCES: usize = 24;
 /// Minimum unfolded window summaries in an open hour before pre-folding a `partial=` batch.
 const OPEN_BATCH_SOURCES: usize = 18;
+/// Minimum new closed windows in an open hour before writing an `open_bundle=` Parquet snapshot.
+const OPEN_BUNDLE_MIN: usize = 6;
 /// An hour is closed once ingest has listed raw objects this long past its end plus the log
 /// period, so its windows are all written (late ones are caught by the revisit).
 pub const CLOSE_SLACK_S: i64 = 600;
@@ -234,6 +236,22 @@ pub fn hour_bundle_key(hour_prefix: &str, hour_start: i64, windows: &[String]) -
     )
 }
 
+/// The open-hour partial bundle covering `windows` up to `end_ms` (milliseconds).
+pub fn open_bundle_key(
+    hour_prefix: &str,
+    hour_start: i64,
+    end_ms: i64,
+    windows: &[String],
+) -> String {
+    let rows = windows.iter().map(|k| name_rows(k)).sum();
+    format!(
+        "{hour_prefix}{}open_bundle={:02}-{end_ms}-{}",
+        day_dir(hour_start),
+        hour_start.rem_euclid(DAY_S) / HOUR_S,
+        covering(&names(windows), rows)
+    )
+}
+
 /// The day bundle covering the hour bundles `hours` of the day at `day_start`.
 pub fn day_bundle_key(day_prefix: &str, day_start: i64, hours: &[String]) -> String {
     let rows = hours.iter().map(|k| name_rows(k)).sum();
@@ -247,6 +265,7 @@ pub fn day_bundle_key(day_prefix: &str, day_start: i64, hours: &[String]) -> Str
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameKind {
     Hour,
+    Open,
     Day,
     Partial,
 }
@@ -254,35 +273,43 @@ pub enum NameKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BundleName {
     pub kind: NameKind,
-    /// The hour (`HH`) of an hour bundle, the day of month of a day bundle, 0 for a partial.
+    /// The hour (`HH`) of an hour/open bundle, the day of month of a day bundle, 0 for a partial.
     pub unit: u32,
+    /// End timestamp in milliseconds for `NameKind::Open`.
+    pub end_ms: Option<i64>,
     pub count: usize,
     pub rows: u64,
     pub fp: u64,
 }
 
-/// Parses an hour bundle, day bundle or partial key.
+/// Parses an hour bundle, open bundle, day bundle or partial key.
 pub fn parse_name(key: &str) -> Option<BundleName> {
     let name = file_name(key).strip_suffix(".parquet")?;
-    let (kind, unit, rest) = if let Some(rest) = name.strip_prefix("hour_bundle=") {
+    let (kind, unit, end_ms, rest) = if let Some(rest) = name.strip_prefix("hour_bundle=") {
         let (hh, rest) = rest.split_once('-')?;
-        (NameKind::Hour, hh.parse().ok()?, rest)
+        (NameKind::Hour, hh.parse().ok()?, None, rest)
+    } else if let Some(rest) = name.strip_prefix("open_bundle=") {
+        let (hh, rest) = rest.split_once('-')?;
+        let (end_ms_str, rest) = rest.split_once('-')?;
+        let end_ms: i64 = end_ms_str.parse().ok()?;
+        (NameKind::Open, hh.parse().ok()?, Some(end_ms), rest)
     } else if let Some(rest) = name.strip_prefix("day_bundle=") {
         let day = key.rsplit('/').nth(1)?.strip_prefix("day=")?.parse().ok()?;
-        (NameKind::Day, day, rest)
+        (NameKind::Day, day, None, rest)
     } else {
-        (NameKind::Partial, 0, name.strip_prefix("partial=")?)
+        (NameKind::Partial, 0, None, name.strip_prefix("partial=")?)
     };
     let mut parts = rest.split('-');
     let count = parts.next()?.strip_prefix('c')?.parse().ok()?;
     let rows = parts.next()?.strip_prefix('n')?.parse().ok()?;
     let fp = u64::from_str_radix(parts.next()?.strip_prefix('h')?, 16).ok()?;
-    if parts.next().is_some() || (kind == NameKind::Hour && unit > 23) {
+    if parts.next().is_some() || (matches!(kind, NameKind::Hour | NameKind::Open) && unit > 23) {
         return None;
     }
     Some(BundleName {
         kind,
         unit,
+        end_ms,
         count,
         rows,
         fp,
@@ -2030,6 +2057,9 @@ struct State {
     next_hour: Option<i64>,
     /// Current hour bundle per hour, while its day may still be (re)built or revisited.
     hours: BTreeMap<i64, String>,
+    /// Current open-hour partial bundle per open hour.
+    #[serde(default)]
+    open_bundles: BTreeMap<i64, String>,
     /// Current day bundle per day, while it may be revisited.
     days: BTreeMap<i64, String>,
     /// Days to (re)build once the forward pass is past them.
@@ -2231,8 +2261,13 @@ impl<R: Runtime> Ctx<'_, '_, R> {
     }
 
     /// Folds what the job's best partial and its remaining sources allow this execution, then
-    /// writes the bundle or a partial to resume from.
-    fn build(&mut self, job: Job<'_>) -> Result<Step, String> {
+    /// writes the bundle or a partial to resume from (and for open hours, an `open_bundle=`
+    /// Parquet snapshot every [`OPEN_BUNDLE_MIN`] new closed windows).
+    fn build(
+        &mut self,
+        job: Job<'_>,
+        mut open: Option<(&mut State, usize)>,
+    ) -> Result<Step, String> {
         let mut sources = job.sources;
         sources.sort_unstable_by(|a, b| file_name(a).cmp(file_name(b)));
         let names: Vec<&str> = sources.iter().map(|k| file_name(k)).collect();
@@ -2241,7 +2276,8 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .iter()
             .filter_map(|key| {
                 let name = parse_name(key)?;
-                (name.count > 0
+                (name.kind == NameKind::Partial
+                    && name.count > 0
                     && name.count <= names.len()
                     && fingerprint(names[..name.count].iter().copied()) == name.fp)
                     .then_some((name.count, key))
@@ -2249,11 +2285,21 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .collect();
         candidates.sort_unstable_by(|a, b| b.cmp(a));
         let covered = candidates.first().map_or(0, |(count, _)| *count);
+        let need_partial =
+            job.final_key.is_none() && sources.len().saturating_sub(covered) >= OPEN_BATCH_SOURCES;
+        let need_open = open
+            .as_ref()
+            .is_some_and(|(_, oc)| sources.len().saturating_sub(*oc) >= OPEN_BUNDLE_MIN);
         if job.final_key.is_none() {
-            if sources.len().saturating_sub(covered) < OPEN_BATCH_SOURCES {
+            if !need_partial && !need_open {
                 return Ok(Step::Done);
             }
-            if !self.room(OPEN_BATCH_SOURCES as u32 + 3) {
+            let need = if need_partial {
+                OPEN_BATCH_SOURCES as u32 + 3
+            } else {
+                (sources.len().saturating_sub(covered)).min(MAX_SOURCES) as u32 + 4
+            };
+            if !self.room(need) {
                 return Ok(Step::Pending);
             }
         }
@@ -2312,75 +2358,128 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if defer_final && self.report.stopped.is_none() {
             self.report.stopped = Some("vcpu");
         }
+        let mut wrote_partial = false;
         let (key, mut objects, is_final) = match job
             .final_key
             .filter(|_| done == sources.len() && !defer_final)
         {
             Some(final_key) => {
                 let body = acc.write(job.start, Some(job.unit), job.unit.label())?;
-                (final_key.to_owned(), vec![body], true)
+                (Some(final_key.to_owned()), vec![body], true)
             }
-            None if done > resumed => {
+            None if (job.final_key.is_some() || need_partial) && done > resumed => {
                 let objects = pack_partial(&acc.encode_partial(), CDN_READ_LIMIT)?;
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
                 }
                 let key = format!("{}partial={}", job.folder, covering(&names[..done], rows));
-                (key, objects, false)
+                wrote_partial = true;
+                (Some(key), objects, false)
             }
+            None if job.final_key.is_none() => (None, Vec::new(), false),
             None => return Ok(Step::Pending),
         };
-        self.report.bytes_written += objects.iter().map(|o| o.len() as u64).sum::<u64>();
-        // Continuation objects go first, so a head never names a part that was not written.
-        for (i, part) in objects.drain(1..).enumerate() {
-            self.store.put(&part_key(&key, i + 1), part)?;
-        }
-        let body = objects.pop().ok_or("bundle_body_missing")?;
-        if is_final {
-            if let Some(mut coverage) = job.coverage {
-                let hash = hex::encode(Sha256::digest(&body));
-                let relative = key
-                    .strip_prefix(&self.bundles)
-                    .ok_or("catalog_bundle_key_invalid")?;
-                let canonical = format!("{}sha256={hash}/{relative}", self.bundles);
-                let bytes = body.len() as u64;
-                let md5 = self.store.put_verified(&canonical, body)?;
-                coverage.file = super::worker::Output {
-                    key: canonical,
-                    rows,
-                    bytes,
-                    md5,
-                    metadata: None,
-                };
-                self.publication = Some(coverage);
+        if let Some(key) = key {
+            self.report.bytes_written += objects.iter().map(|o| o.len() as u64).sum::<u64>();
+            // Continuation objects go first, so a head never names a part that was not written.
+            for (i, part) in objects.drain(1..).enumerate() {
+                self.store.put(&part_key(&key, i + 1), part)?;
+            }
+            let body = objects.pop().ok_or("bundle_body_missing")?;
+            if is_final {
+                if let Some(mut coverage) = job.coverage {
+                    let hash = hex::encode(Sha256::digest(&body));
+                    let relative = key
+                        .strip_prefix(&self.bundles)
+                        .ok_or("catalog_bundle_key_invalid")?;
+                    let canonical = format!("{}sha256={hash}/{relative}", self.bundles);
+                    let bytes = body.len() as u64;
+                    let md5 = self.store.put_verified(&canonical, body)?;
+                    coverage.file = super::worker::Output {
+                        key: canonical,
+                        rows,
+                        bytes,
+                        md5,
+                        metadata: None,
+                    };
+                    self.publication = Some(coverage);
+                } else {
+                    self.store.put(&key, body)?;
+                }
             } else {
                 self.store.put(&key, body)?;
             }
-        } else {
-            self.store.put(&key, body)?;
-        }
-        let parts = format!("{}-p", key.trim_end_matches(".parquet"));
-        let stale: Vec<String> = job
-            .partials
-            .into_iter()
-            .filter(|p| *p != key && !p.starts_with(&parts))
-            .collect();
-        if !stale.is_empty() && self.room(1) {
-            match self.store.delete_objects(&stale) {
-                Ok(result) => self.report.deleted += result.deleted.len() as u64,
-                Err(error) => self.report.errors.push(error),
+            let parts = format!("{}-p", key.trim_end_matches(".parquet"));
+            let stale: Vec<String> = job
+                .partials
+                .into_iter()
+                .filter(|p| *p != key && !p.starts_with(&parts))
+                .collect();
+            if !stale.is_empty() && self.room(1) {
+                match self.store.delete_objects(&stale) {
+                    Ok(result) => self.report.deleted += result.deleted.len() as u64,
+                    Err(error) => self.report.errors.push(error),
+                }
             }
         }
         if is_final {
             self.report.rows += rows;
-            Ok(Step::Done)
-        } else {
+            return Ok(Step::Done);
+        }
+        if wrote_partial {
             self.report.partials += 1;
-            if job.final_key.is_none() && sources.len().saturating_sub(done) < OPEN_BATCH_SOURCES {
-                Ok(Step::Done)
-            } else {
-                Ok(Step::Pending)
+        }
+        if let Some((state, open_covered)) = open.as_mut() {
+            if done.saturating_sub(*open_covered) >= OPEN_BUNDLE_MIN && !self.write_stop() {
+                let end_ms = sources[..done]
+                    .iter()
+                    .filter_map(|k| super::catalog::file_bounds(k))
+                    .map(|(_, end)| end * 1000)
+                    .max()
+                    .unwrap_or(job.start * 1000);
+                let open_key = open_bundle_key(&self.bundles, job.start, end_ms, &sources[..done]);
+                let body = acc.write(job.start, Some(Unit::Hour), Unit::Hour.label())?;
+                self.report.bytes_written += body.len() as u64;
+                if self.catalog.version == super::catalog::VERSION {
+                    let hash = hex::encode(Sha256::digest(&body));
+                    let relative = open_key
+                        .strip_prefix(&self.bundles)
+                        .ok_or("catalog_bundle_key_invalid")?;
+                    let canonical = format!("{}sha256={hash}/{relative}", self.bundles);
+                    let bytes = body.len() as u64;
+                    let md5 = self.store.put_verified(&canonical, body)?;
+                    let old = state.open_bundles.insert(job.start, canonical.clone());
+                    self.retire(state, old, Some(&canonical));
+                    self.publication = Some(super::catalog::bundles::Coverage {
+                        file: super::worker::Output {
+                            key: canonical,
+                            rows,
+                            bytes,
+                            md5,
+                            metadata: None,
+                        },
+                        start: job.start,
+                        end: job.start + HOUR_S,
+                        windows: sources[..done].iter().cloned().collect(),
+                        hours: BTreeMap::new(),
+                        built_generation: self.catalog.generation,
+                    });
+                } else {
+                    self.store.put(&open_key, body)?;
+                    let old = state.open_bundles.insert(job.start, open_key.clone());
+                    self.retire(state, old, Some(&open_key));
+                }
             }
+            if self.publication.is_some()
+                || (need_partial && sources.len().saturating_sub(done) >= OPEN_BATCH_SOURCES)
+                || (need_open && done < sources.len())
+            {
+                Ok(Step::Pending)
+            } else {
+                Ok(Step::Done)
+            }
+        } else {
+            Ok(Step::Pending)
         }
     }
 
@@ -2486,17 +2585,22 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 built_generation: self.catalog.generation,
             }
         });
-        let step = self.build(Job {
-            sources: windows,
-            partials,
-            final_key: Some(&key),
-            folder,
-            start: hour,
-            unit: Unit::Hour,
-            coverage,
-        })?;
+        let step = self.build(
+            Job {
+                sources: windows,
+                partials,
+                final_key: Some(&key),
+                folder,
+                start: hour,
+                unit: Unit::Hour,
+                coverage,
+            },
+            None,
+        )?;
         if let Step::Done = step {
             self.retire(state, had, Some(&key));
+            let prev_open = state.open_bundles.remove(&hour);
+            self.retire(state, prev_open, Some(&key));
             state.hours.insert(hour, key);
             state.dirty.insert(day);
             self.report.hours += 1;
@@ -2541,15 +2645,31 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             };
             windows = committed;
         }
-        let step = self.build(Job {
-            sources: windows,
-            partials,
-            final_key: None,
-            folder,
-            start: hour,
-            unit: Unit::Hour,
-            coverage: None,
-        })?;
+        let mut sorted_names: Vec<&str> = windows.iter().map(|k| file_name(k)).collect();
+        sorted_names.sort_unstable();
+        let open_covered = state
+            .open_bundles
+            .get(&hour)
+            .and_then(|key| parse_name(key))
+            .filter(|name| {
+                name.kind == NameKind::Open
+                    && name.count > 0
+                    && name.count <= sorted_names.len()
+                    && fingerprint(sorted_names[..name.count].iter().copied()) == name.fp
+            })
+            .map_or(0, |name| name.count);
+        let step = self.build(
+            Job {
+                sources: windows,
+                partials,
+                final_key: None,
+                folder,
+                start: hour,
+                unit: Unit::Hour,
+                coverage: None,
+            },
+            Some((state, open_covered)),
+        )?;
         if matches!(step, Step::Done) {
             state.inventory = None;
         }
@@ -2603,24 +2723,27 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             .map(|o| o.key)
             .filter(|k| file_name(k).starts_with("partial="))
             .collect();
-        let step = self.build(Job {
-            sources,
-            partials,
-            final_key: Some(&key),
-            folder,
-            start: day,
-            unit: Unit::Day,
-            coverage: (self.catalog.version == super::catalog::VERSION).then(|| {
-                super::catalog::bundles::Coverage {
-                    file: Default::default(),
-                    start: day,
-                    end: day + DAY_S,
-                    windows: BTreeSet::new(),
-                    hours: committed_hours,
-                    built_generation: self.catalog.generation,
-                }
-            }),
-        })?;
+        let step = self.build(
+            Job {
+                sources,
+                partials,
+                final_key: Some(&key),
+                folder,
+                start: day,
+                unit: Unit::Day,
+                coverage: (self.catalog.version == super::catalog::VERSION).then(|| {
+                    super::catalog::bundles::Coverage {
+                        file: Default::default(),
+                        start: day,
+                        end: day + DAY_S,
+                        windows: BTreeSet::new(),
+                        hours: committed_hours,
+                        built_generation: self.catalog.generation,
+                    }
+                }),
+            },
+            None,
+        )?;
         if let Step::Done = step {
             self.retire(state, had, Some(&key));
             state.days.insert(day, key);
@@ -2889,6 +3012,9 @@ pub fn summary_bundle<R: Runtime>(
     let dirty = state.dirty.clone();
     state
         .hours
+        .retain(|h, _| *h >= keep_from || dirty.contains(&(h.div_euclid(DAY_S) * DAY_S)));
+    state
+        .open_bundles
         .retain(|h, _| *h >= keep_from || dirty.contains(&(h.div_euclid(DAY_S) * DAY_S)));
     state.days.retain(|d, _| *d >= keep_from);
     state.catalog_hours.retain(|h, _| *h >= keep_from);
