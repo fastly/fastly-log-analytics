@@ -244,7 +244,7 @@ fn route(
                 value => serde_json::from_value(value.clone())
                     .map_err(|_| Error::new(400, "invalid_capture"))?,
             };
-            let (service, snippets) = preflight(
+            let (service, snippets, conditions, token_info) = preflight(
                 context,
                 token,
                 sid,
@@ -266,7 +266,22 @@ fn route(
                     return Err(Error::new(400, "invalid_prefix"));
                 }
             }
-            let mut result = json!({"valid":true,"service":{"id":sid,"name":service["name"]},"customer_id":service["customer_id"]});
+            let mut result = json!({
+                "valid": true,
+                "service": {"id": sid, "name": service["name"]},
+                "service_name": service["name"],
+                "customer_id": service["customer_id"],
+                "token_info": token_info,
+                "defaults": {
+                    "endpoint_name": "Fastly Object Storage Logs",
+                    "fos_region": "us-east-1",
+                    "fos_bucket_name": format!("fos-{}-logs", safe_service_id(sid)),
+                    "fos_prefix": "",
+                    "sample_rate": 100,
+                    "edge_only": true,
+                    "log_period": "1 minute",
+                },
+            });
             if capture == Capture::Attached {
                 let fields = if input["log_fields"].is_object() {
                     input["log_fields"].clone()
@@ -280,7 +295,20 @@ fn route(
                 let missing =
                     crate::logging::uncaptured_fields(&json!({"log_fields":fields}), &bodies)
                         .map_err(|_| Error::new(400, "invalid_log_fields"))?;
-                result["capture"] = json!({"mode":"attached","missing_fields":missing});
+                let rum_present = conditions.iter().any(|v| v["name"] == "rum_log_condition")
+                    || snippets
+                        .iter()
+                        .any(|v| v["name"].as_str().is_some_and(|n| n.contains("RUM")));
+                let cmcd_present = bodies
+                    .iter()
+                    .any(|b| b.to_ascii_lowercase().contains("req.http.x-cmcd:"))
+                    || snippets.iter().any(|v| v["name"] == "CMCD Extraction");
+                result["capture"] = json!({
+                    "mode": "attached",
+                    "missing_fields": missing,
+                    "rum_present": rum_present,
+                    "cmcd_present": cmcd_present,
+                });
             }
             Ok(result)
         }
@@ -416,11 +444,37 @@ fn own_services(runtime: &impl Runtime) -> Result<Vec<String>, Error> {
         .collect()
 }
 
+fn safe_service_id(sid: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = true;
+    for ch in sid.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 fn validate_token(
     context: &Context<'_, impl Runtime>,
     token: &str,
     sid: Option<&str>,
 ) -> Result<String, Error> {
+    validate_token_with_info(context, token, sid).map(|(customer, _)| customer)
+}
+
+fn validate_token_with_info(
+    context: &Context<'_, impl Runtime>,
+    token: &str,
+    sid: Option<&str>,
+) -> Result<(String, Value), Error> {
     if token.is_empty() || token.len() > 1024 || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Error::new(400, "invalid_token"));
     }
@@ -479,7 +533,18 @@ fn validate_token(
     if app["customer_id"] != customer {
         return Err(Error::new(403, "wrong_account"));
     }
-    Ok(customer)
+    let token_type = if info["user_id"].as_str().is_some_and(|id| !id.is_empty()) {
+        "user"
+    } else {
+        "automation"
+    };
+    let token_info = json!({
+        "id": info["id"],
+        "name": info["name"],
+        "user_id": info["user_id"],
+        "type": token_type,
+    });
+    Ok((customer, token_info))
 }
 
 fn preflight(
@@ -488,14 +553,14 @@ fn preflight(
     sid: &str,
     endpoint: Option<&str>,
     capture: Capture,
-) -> Result<(Value, Vec<Value>), Error> {
+) -> Result<(Value, Vec<Value>, Vec<Value>, Value), Error> {
     if !valid_service_id(sid) {
         return Err(Error::new(400, "invalid_service_id"));
     }
     if own_services(context.runtime)?.iter().any(|v| v == sid) {
         return Err(Error::new(400, "install_service_forbidden"));
     }
-    let customer = validate_token(context, token, Some(sid))?;
+    let (customer, token_info) = validate_token_with_info(context, token, Some(sid))?;
     let service = context.api("GET", &format!("/service/{sid}"), token, None)?;
     if service["customer_id"] != customer {
         return Err(Error::new(403, "wrong_account"));
@@ -558,7 +623,7 @@ fn preflight(
     if attached {
         reconcile::attach_condition_statement(&conditions, "")?;
     }
-    Ok((service, snippets))
+    Ok((service, snippets, conditions, token_info))
 }
 
 fn check_generation(record: &Record, input: &Value) -> Result<(), Error> {
@@ -1021,7 +1086,7 @@ fn provision(
         return Err(Error::new(400, "invalid_logging_settings"));
     }
     let logging_endpoint_name = input.endpoint_name();
-    let (target, _) = preflight(
+    let (target, _, _, _) = preflight(
         context,
         &input.token,
         &input.service_id,

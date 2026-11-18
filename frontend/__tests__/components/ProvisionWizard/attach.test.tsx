@@ -2,15 +2,18 @@
  * @vitest-environment jsdom
  */
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { getApiBase } from '@/lib/api'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import {
-  ATTACH_ENDPOINT_NAME, applyAttach, attachUnavailableMessage, clearAttach, resolveAttachOffer,
-} from '@/components/ProvisionWizard/attach'
-import { INITIAL_CONFIG, type WizardState } from '@/components/ProvisionWizard/types'
+import { createTestQueryClient, createUseSSEMock, renderWithQuery } from '@/__tests__/helpers/page-smoke'
+import { ATTACH_ENDPOINT_NAME, applyAttach, attachUnavailableMessage, clearAttach, resolveAttachOffer } from '@/components/ProvisionWizard/attach'
+import { REGION_LABELS } from '@/lib/utils'
+import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
+import { getStepsForMode, INITIAL_CONFIG, type WizardState } from '@/components/ProvisionWizard/types'
+import { WizardFooter } from '@/components/ProvisionWizard/WizardChrome'
 import { ServiceStep } from '@/components/ProvisionWizard/steps/CredentialsStep'
 import { FeaturesStep } from '@/components/ProvisionWizard/steps/DomainStep'
 import { FieldsStep } from '@/components/ProvisionWizard/steps/FieldsStep'
@@ -19,6 +22,12 @@ import { runDeploy } from '@/components/ProvisionWizard/wizardActions'
 const API_BASE = getApiBase()
 const managed = Object.assign(new Error('service_managed_by_other_install'), { status: 409 })
 const noFields = { groups: [], field_overrides: {} }
+const { state: sseState, start: mockStart } = createUseSSEMock()
+
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
+  useSSE: () => sseState,
+}))
 
 afterEach(() => setCloudModeRuntime(false))
 
@@ -139,5 +148,129 @@ describe('attach UI', () => {
       estimatedBytes: 100,
     })} />)
     expect(screen.getByText(/CMCD/i)).toBeInTheDocument()
+  })
+
+  it('auto-matches rum_enabled, cmcd_enabled, and log_fields from the attach offer', () => {
+    const offer = {
+      serviceId: 'svc-1',
+      available: true as const,
+      missingFields: ['server_region'],
+      data: {
+        capture: { mode: 'attached', missing_fields: ['server_region'], rum_present: true, cmcd_present: true },
+      },
+    }
+    const attached = applyAttach(INITIAL_CONFIG, offer)
+    expect(attached).toMatchObject({
+      capture: 'attached',
+      endpoint_name: ATTACH_ENDPOINT_NAME,
+      logging_enabled: true,
+      rum_enabled: true,
+      cmcd_enabled: true,
+    })
+    expect(attached.log_fields.groups).toEqual(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'])
+    expect(attached.log_fields.field_overrides).toEqual({ server_region: false })
+  })
+
+  it('skips features and fields steps in attach mode', () => {
+    setCloudModeRuntime(true)
+    expect(
+      getStepsForMode('provision', { logging_enabled: true, capture: 'attached' }).map((s) => s.id),
+    ).toEqual(['token', 'service', 'storage', 'execute'])
+
+    const setStep = vi.fn()
+    render(
+      <WizardFooter
+        s={state({
+          step: 'storage',
+          mode: 'provision',
+          setStep,
+          domainStatus: 'idle',
+          config: applyAttach(INITIAL_CONFIG),
+        })}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(setStep).toHaveBeenCalledWith('execute')
+  })
+
+  it('populates fos_bucket_name, fos_region, fos_prefix, and tokenInfo when accepting attach', async () => {
+    setCloudModeRuntime(true)
+    Element.prototype.getAnimations ??= () => []
+    const user = userEvent.setup()
+    mockStart.mockClear()
+    server.use(
+      http.post(`${API_BASE}/api/provision/services`, () =>
+        HttpResponse.json({ services: [{ id: 'svc-1', name: 'Demo', provisioned: false }] }),
+      ),
+      http.post(`${API_BASE}/api/provision/validate`, async ({ request }) => {
+        const body = (await request.json()) as { capture?: string }
+        if (body.capture === 'attached') {
+          return HttpResponse.json({
+            valid: true,
+            service_name: 'Demo',
+            token_info: { id: 'tok-1', name: 'CI Token', type: 'automation' },
+            defaults: {
+              endpoint_name: 'Fastly Object Storage Logs',
+              fos_region: 'eu-central-1',
+              fos_bucket_name: 'fos-svc-1-logs',
+              fos_prefix: 'logs/',
+            },
+            capture: {
+              mode: 'attached',
+              missing_fields: ['server_region'],
+              rum_present: true,
+              cmcd_present: false,
+            },
+          })
+        }
+        return HttpResponse.json(
+          { detail: 'service_managed_by_other_install', error: 'service_managed_by_other_install' },
+          { status: 409 },
+        )
+      }),
+    )
+
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, {
+      queryClient: createTestQueryClient(),
+    })
+
+    await user.type(screen.getByLabelText(/api token/i), 'TOK')
+    await user.click(screen.getByRole('button', { name: /fetch services/i }))
+    await user.click(await screen.findByRole('button', { name: /Select service Demo, id svc-1/i }))
+    await user.click(await screen.findByRole('button', { name: 'Attach alongside the existing install' }))
+
+    expect(await screen.findByDisplayValue('fos-svc-1-logs')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('FLP Cloud Logs')).toBeInTheDocument()
+    expect(screen.getByText(REGION_LABELS['eu-central-1'])).toBeInTheDocument()
+    expect(screen.queryByText(/Select features to deploy/i)).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByText(/fos-svc-1-logs/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Back/i }))
+    await user.click(screen.getByRole('button', { name: /Back/i }))
+    expect(await screen.findByText('CI Token')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Select service Demo, id svc-1/i }))
+    await user.click(await screen.findByRole('button', { name: 'Attach alongside the existing install' }))
+    await user.click(await screen.findByRole('button', { name: 'Continue' }))
+    await user.click(await screen.findByRole('button', { name: 'Deploy to Fastly' }))
+    expect(mockStart).toHaveBeenCalledWith(
+      '/api/provision/execute',
+      expect.objectContaining({
+        capture: 'attached',
+        endpoint_name: 'FLP Cloud Logs',
+        fos_bucket_name: 'fos-svc-1-logs',
+        fos_region: 'eu-central-1',
+        fos_prefix: 'logs/',
+        logging_enabled: true,
+        rum_enabled: true,
+        cmcd_enabled: false,
+        log_fields: JSON.stringify({
+          groups: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'],
+          field_overrides: { server_region: false },
+        }),
+      }),
+    )
   })
 })

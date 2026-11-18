@@ -6588,8 +6588,13 @@ fn attach_alongside(other_has_rum: bool) {
     );
     assert_eq!(
         validated["capture"],
-        json!({"mode":"attached","missing_fields":[]})
+        json!({"mode":"attached","missing_fields":[],"rum_present":other_has_rum,"cmcd_present":false})
     );
+    assert_eq!(
+        validated["defaults"]["fos_bucket_name"],
+        "fos-fixtureservice-logs"
+    );
+    assert_eq!(validated["defaults"]["fos_region"], "us-east-1");
 
     let job = platform.json(
         "POST",

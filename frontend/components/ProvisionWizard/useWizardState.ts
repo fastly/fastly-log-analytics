@@ -362,7 +362,8 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const acceptAttach = () => {
     if (!attachOffer?.available || attachOffer.serviceId !== selectedService?.id) return
     validateOnSuccess(attachOffer.data)
-    setConfig(applyAttach)
+    setConfig((prev) => applyAttach(prev, attachOffer))
+    setStep("storage")
     setAttachOffer(null)
   }
 

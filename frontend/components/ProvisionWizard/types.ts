@@ -125,16 +125,18 @@ export interface WizardDraft {
 
 export function getStepsForMode(
   mode: WizardMode,
-  config?: { logging_enabled?: boolean },
+  config?: { logging_enabled?: boolean; capture?: "managed" | "attached" },
 ): { id: Step; label: string }[] {
+  const attached = config?.capture === "attached"
   const steps: { id: Step; label: string }[] = [
     ...(isCloudMode() ? [] : [{ id: "mode" as const, label: "Role" }]),
     { id: "token", label: "Auth" },
     { id: "service", label: "Service" },
   ]
   if (mode === "ingest") steps.push({ id: "connect", label: "Connect" })
-  steps.push({ id: "features", label: "Features" }, { id: "storage", label: "Storage" })
-  if (!config || config.logging_enabled !== false) {
+  if (!attached) steps.push({ id: "features", label: "Features" })
+  steps.push({ id: "storage", label: "Storage" })
+  if (!attached && (!config || config.logging_enabled !== false)) {
     // Cloud has no NGWAF workspace lookup; its server ignores ngwaf_workspace_id.
     if (!isCloudMode()) steps.push({ id: "ngwaf", label: "NGWAF" })
     steps.push({ id: "fields", label: "Log Fields" })

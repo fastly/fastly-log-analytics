@@ -193,7 +193,15 @@ export function WizardFooter({ s }: { s: WizardState }) {
           )}
           {step === "storage" && (
             <Button
-              onClick={() => setStep(config.logging_enabled ? (isCloudMode() ? "fields" : "ngwaf") : "execute")}
+              onClick={() =>
+                setStep(
+                  config.capture === "attached" || !config.logging_enabled
+                    ? "execute"
+                    : isCloudMode()
+                      ? "fields"
+                      : "ngwaf",
+                )
+              }
               disabled={domainStatus === "taken" || domainStatus === "checking"}
               className="h-9 text-xs"
             >

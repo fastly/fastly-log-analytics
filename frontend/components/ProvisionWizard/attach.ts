@@ -37,12 +37,27 @@ export async function resolveAttachOffer(
   }
 }
 
-export function applyAttach(prev: ProvisionConfig): ProvisionConfig {
-  return {
+const ALL_LOG_FIELD_GROUPS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
+
+export function applyAttach(prev: ProvisionConfig, offer?: AttachOffer): ProvisionConfig {
+  const base: ProvisionConfig = {
     ...prev,
     capture: "attached",
     endpoint_name: ATTACH_ENDPOINT_NAME,
     logging_enabled: true,
+  }
+  if (!offer?.available) return base
+  const capture = (offer.data as { capture?: { rum_present?: unknown; cmcd_present?: unknown } } | undefined)?.capture
+  const fieldOverrides = Object.fromEntries(offer.missingFields.map((id) => [id, false]))
+  return {
+    ...base,
+    rum_enabled: capture?.rum_present === true,
+    cmcd_enabled: capture?.cmcd_present === true,
+    log_fields: {
+      ...prev.log_fields,
+      groups: [...ALL_LOG_FIELD_GROUPS],
+      field_overrides: fieldOverrides,
+    },
   }
 }
 
