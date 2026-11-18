@@ -19,6 +19,7 @@ export const LAYOUT_B: readonly (readonly string[])[] = [
   ["asset_urls"],
   ["ins_lat"],
   ["ins_asn"],
+  ["shield_routes"],
 ];
 
 /**

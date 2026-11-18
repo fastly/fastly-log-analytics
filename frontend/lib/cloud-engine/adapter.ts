@@ -448,6 +448,7 @@ type SectionRollup = {
 
 const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/origin/aggregates": { label: "/origin", eligible: originRollupEligible },
+  "/api/origin/shielding-analysis": { label: "/origin", eligible: originRollupEligible },
   "/api/performance": { label: "/performance", eligible: performanceRollupEligible },
   "/api/performance/aggregates": { label: "/performance", eligible: performanceRollupEligible },
   "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible },

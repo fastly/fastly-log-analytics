@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import type { ManifestFile } from "./dashboard/manifest";
 import { Histogram } from "./dashboard/histogram";
@@ -318,8 +319,8 @@ describe("originRollupSections", () => {
 });
 
 describe("originFromRollup", () => {
-  const source = (summaries: ManifestFile[] = WINDOWS) =>
-    fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(summaries)]);
+  const source = (summaries: ManifestFile[] = WINDOWS, buffers = BUFFERS) =>
+    fixtureSource([fixturePage(RAW)], buffers, { json: [], files: [] }, [fixturePage(summaries)]);
 
   it("answers unfiltered origin IP health, status codes and OTTLB series from summaries without reading raw files", async () => {
     const s = source();
@@ -359,5 +360,47 @@ describe("originFromRollup", () => {
     }
     expect(originRollupEligible("/api/origin/ip-health", body())).toBe(false);
     expect(await originFromRollup("/api/origin/aggregates", body({ filters: {} }), source())).not.toBeNull();
+  });
+
+  it("answers /api/origin/shielding-analysis from shield_routes when covered", async () => {
+    const h = new Histogram();
+    h.min = 30_000;
+    h.max = 30_000;
+    h.buckets[52] = 5;
+    const hBytes = h.toBytes()!;
+    const t = new Date(T0);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["overview", "dim_totals", "shield_routes"], type: "STRING" },
+        { name: "bucket", data: [t, t, t], type: "TIMESTAMP" },
+        { name: "field", data: ["", "route", "route"], type: "STRING" },
+        { name: "value", data: ["", "shield_routes", JSON.stringify(["EWR", "IAD"])], type: "STRING" },
+        { name: "requests", data: [BigInt(5), BigInt(5), BigInt(5)], type: "INT64" },
+        { name: "errors", data: [null, null, BigInt(0)], type: "INT64" },
+        { name: "truncated", data: [null, false, null], type: "BOOLEAN" },
+        { name: "overhead_hist", data: [null, null, hBytes], type: "BYTE_ARRAY" },
+      ],
+    });
+    const win = WINDOWS[0];
+    const s = source([win], { [win.key]: summaryBuf });
+    const served = await originFromRollup(
+      "/api/origin/shielding-analysis",
+      { start_time: win.start, end_time: win.end, limit: 50 },
+      s,
+    ) as {
+      has_data: boolean;
+      total_routes: number;
+      _approx: boolean;
+      _approx_note: string;
+      rows: Array<{ edge_pop: string; shield_pop: string; requests: number }>;
+    };
+    expect(served.has_data).toBe(true);
+    expect(served.total_routes).toBe(1);
+    expect(served._approx).toBe(true);
+    expect(served._approx_note).toBe("≈ (window-local join)");
+    expect(served.rows[0]).toMatchObject({ edge_pop: "EWR", shield_pop: "IAD", requests: 5 });
+    expect(s.log.files).toEqual([win.key]);
+    expect(originRollupEligible("/api/origin/shielding-analysis", { filters: { pop: { mode: "include", values: ["IAD"] } } })).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ import {
   type QualityPart,
 } from "./network";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
+import { shieldingFromRollup } from "./origin-rollup";
 
 /**
  * How a response answered from v3 summaries differs from the raw scan: it
@@ -64,7 +65,9 @@ const lowerBounds = (rollup: RollupResult["rollup"]) =>
  */
 export function canServeHealthFromRollup(sections: readonly string[] | undefined, mapAsn?: string): boolean {
   return Boolean(sections?.length) && sections!.every((section) =>
-    HEALTH_SECTIONS.has(section) || MAP_SECTIONS.has(section) && (!mapAsn || mapAsn === "all"));
+    HEALTH_SECTIONS.has(section) ||
+    section === "shielding_analysis" ||
+    MAP_SECTIONS.has(section) && (!mapAsn || mapAsn === "all"));
 }
 
 function meta(result: RollupResult, approximate: string[], lowerBound: string[]): NetworkRollupMeta {
@@ -290,23 +293,46 @@ export function mapFromRollup(result: RollupResult, params: Pick<NetworkQueryPar
   };
 }
 
-/** /network-health from summaries: the core sections, the city map, or both. */
+/** /network-health from summaries: the core sections, the city map, shielding, or any combination. */
 function healthFromRollup(result: RollupResult, params: NetworkQueryParams) {
   const sections = params.sections ?? [];
+  const wantsShielding = sections.includes("shielding_analysis");
+  const shielding = wantsShielding ? shieldingFromRollup(result, params.top_n ?? 30) : undefined;
+  if (wantsShielding && !shielding) return null;
   const wantsMap = sections.some((section) => MAP_SECTIONS.has(section));
+  const wantsCore = sections.some((section) => HEALTH_SECTIONS.has(section) && section !== "buckets");
   const map = wantsMap ? mapFromRollup(result, params) : null;
   if (wantsMap && !map) return null;
-  if (map && !sections.some((section) => HEALTH_SECTIONS.has(section) && section !== "buckets")) {
+  const shieldingLb = wantsShielding && result.rollup.truncated.has("shield_routes/route")
+    ? ["shielding_analysis.total_routes"] : [];
+  if (!wantsCore) {
     const missing = missingTcpFields(sumAggs(result.rollup.dims.get("country")?.values() ?? []));
+    const approx = [
+      ...(map ? HEALTH_APPROXIMATE : []),
+      ...(wantsShielding ? ["shielding_analysis"] : []),
+    ];
     return {
       ...emptyNetworkHealth(missing),
-      has_data: map.buckets.length > 0,
-      ...map,
-      rollup: meta(result, HEALTH_APPROXIMATE, lowerBounds(result.rollup)),
+      has_data: Boolean(map?.buckets.length) || Boolean(shielding?.has_data),
+      ...(map ?? {}),
+      ...(shielding ? { shielding_analysis: shielding } : {}),
+      rollup: meta(result, approx, [...(map ? lowerBounds(result.rollup) : []), ...shieldingLb]),
     };
   }
   const core = networkHealthFromRollup(result, params);
-  return core && map ? { ...core, cities: map.cities, map_buckets: map.map_buckets } : core;
+  if (!core) return null;
+  return {
+    ...core,
+    ...(map ? { cities: map.cities, map_buckets: map.map_buckets } : {}),
+    ...(shielding ? { shielding_analysis: shielding } : {}),
+    rollup: wantsShielding
+      ? {
+          ...core.rollup,
+          approximate: [...core.rollup.approximate, "shielding_analysis"],
+          lower_bound: [...core.rollup.lower_bound, ...shieldingLb],
+        }
+      : core.rollup,
+  };
 }
 
 const QUALITY_APPROXIMATE = ["scatter"];
@@ -612,12 +638,12 @@ export function networkRollupEligible(path: string, params: NetworkQueryParams):
  * so they share one projection per file.
  */
 export const NETWORK_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "quality", "transport", "sample", "dim_totals"],
+  groups: ["dims", "series5", "quality", "transport", "sample", "shield_routes", "dim_totals"],
   columns: [
-    "label", "requests", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
+    "label", "requests", "errors", "status_5xx", "cache_hits", "resp_bytes_sum", "rtt_sum", "rtt_count", "ploss_sum",
     "ploss_count", "cwnd_sum", "cwnd_count", "rttvar_sum", "rttvar_count", "retrans_count", "lat_sum", "lon_sum",
     "geo_count", "delivery_rate_sum", "delivery_rate_count", "throughput_sum", "throughput_count", "ttfb_sum",
-    "sample_key", "rtt_hist", "ttfb_hist",
+    "sample_key", "rtt_hist", "ttfb_hist", "overhead_hist",
   ],
 });
 

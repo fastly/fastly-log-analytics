@@ -177,7 +177,7 @@ export type RollupSample = {
 };
 
 /** Groups whose rows `decodeRollup` keeps in `Rollup.groups`. */
-const KEYED_GROUPS = new Set(["transport", "origin", "urls", "quality", "ins_url", "ins_ip", "ins_lat", "ins_asn"]);
+const KEYED_GROUPS = new Set(["transport", "origin", "urls", "quality", "ins_url", "ins_ip", "ins_lat", "ins_asn", "shield_routes"]);
 
 /**
  * One field of a `transport`, `origin`, `urls` or `quality` group, or null when

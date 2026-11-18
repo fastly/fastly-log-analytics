@@ -40,6 +40,7 @@ pub const INS_URL_K: usize = 500;
 pub const INS_IP_K: usize = 500;
 pub const INS_ASN_K: usize = 500;
 pub const ASSET_URL_K: usize = 500;
+pub const SHIELD_ROUTE_K: usize = 500;
 /// ASNs kept in `series5` per window and hour bundle: 4x the 30 a day bundle writes.
 pub const SERIES_ASN_K: usize = 120;
 /// Cities kept in `series5` per window and hour bundle (the /network map): 4x the 50 a day
@@ -864,6 +865,8 @@ struct NetCols<'a> {
     ttfb_ms: Num<'a>,
     origin_ms: Num<'a>,
     req_id: Str<'a>,
+    rid: Str<'a>,
+    prid: Str<'a>,
     /// /network transport's `COALESCE(proto, protocol, 'Unknown')`, RTT and delivery rate.
     transport_proto: Str<'a>,
     transport_rtt: Num<'a>,
@@ -945,6 +948,8 @@ impl<'a> NetCols<'a> {
             ),
             origin_ms: Num::new(batch, &[("origin_Whole_ms", 1.0), ("origin_time_ms", 1.0)]),
             req_id: Str::new(batch, &["fastly_req_id", "rid"]),
+            rid: Str::new(batch, &["rid"]),
+            prid: Str::new(batch, &["prid"]),
             transport_proto: Str::new(batch, &["proto", "protocol"]),
             transport_rtt: Num::new(
                 batch,
@@ -2927,6 +2932,75 @@ fn write_insights_lat_asn(rows: &[Rows], bucket: i64, out: &mut Out) {
     }
 }
 
+#[derive(Default)]
+struct ShieldRouteAgg {
+    requests: i64,
+    overhead: Hist,
+    errors: i64,
+}
+
+fn write_shield_routes(rows: &[Rows], bucket: i64, out: &mut Out) {
+    let mut shields: FastMap<&str, Vec<(&str, Option<i64>)>> = FastMap::default();
+    for r in rows {
+        for i in r.live() {
+            if leg(get_b(r.edge, i)) != "false" {
+                continue;
+            }
+            let Some(prid) = r.net.prid.get(i, true) else {
+                continue;
+            };
+            let pop = r.net.pop.get(i, false).unwrap_or("");
+            let us = get_i(r.ottfb, i).or_else(|| ttfb_us(get_f(r.ttfb, i)));
+            shields.entry(prid).or_default().push((pop, us));
+        }
+    }
+
+    let mut routes: FastMap<Cow<str>, ShieldRouteAgg> = FastMap::default();
+    for r in rows {
+        for i in r.live() {
+            if leg(get_b(r.edge, i)) != "true" {
+                continue;
+            }
+            let Some(rid) = r.net.rid.get(i, true) else {
+                continue;
+            };
+            let Some(matched) = shields.get(rid) else {
+                continue;
+            };
+            let e_pop = r.net.pop.get(i, false).unwrap_or("");
+            let e_us = get_i(r.ottfb, i).or_else(|| ttfb_us(get_f(r.ttfb, i)));
+            for &(s_pop, s_us) in matched {
+                let key = serde_json::to_string(&(e_pop, s_pop)).expect("strings serialize");
+                let agg = routes.entry(Cow::Owned(key)).or_default();
+                agg.requests += 1;
+                if let (Some(e), Some(s)) = (e_us, s_us) {
+                    let delta = e - s;
+                    agg.overhead.add(delta);
+                    if delta < 0 {
+                        agg.errors += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let (kept, total, truncated) = top_untimed(routes, |x| x.requests, SHIELD_ROUTE_K);
+    push_total(out, bucket, "shield_routes", "route", total, truncated);
+    for (value, x) in &kept {
+        let mut row = vec![
+            (C::Bundle, V::S("shield_routes")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("route")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(x.requests)),
+            (C::Errors, V::I(x.errors)),
+        ];
+        let blobs = [&x.overhead].map(Hist::to_bytes);
+        push_hists(&mut row, &[C::OverheadHist], &blobs);
+        out.push(&row);
+    }
+}
+
 /// Builds the summary for the rows of one window `[start, end)` (seconds). Deterministic: the
 /// same batches in the same order give the same bytes. Heap: one field's value map at a time
 /// (about rows x 48 bytes plus 4 bytes per IP row), plus at most `IP_TOP_K` sketches per field
@@ -3201,6 +3275,7 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     write_insights(&rows, bucket, &mut out);
     write_asset_urls(&rows, bucket, &mut out);
     write_insights_lat_asn(&rows, bucket, &mut out);
+    write_shield_routes(&rows, bucket, &mut out);
     write_sample(&rows, sample, &mut out);
 
     let batch = out.finish()?;

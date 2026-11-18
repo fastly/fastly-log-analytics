@@ -6,6 +6,7 @@ import type { NetworkRollupMeta } from "./network-rollup";
 import {
   emptyOriginAggregates,
   emptyOriginSummary,
+  enrichShieldingRouteWithPopDistance,
   shapeOriginPathBreakdownRows,
   shapeOriginPopLatencyRows,
   shapeOriginSlowUrlsRows,
@@ -242,7 +243,9 @@ function ottlbSeries(result: RollupResult, bucketMinutes: number, percentile: st
 
 /** Whether summaries may answer this /origin read at all, before any range or listing is resolved. */
 export function originRollupEligible(path: string, body: OriginRollupBody): boolean {
-  if (path !== "/api/origin/aggregates" || hasFilterValues(body.filters, body.custom_filters)) return false;
+  if (hasFilterValues(body.filters, body.custom_filters)) return false;
+  if (path === "/api/origin/shielding-analysis") return true;
+  if (path !== "/api/origin/aggregates") return false;
   const servable = new Set<string>(originRollupSections({
     metric: body.timeseries_metric ?? "ttfb",
     bucketMinutes: body.bucket_minutes ?? 5,
@@ -330,23 +333,65 @@ export function originAggregatesFromRollup(
   };
 }
 
+/**
+ * /network and /origin shielding analysis from `shield_routes` (window-local join
+ * of edge `rid` to shield `prid`), ranked by requests desc and p50 desc.
+ * Returns null when summaries predate `shield_routes`.
+ */
+export function shieldingFromRollup(result: RollupResult, limit = 50) {
+  const routes = rollupGroup(result.rollup, "shield_routes", "route");
+  if (!routes) return null;
+  const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+  const shaped = [...routes].map(([key, agg]) => {
+    const [edge_pop, shield_pop] = JSON.parse(key) as [string, string];
+    const h = agg.hists.overhead;
+    return enrichShieldingRouteWithPopDistance({
+      edge_pop,
+      shield_pop,
+      requests: agg.requests,
+      p50_ms: ms(h, 0.5),
+      p95_ms: ms(h, 0.95),
+      p99_ms: ms(h, 0.99),
+    });
+  });
+  const byReqs = [...shaped].sort((a, b) => b.requests - a.requests);
+  const byP50 = [...shaped].sort(
+    (a, b) => (b.p50_ms ?? -Infinity) - (a.p50_ms ?? -Infinity) || b.requests - a.requests,
+  );
+  const keep = new Set([...byReqs.slice(0, safeLimit), ...byP50.slice(0, safeLimit)]);
+  const rows = byReqs.filter((r) => keep.has(r));
+  const total_routes = routes.size;
+  const truncated = total_routes > rows.length || result.rollup.truncated.has("shield_routes/route");
+  return {
+    has_data: rows.length > 0,
+    requires_fields: [] as string[],
+    edge_only: rows.length === 0 && (result.rollup.overview?.requests ?? 0) > 0,
+    rows,
+    total_routes,
+    truncated,
+    error: false,
+    _approx: true as const,
+    _approx_note: "≈ (window-local join)",
+  };
+}
+
 /** The summary groups and columns /origin reads. */
 export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "dim_totals"],
+  groups: ["dims", "series5", "all_fields", "field_totals", "origin", "urls", "shield_routes", "dim_totals"],
   columns: [
-    "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
+    "count", "requests", "errors", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
     "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
   ],
 });
 
 /**
- * Answers an unfiltered Cloud /origin aggregates read from v3 summaries, or
- * returns null when the raw scan must: a filter, a section or series option
- * summaries don't hold, or a range they don't cover (see `queryRollup`).
+ * Answers an unfiltered Cloud /origin aggregates or shielding-analysis read from
+ * v3 summaries, or returns null when the raw scan must: a filter, a section or
+ * series option summaries don't hold, or a range they don't cover (see `queryRollup`).
  */
 export async function originFromRollup(
   path: string,
-  body: OriginRollupBody,
+  body: OriginRollupBody & { limit?: number },
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
   /** Null reads whole files. */
@@ -357,5 +402,19 @@ export async function originFromRollup(
   const toMs = parseEpochMs(body.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
-  return result ? originAggregatesFromRollup(result, body) : null;
+  if (!result) return null;
+  if (path === "/api/origin/shielding-analysis") {
+    const shielding = shieldingFromRollup(result, body.limit ?? 50);
+    if (!shielding) return null;
+    return {
+      ...shielding,
+      rollup: {
+        data_from: new Date(result.dataFromMs).toISOString(),
+        data_through: new Date(result.dataThroughMs).toISOString(),
+        approximate: ["p50_ms", "p95_ms", "p99_ms"],
+        lower_bound: result.rollup.truncated.has("shield_routes/route") ? ["total_routes"] : [],
+      },
+    };
+  }
+  return originAggregatesFromRollup(result, body);
 }

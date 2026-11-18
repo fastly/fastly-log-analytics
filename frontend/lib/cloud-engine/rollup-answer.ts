@@ -33,6 +33,8 @@ const ANSWERS: Record<string, Answer> = {
   "/api/network/bundle": network,
   "/api/origin/aggregates": (path, params, source, signal) =>
     originFromRollup(path, params as OriginRollupBody, source, signal),
+  "/api/origin/shielding-analysis": (path, params, source, signal) =>
+    originFromRollup(path, params as OriginRollupBody, source, signal),
   "/api/performance": performance,
   "/api/performance/aggregates": performance,
   "/api/security/aggregates": security,

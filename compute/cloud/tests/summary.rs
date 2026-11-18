@@ -2650,6 +2650,64 @@ fn ins_asn_counts_proxy_and_hosting() {
     assert_eq!(row["count"], 1);
 }
 
+#[test]
+fn shield_routes_join_edge_rid_to_shield_prid_within_a_window() {
+    let rows = vec![
+        // One edge row joined to two shield rows (many-to-many), one with negative delta.
+        json!({"timestamp": iso(BASE * 1000), "edge": true, "rid": "r1", "pop": "EWR", "ottfb": 50_000}),
+        json!({"timestamp": iso(BASE * 1000 + 1), "edge": false, "prid": "r1", "pop": "IAD", "ottfb": 20_000}),
+        json!({"timestamp": iso(BASE * 1000 + 2), "edge": false, "prid": "r1", "pop": "ORD", "ottfb": 60_000}),
+        // Shield row with no edge.
+        json!({"timestamp": iso(BASE * 1000 + 3), "edge": false, "prid": "r_orphan", "pop": "IAD", "ottfb": 10_000}),
+        // ttfb-only rows (seconds -> *1e6 fallback).
+        json!({"timestamp": iso(BASE * 1000 + 4), "edge": true, "rid": "r2", "pop": "LHR", "ttfb": 0.080}),
+        json!({"timestamp": iso(BASE * 1000 + 5), "edge": false, "prid": "r2", "pop": "AMS", "ttfb": 0.030}),
+    ];
+    let b = batch(&rows);
+    let summary_rows = read(&summary::write_summary(&[&b], BASE).unwrap());
+    let total = summary_rows
+        .iter()
+        .find(|r| {
+            r["bundle"] == "dim_totals" && r["field"] == "route" && r["value"] == "shield_routes"
+        })
+        .expect("shield_routes dim_totals row");
+    assert_eq!(total["requests"], 3);
+    assert_eq!(total["truncated"], false);
+
+    let route_rows: Vec<&Map<String, Value>> = summary_rows
+        .iter()
+        .filter(|r| r["bundle"] == "shield_routes" && r["field"] == "route")
+        .collect();
+    assert_eq!(route_rows.len(), 3);
+
+    let ewr_iad = route_rows
+        .iter()
+        .find(|r| r["value"] == "[\"EWR\",\"IAD\"]")
+        .unwrap();
+    assert_eq!(ewr_iad["requests"], 1);
+    assert_eq!(ewr_iad["errors"], 0);
+    let h = hist_cell(ewr_iad, "overhead_hist").unwrap();
+    assert_eq!((h.min, h.max, h.count()), (30_000, 30_000, 1));
+
+    let ewr_ord = route_rows
+        .iter()
+        .find(|r| r["value"] == "[\"EWR\",\"ORD\"]")
+        .unwrap();
+    assert_eq!(ewr_ord["requests"], 1);
+    assert_eq!(ewr_ord["errors"], 1);
+    let h = hist_cell(ewr_ord, "overhead_hist").unwrap();
+    assert_eq!((h.min, h.max, h.count()), (-10_000, -10_000, 1));
+
+    let lhr_ams = route_rows
+        .iter()
+        .find(|r| r["value"] == "[\"LHR\",\"AMS\"]")
+        .unwrap();
+    assert_eq!(lhr_ams["requests"], 1);
+    assert_eq!(lhr_ams["errors"], 0);
+    let h = hist_cell(lhr_ams, "overhead_hist").unwrap();
+    assert_eq!((h.min, h.max, h.count()), (50_000, 50_000, 1));
+}
+
 /// Writes `frontend/lib/cloud-engine/dashboard/__fixtures__/summaries/`: raw window Parquet,
 /// their window summaries, hour and day bundles and `index.json`, for the dashboard's
 /// summary-vs-raw tests.

@@ -101,7 +101,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x07";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x08";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
 /// [`part_key`] objects, each at most the CDN read limit.
@@ -656,6 +656,14 @@ const INS_LAT_COLS: &[(C, Op)] = &[
 /// `p_type == "hosting"`.
 const INS_ASN_COLS: &[(C, Op)] = &[(C::Requests, Sum), (C::Count, Sum)];
 
+/// `shield_routes` (`route` field): window-local join of edge `rid` to shield `prid`;
+/// `OverheadHist` holds `(edge_ottfb_us - shield_ottfb_us)` and `Errors` counts negative deltas.
+const SHIELD_ROUTES_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::OverheadHist, Merge),
+    (C::Errors, Sum),
+];
+
 /// A bundle of `(field, value)` rows that sum per value (and, when `timed`, per bucket), cut to
 /// the values with the most requests (`cols[0]`) and counted in `dim_totals`.
 struct Group {
@@ -669,7 +677,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 18] = [
+const GROUPS: [Group; 19] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -796,6 +804,13 @@ const GROUPS: [Group; 18] = [
         fields: &["asn"],
         gated: &["asn"],
     },
+    Group {
+        name: "shield_routes",
+        cols: SHIELD_ROUTES_COLS,
+        timed: false,
+        fields: &["route"],
+        gated: &["route"],
+    },
 ];
 
 impl Group {
@@ -813,6 +828,7 @@ impl Group {
             ("ins_ip", _) => summary::INS_IP_K,
             ("ins_lat", "city") => summary::SERIES_CITY_K,
             ("ins_asn", _) => summary::INS_ASN_K,
+            ("shield_routes", _) => summary::SHIELD_ROUTE_K,
             _ => summary::DIM_K,
         }
     }
@@ -1937,6 +1953,7 @@ impl Acc {
                 "asset_urls",
                 "ins_lat",
                 "ins_asn",
+                "shield_routes",
                 "sample",
             ],
             &mut groups_out,

@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { parquetWriteBuffer } from "hyparquet-writer";
+import { Histogram } from "./dashboard/histogram";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import type { ManifestFile } from "./dashboard/manifest";
 import {
@@ -412,14 +414,14 @@ describe("popHealthFromRollup", () => {
 });
 
 describe("canServeHealthFromRollup", () => {
-  it("accepts the rollup-served sections and the all-ASN map, never shielding or one ASN's map", () => {
+  it("accepts the rollup-served sections, shielding and the all-ASN map, never one ASN's map", () => {
     expect(canServeHealthFromRollup(SECTIONS)).toBe(true);
     expect(canServeHealthFromRollup(["summary"])).toBe(true);
     expect(canServeHealthFromRollup([...SECTIONS, "cities"])).toBe(true);
     expect(canServeHealthFromRollup(MAP, "all")).toBe(true);
     expect(canServeHealthFromRollup(MAP, "13335")).toBe(false);
-    expect(canServeHealthFromRollup(["shielding_analysis"])).toBe(false);
-    expect(canServeHealthFromRollup([...MAP, "shielding_analysis"])).toBe(false);
+    expect(canServeHealthFromRollup(["shielding_analysis"])).toBe(true);
+    expect(canServeHealthFromRollup([...MAP, "shielding_analysis"])).toBe(true);
     expect(canServeHealthFromRollup(undefined)).toBe(false);
     expect(canServeHealthFromRollup([])).toBe(false);
   });
@@ -493,7 +495,6 @@ describe("networkFromRollup", () => {
       { ...health, filter_country: "US" },
       { ...health, filter_asn: 64512 },
       { ...health, filters: { proto: { values: ["2"], mode: "include" as const } } },
-      { ...health, sections: [...MAP, "shielding_analysis"] },
       { ...health, sections: MAP, map_asn: "13335" },
       { ...health, sections: undefined },
       { ...health, end_time: "not a time" },
@@ -519,5 +520,55 @@ describe("networkFromRollup", () => {
       .toBeNull();
     const stale = { ...BUFFERS, [WINDOWS[3].key]: BUFFERS[RAW[3].key] };
     expect(await networkFromRollup("/api/network-health", health, source(WINDOWS, stale))).toBeNull();
+  });
+
+  it("serves shielding from shield_routes when covered", async () => {
+    const h = new Histogram();
+    h.min = 30_000;
+    h.max = 30_000;
+    h.buckets[52] = 10;
+    const hBytes = h.toBytes()!;
+    const t = new Date(T0);
+    const summaryBuf = parquetWriteBuffer({
+      kvMetadata: [{ key: "flp_summary", value: "3" }],
+      columnData: [
+        { name: "bundle", data: ["overview", "dim_totals", "shield_routes"], type: "STRING" },
+        { name: "bucket", data: [t, t, t], type: "TIMESTAMP" },
+        { name: "field", data: ["", "route", "route"], type: "STRING" },
+        { name: "value", data: ["", "shield_routes", JSON.stringify(["EWR", "IAD"])], type: "STRING" },
+        { name: "requests", data: [BigInt(10), BigInt(10), BigInt(10)], type: "INT64" },
+        { name: "errors", data: [null, null, BigInt(0)], type: "INT64" },
+        { name: "truncated", data: [null, false, null], type: "BOOLEAN" },
+        { name: "overhead_hist", data: [null, null, hBytes], type: "BYTE_ARRAY" },
+      ],
+    });
+    const win = WINDOWS[0];
+    const s = source([win], { [win.key]: summaryBuf });
+    const served = await networkFromRollup(
+      "/api/network-health",
+      { start_time: win.start, end_time: win.end, sections: ["shielding_analysis"] },
+      s,
+    ) as {
+      shielding_analysis: {
+        has_data: boolean;
+        total_routes: number;
+        _approx: boolean;
+        _approx_note: string;
+        rows: Array<{ edge_pop: string; shield_pop: string; requests: number; p50_ms: number }>;
+      };
+      rollup: { approximate: string[] };
+    };
+    expect(served.shielding_analysis.has_data).toBe(true);
+    expect(served.shielding_analysis.total_routes).toBe(1);
+    expect(served.shielding_analysis._approx).toBe(true);
+    expect(served.shielding_analysis._approx_note).toBe("≈ (window-local join)");
+    expect(served.shielding_analysis.rows[0]).toMatchObject({
+      edge_pop: "EWR",
+      shield_pop: "IAD",
+      requests: 10,
+    });
+    expect(served.shielding_analysis.rows[0].p50_ms).toBeGreaterThan(20);
+    expect(served.rollup.approximate).toContain("shielding_analysis");
+    expect(s.log.files).toEqual([win.key]);
   });
 });
