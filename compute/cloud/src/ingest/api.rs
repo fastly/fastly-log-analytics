@@ -884,65 +884,7 @@ fn inline_summary_files<R: Runtime>(
                 hours.entry(hour).or_default().push(object);
             }
         }
-        let current = bundle::current_hours(&bundles);
-        let day_bundle = (at >= from && at + 86_400 <= to)
-            .then(|| bundle::day_view(&bundles))
-            .flatten()
-            .filter(|_| {
-                hours.keys().eq(current.keys())
-                    && hours.iter().all(|(hour, ws)| {
-                        let view = bundle::hour_view(*hour, ws, &bundles);
-                        view.windows.is_empty()
-                            && view.bundle == current.get(hour).map(|o| o.key.clone())
-                    })
-            });
-        if let Some(key) = day_bundle {
-            let object = bundles.iter().find(|o| o.key == key).expect("listed");
-            let name = bundle::parse_name(&key).expect("a day bundle");
-            files.push(summary_entry(
-                "day",
-                object,
-                at,
-                at + 86_400,
-                name.rows,
-                name.count,
-            ));
-        } else {
-            for (hour, ws) in &hours {
-                let start = at + i64::from(*hour) * 3600;
-                let inside = (start >= from && start + 3600 <= to)
-                    || (!ws.is_empty()
-                        && ws.iter().all(|o| {
-                            summary_window(&o.key).is_some_and(|(a, b, _)| a >= from && b <= to)
-                        }));
-                let view = if inside {
-                    bundle::hour_view(*hour, ws, &bundles)
-                } else {
-                    bundle::HourView {
-                        bundle: None,
-                        windows: ws.iter().map(|o| o.key.clone()).collect(),
-                    }
-                };
-                if let Some(key) = &view.bundle {
-                    let object = bundles.iter().find(|o| &o.key == key).expect("listed");
-                    let name = bundle::parse_name(key).expect("an hour bundle");
-                    files.push(summary_entry(
-                        "hour",
-                        object,
-                        start,
-                        start + 3600,
-                        name.rows,
-                        name.count,
-                    ));
-                }
-                for object in ws.iter().filter(|o| view.windows.contains(&o.key)) {
-                    let (a, b, rows) = summary_window(&object.key).expect("retained");
-                    if a < to && b > from {
-                        files.push(summary_entry("window", object, a, b, rows, 1));
-                    }
-                }
-            }
-        }
+        push_day_summary_files(&mut files, at, (from, to), true, &hours, &bundles);
         if files.len() >= FILES_PAGE {
             return None;
         }
@@ -1001,6 +943,79 @@ fn summary_window(key: &str) -> Option<(i64, i64, u64)> {
     let end = parts.next()?.parse().ok()?;
     parts.next()?;
     Some((start, end, rows.parse().ok()?))
+}
+
+/// Pushes the summary files that answer `[from, to)` for the UTC day starting at `at`: the day
+/// bundle when `allow_day` and it covers exactly the day's windows, else per hour its valid hour
+/// bundle plus later windows, and every other overlapping window summary.
+fn push_day_summary_files(
+    files: &mut Vec<Value>,
+    at: i64,
+    (from, to): (i64, i64),
+    allow_day: bool,
+    hours: &std::collections::BTreeMap<u32, Vec<Object>>,
+    bundles: &[Object],
+) {
+    use super::bundle;
+    let current = bundle::current_hours(bundles);
+    let day_bundle = (allow_day && at >= from && at + 86_400 <= to)
+        .then(|| bundle::day_view(bundles))
+        .flatten()
+        .filter(|_| {
+            hours.keys().eq(current.keys())
+                && hours.iter().all(|(hour, ws)| {
+                    let view = bundle::hour_view(*hour, ws, bundles);
+                    view.windows.is_empty()
+                        && view.bundle == current.get(hour).map(|o| o.key.clone())
+                })
+        });
+    if let Some(key) = day_bundle {
+        let object = bundles.iter().find(|o| o.key == key).expect("listed");
+        let name = bundle::parse_name(&key).expect("a day bundle");
+        files.push(summary_entry(
+            "day",
+            object,
+            at,
+            at + 86_400,
+            name.rows,
+            name.count,
+        ));
+    } else {
+        for (hour, ws) in hours {
+            let start = at + i64::from(*hour) * 3600;
+            let inside = (start >= from && start + 3600 <= to)
+                || (!ws.is_empty()
+                    && ws.iter().all(|o| {
+                        summary_window(&o.key).is_some_and(|(a, b, _)| a >= from && b <= to)
+                    }));
+            let view = if inside {
+                bundle::hour_view(*hour, ws, bundles)
+            } else {
+                bundle::HourView {
+                    bundle: None,
+                    windows: ws.iter().map(|o| o.key.clone()).collect(),
+                }
+            };
+            if let Some(key) = &view.bundle {
+                let object = bundles.iter().find(|o| &o.key == key).expect("listed");
+                let name = bundle::parse_name(key).expect("an hour bundle");
+                files.push(summary_entry(
+                    "hour",
+                    object,
+                    start,
+                    start + 3600,
+                    name.rows,
+                    name.count,
+                ));
+            }
+            for object in ws.iter().filter(|o| view.windows.contains(&o.key)) {
+                let (a, b, rows) = summary_window(&object.key).expect("retained");
+                if a < to && b > from {
+                    files.push(summary_entry("window", object, a, b, rows, 1));
+                }
+            }
+        }
+    }
 }
 
 fn summary_entry(
@@ -1149,65 +1164,14 @@ fn summary_files<R: Runtime>(
             let hour = (start.rem_euclid(86_400) / 3600) as u32;
             hours.entry(hour).or_default().push(object);
         }
-        let current = bundle::current_hours(&bundles);
-        let day_bundle = (whole_day && windows_done && at >= from && at + 86_400 <= to)
-            .then(|| bundle::day_view(&bundles))
-            .flatten()
-            .filter(|_| {
-                hours.keys().eq(current.keys())
-                    && hours.iter().all(|(hour, ws)| {
-                        let view = bundle::hour_view(*hour, ws, &bundles);
-                        view.windows.is_empty()
-                            && view.bundle == current.get(hour).map(|o| o.key.clone())
-                    })
-            });
-        if let Some(key) = day_bundle {
-            let object = bundles.iter().find(|o| o.key == key).expect("listed");
-            let name = bundle::parse_name(&key).expect("a day bundle");
-            files.push(summary_entry(
-                "day",
-                object,
-                at,
-                at + 86_400,
-                name.rows,
-                name.count,
-            ));
-        } else {
-            for (hour, ws) in &hours {
-                let start = at + i64::from(*hour) * 3600;
-                let inside = (start >= from && start + 3600 <= to)
-                    || (!ws.is_empty()
-                        && ws.iter().all(|o| {
-                            summary_window(&o.key).is_some_and(|(a, b, _)| a >= from && b <= to)
-                        }));
-                let view = if inside {
-                    bundle::hour_view(*hour, ws, &bundles)
-                } else {
-                    bundle::HourView {
-                        bundle: None,
-                        windows: ws.iter().map(|o| o.key.clone()).collect(),
-                    }
-                };
-                if let Some(key) = &view.bundle {
-                    let object = bundles.iter().find(|o| &o.key == key).expect("listed");
-                    let name = bundle::parse_name(key).expect("an hour bundle");
-                    files.push(summary_entry(
-                        "hour",
-                        object,
-                        start,
-                        start + 3600,
-                        name.rows,
-                        name.count,
-                    ));
-                }
-                for object in ws.iter().filter(|o| view.windows.contains(&o.key)) {
-                    let (a, b, rows) = summary_window(&object.key).expect("retained");
-                    if a < to && b > from {
-                        files.push(summary_entry("window", object, a, b, rows, 1));
-                    }
-                }
-            }
-        }
+        push_day_summary_files(
+            &mut files,
+            at,
+            (from, to),
+            whole_day && windows_done,
+            &hours,
+            &bundles,
+        );
         if windows_done {
             day += 1;
             token = None;
