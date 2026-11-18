@@ -583,6 +583,12 @@ const ASSET_COLS: &[(C, Op)] = &[
     (C::OriginWaitSum, Sum),
     (C::OriginRequests, Sum),
 ];
+const ASSET_URL_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::RespBytesSum, Sum),
+    (C::StatusMin, Min),
+    (C::TtlSum, Sum),
+];
 
 const HEADER_IP_COLS: &[(C, Op)] = &[(C::ValueMax, Max)];
 
@@ -652,7 +658,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 15] = [
+const GROUPS: [Group; 16] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -758,6 +764,13 @@ const GROUPS: [Group; 15] = [
         fields: &["ip"],
         gated: &["ip"],
     },
+    Group {
+        name: "asset_urls",
+        cols: ASSET_URL_COLS,
+        timed: false,
+        fields: &["large", "low_ttl"],
+        gated: &["large", "low_ttl"],
+    },
 ];
 
 impl Group {
@@ -769,6 +782,7 @@ impl Group {
             ("header_ip", _) => summary::HEADER_IP_K,
             ("tls_fp", _) => summary::TLS_FP_K,
             ("value", field) => summary::value_keep(field),
+            ("asset_urls", _) => summary::ASSET_URL_K,
             ("proxy", _) => summary::SAMPLE_K,
             ("ins_url", _) => summary::INS_URL_K,
             ("ins_ip", _) => summary::INS_IP_K,
@@ -1863,15 +1877,6 @@ impl Acc {
                     &mut groups_out,
                     &mut layout_rg,
                 )?,
-                "urls" => flush_group(&mut out, &["urls"], &mut groups_out, &mut layout_rg)?,
-                "proxy" => flush_group(
-                    &mut out,
-                    &["quality", "header_ip", "bot_ua", "tls_fp", "value", "proxy"],
-                    &mut groups_out,
-                    &mut layout_rg,
-                )?,
-                "ins_url" => flush_group(&mut out, &["ins_url"], &mut groups_out, &mut layout_rg)?,
-                "ins_ip" => flush_group(&mut out, &["ins_ip"], &mut groups_out, &mut layout_rg)?,
                 _ => {}
             }
         }
@@ -1889,7 +1894,24 @@ impl Acc {
                 cells,
             );
         }
-        flush_group(&mut out, &["sample"], &mut groups_out, &mut layout_rg)?;
+        flush_group(
+            &mut out,
+            &[
+                "urls",
+                "quality",
+                "header_ip",
+                "bot_ua",
+                "tls_fp",
+                "value",
+                "proxy",
+                "ins_url",
+                "ins_ip",
+                "asset_urls",
+                "sample",
+            ],
+            &mut groups_out,
+            &mut layout_rg,
+        )?;
         let batch_refs: Vec<&arrow_array::RecordBatch> = groups_out.iter().collect();
         let layout_json = serde_json::json!({ "v": 1, "rg": layout_rg }).to_string();
         super::convert::write_summary_batches(

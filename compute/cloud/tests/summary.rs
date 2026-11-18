@@ -149,8 +149,100 @@ fn i(row: &Value, key: &str) -> Option<i64> {
     row.get(key).and_then(Value::as_i64)
 }
 
+fn mi(row: &Map<String, Value>, key: &str) -> Option<i64> {
+    row.get(key).and_then(Value::as_i64)
+}
+
+fn mf(row: &Map<String, Value>, key: &str) -> Option<f64> {
+    row.get(key).and_then(Value::as_f64)
+}
+
 fn f(row: &Value, key: &str) -> Option<f64> {
     row.get(key).and_then(Value::as_f64)
+}
+
+#[test]
+fn asset_urls_rows_match_the_raw_tables() {
+    let rows = vec![
+        json!({"timestamp": iso(BASE * 1000), "url": "/app.js", "asset_type": "JavaScript",
+            "content_encoding": "identity", "cache": "MISS", "resp_bytes": 100,
+            "status": 200, "ttl": 0}),
+        json!({"timestamp": iso(BASE * 1000 + 1), "path": "/app.js", "asset_type": "JavaScript",
+            "content_encoding": "GZIP", "cache": "MISS", "resp_bytes": 200,
+            "status": 500, "ttl": 7200}),
+        json!({"timestamp": iso(BASE * 1000 + 2), "url": "/index.html", "asset_type": "HTML",
+            "content_encoding": Value::Null, "cache": "HIT", "resp_bytes": 300,
+            "status": 200, "ttl": 0}),
+        json!({"timestamp": iso(BASE * 1000 + 3), "url": "/style.css", "asset_type": "CSS",
+            "content_encoding": "", "cache": "MISS-CLUSTER", "resp_bytes": 400,
+            "status": 404, "ttl": 1800}),
+        json!({"timestamp": iso(BASE * 1000 + 4), "url": "/data.json", "asset_type": "JSON",
+            "content_encoding": "IDENTITY", "cache": Value::Null, "resp_bytes": 500,
+            "status": 200, "ttl": 0}),
+    ];
+    let b = custom_batch(
+        &rows,
+        &[
+            ("asset_type", convert::Kind::Utf8),
+            ("content_encoding", convert::Kind::Utf8),
+            ("ttl", convert::Kind::Float64),
+        ],
+    );
+    let out = read(&summary::write_summary(&[&b], BASE).unwrap());
+    let rows = bundle(&out, "asset_urls");
+    let large: BTreeMap<_, _> = rows
+        .iter()
+        .filter(|r| r["field"] == "large")
+        .map(|r| {
+            (
+                s(&Value::Object((*r).clone()), "value").unwrap().to_owned(),
+                *r,
+            )
+        })
+        .collect();
+    assert_eq!(large.len(), 2);
+    assert_eq!(
+        mi(
+            large["[\"/app.js\",\"JavaScript\",\"identity\"]"],
+            "requests"
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        mi(
+            large["[\"/app.js\",\"JavaScript\",\"identity\"]"],
+            "resp_bytes_sum"
+        ),
+        Some(100)
+    );
+    assert_eq!(
+        mi(
+            large["[\"/app.js\",\"JavaScript\",\"identity\"]"],
+            "status_min"
+        ),
+        Some(200)
+    );
+    assert!(!large.keys().any(|k| k.contains("unknown")));
+
+    let low: BTreeMap<_, _> = rows
+        .iter()
+        .filter(|r| r["field"] == "low_ttl")
+        .map(|r| {
+            (
+                s(&Value::Object((*r).clone()), "value").unwrap().to_owned(),
+                *r,
+            )
+        })
+        .collect();
+    assert_eq!(low.len(), 3);
+    assert_eq!(
+        mf(low["[\"/app.js\",\"JavaScript\",\"MISS\"]"], "ttl_sum"),
+        Some(0.0)
+    );
+    assert_eq!(
+        mf(low["[\"/style.css\",\"CSS\",\"MISS-CLUSTER\"]"], "ttl_sum"),
+        Some(1800.0)
+    );
 }
 
 fn close(a: &Value, b: f64) {

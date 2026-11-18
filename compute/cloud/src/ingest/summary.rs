@@ -38,6 +38,7 @@ pub const SESSION_K: usize = 2000;
 pub const DIM_K: usize = 2000;
 pub const INS_URL_K: usize = 500;
 pub const INS_IP_K: usize = 500;
+pub const ASSET_URL_K: usize = 500;
 /// ASNs kept in `series5` per window and hour bundle: 4x the 30 a day bundle writes.
 pub const SERIES_ASN_K: usize = 120;
 /// Cities kept in `series5` per window and hour bundle (the /network map): 4x the 50 a day
@@ -248,6 +249,8 @@ columns! {
     RttMin = ("rtt_min", F64),
     TcpRtt = ("tcp_rtt", F64),
     Pop = ("pop", Utf8),
+    StatusMin = ("status_min", I64),
+    TtlSum = ("ttl_sum", F64),
 }
 
 /// The histogram columns, in [`Lat`] order.
@@ -856,6 +859,7 @@ struct NetCols<'a> {
     cache: Str<'a>,
     encoding: Str<'a>,
     body: Num<'a>,
+    ttl: Num<'a>,
     ttfb_ms: Num<'a>,
     origin_ms: Num<'a>,
     req_id: Str<'a>,
@@ -926,6 +930,7 @@ impl<'a> NetCols<'a> {
             cache: Str::new(batch, &["cache_status", "cache"]),
             encoding: Str::new(batch, &["content_encoding", "resp_header_content_encoding"]),
             body: Num::new(batch, &[("resp_body_size", 1.0), ("resp_bytes", 1.0)]),
+            ttl: Num::new(batch, &[("ttl", 1.0)]),
             ttfb_ms: Num::new(
                 batch,
                 &[
@@ -1122,6 +1127,15 @@ struct Asset {
     ttfb_ms: f64,
     origin_ms: f64,
     origin_requests: i64,
+}
+
+#[derive(Default)]
+struct AssetUrl {
+    large_requests: i64,
+    large_bytes: i64,
+    large_status: Option<i64>,
+    low_requests: i64,
+    low_ttl: f64,
 }
 
 /// A `transport` row: /network transport's sums over every row.
@@ -2259,6 +2273,105 @@ fn write_v3(rows: &[Rows], bucket: i64, out: &mut Out) -> Vec<SampleAt> {
     sample.into_sorted_vec()
 }
 
+fn write_asset_urls(rows: &[Rows], bucket: i64, out: &mut Out) {
+    let mut large: FastMap<(Cow<str>, Cow<str>, Cow<str>), AssetUrl> = FastMap::default();
+    let mut low: FastMap<(Cow<str>, Cow<str>, Cow<str>), AssetUrl> = FastMap::default();
+    for r in rows {
+        let c = &r.net;
+        for i in r.live() {
+            let asset_url: Cow<'_, str> = Cow::Owned(c.url.get(i, false).unwrap_or("/").to_owned());
+            let kind: Cow<'_, str> = Cow::Borrowed(asset_type(
+                c.asset_type.get(i, true),
+                c.content_type.get(i, false),
+                Some(asset_url.as_ref()),
+            ));
+            let encoding: Cow<'_, str> = Cow::Owned(
+                ascii_case(c.encoding.get(i, true).unwrap_or("unknown"), false).into_owned(),
+            );
+            let normalized_cache: Cow<'_, str> =
+                Cow::Owned(ascii_case(c.cache.get(i, false).unwrap_or("OTHER"), true).into_owned());
+            let large_key = (asset_url.clone(), kind.clone(), encoding);
+            if matches!(large_key.2.as_ref(), "none" | "identity")
+                && matches!(large_key.1.as_ref(), "JavaScript" | "CSS" | "HTML" | "JSON")
+            {
+                let entry = large.entry(large_key).or_default();
+                entry.large_requests += 1;
+                entry.large_bytes += c.body.get(i).unwrap_or(0.0) as i64;
+                if let Some(status) = get_i(r.status, i) {
+                    entry.large_status =
+                        Some(entry.large_status.map_or(status, |min| min.min(status)));
+                }
+            }
+            if !normalized_cache.starts_with("HIT") {
+                if let Some(ttl) = c.ttl.get(i).filter(|ttl| *ttl < 3600.0) {
+                    let entry = low.entry((asset_url, kind, normalized_cache)).or_default();
+                    entry.low_requests += 1;
+                    entry.low_ttl += ttl;
+                }
+            }
+        }
+    }
+    for (field, map) in [("large", large), ("low_ttl", low)] {
+        let total: i64 = map
+            .values()
+            .map(|a| {
+                if field == "large" {
+                    a.large_requests
+                } else {
+                    a.low_requests
+                }
+            })
+            .sum();
+        let mut ranked: Vec<_> = map.into_iter().collect();
+        let truncated = ranked.len() > ASSET_URL_K;
+        rank(
+            &mut ranked,
+            |a, b| {
+                let ar = if field == "large" {
+                    a.1.large_requests
+                } else {
+                    a.1.low_requests
+                };
+                let br = if field == "large" {
+                    b.1.large_requests
+                } else {
+                    b.1.low_requests
+                };
+                br.cmp(&ar).then_with(|| a.0.cmp(&b.0))
+            },
+            ASSET_URL_K,
+        );
+        push_total(out, bucket, "asset_urls", field, total, truncated);
+        for ((url, kind, value), a) in ranked {
+            let key = serde_json::to_string(&[url.as_ref(), kind.as_ref(), value.as_ref()])
+                .expect("strings serialize");
+            let mut row = vec![
+                (C::Bundle, V::S("asset_urls")),
+                (C::Bucket, V::I(bucket)),
+                (C::FieldName, V::S(field)),
+                (C::Value, V::S(&key)),
+                (
+                    C::Requests,
+                    V::I(if field == "large" {
+                        a.large_requests
+                    } else {
+                        a.low_requests
+                    }),
+                ),
+            ];
+            if field == "large" {
+                row.extend([
+                    (C::RespBytesSum, V::I(a.large_bytes)),
+                    (C::StatusMin, a.large_status.map_or(V::Null, V::I)),
+                ]);
+            } else {
+                row.push((C::TtlSum, V::F(a.low_ttl)));
+            }
+            out.push(&row);
+        }
+    }
+}
+
 fn write_sample(rows: &[Rows], sample: Vec<SampleAt>, out: &mut Out) {
     for (key, ts, at, i) in sample {
         let r = &rows[at];
@@ -2978,6 +3091,7 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
     let sample = write_v3(&rows, bucket, &mut out);
     write_ext(&rows, bucket, &mut out);
     write_insights(&rows, bucket, &mut out);
+    write_asset_urls(&rows, bucket, &mut out);
     write_sample(&rows, sample, &mut out);
 
     let batch = out.finish()?;
