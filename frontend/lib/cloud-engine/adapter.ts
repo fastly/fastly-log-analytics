@@ -1127,6 +1127,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
             created_at?: number | string;
             expires_at?: number | string;
             accepted_at?: number | string | null;
+            last_login_at?: number | string | null;
             revoked?: boolean;
           }>;
         })
@@ -1138,6 +1139,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
             display_name?: string;
             role?: string;
             created_at?: number | string;
+            last_login_at?: number | string | null;
             revoked?: boolean;
             passkeys?: Array<{ id: string; created_at?: number | string }>;
           }>;
@@ -1169,7 +1171,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         auth_method: "passkey",
         created_at: toIso(i.created_at) ?? new Date().toISOString(),
         expires_at: toIso(i.expires_at),
-        last_login_at: toIso(i.accepted_at),
+        last_login_at: toIso(i.last_login_at ?? i.accepted_at),
         service_ids: allServiceIds,
         pii_policy: { mask_ips: i.role === "analyst-no-pii" },
         allow_concurrent_sessions: true,
@@ -1183,7 +1185,8 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
         email: u.role || "analyst",
         auth_method: `Passkey (${u.passkeys?.length ?? 0})`,
         ip_address: u.role || "user",
-        last_active_time: toIso(u.created_at) ?? new Date().toISOString(),
+        last_active_time:
+          toIso(u.last_login_at ?? u.created_at) ?? new Date().toISOString(),
       }));
     const originUrl =
       typeof window !== "undefined" ? window.location.origin : null;

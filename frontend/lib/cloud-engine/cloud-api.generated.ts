@@ -2322,6 +2322,9 @@ export interface components {
       expires_at: string;
       revoked: boolean;
       used: boolean;
+      accepted_at: string | null;
+      user_id: string | null;
+      last_login_at: string | null;
     };
     InviteCreate: {
       display_name: string;
@@ -2707,6 +2710,8 @@ export interface components {
       role: components["schemas"]["Role"];
       revoked?: boolean;
       passkeys?: components["schemas"]["Passkey"][];
+      created_at?: string;
+      last_login_at?: string | null;
     };
     Users: {
       users: components["schemas"]["User"][];

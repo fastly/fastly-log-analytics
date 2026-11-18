@@ -90,6 +90,33 @@ describe("Cloud endpoint bridges", () => {
       .toMatchObject({ by: "day", totals: { gap: 20, gap_pct: 0.2 } });
   });
 
+  it("shows an accepted invite's last sign-in and each user's latest sign-in on the share page", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/admin/invites") return Response.json({ invites: [
+        { id: "i-used", display_name: "Guest", role: "analyst", expires_at: "2026-01-08T00:00:00Z", revoked: false, used: true,
+          accepted_at: "2026-01-02T00:00:00Z", user_id: "u-guest", last_login_at: "2026-01-05T09:30:00Z" },
+        { id: "i-legacy", display_name: "Old", role: "analyst", expires_at: "2026-01-08T00:00:00Z", revoked: false, used: true,
+          accepted_at: "2026-01-03T00:00:00Z", user_id: null, last_login_at: null },
+        { id: "i-open", display_name: "Pending", role: "analyst", expires_at: "2026-01-08T00:00:00Z", revoked: false, used: false,
+          accepted_at: null, user_id: null, last_login_at: null },
+      ] });
+      if (path === "/api/admin/users") return Response.json({ users: [
+        { id: "u-guest", display_name: "Guest", role: "analyst", revoked: false, passkeys: [],
+          created_at: "2026-01-02T00:00:00Z", last_login_at: "2026-01-05T09:30:00Z" },
+        { id: "u-new", display_name: "New", role: "analyst", revoked: false, passkeys: [],
+          created_at: "2026-01-04T00:00:00Z", last_login_at: null },
+      ] });
+      return Response.json({ services: [] });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const body = await (await handleCloudAnalyticalRequest(request("/api/admin/share/status")))!.json();
+    expect(Object.fromEntries(body.invites.map((i: { id: string; last_login_at: string | null }) => [i.id, i.last_login_at])))
+      .toEqual({ "i-used": "2026-01-05T09:30:00Z", "i-legacy": "2026-01-03T00:00:00Z", "i-open": null });
+    expect(Object.fromEntries(body.sessions.map((s: { session_id: string; last_active_time: string }) => [s.session_id, s.last_active_time])))
+      .toEqual({ "u-guest": "2026-01-05T09:30:00Z", "u-new": "2026-01-04T00:00:00Z" });
+  });
+
   it("raises a sustained-loss alert for the longest run of 2+ days at a 5% gap like High-Scale", async () => {
     const day = (n: number, expected: number, ingested: number) =>
       ({ day: n * 86400, expected_rows: expected, ingested_rows: ingested });

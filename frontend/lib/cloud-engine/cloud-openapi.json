@@ -5055,6 +5055,15 @@
           },
           "used": {
             "type": "boolean"
+          },
+          "accepted_at": {
+            "type": ["string", "null"]
+          },
+          "user_id": {
+            "type": ["string", "null"]
+          },
+          "last_login_at": {
+            "type": ["string", "null"]
           }
         },
         "required": [
@@ -5063,7 +5072,10 @@
           "role",
           "expires_at",
           "revoked",
-          "used"
+          "used",
+          "accepted_at",
+          "user_id",
+          "last_login_at"
         ],
         "additionalProperties": false
       },
@@ -6174,6 +6186,12 @@
             "items": {
               "$ref": "#/components/schemas/Passkey"
             }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "last_login_at": {
+            "type": ["string", "null"]
           }
         },
         "required": ["id", "display_name", "role"],
