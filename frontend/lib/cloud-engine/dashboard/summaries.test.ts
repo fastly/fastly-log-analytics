@@ -2,7 +2,7 @@
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CARD_FIELDS,
   customCards,
@@ -13,6 +13,8 @@ import {
 } from "./summaries";
 import {
   classifySummaryAgainstFilters,
+  clearDashboardMemo,
+  DASHBOARD_SUMMARY_SPEC,
   runDashboard,
   searchFieldSummaries,
   searchFieldValues,
@@ -22,7 +24,9 @@ import type { DashboardFilter } from "./filters";
 import { Hll } from "./hll";
 import type { ManifestFile } from "./manifest";
 import { readColumns } from "./parquet";
-import { fixtureSource, parquetFixture } from "./test-fixtures";
+import { LAYOUT_B, withSummaryLayout } from "./summary-layout-fixture";
+import { defineSummarySpec, readSummaryProjection, summaryProjectionLimits } from "./summary-projection";
+import { fixtureSource, parquetFixture, projectingSource } from "./test-fixtures";
 
 // Written by `cargo test --test summary -- --ignored write_dashboard_fixtures`:
 // raw windows of 2027-01-15 08:00-10:00Z, their summaries and the bundles the
@@ -972,5 +976,116 @@ describe("summary field search", () => {
     );
     expect(fast).toEqual({ entries: [], partial: true });
     expect(files).toEqual([]);
+  });
+});
+
+describe("projected dashboard summaries", () => {
+  const LIMITS = { ...summaryProjectionLimits };
+  // The fixtures are a few KiB and mostly footer, which a projection would otherwise read whole.
+  beforeEach(() => Object.assign(summaryProjectionLimits, { wholeBelowBytes: 0, wholeAboveShare: Infinity }));
+  afterEach(() => {
+    Object.assign(summaryProjectionLimits, LIMITS);
+    clearDashboardMemo();
+  });
+
+  const SUMMARIES = INDEX.filter((e) => e.kind !== "raw").map(entry);
+  const BASE = new Set(["bundle", "bucket", "field", "value", "truncated"]);
+  const projected = async (file: ManifestFile, bytes: ArrayBuffer, spec = DASHBOARD_SUMMARY_SPEC) => {
+    const buffers = { [file.key]: bytes };
+    const source = projectingSource(fixtureSource([], buffers), buffers);
+    const read = await readSummaryProjection(source, { ...file, size: bytes.byteLength }, spec);
+    expect(read.whole).toBe(false);
+    expect(source.log.files).toEqual([]);
+    return read.parts;
+  };
+
+  it("decodes every summary from its projection as from the whole file, today's layout or the announced one", async () => {
+    for (const layout of [false, true]) {
+      for (const file of SUMMARIES) {
+        const bytes = layout ? await withSummaryLayout(BUFFERS[file.key]) : BUFFERS[file.key];
+        const whole = await decodeSummary(bytes, 0, 4e12);
+        expect(whole?.ipSketch, file.key).toBeTruthy();
+        expect(await decodeSummary(await projected(file, bytes), 0, 4e12), file.key).toEqual(whole);
+      }
+    }
+  });
+
+  it("needs every group and column of its spec", async () => {
+    const spec = DASHBOARD_SUMMARY_SPEC;
+    // One row group per group, so a spec without a group skips its rows.
+    const split = Object.fromEntries(await Promise.all(SUMMARIES.map(async (file) =>
+      [file.key, await withSummaryLayout(BUFFERS[file.key], LAYOUT_B.flat().map((group) => [group]))] as const)));
+    const only = Object.fromEntries([...spec.only].map(([column, of]) => [column, [...of]]));
+    const reduced = [
+      ...[...spec.groups].map((group) => [`group ${group}`, defineSummarySpec({
+        groups: [...spec.groups].filter((g) => g !== group), columns: [...spec.columns], only,
+      })] as const),
+      ...[...spec.columns].filter((column) => !BASE.has(column)).map((column) => [`column ${column}`, defineSummarySpec({
+        groups: [...spec.groups],
+        columns: [...spec.columns].filter((c) => c !== column),
+        only: Object.fromEntries(Object.entries(only).filter(([c]) => c !== column)),
+      })] as const),
+    ];
+    const unchanged: string[] = [];
+    for (const [name, without] of reduced) {
+      let changed = false;
+      for (const file of SUMMARIES) {
+        const bytes = split[file.key];
+        const got = await decodeSummary(await projected(file, bytes, without), 0, 4e12).catch(() => "threw");
+        if (JSON.stringify(got, (_, v) => (v instanceof Hll ? [...v.toBytes()] : v))
+          !== JSON.stringify(await decodeSummary(bytes, 0, 4e12), (_, v) => (v instanceof Hll ? [...v.toBytes()] : v))) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) unchanged.push(name);
+    }
+    expect(unchanged).toEqual([]);
+  });
+
+  it("reads under half the bytes from a file announcing its layout as from today's", async () => {
+    const [file] = pick("hour");
+    const bytes = await withSummaryLayout([...pick("hour"), ...pick("day")].map((f) => BUFFERS[f.key]));
+    const buffers = { [file.key]: bytes };
+    const source = projectingSource(fixtureSource([], buffers), buffers);
+    const legacy = await withSummaryLayout([...pick("hour"), ...pick("day")].map((f) => BUFFERS[f.key]), null);
+    const legacyBuffers = { [file.key]: legacy };
+    const legacySource = projectingSource(fixtureSource([], legacyBuffers), legacyBuffers);
+    const sized = (data: ArrayBuffer) => ({ ...file, size: data.byteLength });
+    const read = await readSummaryProjection(source, sized(bytes), DASHBOARD_SUMMARY_SPEC);
+    const readLegacy = await readSummaryProjection(legacySource, sized(legacy), DASHBOARD_SUMMARY_SPEC);
+    expect(await decodeSummary(read.parts, 0, 4e12)).toEqual(await decodeSummary(bytes, 0, 4e12));
+    expect(read.downloadedBytes).toBeLessThan(readLegacy.downloadedBytes / 2);
+  });
+
+  it("answers the dashboard from projections, from their cache once the memo is gone, and filtered runs from them", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const buffers = { ...BUFFERS };
+    const hours = await Promise.all(pick("hour", (e) => !e.early).map(async (file) => {
+      buffers[file.key] = await withSummaryLayout(BUFFERS[file.key]);
+      return { ...file, size: buffers[file.key].byteLength };
+    }));
+    const whole = await runDashboard(fixtureSource([page(RAW)], buffers, { json: [], files: [] }, [page(hours)]), { from, to });
+    clearDashboardMemo();
+    const source = projectingSource(fixtureSource([page(RAW)], buffers, { json: [], files: [] }, [page(hours)]), buffers);
+    const result = await runDashboard(source, { from, to });
+    expect({ ...result, stats: undefined }).toEqual({ ...whole, stats: undefined });
+    expect(result.stats).toMatchObject({ listed: 2, fetched: 2, cached: 0 });
+    expect(source.log.files).toEqual([]);
+    expect(new Set(source.ranges)).toEqual(new Set(hours.map((file) => file.key)));
+
+    clearDashboardMemo();
+    const ranges = source.ranges.length;
+    const warm = await runDashboard(source, { from, to });
+    expect({ ...warm, stats: undefined }).toEqual({ ...whole, stats: undefined });
+    expect(warm.stats).toMatchObject({ listed: 2, fetched: 0, cached: 2 });
+    expect(source.ranges).toHaveLength(ranges);
+
+    const filters: DashboardFilter[] = [{ mode: "include", field: "country", value: "FR" }];
+    const filtered = await runDashboard(source, { from, to, filters });
+    expect(filtered.stats).toMatchObject({ listed: 2, fetched: 0, cached: 2 });
+    expect(source.log.files).toEqual([]);
+    expectMatchesRaw(filtered, await runDashboard(fixtureSource([page(RAW)], BUFFERS), { from, to, filters }));
   });
 });

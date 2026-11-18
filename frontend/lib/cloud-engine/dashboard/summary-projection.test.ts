@@ -6,7 +6,8 @@ import { readColumns } from "./parquet";
 import { loadSummaryFixtures } from "./summary-fixtures";
 import { LAYOUT_B, withSummaryLayout } from "./summary-layout-fixture";
 import {
-  defineSummarySpec, readSummaryColumns, readSummaryProjection, summaryLayout, summaryProjectionLimits, type SummarySpec,
+  defineSummarySpec, hasSummaryProjection, readSummaryColumns, readSummaryProjection, summaryLayout,
+  summaryProjectionLimits, type SummarySpec,
 } from "./summary-projection";
 
 const DASH = loadSummaryFixtures("../dashboard/__fixtures__/summaries");
@@ -204,6 +205,19 @@ describe("readSummaryProjection", () => {
         .flatMap((i) => (text(columns.get("bundle")![i]) === "overview" ? [columns.get("ip_sketch")![i]] : []));
     expect(sketches(projected.columns, projected.rows)).toEqual(sketches(whole.columns, whole.rows));
     expect(sketches(projected.columns, projected.rows).length).toBeGreaterThan(0);
+  });
+
+  it("knows a spec of a file is local once projected or cached whole, and only then", async () => {
+    anySize();
+    const file = manifestFile(layoutBytes);
+    const source = fakeSource(layoutBytes);
+    expect(await hasSummaryProjection(source, file, HEAD)).toBe(false);
+    await readSummaryProjection(source, file, HEAD);
+    expect(await hasSummaryProjection(source, file, HEAD)).toBe(true);
+    expect(await hasSummaryProjection(source, file, DIMS)).toBe(false);
+    expect(await hasSummaryProjection(source, { ...file, size: file.size + 1 }, HEAD)).toBe(false);
+    await source.fetchFile(KEY);
+    expect(await hasSummaryProjection(source, file, DIMS)).toBe(true);
   });
 
   it("reads small files, and files a projection would mostly cover, whole", async () => {

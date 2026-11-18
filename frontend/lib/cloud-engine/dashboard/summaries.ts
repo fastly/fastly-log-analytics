@@ -545,7 +545,7 @@ export type DecodedSummary = {
   ipSketch: Hll | null;
 };
 
-const SUMMARY_COLUMNS = [
+export const SUMMARY_COLUMNS = [
   "bundle",
   "bucket",
   "field",
@@ -575,24 +575,26 @@ function ms(value: unknown): number | null {
 }
 
 /**
- * Decodes a window summary or bundle into a rollup for the card fields, or
+ * Decodes a window summary or bundle (whole, or the parts of a
+ * projection) into a rollup for the card fields, or
  * returns null when it is another format version, reaches outside
  * [fromMs, toMs) or never summarized one of `custom` (it predates the field),
  * so the caller reads raw Parquet instead.
  */
 export async function decodeSummary(
-  bytes: ArrayBuffer,
+  data: ArrayBuffer | readonly ArrayBuffer[],
   fromMs: number,
   toMs: number,
   custom: readonly CustomField[] = [],
 ): Promise<DecodedSummary | null> {
-  const version = parquetMetadata(bytes).key_value_metadata?.find(
+  const parts: readonly ArrayBuffer[] = Array.isArray(data) ? data : [data as ArrayBuffer];
+  const version = parquetMetadata(parts[0]).key_value_metadata?.find(
     (kv) => kv.key === "flp_summary",
   )?.value;
   if (version !== SUMMARY_VERSION) return null;
-  const { readColumns } = await import("./parquet");
-  const { rows, columns } = await readColumns(bytes, SUMMARY_COLUMNS);
-  const binary = await readColumns(bytes, ["ip_sketch"], false);
+  const { readSummaryColumns } = await import("./summary-projection");
+  const { rows, columns } = await readSummaryColumns(parts, SUMMARY_COLUMNS);
+  const binary = await readSummaryColumns(parts, ["ip_sketch"], false);
   const col = (name: string) => columns.get(name) ?? [];
   const [kind, bucket, field, value, count, truncated] = [
     col("bundle"),

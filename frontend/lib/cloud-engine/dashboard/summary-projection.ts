@@ -80,6 +80,23 @@ export type SummaryProjectionSource = Pick<FileSource, "fetchFile" | "fetchRange
   writeDerivedFile?: (key: string, identity: string, bytes: ArrayBuffer, meta: string) => Promise<void>;
 };
 
+// Summary keys are immutable (source count, rows and fingerprint), so key and size identify the bytes.
+const fileIdentity = (source: SummaryProjectionSource, file: ManifestFile) =>
+  [source.cacheScope ?? "default", file.key, file.size];
+const partsIdentity = (source: SummaryProjectionSource, file: ManifestFile, spec: SummarySpec) =>
+  JSON.stringify([...fileIdentity(source, file), "summary-proj-v1", spec.id]);
+
+/** Whether `readSummaryProjection` can serve `spec` of `file` without a network request. */
+export async function hasSummaryProjection(
+  source: SummaryProjectionSource,
+  file: ManifestFile,
+  spec: SummarySpec,
+): Promise<boolean> {
+  if (await source.hasFile?.(file.key)) return true;
+  if (!source.fetchRange || !source.writeDerivedFile || !(file.size > summaryProjectionLimits.wholeBelowBytes)) return false;
+  return Boolean(await source.readDerivedFile?.(file.key, partsIdentity(source, file, spec)));
+}
+
 export type SummaryProjection = {
   /**
    * Standalone Parquet files that together hold every row of the spec's
@@ -157,9 +174,8 @@ export async function readSummaryProjection(
     return whole();
   }
   if (await source.hasFile?.(file.key)) return whole();
-  // Summary keys are immutable (source count, rows and fingerprint), so key and size identify the bytes.
-  const identity = [source.cacheScope ?? "default", file.key, file.size];
-  const partsId = JSON.stringify([...identity, "summary-proj-v1", spec.id]);
+  const identity = fileIdentity(source, file);
+  const partsId = partsIdentity(source, file, spec);
   const stored = await readDerivedFile(file.key, partsId);
   if (stored) {
     return { parts: splitParts(await stored.bytes(), stored.meta, file.key), whole: false, cached: true, downloadedBytes: 0 };

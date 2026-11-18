@@ -31,13 +31,43 @@ import {
   decodeSummary,
   planCoarsestFirst,
   planSummaries,
+  SUMMARY_COLUMNS,
   type CardField,
   type CustomField,
   type DecodedSummary,
   type SummaryUse,
 } from "./summaries";
+import {
+  defineSummarySpec,
+  hasSummaryProjection,
+  readSummaryProjection,
+} from "./summary-projection";
 
 export type Scalar = string | number | boolean;
+
+/** The summary groups and columns `decodeSummary` reads. */
+export const DASHBOARD_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["overview", "time_series", "field_totals", "all_fields"],
+  columns: [...SUMMARY_COLUMNS, "ip_sketch"],
+  only: { ip_sketch: ["overview"] },
+});
+
+const readDashboardSummary = async (
+  source: FileSource,
+  file: ManifestFile,
+  signal?: AbortSignal,
+) => {
+  const read = await readSummaryProjection(
+    source,
+    file,
+    DASHBOARD_SUMMARY_SPEC,
+    signal,
+  );
+  return {
+    ...read,
+    byteLength: read.parts.reduce((sum, part) => sum + part.byteLength, 0),
+  };
+};
 
 export type MinuteBucket = {
   t: number;
@@ -1374,7 +1404,7 @@ async function collectAggregator(
     for (const file of scopeListings.values()) {
       if (
         scopeDecoded?.get(file.key)?.variant === variant ||
-        Boolean(await source.hasFile?.(file.key))
+        (await hasSummaryProjection(source, file, DASHBOARD_SUMMARY_SPEC))
       ) {
         cachedSummaryFiles.push(file);
       }
@@ -1411,9 +1441,14 @@ async function collectAggregator(
           summaryBytes = mem.byteLength;
         } else {
           try {
-            const { bytes } = await source.fetchFile(use.file.key, signal);
-            summaryBytes = bytes.byteLength;
-            decoded = await decodeSummary(bytes, fromMs, toMs, customFields);
+            const read = await readDashboardSummary(source, use.file, signal);
+            summaryBytes = read.byteLength;
+            decoded = await decodeSummary(
+              read.parts,
+              fromMs,
+              toMs,
+              customFields,
+            );
             if (decoded) {
               setScopeEntry(decodedSummaries, scope, use.file.key, {
                 variant,
@@ -1734,13 +1769,11 @@ async function collectAggregator(
     let decoded: DecodedSummary | null = null;
     let summaryBytes = 0;
     try {
-      const { bytes, cached, cdn } = await source.fetchFile(
-        summary.file.key,
-        signal,
-      );
-      stats.bytes += bytes.byteLength;
-      summaryBytes = bytes.byteLength;
-      countRead(cached, bytes.byteLength);
+      const { parts, byteLength, cached, downloadedBytes, cdn } =
+        await readDashboardSummary(source, summary.file, signal);
+      stats.bytes += byteLength;
+      summaryBytes = byteLength;
+      countRead(cached, cached ? byteLength : downloadedBytes);
       if (cached) stats.cached++;
       else stats.fetched++;
       if (isCdnHit(cdn)) stats.cdnHits++;
@@ -1748,14 +1781,14 @@ async function collectAggregator(
       if (
         mem &&
         mem.variant === variant &&
-        mem.byteLength === bytes.byteLength &&
+        mem.byteLength === byteLength &&
         mem.decoded.rollup.buckets.every(
           (b) => b.t >= fromMs && b.t + MINUTE_MS <= toMs,
         )
       ) {
         decoded = mem.decoded;
       } else {
-        decoded = await decodeSummary(bytes, fromMs, toMs, customFields);
+        decoded = await decodeSummary(parts, fromMs, toMs, customFields);
       }
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -2334,13 +2367,13 @@ export async function searchFieldSummaries(
         : null;
     if (!decoded) {
       try {
-        const { bytes } = await source.fetchFile(use.file.key, signal);
-        decoded = await decodeSummary(bytes, fromMs, toMs, customFields);
+        const read = await readDashboardSummary(source, use.file, signal);
+        decoded = await decodeSummary(read.parts, fromMs, toMs, customFields);
         if (decoded) {
           setScopeEntry(decodedSummaries, scope, use.file.key, {
             variant,
             decoded,
-            byteLength: bytes.byteLength,
+            byteLength: read.byteLength,
           });
         }
       } catch (error) {
