@@ -130,16 +130,32 @@ const overview = {
 const network = { total_requests: 4321, http3_pct: 12.5, h2_pct: 80, tls_pct: null, ipv6_pct: null, protocol_time_series: [] }
 
 describe('FastlyValueClient on Cloud', () => {
-  it('paints the summary-served overview and network cards while the caching section loads raw', async () => {
+  it('reads every summary-tab section in one summary read, with no raw read', async () => {
     setCloudModeRuntime(true)
-    const sections = recordPosts('/api/value/summary', (asked) => asked?.includes('caching') ? never() : { overview, network, rollup: meta })
+    const sections = recordPosts('/api/value/summary', () => ({ overview, network, caching: null, rollup: meta }))
     renderWithQuery(<FastlyValueClient />, { withNuqs: true })
 
     expect(await screen.findByText('4.3k')).toBeInTheDocument()
     expect(screen.getByText('12.5%')).toBeInTheDocument()
     expect(within(screen.getByTestId('rollup-data-through-slot')).getByText(/Data through 09:45/)).toBeInTheDocument()
-    expect(sections).toEqual(expect.arrayContaining([['overview', 'network'], ['caching']]))
-    expect(sections).toHaveLength(2)
+    expect(sections).toEqual([['overview', 'caching', 'network']])
+  })
+
+  it('marks an estimated P99 on the performance tab', async () => {
+    setCloudModeRuntime(true)
+    const performance = {
+      cache_accel_factor: 3, avg_hit_latency_ms: 5, avg_miss_latency_ms: 15, p99_latency_ms: 120, latency_time_series: [],
+    }
+    recordPosts('/api/value/summary', () => ({
+      overview, network, caching: null, performance,
+      rollup: { ...meta, approximate: ['performance.p99_latency_ms'] },
+    }))
+    renderWithQuery(<FastlyValueClient />, { withNuqs: true })
+    await screen.findByText('4.3k')
+    const user = (await import('@testing-library/user-event')).default.setup()
+    await user.click(screen.getByRole('tab', { name: /Performance/ }))
+
+    expect(await screen.findByText(/^≈120/)).toBeInTheDocument()
   })
 
   it('keeps one raw read for every section when a filter is applied', async () => {

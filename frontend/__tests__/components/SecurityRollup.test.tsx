@@ -104,6 +104,23 @@ describe('SecurityClient on Cloud', () => {
     expect(screen.queryByText('Loading IPv6 adoption data...')).not.toBeInTheDocument()
   })
 
+  it('marks the row-level sections Cloud answered from summaries', async () => {
+    setCloudModeRuntime(true)
+    const rowMeta = {
+      data_from: '2027-01-15T08:00:00.000Z', data_through: '2027-01-15T09:30:00.000Z',
+      approximate: ['bot_efficiency.referrals'], lower_bound: ['wellknown_bots'],
+    }
+    recordPosts((asked) => asked?.includes('wellknown_bots')
+      ? { wellknown_bots: [], bot_efficiency: [], top_ips_header: [], rollup: rowMeta }
+      : { ...summaryAnswer, rollup: meta })
+    renderWithQuery(<SecurityClient />, { withNuqs: true })
+
+    expect(await screen.findByText('Well-Known Bots (≥ counts)')).toBeInTheDocument()
+    expect(screen.getByText('Bot & Crawler Cost vs. Referrals (≈ referrals)')).toBeInTheDocument()
+    expect(await screen.findByText('Request Header Size Distribution (≥ counts)')).toBeInTheDocument()
+    expect(within(screen.getAllByTestId('rollup-data-through-slot')[0]).getByText(/Data through 09:30/)).toBeInTheDocument()
+  })
+
   it('keeps one raw read, with no summary labels, when a filter is applied', async () => {
     setCloudModeRuntime(true)
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }

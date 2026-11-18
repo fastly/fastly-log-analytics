@@ -19,7 +19,8 @@ import { HelpDialog } from '@/components/ui/confirm-dialog'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import { SECURITY_INFO, type SecurityData, type SummaryQueryState } from './BotsSection'
-import { boundMark } from '@/components/network/rollupLabels'
+import { approxMark, boundMark, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 type TopIpHeader = components['schemas']['TopIpHeaderRow']
 type ThreatIntelItem = components['schemas']['ThreatIntelItem']
@@ -37,19 +38,23 @@ export function ThreatIntelPanel({
 }) {
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
 
-  const { data, isLoading, error } = useServiceQuery<ThreatIntelItem[]>(
+  const { data: response, isLoading, error } = useServiceQuery<{ data?: ThreatIntelItem[] } | undefined>(
     ['security', 'threat-intel', serviceId, startTime, endTime],
     async ({ signal }) => {
-      if (!serviceId) return []
+      if (!serviceId) return undefined
       const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel', {
         signal,
         params: { query: { start_time: startTime ?? undefined, end_time: endTime ?? undefined } },
       })
       if (reqErr) throw new Error(extractApiError(reqErr))
-      return res?.data || []
+      return res
     },
     { enabled: !!serviceId },
   )
+  const data = response?.data
+  const rollup = readRollupMeta(response)
+  const requestsMark = boundMark(rollup, 'threat_intel.requests')
+  const countryMark = approxMark(rollup, 'threat_intel.top_country')
 
   const columns = React.useMemo<ColumnDef<ThreatIntelItem>[]>(
     () => [
@@ -70,7 +75,7 @@ export function ThreatIntelPanel({
         header: 'Requests',
         cell: ({ row }) => (
           <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">
-            {formatCount(row.original.requests)}
+            {requestsMark}{formatCount(row.original.requests)}
           </span>
         ),
       },
@@ -82,6 +87,7 @@ export function ThreatIntelPanel({
           return (
             <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/80">
               <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+              {countryMark}
               <FilterValueCell filters={[{ column: 'country', value: country }]} display={country} />
             </div>
           )
@@ -138,7 +144,7 @@ export function ThreatIntelPanel({
           ),
       },
     ],
-    [],
+    [requestsMark, countryMark],
   )
 
   if (isLoading) {
@@ -181,6 +187,7 @@ export function ThreatIntelPanel({
 
   return (
     <>
+      <RollupDataThroughSlot reserve={isCloudMode()} meta={rollup} className="mb-6" />
       <Card className="col-span-12 border-muted/40 shadow-sm bg-card p-0">
         <DataTable
           columns={columns}

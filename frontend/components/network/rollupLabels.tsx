@@ -12,6 +12,17 @@ export function readRollupMeta(data: unknown): NetworkRollupMeta | undefined {
   return (data as { rollup?: NetworkRollupMeta } | null | undefined)?.rollup
 }
 
+/** One page's summary reads combined: the narrower window and every marked field, or whichever read has a block. */
+export function mergeRollupMeta(a: NetworkRollupMeta | undefined, b: NetworkRollupMeta | undefined): NetworkRollupMeta | undefined {
+  if (!a || !b) return a ?? b
+  return {
+    data_from: a.data_from > b.data_from ? a.data_from : b.data_from,
+    data_through: a.data_through < b.data_through ? a.data_through : b.data_through,
+    approximate: [...a.approximate, ...b.approximate],
+    lower_bound: [...a.lower_bound, ...b.lower_bound],
+  }
+}
+
 export const approxMark = (meta: NetworkRollupMeta | undefined, field: string) => meta?.approximate.includes(field) ? '≈' : ''
 export const boundMark = (meta: NetworkRollupMeta | undefined, field: string) => meta?.lower_bound.includes(field) ? '≥' : ''
 

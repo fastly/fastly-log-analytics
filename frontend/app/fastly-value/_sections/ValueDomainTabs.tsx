@@ -27,6 +27,7 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { formatBytes, formatCompactCount, formatMs, formatPctValue, CHART_COLORS } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 
 export type ValueData = components['schemas']['ValueSummaryResponse']
 export type CachingData = components['schemas']['CachingMetrics']
@@ -334,7 +335,7 @@ export function CachingValueTab({ data }: { data?: CachingData | null }) {
   )
 }
 
-export function SecurityValueTab({ data }: { data?: SecurityData | null }) {
+export function SecurityValueTab({ data, rollup }: { data?: SecurityData | null; rollup?: NetworkRollupMeta }) {
   const threatData = React.useMemo(() => {
     if (!data?.threat_time_series?.length) return []
     const grouped = groupCategoryTimeSeries(data.threat_time_series, 'blocked')
@@ -397,7 +398,9 @@ export function SecurityValueTab({ data }: { data?: SecurityData | null }) {
         <AnalyticsCard title="Threat Timeline" isEmpty={!threatData.length}>
           <PlotlyChart data={threatData} layout={THREAT_LAYOUT} a11yTitle="WAF blocked and logged requests over time" />
         </AnalyticsCard>
-        <AnalyticsCard title="Top WAF Signals" isEmpty={!signalData.length}>
+        <AnalyticsCard
+          title={`Top WAF Signals${boundMark(rollup, 'security.top_waf_signals') ? ' (≥ counts)' : ''}`}
+          isEmpty={!signalData.length}>
           <PlotlyChart data={signalData} layout={SIGNAL_LAYOUT} a11yTitle="Top WAF signal types by count" />
         </AnalyticsCard>
       </div>
@@ -405,7 +408,7 @@ export function SecurityValueTab({ data }: { data?: SecurityData | null }) {
   )
 }
 
-export function BotValueTab({ data }: { data?: BotData | null }) {
+export function BotValueTab({ data, rollup }: { data?: BotData | null; rollup?: NetworkRollupMeta }) {
   const donutData = React.useMemo(() => {
     if (!data?.total_requests || !data?.bot_requests) return []
     const human = data.total_requests - data.bot_requests
@@ -468,7 +471,7 @@ export function BotValueTab({ data }: { data?: BotData | null }) {
         <AnalyticsCard title="Bot vs Human Traffic" isEmpty={!donutData.length}>
           <PlotlyChart data={donutData} layout={BOT_DONUT_LAYOUT} a11yTitle="Bot versus human traffic breakdown" />
         </AnalyticsCard>
-        <AnalyticsCard title="Top Bots" isEmpty={!topBotsData.length}>
+        <AnalyticsCard title={`Top Bots${boundMark(rollup, 'bots.top_bots') ? ' (≥ counts)' : ''}`} isEmpty={!topBotsData.length}>
           <PlotlyChart data={topBotsData} layout={TOP_BOTS_LAYOUT} a11yTitle="Top bot names by request count" />
         </AnalyticsCard>
       </div>
@@ -476,7 +479,7 @@ export function BotValueTab({ data }: { data?: BotData | null }) {
   )
 }
 
-export function PerformanceValueTab({ data }: { data?: PerformanceData | null }) {
+export function PerformanceValueTab({ data, rollup }: { data?: PerformanceData | null; rollup?: NetworkRollupMeta }) {
   const latencyData = React.useMemo(() => {
     if (!data?.latency_time_series?.length) return []
     const grouped = groupCategoryTimeSeries(data.latency_time_series, 'hit')
@@ -519,7 +522,7 @@ export function PerformanceValueTab({ data }: { data?: PerformanceData | null })
         <StatCard
           title="P99 Latency"
           icon={Gauge}
-          value={formatMs(data.p99_latency_ms)}
+          value={`${data.p99_latency_ms != null ? approxMark(rollup, 'performance.p99_latency_ms') : ''}${formatMs(data.p99_latency_ms)}`}
           sub="99th percentile"
         />
       </div>

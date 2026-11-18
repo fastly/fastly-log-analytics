@@ -10,6 +10,7 @@ import { PlotlyChart } from '@/components/PlotlyChart'
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { formatBytes, formatCompactCount, formatCurrency, CHART_COLORS } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
+import { boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 
 export type IOData = components['schemas']['IOMetrics']
 export type IOOpportunity = components['schemas']['IOOpportunityRow']
@@ -213,7 +214,7 @@ function padSinglePoint(points: { time: string; value: number }[]): { time: stri
   return [{ time: fmt(prev), value: 0 }, points[0], { time: fmt(next), value: 0 }]
 }
 
-function IOEnabledView({ data }: { data: IOData }) {
+function IOEnabledView({ data, rollup }: { data: IOData; rollup?: NetworkRollupMeta }) {
   const trendData = React.useMemo(() => {
     const hasTransforms = data.io_time_series?.some((p) => p.value > 0)
     if (hasTransforms) {
@@ -364,7 +365,9 @@ function IOEnabledView({ data }: { data: IOData }) {
         </div>
       )}
       {data.io_format_conversion_pairs?.length ? (
-        <AnalyticsCard title="Format Conversions" description="Input → output format pairs by volume">
+        <AnalyticsCard
+          title={`Format Conversions${boundMark(rollup, 'io.io_format_conversion_pairs') ? ' (≥ counts)' : ''}`}
+          description="Input → output format pairs by volume">
           <DataTableReadonly
             columns={CONVERSION_COLUMNS}
             data={data.io_format_conversion_pairs ?? []}
@@ -384,7 +387,7 @@ function IOEnabledView({ data }: { data: IOData }) {
   )
 }
 
-export function IOValueTab({ data, loading }: { data?: IOData | null; loading?: boolean }) {
+export function IOValueTab({ data, loading, rollup }: { data?: IOData | null; loading?: boolean; rollup?: NetworkRollupMeta }) {
   if (loading) {
     return (
       <div className="space-y-6 pt-4">
@@ -402,7 +405,7 @@ export function IOValueTab({ data, loading }: { data?: IOData | null; loading?: 
     return <p className="text-muted-foreground py-8 text-center">No image traffic detected for this service.</p>
   }
   if (data.io_transforms != null) {
-    return <IOEnabledView data={data} />
+    return <IOEnabledView data={data} rollup={rollup} />
   }
   return <IOUpsellView data={data} />
 }

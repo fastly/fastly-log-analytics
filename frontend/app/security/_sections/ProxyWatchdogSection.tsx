@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import type { ImpossibleDistanceData } from '@/components/Insights'
 import type { SecurityData } from './BotsSection'
+import { approxMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import {
   ProxyExportCenterCard,
   ProxyWatchdogStatCards,
@@ -165,6 +166,8 @@ export interface ProxyWatchdogSectionProps {
   startTime?: string | null
   endTime?: string | null
   activeServiceId?: string | null
+  /** Cloud's summary block when it answered the watchdog from summaries. */
+  rollup?: NetworkRollupMeta
 }
 
 export function ProxyWatchdogSection({
@@ -174,6 +177,7 @@ export function ProxyWatchdogSection({
   startTime,
   endTime,
   activeServiceId,
+  rollup,
 }: ProxyWatchdogSectionProps) {
   const [threshold, setThreshold] = useState<'High' | 'Medium' | 'Low'>('High')
   const [format, setFormat] = useState<'fastly-acl' | 'plain'>('fastly-acl')
@@ -258,6 +262,11 @@ export function ProxyWatchdogSection({
 
   return (
     <div className="space-y-6">
+      {approxMark(rollup, 'proxies') && (
+        <p className="text-xs text-muted-foreground">
+          ≈ Estimated from a sample of the connections the summaries keep.
+        </p>
+      )}
       <ProxyWatchdogStatCards
         isLoading={isLoading}
         activeProxiesCount={activeProxiesCount}

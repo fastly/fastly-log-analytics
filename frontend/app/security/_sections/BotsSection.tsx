@@ -11,7 +11,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Bot, Fingerprint, Scale } from 'lucide-react'
 import type { PlotlyLayout } from '@/types/api'
-import type { NetworkRollupMeta } from '@/components/network/rollupLabels'
+import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import {
   BOT_COLUMN_IDS,
   BOT_EFFICIENCY_COLUMN_IDS,
@@ -107,6 +107,11 @@ export function BotsSection({
   const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
   const sumErr = sum.error as AnalyticsCardError | null
   const fpColumns = React.useMemo(() => fingerprintColumns(sum.rollup), [sum.rollup])
+  const efficiencyMarks = [
+    boundMark(sum.rollup, 'bot_efficiency') && '≥ counts',
+    approxMark(sum.rollup, 'bot_efficiency.referrals') && '≈ referrals',
+  ].filter(Boolean).join(', ')
+  const efficiencySuffix = efficiencyMarks ? ` (${efficiencyMarks})` : ''
   const uaEmptyMsg = isFieldActive('ua')
     ? 'No bot or crawler traffic detected in this time window.'
     : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'
@@ -193,7 +198,7 @@ export function BotsSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Well-Known Bots"
+          title={`Well-Known Bots${boundMark(sum.rollup, 'wellknown_bots') ? ' (≥ counts)' : ''}`}
           icon={<Bot className="h-4 w-4" />}
           headerAction={
             <ColumnVisibilityDropdown
@@ -262,7 +267,7 @@ export function BotsSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Bot & Crawler Cost vs. Referrals"
+          title={`Bot & Crawler Cost vs. Referrals${efficiencySuffix}`}
           icon={<Scale className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
@@ -291,7 +296,7 @@ export function BotsSection({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)"
+          title={`Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)${efficiencySuffix}`}
           icon={<Scale className="h-4 w-4" />}
           headerAction={
             onBotEfficiencyVisChange ? (

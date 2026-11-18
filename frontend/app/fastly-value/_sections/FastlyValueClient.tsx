@@ -47,8 +47,8 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
     if (activeTab === 'assets') return ['overview'] // dummy section, query disabled
     return [activeTab]
   }, [activeTab]) as ValueSection[]
-  // Cloud answers the overview and network sections from summaries when unfiltered; read them apart
-  // so they paint without waiting on the raw scan the other sections need.
+  // Cloud answers the VALUE_ROLLUP_SECTIONS from summaries when unfiltered; read them apart from any
+  // others so they paint without waiting on a raw scan.
   const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
   const [rollupSections, rawSections] = React.useMemo(() => {
     const servable = new Set<string>(VALUE_ROLLUP_SECTIONS)
@@ -117,10 +117,11 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
   const refreshing = activeTab !== 'assets' && (valueQuery.isFetching || rollupQuery.isFetching) && hasActiveSectionData
   // On a split summary tab the caching cards wait on the raw scan while the overview cards paint.
   const cachingLoading = split && rawSections.length > 0 && valueQuery.isLoading
+  const rollup = split ? readRollupMeta(rollupQuery.data) : undefined
 
   return (
     <div className="space-y-6">
-      <RollupDataThroughSlot reserve={split} meta={split ? readRollupMeta(rollupQuery.data) : undefined} />
+      <RollupDataThroughSlot reserve={split} meta={rollup} />
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
         <TabsList className="flex flex-wrap h-auto gap-1">
           {TABS.map((tab) => (
@@ -159,13 +160,13 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 <CachingValueTab data={data?.caching} />
               </TabsContent>
               <TabsContent value="security">
-                <SecurityValueTab data={data?.security} />
+                <SecurityValueTab data={data?.security} rollup={rollup} />
               </TabsContent>
               <TabsContent value="bots">
-                <BotValueTab data={data?.bots} />
+                <BotValueTab data={data?.bots} rollup={rollup} />
               </TabsContent>
               <TabsContent value="performance">
-                <PerformanceValueTab data={data?.performance} />
+                <PerformanceValueTab data={data?.performance} rollup={rollup} />
               </TabsContent>
               <TabsContent value="network">
                 <NetworkValueTab data={data?.network} />
@@ -182,7 +183,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 />
               </TabsContent>
               <TabsContent value="io">
-                <IOValueTab data={data?.io} loading={loading} />
+                <IOValueTab data={data?.io} loading={loading} rollup={rollup} />
               </TabsContent>
             </div>
           )}
