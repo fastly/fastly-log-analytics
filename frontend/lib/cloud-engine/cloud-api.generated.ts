@@ -1529,6 +1529,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/admin/usage/service-stats": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Fastly Stats API requests, delivered bytes and cache hits per whole UTC hour for the logged service, with its sampling settings */
+    get: operations["get__api_admin_usage_service_stats"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/admin/operational-logging": {
     parameters: {
       query?: never;
@@ -4201,6 +4218,57 @@ export interface operations {
         content: {
           "application/json": {
             started: boolean;
+          };
+        };
+      };
+      /** @description Request rejected */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ApiError"];
+        };
+      };
+    };
+  };
+  get__api_admin_usage_service_stats: {
+    parameters: {
+      query: {
+        /** @description Unix ms; rounded up to the hour */
+        from: number;
+        /** @description Unix ms; rounded down to the hour, at most 31 days after from */
+        to: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Hours Fastly has reported, oldest first; edge-only fields when the service logs only at the edge */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            service_id: string;
+            /** @description Unix s, whole UTC hour */
+            from: number;
+            /** @description Unix s, whole UTC hour (exclusive) */
+            to: number;
+            /** @description Percent of requests logged */
+            sample_rate: number;
+            edge_only: boolean;
+            hours: {
+              /** @description Unix s */
+              start_time: number;
+              requests: number;
+              /** @description Response body plus header bytes */
+              bandwidth_bytes: number;
+              hits: number;
+            }[];
           };
         };
       };

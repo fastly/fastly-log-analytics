@@ -974,6 +974,39 @@ impl Runtime for Fake {
     fn logged_traffic(&self, _: &str, _: u64, _: u64) -> Result<Value, String> {
         Ok(json!({"days": []}))
     }
+    fn service_stats(
+        &self,
+        service_id: &str,
+        from: u64,
+        to: u64,
+        fields: &[&str],
+    ) -> Result<Value, String> {
+        if service_id != SID {
+            return Err("unknown_service".into());
+        }
+        let value = |field: &str| match field {
+            "requests" => 1000,
+            "resp_body_bytes" => 9000,
+            "resp_header_bytes" => 1000,
+            "hits" => 900,
+            "edge_requests" => 600,
+            "edge_resp_body_bytes" => 5000,
+            "edge_resp_header_bytes" => 500,
+            "edge_hit_requests" => 540,
+            _ => 1,
+        };
+        let rows = (from..to)
+            .step_by(3600)
+            .map(|start| {
+                let mut row = json!({"start_time": start});
+                for field in fields {
+                    row[*field] = json!(value(field));
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        Ok(json!(rows))
+    }
     fn core_cache_replace(
         &self,
         key: &str,
@@ -6876,6 +6909,83 @@ fn logged_traffic_reports_the_ingest_relay_setting() {
     let (status, body, _) = logs_call(&fake, "GET", "/api/admin/usage/logged-traffic", Value::Null);
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["logging"]["ingest_relay"], json!(0));
+}
+
+/// 2026-07-23T10:00:00Z
+const STATS_HOUR: u64 = 1_784_800_800;
+
+#[test]
+fn service_stats_sums_the_logged_service_fields_per_whole_hour() {
+    let fake = Fake::new(BASE);
+    tick_runtime(&fake);
+    let from_ms = (STATS_HOUR + 1200) * 1000;
+    let to_ms = (STATS_HOUR + 3 * 3600 - 1200) * 1000;
+    let path = format!("/api/admin/usage/service-stats?from={from_ms}&to={to_ms}");
+    let (status, body, audit) = logs_call(&fake, "GET", &path, Value::Null);
+    assert_eq!(status, 200, "{body}");
+    assert!(audit.is_none());
+    assert_eq!(
+        body,
+        json!({
+            "service_id": SID, "from": STATS_HOUR + 3600, "to": STATS_HOUR + 2 * 3600,
+            "sample_rate": 1, "edge_only": false,
+            "hours": [{"start_time": STATS_HOUR + 3600, "requests": 1000, "bandwidth_bytes": 10000, "hits": 900}],
+        })
+    );
+}
+
+#[test]
+fn service_stats_reads_edge_fields_when_logging_is_edge_only() {
+    let fake = Fake::new(BASE);
+    tick_runtime(&fake);
+    let mut svc = serde_json::to_value(service()).unwrap();
+    svc["edge_only"] = json!(true);
+    fake.kv.borrow_mut().insert(format!("svc:{SID}"), (2, svc));
+    let path = format!(
+        "/api/admin/usage/service-stats?from={}&to={}",
+        STATS_HOUR * 1000,
+        (STATS_HOUR + 3600) * 1000
+    );
+    let (status, body, _) = logs_call(&fake, "GET", &path, Value::Null);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["edge_only"], json!(true));
+    assert_eq!(
+        body["hours"],
+        json!([{"start_time": STATS_HOUR, "requests": 600, "bandwidth_bytes": 5500, "hits": 540}])
+    );
+}
+
+#[test]
+fn service_stats_rejects_bad_ranges_and_needs_an_installed_service() {
+    let fake = Fake::new(BASE);
+    let ok = format!(
+        "/api/admin/usage/service-stats?from={}&to={}",
+        STATS_HOUR * 1000,
+        (STATS_HOUR + 3600) * 1000
+    );
+    assert_eq!(logs_call(&fake, "GET", &ok, Value::Null).0, 409);
+    tick_runtime(&fake);
+    let too_long = format!(
+        "/api/admin/usage/service-stats?from={}&to={}",
+        STATS_HOUR * 1000,
+        (STATS_HOUR + 32 * 86_400) * 1000
+    );
+    for path in [
+        "/api/admin/usage/service-stats?from=5000".to_string(),
+        format!(
+            "/api/admin/usage/service-stats?from={}&to={}",
+            STATS_HOUR * 1000,
+            STATS_HOUR * 1000
+        ),
+        too_long,
+    ] {
+        let (status, body, _) = logs_call(&fake, "GET", &path, Value::Null);
+        assert_eq!(
+            (status, &body["error"]),
+            (400, &json!("invalid_range")),
+            "{path}"
+        );
+    }
 }
 
 #[test]

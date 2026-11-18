@@ -24,14 +24,46 @@ Source: [`frontend/app/fastly-value/`](../../frontend/app/fastly-value/) (`page.
 
 Request sections query ClickHouse `request_facts` and minute projections for the active service. The `io` section reads the Fastly Historical Stats API (`/stats/service/{id}?by=day`) with the service's stored token, cached for 60 seconds (`_IO_STATS_CACHE`); it returns nothing if no token or service ID is configured. Optional log fields that are absent degrade to null or zero rather than failing the query.
 
+## Fastly-reported comparison
+
+With no filter, the Summary tab's Total Requests, Bandwidth Delivered and Origin Offload cards add a line such as `Fastly reported 1.2M · logs −0.4%` from the Fastly [Historical Stats API](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/), so dropped or missing logs show up. The logged figures stay the primary values: filters and breakdowns depend on them. The line is left out, without failing the page, when a filter is active, Stats can't be read (no token or service ID, an error, an analyst on Cloud) or the range spans more than 31 days. The line's tooltip names the comparison window.
+
+The window is the whole UTC hours from the range start through the last hour Stats has reported, clipped to the logs' coverage (the High-Scale watermark, the Cloud "data through"). Stats reports an hour about 15 minutes after it ends, so the current partial hour is never compared. The response's `fastly_reported` (`FastlyReportedMetrics`) carries the Stats totals over that window and the logged requests and bytes over the same hours (`logged_requests`, `logged_bandwidth_bytes`). The page compares the logs with `reported × sample_rate / 100`. Offload is compared in percentage points against the card's logged value over the whole range.
+
+| Logged figure | Stats fields (all nodes) | Stats fields (`edge_only`) |
+|---|---|---|
+| Requests (one log line per request on each node) | `requests` | `edge_requests` |
+| Bytes (`resp.bytes_written`, headers included) | `resp_body_bytes` + `resp_header_bytes` | `edge_resp_body_bytes` + `edge_resp_header_bytes` |
+| Cache hits (`HIT*` cache states) | `hits` | `edge_hit_requests` |
+
+Field definitions: [Historical Stats field reference](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/). Fields not used, and why:
+- `bandwidth` also counts backend request, Compute and WebSocket bytes.
+- `hit_ratio` is hits / (hits + misses), not hits / requests.
+- `origin_offload` is byte-based.
+- `origin_fetches` doesn't match either install's origin count, so origin counts aren't compared.
+
+Known differences that are not lost logs:
+- `requests` counts a shielded request at the edge and again at the shield. The logs do the same (`vcl_log` runs on every node), so both sides double-count alike. With `edge_only` both sides use the edge fields.
+- A logging `custom_condition`, the `/rum-beacon` exclusion and segmented-caching inner requests leave requests out of the logs that Stats still counts.
+- Sampling is random, so a sampled service drifts by a fraction of a percent.
+- Ingest lag at the window's end can make the logs read low until they catch up.
+
+High-Scale: `fetch_fastly_reported` in [`backend/repositories/value.py`](../../backend/repositories/value.py) makes one `GET /stats/service/{id}?by=hour&from&to` call with the service's stored token, cached for 5 minutes (`_FASTLY_REPORTED_CACHE`), in parallel with the ClickHouse reads; the logged totals over the window are one extra `request_facts` count.
+
+Cloud: the admin-only Compute route `GET /api/admin/usage/service-stats?from=<ms>&to=<ms>` ([`compute/cloud/src/admin/logs.rs`](../../compute/cloud/src/admin/logs.rs)) reads the four fields hourly for the logged service (at most 31 days) and returns them with its `sample_rate` and `edge_only`. [`frontend/lib/cloud-engine/value-stats.ts`](../../frontend/lib/cloud-engine/value-stats.ts) starts that read alongside the summaries, waits at most 1.5 s more for it, and compares it with the summaries' hourly logged series. It is cached per range for 5 minutes, failures included. Analysts get a 403 and no line. A read that falls back to the raw scan has no comparison either.
+
+## Bandwidth Saved (est.)
+
+Logged response bytes of cache hits: an estimate of what origin would have sent without the cache. Stats has no equivalent figure, so it has no comparison line.
+
 ## Cloud
 
-Cloud answers `POST /api/value/summary` in the browser. With no filter, `overview` and `network` are served from v3 summaries and read apart from the other sections, so the Network tab reads only summaries and the Summary tab paints its overview and protocol cards while `caching` scans raw (the Origin Offload and Bandwidth Saved cards show loading until then). "Data through" shows above the tabs. A filter keeps one raw read per tab.
+Cloud answers `POST /api/value/summary` in the browser. With no filter, `overview` and `network` are served from v3 summaries and read apart from the other sections, so the Network tab reads only summaries and the Summary tab paints its overview and protocol cards while `caching` scans raw (the Origin Offload and Bandwidth Saved (est.) cards show loading until then). "Data through" shows above the tabs. A filter keeps one raw read per tab.
 
 Counts come from the summaries' per-field value counts and the overview row's bytes and HIT/MISS latency sums; the protocol series rebuckets the 5-minute protocol series. The read falls back to the raw scan when a needed field (`cache`, `proto`, `tls`, `is_ipv6`) is cut to its top K or holds non-ASCII values, a custom field shadows one the raw scan reads, a `HIT`-prefixed cache state other than `HIT`, `HIT-STALE` or `HIT-CLUSTER` or a `MISS`-prefixed one other than `MISS` is logged, the byte total is zero, the protocol series is cut or can't be rebucketed to the chart interval, or the range isn't covered by bundles. `caching`, `performance`, `security`, `bots` and `io` always scan raw: they need per-bucket prefix-matched cache counts, exact p99, WAF and bot fields and per-format image bytes that summaries don't hold. The raw scan projects only the columns its requested sections read.
 
 ## Tests
 
-- Cloud: [`frontend/lib/cloud-engine/value-rollup.test.ts`](../../frontend/lib/cloud-engine/value-rollup.test.ts), [`frontend/lib/cloud-engine/adapter-section-rollups.test.ts`](../../frontend/lib/cloud-engine/adapter-section-rollups.test.ts), [`frontend/__tests__/components/AssetsValueRollup.test.tsx`](../../frontend/__tests__/components/AssetsValueRollup.test.tsx)
-- Frontend: `fastly-value page mounts and renders title and tab navigation` in [`frontend/__tests__/app/dashboard.test.tsx`](../../frontend/__tests__/app/dashboard.test.tsx)
-- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/repositories/test_base_helpers.py`](../../tests/repositories/test_base_helpers.py)
+- Cloud: [`frontend/lib/cloud-engine/value-rollup.test.ts`](../../frontend/lib/cloud-engine/value-rollup.test.ts), [`frontend/lib/cloud-engine/value-stats.test.ts`](../../frontend/lib/cloud-engine/value-stats.test.ts), `service_stats_*` in [`compute/cloud/tests/ingest.rs`](../../compute/cloud/tests/ingest.rs), [`frontend/lib/cloud-engine/adapter-section-rollups.test.ts`](../../frontend/lib/cloud-engine/adapter-section-rollups.test.ts), [`frontend/__tests__/components/AssetsValueRollup.test.tsx`](../../frontend/__tests__/components/AssetsValueRollup.test.tsx)
+- Frontend: `fastly-value page mounts and renders title and tab navigation` in [`frontend/__tests__/app/dashboard.test.tsx`](../../frontend/__tests__/app/dashboard.test.tsx), [`frontend/__tests__/app/fastly-value-reported.test.tsx`](../../frontend/__tests__/app/fastly-value-reported.test.tsx)
+- Backend: [`tests/routers/test_analytics_routers.py`](../../tests/routers/test_analytics_routers.py), [`tests/repositories/test_value_fastly_reported.py`](../../tests/repositories/test_value_fastly_reported.py), [`tests/repositories/test_base_helpers.py`](../../tests/repositories/test_base_helpers.py)

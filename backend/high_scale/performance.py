@@ -11,8 +11,10 @@ if TYPE_CHECKING:
 
 import hashlib
 import heapq
+import logging
 import os
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 
@@ -44,6 +46,8 @@ from backend.repositories.utils.response_shaping import (
     shape_waterfall_avg,
 )
 from backend.utils.bounded_cache import CacheRegistry
+
+logger = logging.getLogger(__name__)
 
 SCATTER_SAMPLE_SIZE = 300
 
@@ -510,6 +514,7 @@ def value_summary(
     *,
     sections: set[str] | None = None,
 ) -> ValueSummaryResponse:
+    from backend.repositories import value as value_repo
     from backend.repositories.value import (
         _shape_caching_and_overview_buckets,
         _shape_raw_network_buckets,
@@ -569,6 +574,24 @@ def value_summary(
         bytes_expr = "toInt64OrZero(coalesce(nullIf(custom_fields['resp_bytes'], ''), custom_fields['bytes']))"
         proto_expr = "coalesce(nullIf(custom_fields['proto'], ''), custom_fields['protocol'])"
         ipv6_expr = "coalesce(nullIf(custom_fields['is_ipv6'], ''), custom_fields['ipv6'])"
+
+        def _fetch_fastly_reported() -> dict[str, Any] | None:
+            try:
+                coverage_end = getattr(service.watermark_for("request"), "coverage_end", None)
+                return value_repo.fetch_fastly_reported(
+                    service.service_id, start_time, end_time, coverage_end=coverage_end
+                )
+            except Exception:
+                logger.warning("Fastly-reported stats unavailable for %s", service.service_id, exc_info=True)
+                return None
+
+        reported_future: Future[dict[str, Any] | None] | None = None
+        if "overview" in wanted and not filters:
+            stats_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hs-val-stats")
+            reported_future = trace.submit(
+                stats_pool, "fastly_reported_stats", _fetch_fastly_reported, activity="overhead"
+            )
+            stats_pool.shutdown(wait=False)
 
         def _run_bucket_scan() -> list[dict[str, Any]]:
             bot_select = (
@@ -647,6 +670,25 @@ def value_summary(
                 result["caching"] = shaped["caching"]
             if "overview" in wanted and "overview" in shaped:
                 result["overview"] = shaped["overview"]
+        if reported_future is not None and (reported := reported_future.result()) is not None:
+            w_where, w_params = _facts_where(
+                service.service_id, reported["window_start"], reported["window_end"], {}, end_inclusive=False
+            )
+            w_rows = trace.run(
+                "fastly_reported_window",
+                lambda: service.client.execute(
+                    f"/* value:fastly_reported_window */ SELECT count() AS requests, "
+                    f"sum({bytes_expr}) AS bandwidth_bytes FROM request_facts WHERE {w_where}",
+                    w_params,
+                ),
+                source="fact",
+            )
+            w_row = w_rows[0] if w_rows else {}
+            result["fastly_reported"] = {
+                **reported,
+                "logged_requests": int(w_row.get("requests") or 0),
+                "logged_bandwidth_bytes": int(w_row.get("bandwidth_bytes") or 0),
+            }
             if "performance" in wanted and "performance_from_buckets" in shaped:
                 pf = shaped["performance_from_buckets"]
                 p99_rows = (

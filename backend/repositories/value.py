@@ -9,12 +9,21 @@ from typing import Any
 
 from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
-from backend.utils.date_utils import safe_iso
+from backend.utils.date_utils import iso_z, safe_iso
 
 logger = logging.getLogger(__name__)
 
 _IO_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 CacheRegistry.register("value._IO_STATS_CACHE", _IO_STATS_CACHE)
+_FASTLY_REPORTED_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=300.0)
+CacheRegistry.register("value._FASTLY_REPORTED_CACHE", _FASTLY_REPORTED_CACHE)
+_FASTLY_REPORTED_MAX_SPAN_S = 31 * 86400
+# Logs are written on every node that handles a request, so the all-node Stats
+# fields match them; edge_only logging matches the edge_* fields instead.
+_FASTLY_REPORTED_FIELDS = {
+    False: ("requests", ("resp_body_bytes", "resp_header_bytes"), "hits"),
+    True: ("edge_requests", ("edge_resp_body_bytes", "edge_resp_header_bytes"), "edge_hit_requests"),
+}
 
 _IO_TRANSFORM_FIELD = "imgopto"
 _IO_RESP_BYTES_FIELD = "imgopto_resp_body_bytes"
@@ -94,6 +103,90 @@ def _fetch_io_stats(
 
     _IO_STATS_CACHE[path] = payload
     return payload
+
+
+def fastly_reported_from_stats(
+    records: list[dict[str, Any]],
+    from_s: int,
+    to_s: int,
+    *,
+    edge_only: bool,
+    sample_rate: int,
+) -> dict[str, Any] | None:
+    """Sum hourly Stats buckets inside ``[from_s, to_s)``; the window ends at the last hour Fastly reported."""
+    req_field, byte_fields, hit_field = _FASTLY_REPORTED_FIELDS[edge_only]
+    requests = bandwidth = hits = 0
+    last_start: int | None = None
+    for rec in records:
+        start = rec.get("start_time")
+        if not isinstance(start, (int, float)) or not from_s <= int(start) < to_s:
+            continue
+        last_start = max(last_start or int(start), int(start))
+        requests += int(rec.get(req_field) or 0)
+        bandwidth += sum(int(rec.get(f) or 0) for f in byte_fields)
+        hits += int(rec.get(hit_field) or 0)
+    if last_start is None:
+        return None
+    return {
+        "window_start": iso_z(datetime.fromtimestamp(from_s, tz=UTC)),
+        "window_end": iso_z(datetime.fromtimestamp(last_start + 3600, tz=UTC)),
+        "requests": requests,
+        "bandwidth_bytes": bandwidth,
+        "hit_requests": hits,
+        "origin_offload_pct": round(hits * 100.0 / requests, 2) if requests else None,
+        "sample_rate": sample_rate,
+        "edge_only": edge_only,
+    }
+
+
+def fetch_fastly_reported(
+    service_id: str,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    now: datetime | None = None,
+    coverage_end: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Fastly Historical Stats totals for the whole closed UTC hours of the range, or None when unavailable."""
+    from backend import config
+    from backend.core.fastly import client
+    from backend.utils.date_utils import parse_iso_utc
+
+    start_dt, end_dt = parse_iso_utc(start_time), parse_iso_utc(end_time)
+    if start_dt is None or end_dt is None:
+        return None
+    now = now or datetime.now(UTC)
+    from_s = -(-int(start_dt.timestamp()) // 3600) * 3600
+    to_s = min(int(end_dt.timestamp()), int(now.timestamp()))
+    if coverage_end is not None:
+        to_s = min(to_s, int(coverage_end.timestamp()))
+    to_s = to_s // 3600 * 3600
+    if to_s <= from_s or to_s - from_s > _FASTLY_REPORTED_MAX_SPAN_S:
+        return None
+
+    cdn_svc = config.get_fastly_logging_service_id(service_id)
+    api_key = config.get_fastly_api_key(service_id)
+    if not api_key or not cdn_svc:
+        return None
+    cfg = config.load_config(service_id) or {}
+    prov = cfg.get("provisioning") or {}
+    sample_raw = prov.get("sample_rate") if "sample_rate" in prov else cfg.get("sample_rate")
+    edge_only = bool(prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False))
+    sample_rate = min(100, max(1, int(100 if sample_raw is None else sample_raw)))
+
+    path = f"/stats/service/{cdn_svc}?by=hour&from={from_s}&to={to_s}"
+    payload = _FASTLY_REPORTED_CACHE.get(path)
+    if payload is None:
+        try:
+            payload = client.fastly("GET", path, token=api_key, timeout=8, max_retries=1)
+        except Exception:
+            logger.debug("Fastly-reported stats fetch failed for %s", cdn_svc, exc_info=True)
+            return None
+        _FASTLY_REPORTED_CACHE[path] = payload
+    records = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        return None
+    return fastly_reported_from_stats(records, from_s, to_s, edge_only=edge_only, sample_rate=sample_rate)
 
 
 def _build_io_metrics(payload: dict, timer: SectionTimer) -> dict[str, Any]:

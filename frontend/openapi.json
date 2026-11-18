@@ -54749,6 +54749,72 @@
         ],
         "title": "ErrorSpikesMeta"
       },
+      "FastlyReportedMetrics": {
+        "properties": {
+          "window_start": {
+            "type": "string",
+            "title": "Window Start"
+          },
+          "window_end": {
+            "type": "string",
+            "title": "Window End"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "bandwidth_bytes": {
+            "type": "integer",
+            "title": "Bandwidth Bytes"
+          },
+          "hit_requests": {
+            "type": "integer",
+            "title": "Hit Requests"
+          },
+          "origin_offload_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Offload Pct"
+          },
+          "sample_rate": {
+            "type": "integer",
+            "title": "Sample Rate",
+            "default": 100
+          },
+          "edge_only": {
+            "type": "boolean",
+            "title": "Edge Only",
+            "default": false
+          },
+          "logged_requests": {
+            "type": "integer",
+            "title": "Logged Requests"
+          },
+          "logged_bandwidth_bytes": {
+            "type": "integer",
+            "title": "Logged Bandwidth Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "window_start",
+          "window_end",
+          "requests",
+          "bandwidth_bytes",
+          "hit_requests",
+          "logged_requests",
+          "logged_bandwidth_bytes"
+        ],
+        "title": "FastlyReportedMetrics",
+        "description": "Fastly Historical Stats totals beside the logs for the same whole closed UTC hours."
+      },
       "FieldAggregate": {
         "properties": {
           "top": {
@@ -87379,6 +87445,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/IOMetrics"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fastly_reported": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FastlyReportedMetrics"
               },
               {
                 "type": "null"

@@ -113,6 +113,7 @@ const KNOWN_SEGMENTS: &[&str] = &[
     "reconcile-storage",
     "compute-billing",
     "logged-traffic",
+    "service-stats",
     "edge_requests",
     "field",
     "compute_requests",

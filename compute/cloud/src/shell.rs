@@ -305,6 +305,16 @@ pub trait Runtime: SetupStores {
     fn logged_traffic(&self, _service_id: &str, _from: u64, _to: u64) -> Result<Value, String> {
         Err("logged_traffic_unavailable".into())
     }
+    /// Fastly Stats hourly buckets `[{start_time, <field>...}]` of `fields` for `service_id` over `[from, to)` (unix s).
+    fn service_stats(
+        &self,
+        _service_id: &str,
+        _from: u64,
+        _to: u64,
+        _fields: &[&str],
+    ) -> Result<Value, String> {
+        Err("service_stats_unavailable".into())
+    }
     fn kv_list(&self, _prefix: &str, _cursor: Option<&str>, _limit: u32) -> Result<KvPage, String> {
         Err("unsupported".into())
     }

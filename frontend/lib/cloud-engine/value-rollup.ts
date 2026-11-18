@@ -4,6 +4,7 @@ import { parseEpochMs, roundTo } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { hasFilterValues, VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
 import { emptyValueSummary, type ValueQueryParams } from "./value";
+import type { LoggedHour } from "./value-stats";
 
 export type ValueRollupBody = Pick<ValueQueryParams, "start_time" | "end_time" | "chart_interval"> & {
   filters?: unknown;
@@ -65,7 +66,7 @@ const isH11 = (p: string) => p.startsWith("HTTP/1.1") || p === "1.1";
 export function valueSummaryFromRollup(
   result: RollupResult,
   body: ValueRollupBody,
-): (Partial<ValueSummary> & { rollup: NetworkRollupMeta }) | null {
+): (Partial<ValueSummary> & { rollup: NetworkRollupMeta & { logged_hours?: LoggedHour[] } }) | null {
   const { rollup } = result;
   const { fields, truncated, overview } = rollup;
   const sections = (body.sections ?? []) as (keyof ValueSummary)[];
@@ -76,12 +77,17 @@ export function valueSummaryFromRollup(
   for (const field of ["cache", "proto"]) {
     if (needed.includes(field) && [...fields.get(field)?.keys() ?? []].some((value) => !ASCII.test(value))) return null;
   }
-  const meta: NetworkRollupMeta = {
+  const meta: NetworkRollupMeta & { logged_hours?: LoggedHour[] } = {
     data_from: new Date(result.dataFromMs).toISOString(),
     data_through: new Date(result.dataThroughMs).toISOString(),
     approximate: [],
     lower_bound: [],
   };
+  if (want("overview")) {
+    // The adapter compares these with Fastly's Stats API hours and drops them from the answer.
+    const hourly = rebucketSeries(rollup, "overall", 3_600_000)?.get("") ?? new Map();
+    meta.logged_hours = [...hourly].sort(([a], [z]) => a - z).map(([t, agg]) => [t, agg.requests, agg.respBytes]);
+  }
   const out = emptyValueSummary();
   const total = overview.requests;
   const pick = () => ({ ...Object.fromEntries(sections.map((section) => [section, out[section]])), rollup: meta });

@@ -1039,6 +1039,61 @@ def test_value_summary_populated_buckets(client, test_service_source, monkeypatc
     assert vals == (12, 9, 12) and len(body["network"]["protocol_time_series"]) > 0
 
 
+def test_value_summary_fastly_reported_only_when_unfiltered(client, test_service_source, monkeypatch):
+    window_sql: list[tuple[str, dict]] = []
+
+    def _exec(sql: str, params: dict | None = None, settings: dict | None = None):
+        if "value:fastly_reported_window" in str(sql):
+            window_sql.append((str(sql), dict(params or {})))
+            return [{"requests": 480, "bandwidth_bytes": 51_000}]
+        return []
+
+    empty_wm = SimpleNamespace(coverage_start=None, coverage_end=None, last_visible_event_id=None)
+    svc = SimpleNamespace(
+        service_id=test_service_source["service_id"],
+        client=SimpleNamespace(execute=_exec),
+        watermark=lambda: empty_wm,
+        watermark_for=lambda domain="request": empty_wm,
+    )
+    monkeypatch.setattr(
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        lambda: SimpleNamespace(resolve=lambda sid: svc),
+    )
+    stats = {
+        "window_start": "2026-07-23T10:00:00Z",
+        "window_end": "2026-07-23T12:00:00Z",
+        "requests": 1000,
+        "bandwidth_bytes": 100_000,
+        "hit_requests": 900,
+        "origin_offload_pct": 90.0,
+        "sample_rate": 50,
+        "edge_only": False,
+    }
+    fetched: list[tuple] = []
+    monkeypatch.setattr(
+        "backend.repositories.value.fetch_fastly_reported",
+        lambda *a, **kw: fetched.append(a) or dict(stats),
+    )
+    base = {"start_time": "2026-07-23T09:30:00Z", "end_time": "2026-07-23T12:30:00Z", "sections": ["overview"]}
+
+    body = client.post("/api/value/summary", headers=_SVC_HEADERS, json={**base, "filters": {}}).json()
+    assert body["fastly_reported"] == {**stats, "logged_requests": 480, "logged_bandwidth_bytes": 51_000}
+    sql, params = window_sql[0]
+    assert "event_timestamp < {end:DateTime64(3)}" in sql
+    assert (params["start"], params["end"]) == (
+        datetime(2026, 7, 23, 10, tzinfo=UTC),
+        datetime(2026, 7, 23, 12, tzinfo=UTC),
+    )
+
+    fetched.clear()
+    filtered = {**base, "filters": {"cache": {"values": ["HIT"]}}}
+    body = client.post("/api/value/summary", headers=_SVC_HEADERS, json=filtered).json()
+    assert body.get("fastly_reported") is None and fetched == []
+
+    caching_only = client.post("/api/value/summary", headers=_SVC_HEADERS, json={**base, "sections": ["caching"]})
+    assert caching_only.json().get("fastly_reported") is None and fetched == []
+
+
 @pytest.mark.parametrize(
     ("timestamp", "expected"),
     [

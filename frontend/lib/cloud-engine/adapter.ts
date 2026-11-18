@@ -46,6 +46,7 @@ import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire
 import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
 import { isNativeCloudRoute } from "./native-routes";
+import { valueStatsDecorator } from "./value-stats";
 import { migrateLegacySavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
 import { fetchCloudMetadata, resetCloudMetadataCache } from "./metadata-cache";
@@ -441,6 +442,8 @@ async function cloudNetworkRollup(request: Request, path: string, origin?: Cloud
 type SectionRollup = {
   label: string;
   eligible: (path: string, params: Record<string, unknown>) => boolean;
+  /** Starts side reads alongside the summaries and returns how to finish their answer. */
+  decorate?: (start: string, end: string, params: Record<string, unknown>) => (answer: unknown) => Promise<unknown>;
 };
 
 const SECTION_ROLLUPS: Record<string, SectionRollup> = {
@@ -450,7 +453,7 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible },
   "/api/security/bundle": { label: "/security", eligible: securityRollupEligible },
   "/api/assets/aggregates": { label: "/assets", eligible: assetsRollupEligible },
-  "/api/value/summary": { label: "/fastly-value", eligible: valueRollupEligible },
+  "/api/value/summary": { label: "/fastly-value", eligible: valueRollupEligible, decorate: valueStatsDecorator },
 };
 
 /**
@@ -473,11 +476,12 @@ async function cloudSectionRollup(request: Request, path: string, route: Section
   const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  const finish = route.decorate?.(start, end, { ...params, ...serviceId ? { service_id: serviceId } : {} });
   try {
     const answer = await rollupAnswer(path, {
       ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
     }, serviceId, request.signal);
-    return answer ? jsonResponse(answer, request) : null;
+    return answer ? jsonResponse(finish ? await finish(answer) : answer, request) : null;
   } catch (error) {
     if (request.signal.aborted) throw error;
     console.warn(`flp: ${route.label} summaries failed; reading raw Parquet`, error);

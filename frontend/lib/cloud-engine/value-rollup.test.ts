@@ -135,6 +135,17 @@ describe("valueSummaryFromRollup", () => {
     expect(valueSummaryFromRollup(with_({ overview: undefined }), body())).toBeNull();
   });
 
+  it("carries the overview's logged requests and bytes per UTC hour for the Fastly Stats comparison", async () => {
+    const result = await rollupOf("network", FIXTURES.network.files("window"));
+    const out = valueSummaryFromRollup(result, body())!;
+    const hours = out.rollup.logged_hours!;
+    expect(hours.length).toBeGreaterThan(0);
+    expect(hours.every(([at]) => at % HOUR === 0)).toBe(true);
+    expect(hours.reduce((n, [, requests]) => n + requests, 0)).toBe(out.overview!.total_requests);
+    expect(hours.reduce((n, [, , bytes]) => n + bytes, 0)).toBeCloseTo(out.overview!.total_bandwidth_bytes!, 1);
+    expect(valueSummaryFromRollup(result, body({ sections: ["network"] }))!.rollup).not.toHaveProperty("logged_hours");
+  });
+
   it("answers an empty range with the raw scan's empty sections", () => {
     const overview = { requests: 0, totalBandwidth: 0, hitElapsedSum: 0, hitElapsedCount: 0, missElapsedSum: 0, missElapsedCount: 0 };
     const out = valueSummaryFromRollup({

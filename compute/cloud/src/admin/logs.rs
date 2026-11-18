@@ -126,6 +126,11 @@ pub fn handle(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome
     if request.method == "GET" && request.path == "/api/admin/usage/logged-traffic" {
         return logged_traffic(runtime);
     }
+    if let Some(("/api/admin/usage/service-stats", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return service_stats(runtime, query);
+        }
+    }
     let route = (request.method.as_str(), request.path.as_str());
     match route {
         ("GET", "/api/admin/operational-logging") => done(
@@ -480,6 +485,80 @@ fn compute_billing(runtime: &impl Runtime, query: &str) -> Outcome {
         Ok(billing) => done(billing, None),
         Err(error) => fail(502, &error),
     }
+}
+
+/// Stats fields matching what the logs count: every node's requests, delivered bytes (body plus
+/// headers, as `resp.bytes_written`) and cache hits, or the edge-only fields when only edges log.
+const SERVICE_STATS_FIELDS: [[&str; 4]; 2] = [
+    ["requests", "resp_body_bytes", "resp_header_bytes", "hits"],
+    [
+        "edge_requests",
+        "edge_resp_body_bytes",
+        "edge_resp_header_bytes",
+        "edge_hit_requests",
+    ],
+];
+
+/// The logged service's Fastly-reported requests, bytes and hits per whole UTC hour inside
+/// `from`..`to` (epoch ms), with the sampling settings that relate them to the logged rows.
+fn service_stats(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+    };
+    let (Some(from), Some(to)) = (param("from"), param("to")) else {
+        return fail(400, "invalid_range");
+    };
+    let (from, to) = (from.div_ceil(1000), to / 1000);
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    let service = match load_installed_service(runtime) {
+        Ok((_, Some(service), _)) => service,
+        Ok(_) => return fail(409, "service_not_configured"),
+        Err(error) => return fail(503, &error),
+    };
+    let (from, to) = (from.div_ceil(3600) * 3600, to / 3600 * 3600);
+    let [requests, body, header, hits] = SERVICE_STATS_FIELDS[usize::from(service.edge_only)];
+    let rows = if from < to {
+        match runtime.service_stats(
+            &service.service_id,
+            from,
+            to,
+            &[requests, body, header, hits],
+        ) {
+            Ok(rows) => rows,
+            Err(error) => return fail(502, &error),
+        }
+    } else {
+        json!([])
+    };
+    let num = |row: &Value, field: &str| row[field].as_f64().unwrap_or(0.0).round() as u64;
+    let hours: Vec<Value> = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let start = row["start_time"]
+                .as_u64()
+                .filter(|s| (from..to).contains(s))?;
+            Some(json!({
+                "start_time": start,
+                "requests": num(row, requests),
+                "bandwidth_bytes": num(row, body) + num(row, header),
+                "hits": num(row, hits),
+            }))
+        })
+        .collect();
+    done(
+        json!({
+            "service_id": service.service_id, "from": from, "to": to,
+            "sample_rate": service.sample_rate.clamp(1, 100), "edge_only": service.edge_only,
+            "hours": hours,
+        }),
+        None,
+    )
 }
 
 /// Complete UTC days of logged-service traffic the cost estimate averages, as in v3's prefill.

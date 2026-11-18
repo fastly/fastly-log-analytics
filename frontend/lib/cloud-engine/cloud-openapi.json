@@ -3174,6 +3174,98 @@
         }
       }
     },
+    "/api/admin/usage/service-stats": {
+      "get": {
+        "operationId": "get__api_admin_usage_service_stats",
+        "summary": "Fastly Stats API requests, delivered bytes and cache hits per whole UTC hour for the logged service, with its sampling settings",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Unix ms; rounded up to the hour"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Unix ms; rounded down to the hour, at most 31 days after from"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hours Fastly has reported, oldest first; edge-only fields when the service logs only at the edge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["service_id", "from", "to", "sample_rate", "edge_only", "hours"],
+                  "properties": {
+                    "service_id": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "integer",
+                      "description": "Unix s, whole UTC hour"
+                    },
+                    "to": {
+                      "type": "integer",
+                      "description": "Unix s, whole UTC hour (exclusive)"
+                    },
+                    "sample_rate": {
+                      "type": "integer",
+                      "description": "Percent of requests logged"
+                    },
+                    "edge_only": {
+                      "type": "boolean"
+                    },
+                    "hours": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["start_time", "requests", "bandwidth_bytes", "hits"],
+                        "properties": {
+                          "start_time": {
+                            "type": "integer",
+                            "description": "Unix s"
+                          },
+                          "requests": {
+                            "type": "integer"
+                          },
+                          "bandwidth_bytes": {
+                            "type": "integer",
+                            "description": "Response body plus header bytes"
+                          },
+                          "hits": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/operational-logging": {
       "get": {
         "operationId": "get__api_admin_operational_logging",

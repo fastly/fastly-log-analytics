@@ -34,6 +34,7 @@ export type SecurityData = components['schemas']['SecurityMetrics']
 export type BotData = components['schemas']['BotMetrics']
 export type PerformanceData = components['schemas']['PerformanceMetrics']
 export type NetworkData = components['schemas']['NetworkMetrics']
+export type FastlyReportedData = components['schemas']['FastlyReportedMetrics']
 
 export const TABS = [
   { id: 'summary', label: 'Summary', icon: BarChart3 },
@@ -154,10 +155,44 @@ export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | nul
   )
 }
 
+const BANDWIDTH_SAVED_TOOLTIP =
+  "Logged response bytes of cache hits: what origin would have sent without the cache. Fastly's Stats API has no equivalent figure."
+
+const signed = (n: number, digits: number) => `${n < 0 ? '−' : '+'}${Math.abs(n).toFixed(digits)}`
+
+const utcMinute = (iso: string) => iso.slice(0, 16).replace('T', ' ')
+
+function reportedTitle(reported: FastlyReportedData): string {
+  const window = `${utcMinute(reported.window_start)}–${reported.window_end.slice(11, 16)} UTC`
+  const sampled = (reported.sample_rate ?? 100) < 100
+    ? ` Logs record ${reported.sample_rate}% of requests, so they are compared with ${reported.sample_rate}% of Fastly's figure.`
+    : ''
+  return `Fastly Stats API, whole UTC hours ${window}, compared with the logs over the same hours.${sampled}`
+}
+
+/** Fastly's Stats API figure for a logged total, and how far the logs over the same hours are from it. */
+function FastlyReportedLine({ reported, value, logged, expected }: {
+  reported: FastlyReportedData
+  value: string
+  logged: number
+  expected: number
+}) {
+  const share = (reported.sample_rate ?? 100) / 100
+  const base = expected * share
+  const delta = base > 0 ? ` · logs ${signed(((logged - base) / base) * 100, 1)}%` : ''
+  return <span className="block" title={reportedTitle(reported)}>{`Fastly reported ${value}${delta}`}</span>
+}
+
+function withReported(sub: React.ReactNode, line: React.ReactNode) {
+  return line ? <>{sub && <span className="block">{sub}</span>}{line}</> : sub
+}
+
 export function SummaryValueTab({ data, loading, cachingLoading }: { data?: ValueData; loading?: boolean; cachingLoading?: boolean }) {
   const overview = data?.overview
   const caching = data?.caching
   const network = data?.network
+  const reported = data?.fastly_reported
+  const offload = caching?.origin_offload_pct ?? overview?.origin_offload_pct
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -166,7 +201,14 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           icon={Gauge}
           loading={loading}
           value={overview?.total_requests != null ? formatCompactCount(overview.total_requests) : '—'}
-          sub="processed at the edge"
+          sub={withReported('processed at the edge', reported && (
+            <FastlyReportedLine
+              reported={reported}
+              value={formatCompactCount(reported.requests)}
+              logged={reported.logged_requests}
+              expected={reported.requests}
+            />
+          ))}
           tooltip="Total requests processed by Fastly in the selected time range"
         />
         <StatCard
@@ -174,7 +216,17 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           icon={HardDrive}
           loading={loading}
           value={overview?.total_bandwidth_bytes != null ? formatBytes(overview.total_bandwidth_bytes) : '—'}
-          sub={overview?.origin_offload_pct != null ? `${overview.origin_offload_pct}% served from cache` : ''}
+          sub={withReported(
+            overview?.origin_offload_pct != null ? `${overview.origin_offload_pct}% served from cache` : '',
+            reported && (
+              <FastlyReportedLine
+                reported={reported}
+                value={formatBytes(reported.bandwidth_bytes)}
+                logged={reported.logged_bandwidth_bytes}
+                expected={reported.bandwidth_bytes}
+              />
+            ),
+          )}
           tooltip="Total bandwidth delivered from edge and origin combined"
         />
         <StatCard
@@ -200,14 +252,20 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           icon={ArrowDownToLine}
           loading={loading || cachingLoading}
           value={formatPctValue(caching?.origin_offload_pct)}
-          sub="requests served from cache"
+          sub={withReported('requests served from cache', reported?.origin_offload_pct != null && (
+            <span className="block" title={reportedTitle(reported)}>
+              {`Fastly reported ${reported.origin_offload_pct.toFixed(1)}%${
+                offload != null ? ` · logs ${signed(offload - reported.origin_offload_pct, 1)} pts` : ''}`}
+            </span>
+          ))}
         />
         <StatCard
-          title="Bandwidth Saved"
+          title="Bandwidth Saved (est.)"
           icon={HardDrive}
           loading={loading || cachingLoading}
           value={caching?.bandwidth_saved_bytes != null ? formatBytes(caching.bandwidth_saved_bytes) : '—'}
-          sub="served from edge cache"
+          sub="Estimate: cache-hit bytes served from the edge"
+          tooltip={BANDWIDTH_SAVED_TOOLTIP}
         />
         {network?.http3_pct != null && (
           <StatCard
@@ -247,10 +305,11 @@ export function CachingValueTab({ data }: { data?: CachingData | null }) {
           sub="requests served from cache"
         />
         <StatCard
-          title="Bandwidth Saved"
+          title="Bandwidth Saved (est.)"
           icon={ArrowDownToLine}
           value={data.bandwidth_saved_bytes != null ? formatBytes(data.bandwidth_saved_bytes) : '—'}
-          sub="served from edge cache"
+          sub="Estimate: cache-hit bytes served from the edge"
+          tooltip={BANDWIDTH_SAVED_TOOLTIP}
         />
         <StatCard
           title="Shield Effectiveness"

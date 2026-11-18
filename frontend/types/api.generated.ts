@@ -8042,6 +8042,40 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * FastlyReportedMetrics
+         * @description Fastly Historical Stats totals beside the logs for the same whole closed UTC hours.
+         */
+        FastlyReportedMetrics: {
+            /** Window Start */
+            window_start: string;
+            /** Window End */
+            window_end: string;
+            /** Requests */
+            requests: number;
+            /** Bandwidth Bytes */
+            bandwidth_bytes: number;
+            /** Hit Requests */
+            hit_requests: number;
+            /** Origin Offload Pct */
+            origin_offload_pct?: number | null;
+            /**
+             * Sample Rate
+             * @default 100
+             */
+            sample_rate: number;
+            /**
+             * Edge Only
+             * @default false
+             */
+            edge_only: boolean;
+            /** Logged Requests */
+            logged_requests: number;
+            /** Logged Bandwidth Bytes */
+            logged_bandwidth_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** FieldAggregate */
         FieldAggregate: {
             /** Top */
@@ -18886,6 +18920,7 @@ export interface components {
             performance?: components["schemas"]["PerformanceMetrics"] | null;
             network?: components["schemas"]["NetworkMetrics"] | null;
             io?: components["schemas"]["IOMetrics"] | null;
+            fastly_reported?: components["schemas"]["FastlyReportedMetrics"] | null;
         };
         /** ValueTimeSeriesPoint */
         ValueTimeSeriesPoint: {

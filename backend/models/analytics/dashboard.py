@@ -304,6 +304,21 @@ class IOMetrics(_TotalRequestsMetricsBase):
     estimated_savings_bytes: int | None = None
 
 
+class FastlyReportedMetrics(WireSafeModel):
+    """Fastly Historical Stats totals beside the logs for the same whole closed UTC hours."""
+
+    window_start: str
+    window_end: str
+    requests: int
+    bandwidth_bytes: int
+    hit_requests: int
+    origin_offload_pct: float | None = None
+    sample_rate: int = 100
+    edge_only: bool = False
+    logged_requests: int
+    logged_bandwidth_bytes: int
+
+
 class ValueSummaryResponse(BaseResponse):
     overview: OverviewMetrics | None = None
     caching: CachingMetrics | None = None
@@ -312,6 +327,7 @@ class ValueSummaryResponse(BaseResponse):
     performance: PerformanceMetrics | None = None
     network: NetworkMetrics | None = None
     io: IOMetrics | None = None
+    fastly_reported: FastlyReportedMetrics | None = None
 
 
 ChartMetric = Literal[

@@ -1432,6 +1432,45 @@ impl Runtime for FastlyRuntime {
             "days": days.into_values().map(Value::Object).collect::<Vec<_>>(),
         }))
     }
+    fn service_stats(
+        &self,
+        service_id: &str,
+        from: u64,
+        to: u64,
+        fields: &[&str],
+    ) -> Result<Value, String> {
+        let token = self.secret("fastly_token")?.ok_or("missing_api_token")?;
+        let query = format!("from={from}&to={to}&by=hour");
+        let mut hours = std::collections::BTreeMap::<u64, serde_json::Map<String, Value>>::new();
+        for field in fields {
+            let response = self.admin_api(crate::admin::ApiRequest {
+                method: "GET",
+                path: &format!(
+                    "/stats/service/{}/field/{field}",
+                    crate::admin::transport::encode(service_id)
+                ),
+                query: &query,
+                token: &token,
+                body: None,
+                timeout: FASTLY_API_TIMEOUT,
+            })?;
+            if response.status != 200 {
+                return Err(format!("stats_api_status_{}", response.status));
+            }
+            let (_, _, _, buckets) =
+                crate::telemetry::usage::stats_field_buckets(&response.body, field)?;
+            for bucket in buckets {
+                if let Some(start) = bucket["start_time"].as_u64() {
+                    let entry = hours.entry(start).or_default();
+                    entry.insert("start_time".into(), start.into());
+                    entry.insert((*field).into(), bucket[*field].clone());
+                }
+            }
+        }
+        Ok(Value::Array(
+            hours.into_values().map(Value::Object).collect(),
+        ))
+    }
     fn usage_agg(&self) -> Option<&crate::telemetry::usage::UsageAgg> {
         Some(&self.usage)
     }

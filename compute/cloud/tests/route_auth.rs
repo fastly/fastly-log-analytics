@@ -495,6 +495,11 @@ const ROUTES: &[(&str, &str, Class)] = &[
         Class::Admin,
     ),
     ("GET", "/api/admin/usage/logged-traffic", Class::Admin),
+    (
+        "GET",
+        "/api/admin/usage/service-stats?from=0&to=3600000",
+        Class::Admin,
+    ),
     ("GET", "/api/logs/cron_ticks/live", Class::Admin),
 ];
 
