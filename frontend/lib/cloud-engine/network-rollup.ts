@@ -470,6 +470,12 @@ function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: 
   };
 }
 
+const QUALITY_PART_KEYS: Record<QualityPart, string> = {
+  throughput: "quality/overall",
+  region: "quality/region",
+  asn_client: "quality/asn",
+};
+
 /**
  * /network-quality from summaries, shaped like `queryNetworkQuality`. Counts,
  * averages and shares are exact; the scatter is a hashed sample of the rows
@@ -490,14 +496,21 @@ export function qualityFromRollup(result: RollupResult, params: NetworkQueryPara
   }
   const { answer, missingParts } = quality;
   if (!missingParts.length) return answer;
+  let startMs = result.dataThroughMs;
+  let endMs = result.dataFromMs;
+  for (const part of missingParts) {
+    const span = result.missingRanges?.get(QUALITY_PART_KEYS[part]);
+    startMs = Math.min(startMs, span?.startMs ?? result.dataFromMs);
+    endMs = Math.max(endMs, span?.endMs ?? result.dataThroughMs);
+  }
   const partial: NetworkPartial = {
     network_partial: true,
     answer,
     residual: {
       quality_parts: missingParts,
       ...missingParts.includes("asn_client") ? { quality_asns: answer.by_asn.map((row) => row.asn) } : {},
-      start_time: new Date(result.dataFromMs).toISOString(),
-      end_time: new Date(result.dataThroughMs).toISOString(),
+      start_time: new Date(startMs).toISOString(),
+      end_time: new Date(endMs).toISOString(),
     },
   };
   return partial;

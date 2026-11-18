@@ -812,6 +812,8 @@ export type RollupResult = {
   rollup: Rollup;
   dataFromMs: number;
   dataThroughMs: number;
+  /** Earliest-start to latest-end ms across files that lacked a `group/field` present in other files. */
+  missingRanges?: Map<string, { startMs: number; endMs: number }>;
 };
 
 type RollupSource = Pick<FileSource, "fetchJson"> & SummaryProjectionSource;
@@ -895,9 +897,32 @@ async function runRollup(
     plan.files.map((use) => decodeCached(source, use.file, spec)),
   );
   if (parts.some((part) => part === null)) return null;
+  const merged = mergeRollups(parts as Rollup[]);
+  const seenKeys = new Set<string>();
+  for (const part of parts as Rollup[]) {
+    for (const key of part.present ?? []) seenKeys.add(key);
+  }
+  const missingRanges = new Map<string, { startMs: number; endMs: number }>();
+  for (const key of seenKeys) {
+    if (merged.present && Set.prototype.has.call(merged.present, key)) continue;
+    let startMs = Infinity;
+    let endMs = -Infinity;
+    for (let i = 0; i < parts.length; i++) {
+      const present = (parts[i] as Rollup).present;
+      if (present && Set.prototype.has.call(present, key)) continue;
+      const use = plan.files[i];
+      const files = use.covers.length ? use.covers : [use.file];
+      for (const f of files) {
+        startMs = Math.min(startMs, Date.parse(f.start));
+        endMs = Math.max(endMs, Date.parse(f.end));
+      }
+    }
+    if (startMs < endMs) missingRanges.set(key, { startMs, endMs });
+  }
   return {
-    rollup: mergeRollups(parts as Rollup[]),
+    rollup: merged,
     dataFromMs: plan.dataFromMs,
     dataThroughMs: plan.dataThroughMs,
+    missingRanges,
   };
 }

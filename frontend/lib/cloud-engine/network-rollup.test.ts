@@ -571,4 +571,57 @@ describe("networkFromRollup", () => {
     expect(served.rollup.approximate).toContain("shielding_analysis");
     expect(s.log.files).toEqual([win.key]);
   });
+
+  it("narrows quality residual start_time/end_time to only the uncovered sub-range", async () => {
+    const makeSummary = (startIso: string, includeQuality: boolean) => {
+      const t = new Date(startIso);
+      const bundle = ["series5", ...(includeQuality ? ["dim_totals", "dim_totals", "dim_totals"] : [])];
+      const bucket = bundle.map(() => t);
+      const field = ["overall", ...(includeQuality ? ["overall", "region", "asn"] : [])];
+      const value = ["", ...(includeQuality ? ["quality", "quality", "quality"] : [])];
+      const requests = bundle.map(() => BigInt(10));
+      const truncated = [null, ...(includeQuality ? [false, false, false] : [])];
+      return parquetWriteBuffer({
+        kvMetadata: [{ key: "flp_summary", value: "3" }],
+        columnData: [
+          { name: "bundle", data: bundle, type: "STRING" },
+          { name: "bucket", data: bucket, type: "TIMESTAMP" },
+          { name: "field", data: field, type: "STRING" },
+          { name: "value", data: value, type: "STRING" },
+          { name: "requests", data: requests, type: "INT64" },
+          { name: "truncated", data: truncated, type: "BOOLEAN" },
+        ],
+      });
+    };
+
+    const span = WINDOWS.slice(0, 3);
+    const partialBuffers = {
+      [span[0].key]: makeSummary(span[0].start, true),
+      [span[1].key]: makeSummary(span[1].start, false),
+      [span[2].key]: makeSummary(span[2].start, true),
+    };
+    const partial = await networkFromRollup(
+      "/api/network-quality",
+      { start_time: span[0].start, end_time: span[2].end, region_country: "US" },
+      source(span, partialBuffers),
+    );
+    if (!isNetworkPartial(partial)) throw new Error("expected NetworkPartial");
+    expect(partial.residual.quality_parts).toEqual(["throughput", "region", "asn_client"]);
+    expect(partial.residual.start_time).toBe(span[1].start);
+    expect(partial.residual.end_time).toBe(span[1].end);
+
+    const noneBuffers = {
+      [span[0].key]: makeSummary(span[0].start, false),
+      [span[1].key]: makeSummary(span[1].start, false),
+      [span[2].key]: makeSummary(span[2].start, false),
+    };
+    const fullFallback = await networkFromRollup(
+      "/api/network-quality",
+      { start_time: span[0].start, end_time: span[2].end, region_country: "US" },
+      source(span, noneBuffers),
+    );
+    if (!isNetworkPartial(fullFallback)) throw new Error("expected NetworkPartial");
+    expect(fullFallback.residual.start_time).toBe(span[0].start);
+    expect(fullFallback.residual.end_time).toBe(span[2].end);
+  });
 });
