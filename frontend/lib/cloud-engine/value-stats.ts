@@ -26,7 +26,7 @@ export function clearServiceStatsCache() {
 const isoZ = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
 
 /**
- * Fastly's Stats API hours for the logged service over the whole UTC hours of
+ * Fastly Platform Metrics hours for the logged service over the whole UTC hours of
  * the range, or null when it can't be read: an analyst (the route is
  * admin-only), no configured service, a Stats error or a range Stats doesn't
  * cover. Answers and failures are reused per range for a few minutes.

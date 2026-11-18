@@ -8,7 +8,7 @@ export interface ComputePoint {
   billed_ms: number;
 }
 
-/** `/api/usage/compute`: Fastly Stats API Compute figures for the page range. */
+/** `/api/usage/compute`: Fastly Platform Metrics Compute figures for the page range. */
 export type ComputeUsageResponse =
   | {
       source: "fastly";
@@ -21,7 +21,7 @@ export type ComputeUsageResponse =
       worker_vcpu_ms: number;
       covered_from: string | null;
       covered_to: string | null;
-      /** Hourly, only for hours the Stats API returned. */
+      /** Hourly, only for hours Platform Metrics returned. */
       data: ComputePoint[];
     }
   | { source: "unavailable"; reason: string };

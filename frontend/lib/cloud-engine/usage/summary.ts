@@ -1385,7 +1385,7 @@ export interface ComputeBilling {
   requests: number;
   executionTimeMs: number;
   billedTimeMs: number;
-  /** Unix ms span of the hourly buckets the Stats API returned, or null when it had none. */
+  /** Unix ms span of hourly buckets Platform Metrics returned, or null when it had none. */
   coveredFrom: number | null;
   coveredTo: number | null;
   cdnBandwidthBytes?: number;
@@ -1701,7 +1701,7 @@ export function incurredCost(input: IncurredInput): {
     },
   ];
   if (billing) {
-    // Front VCL Stats API totals are dominated by 1s self-healthcheck probes (`/_tick`, `/_flush`).
+    // Front VCL Platform Metrics totals are dominated by 1s self-healthcheck probes (`/_tick`, `/_flush`).
     // Price actual logged `/fos/...` CDN file delivery plus Compute egress on app and worker.
     const bytes = input.loggedCdnBytes + billing.computeBandwidthBytes;
     const requests = input.classB + (input.cdnHits ?? 0);
@@ -1813,7 +1813,7 @@ export function incurredCost(input: IncurredInput): {
   };
 }
 
-/** Fastly Stats API Compute totals for `[from, to]` (unix ms), hourly resolution. */
+/** Fastly Platform Metrics Compute totals for `[from, to]` (unix ms), hourly resolution. */
 export async function fetchComputeBilling(
   range: { from: number; to: number },
   signal?: AbortSignal,

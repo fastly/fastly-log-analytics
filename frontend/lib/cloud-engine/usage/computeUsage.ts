@@ -8,7 +8,7 @@ const MAX_SPAN_MS = 31 * 86_400_000;
 
 const sharedBilling = createSharedRequests<ComputeBilling>();
 
-// A /usage load reads the same range's Stats API totals for the Compute charts and the
+// A /usage load reads the same range's Platform Metrics totals for the Compute charts and the
 // Incurred Cost lines; reuse a settled answer briefly so the page makes one Stats fan-out.
 const BILLING_TTL_MS = 15_000;
 const settledBilling = new Map<string, { at: number; value: ComputeBilling }>();
@@ -58,7 +58,7 @@ async function readBilling(
   }
 }
 
-/** Fastly's Stats API totals for the range, or null when they can't be read for it. */
+/** Fastly Platform Metrics totals for the range, or null when they can't be read for it. */
 export async function usageComputeBilling(
   range: { from: number; to: number },
   signal?: AbortSignal,

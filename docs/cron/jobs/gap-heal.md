@@ -11,7 +11,7 @@
 ## 2. Scheduling & Cadence
 - **Trigger Type:** Interval timer (`interval`)
 - **Default Schedule:** Every 30 minutes (`interval_minutes = 30`).
-- **Timing Rationale:** Fastly Stats API updates every ~5-15 minutes, and hourly buckets finalize on the hour. A 30-minute cadence ensures quick detection of closed hourly loss runs without redundant API traffic.
+- **Timing Rationale:** Fastly Platform Metrics updates every ~5-15 minutes, and hourly buckets finalize on the hour. A 30-minute cadence ensures quick detection of closed hourly loss runs without redundant API traffic.
 - **Configurable Overrides:**
   - `provisioning.cron_gap_heal.enabled` (default: true).
   - `provisioning.cron_gap_heal.interval_minutes` (default: 30; dynamic scheduler rescheduling supported).

@@ -107,7 +107,7 @@ export function UsageStatCards({
   rateStorage: number
   activeServiceId: string | null
   onNavigateToAdmin: (href: string) => void
-  /** Cloud only: Fastly Stats API Compute for the range; the logged figures are the fallback. */
+  /** Cloud only: Fastly Platform Metrics Compute for the range; logs are the fallback. */
   compute?: ComputeUsageResponse
   platformStorage?: components['schemas']['PlatformStorageUsage']
 }) {

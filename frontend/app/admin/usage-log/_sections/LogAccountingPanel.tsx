@@ -137,7 +137,7 @@ export function LogAccountingPanel() {
       title="Ingest Accounting"
       description={IS_CLOUD_MODE
         ? 'Completed UTC days: sample-adjusted Fastly request counters versus measured processed rows. Native accounting has daily precision.'
-        : "Fastly's authoritative request counter (Stats API) vs our locally-ingested rows, per bucket. Requests sit 1:1 with our rows, so a positive gap means requests Fastly served that never landed in our table."}
+        : "Fastly's authoritative Platform Metrics request counter vs our locally-ingested rows, per bucket. Requests sit 1:1 with our rows, so a positive gap means requests Fastly served that never landed in our table."}
       icon={<Database className="h-4 w-4" />}
       error={error as AnalyticsCardError | null}
       headerAction={

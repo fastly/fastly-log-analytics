@@ -171,7 +171,7 @@ export function valueSummaryFromRollup(
     lower_bound: [],
   };
   if (want("overview")) {
-    // The adapter compares these with Fastly's Stats API hours and drops them from the answer.
+    // The adapter compares these with Fastly Platform Metrics hours and drops them from the answer.
     const hourly = rebucketSeries(rollup, "overall", 3_600_000)?.get("") ?? new Map();
     meta.logged_hours = [...hourly].sort(([a], [z]) => a - z).map(([t, agg]) => [t, agg.requests, agg.respBytes]);
   }

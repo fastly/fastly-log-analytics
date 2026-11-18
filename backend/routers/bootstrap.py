@@ -551,7 +551,7 @@ def _bootstrap_sync(
                 logger.debug("[bootstrap] slow_queries_count seed unavailable", exc_info=True)
             # ``log_accounting`` is intentionally NOT seeded here. Its
             # ``compute_log_accounting`` helper chains up to 3 Fastly
-            # Stats API calls on cache miss (~800 ms), which would
+            # Platform Metrics calls on cache miss (~800 ms), which would
             # dominate every cold bootstrap. The IngestHealthCard's
             # existing 30 s ``refetchInterval`` + #13's TTL cache mean
             # the card paints with real data inside one tick of mount

@@ -1661,7 +1661,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       return jsonResponse(await computeUsage({ from: fromMs, to: toMs }, request.signal), request);
     }
 
-    // Shares the Compute charts' Stats API read; resolves to null (logged lines) on failure.
+    // Shares the Compute charts' Platform Metrics read; resolves to null (logged lines) on failure.
     const costBilling = pathname === "/api/usage/current-storage"
       ? usageComputeBilling({ from: fromMs, to: toMs }, request.signal)
       : Promise.resolve(null);

@@ -244,7 +244,7 @@ export function UsagePageContent({
   const observedStorageGbHours =
     platform?.storage.status === 'ok' ? platform.storage.gb_hours ?? null : null
 
-  // One Stats API read per range, shared by the cost card and both Compute charts.
+  // One Platform Metrics read per range, shared by the cost card and both Compute charts.
   const {
     data: compute,
     isLoading: loadingCompute,

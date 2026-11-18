@@ -349,7 +349,7 @@ function IOEnabledView({ data, rollup }: { data: IOData; rollup?: NetworkRollupM
         ) : (
           <AnalyticsCard title="Format Distribution">
             <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
-              Per-format breakdown not available from the Stats API
+              Per-format breakdown not available from Platform Metrics
             </div>
           </AnalyticsCard>
         )}

@@ -157,7 +157,7 @@ export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | nul
 }
 
 const BANDWIDTH_SAVED_TOOLTIP =
-  "Logged response bytes of cache hits: what origin would have sent without the cache. Fastly's Stats API has no equivalent figure."
+  "Logged response bytes of cache hits: what origin would have sent without the cache. Fastly Platform Metrics has no equivalent figure."
 
 const signed = (n: number, digits: number) => `${n < 0 ? '−' : '+'}${Math.abs(n).toFixed(digits)}`
 
@@ -168,10 +168,10 @@ function reportedTitle(reported: FastlyReportedData): string {
   const sampled = (reported.sample_rate ?? 100) < 100
     ? ` Logs record ${reported.sample_rate}% of requests, so they are compared with ${reported.sample_rate}% of Fastly's figure.`
     : ''
-  return `Fastly Stats API, whole UTC hours ${window}, compared with the logs over the same hours.${sampled}`
+  return `Fastly Platform Metrics, whole UTC hours ${window}, compared with the logs over the same hours.${sampled}`
 }
 
-/** Fastly's Stats API figure for a logged total, and how far the logs over the same hours are from it. */
+/** Fastly Platform Metrics figure for a logged total, and its distance from logs in the same hours. */
 function FastlyReportedLine({ reported, value, logged, expected }: {
   reported: FastlyReportedData
   value: string

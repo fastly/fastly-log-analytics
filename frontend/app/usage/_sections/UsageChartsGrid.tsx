@@ -353,15 +353,15 @@ export function UsageChartsGrid({
     [baseLayout, gridColor],
   )
 
-  // ── Compute charts (Cloud: Fastly Stats API, app + worker services) ────────
+  // ── Compute charts (Cloud: Platform Metrics, app + worker services) ──────
   const computePoints = useMemo(() => {
     if (compute?.source !== 'fastly') return []
     return effectiveInterval === '1 day' ? rollupComputeByDay(compute.data) : compute.data
   }, [compute, effectiveInterval])
   const computeDescription =
     compute?.source === 'unavailable' && compute.reason === 'range_over_31_days'
-      ? 'Fastly Stats API Compute figures cover ranges of up to 31 days'
-      : 'Fastly Stats API, app and worker services; the latest hour can still be filling in'
+      ? 'Fastly Platform Metrics Compute figures cover ranges of up to 31 days'
+      : 'Fastly Platform Metrics, app and worker services; the latest hour can still be filling in'
   const computeRequestsData = useMemo<PlotlyTrace[]>(() => {
     const x = computePoints.map((p) => p.time)
     return [
