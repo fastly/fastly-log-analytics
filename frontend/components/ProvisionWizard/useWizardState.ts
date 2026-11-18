@@ -4,7 +4,9 @@ import React, { useState, useEffect, useEffectEvent, useRef } from 'react'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import {
+  adminFetch,
   client,
+  getApiBase,
   unwrapClient,
   queryKeys,
   extractApiError,
@@ -264,9 +266,27 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     error: servicesError,
     isLoading: isLoadingServices,
   } = useQuery({
-    queryKey: ["provision-services", submittedToken],
+    queryKey: ["provision-services", submittedToken, isCloudMode()],
     queryFn: async () => {
       if (!submittedToken) return []
+      if (isCloudMode()) {
+        const response = await adminFetch(`${getApiBase()}/api/provision/services`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: submittedToken }),
+        })
+        if (!response.ok) {
+          const errorBody = await response.json().catch(() => null)
+          const err = new Error(extractApiError(errorBody ?? response.statusText)) as Error & { code?: string }
+          err.code =
+            (errorBody as { detail?: { error?: string }; error?: string } | null)?.detail?.error ??
+            (errorBody as { error?: string } | null)?.error
+          throw err
+        }
+        const payload = (await response.json()) as { services?: ProvisionService[] }
+        return payload.services ?? []
+      }
       const { data, error } = await client.GET("/api/provision/services", {
         params: { query: { token: submittedToken } },
       })

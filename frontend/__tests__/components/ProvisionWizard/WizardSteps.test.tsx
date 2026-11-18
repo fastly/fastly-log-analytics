@@ -477,6 +477,67 @@ describe('ProvisionWizard — Cloud mode skips the mode step', () => {
   })
 })
 
+describe('ProvisionWizard — token submission (/api/provision/services)', () => {
+  afterEach(() => {
+    setCloudModeRuntime(false)
+    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
+  })
+
+  it('calls POST /api/provision/services with JSON { token } in Cloud mode and advances to service step', async () => {
+    setCloudModeRuntime(true)
+    const user = userEvent.setup()
+    let receivedPost: unknown = null
+    let getCalled = false
+    server.use(
+      http.post(`${API_BASE}/api/provision/services`, async ({ request }) => {
+        receivedPost = await request.json()
+        return HttpResponse.json({
+          customer_id: 'cust-1',
+          services: [{ id: 'svc-1', name: 'Cloud Svc', type: 'vcl', customer_id: 'cust-1' }],
+        })
+      }),
+      http.get(`${API_BASE}/api/provision/services`, () => {
+        getCalled = true
+        return HttpResponse.json({ error: 'cloud_endpoint_unsupported' }, { status: 501 })
+      }),
+    )
+
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: createTestQueryClient() })
+    await user.type(screen.getByLabelText(/api token/i), 'tok-cloud-123')
+    await user.click(screen.getByRole('button', { name: /fetch services/i }))
+
+    expect(await screen.findByText('Cloud Svc')).toBeInTheDocument()
+    expect(receivedPost).toEqual({ token: 'tok-cloud-123' })
+    expect(getCalled).toBe(false)
+  })
+
+  it('still calls GET /api/provision/services?token=... in non-Cloud mode', async () => {
+    setCloudModeRuntime(false)
+    const user = userEvent.setup()
+    let receivedQueryToken: string | null = null
+    let postCalled = false
+    server.use(
+      http.get(`${API_BASE}/api/provision/services`, ({ request }) => {
+        receivedQueryToken = new URL(request.url).searchParams.get('token')
+        return HttpResponse.json([{ id: 'svc-2', name: 'Local Svc', provisioned: false }])
+      }),
+      http.post(`${API_BASE}/api/provision/services`, () => {
+        postCalled = true
+        return HttpResponse.json({}, { status: 405 })
+      }),
+    )
+
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: createTestQueryClient() })
+    await user.click(screen.getByRole('button', { name: /admin: provision/i }))
+    await user.type(screen.getByLabelText(/api token/i), 'tok-local-456')
+    await user.click(screen.getByRole('button', { name: /fetch services/i }))
+
+    expect(await screen.findByText('Local Svc')).toBeInTheDocument()
+    expect(receivedQueryToken).toBe('tok-local-456')
+    expect(postCalled).toBe(false)
+  })
+})
+
 const buildToggleGroup = (catalog: LogFieldsCatalog | null | undefined) => (
   prev: typeof INITIAL_CONFIG, groupId: string, checked: boolean,
 ) => ({ ...prev, log_fields: toggleLogFieldGroup(prev.log_fields, catalog, groupId, checked) })
