@@ -165,6 +165,13 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
     prov = cfg.get("provisioning") or {}
     edge_only = prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False)
     edge_only = bool(edge_only)
+    sample_raw = prov.get("sample_rate", cfg.get("sample_rate"))
+    if sample_raw is None:
+        sample_raw = 100
+    try:
+        sample_rate = min(100.0, max(1.0, float(sample_raw)))
+    except (TypeError, ValueError):
+        sample_rate = 100.0
 
     created_at_str = cfg.get("created_at")
     if created_at_str:
@@ -269,7 +276,8 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
     worst_ts: str | None = None
     worst_gap_pct: float | None = None
     for b in all_buckets:
-        req_count = int(fastly_counts.get(b, 0))
+        reported_count = int(fastly_counts.get(b, 0))
+        req_count = round(reported_count * sample_rate / 100.0)
         _meta_rows, fcount = local_counts.get(b, (0, 0))
         ours = int(ch_counts.get(b, _meta_rows))
         gap = req_count - ours

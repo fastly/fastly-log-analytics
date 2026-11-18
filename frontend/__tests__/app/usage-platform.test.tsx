@@ -146,6 +146,32 @@ describe('observed Platform usage', () => {
     expect(screen.queryByText('Measured · Fastly Platform (account-wide)')).not.toBeInTheDocument()
   })
 
+  it('preserves authoritative zero Compute usage instead of falling back to logged values', () => {
+    render(
+      <UsageStatCards
+        {...statProps}
+        storage={{ ...storage, compute_requests: 7, compute_vcpu_ms: 3 } as StorageUsageData}
+        compute={{
+          source: 'fastly',
+          requests: 0,
+          vcpu_ms: 0,
+          billed_ms: 0,
+          app_requests: 0,
+          worker_requests: 0,
+          app_vcpu_ms: 0,
+          worker_vcpu_ms: 0,
+          covered_from: null,
+          covered_to: null,
+          data: [],
+        }}
+      />,
+    )
+
+    expect(screen.getByText('0 reqs')).toBeInTheDocument()
+    expect(screen.queryByText('7 reqs')).not.toBeInTheDocument()
+    expect(screen.getByText('Fastly stats · KV logged')).toBeInTheDocument()
+  })
+
   it('replaces estimator storage cost and total with the measured account-wide source', () => {
     const { rerender } = render(<CostCalculator />)
     const reference = screen.getByText('Total Estimated Monthly Cost').parentElement?.nextElementSibling?.textContent

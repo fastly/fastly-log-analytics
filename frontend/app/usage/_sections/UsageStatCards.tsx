@@ -125,7 +125,7 @@ export function UsageStatCards({
   const loggedRequests = ((storage as Record<string, unknown> | undefined)?.compute_requests as number | undefined) ?? 0
   const computeRow = useMemo(
     () =>
-      compute?.source === 'fastly' && compute.requests > 0
+      compute?.source === 'fastly'
         ? { source: 'fastly' as const, requests: compute.requests, vcpuMs: compute.vcpu_ms, billedMs: compute.billed_ms }
         : loggedRequests > 0
           ? {

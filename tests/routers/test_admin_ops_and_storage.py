@@ -999,7 +999,7 @@ def _run_log_accounting(log_accounting_client, svc_id: str, counts: list[tuple[i
         return log_accounting_client.get(f"/api/admin/log-accounting?hours={hours}&by=hour")
 
 
-@pytest.mark.usefixtures("frozen_clock", "_clear_log_accounting_ttl_caches")
+@pytest.mark.usefixtures("_clear_log_accounting_ttl_caches")
 def test_log_accounting_sustained_loss_normal_drift_and_missing_key(log_accounting_client, log_accounting_source):
     from backend.routers.admin import log_accounting as _la
 
@@ -1023,6 +1023,34 @@ def test_log_accounting_sustained_loss_normal_drift_and_missing_key(log_accounti
     _la._FASTLY_COUNTS_CACHE.clear()
     with patch("backend.config.get_fastly_api_key", return_value=None):
         assert log_accounting_client.get("/api/admin/log-accounting?hours=4&by=hour").status_code == 400
+
+
+@pytest.mark.usefixtures("_clear_log_accounting_ttl_caches")
+def test_log_accounting_applies_configured_sampling_rate(log_accounting_source, monkeypatch):
+    from backend.routers.admin import log_accounting as _la
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    buckets = [(now - timedelta(hours=2), 250), (now - timedelta(hours=1), 250)]
+    monkeypatch.setattr("backend.config.load_config", lambda _sid: {"provisioning": {"sample_rate": 25}})
+    monkeypatch.setattr(
+        _la,
+        "_fetch_fastly_request_counts",
+        lambda *_args, **_kwargs: {bucket.strftime("%Y-%m-%dT%H"): 1000 for bucket, _rows in buckets},
+    )
+    monkeypatch.setattr(_la, "_clickhouse_row_counts_per_bucket", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "backend.core.metadata.get_log_accounting_counts",
+        lambda *_args, **_kwargs: {bucket.strftime("%Y-%m-%dT%H"): (rows, 0) for bucket, rows in buckets},
+    )
+    monkeypatch.setattr("backend.core.metadata.get_latest_ingest_ts", lambda *_args: None)
+    monkeypatch.setattr("backend.config.get_fastly_api_key", lambda *_args: "token")
+
+    result = _la.compute_log_accounting(log_accounting_source, hours=3, by="hour")
+
+    assert result["totals"].fastly_requests == 500
+    assert result["totals"].our_rows == 500
+    assert result["totals"].gap == 0
+    assert result["sustained_loss"] is None
 
 
 @pytest.mark.usefixtures("frozen_clock", "_clear_log_accounting_ttl_caches")
