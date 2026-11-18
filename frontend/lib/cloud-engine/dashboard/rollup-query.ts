@@ -39,9 +39,11 @@ export type RollupHists = {
  */
 export type RollupAgg = {
   requests: number;
+  count: number;
   errors: number;
   status5xx: number;
   cacheHits: number;
+  hitRequests: number;
   respBytes: number;
   latUsSum: number;
   latUsCount: number;
@@ -173,7 +175,7 @@ export type RollupSample = {
 };
 
 /** Groups whose rows `decodeRollup` keeps in `Rollup.groups`. */
-const KEYED_GROUPS = new Set(["transport", "origin", "urls", "quality"]);
+const KEYED_GROUPS = new Set(["transport", "origin", "urls", "quality", "ins_url", "ins_ip"]);
 
 /**
  * One field of a `transport`, `origin`, `urls` or `quality` group, or null when
@@ -268,9 +270,11 @@ function addFieldCounts(
 
 const SUM_COLUMNS = {
   requests: "requests",
+  count: "count",
   errors: "errors",
   status5xx: "status_5xx",
   cacheHits: "cache_hits",
+  hitRequests: "hit_requests",
   respBytes: "resp_bytes_sum",
   latUsSum: "lat_us_sum",
   latUsCount: "lat_us_count",

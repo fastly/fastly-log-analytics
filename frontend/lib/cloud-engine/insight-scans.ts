@@ -19,7 +19,7 @@ import {
 } from "./insights";
 import { escapeSqlLiteral } from "./sql-validator";
 import type { RollupResult } from "./dashboard/rollup-query";
-import { INSIGHTS_DEFERRED, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
 
 export { CLOUD_INSIGHT_DETECTORS } from "./insights";
 
@@ -101,8 +101,9 @@ export async function queryCloudInsights(
   const availableIds = new Set(availability.insights.filter((d) => d.available).map((d) => d.id));
   const firstMs = options.baseline ? options.baseline.dataFromMs : totals[0]?.first_ms;
   const historyHours = firstMs == null ? 0 : Math.max(0, (windowStartMs - Number(firstMs)) / 3_600_000);
+  const deferred = options.baseline ? insightsDeferredDetectors(options.baseline.rollup) : INSIGHTS_DEFERRED;
   const wanted = (id: string) => body.detectors ? body.detectors.includes(id)
-    : !(options.baseline && INSIGHTS_DEFERRED.has(id));
+    : !(options.baseline && deferred.has(id));
   const scan = ({ build, ids }: (typeof INSIGHT_SCANS)[keyof typeof INSIGHT_SCANS]) =>
     Number(totals[0]?.requests ?? 0) > 0 && ids.some((id) => wanted(id) && availableIds.has(id) &&
       (historyHours >= Math.min(min_Baseline, baselineHours) || CURRENT_WINDOW_INSIGHT_DETECTORS.has(id)))
@@ -113,15 +114,15 @@ export async function queryCloudInsights(
     scan(INSIGHT_SCANS.asn), scan(INSIGHT_SCANS.geo), scan(INSIGHT_SCANS.scalar),
   ]);
   const summarized = options.baseline && rollupInsightsBaseline(options.baseline, {
-    city: cityRows, dimension: dimensionRows, asn: asnRows, scalar: scalarRows,
+    url: urlRows, ip: ipRows, city: cityRows, dimension: dimensionRows, asn: asnRows, scalar: scalarRows,
   });
   const envelope = await handleInsights(body, {
     now: new Date(end),
     maskIps: options.maskIps,
     availableColumns,
     availableHistoryHours: historyHours,
-    urlAggregateRows: urlRows,
-    ipSecurityRows: ipRows,
+    urlAggregateRows: summarized?.rows.url ?? urlRows,
+    ipSecurityRows: summarized?.rows.ip ?? ipRows,
     cityAggregateRows: summarized?.rows.city ?? cityRows,
     dimensionAggregateRows: summarized?.rows.dimension ?? dimensionRows,
     asnAggregateRows: summarized?.rows.asn ?? asnRows,

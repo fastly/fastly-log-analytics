@@ -626,6 +626,7 @@ export async function handleInsights(
           const wTotal = n(r, "w_total"), bTotal = n(r, "b_total");
           const meta = { window_requests: wTotal, baseline_requests: bTotal, filters: { url: r.url } };
           if (d.id === "error_spikes") {
+            if (r.b_ins_url_absent) continue;
             const w = pct(n(r, "w_5xx"), wTotal), b = pct(n(r, "b_5xx"), bTotal);
             if (wTotal >= 3 && w >= 5 && (bTotal < 10 || w >= b * 2 + 5)) {
               add(label, w, b, "% 5xx", { ...meta, window_errors: n(r, "w_5xx") }, w >= 20 ? "critical" : "warning");

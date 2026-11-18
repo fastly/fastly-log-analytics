@@ -9187,7 +9187,7 @@ mod summary_bundles {
                 .unwrap()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap(),
-            "status": pick(&[200, 200, 404, 503, 0], i),
+            "status": pick(&[200, 200, 404, 503, 401, 0], i),
             "cache": pick(&["HIT", "MISS", "PASS", "HIT-CLUSTER", "SYNTH"], i),
             "resp_bytes": 100 + i * 7,
             "elapsed": 5_000 + i * 13,
@@ -9205,7 +9205,7 @@ mod summary_bundles {
             "pop": pick(&["IAD", "LHR", "NRT"], i),
             "ost": pick(&[200, 502], i),
             "ploss": (i % 10) as f64 / 100.0,
-            "url": format!("/p{}", i % 23),
+            "url": if i % 13 == 0 { "/login".to_string() } else { format!("/p{}", i % 23) },
         });
         if i % 11 != 0 {
             row["ip"] = format!("10.0.{}.{}", i % 3, i % 41).into();

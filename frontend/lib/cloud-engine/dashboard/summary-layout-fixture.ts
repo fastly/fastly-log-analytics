@@ -14,6 +14,8 @@ export const LAYOUT_B: readonly (readonly string[])[] = [
   ["quality", "sample"],
   ["header_ip", "bot_ua", "tls_fp", "proxy"],
   ["value"],
+  ["ins_url"],
+  ["ins_ip"],
 ];
 
 /**

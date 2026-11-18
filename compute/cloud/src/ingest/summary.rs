@@ -36,6 +36,8 @@ pub const IP_TOP_K: usize = 500;
 pub const IP_SAMPLE_CAP: u64 = 5000;
 pub const SESSION_K: usize = 2000;
 pub const DIM_K: usize = 2000;
+pub const INS_URL_K: usize = 500;
+pub const INS_IP_K: usize = 500;
 /// ASNs kept in `series5` per window and hour bundle: 4x the 30 a day bundle writes.
 pub const SERIES_ASN_K: usize = 120;
 /// Cities kept in `series5` per window and hour bundle (the /network map): 4x the 50 a day
@@ -870,6 +872,7 @@ struct NetCols<'a> {
     proxy_rtt: Num<'a>,
     pop: Str<'a>,
     plain_city: Str<'a>,
+    plain_url: Str<'a>,
     referer: Str<'a>,
     ja3: Str<'a>,
     p_type: Str<'a>,
@@ -954,6 +957,7 @@ impl<'a> NetCols<'a> {
             proxy_rtt: Num::new(batch, &[("tcp_rtt", 1.0), ("tcpi_rtt", 1.0)]),
             pop: Str::new(batch, &["pop"]),
             plain_city: Str::new(batch, &["city"]),
+            plain_url: Str::new(batch, &["url"]),
             referer: Str::new(batch, &["referer"]),
             ja3: Str::new(batch, &["ja3"]),
             p_type: Str::new(batch, &["p_type"]),
@@ -2584,6 +2588,120 @@ fn write_ext(rows: &[Rows], bucket: i64, out: &mut Out) {
     }
 }
 
+const AUTH_TOKENS: [&str; 21] = [
+    "login",
+    "signin",
+    "sign-in",
+    "log-in",
+    "auth",
+    "oauth",
+    "openid",
+    "token",
+    "sso",
+    "saml",
+    "session",
+    "account",
+    "password",
+    "passwd",
+    "passwrd",
+    "credential",
+    "xmlrpc",
+    "mfa",
+    "otp",
+    "2fa",
+    "verify",
+];
+
+#[derive(Default)]
+struct InsUrlAgg {
+    requests: i64,
+    s5: i64,
+    hit: i64,
+    miss: i64,
+    pass: i64,
+}
+
+#[derive(Default)]
+struct InsIpAgg {
+    denied: i64,
+    c404: i64,
+}
+
+/// The /insights baseline rows (`ins_url` and `ins_ip`), in [`GROUPS`] order.
+fn write_insights(rows: &[Rows], bucket: i64, out: &mut Out) {
+    let mut ins_urls: FastMap<Cow<str>, InsUrlAgg> = FastMap::default();
+    let mut ins_ips: FastMap<Cow<str>, InsIpAgg> = FastMap::default();
+    for r in rows {
+        let url_col = FieldCol::resolve(r.batch, "url");
+        for i in r.live() {
+            let status = get_i(r.status, i);
+            let cache = get_s(r.cache, i);
+            if let Some(col) = &url_col {
+                let s5 = i64::from(status.is_some_and(|s| s >= 500));
+                let hit = i64::from(cache.is_some_and(|c| c.starts_with("HIT")));
+                let miss = i64::from(cache.is_some_and(|c| c.starts_with("MISS")));
+                let pass = i64::from(cache.is_some_and(|c| c.starts_with("PASS")));
+                col.for_each_key(i, false, |key| {
+                    let u = ins_urls.entry(key.render()).or_default();
+                    u.requests += 1;
+                    u.s5 += s5;
+                    u.hit += hit;
+                    u.miss += miss;
+                    u.pass += pass;
+                });
+            }
+            let Some(ip) = get_s(r.ip, i).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let Some(status) = status else {
+                continue;
+            };
+            if status == 404 {
+                ins_ips.entry(Cow::Borrowed(ip)).or_default().c404 += 1;
+            } else if matches!(status, 401 | 403) {
+                // ASCII case fold differs from RE2's Unicode `i` only for U+212A and U+017F.
+                if r.net
+                    .plain_url
+                    .get(i, true)
+                    .is_some_and(|url| AUTH_TOKENS.iter().any(|tok| contains_ci(url, tok)))
+                {
+                    ins_ips.entry(Cow::Borrowed(ip)).or_default().denied += 1;
+                }
+            }
+        }
+    }
+
+    let (kept, total, truncated) = top_untimed(ins_urls, |u| u.requests, INS_URL_K);
+    push_total(out, bucket, "ins_url", "url", total, truncated);
+    for (value, u) in &kept {
+        out.push(&[
+            (C::Bundle, V::S("ins_url")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("url")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(u.requests)),
+            (C::Status5xx, V::I(u.s5)),
+            (C::HitRequests, V::I(u.hit)),
+            (C::MissRequests, V::I(u.miss)),
+            (C::PassRequests, V::I(u.pass)),
+        ]);
+    }
+
+    let (kept, total, truncated) = top_untimed(ins_ips, |x| x.denied + x.c404, INS_IP_K);
+    push_total(out, bucket, "ins_ip", "ip", total, truncated);
+    for (value, x) in &kept {
+        out.push(&[
+            (C::Bundle, V::S("ins_ip")),
+            (C::Bucket, V::I(bucket)),
+            (C::FieldName, V::S("ip")),
+            (C::Value, V::S(value)),
+            (C::Requests, V::I(x.denied + x.c404)),
+            (C::Errors, V::I(x.denied)),
+            (C::Count, V::I(x.c404)),
+        ]);
+    }
+}
+
 /// Builds the summary for the rows of one window `[start, end)` (seconds). Deterministic: the
 /// same batches in the same order give the same bytes. Heap: one field's value map at a time
 /// (about rows x 48 bytes plus 4 bytes per IP row), plus at most `IP_TOP_K` sketches per field
@@ -2855,6 +2973,7 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
 
     let sample = write_v3(&rows, bucket, &mut out);
     write_ext(&rows, bucket, &mut out);
+    write_insights(&rows, bucket, &mut out);
     write_sample(&rows, sample, &mut out);
 
     let batch = out.finish()?;

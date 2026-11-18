@@ -90,7 +90,9 @@ const insights: Answer = async (source, spec) => {
     return { country, city: name };
   });
   const asn = [...(result.rollup.fields.get("asn")?.keys() ?? [])].map((value) => ({ asn: value }));
-  return rollupInsightsBaseline(insightsBaselineRollup(result), { city, dimension: [], asn, scalar: [{}] });
+  const url = [...(result.rollup.groups?.get("ins_url")?.get("url")?.keys() ?? [])].map((value) => ({ url: value }));
+  const ip = [...(result.rollup.groups?.get("ins_ip")?.get("ip")?.keys() ?? [])].map((value) => ({ ip: value }));
+  return rollupInsightsBaseline(insightsBaselineRollup(result), { url, ip, city, dimension: [], asn, scalar: [{}] });
 };
 
 const PAGES: Record<string, Page> = {
@@ -150,7 +152,7 @@ const PAGES: Record<string, Page> = {
     // WAF rule and bot columns; see security-rollup.test.ts "reads the field totals ...".
     elsewhere: ["group field_totals"],
   },
-  insights: { spec: INSIGHTS_SUMMARY_SPEC, fixtures: ["network", "dashboard"], answers: [insights] },
+  insights: { spec: INSIGHTS_SUMMARY_SPEC, fixtures: ["network", "dashboard", "origin"], answers: [insights] },
 };
 
 /** One fixture's raw windows and a summary set, as the server lists them, with its files' bytes. */

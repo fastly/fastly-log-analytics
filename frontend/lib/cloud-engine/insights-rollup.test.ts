@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DuckDBAnalyticalEngine as ParquetEngine, type DuckDBReadContext } from "./dashboard/duckdb";
-import { decodeRollup, mergeRollups, type RollupResult } from "./dashboard/rollup-query";
+import { BOUNDS, Histogram } from "./dashboard/histogram";
+import { decodeRollup, emptyAgg, mergeRollups, type RollupResult } from "./dashboard/rollup-query";
 import {
   FIXTURE_START,
   SUMMARY_FIXTURE_BUFFERS as BUFFERS,
@@ -17,7 +18,7 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
-import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -105,11 +106,12 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     const options = { signal, maskIps: false, filters: [], engine: read };
     // The fixtures lie in 2027; the window end is clamped to now.
     vi.useFakeTimers({ toFake: ["Date"], now: T1 });
+    const baseline = await baselineRollup();
     const [raw, rolled] = await (async () => {
       try {
         return [
           await queryCloudInsights(body, options),
-          await queryCloudInsights(body, { ...options, baseline: await baselineRollup() }),
+          await queryCloudInsights(body, { ...options, baseline }),
         ];
       } finally {
         vi.useRealTimers();
@@ -128,7 +130,8 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(rolled.insights.map((c) => c.id)).toEqual(raw.insights.map((c) => c.id));
     expect(raw.insights.filter((c) => c.summary.includes("Not evaluated") || c.placeholder)).toEqual([]);
     const ids = raw.insights.map((c) => c.id);
-    const deferred = ids.filter((id) => INSIGHTS_DEFERRED.has(id));
+    const deferredSet = insightsDeferredDetectors(baseline.rollup);
+    const deferred = ids.filter((id) => deferredSet.has(id));
     expect(deferred).toEqual(expect.arrayContaining(["content_discovery", "error_spikes"]));
     expect(rolled.deferred_detectors).toEqual(deferred);
     expect(ids).toEqual(expect.arrayContaining(["city_surges", "new_country_traffic", "asn_concentration", "cache_hit_cliff"]));
@@ -194,5 +197,165 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(await insightsBaselineFromRollup(body, country,
       fixtureSource([fixturePage(RAW)], BUFFERS, filtered, [fixturePage(fixtureFiles("window"))]), signal)).toBeNull();
     expect(filtered).toEqual({ json: [], files: [] });
+  });
+
+  it("url detectors read ins_url baselines and match raw, skipping absent URLs when truncated", async () => {
+    const base = await baselineRollup();
+    const h = new Histogram();
+    h.min = 50_000;
+    h.max = 50_000;
+    h.buckets[BOUNDS.findIndex((b) => b > 50_000) - 1] = 25; // 50 ms
+
+    const insUrlMap = new Map([
+      ["/err", { ...emptyAgg(), requests: 100, status5xx: 1, hitRequests: 0, missRequests: 0, passRequests: 0 }],
+      ["/collapse", { ...emptyAgg(), requests: 100, status5xx: 0, hitRequests: 90, missRequests: 10, passRequests: 0 }],
+      ["/pass", { ...emptyAgg(), requests: 100, status5xx: 0, hitRequests: 0, missRequests: 0, passRequests: 5 }],
+      ["/slow", { ...emptyAgg(), requests: 50, status5xx: 0, hitRequests: 0, missRequests: 0, passRequests: 0 }],
+    ]);
+    const urlsMap = new Map([
+      ["/slow", { ...emptyAgg(), requests: 50, elapsedCount: 25, hists: { ...emptyAgg().hists, elapsed: h } }],
+    ]);
+    const covered: RollupResult = {
+      ...base,
+      rollup: {
+        ...base.rollup,
+        groups: new Map([
+          ["ins_url", new Map([["url", insUrlMap]])],
+          ["urls", new Map([["url", urlsMap]])],
+        ]),
+        present: new Set([...(base.rollup.present ?? []), "ins_url/url", "urls/url"]),
+      },
+    };
+    const urlRows = [
+      { url: "/err", w_total: 20, w_5xx: 10, w_hits: 0, w_miss: 0, w_pass: 0, w_lat_total: 0, w_p95: 0, w_p99: 0, w_p50: 0 },
+      { url: "/collapse", w_total: 20, w_5xx: 0, w_hits: 2, w_miss: 18, w_pass: 0, w_lat_total: 0, w_p95: 0, w_p99: 0, w_p50: 0 },
+      { url: "/pass", w_total: 20, w_5xx: 0, w_hits: 0, w_miss: 0, w_pass: 18, w_lat_total: 0, w_p95: 0, w_p99: 0, w_p50: 0 },
+      { url: "/slow", w_total: 20, w_5xx: 0, w_hits: 0, w_miss: 0, w_pass: 0, w_lat_total: 20, w_p95: 500, w_p99: 600, w_p50: 100 },
+    ];
+
+    const { rows, source, meta } = rollupInsightsBaseline(covered, {
+      url: urlRows,
+      city: [],
+      dimension: [],
+      asn: [],
+      scalar: [],
+    });
+
+    for (const id of ["error_spikes", "cache_collapse", "cacheability_regression", "latency_regression"]) {
+      expect(source.deferred.has(id), id).toBe(false);
+    }
+    expect(meta.approximate).toContain("latency_regression");
+    expect(meta.approximate).not.toContain("error_spikes");
+
+    const env = await handleInsights(body, {
+      now: new Date(T1),
+      availableColumns: new Set(["url", "status", "cache", "elapsed"]),
+      availableHistoryHours: 1,
+      urlAggregateRows: rows.url,
+      scalarAggregateRows: rows.scalar,
+      windowTotalRequests: 80,
+      baselineTotalRequests: 350,
+      baselineSource: source,
+    });
+    expect(env.insights.find((c) => c.id === "error_spikes")!.items).toMatchObject([{ label: "/err", baseline_val: 1 }]);
+    expect(env.insights.find((c) => c.id === "cache_collapse")!.items).toMatchObject([{ label: "/collapse", baseline_val: 90 }]);
+    expect(env.insights.find((c) => c.id === "cacheability_regression")!.items).toMatchObject([{ label: "/pass", baseline_val: 5 }]);
+    expect(env.insights.find((c) => c.id === "latency_regression")!.items).toMatchObject([
+      { label: "/slow", baseline_label: "≈ baseline" },
+    ]);
+
+    // Truncated baseline: absent URL must be skipped by error_spikes, while tail_latency still runs.
+    const truncated: RollupResult = {
+      ...covered,
+      rollup: { ...covered.rollup, truncated: new Set([...covered.rollup.truncated, "ins_url/url"]) },
+    };
+    const truncRes = rollupInsightsBaseline(truncated, {
+      url: [{ url: "/absent-5xx", w_total: 25, w_5xx: 20, w_hits: 0, w_miss: 0, w_pass: 0, w_lat_total: 25, w_p95: 100, w_p99: 600, w_p50: 50 }],
+      city: [],
+      dimension: [],
+      asn: [],
+      scalar: [],
+    });
+    const truncEnv = await handleInsights(body, {
+      now: new Date(T1),
+      availableColumns: new Set(["url", "status", "cache", "elapsed"]),
+      availableHistoryHours: 1,
+      urlAggregateRows: truncRes.rows.url,
+      scalarAggregateRows: truncRes.rows.scalar,
+      windowTotalRequests: 25,
+      baselineTotalRequests: 350,
+      baselineSource: truncRes.source,
+    });
+    expect(truncEnv.insights.find((c) => c.id === "error_spikes")!.items).toEqual([]);
+    expect(truncEnv.insights.find((c) => c.id === "tail_latency")!.items).toMatchObject([{ label: "/absent-5xx" }]);
+  });
+
+  it("ip detectors read ins_ip baselines and label lower bounds when truncated", async () => {
+    const base = await baselineRollup();
+    const insIpMap = new Map([
+      ["1.2.3.4", { ...emptyAgg(), requests: 5, errors: 2, count: 3 }],
+    ]);
+    const covered: RollupResult = {
+      ...base,
+      rollup: {
+        ...base.rollup,
+        groups: new Map([["ins_ip", new Map([["ip", insIpMap]])]]),
+        present: new Set([...(base.rollup.present ?? []), "ins_ip/ip"]),
+      },
+    };
+    const ipRows = [
+      { ip: "1.2.3.4", ce_w_denied: 30, ce_w_attempts: 40, ce_w_paths: 5, w_total: 40, cd_w_404: 35, cd_distinct_404: 20 },
+    ];
+
+    const { rows, source } = rollupInsightsBaseline(covered, {
+      ip: ipRows,
+      city: [],
+      dimension: [],
+      asn: [],
+      scalar: [],
+    });
+    expect(source.deferred.has("credential_enumeration")).toBe(false);
+    expect(source.deferred.has("content_discovery")).toBe(false);
+
+    const env = await handleInsights(body, {
+      now: new Date(T1),
+      availableColumns: new Set(["ip", "url", "status"]),
+      availableHistoryHours: 1,
+      ipSecurityRows: rows.ip,
+      windowTotalRequests: 40,
+      baselineTotalRequests: 100,
+      baselineSource: source,
+    });
+    expect(env.insights.find((c) => c.id === "credential_enumeration")!.items).toMatchObject([
+      { label: "1.2.3.4", baseline_val: 2 },
+    ]);
+    expect(env.insights.find((c) => c.id === "content_discovery")!.items).toMatchObject([
+      { label: "1.2.3.4", baseline_val: 3 },
+    ]);
+
+    const truncated: RollupResult = {
+      ...covered,
+      rollup: { ...covered.rollup, truncated: new Set([...covered.rollup.truncated, "ins_ip/ip"]) },
+    };
+    const truncRes = rollupInsightsBaseline(truncated, {
+      ip: [{ ip: "9.9.9.9", ce_w_denied: 30, ce_w_attempts: 40, ce_w_paths: 5, w_total: 40, cd_w_404: 35, cd_distinct_404: 20 }],
+      city: [],
+      dimension: [],
+      asn: [],
+      scalar: [],
+    });
+    expect(truncRes.meta.lower_bound).toEqual(expect.arrayContaining(["credential_enumeration", "content_discovery"]));
+    const truncEnv = await handleInsights(body, {
+      now: new Date(T1),
+      availableColumns: new Set(["ip", "url", "status"]),
+      availableHistoryHours: 1,
+      ipSecurityRows: truncRes.rows.ip,
+      windowTotalRequests: 40,
+      baselineTotalRequests: 100,
+      baselineSource: truncRes.source,
+    });
+    expect(truncEnv.insights.find((c) => c.id === "credential_enumeration")!.items).toMatchObject([
+      { label: "9.9.9.9", baseline_val: 0, baseline_label: "≥ baseline" },
+    ]);
   });
 });

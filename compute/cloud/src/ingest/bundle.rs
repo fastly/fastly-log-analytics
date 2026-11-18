@@ -101,7 +101,7 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
-const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x05";
+const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x06";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
 /// [`part_key`] objects, each at most the CDN read limit.
@@ -625,6 +625,20 @@ const SAMPLE_COLS: &[(C, Op)] = &[
     (C::RttSum, Sum),
 ];
 
+/// `ins_url` (`url` field): `Status5xx` is `status >= 500`; `HitRequests`/`MissRequests`/
+/// `PassRequests` use case-sensitive `starts_with` on the raw `cache` column.
+const INS_URL_COLS: &[(C, Op)] = &[
+    (C::Requests, Sum),
+    (C::Status5xx, Sum),
+    (C::HitRequests, Sum),
+    (C::MissRequests, Sum),
+    (C::PassRequests, Sum),
+];
+
+/// `ins_ip` (`ip` field): `Errors` = denied auth (status 401/403 and auth URL), `Count` = 404s,
+/// `Requests` = `Errors + Count`.
+const INS_IP_COLS: &[(C, Op)] = &[(C::Requests, Sum), (C::Errors, Sum), (C::Count, Sum)];
+
 /// A bundle of `(field, value)` rows that sum per value (and, when `timed`, per bucket), cut to
 /// the values with the most requests (`cols[0]`) and counted in `dim_totals`.
 struct Group {
@@ -638,7 +652,7 @@ struct Group {
     gated: &'static [&'static str],
 }
 
-const GROUPS: [Group; 13] = [
+const GROUPS: [Group; 15] = [
     Group {
         name: "dims",
         cols: DIM_COLS,
@@ -730,6 +744,20 @@ const GROUPS: [Group; 13] = [
         fields: &["sample"],
         gated: &["sample"],
     },
+    Group {
+        name: "ins_url",
+        cols: INS_URL_COLS,
+        timed: false,
+        fields: &["url"],
+        gated: &["url"],
+    },
+    Group {
+        name: "ins_ip",
+        cols: INS_IP_COLS,
+        timed: false,
+        fields: &["ip"],
+        gated: &["ip"],
+    },
 ];
 
 impl Group {
@@ -742,6 +770,8 @@ impl Group {
             ("tls_fp", _) => summary::TLS_FP_K,
             ("value", field) => summary::value_keep(field),
             ("proxy", _) => summary::SAMPLE_K,
+            ("ins_url", _) => summary::INS_URL_K,
+            ("ins_ip", _) => summary::INS_IP_K,
             _ => summary::DIM_K,
         }
     }

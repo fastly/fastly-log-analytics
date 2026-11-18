@@ -2407,6 +2407,71 @@ fn summaries_are_reproducible_and_zstd_compressed() {
     );
 }
 
+#[test]
+fn ins_url_counts_status_ge_500_and_case_sensitive_cache_prefixes() {
+    let rows = vec![
+        json!({"timestamp": iso(BASE * 1000), "url": "/a", "status": 503, "cache": "HIT"}),
+        json!({"timestamp": iso(BASE * 1000 + 1), "url": "/a", "status": 600, "cache": "hit-stale"}),
+        json!({"timestamp": iso(BASE * 1000 + 2), "url": "/a", "status": 200, "cache": "HIT-CLUSTER"}),
+        json!({"timestamp": iso(BASE * 1000 + 3), "url": "/a", "status": 200, "cache": "MISS-CLUSTER"}),
+        json!({"timestamp": iso(BASE * 1000 + 4), "url": "/a", "status": 200, "cache": "PASS-FOO"}),
+        json!({"timestamp": iso(BASE * 1000 + 5), "url": Value::Null, "status": 503, "cache": "HIT"}),
+    ];
+    let b = batch(&rows);
+    let summary_rows = read(&summary::write_summary(&[&b], BASE).unwrap());
+    let total = summary_rows
+        .iter()
+        .find(|r| r["bundle"] == "dim_totals" && r["field"] == "url" && r["value"] == "ins_url")
+        .expect("ins_url dim_totals row");
+    assert_eq!(total["requests"], 5);
+    assert_eq!(total["truncated"], false);
+
+    let url_rows: Vec<&Map<String, Value>> = summary_rows
+        .iter()
+        .filter(|r| r["bundle"] == "ins_url" && r["field"] == "url")
+        .collect();
+    assert_eq!(url_rows.len(), 1);
+    let row = url_rows[0];
+    assert_eq!(row["value"], "/a");
+    assert_eq!(row["requests"], 5);
+    assert_eq!(row["status_5xx"], 2);
+    assert_eq!(row["hit_requests"], 2);
+    assert_eq!(row["miss_requests"], 1);
+    assert_eq!(row["pass_requests"], 1);
+}
+
+#[test]
+fn ins_ip_counts_denied_auth_and_404_per_ip() {
+    let rows = vec![
+        json!({"timestamp": iso(BASE * 1000), "ip": "1.1.1.1", "url": "/LOGIN", "status": 401}),
+        json!({"timestamp": iso(BASE * 1000 + 1), "ip": "1.1.1.1", "url": "/missing", "status": 404}),
+        json!({"timestamp": iso(BASE * 1000 + 2), "ip": "2.2.2.2", "url": "/login", "status": 200}),
+        json!({"timestamp": iso(BASE * 1000 + 3), "ip": "3.3.3.3", "url": "/x", "status": 403}),
+        json!({"timestamp": iso(BASE * 1000 + 4), "ip": "4.4.4.4", "url": Value::Null, "status": 401}),
+        json!({"timestamp": iso(BASE * 1000 + 5), "ip": "", "url": "/missing", "status": 404}),
+        json!({"timestamp": iso(BASE * 1000 + 6), "ip": Value::Null, "url": "/missing", "status": 404}),
+    ];
+    let b = batch(&rows);
+    let summary_rows = read(&summary::write_summary(&[&b], BASE).unwrap());
+    let total = summary_rows
+        .iter()
+        .find(|r| r["bundle"] == "dim_totals" && r["field"] == "ip" && r["value"] == "ins_ip")
+        .expect("ins_ip dim_totals row");
+    assert_eq!(total["requests"], 2);
+    assert_eq!(total["truncated"], false);
+
+    let ip_rows: Vec<&Map<String, Value>> = summary_rows
+        .iter()
+        .filter(|r| r["bundle"] == "ins_ip" && r["field"] == "ip")
+        .collect();
+    assert_eq!(ip_rows.len(), 1);
+    let row = ip_rows[0];
+    assert_eq!(row["value"], "1.1.1.1");
+    assert_eq!(row["requests"], 2);
+    assert_eq!(row["errors"], 1);
+    assert_eq!(row["count"], 1);
+}
+
 /// Writes `frontend/lib/cloud-engine/dashboard/__fixtures__/summaries/`: raw window Parquet,
 /// their window summaries, hour and day bundles and `index.json`, for the dashboard's
 /// summary-vs-raw tests.
