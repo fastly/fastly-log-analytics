@@ -283,9 +283,10 @@ function AttachPanel({ s }: { s: WizardState }) {
     <div className="shrink-0 p-4 border rounded-lg bg-muted/10 space-y-3 text-sm" role="region" aria-label="Attach alongside the existing install">
       <p className="font-semibold">Another install already manages this service&apos;s logging VCL.</p>
       <p className="text-muted-foreground leading-relaxed">
-        Cloud can attach alongside it and reuse its capture VCL. Cloud adds only its own owner marker, the
-        logging endpoint &quot;{ATTACH_ENDPOINT_NAME}&quot; and its response condition, and leaves everything
-        else on the service alone. Request logs only: RUM and CMCD stay with the other install.
+        Cloud can attach alongside it and reuse its capture VCL. Cloud adds only its own owner marker,
+        its logging endpoints (starting with &quot;{ATTACH_ENDPOINT_NAME}&quot;), and their response
+        conditions, attaching request logs (including CMCD if captured) and RUM without modifying the
+        existing capture VCL.
       </p>
       {offer.missingFields.length > 0 && (
         <p className="text-muted-foreground">

@@ -45,6 +45,22 @@ pub fn attach_condition_statement(conditions: &[Value], fallback: &str) -> Resul
         _ => Err(Error::new(409, "capture_condition_unreadable")),
     }
 }
+pub fn attach_rum_condition_statement(
+    conditions: &[Value],
+    fallback: &str,
+) -> Result<String, Error> {
+    let Some(existing) = conditions.iter().find(|v| v["name"] == "rum_log_condition") else {
+        return Ok(fallback.to_owned());
+    };
+    match (existing["statement"].as_str(), existing["type"].as_str()) {
+        (Some(statement), Some(kind))
+            if !statement.trim().is_empty() && kind.eq_ignore_ascii_case("RESPONSE") =>
+        {
+            Ok(statement.to_owned())
+        }
+        _ => Err(Error::new(409, "capture_condition_unreadable")),
+    }
+}
 pub fn active_version(
     context: &Context<'_, impl Runtime>,
     sid: &str,
@@ -112,7 +128,7 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     .clone();
     let host = &service.fos_endpoint;
     let shield = crate::logging::rum::shield_for_region(&service.fos_region);
-    let backends = if service.rum.enabled {
+    let mut backends = if service.rum.enabled && service.capture != Capture::Attached {
         vec![json!({
             "name": "fos_origin",
             "address": host,
@@ -129,7 +145,7 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     } else {
         vec![]
     };
-    let dictionaries = if service.rum.enabled {
+    let mut dictionaries = if service.rum.enabled && service.capture != Capture::Attached {
         vec![json!({
             "name": "fos_credentials",
             "write_only": true,
@@ -139,14 +155,29 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     };
     if service.capture == Capture::Attached {
         snippets.retain(|snippet| snippet["name"] == marker(service));
+        backends.clear();
+        dictionaries.clear();
         for endpoint in &mut endpoints {
-            endpoint["response_condition"] = ATTACH_CONDITION.into();
+            if endpoint["response_condition"] == "rum_log_condition" {
+                endpoint["name"] = ATTACH_RUM_ENDPOINT.into();
+                endpoint["response_condition"] = ATTACH_RUM_CONDITION.into();
+            } else {
+                endpoint["response_condition"] = ATTACH_CONDITION.into();
+            }
         }
         for condition in &mut conditions {
             if condition["name"] == "log_analytics_condition" {
                 condition["name"] = ATTACH_CONDITION.into();
+            } else if condition["name"] == "rum_log_condition" {
+                condition["name"] = ATTACH_RUM_CONDITION.into();
             }
         }
+        conditions.retain(|condition| {
+            matches!(
+                condition["name"].as_str(),
+                Some(ATTACH_CONDITION | ATTACH_RUM_CONDITION)
+            )
+        });
     }
     Ok(BTreeMap::from([
         ("snippet".into(), snippets),
@@ -308,7 +339,8 @@ pub fn run(
                     None,
                 )?;
             }
-            if service.rum.enabled && job.kind != "teardown" {
+            if service.rum.enabled && service.capture != Capture::Attached && job.kind != "teardown"
+            {
                 let purge_path = format!("/service/{}/purge/rum-js", service.service_id);
                 context.discard_uncertainty("POST", &purge_path, None);
                 let _ = context.api_status("POST", &purge_path, token, None)?;
@@ -442,6 +474,27 @@ fn discover(
             };
             ours["statement"] = statement.into();
         }
+        if service.rum.enabled {
+            if let Some(ours) = target
+                .get_mut("condition")
+                .and_then(|c| c.iter_mut().find(|v| v["name"] == ATTACH_RUM_CONDITION))
+            {
+                let statement = match attach_rum_condition_statement(
+                    conditions,
+                    ours["statement"].as_str().unwrap_or(""),
+                ) {
+                    Ok(statement) => statement,
+                    Err(error) if job.kind == "teardown" => conditions
+                        .iter()
+                        .find(|v| v["name"] == ATTACH_RUM_CONDITION)
+                        .and_then(|v| v["statement"].as_str())
+                        .map(str::to_owned)
+                        .ok_or(error)?,
+                    Err(error) => return Err(error),
+                };
+                ours["statement"] = statement.into();
+            }
+        }
     } else if !own_marker
         && snippets
             .iter()
@@ -572,7 +625,7 @@ fn discover(
                         || job.previous_endpoint_names.iter().any(|v| v == name)
                 } else if resource == "condition" {
                     if attached {
-                        name == ATTACH_CONDITION
+                        name == ATTACH_CONDITION || name == ATTACH_RUM_CONDITION
                     } else {
                         matches!(
                             name,
@@ -707,7 +760,7 @@ fn discover(
         if job.changes.is_empty() || job.dry_run {
             if job.kind == "teardown" {
                 "remove_front"
-            } else if !job.dry_run && service.rum.enabled {
+            } else if !job.dry_run && service.rum.enabled && service.capture != Capture::Attached {
                 "sync_rum"
             } else {
                 "finalize"

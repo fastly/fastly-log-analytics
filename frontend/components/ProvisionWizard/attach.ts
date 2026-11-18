@@ -43,8 +43,6 @@ export function applyAttach(prev: ProvisionConfig): ProvisionConfig {
     capture: "attached",
     endpoint_name: ATTACH_ENDPOINT_NAME,
     logging_enabled: true,
-    rum_enabled: false,
-    cmcd_enabled: false,
   }
 }
 

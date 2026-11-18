@@ -91,6 +91,8 @@ impl Capture {
 
 pub const ATTACH_ENDPOINT: &str = "FLP Cloud Logs";
 pub const ATTACH_CONDITION: &str = "flp_cloud_log_condition";
+pub const ATTACH_RUM_ENDPOINT: &str = "FLP Cloud RUM";
+pub const ATTACH_RUM_CONDITION: &str = "flp_cloud_rum_condition";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -408,7 +410,9 @@ impl Provision {
         if let Some(ref version) = self.faro_version {
             rum.faro_version = version.clone();
         }
-        if let Some(ref name) = self.rum_endpoint_name {
+        if self.capture == Capture::Attached {
+            rum.endpoint_name = ATTACH_RUM_ENDPOINT.into();
+        } else if let Some(ref name) = self.rum_endpoint_name {
             if !name.trim().is_empty() {
                 rum.endpoint_name = name.clone();
             }

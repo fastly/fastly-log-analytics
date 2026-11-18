@@ -6729,18 +6729,10 @@ fn attach_mode_requires_the_other_install_capture_vcl() {
 }
 
 #[test]
-fn attach_mode_rejects_rum_cmcd_and_reserved_endpoint_names() {
+fn attach_mode_rejects_reserved_endpoint_names() {
     let platform = Platform::new();
     seed_other_install(&platform, None, false);
     for (extra, code) in [
-        (
-            json!({"rum_enabled":true}),
-            "rum_unavailable_in_attach_mode",
-        ),
-        (
-            json!({"cmcd":{"enabled":true}}),
-            "cmcd_unavailable_in_attach_mode",
-        ),
         (
             json!({"logging_endpoint_name":"Fastly RUM Logs"}),
             "attach_endpoint_name_reserved",
@@ -6759,6 +6751,116 @@ fn attach_mode_rejects_rum_cmcd_and_reserved_endpoint_names() {
         assert_eq!(error_code(&response), code, "{extra}");
     }
     assert_eq!(platform.adapter.key_count(), 0);
+}
+
+#[test]
+fn attach_mode_supports_cmcd_and_rum_without_touching_vcl_backend_or_dictionary() {
+    let platform = Platform::new();
+    let seeded = seed_other_install(&platform, None, true);
+    let job = platform.json(
+        "POST",
+        "/api/admin/provision/execute",
+        attach_body(json!({
+            "rum_enabled": true,
+            "cmcd": {"enabled": true, "mode": "query_string", "version": 1},
+        })),
+    )["job"]
+        .clone();
+    assert_eq!(platform.drain(job)["status"], "complete");
+
+    let service = platform.service();
+    assert_eq!(service["service"]["capture"], "attached");
+    assert_eq!(service["service"]["rum"]["enabled"], true);
+    assert_eq!(service["service"]["rum"]["endpoint_name"], "FLP Cloud RUM");
+    assert_eq!(service["service"]["cmcd"]["enabled"], true);
+
+    for (resource, value) in &seeded {
+        let now = platform.adapter.resources("fixtureService", resource);
+        assert!(now.contains(value), "{resource} {} changed", value["name"]);
+    }
+
+    let names = |resource: &str| -> Vec<String> {
+        let mut names: Vec<String> = platform
+            .adapter
+            .resources("fixtureService", resource)
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .filter(|name| {
+                !seeded
+                    .iter()
+                    .any(|(r, v)| r == &resource && v["name"] == name.as_str())
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names("snippet"), ["flp-owner-fixtureApp"]);
+    assert_eq!(names("logging/fos"), ["FLP Cloud Logs", "FLP Cloud RUM"]);
+    assert_eq!(
+        names("condition"),
+        ["flp_cloud_log_condition", "flp_cloud_rum_condition"]
+    );
+
+    let logs_ep = platform
+        .adapter
+        .resources("fixtureService", "logging/fos")
+        .into_iter()
+        .find(|v| v["name"] == "FLP Cloud Logs")
+        .unwrap();
+    assert_eq!(logs_ep["response_condition"], "flp_cloud_log_condition");
+    assert!(logs_ep["format"].as_str().unwrap().contains("cmcd"));
+
+    let rum_ep = platform
+        .adapter
+        .resources("fixtureService", "logging/fos")
+        .into_iter()
+        .find(|v| v["name"] == "FLP Cloud RUM")
+        .unwrap();
+    assert_eq!(rum_ep["response_condition"], "flp_cloud_rum_condition");
+    assert_eq!(rum_ep["bucket_name"], "fos-attach-logs");
+
+    let conditions = platform.adapter.resources("fixtureService", "condition");
+    let statement =
+        |name: &str| conditions.iter().find(|v| v["name"] == name).unwrap()["statement"].clone();
+    assert_eq!(
+        statement("flp_cloud_rum_condition"),
+        statement("rum_log_condition")
+    );
+
+    let touched: Vec<_> = platform
+        .adapter
+        .calls()
+        .into_iter()
+        .filter(|(_, path)| {
+            path.starts_with("/service/fixtureService/")
+                && (path.contains("/backend") || path.contains("/dictionary"))
+        })
+        .collect();
+    assert!(
+        touched.is_empty(),
+        "touched backend/dictionary: {touched:?}"
+    );
+
+    let changed_rum = "req.url.path == \"/rum-beacon\" && req.http.host == \"rum.example\"";
+    platform.adapter.seed_resource(
+        "fixtureService",
+        "condition",
+        json!({"name":"rum_log_condition","statement":changed_rum,"type":"RESPONSE","priority":10}),
+    );
+    let again = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({"generation":service["generation"]}),
+    );
+    assert_eq!(platform.drain(again["job"].clone())["status"], "complete");
+    let updated_conditions = platform.adapter.resources("fixtureService", "condition");
+    assert_eq!(
+        updated_conditions
+            .iter()
+            .find(|v| v["name"] == "flp_cloud_rum_condition")
+            .unwrap()["statement"],
+        changed_rum
+    );
 }
 
 #[test]

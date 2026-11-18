@@ -694,23 +694,21 @@ fn validate_service(
         return Err(Error::new(400, "log_period_exceeds_window_capacity"));
     }
     if service.capture == Capture::Attached {
-        if service.rum.enabled {
-            return Err(Error::new(400, "rum_unavailable_in_attach_mode"));
-        }
-        if service.cmcd.enabled {
-            return Err(Error::new(400, "cmcd_unavailable_in_attach_mode"));
-        }
         // Older installs find their endpoints by name or substring and would adopt or delete ours.
-        let name = service.logging_endpoint_name.to_ascii_lowercase();
-        if reconcile::managed_name(&service.logging_endpoint_name)
-            || [
-                "fastly log analytics",
-                "fastly log analysis",
-                "fastly object storage logs",
-                "fastly rum",
-            ]
-            .iter()
-            .any(|reserved| name.contains(reserved))
+        let check_reserved = |raw: &str| {
+            let name = raw.to_ascii_lowercase();
+            reconcile::managed_name(raw)
+                || [
+                    "fastly log analytics",
+                    "fastly log analysis",
+                    "fastly object storage logs",
+                    "fastly rum",
+                ]
+                .iter()
+                .any(|reserved| name.contains(reserved))
+        };
+        if check_reserved(&service.logging_endpoint_name)
+            || (service.rum.enabled && check_reserved(&service.rum.endpoint_name))
         {
             return Err(Error::new(400, "attach_endpoint_name_reserved"));
         }

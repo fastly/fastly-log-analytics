@@ -13,6 +13,7 @@ import {
 import { INITIAL_CONFIG, type WizardState } from '@/components/ProvisionWizard/types'
 import { ServiceStep } from '@/components/ProvisionWizard/steps/CredentialsStep'
 import { FeaturesStep } from '@/components/ProvisionWizard/steps/DomainStep'
+import { FieldsStep } from '@/components/ProvisionWizard/steps/FieldsStep'
 import { runDeploy } from '@/components/ProvisionWizard/wizardActions'
 
 const API_BASE = getApiBase()
@@ -69,17 +70,19 @@ describe('resolveAttachOffer', () => {
 })
 
 describe('attach config', () => {
-  it('forces logging only under the reserved endpoint name and deploys with capture attached', () => {
+  it('sets capture attached with the reserved endpoint name while preserving rum_enabled and cmcd_enabled', () => {
     const attached = applyAttach({ ...INITIAL_CONFIG, rum_enabled: true, cmcd_enabled: true, endpoint_name: 'Mine' })
     expect(attached).toMatchObject({
-      capture: 'attached', endpoint_name: ATTACH_ENDPOINT_NAME, logging_enabled: true, rum_enabled: false, cmcd_enabled: false,
+      capture: 'attached', endpoint_name: ATTACH_ENDPOINT_NAME, logging_enabled: true, rum_enabled: true, cmcd_enabled: true,
     })
     let posted: Record<string, unknown> | undefined
     runDeploy({
       token: 'TOK', selectedService: { id: 'svc-1', name: 'Demo', provisioned: false }, config: attached,
       setIsDeploying: () => {}, start: (_path, body) => { posted = body },
     })
-    expect(posted).toMatchObject({ capture: 'attached', endpoint_name: ATTACH_ENDPOINT_NAME, rum_enabled: false })
+    expect(posted).toMatchObject({
+      capture: 'attached', endpoint_name: ATTACH_ENDPOINT_NAME, rum_enabled: true, cmcd_enabled: true,
+    })
   })
 
   it('a managed deploy sends no capture key, and choosing another service clears attach mode', () => {
@@ -109,6 +112,9 @@ describe('attach UI', () => {
     render(<ServiceStep s={s} />)
     expect(screen.getByText(/server_region/)).toBeInTheDocument()
     expect(screen.getByText(new RegExp(ATTACH_ENDPOINT_NAME))).toBeInTheDocument()
+    expect(screen.queryByText(/Request logs only: RUM and CMCD stay with the other install/)).toBeNull()
+    expect(screen.getByText(/RUM/i)).toBeInTheDocument()
+    expect(screen.getByText(/CMCD/i)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Attach alongside the existing install' }))
     expect(s.acceptAttach).toHaveBeenCalledOnce()
   })
@@ -119,9 +125,19 @@ describe('attach UI', () => {
     expect(screen.queryByRole('button', { name: /Attach alongside/ })).toBeNull()
   })
 
-  it('disables the RUM feature choices once attached', () => {
+  it('keeps the RUM feature choices enabled once attached', () => {
     render(<FeaturesStep s={state({ config: applyAttach(INITIAL_CONFIG) })} />)
     const buttons = screen.getAllByRole('button')
-    expect(buttons.filter((b) => b.hasAttribute('disabled'))).toHaveLength(2)
+    expect(buttons.filter((b) => b.hasAttribute('disabled'))).toHaveLength(0)
+  })
+
+  it('shows the CMCD configuration section once attached', () => {
+    render(<FieldsStep s={state({
+      config: applyAttach(INITIAL_CONFIG),
+      isLoadingCatalog: false,
+      catalog: { groups: [], presets: {} },
+      estimatedBytes: 100,
+    })} />)
+    expect(screen.getByText(/CMCD/i)).toBeInTheDocument()
   })
 })
