@@ -8044,7 +8044,7 @@ export interface components {
         };
         /**
          * FastlyReportedMetrics
-         * @description Fastly Historical Stats totals beside the logs for the same whole closed UTC hours.
+         * @description Fastly Platform Metrics totals beside logs for the same closed UTC hours.
          */
         FastlyReportedMetrics: {
             /** Window Start */
