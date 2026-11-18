@@ -5,7 +5,7 @@ import { createBrowserBackend, DuckDBAnalyticalEngine } from "./duckdb";
 type MockReader = AsyncIterable<never> & { schema: { fields: never[] } };
 const state = vi.hoisted(() => ({
   fail: "", cleanupFails: false, factories: 0, terminations: 0,
-  queries: [] as string[], modules: [] as string[],
+  queries: [] as string[], modules: [] as string[], workers: [] as EventTarget[],
   send: null as ((sql: string) => Promise<MockReader>) | null,
   terminate: null as (() => Promise<void>) | null,
 }));
@@ -25,6 +25,7 @@ vi.mock("@duckdb/duckdb-wasm", () => ({
     async instantiate(module: string) {
       state.modules.push(module);
       if (state.fail === "instantiate") throw new Error("synthetic instantiate failure");
+      if (state.fail === "hang") await new Promise(() => {});
     }
     async open() { if (state.fail === "open") throw new Error("synthetic open failure"); }
     async connect() {
@@ -52,9 +53,12 @@ vi.mock("@duckdb/duckdb-wasm", () => ({
 beforeEach(() => {
   Object.assign(state, {
     fail: "", cleanupFails: false, factories: 0, terminations: 0,
-    queries: [], modules: [], send: null, terminate: null,
+    queries: [], modules: [], workers: [], send: null, terminate: null,
   });
-  vi.stubGlobal("Worker", class { terminate() { state.terminations++; } });
+  vi.stubGlobal("Worker", class extends EventTarget {
+    constructor() { super(); state.workers.push(this); }
+    terminate() { state.terminations++; }
+  });
 });
 
 describe("browser native rejection and cancellation", () => {
@@ -229,5 +233,16 @@ describe("DuckDB module URL", () => {
     } finally {
       createObjectURL.mockRestore();
     }
+  });
+});
+
+describe("DuckDB worker failure during initialization", () => {
+  it("rejects, rather than hanging, when the DuckDB worker fails before instantiate settles", async () => {
+    state.fail = "hang";
+    const created = createBrowserBackend();
+    await vi.waitFor(() => expect(state.modules).toHaveLength(1));
+    state.workers[0].dispatchEvent(Object.assign(new Event("error"), { message: "synthetic worker failure" }));
+    await expect(created).rejects.toThrow("DuckDB worker failed: synthetic worker failure");
+    expect(state.terminations).toBe(1);
   });
 });

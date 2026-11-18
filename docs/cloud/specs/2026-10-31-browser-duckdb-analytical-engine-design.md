@@ -78,6 +78,7 @@ flowchart LR
 
 ### 3.4 Module URL and Warm Reuse (added later)
 - DuckDB instantiates from the same-origin versioned module URL (`/duckdb/<version>/duckdb-eh.wasm`). Both Compute (`site.rs`) and the front VCL serve `/duckdb/` with `public, max-age=31536000, immutable`, so a normal profile's HTTP cache serves warm loads. A copy kept in Cache Storage and passed as a `blob:` URL was tried and removed: on the live https origin the nested DuckDB worker could not fetch a `blob:` URL created by the engine worker, and DuckDB-wasm never settles a failed module fetch, so every DuckDB page hung. An ephemeral profile (such as a fresh automated browser context) still downloads the module once per new worker, because it is larger than that profile's in-memory per-entry cache limit.
+- `createBrowserBackend` rejects with `DuckDB worker failed: …` when the DuckDB worker fires `error` before initialization settles; `AsyncDuckDB` alone drops its pending requests on that event without settling them.
 
 ---
 

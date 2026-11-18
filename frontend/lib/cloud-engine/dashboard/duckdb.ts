@@ -465,26 +465,39 @@ export async function createBrowserBackend(): Promise<DuckDBBackend> {
     throw new DuckDBBackendInitializationError(error, true);
   }
   let conn: Awaited<ReturnType<typeof db.connect>>;
+  // AsyncDuckDB drops its pending requests on a worker error without settling
+  // them, so initialization would otherwise wait forever.
+  let workerFailed!: (error: Error) => void;
+  const workerFailure = new Promise<never>((_, reject) => { workerFailed = reject; });
+  const onWorkerError = (event: Event) => {
+    workerFailed(new Error(`DuckDB worker failed: ${(event as ErrorEvent).message || "script error"}`));
+  };
+  worker.addEventListener("error", onWorkerError);
   try {
-    await db.instantiate(assets.wasm);
-    await db.open({
-      // Disable open-time full-file fallback after the source's 206 identity
-      // probe. The SDK can still accept 200 responses on subsequent range reads.
-      filesystem: {
-        reliableHeadRequests: true,
-        allowFullHTTPReads: false,
-        forceFullHTTPReads: false,
-      },
-      opfs: { fileHandling: "manual" },
-    });
-    conn = await db.connect();
-    await conn.query(
-      `SET custom_extension_repository = ${sqlString(assets.extensions)}`,
-    );
+    conn = await Promise.race([(async () => {
+      await db.instantiate(assets.wasm);
+      await db.open({
+        // Disable open-time full-file fallback after the source's 206 identity
+        // probe. The SDK can still accept 200 responses on subsequent range reads.
+        filesystem: {
+          reliableHeadRequests: true,
+          allowFullHTTPReads: false,
+          forceFullHTTPReads: false,
+        },
+        opfs: { fileHandling: "manual" },
+      });
+      const connection = await db.connect();
+      await connection.query(
+        `SET custom_extension_repository = ${sqlString(assets.extensions)}`,
+      );
+      return connection;
+    })(), workerFailure]);
   } catch (error) {
     try { await boundedDuckDBCleanup(() => db.terminate()); }
     catch (cleanupError) { throw new DuckDBBackendInitializationError(error, false, cleanupError); }
     throw new DuckDBBackendInitializationError(error, true);
+  } finally {
+    worker.removeEventListener("error", onWorkerError);
   }
   // One pending query per connection: serialize so cancelSent() only ever
   // cancels the statement that belongs to the aborted signal.
