@@ -22,6 +22,7 @@ import {
   RUM_VITALS_COLUMNS,
   type DuckDBColumnType,
 } from "./dashboard/duckdb";
+import type { Schema } from "@/types/api";
 
 export {
   MAX_QUERY_ROWS,
@@ -60,20 +61,7 @@ export interface QueryRequest {
   end_time?: string;
 }
 
-export interface QueryResponse {
-  columns: string[];
-  data: Record<string, unknown>[];
-  row_count: number;
-  total_rows: number;
-  truncated: boolean;
-  elapsed_ms: number;
-  execution_time_ms: number;
-  explain_plan?: string | null;
-  debug_queries: { engine: string; sql: string; duration_ms: number }[];
-  _debug_queries: { engine: string; sql: string; duration_ms: number }[];
-  debug_calls: unknown[];
-  section_timings: { name: string; duration_ms: number }[];
-}
+export type QueryResponse = Schema<"QueryResponse">;
 
 export interface CloudQueryContext {
   serviceId?: string;
