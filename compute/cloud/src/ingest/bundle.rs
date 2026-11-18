@@ -1864,6 +1864,14 @@ impl Acc {
                     &mut layout_rg,
                 )?,
                 "urls" => flush_group(&mut out, &["urls"], &mut groups_out, &mut layout_rg)?,
+                "proxy" => flush_group(
+                    &mut out,
+                    &["quality", "header_ip", "bot_ua", "tls_fp", "value", "proxy"],
+                    &mut groups_out,
+                    &mut layout_rg,
+                )?,
+                "ins_url" => flush_group(&mut out, &["ins_url"], &mut groups_out, &mut layout_rg)?,
+                "ins_ip" => flush_group(&mut out, &["ins_ip"], &mut groups_out, &mut layout_rg)?,
                 _ => {}
             }
         }
@@ -1881,20 +1889,7 @@ impl Acc {
                 cells,
             );
         }
-        flush_group(
-            &mut out,
-            &[
-                "quality",
-                "header_ip",
-                "bot_ua",
-                "tls_fp",
-                "value",
-                "proxy",
-                "sample",
-            ],
-            &mut groups_out,
-            &mut layout_rg,
-        )?;
+        flush_group(&mut out, &["sample"], &mut groups_out, &mut layout_rg)?;
         let batch_refs: Vec<&arrow_array::RecordBatch> = groups_out.iter().collect();
         let layout_json = serde_json::json!({ "v": 1, "rg": layout_rg }).to_string();
         super::convert::write_summary_batches(
