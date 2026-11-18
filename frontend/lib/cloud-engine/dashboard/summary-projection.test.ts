@@ -91,8 +91,11 @@ function spans(bytes: ArrayBuffer, rowGroup: number) {
 const overlaps = ([start, end]: [number, number], span: { start: number; end: number }) =>
   start < span.end && span.start < end;
 
-/** Ranges past the footer probe (the probe is the read ending at the file's end). */
-const dataRanges = (net: { ranges: [number, number][] }, size: number) => net.ranges.filter(([, end]) => end !== size);
+/** Ranges before the footer (the probe ends at the file's end; a footer longer than the probe takes one more read). */
+const dataRanges = (net: { ranges: [number, number][] }, bytes: ArrayBuffer) => {
+  const footerStart = bytes.byteLength - metaOf(bytes).metadata_length - 8;
+  return net.ranges.filter(([start, end]) => end !== bytes.byteLength && start < footerStart);
+};
 
 /** The rows of `spec`'s groups (a `dim_totals` row by the group it names), as plain objects. */
 async function groupRows(parts: readonly ArrayBuffer[], spec: SummarySpec, columns: string[]) {
@@ -120,7 +123,7 @@ describe("readSummaryProjection", () => {
     expect(metaOf(read.parts[0]).row_groups).toHaveLength(1);
     expect(names(read.parts[0])).toEqual(["bundle", "bucket", "field", "value", "truncated", "requests"]);
     const head = spans(layoutBytes, 0);
-    const data = dataRanges(source.net, layoutBytes.byteLength);
+    const data = dataRanges(source.net, layoutBytes);
     expect(data.length).toBeGreaterThan(0);
     for (const range of data) expect(range[0] >= head.start && range[1] <= head.end).toBe(true);
     const fetched = data.reduce((sum, [start, end]) => sum + end - start, 0);
@@ -139,7 +142,7 @@ describe("readSummaryProjection", () => {
     expect(Number(metaOf(read.parts[0]).num_rows)).toBe(Number(metaOf(legacyBytes).num_rows));
     expect(names(read.parts[0])).toEqual(["bundle", "bucket", "field", "value", "count", "truncated", "requests"]);
     const sketch = spans(legacyBytes, 0).chunk("ip_sketch");
-    for (const range of dataRanges(source.net, legacyBytes.byteLength)) expect(overlaps(range, sketch)).toBe(false);
+    for (const range of dataRanges(source.net, legacyBytes)) expect(overlaps(range, sketch)).toBe(false);
     expect(await groupRows(read.parts, DIMS, ["bundle", "field", "value", "requests"]))
       .toEqual(await groupRows([legacyBytes], DIMS, ["bundle", "field", "value", "requests"]));
   });
@@ -197,7 +200,7 @@ describe("readSummaryProjection", () => {
     const read = await readSummaryProjection(source, manifestFile(layoutBytes), spec);
     expect(read.parts.map((part) => names(part).includes("ip_sketch"))).toEqual([true, false]);
     const fieldsSketch = spans(layoutBytes, LAYOUT_B.findIndex((groups) => groups.includes("all_fields"))).chunk("ip_sketch");
-    for (const range of dataRanges(source.net, layoutBytes.byteLength)) expect(overlaps(range, fieldsSketch)).toBe(false);
+    for (const range of dataRanges(source.net, layoutBytes)) expect(overlaps(range, fieldsSketch)).toBe(false);
     const projected = await readSummaryColumns(read.parts, ["bundle", "ip_sketch"], false);
     const whole = await readColumns(layoutBytes, ["bundle", "ip_sketch"], false);
     const sketches = (columns: Map<string, ArrayLike<unknown>>, rows: number) =>

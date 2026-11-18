@@ -12,6 +12,8 @@ export const LAYOUT_B: readonly (readonly string[])[] = [
   ["bins", "assets", "transport", "origin"],
   ["urls"],
   ["quality", "sample"],
+  ["header_ip", "bot_ua", "tls_fp", "proxy"],
+  ["value"],
 ];
 
 /**
@@ -44,6 +46,7 @@ export async function withSummaryLayout(
   }
   if (!layout) {
     return parquetWriteBuffer({
+    statisticsTruncateLength: 64,
       schema: metadata.schema,
       rowGroupSize: text.length,
       kvMetadata: (metadata.key_value_metadata ?? []).map(({ key, value }) => ({ key, value: value ?? "" })),
@@ -62,6 +65,7 @@ export async function withSummaryLayout(
   const order = kept.flatMap((entry) => entry.rows);
   const kv = (metadata.key_value_metadata ?? []).filter((entry) => entry.key !== "flp_summary_layout");
   return parquetWriteBuffer({
+    statisticsTruncateLength: 64,
     schema: metadata.schema,
     rowGroupSize: kept.map((entry) => entry.rows.length),
     kvMetadata: [
