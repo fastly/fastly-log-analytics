@@ -75,7 +75,7 @@ describe("answerFromRollup", () => {
 
     const windows = fixtureFiles("window", (e) => e.end <= FIXTURE_START + 3600);
     const parts = await Promise.all(windows.map((f) => decodeRollup(SUMMARY_FIXTURE_BUFFERS[f.key], 300_000)));
-    const full = { rollup: mergeRollups(parts.map((p) => p!)), dataFromMs: T0, dataThroughMs: T0 + HOUR };
+    const full = { rollup: mergeRollups(parts.map((p) => p!)), dataFromMs: T0, dataThroughMs: T0 + HOUR, missingRanges: new Map() };
     expect(answer).toStrictEqual(insightsBaselineRollup(full));
     const [city] = full.rollup.dims.get("city")!.keys();
     const [country, name] = JSON.parse(city) as [string, string];
