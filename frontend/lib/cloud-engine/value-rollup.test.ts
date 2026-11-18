@@ -6,6 +6,7 @@ import { decodeRollup, mergeRollups, type RollupResult } from "./dashboard/rollu
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
 import { fixtureSource } from "./dashboard/test-fixtures";
 import { queryValueSummary } from "./value";
+import { VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
 import { valueFromRollup, valueRollupEligible, valueSummaryFromRollup } from "./value-rollup";
 
 const HOUR = 3_600_000;
@@ -266,6 +267,41 @@ describe("valueFromRollup", () => {
     expect(served).toEqual(valueSummaryFromRollup(await rollupOf("network", files("window")), all));
     expect(served).not.toBeNull();
     expect(s.log.files.every((key) => files("window").some((f) => f.key === key))).toBe(true);
+  });
+
+  it("every value section is served from rollups when value is covered", async () => {
+    expect([...VALUE_ROLLUP_SECTIONS]).toEqual([...ALL_SECTIONS]);
+    const sv = FIXTURES.securityValue;
+    const s = fixtureSource([fixturePage(sv.files("raw"))], sv.buffers, { json: [], files: [] }, [fixturePage(sv.files("window"))]);
+    const all = body({ sections: [...VALUE_ROLLUP_SECTIONS] });
+    const served = await valueFromRollup("/api/value/summary", all, s);
+    expect(served).not.toBeNull();
+    expect(s.log.files.every((key) => sv.files("window").some((f) => f.key === key))).toBe(true);
+    expect(served!.performance!.p99_latency_ms).not.toBeNull();
+    expect(served!.rollup.approximate).toContain("performance.p99_latency_ms");
+    expect(served!.io!.format_distribution!.length).toBeGreaterThan(1);
+    expect(served!.io!.optimization_opportunities).toEqual([]);
+    expect(served!.io!.image_request_count).toBe(0);
+    expect(served!.io!.image_bandwidth_bytes).toBeNull();
+    expect(served!.security!.waf_blocked).toBeNull();
+    expect(served!.security!.waf_logged).toBeNull();
+    expect(served!.security!.waf_passed).toBeNull();
+    expect(served!.security!.threat_time_series).toEqual([]);
+    expect(served!.bots!.verified_bots).toBeNull();
+
+    const full = await rollupOf("securityValue", sv.files("window"));
+    for (const [alias, section] of [
+      ["content_type", "io"],
+      ["resp_header_content_type", "io"],
+      ["waf_action", "security"],
+      ["ngwaf_decision", "security"],
+      ["bot_verified", "bots"],
+      ["verified_bot", "bots"],
+    ] as const) {
+      const aliased = new Map([...full.rollup.fields, [alias, new Map([["x", 1]])]]);
+      expect(valueSummaryFromRollup({ ...full, rollup: { ...full.rollup, fields: aliased } }, body({ sections: [section] })), alias)
+        .toBeNull();
+    }
   });
 
   it("leaves filters, other sections, unnamed sections and other routes to the raw scan", async () => {
