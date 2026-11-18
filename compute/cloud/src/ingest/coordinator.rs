@@ -1778,7 +1778,8 @@ fn valid_result(
                 .all(|o| outputs.contains(o.key.as_str()))
         })
         && (result.summaries.is_empty()
-            || (plan.stream == super::rum::STREAM && result.summaries.len() <= result.outputs.len())
+            || (plan.stream == super::rum::STREAM
+                && result.summaries.len() <= result.outputs.len())
             || result.summaries.len() == result.outputs.len())
         && result.summaries.iter().all(|output| {
             let prefix = if plan.stream == super::rum::STREAM {
@@ -1786,9 +1787,7 @@ fn valid_result(
             } else {
                 summary::summary_prefix(scope, &plan.table)
             };
-            output.key.starts_with(&prefix)
-                && output.key.contains(&token)
-                && output.md5.len() == 32
+            output.key.starts_with(&prefix) && output.key.contains(&token) && output.md5.len() == 32
         })
 }
 

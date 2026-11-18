@@ -6,6 +6,7 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { cmcdFromRollup, cmcdRollupEligible, type CmcdRollupSource } from "./cmcd-rollup";
 
 export const CMCD_COLUMNS = [
   "cmcd_sid",
@@ -68,6 +69,7 @@ export interface CmcdQueryParams {
   bucket_seconds?: number;
   top_n?: number;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
+  rollupSource?: CmcdRollupSource;
   customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
   signal?: AbortSignal;
 }
@@ -167,6 +169,10 @@ export function cmcdScanColumns(filters: unknown): string[] | null {
 }
 
 export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
+  if (params.rollupSource && cmcdRollupEligible(params)) {
+    const rollup = await cmcdFromRollup(params, params.rollupSource, params.signal);
+    if (rollup) return rollup;
+  }
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildCmcdWhere(params);

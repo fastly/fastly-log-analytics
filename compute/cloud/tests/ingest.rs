@@ -10766,8 +10766,9 @@ fn custom_and_cmcd_fields_are_written_as_typed_columns_and_committed() {
     put_raw(&fake, BASE, "a", &[row.to_string()]);
     assert_eq!(tick_service(&fake, &svc).unwrap().converted, 1);
     let schema = ingest::convert::RequestSchema::for_fields(&svc.log_fields);
-    let keys = fake.keys("processed/request/");
+    let keys = fake.keys("processed/request/year=");
     assert_eq!(keys.len(), 1);
+    assert_eq!(fake.keys("processed/request/cmcd_summary/").len(), 1);
     let batch = &batches(&fake.bucket.borrow()[&keys[0]])[0];
     let text = |name: &str| {
         let col = batch.column_by_name(name).unwrap();

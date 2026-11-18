@@ -13,7 +13,7 @@
 use super::compaction::PART_BYTES;
 use super::coordinator::WORKER_LEASE_MARGIN_S;
 use super::{
-    convert, load,
+    cmcd_summary, convert, load,
     storage::{Retry, Store, WALL_STOP},
     summary, Full, Loaded, Outcome, BATCH_FULL, MAX_BATCH_DECOMPRESSED_BYTES, SEGMENT_NEEDED,
 };
@@ -413,6 +413,7 @@ fn convert_shard<R: Runtime>(
         vec![processed]
     };
     let summaries = summary::summary_prefix(&shard.prefix, &shard.table);
+    let cmcd_summaries = cmcd_summary::cmcd_summary_prefix(&shard.prefix, &shard.table);
     let mut loaded: Vec<Loaded> = Vec::new();
     let mut decompressed = 0u64;
     let planned_at = match shard.created_at {
@@ -493,15 +494,23 @@ fn convert_shard<R: Runtime>(
         object_windows.push(windows);
     }
     let rum_summaries = super::rum_summary::prefix(&shard.prefix);
-    // `window_room` counts two PUTs per window; a RUM window writes data files plus one summary.
+    // `window_room` counts two PUTs per window; a RUM window writes data files plus one summary,
+    // and a CMCD-bearing request window adds a third PUT for `cmcd_summary`.
     let mut rum_window_rows: BTreeMap<i64, u64> = BTreeMap::new();
+    let mut total_puts: usize = 0;
     for (&(_, start), batches) in &by_window {
         if rum {
             let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
             *rum_window_rows.entry(start).or_default() += rows;
+            total_puts += 1;
+        } else {
+            let refs: Vec<&RecordBatch> = batches.iter().collect();
+            total_puts += 2 + usize::from(cmcd_summary::batches_have_cmcd(&refs));
         }
     }
-    let total_puts = by_window.len() + if rum { rum_window_rows.len() } else { by_window.len() };
+    if rum {
+        total_puts += rum_window_rows.len();
+    }
     if total_puts > 2 * window_room(shard.keys.len() + retry.used() as usize) {
         return Ok(Done::Split);
     }
@@ -512,7 +521,10 @@ fn convert_shard<R: Runtime>(
         let end = start + shard.window_s;
         let key = super::processed_key(&tables[table], start, end, &token, rows);
         let summary = (!rum).then(|| summary::summary_key(&summaries, start, end, &token, rows));
-        keys.insert((table, start), (key, summary, rows));
+        let refs: Vec<&RecordBatch> = batches.iter().collect();
+        let cmcd = (!rum && cmcd_summary::batches_have_cmcd(&refs))
+            .then(|| cmcd_summary::cmcd_summary_key(&cmcd_summaries, start, end, &token, rows));
+        keys.insert((table, start), (key, summary, cmcd, rows));
     }
     let rum_summary_keys: BTreeMap<i64, (String, u64)> = rum_window_rows
         .into_iter()
@@ -527,7 +539,7 @@ fn convert_shard<R: Runtime>(
         "plan_id": shard.plan_id, "shard": shard.shard, "attempt": shard.attempt,
         "keys": keys
             .values()
-            .flat_map(|(key, summary, _)| std::iter::once(key).chain(summary))
+            .flat_map(|(key, summary, cmcd, _)| std::iter::once(key).chain(summary).chain(cmcd))
             .chain(rum_summary_keys.values().map(|(key, _)| key))
             .collect::<Vec<_>>(),
     });
@@ -555,14 +567,15 @@ fn convert_shard<R: Runtime>(
             };
             let batch_refs: Vec<&RecordBatch> = batches.iter().collect();
             may_put()?;
-            let (key, summary_key, rows) = &keys[&(table, window_start)];
+            let (key, summary_key, cmcd_key, rows) = &keys[&(table, window_start)];
             let bytes = convert::write_parquet(&batch_refs)?;
             let metadata = super::file_metadata::from_parquet(&bytes)?;
             let size = bytes.len() as u64;
             let parts = bytes.len().div_ceil(PART_BYTES);
             remaining_puts = remaining_puts.saturating_sub(1);
             let after = remaining_puts + 1;
-            let md5 = if parts > 1 && runtime.admin_remaining_calls() as usize >= parts + 2 + after {
+            let md5 = if parts > 1 && runtime.admin_remaining_calls() as usize >= parts + 2 + after
+            {
                 put_parts(store, key, bytes, &may_put)?
             } else {
                 store.put_verified_retrying(key, bytes, Some(&retry))?
@@ -594,6 +607,12 @@ fn convert_shard<R: Runtime>(
                     metadata: None,
                 });
             }
+            if let Some(cmcd_key) = cmcd_key {
+                may_put()?;
+                let bytes = cmcd_summary::write_cmcd_summary(&batch_refs, window_start)?;
+                remaining_puts = remaining_puts.saturating_sub(1);
+                store.put_verified_retrying(cmcd_key, bytes, Some(&retry))?;
+            }
             if rum {
                 if table == 0 {
                     vitals_batches = batches;
@@ -607,8 +626,7 @@ fn convert_shard<R: Runtime>(
             let vcpu = runtime.vcpu_ms();
             let vitals_refs: Vec<&RecordBatch> = vitals_batches.iter().collect();
             let errors_refs: Vec<&RecordBatch> = errors_batches.iter().collect();
-            let bytes =
-                super::rum_summary::write_summary(&vitals_refs, &errors_refs, window_start);
+            let bytes = super::rum_summary::write_summary(&vitals_refs, &errors_refs, window_start);
             summary_vcpu.set(summary_vcpu.get() + runtime.vcpu_ms().saturating_sub(vcpu));
             let bytes = bytes?;
             let size = bytes.len() as u64;

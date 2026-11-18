@@ -25,6 +25,7 @@
 pub mod api;
 pub mod bundle;
 pub mod catalog;
+pub mod cmcd_summary;
 pub mod compaction;
 pub mod convert;
 pub mod coordinator;

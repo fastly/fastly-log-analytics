@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { parquetWriteBuffer } from "hyparquet-writer";
 import { describe, expect, it } from "vitest";
 import {
   classifySessionDurationBucket,
@@ -7,7 +8,13 @@ import {
   handleCmcdRequest,
   queryCmcdAggregates,
 } from "./cmcd";
-import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
+import { BOUNDS, Histogram } from "./dashboard/histogram";
+import { Hll } from "./dashboard/hll";
+import {
+  DuckDBAnalyticalEngine,
+  fixtureSource,
+  manifestEntry,
+} from "./dashboard/test-fixtures";
 
 describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
   it("does not fabricate missing optional streaming measurements", async () => {
@@ -173,5 +180,201 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
       expect(res.session_duration_dist).toHaveLength(1);
     }
     await engine.reset();
+  });
+
+  it("aggregates from cmcd_summary", async () => {
+    const hllOf = (items: string[]) => {
+      const h = new Hll();
+      for (const item of items) h.add(item);
+      return h.toBytes();
+    };
+    const histOf = (values: number[]) => {
+      const h = new Histogram();
+      for (const raw of values) {
+        const v = Math.round(raw * 1000);
+        h.min = Math.min(h.min, v);
+        h.max = Math.max(h.max, v);
+        if (v < BOUNDS[0]) h.under++;
+        else if (v >= BOUNDS[BOUNDS.length - 1]) h.over++;
+        else {
+          for (let s = 0; s < BOUNDS.length - 1; s++) {
+            if (v >= BOUNDS[s] && v < BOUNDS[s + 1]) {
+              h.buckets[s]++;
+              break;
+            }
+          }
+        }
+      }
+      return h.toBytes();
+    };
+
+    const t0 = 1_800_000_000_000;
+    const t1 = t0 + 300_000;
+    const t2 = t0 + 600_000;
+    const makeSummaryBuffer = (rows: Array<Record<string, unknown>>) => {
+      const str = (k: string) => rows.map((r) => (r[k] as string | undefined) ?? null);
+      const i64 = (k: string) =>
+        rows.map((r) => (r[k] == null ? null : BigInt(r[k] as number)));
+      const f64 = (k: string) => rows.map((r) => (r[k] as number | undefined) ?? null);
+      const bool = (k: string) => rows.map((r) => (r[k] as boolean | undefined) ?? null);
+      const bin = (k: string) =>
+        rows.map((r) => (r[k] as Uint8Array | undefined) ?? null);
+      return parquetWriteBuffer({
+        codec: "SNAPPY",
+        columnData: [
+          { name: "kind", type: "STRING", data: str("kind") },
+          { name: "bucket", type: "INT64", data: i64("bucket") },
+          { name: "key", type: "STRING", data: str("key") },
+          { name: "label", type: "STRING", data: str("label") },
+          { name: "truncated", type: "BOOLEAN", data: bool("truncated") },
+          { name: "reqs", type: "INT64", data: i64("reqs") },
+          { name: "sid_hll", type: "BYTE_ARRAY", data: bin("sid_hll") },
+          { name: "rebuffer_events", type: "INT64", data: i64("rebuffer_events") },
+          { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: bin("rebuffer_sid_hll") },
+          { name: "has_bs", type: "INT64", data: i64("has_bs") },
+          { name: "has_su", type: "INT64", data: i64("has_su") },
+          { name: "has_ot", type: "INT64", data: i64("has_ot") },
+          { name: "has_bl", type: "INT64", data: i64("has_bl") },
+          { name: "has_br", type: "INT64", data: i64("has_br") },
+          { name: "has_mtp", type: "INT64", data: i64("has_mtp") },
+          { name: "has_cid", type: "INT64", data: i64("has_cid") },
+          { name: "br_sum", type: "DOUBLE", data: f64("br_sum") },
+          { name: "br_n", type: "INT64", data: i64("br_n") },
+          { name: "tb_sum", type: "DOUBLE", data: f64("tb_sum") },
+          { name: "tb_n", type: "INT64", data: i64("tb_n") },
+          { name: "bl_sum", type: "DOUBLE", data: f64("bl_sum") },
+          { name: "bl_n", type: "INT64", data: i64("bl_n") },
+          { name: "mtp_sum", type: "DOUBLE", data: f64("mtp_sum") },
+          { name: "mtp_n", type: "INT64", data: i64("mtp_n") },
+          { name: "v_br_sum", type: "DOUBLE", data: f64("v_br_sum") },
+          { name: "v_br_n", type: "INT64", data: i64("v_br_n") },
+          { name: "v_tb_sum", type: "DOUBLE", data: f64("v_tb_sum") },
+          { name: "v_tb_n", type: "INT64", data: i64("v_tb_n") },
+          { name: "v_bl_sum", type: "DOUBLE", data: f64("v_bl_sum") },
+          { name: "v_bl_n", type: "INT64", data: i64("v_bl_n") },
+          { name: "util_sum", type: "DOUBLE", data: f64("util_sum") },
+          { name: "util_n", type: "INT64", data: i64("util_n") },
+          { name: "util_all_sum", type: "DOUBLE", data: f64("util_all_sum") },
+          { name: "util_all_n", type: "INT64", data: i64("util_all_n") },
+          { name: "startup_requests", type: "INT64", data: i64("startup_requests") },
+          { name: "su_bl_sum", type: "DOUBLE", data: f64("su_bl_sum") },
+          { name: "su_bl_n", type: "INT64", data: i64("su_bl_n") },
+          { name: "su_ttfb_sum", type: "DOUBLE", data: f64("su_ttfb_sum") },
+          { name: "su_ttfb_n", type: "INT64", data: i64("su_ttfb_n") },
+          { name: "v_bl_hist", type: "BYTE_ARRAY", data: bin("v_bl_hist") },
+          { name: "bl_hist", type: "BYTE_ARRAY", data: bin("bl_hist") },
+          { name: "v_mtp_hist", type: "BYTE_ARRAY", data: bin("v_mtp_hist") },
+          { name: "mtp_hist", type: "BYTE_ARRAY", data: bin("mtp_hist") },
+          { name: "min_ts", type: "INT64", data: i64("min_ts") },
+          { name: "max_ts", type: "INT64", data: i64("max_ts") },
+          { name: "first_ts", type: "INT64", data: i64("first_ts") },
+          { name: "last_ts", type: "INT64", data: i64("last_ts") },
+        ],
+      });
+    };
+
+    const key1 = "processed/request/cmcd_summary/year=2027/month=01/day=15/hour=08/window=1800000000-1800000300-p1s0-n2.parquet";
+    const key2 = "processed/request/cmcd_summary/year=2027/month=01/day=15/hour=08/window=1800000300-1800000600-p1s0-n1.parquet";
+    const buffers: Record<string, ArrayBuffer> = {
+      [key1]: makeSummaryBuffer([
+        {
+          kind: "bucket", bucket: t0, reqs: 2, sid_hll: hllOf(["s1", "span"]),
+          rebuffer_events: 1, rebuffer_sid_hll: hllOf(["s1"]),
+          has_bs: 2, has_su: 2, has_ot: 2, has_bl: 2, has_br: 2, has_mtp: 2, has_cid: 2,
+          br_sum: 6000, br_n: 2, tb_sum: 8000, tb_n: 2, bl_sum: 4000, bl_n: 2, mtp_sum: 10000, mtp_n: 2,
+          v_br_sum: 6000, v_br_n: 2, v_tb_sum: 8000, v_tb_n: 2, v_bl_sum: 4000, v_bl_n: 2,
+          util_sum: 1.5, util_n: 2, util_all_sum: 1.5, util_all_n: 2,
+          startup_requests: 1, su_bl_sum: 1000, su_bl_n: 1, su_ttfb_sum: 20, su_ttfb_n: 1,
+          v_bl_hist: histOf([1000, 3000]), bl_hist: histOf([1000, 3000]),
+          v_mtp_hist: histOf([4000, 6000]), mtp_hist: histOf([4000, 6000]),
+          min_ts: t0 + 1000, max_ts: t0 + 10000,
+        },
+        { kind: "session", key: "s1", reqs: 1, first_ts: t0 + 1000, last_ts: t0 + 1000 },
+        { kind: "session", key: "span", reqs: 1, first_ts: t0 + 10000, last_ts: t0 + 10000 },
+        { kind: "content", key: "movie", reqs: 2, sid_hll: hllOf(["s1", "span"]), rebuffer_sid_hll: hllOf(["s1"]), has_bs: 2, v_br_sum: 6000, v_br_n: 2, br_sum: 6000, br_n: 2, v_bl_sum: 4000, v_bl_n: 2, bl_sum: 4000, bl_n: 2 },
+        { kind: "country", key: "US", reqs: 2, sid_hll: hllOf(["s1", "span"]), rebuffer_events: 1, rebuffer_sid_hll: hllOf(["s1"]), has_bs: 2, v_mtp_hist: histOf([4000, 6000]), mtp_hist: histOf([4000, 6000]) },
+        { kind: "asn", key: "15169", label: "Google", reqs: 2, sid_hll: hllOf(["s1", "span"]), rebuffer_events: 1, rebuffer_sid_hll: hllOf(["s1"]), has_bs: 2, v_br_sum: 6000, v_br_n: 2, br_sum: 6000, br_n: 2, v_bl_sum: 4000, v_bl_n: 2, bl_sum: 4000, bl_n: 2, mtp_sum: 10000, mtp_n: 2 },
+        { kind: "ot", key: "v", reqs: 2 },
+        { kind: "sf", key: "h", reqs: 2, sid_hll: hllOf(["s1", "span"]) },
+      ]),
+      [key2]: makeSummaryBuffer([
+        {
+          kind: "bucket", bucket: t1, reqs: 1, sid_hll: hllOf(["span"]),
+          rebuffer_events: 0, has_bs: 1, has_su: 1, has_ot: 1, has_bl: 1, has_br: 1, has_mtp: 1, has_cid: 1,
+          br_sum: 3000, br_n: 1, tb_sum: 6000, tb_n: 1, bl_sum: 2000, bl_n: 1, mtp_sum: 8000, mtp_n: 1,
+          v_br_sum: 3000, v_br_n: 1, v_tb_sum: 6000, v_tb_n: 1, v_bl_sum: 2000, v_bl_n: 1,
+          util_sum: 0.5, util_n: 1, util_all_sum: 0.5, util_all_n: 1,
+          startup_requests: 0,
+          v_bl_hist: histOf([2000]), bl_hist: histOf([2000]),
+          v_mtp_hist: histOf([8000]), mtp_hist: histOf([8000]),
+          min_ts: t1 + 10000, max_ts: t1 + 10000,
+        },
+        { kind: "session", key: "span", reqs: 1, first_ts: t1 + 10000, last_ts: t1 + 10000 },
+        { kind: "content", key: "movie", reqs: 1, sid_hll: hllOf(["span"]), has_bs: 1, v_br_sum: 3000, v_br_n: 1, br_sum: 3000, br_n: 1, v_bl_sum: 2000, v_bl_n: 1, bl_sum: 2000, bl_n: 1 },
+        { kind: "country", key: "US", reqs: 1, sid_hll: hllOf(["span"]), has_bs: 1, v_mtp_hist: histOf([8000]), mtp_hist: histOf([8000]) },
+        { kind: "asn", key: "15169", label: "Google", reqs: 1, sid_hll: hllOf(["span"]), has_bs: 1, v_br_sum: 3000, v_br_n: 1, br_sum: 3000, br_n: 1, v_bl_sum: 2000, v_bl_n: 1, bl_sum: 2000, bl_n: 1, mtp_sum: 8000, mtp_n: 1 },
+        { kind: "ot", key: "v", reqs: 1 },
+        { kind: "sf", key: "h", reqs: 1, sid_hll: hllOf(["span"]) },
+      ]),
+    };
+
+    const rawPages = [{
+      files: [
+        manifestEntry("processed/request/year=2027/month=01/day=15/hour=08/window=1800000000-1800000300-p1s0-n2.parquet", new Date(t0).toISOString(), new Date(t1).toISOString(), 2),
+        manifestEntry("processed/request/year=2027/month=01/day=15/hour=08/window=1800000300-1800000600-p1s0-n1.parquet", new Date(t1).toISOString(), new Date(t2).toISOString(), 1),
+      ],
+      next_cursor: null,
+      complete: true,
+    }];
+    const cmcdPage = {
+      files: [
+        manifestEntry(key1, new Date(t0).toISOString(), new Date(t1).toISOString(), 2),
+        manifestEntry(key2, new Date(t1).toISOString(), new Date(t2).toISOString(), 1),
+      ],
+      next_cursor: null,
+      complete: true,
+    };
+    const baseSource = fixtureSource(rawPages, buffers);
+    const rollupSource = {
+      ...baseSource,
+      async fetchJson(url: string, signal?: AbortSignal) {
+        const params = new URL(url, "http://x").searchParams;
+        if (params.get("dataset") === "cmcd_summary") return cmcdPage;
+        return baseSource.fetchJson(url, signal);
+      },
+    };
+
+    const res = await queryCmcdAggregates({
+      start_time: new Date(t0).toISOString(),
+      end_time: new Date(t2).toISOString(),
+      bucket_seconds: 300,
+      rollupSource,
+    });
+    expect(res.overview).toMatchObject({
+      active_sessions: 2,
+      peak_viewers: 2,
+      rebuffer_rate: 50,
+      avg_bitrate: 3000,
+      avg_buffer_length: 2000,
+    });
+    expect(res.summary).toMatchObject({
+      active_sessions: 2,
+      total_requests: 3,
+      rebuffer_events: 1,
+      peak_viewers: 2,
+    });
+    expect(res.sessions_ts).toHaveLength(2);
+    expect(res.sessions_ts[0]).toMatchObject({ concurrent_sessions: 2, new_sessions: 2 });
+    expect(res.sessions_ts[1]).toMatchObject({ concurrent_sessions: 1, new_sessions: 0 });
+    expect(res.session_duration_dist.map((d) => ({ duration_bucket: d.duration_bucket, session_count: d.session_count })))
+      .toEqual([
+        { duration_bucket: "<30s", session_count: 1 },
+        { duration_bucket: "5–10m", session_count: 1 },
+      ]);
+    expect(res.top_content[0]).toMatchObject({ content_id: "movie", sessions: 2, requests: 3 });
+    expect(res.rebuffer_by_country[0]).toMatchObject({ country: "US", sessions: 2, rebuffer_events: 1 });
+    expect(res.rebuffer_by_asn[0]).toMatchObject({ asn: 15169, as_name: "Google", sessions: 2 });
+    expect(res.object_type_dist[0]).toMatchObject({ object_type: "v", requests: 3 });
+    expect(res.streaming_format_dist[0]).toMatchObject({ streaming_format: "h", session_count: 2 });
   });
 });

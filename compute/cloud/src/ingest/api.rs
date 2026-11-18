@@ -46,11 +46,12 @@ fn default_dataset() -> String {
     "request".into()
 }
 
-/// Folder holding one dataset's Parquet files: `request`, `rum` or `ops:{kind}`.
+/// Folder holding one dataset's Parquet files: `request`, `cmcd_summary`, `rum` or `ops:{kind}`.
 pub fn dataset_root(service: &Service, dataset: &str) -> Option<String> {
     let scope = scope(service);
     match dataset {
         "request" => Some(processed_prefix(service)),
+        "cmcd_summary" => Some(format!("{}cmcd_summary/", processed_prefix(service))),
         "rum" => Some(format!("{scope}processed/rum/")),
         _ => {
             let kind = LogKind::parse(dataset.strip_prefix("ops:")?)?;

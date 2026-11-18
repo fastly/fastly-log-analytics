@@ -13,6 +13,7 @@ import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "
 import { assetsRollupEligible } from "./assets-rollup";
 import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
+import { cmcdRollupEligible } from "./cmcd-rollup";
 import type { DashboardFilter } from "./dashboard/filters";
 import type { MinuteBucket } from "./dashboard/engine";
 import { parseVcpuMsHeader } from "./dashboard/sources";
@@ -455,6 +456,7 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/security/bundle": { label: "/security", eligible: securityRollupEligible },
   "/api/security/threat-intel": { label: "/security", eligible: securityRollupEligible },
   "/api/assets/aggregates": { label: "/assets", eligible: assetsRollupEligible },
+  "/api/cmcd/aggregates": { label: "/cmcd", eligible: (_path, params) => cmcdRollupEligible(params as CmcdQueryParams) },
   "/api/value/summary": { label: "/fastly-value", eligible: valueRollupEligible, decorate: valueStatsDecorator },
 };
 

@@ -1,4 +1,6 @@
 import { assetsFromRollup, type AssetsRollupBody } from "./assets-rollup";
+import type { CmcdQueryParams } from "./cmcd";
+import { cmcdFromRollup } from "./cmcd-rollup";
 import type { RollupResult } from "./dashboard/rollup-query";
 import type { InsightsRequest } from "./insights";
 import { insightsBaselineFromRollup, insightsBaselineRollup } from "./insights-rollup";
@@ -42,6 +44,8 @@ const ANSWERS: Record<string, Answer> = {
   "/api/security/threat-intel": security,
   "/api/assets/aggregates": (path, params, source, signal) =>
     assetsFromRollup(path, params as AssetsRollupBody, source, signal),
+  "/api/cmcd/aggregates": (_path, params, source, signal) =>
+    cmcdFromRollup(params as CmcdQueryParams, source, signal),
   "/api/value/summary": (path, params, source, signal) =>
     valueFromRollup(path, params as ValueRollupBody, source, signal),
   // The adapter passes only unfiltered baselines; the window is read raw on the page.
