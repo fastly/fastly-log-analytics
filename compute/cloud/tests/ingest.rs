@@ -885,7 +885,7 @@ impl Runtime for Fake {
         service_id: &str,
         key: &str,
         cdn_key: &str,
-        _max: usize,
+        max: usize,
         _timeout: std::time::Duration,
     ) -> Result<FosResponse, String> {
         self.charge()?;
@@ -896,6 +896,10 @@ impl Runtime for Fake {
             return Ok(response);
         }
         self.spend_get_vcpu(key);
+        // As the SDK's CDN read does once a body passes the response limit.
+        if self.bucket.borrow().get(key).is_some_and(|b| b.len() > max) {
+            return Err("cdn_body_too_large".into());
+        }
         self.source_bytes.set(
             self.source_bytes.get()
                 + self
@@ -9958,6 +9962,86 @@ mod summary_bundles {
         settle(&fake);
         assert!(!fake.bucket.borrow().contains_key(&legacy_partial));
         assert_eq!(fake.bucket.borrow()[&key], want);
+    }
+
+    #[test]
+    fn a_day_partial_past_the_read_limit_is_reported_and_the_day_rebuilds_without_it() {
+        let fake = Fake::new(BASE + 17 * HOUR);
+        watermark(&fake, BASE + 17 * HOUR);
+        seed_hour(&fake, BASE, 6);
+        seed_hour(&fake, BASE + HOUR, 2);
+        settle(&fake);
+        let day = one_of(&fake, "day_bundle=");
+        let want = fake.bucket.borrow()[&day].clone();
+        let mut hours: Vec<String> = of(&fake, "hour_bundle=")
+            .iter()
+            .map(|k| k.rsplit('/').next().unwrap().to_owned())
+            .collect();
+        hours.sort();
+        // An unpacked partial that grew past the 8 MiB CDN read limit, so every resume failed.
+        let stuck = format!(
+            "{BUNDLES}year=2027/month=01/day=15/partial=c1-n1-h{:016x}.parquet",
+            bundle::fingerprint([hours[0].as_str()])
+        );
+        let mut body = b"FLPB\x03".to_vec();
+        body.resize(9 << 20, 0);
+        fake.bucket.borrow_mut().insert(stuck.clone(), body);
+        fake.kv.borrow_mut().remove(bundle::STATE_KEY);
+        fake.bucket.borrow_mut().remove(&day);
+
+        let mut errors = Vec::new();
+        for _ in 0..40 {
+            let report = run(&fake);
+            errors.extend(report.errors);
+            if !report.more_pending {
+                break;
+            }
+        }
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("cdn_body_too_large:partial=c1-")),
+            "{errors:?}"
+        );
+        assert!(!fake.bucket.borrow().contains_key(&stuck));
+        assert_eq!(one_of(&fake, "day_bundle="), day);
+        assert_eq!(fake.bucket.borrow()[&day], want);
+    }
+
+    #[test]
+    fn a_day_that_cannot_be_built_does_not_hold_back_later_days() {
+        let fake = Fake::new(BASE + 41 * HOUR);
+        watermark(&fake, BASE + 41 * HOUR);
+        seed_hour(&fake, BASE, 3);
+        seed_hour(&fake, BASE + 24 * HOUR, 3);
+        for _ in 0..40 {
+            run(&fake);
+            if of(&fake, "hour_bundle=").len() == 2 {
+                break;
+            }
+        }
+        assert!(of(&fake, "day_bundle=").is_empty());
+        let unreadable = of(&fake, "hour_bundle=")
+            .into_iter()
+            .find(|k| k.contains("/day=15/"))
+            .unwrap();
+        fake.bucket
+            .borrow_mut()
+            .insert(unreadable, vec![0; 9 << 20]);
+
+        let mut errors = Vec::new();
+        for _ in 0..20 {
+            errors.extend(run(&fake).errors);
+        }
+        let days = of(&fake, "day_bundle=");
+        assert_eq!(days.len(), 1, "{days:?} {errors:?}");
+        assert!(days[0].contains("/day=16/"), "{days:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("cdn_body_too_large:hour_bundle=08-")),
+            "{errors:?}"
+        );
     }
 
     #[test]

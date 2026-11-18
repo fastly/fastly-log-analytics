@@ -8,7 +8,10 @@
 //! - hour: `summary_bundle/{table}/year=Y/month=M/day=D/hour_bundle=HH-c{n}-n{rows}-h{fp}.parquet`
 //! - day: `summary_bundle/{table}/year=Y/month=M/day=D/day_bundle=c{n}-n{rows}-h{fp}.parquet`
 //! - resumable partials (never read by readers): `partial=c{k}-n{rows}-h{fp}.parquet` in the
-//!   hour's window folder (hour builds) or the day's `summary_bundle` folder (day builds).
+//!   hour's window folder (hour builds) or the day's `summary_bundle` folder (day builds). The
+//!   state is zstd-compressed and split so no object passes `CDN_READ_LIMIT`: the head holds the
+//!   first slice, `partial=c{k}-n{rows}-h{fp}-p{i}.parquet` the rest. A partial that cannot be
+//!   read is reported and skipped, and goes with the other stale partials at the next write.
 //!
 //! A day's hour and day bundles share one folder, so one LIST resolves a closed day and one
 //! retention dataset covers both.
@@ -95,6 +98,83 @@ pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
 const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x03";
+/// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
+/// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
+/// [`part_key`] objects, each at most the CDN read limit.
+const PACKED_MAGIC: &[u8; 5] = b"FLPB\x04";
+const PACKED_HEAD: usize = PACKED_MAGIC.len() + 4 + 8;
+/// A raw partial is a few times its bundle; larger means a corrupt length.
+const PARTIAL_RAW_MAX: u64 = 256 << 20;
+
+/// Compresses an encoded partial and splits it into objects of at most `limit` bytes, head first.
+fn pack_partial(raw: &[u8], limit: usize) -> Result<Vec<Vec<u8>>, String> {
+    let packed = zstd::bulk::compress(raw, 1).map_err(|_| "partial_encode_failed")?;
+    let mut rest = packed.as_slice();
+    let mut objects = Vec::new();
+    let mut head = Vec::with_capacity(limit.min(PACKED_HEAD + rest.len()));
+    head.extend_from_slice(PACKED_MAGIC);
+    head.extend_from_slice(&[0; 4]);
+    head.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+    let mut object = head;
+    loop {
+        let take = rest.len().min(limit - object.len());
+        object.extend_from_slice(&rest[..take]);
+        rest = &rest[take..];
+        objects.push(object);
+        if rest.is_empty() {
+            break;
+        }
+        object = Vec::with_capacity(limit.min(rest.len()));
+    }
+    let count = u32::try_from(objects.len()).map_err(|_| "partial_encode_failed")?;
+    objects[0][PACKED_MAGIC.len()..PACKED_MAGIC.len() + 4].copy_from_slice(&count.to_le_bytes());
+    Ok(objects)
+}
+
+/// The object count of a packed partial head.
+fn packed_parts(head: &[u8]) -> Option<usize> {
+    if head.len() < PACKED_HEAD || !head.starts_with(PACKED_MAGIC) {
+        return None;
+    }
+    let count = u32::from_le_bytes(head[PACKED_MAGIC.len()..][..4].try_into().ok()?);
+    usize::try_from(count).ok().filter(|n| *n > 0)
+}
+
+/// The encoded partial from all of a packed partial's objects, head first.
+fn unpack_partial(objects: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let head = objects.first().ok_or("partial_unreadable")?;
+    if packed_parts(head) != Some(objects.len()) {
+        return Err("partial_unreadable".into());
+    }
+    let raw_len = u64::from_le_bytes(
+        head[PACKED_MAGIC.len() + 4..PACKED_HEAD]
+            .try_into()
+            .unwrap(),
+    );
+    if raw_len > PARTIAL_RAW_MAX {
+        return Err("partial_unreadable".into());
+    }
+    let mut packed = head[PACKED_HEAD..].to_vec();
+    for object in &objects[1..] {
+        packed.extend_from_slice(object);
+    }
+    let raw =
+        zstd::bulk::decompress(&packed, raw_len as usize).map_err(|_| "partial_unreadable")?;
+    if raw.len() as u64 != raw_len || !raw.starts_with(PARTIAL_MAGIC) {
+        return Err("partial_unreadable".into());
+    }
+    Ok(raw)
+}
+
+/// Object `i` (from 1) of the packed partial at `head`; [`parse_name`] rejects it.
+fn part_key(head: &str, i: usize) -> String {
+    format!("{}-p{i}.parquet", head.trim_end_matches(".parquet"))
+}
+
+/// A partial that can never be read as it is, so a build skips it rather than retrying it.
+fn unreadable(error: &str) -> bool {
+    matches!(error, "cdn_body_too_large" | "get_body_too_large")
+}
 
 /// `{scope}processed/summary_bundle/{table}/`, holding hour and day bundles.
 pub fn bundle_prefix(scope: &str, table: &str) -> String {
@@ -1756,6 +1836,9 @@ struct Ctx<'s, 'a, R: Runtime> {
     publication: Option<super::catalog::bundles::Coverage>,
 }
 
+/// A partial's state and object count, `Err` when it cannot be read, `None` when out of calls.
+type Resume = Option<Result<(Acc, usize), String>>;
+
 struct Job<'j> {
     sources: Vec<String>,
     partials: Vec<String>,
@@ -1923,7 +2006,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         let mut sources = job.sources;
         sources.sort_unstable_by(|a, b| file_name(a).cmp(file_name(b)));
         let names: Vec<&str> = sources.iter().map(|k| file_name(k)).collect();
-        let best = job
+        let mut candidates: Vec<(usize, &String)> = job
             .partials
             .iter()
             .filter_map(|key| {
@@ -1933,8 +2016,9 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     && fingerprint(names[..name.count].iter().copied()) == name.fp)
                     .then_some((name.count, key))
             })
-            .max();
-        let covered = best.map_or(0, |(count, _)| count);
+            .collect();
+        candidates.sort_unstable_by(|a, b| b.cmp(a));
+        let covered = candidates.first().map_or(0, |(count, _)| *count);
         if job.final_key.is_none() {
             if sources.len().saturating_sub(covered) < OPEN_BATCH_SOURCES {
                 return Ok(Step::Done);
@@ -1945,20 +2029,30 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         }
         let mut acc = Acc::new(job.unit);
         let mut done = 0;
-        if let Some((count, key)) = best {
+        let mut extra = 0;
+        for (count, key) in candidates {
             if !self.room(3) {
                 return Ok(Step::Pending);
             }
-            if let Some(bytes) = self.store.get(self.cdn_key, key, CDN_READ_LIMIT)? {
-                if bytes.starts_with(PARTIAL_MAGIC) {
-                    acc = Acc::decode_partial(&bytes, job.unit)?;
+            match self.read_partial(key, job.unit)? {
+                Some(Ok((state, parts))) => {
+                    acc = state;
                     done = count;
+                    extra = parts - 1;
                     self.report.sources += 1;
+                    break;
                 }
+                // A partial that cannot be read is skipped for the next one, or a fresh build,
+                // and deleted with the other stale partials once this build writes.
+                Some(Err(error)) => self
+                    .report
+                    .errors
+                    .push(format!("{error}:{}", file_name(key))),
+                None => return Ok(Step::Pending),
             }
         }
         let resumed = done;
-        let tail = if job.partials.is_empty() { 3 } else { 4 };
+        let tail = if job.partials.is_empty() { 3 } else { 4 } + extra as u32;
         while done < sources.len() {
             if done - resumed >= MAX_SOURCES || self.stop() {
                 break;
@@ -1966,17 +2060,19 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             if !self.room(tail) {
                 break;
             }
+            let source = file_name(&sources[done]);
             let Some(bytes) = self
                 .store
-                .get(self.cdn_key, &sources[done], CDN_READ_LIMIT)?
+                .get(self.cdn_key, &sources[done], CDN_READ_LIMIT)
+                .map_err(|e| format!("{e}:{source}"))?
             else {
                 // Removed since the LIST (an abandoned plan): relist next execution.
                 self.report
                     .errors
-                    .push(format!("summary_vanished:{}", file_name(&sources[done])));
+                    .push(format!("summary_vanished:{source}"));
                 break;
             };
-            acc.fold(bytes, 1)?;
+            acc.fold(bytes, 1).map_err(|e| format!("{e}:{source}"))?;
             acc.prune();
             done += 1;
             self.report.sources += 1;
@@ -1986,22 +2082,30 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if defer_final && self.report.stopped.is_none() {
             self.report.stopped = Some("vcpu");
         }
-        let (key, body, is_final) = match job
+        let (key, mut objects, is_final) = match job
             .final_key
             .filter(|_| done == sources.len() && !defer_final)
         {
             Some(final_key) => {
                 let body = acc.write(job.start, Some(job.unit), job.unit.label())?;
-                (final_key.to_owned(), body, true)
+                (final_key.to_owned(), vec![body], true)
             }
             None if done > resumed => {
-                let body = acc.encode_partial();
+                let objects = pack_partial(&acc.encode_partial(), CDN_READ_LIMIT)?;
+                if !self.room(objects.len() as u32) {
+                    return Ok(Step::Pending);
+                }
                 let key = format!("{}partial={}", job.folder, covering(&names[..done], rows));
-                (key, body, false)
+                (key, objects, false)
             }
             None => return Ok(Step::Pending),
         };
-        self.report.bytes_written += body.len() as u64;
+        self.report.bytes_written += objects.iter().map(|o| o.len() as u64).sum::<u64>();
+        // Continuation objects go first, so a head never names a part that was not written.
+        for (i, part) in objects.drain(1..).enumerate() {
+            self.store.put(&part_key(&key, i + 1), part)?;
+        }
+        let body = objects.pop().ok_or("bundle_body_missing")?;
         if is_final {
             if let Some(mut coverage) = job.coverage {
                 let hash = hex::encode(Sha256::digest(&body));
@@ -2025,7 +2129,12 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         } else {
             self.store.put(&key, body)?;
         }
-        let stale: Vec<String> = job.partials.into_iter().filter(|p| *p != key).collect();
+        let parts = format!("{}-p", key.trim_end_matches(".parquet"));
+        let stale: Vec<String> = job
+            .partials
+            .into_iter()
+            .filter(|p| *p != key && !p.starts_with(&parts))
+            .collect();
         if !stale.is_empty() && self.room(1) {
             match self.store.delete_objects(&stale) {
                 Ok(result) => self.report.deleted += result.deleted.len() as u64,
@@ -2043,6 +2152,44 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 Ok(Step::Pending)
             }
         }
+    }
+
+    /// The state saved in the partial at `key` and how many objects hold it; `Some(Err)` when it
+    /// can never be read as stored, `None` when out of calls.
+    fn read_partial(&self, key: &str, unit: Unit) -> Result<Resume, String> {
+        let get = |key: &str| match self.store.get(self.cdn_key, key, CDN_READ_LIMIT) {
+            Ok(Some(bytes)) => Ok(Ok(bytes)),
+            Ok(None) => Ok(Err("partial_vanished".to_owned())),
+            Err(error) if unreadable(&error) => Ok(Err(error)),
+            Err(error) => Err(error),
+        };
+        let head = match get(key)? {
+            Ok(head) => head,
+            Err(error) => return Ok(Some(Err(error))),
+        };
+        let (raw, parts) = if head.starts_with(PARTIAL_MAGIC) {
+            (head, 1)
+        } else if let Some(parts) = packed_parts(&head) {
+            let mut objects = vec![head];
+            for i in 1..parts {
+                if !self.room(3) {
+                    return Ok(None);
+                }
+                match get(&part_key(key, i))? {
+                    Ok(part) => objects.push(part),
+                    Err(error) => return Ok(Some(Err(error))),
+                }
+            }
+            match unpack_partial(&objects) {
+                Ok(raw) => (raw, parts),
+                Err(error) => return Ok(Some(Err(error))),
+            }
+        } else {
+            return Ok(Some(Err("partial_unreadable".into())));
+        };
+        Ok(Some(
+            Acc::decode_partial(&raw, unit).map(|acc| (acc, parts)),
+        ))
     }
 
     fn retire(&self, state: &mut State, old: Option<String>, new: Option<&str>) {
@@ -2398,15 +2545,27 @@ pub fn summary_bundle<R: Runtime>(
     let result = (|| -> Result<(), String> {
         let ctx = &mut ctx;
         let state = &mut state;
+        let mut held = false;
         if let Some(closed) = closed {
             while next + HOUR_S <= closed {
                 if ctx.report.stopped.is_some() || (ctx.report.bytes_written > 0 && ctx.stop()) {
                     ctx.report.more_pending = true;
                     return Ok(());
                 }
-                if let Step::Pending = ctx.hour(state, next)? {
-                    ctx.report.more_pending = true;
-                    return Ok(());
+                match ctx.hour(state, next) {
+                    Ok(Step::Done) => {}
+                    Ok(Step::Pending) => {
+                        ctx.report.more_pending = true;
+                        return Ok(());
+                    }
+                    // The cursor cannot pass an hour it could not bundle, but bundled hours and
+                    // their days still get revisited and built.
+                    Err(error) => {
+                        ctx.report.errors.push(error);
+                        ctx.report.more_pending = true;
+                        held = true;
+                        break;
+                    }
                 }
                 next += HOUR_S;
                 state.next_hour = Some(next);
@@ -2424,10 +2583,17 @@ pub fn summary_bundle<R: Runtime>(
                     ctx.report.more_pending = true;
                     return Ok(());
                 }
-                if let Step::Pending = ctx.hour(state, hour)? {
-                    state.revisit = Some(hour);
-                    ctx.report.more_pending = true;
-                    return Ok(());
+                match ctx.hour(state, hour) {
+                    Ok(Step::Done) => {}
+                    Ok(Step::Pending) => {
+                        state.revisit = Some(hour);
+                        ctx.report.more_pending = true;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        ctx.report.errors.push(error);
+                        ctx.report.more_pending = true;
+                    }
                 }
                 hour += HOUR_S;
             }
@@ -2442,25 +2608,37 @@ pub fn summary_bundle<R: Runtime>(
                 ctx.report.more_pending = true;
                 return Ok(());
             }
-            match ctx.day(state, day)? {
-                Step::Done => {
+            match ctx.day(state, day) {
+                Ok(Step::Done) => {
                     state.dirty.remove(&day);
                 }
-                Step::Pending => {
+                Ok(Step::Pending) => {
                     ctx.report.more_pending = true;
                     return Ok(());
                 }
+                // The day stays dirty for the next execution; later days go on.
+                Err(error) => {
+                    ctx.report.errors.push(error);
+                    ctx.report.more_pending = true;
+                }
             }
         }
-        if closed.is_some() {
+        if closed.is_some() && !held {
             let mut open = next;
             while open <= now {
                 if ctx.report.stopped.is_some() || ctx.report.bytes_written > 0 {
                     break;
                 }
-                if let Step::Pending = ctx.open_hour(state, open)? {
-                    ctx.report.more_pending = true;
-                    return Ok(());
+                match ctx.open_hour(state, open) {
+                    Ok(Step::Done) => {}
+                    Ok(Step::Pending) => {
+                        ctx.report.more_pending = true;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        ctx.report.errors.push(error);
+                        ctx.report.more_pending = true;
+                    }
                 }
                 open += HOUR_S;
             }
@@ -2656,6 +2834,45 @@ mod tests {
             .windows(2)
             .all(|w| (w[0].0, w[0].1) <= (w[1].0, w[1].1)));
         assert!(Acc::decode_partial(&acc.encode_partial()[..40], Unit::Hour).is_err());
+    }
+
+    #[test]
+    fn packed_partials_split_into_objects_under_the_limit_and_resume_to_the_same_bytes() {
+        let windows: Vec<Vec<u8>> = (0..4).map(|i| rich_window(i * 300)).collect();
+        let refs: Vec<&[u8]> = windows.iter().map(Vec::as_slice).collect();
+        let mut first = Acc::new(Unit::Day);
+        for w in &windows[..2] {
+            first.fold(w.clone(), 1).unwrap();
+            first.prune();
+        }
+        let raw = first.encode_partial();
+        let objects = pack_partial(&raw, 4096).unwrap();
+        assert!(objects.len() > 2, "{} objects", objects.len());
+        assert!(objects.iter().all(|o| o.len() <= 4096));
+        assert!(objects.iter().map(Vec::len).sum::<usize>() < raw.len());
+        assert_eq!(packed_parts(&objects[0]), Some(objects.len()));
+        assert_eq!(packed_parts(&raw), None);
+        assert_eq!(unpack_partial(&objects).unwrap(), raw);
+        assert!(unpack_partial(&objects[..objects.len() - 1]).is_err());
+
+        let mut resumed =
+            Acc::decode_partial(&unpack_partial(&objects).unwrap(), Unit::Day).unwrap();
+        for w in &windows[2..] {
+            resumed.fold(w.clone(), 1).unwrap();
+            resumed.prune();
+        }
+        let fin = resumed
+            .write(1_800_000_000, Some(Unit::Day), Unit::Day.label())
+            .unwrap();
+        assert_eq!(fin, merge(&refs, 1_800_000_000, Unit::Day).unwrap());
+
+        let head = "p/year=2027/month=01/day=15/partial=c2-n9-h00000000000000ab.parquet";
+        let part = part_key(head, 1);
+        assert_eq!(
+            part,
+            "p/year=2027/month=01/day=15/partial=c2-n9-h00000000000000ab-p1.parquet"
+        );
+        assert_eq!(parse_name(&part), None);
     }
 
     #[test]
