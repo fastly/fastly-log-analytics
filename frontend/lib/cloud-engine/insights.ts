@@ -10,6 +10,7 @@
 
 import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
 import type { InsightsBaselineSource } from "./insights-rollup";
+import type { Schema } from "@/types/api";
 
 export const INSIGHTS_ROLLUP_MIN_COVERAGE = 0.8; // 80% hourly rollup coverage threshold
 export const min_Baseline = 24;
@@ -800,14 +801,7 @@ export interface CacheCollapseDetailRequest {
   baseline_hours?: number;
 }
 
-export interface CacheCollapseTimelinePoint {
-  bucket: string;
-  expected_hits: number;
-  real_hits: number;
-  misses: number;
-  total_requests: number;
-  hit_rate: number;
-}
+export type CacheCollapseTimelinePoint = Schema<"CacheCollapseTimelinePoint">;
 
 export interface CacheCollapseRecentMiss {
   timestamp: string;
