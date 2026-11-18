@@ -40,7 +40,7 @@ All routes are in [`backend/routers/usage.py`](../../backend/routers/usage.py), 
 | `GET /api/usage/log-activity` | Processed log activity over time. |
 | `GET /api/usage/rum-breakdown` | RUM operations breakdown. |
 
-Operation counts come from the PostgreSQL `usage_log` and `usage_log_hourly_summary` tables (every FOS call is attributed by process context); Fastly `/stats/service` calls need the service's stored Fastly token. Rates and the billing zone are managed with `GET`/`PATCH /api/admin/usage-logging` ([`backend/routers/admin/admin_queries.py`](../../backend/routers/admin/admin_queries.py)); the per-operation ledger page is [admin/usage-log.md](admin/usage-log.md).
+Operation reconciliation and usage charts use Fastly Platform Metrics with the service's stored token. Local operation attribution comes from the PostgreSQL `usage_log` and `usage_log_hourly_summary` tables, where every FOS call is attributed by process context. Rates and the billing zone are managed with `GET`/`PATCH /api/admin/usage-logging` ([`backend/routers/admin/admin_queries.py`](../../backend/routers/admin/admin_queries.py)); the per-operation ledger page is [admin/usage-log.md](admin/usage-log.md).
 
 High-Scale estimator traffic comes from the selected monitored logging service, not the separate archive-delivery CDN service. Missing Fastly edge-request counters remain unavailable; an explicit zero remains measured zero.
 

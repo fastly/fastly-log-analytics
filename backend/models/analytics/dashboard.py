@@ -305,7 +305,7 @@ class IOMetrics(_TotalRequestsMetricsBase):
 
 
 class FastlyReportedMetrics(WireSafeModel):
-    """Fastly Historical Stats totals beside the logs for the same whole closed UTC hours."""
+    """Fastly Platform Metrics totals beside logs for the same closed UTC hours."""
 
     window_start: str
     window_end: str

@@ -318,7 +318,7 @@ def reconcile_fastly_stats(
     hourly_records: list[dict],
 ) -> int:
     """Upsert per-hour reconciliation rows to align local usage_log with Fastly's
-    authoritative /stats/aggregate counts.
+    authoritative account-level Platform Metrics counts.
 
     Each record in ``hourly_records`` is a dict with::
 
@@ -460,7 +460,7 @@ def reconcile_fastly_stats(
                             service_id,
                             op_class,
                             f"RECONCILE_{op_class}",
-                            f"fastly://stats/aggregate/{hour_start}",
+                            f"fastly://metrics/v2/platform/aggregate/hourly/{hour_start}",
                             "OK",
                             0.0,
                             "fastly.reconciliation",

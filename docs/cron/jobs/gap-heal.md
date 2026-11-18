@@ -28,7 +28,7 @@
 ## 3. Architecture Execution Matrix
 | Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Unified ClickHouse Architecture** | APScheduler + Stateless Workers | Compares Fastly `/stats/service` metrics against ClickHouse / PostgreSQL control-plane counts; triggers `_run_full_sweep` (`discover_prefix`) if sustained loss occurs. | Active-request deferral (`should_defer_cron("gap_heal", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
+| **Unified ClickHouse Architecture** | APScheduler + Stateless Workers | Compares entity-level Fastly Platform Metrics against ClickHouse / PostgreSQL control-plane counts; triggers `_run_full_sweep` (`discover_prefix`) if sustained loss occurs. | Active-request deferral (`should_defer_cron("gap_heal", service_id)`). Gated by `FLA_DEV_NO_CRONS=1`. |
 
 ---
 
@@ -47,7 +47,7 @@
    - Evaluates `should_defer_cron("gap_heal", service_id)`. If active user queries are running, yields to preserve dashboard query latency.
 2. **Accounting Computation:**
    - Calls `compute_log_accounting(src, hours=24, by="hour")`.
-   - Queries Fastly Stats API for edge-recorded billable request counts in 1-hour buckets.
+   - Queries the Platform Metrics entity endpoint for edge-recorded billable request counts in 1-hour buckets.
    - Queries ClickHouse / PostgreSQL control plane for ingested request counts in the same hourly buckets.
 3. **Loss Analysis:**
    - Compares Edge Count vs Ingested Count across completed buckets (ignores the active, in-progress hour).
@@ -69,7 +69,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **Fastly API Calls:** Requests to Fastly `/stats/service/{id}` are cached with 45s TTL to prevent rate limit exhaustion.
+  - **Fastly API Calls:** Entity-level Platform Metrics requests are cached with 45s TTL to prevent rate limit exhaustion.
   - **ClickHouse / Control Plane Accounting Queries:** Count queries across hourly partitions use short-TTL cache (45s).
   - **Audit Logging:** Every gap heal evaluation records its findings in `cron_runs` (warning when sustained loss is detected or throttled).
 - **Timing & Resource Budgets:**

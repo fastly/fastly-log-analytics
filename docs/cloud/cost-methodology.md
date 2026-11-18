@@ -209,7 +209,7 @@ scope/provenance reach the browser, never bucket identities or signing material.
 |---|---|---|
 | Service billing quantities | **Real billing usage** | Current and previous UTC month from `/billing/v3/service-usage-metrics`. A row must explicitly identify an allowlisted service, requested month and recognized product. Unknown or unattributable rows are omitted. |
 | Actual charged USD | **Unavailable** | The usage APIs provide quantities, not service-attributed invoice charges. We do not request account invoices to manufacture a project total. Empty usage does not establish zero spend. |
-| Requests, Compute requests, active CPU ms, bandwidth | **Service stats** | `/stats/service/{id}`, daily history plus a bounded hourly tail, clipped separately to both UTC months. Missing metrics remain missing. Current-month data is delayed and provisional. |
+| Requests, Compute requests, active CPU ms, bandwidth | **Service metrics** | Fastly Platform Metrics entity series, daily history plus a bounded hourly tail, clipped separately to both UTC months. Missing metrics remain missing. Current-month data is delayed and provisional. |
 | Compute USD | **Derived from stats × list price** | Compute requests × $0.50/million + active CPU ms × $0.05/million. No allowances, discounts, rounding or contractual adjustments. This is not billed spend. |
 | Object count and visible bytes | **Live storage observation** | Direct, signed ListObjectsV2. Not a historical storage invoice; deleted objects and incomplete uploads are invisible. |
 | Visible-byte storage footprint | **Derived from LIST × list price** | Observed decimal GB × $0.020/GB-month. This is a hypothetical monthly price for the visible footprint, not actual storage charges. |

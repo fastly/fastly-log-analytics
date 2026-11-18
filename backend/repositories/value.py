@@ -1,4 +1,4 @@
-"""Fastly Value pure-Python shaping and Fastly Historical Stats IO helpers."""
+"""Fastly Value shaping and Platform Metrics I/O helpers."""
 
 from __future__ import annotations
 

@@ -72,7 +72,7 @@ Live breakdown of storage usage (raw logs vs. FOS Archive Parquet), a bar chart 
 Requires a `FASTLY_API_KEY` with the [Billing permission](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/about-user-roles-and-permissions/#account-management-roles).
 
 ### Log-line accounting
-A dedicated admin panel reconciles Fastly's authoritative `/stats/service/{id}` log emission counter against ingested rows, bucket-by-bucket. Surfaces per-bucket gaps, a worst-bucket callout, and a sustained-loss alert (≥2 consecutive hours with ≥5% one-sided gap) so pipeline loss is visible immediately rather than hidden in aggregate totals.
+A dedicated admin panel reconciles Fastly's authoritative entity-level Platform Metrics request counter against ingested rows, bucket-by-bucket. Surfaces per-bucket gaps, a worst-bucket callout, and a sustained-loss alert (≥2 consecutive hours with ≥5% one-sided gap) so pipeline loss is visible immediately rather than hidden in aggregate totals.
 
 ### FOS usage logging
 Every FOS Class A / Class B operation and CDN download is recorded with its process context (cron job name or API route) for cost analysis. The `/admin/usage-log` page surfaces a filterable, exportable timeline with cost attribution by job / route.

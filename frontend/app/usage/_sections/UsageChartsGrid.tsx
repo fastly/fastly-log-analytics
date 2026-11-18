@@ -117,8 +117,8 @@ export function UsageChartsGrid({
   fetchingCompute?: boolean
   errorCompute?: unknown
 }) {
-  // FOS Operations, Bandwidth, and Log Activity use Fastly's /stats/* APIs
-  // which only support hour/day granularity. Render a custom button group
+  // FOS Operations, Bandwidth, and Log Activity use historical Platform Metrics.
+  // Render a custom button group
   // with just those two so the user sees no misleading 1s/1m buttons.
   const restictedIntervalButtons = (
     <ButtonGroup>
@@ -422,7 +422,7 @@ export function UsageChartsGrid({
     >
       <AnalyticsCard
         title="FOS Operations"
-        description="Class A and Class B operations from the Historical Stats API"
+        description="Class A and Class B operations from Fastly Platform Metrics"
         headerAction={fosOpsIntervalButtons}
         isLoading={loadingOps}
         isFetching={fetchingOps}

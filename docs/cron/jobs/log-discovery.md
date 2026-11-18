@@ -50,7 +50,7 @@
    - Bulk-inserts rows into ClickHouse `request_facts` as `pending`, verifies the count, flips the batch publication gate to `visible`, and acknowledges the batch sources in PostgreSQL.
 4. **Throttled Heavy Refresh:** If `_claim_heavy_refresh(service_id)` succeeds (at most once every 60s, or on a forced run):
    - Triggers `update_top_values()` (reservoir sample backing autocomplete; short-circuits via fingerprint cache if data has not changed).
-   - Runs the usage-log phase: `backfill_fastly_edge_writes()`, `reconcile_fastly_stats()` (Fastly `/stats/aggregate` billing reconciliation), and `run_usage_log_cleanup()`.
+   - Runs the usage-log phase: `backfill_fastly_edge_writes()`, `reconcile_fastly_stats()` (account-level Fastly Platform Metrics reconciliation), and `run_usage_log_cleanup()`.
 5. **Quarantine Handling:**
    - Valid rows continue ingesting when individual lines are malformed. Each bad line is captured as a separate exact-byte item under `data/services/{service_id}/quarantine/`; corrupt gzip containers are captured as one complete gzip item.
    - Metadata records request/RUM source type, original FOS key, line ordinal, byte offset/length when known, normalized error category, bounded error text, and SHA-256.
@@ -65,7 +65,7 @@
   - **FOS S3 API Calls:** Every `LIST`, `GET`, `PUT`, and `DELETE` operation is attributed in the PostgreSQL `usage_log` table.
   - **PostgreSQL Operations:** Ledger, `ingested_files`, `cron_runs`, and outcome-counter writes use the shared instrumented metadata connection.
   - **ClickHouse Operations:** Publication and verification queries are registered through `query_registry.register("ClickHouse", ...)`.
-  - **Fastly API Calls:** Reconcile calls to Fastly `/stats/aggregate` log latency and response codes.
+  - **Fastly API Calls:** Reconcile calls to the Platform Metrics aggregate endpoint log latency and response codes.
 - **Timing & Resource Budgets:**
   - Discovery tick (steady-state, 0 new files): < 250ms total execution.
   - Worker memory ceiling: <= 2 GiB under default lightweight batch settings (`HIGH_SCALE_WORKER_THREADS=1`, `HIGH_SCALE_MAX_BATCH_BYTES=6291456`, `HIGH_SCALE_MAX_BATCH_OBJECTS=10`).
