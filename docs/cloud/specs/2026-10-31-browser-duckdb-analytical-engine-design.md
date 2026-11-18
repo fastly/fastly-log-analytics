@@ -76,9 +76,8 @@ flowchart LR
     - If `accept-encoding` contains `gzip` (case-insensitive token check), return `asset.bytes` directly with `Content-Encoding: gzip` (zero decompression allocation in Compute).
     - If `accept-encoding` does not contain `gzip`, decompress `asset.bytes` with `flate2::read::GzDecoder` and return the uncompressed bytes without `Content-Encoding`.
 
-### 3.4 Warm Reuse Across Tabs (added later)
-- The module is served `immutable`, but at about 8 MB gzip it is too big for a browser's in-memory HTTP cache in an ephemeral profile (Chromium allows one entry an eighth of a 50 MB cache), so each new tab's DuckDB worker downloaded it again. [`cachedDuckDBModule`](../../../frontend/lib/cloud-engine/dashboard/duckdb-module-cache.ts) keeps it in Cache Storage (`flp-duckdb-module-<version>`, deleting other versions' caches) and instantiates DuckDB from a `blob:` URL of it, revoked once instantiated. A failed or missing Cache Storage falls back to the asset URL.
-- The DuckDB worker fetches that `blob:` URL under the CSP of its own script response, so the Compute CSP ([`csp.rs`](../../../compute/cloud/src/csp.rs)) allows `connect-src 'self' blob:`.
+### 3.4 Module URL and Warm Reuse (added later)
+- DuckDB instantiates from the same-origin versioned module URL (`/duckdb/<version>/duckdb-eh.wasm`). Both Compute (`site.rs`) and the front VCL serve `/duckdb/` with `public, max-age=31536000, immutable`, so a normal profile's HTTP cache serves warm loads. A copy kept in Cache Storage and passed as a `blob:` URL was tried and removed: on the live https origin the nested DuckDB worker could not fetch a `blob:` URL created by the engine worker, and DuckDB-wasm never settles a failed module fetch, so every DuckDB page hung. An ephemeral profile (such as a fresh automated browser context) still downloads the module once per new worker, because it is larger than that profile's in-memory per-entry cache limit.
 
 ---
 

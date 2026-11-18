@@ -214,42 +214,20 @@ describe("owned browser backend initialization", () => {
   });
 });
 
-describe("DuckDB module reuse across tabs", () => {
-  it("downloads the module once and instantiates every later backend from the Cache Storage copy", async () => {
-    const stored = new Map<string, Map<string, Response>>();
-    vi.stubGlobal("caches", {
-      open: async (name: string) => {
-        const entries = stored.get(name) ?? new Map<string, Response>();
-        stored.set(name, entries);
-        return {
-          match: async (url: string) => entries.get(url)?.clone(),
-          put: async (url: string, response: Response) => { entries.set(url, response); },
-        };
-      },
-      keys: async () => [...stored.keys()],
-      delete: async (name: string) => stored.delete(name),
-    });
-    const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
-    const read = globalThis.fetch;
-    const fetches = vi.fn(async () => new Response(bytes.slice(), { headers: { "content-type": "application/wasm" } }));
-    vi.stubGlobal("fetch", fetches);
-    const revoked: string[] = [];
-    const revoke = URL.revokeObjectURL;
-    URL.revokeObjectURL = (url: string) => { revoked.push(url); };
+describe("DuckDB module URL", () => {
+  // A blob: module URL made in the engine worker fails to fetch from its nested DuckDB worker on the live https origin, hanging instantiate.
+  it("instantiates from the same-origin versioned module URL, never a Cache Storage blob: copy", async () => {
+    const open = vi.fn();
+    vi.stubGlobal("self", { location: { origin: "https://flp.test" } });
+    vi.stubGlobal("caches", { open, keys: vi.fn(), delete: vi.fn() });
+    const createObjectURL = vi.spyOn(URL, "createObjectURL");
     try {
-      // Each tab's query worker builds its own backend.
-      for (let tab = 0; tab < 2; tab++) await (await createBrowserBackend()).dispose();
-      expect(fetches).toHaveBeenCalledTimes(1);
-      expect(state.modules).toHaveLength(2);
-      for (const url of state.modules) {
-        expect(url).toMatch(/^blob:/);
-        const response = await read(url);
-        expect(response.headers.get("content-type")).toBe("application/wasm");
-        expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
-      }
-      expect(revoked).toEqual(state.modules);
+      await (await createBrowserBackend()).dispose();
+      expect(state.modules).toEqual(["https://flp.test/duckdb/test/duckdb-eh.wasm"]);
+      expect(open).not.toHaveBeenCalled();
+      expect(createObjectURL).not.toHaveBeenCalled();
     } finally {
-      URL.revokeObjectURL = revoke;
+      createObjectURL.mockRestore();
     }
   });
 });

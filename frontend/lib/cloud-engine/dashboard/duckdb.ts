@@ -7,7 +7,6 @@ import type {
   PartialAggregates,
   Scalar,
 } from "./engine";
-import { cachedDuckDBModule } from "./duckdb-module-cache";
 import { numericFilterValue, type DashboardFilter } from "./filters";
 import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
 import { CARD_FIELDS, type CustomField } from "./summaries";
@@ -467,12 +466,7 @@ export async function createBrowserBackend(): Promise<DuckDBBackend> {
   }
   let conn: Awaited<ReturnType<typeof db.connect>>;
   try {
-    const wasm = await cachedDuckDBModule(assets.wasm, duckdb.PACKAGE_VERSION);
-    try {
-      await db.instantiate(wasm.url);
-    } finally {
-      wasm.release();
-    }
+    await db.instantiate(assets.wasm);
     await db.open({
       // Disable open-time full-file fallback after the source's 206 identity
       // probe. The SDK can still accept 200 responses on subsequent range reads.
