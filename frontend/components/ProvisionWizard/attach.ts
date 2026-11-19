@@ -56,6 +56,7 @@ export function applyAttach(prev: ProvisionConfig, offer?: AttachOffer): Provisi
     log_fields: {
       ...prev.log_fields,
       groups: [...ALL_LOG_FIELD_GROUPS],
+      custom_fields: prev.log_fields.custom_fields ?? [],
       field_overrides: fieldOverrides,
     },
   }

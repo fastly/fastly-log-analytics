@@ -1744,6 +1744,26 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       expect(new EventStreamHttpError(500).message).toBe('HTTP error! status: 500')
     })
 
+    it('includes API error detail in EventStreamHttpError when present in a non-2xx body', async () => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ detail: { error: 'attach_endpoint_name_reserved' } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      await expect(
+        runEventStream({
+          url: 'http://test/stream',
+          signal: new AbortController().signal,
+          onFrame: () => {},
+          fetchImpl: fetchImpl,
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: 'HTTP error! status: 400: attach_endpoint_name_reserved',
+      })
+    })
+
     it('stops dispatching frames once isActive() goes false', async () => {
       const frames: string[] = []
       let live = true

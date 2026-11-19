@@ -7049,3 +7049,94 @@ fn attach_mode_rejects_an_other_install_condition_it_cannot_read() {
         assert_eq!(platform.adapter.key_count(), 0);
     }
 }
+
+#[test]
+fn attach_mode_accepts_partial_log_fields_with_cmcd_rum_and_teardown_preserves_other_install() {
+    let platform = Platform::new();
+    let mut seeded = seed_other_install(&platform, None, true);
+    let cmcd_snippet = json!({"name":"CMCD Extraction","subroutine":"vcl_recv","type":"recv","content":"declare local var.cmcd STRING;"});
+    platform
+        .adapter
+        .seed_resource("fixtureService", "snippet", cmcd_snippet.clone());
+    seeded.push(("snippet", cmcd_snippet));
+    let rum_s3 = json!({"name":"Fastly RUM Logs","bucket_name":"other-logs","response_condition":"rum_log_condition"});
+    platform
+        .adapter
+        .seed_resource("fixtureService", "logging/s3", rum_s3.clone());
+    seeded.push(("logging/s3", rum_s3));
+
+    // Wizard's applyAttach sends log_fields as a JSON string without custom_fields.
+    let job = platform.json(
+        "POST",
+        "/api/provision/execute",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-attach-logs",
+            "fos_region": "us-east-1",
+            "capture": "attached",
+            "edge_only": false,
+            "sample_rate": "100",
+            "logging_enabled": true,
+            "rum_enabled": true,
+            "cmcd": {"enabled": true, "mode": "query_string", "version": 1},
+            "log_fields": "{\"groups\":[\"A\",\"B\",\"C\",\"D\",\"E\",\"F\",\"G\",\"H\",\"I\",\"J\",\"K\",\"L\",\"M\"],\"field_overrides\":{}}",
+        }),
+    )["job"]
+        .clone();
+    assert_eq!(platform.drain(job)["status"], "complete");
+
+    let service = platform.service();
+    let teardown = platform.json(
+        "POST",
+        "/api/admin/provision/teardown",
+        json!({
+            "service_id": "fixtureService",
+            "confirm_service_id": "fixtureService",
+            "token": "fixture-token",
+            "generation": service["generation"],
+        }),
+    );
+    let finished = platform.drain(teardown["job"].clone());
+    assert_eq!(finished["status"], "complete");
+    let mut removed: Vec<_> = finished["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["action"].as_str().unwrap().to_owned(),
+                c["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    removed.sort();
+    assert_eq!(
+        removed,
+        [
+            ("delete".to_owned(), "FLP Cloud Logs".to_owned()),
+            ("delete".to_owned(), "FLP Cloud RUM".to_owned()),
+            ("delete".to_owned(), "flp-owner-fixtureApp".to_owned()),
+            ("delete".to_owned(), "flp_cloud_log_condition".to_owned()),
+            ("delete".to_owned(), "flp_cloud_rum_condition".to_owned()),
+        ]
+    );
+    for resource in [
+        "snippet",
+        "logging/s3",
+        "logging/fos",
+        "condition",
+        "backend",
+        "dictionary",
+    ] {
+        let mut now = platform.adapter.resources("fixtureService", resource);
+        let mut before: Vec<Value> = seeded
+            .iter()
+            .filter(|(r, _)| *r == resource)
+            .map(|(_, v)| v.clone())
+            .collect();
+        now.sort_by_key(|v| v["name"].to_string());
+        before.sort_by_key(|v| v["name"].to_string());
+        assert_eq!(now, before, "{resource}");
+    }
+}
