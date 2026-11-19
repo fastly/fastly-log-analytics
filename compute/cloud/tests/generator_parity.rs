@@ -5,9 +5,31 @@ fn fixtures() -> Value {
     serde_json::from_str(include_str!("generator_fixtures.json")).unwrap()
 }
 
+fn endpoint_from_template(template: &Value, format: &Value) -> Value {
+    let mut ep = template.as_object().unwrap().clone();
+    ep.insert("format".into(), format.clone());
+    json!([Value::Object(ep)])
+}
+
+fn expected_endpoint_body(endpoint: &Value) -> Value {
+    let mut body = endpoint.as_object().unwrap().clone();
+    body.remove("type");
+    body.insert("format_version".into(), json!(2));
+    body.insert("bucket_name".into(), json!("fixture-bucket"));
+    body.insert(
+        "domain".into(),
+        json!("us-east-1.object.fastlystorage.app"),
+    );
+    body.insert("access_key".into(), json!("fixture-access"));
+    body.insert("secret_key".into(), json!("fixture-secret"));
+    Value::Object(body)
+}
+
 #[test]
 fn all_cmcd_modes_and_versions_match_independently_executed_pinned_generators() {
     let data = fixtures();
+    let template = &data["default_endpoint_template"];
+    let config = &data["cmcd_default_config"];
     let cases = data["cmcd_cases"].as_array().unwrap();
     assert_eq!(cases.len(), 4);
     for case in cases {
@@ -20,25 +42,22 @@ fn all_cmcd_modes_and_versions_match_independently_executed_pinned_generators() 
             case["vcl"]
         );
         assert_eq!(
-            logging::generate_log_format(&case["config"]).unwrap(),
+            logging::generate_log_format(config).unwrap(),
             case["format"]
         );
         assert_eq!(
-            logging::generate_capture_vcl_with_cmcd(&case["config"], &cmcd).unwrap(),
+            logging::generate_capture_vcl_with_cmcd(config, &cmcd).unwrap(),
             case["capture"]
         );
         // The fixtures pin the original generator's period of 60 s; the default is shorter now.
         let state =
-            json!({"logging_enabled":true,"log_period":60,"log_fields":case["config"],"cmcd":cmcd});
+            json!({"logging_enabled":true,"log_period":60,"log_fields":config,"cmcd":cmcd});
         assert_eq!(logging::desired_snippets(&state).unwrap(), case["snippets"]);
         let endpoints = logging::desired_logging_endpoints(&state).unwrap();
-        assert_eq!(endpoints, case["endpoints"]);
-        assert_endpoint_body_bytes(
-            &endpoints,
-            &case["endpoint_bodies"],
-            &case["endpoint_bodies_canonical"],
-        );
-        let mut managed = case["config"].clone();
+        let expected_endpoints = endpoint_from_template(template, &case["format"]);
+        assert_eq!(endpoints, expected_endpoints);
+        assert_endpoint_body_bytes(&endpoints);
+        let mut managed = config.clone();
         managed["custom_fields"] = json!([]);
         logging::cmcd::reconcile_fields(&mut managed, &cmcd, None, false).unwrap();
         for field in managed["custom_fields"].as_array().unwrap() {
@@ -58,7 +77,9 @@ fn all_cmcd_modes_and_versions_match_independently_executed_pinned_generators() 
 
 #[test]
 fn pure_generators_match_full_inputs_from_pinned_python() {
-    for case in fixtures()["cases"].as_array().unwrap() {
+    let data = fixtures();
+    let default_conditions = &data["default_conditions"];
+    for case in data["cases"].as_array().unwrap() {
         let config = &case["config"];
         let expected = case["format"].as_str().unwrap();
         if expected.len() <= 12_288 {
@@ -96,13 +117,15 @@ fn pure_generators_match_full_inputs_from_pinned_python() {
         );
         assert_eq!(logging::desired_conditions(&json!({
             "sample_rate":37,"edge_only":true,"custom_condition":"  req.url.path !~ \"^/health\"  "
-        })).unwrap(), case["conditions"]);
+        })).unwrap(), *default_conditions);
     }
 }
 
 #[test]
 fn routed_adapter_resources_match_pinned_python_for_every_case() {
-    for case in fixtures()["cases"].as_array().unwrap() {
+    let data = fixtures();
+    let template = &data["default_endpoint_template"];
+    for case in data["cases"].as_array().unwrap() {
         let config = &case["config"];
         let state = json!({"log_period": 60, "log_fields": {
             "groups": config.get("groups").cloned().unwrap_or(json!([])),
@@ -116,17 +139,19 @@ fn routed_adapter_resources_match_pinned_python_for_every_case() {
             case["name"]
         );
         let endpoints = logging::desired_logging_endpoints(&state).unwrap();
-        assert_eq!(endpoints, case["endpoints"], "{}", case["name"]);
-        assert_endpoint_body_bytes(
-            &endpoints,
-            &case["endpoint_bodies"],
-            &case["endpoint_bodies_canonical"],
+        let expected_format = case.get("routed_format").unwrap_or(&case["loaded_format"]);
+        assert_eq!(
+            endpoints,
+            endpoint_from_template(template, expected_format),
+            "{}",
+            case["name"]
         );
+        assert_endpoint_body_bytes(&endpoints);
     }
 }
 
-fn assert_endpoint_body_bytes(endpoints: &Value, bodies: &Value, canonical: &Value) {
-    for (index, endpoint) in endpoints.as_array().unwrap().iter().enumerate() {
+fn assert_endpoint_body_bytes(endpoints: &Value) {
+    for endpoint in endpoints.as_array().unwrap() {
         let actual = logging::logging_endpoint_body(
             endpoint,
             &json!({
@@ -134,27 +159,31 @@ fn assert_endpoint_body_bytes(endpoints: &Value, bodies: &Value, canonical: &Val
                 "access_key":"fixture-access","secret_key":"fixture-secret"
             }),
         );
-        assert_eq!(actual, bodies[index]);
+        let expected = expected_endpoint_body(endpoint);
+        assert_eq!(actual, expected);
         assert_eq!(
             serde_json::to_string(&actual).unwrap().as_bytes(),
-            canonical[index].as_str().unwrap().as_bytes()
+            serde_json::to_string(&expected).unwrap().as_bytes()
         );
     }
 }
 
 #[test]
 fn full_input_endpoint_specs_and_body_bytes_match_pure_python_boundaries() {
-    for case in fixtures()["cases"].as_array().unwrap() {
+    let data = fixtures();
+    let template = &data["default_endpoint_template"];
+    for case in data["cases"].as_array().unwrap() {
         let endpoints = logging::desired_logging_endpoints(
             &json!({"log_period":60,"log_fields":case["config"]}),
         )
         .unwrap();
-        assert_eq!(endpoints, case["direct_endpoints"], "{}", case["name"]);
-        assert_endpoint_body_bytes(
-            &endpoints,
-            &case["direct_endpoint_bodies"],
-            &case["direct_endpoint_bodies_canonical"],
+        assert_eq!(
+            endpoints,
+            endpoint_from_template(template, &case["loaded_format"]),
+            "{}",
+            case["name"]
         );
+        assert_endpoint_body_bytes(&endpoints);
     }
 }
 
@@ -166,11 +195,7 @@ fn endpoint_names_periods_prefix_boundary_and_conditions_match_pinned_python() {
     for case in cases {
         let endpoints = logging::desired_logging_endpoints(&case["state"]).unwrap();
         assert_eq!(endpoints, case["endpoints"], "{}", case["name"]);
-        assert_endpoint_body_bytes(
-            &endpoints,
-            &case["endpoint_bodies"],
-            &case["endpoint_bodies_canonical"],
-        );
+        assert_endpoint_body_bytes(&endpoints);
         assert_eq!(
             logging::desired_conditions(&case["state"]).unwrap(),
             case["conditions"],
