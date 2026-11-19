@@ -2074,6 +2074,7 @@ async function stepJobToCompletion(
   signal?: AbortSignal,
 ): Promise<void> {
   let transientRetries = 0;
+  let secretRetries = 0;
   while (!signal?.aborted) {
     const res = await fetch(
       `/api/admin/jobs/${encodeURIComponent(jobId)}/step`,
@@ -2092,6 +2093,14 @@ async function stepJobToCompletion(
         detail?: string;
       };
       const code = errBody.error ?? errBody.detail ?? "";
+      if (code === "credentials_pending" && secretRetries < 40) {
+        if (secretRetries === 0) {
+          emit({ type: "status", message: "Waiting for Fastly secret store propagation…" });
+        }
+        secretRetries += 1;
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
       if (TRANSIENT_JOB_ERRORS.has(code) && transientRetries < 12) {
         transientRetries += 1;
         await new Promise((r) => setTimeout(r, 350));
@@ -2107,6 +2116,7 @@ async function stepJobToCompletion(
     }
 
     transientRetries = 0;
+    secretRetries = 0;
     const data = (await res.json()) as {
       job?: {
         id: string;

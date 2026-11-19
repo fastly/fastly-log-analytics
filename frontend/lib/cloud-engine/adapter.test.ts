@@ -1262,4 +1262,47 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const insightsJson = await insightsRes!.json();
     expect(Array.isArray(insightsJson.insights)).toBe(true);
   });
+
+  it("retries 409 credentials_pending during provision job stepping until secret propagates", async () => {
+    setCloudModeRuntime(true);
+    vi.useFakeTimers();
+    let stepCalls = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/api/provision/execute")) {
+        return Response.json({ job: { id: "job-cred-1" } });
+      }
+      if (url.endsWith("/api/admin/jobs/job-cred-1/step")) {
+        stepCalls += 1;
+        if (stepCalls === 1) {
+          return Response.json({ error: "credentials_pending", detail: "credentials_pending" }, { status: 409 });
+        }
+        return Response.json({ job: { id: "job-cred-1", status: "complete", step: "finalize", completed_steps: ["bucket", "finalize"] } });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const res = await handleCloudAnalyticalRequest(
+        new Request("http://localhost/api/provision/execute", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: "tok", service_id: "svc1", capture: "attached" }),
+        }),
+      );
+      expect(res).not.toBeNull();
+      expect(res!.status).toBe(200);
+      const textPromise = res!.text();
+      await vi.advanceTimersByTimeAsync(3500);
+      const body = await textPromise;
+      expect(stepCalls).toBe(2);
+      expect(body).toContain("Waiting for Fastly secret store propagation");
+      expect(body).toContain('"status":"complete"');
+      expect(body).not.toContain('"type":"error"');
+    } finally {
+      globalThis.fetch = origFetch;
+      vi.useRealTimers();
+    }
+  });
 });
