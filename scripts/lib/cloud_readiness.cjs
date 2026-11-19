@@ -24,7 +24,7 @@ function installCloudReadiness() {
   });
   window.addEventListener('fla:cloud-query', ({ detail }) => {
     if (!detail || !Number.isSafeInteger(detail.id) || typeof detail.section !== 'string') return;
-    if (!['pending', 'success', 'error'].includes(detail.state)) return;
+    if (!['pending', 'success', 'error', 'cancelled'].includes(detail.state)) return;
     observed = true;
     const route = key(detail.route, detail.search, detail.serviceId);
     const identity = `${route}:${detail.section}`;

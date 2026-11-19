@@ -47,6 +47,10 @@ function failureReason(failure: unknown): string {
   return /^[A-Za-z]\w{0,63}$/.test(name) ? name : "Error";
 }
 
+function isAbortFailure(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 export async function measureCloudQuery<T>(
   section: string,
   query: () => Promise<T>,
@@ -77,7 +81,9 @@ export async function measureCloudQuery<T>(
     return data;
   } catch (error) {
     globalThis.dispatchEvent(new CustomEvent("fla:cloud-query", {
-      detail: { ...detail, state: "error", totalRows: null, error: failureReason(error) },
+      detail: isAbortFailure(error)
+        ? { ...detail, state: "cancelled", totalRows: null }
+        : { ...detail, state: "error", totalRows: null, error: failureReason(error) },
     }));
     throw error;
   }

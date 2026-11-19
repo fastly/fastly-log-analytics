@@ -47,7 +47,7 @@ it("reports real completion only after a pending query resolves, preserving zero
   }
 });
 
-it("does not turn stale-view exceptions or canceled queries into successful readiness", async () => {
+it("does not turn stale-view exceptions into successful readiness", async () => {
   setCloudModeRuntime(true);
   const events: unknown[] = [];
   const listener = (event: Event) => events.push((event as CustomEvent).detail);
@@ -57,6 +57,25 @@ it("does not turn stale-view exceptions or canceled queries into successful read
     await expect(measureCloudQuery("dashboard.bundle", async () => { throw error; })).rejects.toBe(error);
     expect(events).toMatchObject([{ state: "pending" }, { state: "error", totalRows: null, error: "Error" }]);
     expect(JSON.stringify(events)).not.toContain(error.message);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("reports canceled work separately from query failures", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new DOMException("Superseded", "AbortError");
+    await expect(measureCloudQuery("api./api/scoring/labels", async () => {
+      throw error;
+    })).rejects.toBe(error);
+    expect(events).toMatchObject([
+      { state: "pending", section: "api./api/scoring/labels" },
+      { state: "cancelled", section: "api./api/scoring/labels" },
+    ]);
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
   }
