@@ -29,6 +29,10 @@ function installCloudReadiness() {
     const route = key(detail.route, detail.search, detail.serviceId);
     const identity = `${route}:${detail.section}`;
     if ((queries.get(identity)?.id ?? -1) > detail.id) return;
+    if (detail.state === 'cancelled') {
+      queries.delete(identity);
+      return;
+    }
     queries.set(identity, { id: detail.id, route, section: detail.section, state: detail.state,
       totalRows: rows(detail.totalRows) ? detail.totalRows : null,
       error: detail.state === 'error' ? message(detail.error) ?? (rows(detail.status) ? `HTTP ${detail.status}` : null) : null });

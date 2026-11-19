@@ -8,19 +8,32 @@ import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { components } from '@/types/api.generated'
 
 export const TICK_BACKEND_CALL_CEILING = 32
 export const TICK_VCPU_BUDGET_MS = 1000
 export const DEFAULT_CLOCK_INTERVAL_S = 120
 
-export function summarizeTickHealth(runs: Array<{ started_at?: string; backend_calls?: number; vcpu_ms?: number; status?: string }>, nowMs = Date.now()) {
+export function summarizeTickHealth(
+  runs: Array<{ started_at?: string; backend_calls?: number; vcpu_ms?: number; status?: string }>,
+  nowMs = Date.now(),
+  clockIntervalS = DEFAULT_CLOCK_INTERVAL_S,
+) {
   const latest = runs[0]
   const last_tick_at = latest?.started_at ?? null
-  const clock_interval_s = DEFAULT_CLOCK_INTERVAL_S
+  const clock_interval_s = clockIntervalS
   const maxBackendCalls = runs.reduce((m, r) => Math.max(m, r.backend_calls ?? 0), 0)
   const maxVcpuMs = runs.reduce((m, r) => Math.max(m, r.vcpu_ms ?? 0), 0)
+  if (runs.length === 0) {
+    return {
+      tick_health: 'waiting' as const,
+      last_tick_at,
+      clock_interval_s,
+      maxBackendCalls,
+      maxVcpuMs,
+    }
+  }
   const ageSec = last_tick_at ? Math.max(0, (nowMs - Date.parse(last_tick_at)) / 1000) : null
   const healthy =
     ageSec !== null &&
@@ -28,7 +41,7 @@ export function summarizeTickHealth(runs: Array<{ started_at?: string; backend_c
     maxBackendCalls <= TICK_BACKEND_CALL_CEILING &&
     maxVcpuMs <= TICK_VCPU_BUDGET_MS
   return {
-    tick_health: healthy ? 'healthy' : 'degraded',
+    tick_health: healthy ? ('healthy' as const) : ('degraded' as const),
     last_tick_at,
     clock_interval_s,
     maxBackendCalls,
@@ -100,13 +113,15 @@ export function SystemHealthCard() {
   // client render to the server's loading state, then swap to data after mount.
   const mounted = useMounted()
 
+  const cloud = isCloudMode()
+
   // Freshness is driven by useAdminEventStream (mounted globally
   // in SyncStatusBadge, gated to /admin and /logs paths). The 5-min
   // refetchInterval is a pure safety net for silently-dropped streams
   // — same shape as useSyncStatus / useLastSync.
   const { data: snap, isLoading, isFetching, error } = useQuery({
     queryKey: queryKeys.admin.healthSnapshot(),
-    enabled: !IS_CLOUD_MODE,
+    enabled: !cloud,
     queryFn: async () => {
       return (await unwrapClient(
         client.GET('/api/admin/health-snapshot'),
@@ -123,7 +138,7 @@ export function SystemHealthCard() {
   // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch('1h'),
-    enabled: !IS_CLOUD_MODE,
+    enabled: !cloud,
     queryFn: async () => {
       return (await unwrapClient(
         client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } }),
@@ -137,7 +152,7 @@ export function SystemHealthCard() {
 
   const { data: cloudSync, dataUpdatedAt: cloudSyncUpdatedAt } = useQuery({
     queryKey: ['cloud-system-health-sync'],
-    enabled: IS_CLOUD_MODE,
+    enabled: cloud,
     queryFn: async () => {
       const res = await fetch('/api/sync-status', { credentials: 'include' })
       if (!res.ok) return null
@@ -154,15 +169,24 @@ export function SystemHealthCard() {
     refetchIntervalInBackground: false,
   })
 
-  if (IS_CLOUD_MODE) {
+  if (cloud) {
     const runs = cloudSync?.cron_runs ?? []
-    const tick = summarizeTickHealth(runs)
+    const clockInterval = cloudSync?.clock_interval_s ?? DEFAULT_CLOCK_INTERVAL_S
+    const tick = summarizeTickHealth(runs, Date.now(), clockInterval)
     const lastTickAt = cloudSync?.last_tick_at ?? tick.last_tick_at
     const tickAgeSec =
       lastTickAt && cloudSyncUpdatedAt > 0
         ? Math.max(0, Math.round((cloudSyncUpdatedAt - Date.parse(lastTickAt)) / 1000))
         : null
-    const healthy = tick.tick_health === 'healthy'
+    const lastTickFresh = tickAgeSec !== null && tickAgeSec <= clockInterval * 3
+    const edgeClockStatus =
+      runs.length === 0
+        ? (lastTickFresh ? 'HEALTHY' : 'WAITING')
+        : tick.tick_health === 'healthy'
+          ? 'HEALTHY'
+          : 'DEGRADED'
+    const edgeClockTone: Tone =
+      edgeClockStatus === 'HEALTHY' ? 'default' : edgeClockStatus === 'WAITING' ? 'unknown' : 'warn'
     return (
       <AnalyticsCard
         title="Compute & Edge Clock Health"
@@ -171,15 +195,15 @@ export function SystemHealthCard() {
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           <Stat
             label="Edge Clock (/_tick)"
-            value={runs.length === 0 && !lastTickAt ? 'WAITING' : healthy ? 'HEALTHY' : 'DEGRADED'}
-            sub={`Cadence: ${cloudSync?.clock_interval_s ?? DEFAULT_CLOCK_INTERVAL_S}s IAD shield probe`}
-            tone={runs.length === 0 && !lastTickAt ? 'unknown' : healthy ? 'default' : 'warn'}
+            value={edgeClockStatus}
+            sub={`Cadence: ${clockInterval}s IAD shield probe`}
+            tone={edgeClockTone}
           />
           <Stat
             label="Last Ingest Tick"
             value={tickAgeSec == null ? '–' : `${formatElapsed(tickAgeSec, ELAPSED_AGE_COMPACT)} ago`}
             sub={lastTickAt ?? 'awaiting first tick'}
-            tone={tickAgeSec == null ? 'unknown' : tickAgeSec > DEFAULT_CLOCK_INTERVAL_S * 3 ? 'warn' : 'default'}
+            tone={tickAgeSec == null ? 'unknown' : tickAgeSec > clockInterval * 3 ? 'warn' : 'default'}
           />
           <Stat
             label="Peak Tick vCPU"

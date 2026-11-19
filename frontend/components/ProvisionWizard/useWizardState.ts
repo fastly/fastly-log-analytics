@@ -312,7 +312,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const { data: catalog, isLoading: isLoadingCatalog } = useQuery({
     queryKey: ["services", "catalog"],
     queryFn: async () => unwrapClient(client.GET("/api/log-fields/catalog")),
-    enabled: step === "fields",
+    enabled: open && config.logging_enabled !== false,
   })
 
   const updateLogFields = (fn: (lf: ProvisionConfig["log_fields"]) => ProvisionConfig["log_fields"]) =>

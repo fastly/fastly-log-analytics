@@ -92,7 +92,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   cdn_secret: "",
   enable_cron_sync: true,
   delete_after: true,
-  log_fields: { groups: [], field_overrides: {} },
+  log_fields: { groups: [], custom_fields: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,
   cmcd_mode: "query_string",

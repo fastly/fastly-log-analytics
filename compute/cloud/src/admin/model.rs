@@ -535,11 +535,17 @@ fn deserialize_fields<'de, D: serde::Deserializer<'de>>(
     if value.is_null() {
         return Ok(default_fields());
     }
-    if let Some(text) = value.as_str() {
-        serde_json::from_str(text).map_err(serde::de::Error::custom)
+    let mut parsed = if let Some(text) = value.as_str() {
+        serde_json::from_str(text).map_err(serde::de::Error::custom)?
     } else {
-        Ok(value)
+        value
+    };
+    if let Some(obj) = parsed.as_object_mut() {
+        obj.entry("custom_fields").or_insert_with(|| json!([]));
+        obj.entry("field_overrides").or_insert_with(|| json!({}));
+        obj.entry("field_limits").or_insert_with(|| json!({}));
     }
+    Ok(parsed)
 }
 
 fn period() -> u32 {

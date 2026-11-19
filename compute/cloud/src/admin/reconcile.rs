@@ -570,7 +570,7 @@ fn discover(
         .iter()
         .filter_map(|s| s["name"].as_str().map(str::to_owned))
         .collect();
-    if service.cmcd.enabled && service.logging_enabled && job.kind != "teardown" {
+    if !attached && service.cmcd.enabled && service.logging_enabled && job.kind != "teardown" {
         for snippet in snippets {
             let name = snippet["name"].as_str().unwrap_or("");
             if name == "CMCD Extraction" {

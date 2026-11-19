@@ -62,25 +62,6 @@ it("does not turn stale-view exceptions into successful readiness", async () => 
   }
 });
 
-it("reports canceled work separately from query failures", async () => {
-  setCloudModeRuntime(true);
-  const events: unknown[] = [];
-  const listener = (event: Event) => events.push((event as CustomEvent).detail);
-  window.addEventListener("fla:cloud-query", listener);
-  try {
-    const error = new DOMException("Superseded", "AbortError");
-    await expect(measureCloudQuery("api./api/scoring/labels", async () => {
-      throw error;
-    })).rejects.toBe(error);
-    expect(events).toMatchObject([
-      { state: "pending", section: "api./api/scoring/labels" },
-      { state: "cancelled", section: "api./api/scoring/labels" },
-    ]);
-  } finally {
-    window.removeEventListener("fla:cloud-query", listener);
-  }
-});
-
 it("names a dropped connection a network error without exposing the failing URL", async () => {
   setCloudModeRuntime(true);
   const events: unknown[] = [];
@@ -91,6 +72,20 @@ it("names a dropped connection a network error without exposing the failing URL"
     await expect(measureCloudQuery("api./api/insight-availability", async () => { throw error; })).rejects.toBe(error);
     expect(events).toMatchObject([{ state: "pending" }, { state: "error", error: "NetworkError" }]);
     expect(JSON.stringify(events)).not.toContain("sentinel");
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("emits cancelled instead of error on AbortError without poisoning readiness", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new DOMException("Aborted", "AbortError");
+    await expect(measureCloudQuery("api./api/services/svc/scoring/labels", async () => { throw error; })).rejects.toBe(error);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "cancelled", totalRows: null }]);
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
   }

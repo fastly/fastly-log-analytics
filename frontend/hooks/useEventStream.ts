@@ -3,7 +3,7 @@
 import { useState, useEffect, useEffectEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBootstrapPending, useIsAnalyst } from '@/hooks/useBootstrap'
-import { client, unwrapClient, queryKeys } from '@/lib/api'
+import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import type { Schema } from '@/types/api'
 import {
@@ -19,10 +19,12 @@ import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 
 export class EventStreamHttpError extends Error {
   readonly status: number
-  constructor(status: number) {
-    super(`HTTP error! status: ${status}`)
+  readonly detail?: string
+  constructor(status: number, detail?: string) {
+    super(detail ? `HTTP error! status: ${status}: ${detail}` : `HTTP error! status: ${status}`)
     this.name = 'EventStreamHttpError'
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -55,7 +57,24 @@ export async function runEventStream(opts: RunEventStreamOptions): Promise<void>
     }
     return
   }
-  if (!response.ok) throw new EventStreamHttpError(response.status)
+  if (!response.ok) {
+    let detail: string | undefined
+    try {
+      const text = await response.text()
+      if (text) {
+        try {
+          const parsed = JSON.parse(text) as unknown
+          const extracted = extractApiError(parsed)
+          if (extracted && extracted !== 'Unknown error') detail = extracted
+        } catch {
+          detail = text.trim().slice(0, 200) || undefined
+        }
+      }
+    } catch {
+      /* ignore body read failure */
+    }
+    throw new EventStreamHttpError(response.status, detail)
+  }
   const reader = response.body?.getReader()
   if (!reader) throw new Error('Response body is null')
 

@@ -168,6 +168,7 @@ describe('attach UI', () => {
       cmcd_enabled: true,
     })
     expect(attached.log_fields.groups).toEqual(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'])
+    expect(attached.log_fields.custom_fields).toEqual([])
     expect(attached.log_fields.field_overrides).toEqual({ server_region: false })
   })
 
@@ -268,6 +269,7 @@ describe('attach UI', () => {
         cmcd_enabled: false,
         log_fields: JSON.stringify({
           groups: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'],
+          custom_fields: [],
           field_overrides: { server_region: false },
         }),
       }),
