@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
-import { DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES, type UnitCosts } from '@/lib/cloud-engine/usage/estimate'
+import { DEFAULT_COMPACTION, DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES, type UnitCosts } from '@/lib/cloud-engine/usage/estimate'
 
 describe('Cloud cost calculator', () => {
   it('falls back for a null rate without replacing an explicit zero rate', () => {
@@ -19,6 +19,7 @@ describe('Cloud cost calculator', () => {
     render(<CloudCostCalculator prefillData={{
       inputs: { ...DEFAULT_INPUTS, requestsPerDay: 0, edgeRequestsPerDay: 0 },
       units: { ...units, secrets: 3 },
+      compaction: { ...DEFAULT_COMPACTION, enabled: false },
       measuredInputs: { requestsPerDay: true, edgeRequestsPerDay: true },
       measuredUnits: { secrets: true },
       rates: { ...LIST_PRICE_RATES, secret_rate_per_month: 7 },

@@ -11,6 +11,8 @@ import {
   type EstimateMeasurements,
   type UnitCosts,
 } from "./estimate";
+
+const NO_COMPACTION = { ...DEFAULT_COMPACTION, enabled: false };
 import { INGEST_ASSUMPTIONS, INGEST_LIMITS } from "./ingestShape";
 
 const MIB = 1024 * 1024;
@@ -49,7 +51,7 @@ describe("high-RPS ingest costs", () => {
       DEFAULT_INPUTS,
       DEFAULT_UNITS,
       LIST_PRICE_RATES,
-      DEFAULT_COMPACTION,
+      NO_COMPACTION,
       { relay: 0 },
     );
     expect(defaults.total).toBeCloseTo(19.597077525936452, 9);
@@ -58,7 +60,7 @@ describe("high-RPS ingest costs", () => {
       atRps(10_000),
       DEFAULT_UNITS,
       LIST_PRICE_RATES,
-      DEFAULT_COMPACTION,
+      NO_COMPACTION,
       { relay: 0 },
     );
     expect(tenK.total).toBeCloseTo(554.2335133881452, 9);

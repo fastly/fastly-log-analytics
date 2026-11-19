@@ -316,6 +316,23 @@ fn debug_panel_visibility_settings_are_persisted_and_resolved_per_role() {
 #[test]
 fn shield_clock_advertises_sleep_ttl_until_next_due_wake() {
     let h = Harness::new();
+    let svc: Value = serde_json::from_slice(
+        &h.send("GET", "/api/admin/services/fixtureService", "admin")
+            .body,
+    )
+    .unwrap();
+    let patch = h.send_with(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        "admin",
+        Some("https://logs.example.com"),
+        &serde_json::to_vec(&json!({
+            "generation": svc["generation"],
+            "compaction": {"mode": "off", "size_target_mb": 128}
+        }))
+        .unwrap(),
+    );
+    assert_eq!(patch.status, 200);
     h.platform.clock.fetch_add(120, Ordering::SeqCst);
 
     let tick0 = h.send("GET", "/_tick", "anonymous");
