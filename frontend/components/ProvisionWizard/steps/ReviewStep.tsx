@@ -20,7 +20,11 @@ import {
   Zap,
 } from 'lucide-react'
 import { cn, copyToClipboard, formatBytes, REGION_LABELS, SHIELD_LABELS } from '@/lib/utils'
-import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps } from '@/lib/api'
+import {
+  estimateLogFieldBytesPerLine,
+  evaluateLogFieldPresetSummary,
+  resolveEnabledGroupsWithDeps,
+} from '@/lib/api'
 import { RAW_LOG_COMPRESSION_RATIO } from '@/components/CostCalculator/costCalculatorModel'
 import type { WizardState } from '../types'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
@@ -36,6 +40,52 @@ export function ExecuteStep({ s }: { s: WizardState }) {
     () => evaluateLogFieldPresetSummary(config.log_fields, catalog),
     [config.log_fields, catalog],
   )
+  const effectiveEstimatedBytes = React.useMemo(() => {
+    if (s.estimatedBytes > 0) return s.estimatedBytes
+    return estimateLogFieldBytesPerLine(config.log_fields, catalog)
+  }, [s.estimatedBytes, config.log_fields, catalog])
+  const { enabledFieldCount, groupBreakdown, disabledGroupCount } = React.useMemo(() => {
+    const overrides = config.log_fields?.field_overrides ?? {}
+    const fields = catalog?.fields ?? []
+    const isFieldEnabled = (f: { id: string; group: string | null }) => {
+      const override = overrides[f.id]
+      if (override !== undefined) return override
+      return f.group === null || enabledGroups.has(f.group)
+    }
+    const enabledTotal = fields.filter(isFieldEnabled).length
+    const groups = catalog?.groups ?? []
+    const breakdown = groups
+      .map((g) => {
+        const groupFields = fields.filter((f) => f.group === g.id)
+        const totalInGroup = groupFields.length > 0 ? groupFields.length : (g.fields?.length ?? 0)
+        const enabledInGroup =
+          groupFields.length > 0
+            ? groupFields.filter(isFieldEnabled).length
+            : g.locked || (g.id != null && enabledGroups.has(g.id))
+              ? totalInGroup
+              : 0
+        const groupActive =
+          g.locked ||
+          (g.id != null && enabledGroups.has(g.id)) ||
+          enabledInGroup > 0
+        return {
+          id: g.id ?? 'core',
+          label: g.label,
+          enabledCount: enabledInGroup,
+          totalCount: totalInGroup,
+          active: groupActive,
+        }
+      })
+      .filter((g) => g.active)
+    const disabled = groups.filter(
+      (g) => !g.locked && !(g.id != null && enabledGroups.has(g.id)),
+    ).length
+    return {
+      enabledFieldCount: enabledTotal,
+      groupBreakdown: breakdown,
+      disabledGroupCount: disabled,
+    }
+  }, [catalog, config.log_fields?.field_overrides, enabledGroups])
   // Cloud ingests on its own edge clock; cron sync, CDN prefix and shield are self-hosted settings.
   const cloud = isCloudMode()
   const syncEnabled = cloud || config.enable_cron_sync
@@ -171,11 +221,20 @@ export function ExecuteStep({ s }: { s: WizardState }) {
               </ReviewCard>
               {config.logging_enabled !== false && (
                 <ReviewCard className="col-span-2 space-y-3">
-                  <div className="flex justify-between items-center">
+                  <div className="flex justify-between items-center gap-2">
                     <ReviewHeader icon={FileJson}>Log Configuration</ReviewHeader>
-                    <span className="font-mono text-[10px] bg-muted px-2 py-0.5 rounded text-muted-foreground border">
-                      ~{formatBytes(s.estimatedBytes)} / line (~{formatBytes(Math.max(1, Math.round(s.estimatedBytes / RAW_LOG_COMPRESSION_RATIO)))} .zst)
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {catalog && (
+                        <span className="font-mono text-[10px] bg-muted px-2 py-0.5 rounded text-muted-foreground border">
+                          {enabledFieldCount} fields
+                        </span>
+                      )}
+                      <span className="font-mono text-[10px] bg-muted px-2 py-0.5 rounded text-muted-foreground border">
+                        {s.isLoadingCatalog || !catalog
+                          ? "Loading fields..."
+                          : `~${formatBytes(effectiveEstimatedBytes)} / line (~${formatBytes(Math.max(1, Math.round(effectiveEstimatedBytes / RAW_LOG_COMPRESSION_RATIO)))} .zst)`}
+                      </span>
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-1.5 pt-1">
                     <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
@@ -183,22 +242,19 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                         ? `${presetSummary.bestPresetName} Preset`
                         : "Custom Configuration"}
                     </div>
-                    {!presetSummary.bestPresetName &&
-                      catalog?.groups?.map((g) => {
-                        const isEnabled =
-                          g.locked || (g.id != null && presetSummary.enabledGroupsSet.has(g.id))
-                        return isEnabled ? (
-                          <div
-                            key={g.id || "core"}
-                            className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20"
-                          >
-                            {g.label}
-                          </div>
-                        ) : null
-                      })}
-                    {presetSummary.disabledCount > 0 && (
+                    {groupBreakdown.map((g) => (
+                      <div
+                        key={g.id}
+                        className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20"
+                      >
+                        {g.totalCount > 0
+                          ? `${g.label} (${g.enabledCount}/${g.totalCount})`
+                          : g.label}
+                      </div>
+                    ))}
+                    {disabledGroupCount > 0 && (
                       <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
-                        +{presetSummary.disabledCount} disabled
+                        +{disabledGroupCount} disabled
                       </div>
                     )}
                   </div>
