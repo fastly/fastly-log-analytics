@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import * as React from 'react'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { renderWithQuery, stubMatchMedia, stubResizeObserver } from '@/__tests__/helpers/page-smoke'
