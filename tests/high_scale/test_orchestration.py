@@ -308,7 +308,11 @@ class _ThreadSafeControl:
         return SimpleNamespace(claimed=True, lease_generation=1)
 
     def source(self, service_id: str, object_key: str):
-        raise KeyError(object_key)
+        return SimpleNamespace(
+            object_key=object_key,
+            status="claimed",
+            claim_token=SimpleNamespace(object_key=object_key, owner="worker", owner_epoch=1, lease_generation=1),
+        )
 
     def advance_source_cursor(self, service_id: str, cursor: str, **kwargs: object) -> None:
         with self._lock:
@@ -369,7 +373,7 @@ class _ContendedControl(_ThreadSafeControl):
     def source(self, service_id: str, object_key: str):
         if object_key in self.finished and object_key in self.claimed:
             return SimpleNamespace(status="acknowledged")
-        raise KeyError(object_key)
+        return super().source(service_id, object_key)
 
 
 class _CountingController:
@@ -1045,7 +1049,15 @@ def _reinspection_harness(
     control.source_cursor_for.return_value = forward_cursor
     control.source_reinspection_state_for.return_value = reinspection_state
     control.discover_source.return_value = SimpleNamespace(status="discovered")
-    control.claim_sources_batch = MagicMock(return_value=tuple(SimpleNamespace(object_key=k) for k in claimed_keys))
+    control.claim_sources_batch = MagicMock(
+        return_value=tuple(
+            SimpleNamespace(
+                object_key=k,
+                claim_token=SimpleNamespace(object_key=k, owner=worker_id, owner_epoch=owner_epoch, lease_generation=1),
+            )
+            for k in claimed_keys
+        )
+    )
     control.expired_claims.return_value = ()
     control.advance_source_cursor = MagicMock()
     lister, reader, controller = MagicMock(), MagicMock(), MagicMock()
@@ -1514,7 +1526,7 @@ def test_clickhouse_adapter_rejects_invalid_rows_before_http() -> None:
         batch.service_id,
         batch.domain,
         batch.generation,
-        ({**batch.rows[0], "custom_fields": {"bad": 1}},),
+        ({**batch.rows[0], "custom_fields": {"bad": [1]}},),
     )
     client = FakeHttpClickHouse()
     with pytest.raises(ValueError, match="keys and values"):

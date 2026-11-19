@@ -1495,7 +1495,11 @@ class HighScaleWorkerCoordinator:
                                     if is_final_chunk and failed == 0 and not page.reinspection_page
                                     else None
                                 ),
-                                claim_tokens=tuple(claim_tokens_by_key[src.object_key] for src, _ in valid_payloads),
+                                claim_tokens=(
+                                    tuple(claim_tokens_by_key[src.object_key] for src, _ in valid_payloads)
+                                    if self._control is not None
+                                    else ()
+                                ),
                                 now=now,
                                 **ingest_kwargs,
                             )
