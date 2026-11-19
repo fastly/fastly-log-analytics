@@ -1,6 +1,8 @@
 use super::support::*;
 use fastly_log_analytics::{
-    admin::{self, fixture::FixtureAdapter, valid_bucket, valid_prefix, valid_service_id, FosRequest},
+    admin::{
+        self, fixture::FixtureAdapter, valid_bucket, valid_prefix, valid_service_id, FosRequest,
+    },
     http::Request,
     shell::Runtime,
 };

@@ -7,7 +7,10 @@ use fastly_log_analytics::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::{json, Value};
-use std::{collections::{BTreeMap, BTreeSet}, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 #[test]
 fn a_tick_that_arrives_with_execution_vcpu_already_spent_still_commits() {

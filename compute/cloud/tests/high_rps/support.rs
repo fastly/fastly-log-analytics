@@ -260,7 +260,11 @@ impl Fake {
             "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>{truncated}</IsTruncated>{contents}{prefixes}{token}</ListBucketResult>"
         )
     }
-    pub(super) fn multipart(&self, request: &FosRequest<'_>, id: &str) -> Result<FosResponse, String> {
+    pub(super) fn multipart(
+        &self,
+        request: &FosRequest<'_>,
+        id: &str,
+    ) -> Result<FosResponse, String> {
         let mut uploads = self.uploads.borrow_mut();
         let Some((key, parts)) = uploads.get_mut(id) else {
             return Self::reply(404, "<Error><Code>NoSuchUpload</Code></Error>");

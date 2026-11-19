@@ -1,5 +1,8 @@
 use super::support::*;
-use fastly_log_analytics::ingest::{convert, summary::{self, Hll}};
+use fastly_log_analytics::ingest::{
+    convert,
+    summary::{self, Hll},
+};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,7 +89,6 @@ fn asset_urls_rows_match_the_raw_tables() {
         Some(1800.0)
     );
 }
-
 
 #[test]
 fn summary_matches_a_brute_force_computation_over_the_rows() {
@@ -428,7 +430,6 @@ fn top_k_keeps_the_most_frequent_values_and_totals_stay_exact() {
         "no IPs, no sketch"
     );
 }
-
 
 #[test]
 fn custom_columns_are_summarized_but_system_columns_are_not() {

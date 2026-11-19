@@ -230,7 +230,6 @@ fn page_load_id_is_recorded_in_telemetry_and_debug_headers_are_emitted() {
     );
 }
 
-
 #[test]
 fn harness_header_is_recorded_only_for_authenticated_requests() {
     let path = "/api/admin/services/fixtureService";

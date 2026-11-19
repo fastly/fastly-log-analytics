@@ -129,7 +129,10 @@ pub(super) fn read(bytes: &[u8]) -> Vec<Map<String, Value>> {
     out
 }
 
-pub(super) fn bundle<'a>(rows: &'a [Map<String, Value>], name: &str) -> Vec<&'a Map<String, Value>> {
+pub(super) fn bundle<'a>(
+    rows: &'a [Map<String, Value>],
+    name: &str,
+) -> Vec<&'a Map<String, Value>> {
     rows.iter().filter(|r| r["bundle"] == name).collect()
 }
 

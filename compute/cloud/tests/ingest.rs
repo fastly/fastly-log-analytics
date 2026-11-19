@@ -7,15 +7,15 @@ use std::time::Instant;
 mod support;
 use support::*;
 
-#[path = "ingest/freshness.rs"]
-mod freshness;
-#[path = "ingest/core_and_backfill.rs"]
-mod core_and_backfill;
 #[path = "ingest/catalog_and_retention.rs"]
 mod catalog_and_retention;
-#[path = "ingest/sweep_and_api.rs"]
-mod sweep_and_api;
+#[path = "ingest/core_and_backfill.rs"]
+mod core_and_backfill;
+#[path = "ingest/freshness.rs"]
+mod freshness;
 #[path = "ingest/plans_and_workers.rs"]
 mod plans_and_workers;
 #[path = "ingest/rum_and_wire_formats.rs"]
 mod rum_and_wire_formats;
+#[path = "ingest/sweep_and_api.rs"]
+mod sweep_and_api;

@@ -1334,7 +1334,6 @@ pub(super) fn tick_with_service(fake: &Fake, service: &Service) -> Result<ingest
     report
 }
 
-
 pub(super) fn rows(fake: &Fake, kind: LogKind) -> Vec<Value> {
     fake.new_request();
     telemetry::read_live(fake, SID, kind, None, Some(2000), None)
@@ -1586,7 +1585,12 @@ pub(super) fn files_page(fake: &Fake, query: &str) -> Result<Value, (u16, &'stat
     page
 }
 
-pub(super) fn publish_files(fake: &Fake, keys: &[String], summaries: &[String], replaces: &[String]) -> Value {
+pub(super) fn publish_files(
+    fake: &Fake,
+    keys: &[String],
+    summaries: &[String],
+    replaces: &[String],
+) -> Value {
     let outputs = |keys: &[String]| {
         keys.iter()
             .map(|key| ingest::worker::Output {
@@ -1773,7 +1777,11 @@ pub(super) fn request_windows(fake: &Fake) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn admin_page(fake: &Fake, raw: Option<bool>, query: &str) -> Result<Value, (u16, &'static str)> {
+pub(super) fn admin_page(
+    fake: &Fake,
+    raw: Option<bool>,
+    query: &str,
+) -> Result<Value, (u16, &'static str)> {
     fake.new_request();
     match raw {
         Some(raw) => api::tree(fake, &service(), query, Instant::now(), raw),
@@ -1864,7 +1872,11 @@ pub(super) fn quarantine_page(fake: &Fake, query: &str) -> Result<Value, (u16, &
     api::quarantine(fake, &service(), query)
 }
 
-pub(super) fn purge_as(fake: &Fake, actor: &str, body: Value) -> Result<Value, (u16, &'static str)> {
+pub(super) fn purge_as(
+    fake: &Fake,
+    actor: &str,
+    body: Value,
+) -> Result<Value, (u16, &'static str)> {
     fake.new_request();
     let buffer = LogBuffer::new(SID, "purge");
     let result = api::quarantine_purge(

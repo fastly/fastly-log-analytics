@@ -140,7 +140,6 @@ fn a_failed_or_lost_relay_retries_its_shards_without_loss_or_duplicates() {
     assert_eq!(got, sorted(expected));
 }
 
-
 #[test]
 fn a_relay_forwards_only_shard_requests_within_its_bounds() {
     let fake = Fake::new();

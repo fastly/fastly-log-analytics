@@ -16,10 +16,7 @@ fn expected_endpoint_body(endpoint: &Value) -> Value {
     body.remove("type");
     body.insert("format_version".into(), json!(2));
     body.insert("bucket_name".into(), json!("fixture-bucket"));
-    body.insert(
-        "domain".into(),
-        json!("us-east-1.object.fastlystorage.app"),
-    );
+    body.insert("domain".into(), json!("us-east-1.object.fastlystorage.app"));
     body.insert("access_key".into(), json!("fixture-access"));
     body.insert("secret_key".into(), json!("fixture-secret"));
     Value::Object(body)
@@ -50,8 +47,7 @@ fn all_cmcd_modes_and_versions_match_independently_executed_pinned_generators() 
             case["capture"]
         );
         // The fixtures pin the original generator's period of 60 s; the default is shorter now.
-        let state =
-            json!({"logging_enabled":true,"log_period":60,"log_fields":config,"cmcd":cmcd});
+        let state = json!({"logging_enabled":true,"log_period":60,"log_fields":config,"cmcd":cmcd});
         assert_eq!(logging::desired_snippets(&state).unwrap(), case["snippets"]);
         let endpoints = logging::desired_logging_endpoints(&state).unwrap();
         let expected_endpoints = endpoint_from_template(template, &case["format"]);

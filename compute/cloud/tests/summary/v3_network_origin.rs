@@ -280,7 +280,11 @@ fn leg_of(r: &Value) -> &'static str {
 type Row = Map<String, Value>;
 
 /// The `name` rows of `field` by value, and the field's `dim_totals` row.
-pub(super) fn group_rows<'a>(out: &'a [Row], name: &str, field: &str) -> (BTreeMap<String, &'a Row>, &'a Row) {
+pub(super) fn group_rows<'a>(
+    out: &'a [Row],
+    name: &str,
+    field: &str,
+) -> (BTreeMap<String, &'a Row>, &'a Row) {
     let rows = bundle(out, name)
         .into_iter()
         .filter(|r| r["field"] == field)

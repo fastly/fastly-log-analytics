@@ -84,7 +84,6 @@ fn crashes_and_lost_replies_mid_split_neither_lose_nor_duplicate_lines() {
     assert_eq!(got, sorted(expected));
 }
 
-
 #[test]
 fn a_segment_whose_prefix_skip_outlasts_the_worker_stop_fails_visibly_and_keeps_its_raw() {
     let fake = Fake::new();

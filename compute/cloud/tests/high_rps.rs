@@ -4,13 +4,13 @@
 
 mod common;
 
-#[path = "high_rps/support.rs"]
-mod support;
-#[path = "high_rps/segments.rs"]
-mod segments;
 #[path = "high_rps/multipart.rs"]
 mod multipart;
 #[path = "high_rps/relay.rs"]
 mod relay;
 #[path = "high_rps/replan.rs"]
 mod replan;
+#[path = "high_rps/segments.rs"]
+mod segments;
+#[path = "high_rps/support.rs"]
+mod support;

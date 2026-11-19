@@ -9,7 +9,10 @@ use fastly_log_analytics::{
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::{json, Value};
-use std::{collections::{BTreeMap, BTreeSet}, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 #[test]
 fn service_schema_adds_committed_and_enabled_custom_fields_in_name_order() {
