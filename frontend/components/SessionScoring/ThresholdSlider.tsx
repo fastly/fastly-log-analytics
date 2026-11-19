@@ -495,6 +495,10 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
             <Skeleton className="h-20 w-full" />
             <Skeleton className="h-20 w-full" />
           </div>
+        ) : !data.flagged || !data.passed ? (
+          <p className="text-xs text-muted-foreground py-3">
+            Threshold preview unavailable until scored sessions are recorded.
+          </p>
         ) : (
           <>
             <ThresholdMatrix flagged={data.flagged} passed={data.passed} />

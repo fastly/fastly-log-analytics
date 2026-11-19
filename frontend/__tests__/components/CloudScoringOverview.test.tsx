@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { PropsWithChildren } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CloudScoringOverview } from '@/components/SessionScoring/CloudScoringOverview'
+import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { useScoringLabels } from '@/components/SessionScoring/LabelsTab'
 import { FlagSessionPopover } from '@/components/SessionScoring/SessionFlagAndEvents'
 import { adminFetch, client } from '@/lib/api'
@@ -90,5 +91,16 @@ describe('Cloud scoring capability views', () => {
       '/api/services/{service_id}/scoring/labels',
       expect.objectContaining({ params: { path: { service_id: 'fixture-service' } } }),
     ))
+  })
+
+  it('renders ThresholdSlider cleanly when preview omits flagged/passed buckets', async () => {
+    vi.spyOn(client, 'GET').mockImplementation(async (path) => {
+      if (path === '/api/services/{service_id}/scoring/threshold-preview') {
+        return { data: { available: false, reason: 'scoring_fields_not_present' }, response: new Response() } as never
+      }
+      return { data: { threshold: null, enabled: false }, response: new Response() } as never
+    })
+    render(<ThresholdSlider serviceId="fixture-service" sinceHours={24} />, { wrapper })
+    await screen.findByText(/Threshold preview unavailable until scored sessions are recorded/)
   })
 })
