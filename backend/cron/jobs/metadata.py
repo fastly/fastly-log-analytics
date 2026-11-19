@@ -6,6 +6,7 @@ import importlib
 import logging
 import math
 import os
+import re
 import shutil
 import sys as _sys
 import time
@@ -35,6 +36,7 @@ from backend.cron.scheduler import (
     record_skip_row,
 )
 from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+from backend.utils.telemetry import redact_error_text
 
 if TYPE_CHECKING:
     from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer as _run_insights_prewarmer
@@ -303,6 +305,23 @@ def get_cache_stats() -> dict:
 # ── Webhook notifications ────────────────────────────────────────────────────
 
 
+_WEBHOOK_URL_RE = re.compile(r"https?://\S+")
+
+
+def _is_retryable_webhook_error(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_WEBHOOK_STATUS
+    return False
+
+
+def _format_webhook_error(exc: BaseException) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return redact_error_text(_WEBHOOK_URL_RE.sub("[redacted-url]", str(exc)))
+
+
 def _send_webhook(
     destination: Any,
     payload: dict,
@@ -318,7 +337,7 @@ def _send_webhook(
 
 
 @tenacity.retry(
-    retry=tenacity.retry_if_exception_type((httpx.HTTPStatusError, httpx.TransportError)),
+    retry=tenacity.retry_if_exception(_is_retryable_webhook_error),
     stop=tenacity.stop_after_attempt(3),
     wait=tenacity.wait_exponential(multiplier=1, min=1, max=8),
     reraise=True,
@@ -328,8 +347,7 @@ def _post_json(url: str, payload: dict) -> None:
 
     destination = validate_webhook_destination(url)
     response = _send_webhook(destination, payload)
-    if response.status_code in _RETRYABLE_WEBHOOK_STATUS:
-        response.raise_for_status()
+    response.raise_for_status()
 
 
 _post_alert_webhook = _post_json
@@ -603,8 +621,14 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                         try:
                             _post_alert_webhook(webhook_url, payload)
                         except Exception as e:
-                            webhook_failures.append(f"webhook for {alert['name']}: {e}")
-                            logger.error("%s Failed to send webhook for alert %s: %s", alert_tag, alert["id"], e)
+                            err_detail = _format_webhook_error(e)
+                            webhook_failures.append(f"webhook for {alert['name']}: {err_detail}")
+                            logger.error(
+                                "%s Failed to send webhook for alert %s: %s",
+                                alert_tag,
+                                alert["id"],
+                                err_detail,
+                            )
                     for channel in alert.get("channels") or []:
                         try:
                             chan_type, chan_url = channel.get("type"), channel.get("url")
@@ -646,13 +670,14 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                             elif chan_type == "webhook":
                                 _post_alert_webhook(chan_url, payload or {"alert": alert})
                         except Exception as e:
-                            webhook_failures.append(f"channel {channel.get('type')} for {alert['name']}: {e}")
+                            err_detail = _format_webhook_error(e)
+                            webhook_failures.append(f"channel {channel.get('type')} for {alert['name']}: {err_detail}")
                             logger.error(
                                 "%s Failed to send notifications to channel %s for alert %s: %s",
                                 alert_tag,
                                 channel.get("type"),
                                 alert["id"],
-                                e,
+                                err_detail,
                             )
             n_eval, n_trig = len(enabled_alerts), len(triggered_items)
             status = "warning" if (n_trig > 0 or webhook_failures) else "success"

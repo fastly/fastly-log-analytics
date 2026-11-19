@@ -1798,15 +1798,17 @@ class TestWebhookSenders:
         assert len(seen) == 3
         assert seen[0] == ("https://hook.example/x", {"a": 1})
 
-    def test_does_not_retry_a_4xx(self, monkeypatch):
+    @pytest.mark.parametrize("status_code", [400, 401, 403, 404])
+    def test_does_not_retry_a_4xx(self, monkeypatch, status_code):
         calls = []
 
         def fake_post(destination, _payload):
             calls.append(destination)
-            return _response(400)
+            return _response(status_code)
 
         monkeypatch.setattr(metadata, "_send_webhook", fake_post)
-        metadata._post_slack_notification("https://hook.example/x", {"text": "hi"})
+        with pytest.raises(httpx.HTTPStatusError):
+            metadata._post_slack_notification("https://hook.example/x", {"text": "hi"})
         assert len(calls) == 1
 
     def test_gives_up_after_three_attempts_and_reraises(self, monkeypatch):
@@ -1860,3 +1862,126 @@ class TestWebhookSenders:
         assert destination.url == "https://1.1.1.1:8443/path"
         assert destination.host == "hook.example:8443"
         assert destination.sni_hostname == "hook.example"
+
+    def test_send_webhook_uses_pinned_ip_host_sni_and_safe_client_options(self, monkeypatch):
+        from backend.utils.webhook_url import PinnedWebhookDestination
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["client_kwargs"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def send(self, request):
+                captured["request"] = request
+                return _response(200)
+
+        monkeypatch.setattr(metadata.httpx, "Client", FakeClient)
+        dest = PinnedWebhookDestination(
+            url="https://1.1.1.1:8443/hook",
+            host="hook.example:8443",
+            sni_hostname="hook.example",
+        )
+        resp = metadata._send_webhook(dest, {"ok": True})
+
+        assert resp.status_code == 200
+        assert captured["client_kwargs"] == {"timeout": 5, "follow_redirects": False, "trust_env": False}
+        req = captured["request"]
+        assert str(req.url) == "https://1.1.1.1:8443/hook"
+        assert req.headers["host"] == "hook.example:8443"
+        assert req.extensions["sni_hostname"] == "hook.example"
+
+    def test_alerts_evaluation_redacts_webhook_urls_and_bodies_on_failure(self, monkeypatch):
+        monkeypatch.undo()
+        monkeypatch.setattr(tenacity.nap.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            "backend.utils.webhook_url.socket.getaddrinfo",
+            lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))],
+        )
+
+        secret_legacy_url = "https://hooks.example.com/services/T000/B000/SECRET_LEGACY_TOKEN"
+        secret_slack_url = "https://hooks.slack.com/services/T111/B222/SECRET_SLACK_TOKEN"
+        secret_body = "upstream-secret-response-body-xyz"
+
+        src = _sample_source()
+        alerts = [
+            _make_alert(
+                "svc-alerts-contract",
+                alert_id="a1",
+                name="Error Spike",
+                webhook_url=secret_legacy_url,
+                channels=[{"type": "slack", "url": secret_slack_url}],
+            )
+        ]
+
+        attempts = []
+
+        def fake_send(_client_self, request, **_kwargs):
+            attempts.append(str(request.url))
+            if "SECRET_LEGACY_TOKEN" in str(request.url):
+                return httpx.Response(403, text=secret_body, request=request)
+            raise httpx.ConnectError(f"failed connecting to {secret_slack_url}", request=request)
+
+        log_calls = []
+        progress_events = []
+        error_logs = []
+
+        with (
+            patch("backend.cron.jobs.metadata.get_source_for_service", return_value=src),
+            patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+            patch("backend.repositories.assets.get_alerts", return_value=alerts),
+            patch("backend.core.fos_client.start_cron_run", return_value=109),
+            patch("backend.core.fos_client.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
+            patch(
+                "backend.repositories.assets.evaluate_alert",
+                return_value=(True, secret_legacy_url, {"test": 1}, "2026-01-01T00:00:00Z"),
+            ),
+            patch("backend.repositories.assets.update_last_triggered"),
+            patch("backend.core.metadata.base.export_admin_state"),
+            patch("httpx.Client.send", autospec=True, side_effect=fake_send),
+            patch("backend.cron.scheduler.start_progress"),
+            patch("backend.cron.scheduler.end_progress"),
+            patch("backend.cron.scheduler.cleanup_progress_and_reap"),
+            patch(
+                "backend.cron.jobs.metadata._log_and_add_progress",
+                side_effect=lambda _rid, _sid, **kw: progress_events.append(kw.get("event")),
+            ),
+            patch(
+                "backend.cron.jobs.metadata.logger.error",
+                side_effect=lambda msg, *a: error_logs.append(msg % a if a else msg),
+            ),
+        ):
+            metadata._run_service_alerts_evaluation("svc-alerts-contract")
+
+        # 403 is non-retryable (1 attempt); ConnectError retries 3 times.
+        assert sum("SECRET_LEGACY_TOKEN" in u for u in attempts) == 1
+        assert sum("SECRET_SLACK_TOKEN" in u for u in attempts) == 3
+
+        assert len(log_calls) == 1
+        args, kwargs = log_calls[0]
+        assert args[3] == "warning"
+        summary = kwargs.get("summary", "")
+        assert "2 notification failures" in summary
+        assert "HTTP 403" in summary
+
+        done_msgs = [
+            ev.get("message", "") for ev in progress_events if isinstance(ev, dict) and ev.get("type") == "done"
+        ]
+        assert len(done_msgs) == 1
+
+        all_text = "\n".join([summary, *done_msgs, *error_logs])
+        for secret in (
+            "SECRET_LEGACY_TOKEN",
+            "SECRET_SLACK_TOKEN",
+            "hooks.example.com",
+            "hooks.slack.com",
+            "1.1.1.1",
+            secret_body,
+        ):
+            assert secret not in all_text
