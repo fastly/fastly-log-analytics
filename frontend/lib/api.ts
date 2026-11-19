@@ -100,6 +100,15 @@ export const client = createClient<paths>({
       const { handleCloudAnalyticalRequest } = await getCloudAdapter();
       const intercepted = await handleCloudAnalyticalRequest(req);
       if (intercepted) return intercepted;
+      const { measureCloudQuery } = await import("@/lib/cloud-engine/readiness");
+      const url = new URL(req.url);
+      const serviceId = req.headers.get("x-service-id");
+      return measureCloudQuery(
+        `api.${url.pathname}`,
+        () => globalThis.fetch(req),
+        undefined,
+        serviceId,
+      );
     }
     return globalThis.fetch(req);
   },

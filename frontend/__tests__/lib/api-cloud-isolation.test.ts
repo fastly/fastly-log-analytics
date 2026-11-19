@@ -52,6 +52,35 @@ describe("API Cloud isolation", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("publishes native Cloud request readiness for OpenAPI passthrough", async () => {
+    setCloudModeRuntime(true);
+    const fetch = vi.fn(async () => Response.json({ status: "ok" }));
+    vi.stubGlobal("fetch", fetch);
+    const events: Array<Record<string, unknown>> = [];
+    const listener = (event: Event) => events.push((event as CustomEvent).detail);
+    window.addEventListener("fla:cloud-query", listener);
+    try {
+      await client.GET("/api/services/{service_id}/scoring/config", {
+        params: { path: { service_id: "svc-1" } },
+      });
+    } finally {
+      window.removeEventListener("fla:cloud-query", listener);
+    }
+
+    expect(events).toMatchObject([
+      {
+        section: "api./api/services/svc-1/scoring/config",
+        serviceId: "test",
+        state: "pending",
+      },
+      {
+        section: "api./api/services/svc-1/scoring/config",
+        serviceId: "test",
+        state: "success",
+      },
+    ]);
+  });
+
   it.each([
     ["/api/services?view=all", "https://analytics.example.test:8443/api/services?view=all"],
     ["api/services", "https://analytics.example.test:8443/api/services"],
