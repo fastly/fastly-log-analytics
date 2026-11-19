@@ -1,4 +1,4 @@
-.PHONY: test soak lint format scan build deploy deploy-test deploy-check loadtest-campaign admin-reset trim-target
+.PHONY: test soak lint format scan build deploy deploy-test deploy-check loadtest-campaign admin-reset trim-target require-lt-config
 
 NAME ?= flp
 VERBOSE ?= 0
@@ -8,7 +8,7 @@ TARGET_MAX_GB ?= 20
 AR_wasm32_wasip1 ?= $(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 --print sysroot 2>/dev/null)/lib/rustlib/$(shell PATH="$$HOME/.cargo/bin:$$PATH" rustc +1.96.0 -vV 2>/dev/null | sed -n 's/^host: //p')/bin/llvm-ar
 export AR_wasm32_wasip1
 LT_REPO ?= $(HOME)/Projects/fastly-log-analytics-load-testing
-LT_CONFIG := $(CURDIR)/fastly-lt.toml
+LT_CONFIG ?=
 REPO_ROOT := $(abspath $(CURDIR)/../..)
 
 # Cargo never deletes superseded test binaries. Past the cap, drop this crate's
@@ -38,7 +38,11 @@ test: trim-target
 	exit $$rc
 
 soak:
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --manifest-path ../Cargo.toml -p fastly-logs-parquet-shell --locked --test ingest --run-ignored ignored-only -E 'test(/^simulation::(two_days_of_1s_ticks_at_52_files_per_period_convert_exactly_without_a_backlog|every_maintenance_stage_gets_a_turn_within_four_intervals_under_load)$$/)'
+	@if command -v cargo-nextest > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-nextest" ]; then \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --manifest-path ../Cargo.toml -p fastly-logs-parquet-shell --locked --test ingest --run-ignored ignored-only -E 'test(/^simulation::(two_days_of_1s_ticks_at_52_files_per_period_convert_exactly_without_a_backlog|every_maintenance_stage_gets_a_turn_within_four_intervals_under_load)$$/)'; \
+	else \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path ../Cargo.toml -p fastly-logs-parquet-shell --locked --test ingest simulation:: -- --ignored --nocapture; \
+	fi
 
 lint:
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo fmt --manifest-path ../Cargo.toml --all -- --check
@@ -61,13 +65,29 @@ build:
 deploy: scan
 	PYTHONPATH="$(REPO_ROOT)" uv run --project "$(REPO_ROOT)" tools/release.py deploy --name $(NAME)
 
-deploy-test: scan
-	PYTHONPATH="$(REPO_ROOT)" uv run --project "$(REPO_ROOT)" tools/deploy_test_all.py --name $(NAME) --lt-repo $(LT_REPO)
+deploy-test: scan require-lt-config
+	PYTHONPATH="$(REPO_ROOT)" uv run --project "$(REPO_ROOT)" tools/deploy_test_all.py --name $(NAME) --lt-repo $(LT_REPO) --lt-config $(LT_CONFIG)
 
-deploy-check:
+require-lt-config:
+	@if [ -z "$(strip $(LT_CONFIG))" ]; then \
+		echo "LT_CONFIG is required; point it at a private config outside this repository." >&2; \
+		exit 2; \
+	fi
+	@case "$(abspath $(LT_CONFIG))" in \
+		"$(REPO_ROOT)"|"$(REPO_ROOT)"/*) \
+			echo "LT_CONFIG must be outside this repository: $(abspath $(LT_CONFIG))" >&2; \
+			exit 2; \
+			;; \
+	esac
+	@if [ ! -f "$(LT_CONFIG)" ]; then \
+		echo "LT_CONFIG file does not exist: $(LT_CONFIG)" >&2; \
+		exit 2; \
+	fi
+
+deploy-check: require-lt-config
 	uv run --project $(LT_REPO) lt deploy-check --config $(LT_CONFIG)
 
-loadtest-campaign:
+loadtest-campaign: require-lt-config
 	$(if $(strip $(CAMPAIGN)),,$(error CAMPAIGN is required, e.g. make loadtest-campaign CAMPAIGN=c1))
 	uv run --project $(LT_REPO) lt campaign --config $(LT_CONFIG) --campaign $(CAMPAIGN)
 

@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import re
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -217,6 +218,72 @@ def test_analyst_read_only_blocks_writes_and_mutating_verbs(client):
     for method in ("put", "patch", "delete"):
         r2 = getattr(client, method)("/api/dashboard/some-mutating-endpoint?service=svcA", headers=_WRITE_HEADERS)
         assert r2.status_code == 403 and r2.json()["error"] == "read_only"
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_admin_attachment_analyst_scope_and_revocation_lifecycle(client, monkeypatch):
+    class _Manager:
+        state = SimpleNamespace(public_endpoint="https://testserver")
+
+        def __init__(self):
+            self.session = None
+
+        def attach(self, service_ids):
+            self.session = AnalystSession(
+                session_id="session-1",
+                invite_id="invite-1",
+                name="Scoped Analyst",
+                email="scoped@example.com",
+                ip_address="testclient",
+                user_agent="pytest",
+                fingerprint_signature="fixture",
+                pii_policy={},
+                query_window_hours=None,
+                query_start_time=None,
+                query_end_time=None,
+                login_time="2026-01-01T00:00:00Z",
+                last_active_time="2026-01-01T00:00:00Z",
+                service_ids=service_ids,
+            )
+
+        def validate_session(self, session_id):
+            return self.session if session_id == "session-1" else None
+
+        def is_sharing_active(self):
+            return True
+
+        def touch_session(self, *args, **kwargs):
+            pass
+
+        def revoke(self):
+            self.session = None
+
+    manager = _Manager()
+    monkeypatch.setattr("backend.utils.remote_access.get_tunnel_manager", lambda: manager)
+    monkeypatch.setattr("backend.utils.remote_access.compute_fingerprint", lambda headers: "fixture")
+    monkeypatch.setattr("backend.core.share_db.set_setting", lambda *args, **kwargs: None)
+    client.cookies.set("analyst_session_id", "session-1")
+
+    assert client.post("/api/views").status_code == 200
+    unattached = client.get("/api/dashboard?service=svcA", headers=_HEADERS)
+    assert unattached.status_code == 401 and unattached.json()["error"] == "unauthenticated"
+
+    manager.attach(["svcA"])
+    assert client.get("/api/dashboard?service=svcA", headers=_HEADERS).status_code == 200
+    leaked = client.get("/api/dashboard?service=svcB", headers=_HEADERS)
+    assert leaked.status_code == 403 and leaked.json()["error"] == "service_not_authorized"
+    write = client.post("/api/views", headers=_WRITE_HEADERS)
+    assert write.status_code == 403 and write.json()["error"] == "read_only"
+
+    manager.attach(["svcB"])
+    old_scope = client.get("/api/dashboard?service=svcA", headers=_HEADERS)
+    assert old_scope.status_code == 403 and old_scope.json()["error"] == "service_not_authorized"
+    assert client.get("/api/dashboard?service=svcB", headers=_HEADERS).status_code == 200
+
+    manager.revoke()
+    blocked = client.get("/api/dashboard?service=svcB", headers=_HEADERS)
+    assert blocked.status_code == 401 and blocked.json()["error"] == "unauthenticated"
 
 
 def test_analyst_service_scope_enforcement(client):

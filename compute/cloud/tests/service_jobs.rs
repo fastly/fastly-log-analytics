@@ -1777,6 +1777,69 @@ fn committed_custom_field_name_and_semantic_type_cannot_change() {
 }
 
 #[test]
+fn custom_field_lifecycle_rejects_bad_types_and_allows_change_and_removal_before_commit() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let initial = platform.service();
+    let fields = json!({"groups":["A"],"custom_fields":[{
+        "name":"tenant","label":"Tenant","vcl":"req.http.X-Tenant",
+        "parquet_type":"Utf8","value_type":"string","bytes_estimate":40,"enabled":true
+    }],"field_overrides":{},"field_limits":{}});
+    let created = platform.json(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":initial["generation"],"log_fields":fields}),
+    );
+    assert_eq!(
+        created["service"]["log_fields"]["custom_fields"][0]["value_type"],
+        "string"
+    );
+
+    let mut invalid = created["service"]["log_fields"].clone();
+    invalid["custom_fields"][0]["value_type"] = json!("numeric");
+    assert_eq!(
+        platform
+            .call(
+                "PATCH",
+                "/api/admin/services/fixtureService",
+                json!({"generation":created["generation"],"log_fields":invalid})
+            )
+            .status,
+        400
+    );
+    assert_eq!(
+        platform.service()["service"]["log_fields"]["custom_fields"][0]["value_type"],
+        "string"
+    );
+
+    let mut changed_fields = created["service"]["log_fields"].clone();
+    changed_fields["custom_fields"][0]["label"] = json!("Account");
+    changed_fields["custom_fields"][0]["parquet_type"] = json!("Int64");
+    changed_fields["custom_fields"][0]["value_type"] = json!("numeric");
+    let changed = platform.json(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":created["generation"],"log_fields":changed_fields}),
+    );
+    assert_eq!(
+        changed["service"]["log_fields"]["custom_fields"][0]["parquet_type"],
+        "Int64"
+    );
+
+    let mut removed_fields = changed["service"]["log_fields"].clone();
+    removed_fields["custom_fields"] = json!([]);
+    let removed = platform.json(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({"generation":changed["generation"],"log_fields":removed_fields}),
+    );
+    assert!(removed["service"]["log_fields"]["custom_fields"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn s3_paths_use_sigv4_encoding_not_html_form_encoding() {
     assert_eq!(
         admin::fos_path("fos-test-logs", "raw/~a* b+é.gz"),

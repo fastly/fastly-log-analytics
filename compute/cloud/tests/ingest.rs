@@ -1,4 +1,6 @@
-use arrow_array::{Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray};
+use arrow_array::{
+    cast::AsArray, Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
+};
 use bytes::Bytes;
 use fastly_log_analytics::{
     admin::{FosRequest, FosResponse, Record, Service},
@@ -765,12 +767,17 @@ impl Runtime for Fake {
                     retry_after: None,
                 })
             }
-            "GET" if request.query.contains("list-type") => Ok(FosResponse {
-                cdn_cache: None,
-                status: 200,
-                body: self.list(request.query).into_bytes(),
-                retry_after: None,
-            }),
+            "GET" if request.query.contains("list-type") => {
+                if let Some(response) = self.take_transient("LIST") {
+                    return Ok(response);
+                }
+                Ok(FosResponse {
+                    cdn_cache: None,
+                    status: 200,
+                    body: self.list(request.query).into_bytes(),
+                    retry_after: None,
+                })
+            }
             "GET" => Ok(match self.recorded_get(request.key) {
                 Some(body) => FosResponse {
                     cdn_cache: None,
@@ -1320,9 +1327,13 @@ fn put_raw(fake: &Fake, minute_start: i64, name: &str, lines: &[String]) -> Stri
 }
 
 fn tick(fake: &Fake) -> Result<ingest::Report, String> {
+    tick_with_service(fake, &service())
+}
+
+fn tick_with_service(fake: &Fake, service: &Service) -> Result<ingest::Report, String> {
     fake.new_request();
     let buffer = LogBuffer::new(SID, "req");
-    let report = ingest::run(fake, &service(), "ak", "sk", Instant::now(), &buffer);
+    let report = ingest::run(fake, service, "ak", "sk", Instant::now(), &buffer);
     telemetry::flush_request_buffer(fake, &buffer);
     report
 }
@@ -1431,6 +1442,213 @@ fn processed_ips(fake: &Fake) -> Vec<String> {
     }
     ips.sort();
     ips
+}
+
+#[test]
+fn canonical_fixture_has_cross_stack_ingest_parity() {
+    const FIXTURE: &str = include_str!("../../../tests/fixtures/canonical_ingest.ndjson");
+
+    let fake = Fake::new(BASE + 3600);
+    let mut fixture_service = service();
+    fixture_service.log_fields = json!({
+        "groups": [],
+        "field_overrides": {},
+        "custom_fields": [
+            {"name": "tenant", "duckdb_type": "VARCHAR", "enabled": true, "committed": true},
+            {"name": "score", "duckdb_type": "BIGINT", "enabled": true, "committed": true},
+            {"name": "optional", "duckdb_type": "BOOLEAN", "enabled": true, "committed": true},
+            {"name": "nullable", "duckdb_type": "VARCHAR", "enabled": true, "committed": true}
+        ]
+    });
+    let lines: Vec<String> = FIXTURE.lines().map(str::to_owned).collect();
+    put_raw(&fake, BASE, "canonical", &lines);
+
+    let report = tick_with_service(&fake, &fixture_service).unwrap();
+    assert_eq!(
+        (
+            report.converted,
+            report.failed,
+            report.rows,
+            report.bad_lines,
+            report.lines_read
+        ),
+        (1, 0, 5, 2, 7)
+    );
+
+    let visible =
+        fastly_log_analytics::telemetry::compact::visible(&fake.keys("processed/request/"), &[]);
+    assert_eq!(visible.len(), 2);
+    let persisted_before: BTreeMap<_, _> = visible
+        .iter()
+        .map(|key| (key.clone(), fake.bucket.borrow()[key].clone()))
+        .collect();
+    type FixtureRow = (
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<bool>,
+        Option<String>,
+    );
+    let mut assigned = BTreeMap::<i64, Vec<FixtureRow>>::new();
+    for key in &visible {
+        let start = ingest::parse_processed(key).unwrap().start;
+        for batch in batches(&fake.bucket.borrow()[key]) {
+            let ids = batch.column_by_name("rid").unwrap().as_string::<i32>();
+            let status = batch
+                .column_by_name("status")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let timestamp = batch
+                .column_by_name("timestamp")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let tenant = batch.column_by_name("tenant").unwrap();
+            assert_eq!(tenant.data_type(), &arrow_schema::DataType::Utf8);
+            let tenant = tenant.as_any().downcast_ref::<StringArray>().unwrap();
+            let score = batch.column_by_name("score").unwrap();
+            assert_eq!(score.data_type(), &arrow_schema::DataType::Int64);
+            let score = score.as_any().downcast_ref::<Int64Array>().unwrap();
+            let optional = batch.column_by_name("optional").unwrap();
+            assert_eq!(optional.data_type(), &arrow_schema::DataType::Boolean);
+            let optional = optional
+                .as_any()
+                .downcast_ref::<arrow_array::BooleanArray>()
+                .unwrap();
+            let nullable = batch.column_by_name("nullable").unwrap();
+            assert_eq!(nullable.data_type(), &arrow_schema::DataType::Utf8);
+            let nullable = nullable.as_any().downcast_ref::<StringArray>().unwrap();
+            assigned
+                .entry(start)
+                .or_default()
+                .extend((0..batch.num_rows()).map(|i| {
+                    (
+                        ids.value(i).to_owned(),
+                        status.iter().nth(i).flatten(),
+                        timestamp.is_valid(i).then(|| timestamp.value(i)),
+                        tenant.is_valid(i).then(|| tenant.value(i).to_owned()),
+                        score.is_valid(i).then(|| score.value(i)),
+                        optional.is_valid(i).then(|| optional.value(i)),
+                        nullable.is_valid(i).then(|| nullable.value(i).to_owned()),
+                    )
+                }));
+        }
+    }
+    assert_eq!(assigned[&BASE].len(), 4);
+    assert_eq!(assigned[&(BASE + 60)].len(), 1);
+    assert_eq!(
+        assigned[&BASE]
+            .iter()
+            .map(
+                |(id, status, timestamp, tenant, score, optional, nullable)| {
+                    (
+                        id.as_str(),
+                        *status,
+                        *timestamp,
+                        tenant.as_deref(),
+                        *score,
+                        *optional,
+                        nullable.as_deref(),
+                    )
+                }
+            )
+            .collect::<Vec<_>>(),
+        [
+            (
+                "canonical-stable",
+                Some(200),
+                Some(BASE * 1000 + 1_000),
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "canonical-stable",
+                Some(200),
+                Some(BASE * 1000 + 2_000),
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "canonical-start",
+                Some(503),
+                Some(BASE * 1000),
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "canonical-null",
+                None,
+                Some(BASE * 1000 + 59_000),
+                None,
+                None,
+                None,
+                None,
+            ),
+        ]
+    );
+    assert_eq!(
+        assigned[&BASE]
+            .iter()
+            .filter(|(id, ..)| id == "canonical-stable")
+            .count(),
+        2
+    );
+    assert_eq!(
+        assigned[&(BASE + 60)],
+        [(
+            "canonical-boundary".into(),
+            Some(204),
+            Some(BASE * 1000 + 60_000),
+            Some("alpha".into()),
+            Some(7),
+            None,
+            None,
+        )]
+    );
+
+    let (mut requests, mut bandwidth) = (0, 0);
+    for key in fake.keys("processed/summary/request/") {
+        for batch in batches(&fake.bucket.borrow()[&key]) {
+            let bundles = batch.column_by_name("bundle").unwrap().as_string::<i32>();
+            let request_counts = batch
+                .column_by_name("requests")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let byte_counts = batch
+                .column_by_name("total_bandwidth_bytes")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            for i in 0..batch.num_rows() {
+                if bundles.value(i) == "overview" {
+                    requests += request_counts.value(i);
+                    bandwidth += byte_counts.value(i);
+                }
+            }
+        }
+    }
+    assert_eq!((requests, bandwidth), (5, 70));
+    assert_eq!(
+        tick_with_service(&fake, &fixture_service)
+            .unwrap()
+            .converted,
+        0
+    );
+    let visible_after =
+        fastly_log_analytics::telemetry::compact::visible(&fake.keys("processed/request/"), &[]);
+    let persisted_after: BTreeMap<_, _> = visible_after
+        .iter()
+        .map(|key| (key.clone(), fake.bucket.borrow()[key].clone()))
+        .collect();
+    assert_eq!(persisted_after, persisted_before);
 }
 
 #[test]
@@ -6660,6 +6878,50 @@ fn storage_tree_can_list_the_ops_and_rum_roots() {
             .0,
         400
     );
+}
+
+#[test]
+fn storage_tree_replays_the_same_cursor_after_a_failed_list() {
+    let fake = Fake::new(BASE);
+    for i in 0..=1000 {
+        fake.bucket
+            .borrow_mut()
+            .insert(format!("processed/request/file-{i:04}.parquet"), vec![1]);
+    }
+    let first = admin_page(&fake, Some(false), "dataset=request").unwrap();
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let query = format!("dataset=request&{}", cursor_query(cursor));
+    fake.transient
+        .borrow_mut()
+        .push_back(("LIST", 503, Some(1)));
+
+    assert_eq!(admin_page(&fake, Some(false), &query).unwrap_err().0, 502);
+
+    let retried = admin_page(&fake, Some(false), &query).unwrap();
+    let first_keys: Vec<_> = first["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["key"].as_str().unwrap())
+        .collect();
+    let retry_keys: Vec<_> = retried["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        first_keys
+            .iter()
+            .chain(&retry_keys)
+            .collect::<Vec<_>>()
+            .len(),
+        1001
+    );
+    let first_keys: BTreeSet<_> = first_keys.into_iter().collect();
+    let retry_keys: BTreeSet<_> = retry_keys.into_iter().collect();
+    assert!(first_keys.is_disjoint(&retry_keys));
+    assert_eq!(retried["complete"], true);
 }
 
 #[test]

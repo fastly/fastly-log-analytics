@@ -182,6 +182,56 @@ describe("closed-hour manifest cache", () => {
     ).rejects.toThrow("generation changed");
   });
 
+  it("rejects an incomplete terminal page rather than returning an empty success", async () => {
+    const fetchJson = vi.fn().mockResolvedValue({
+      files: [],
+      next_cursor: null,
+      complete: false,
+      catalog_generation: 7,
+    });
+
+    await expect(
+      fetchManifest(fetchJson, iso(T0), iso(T0 + H)),
+    ).rejects.toThrow("incomplete");
+  });
+
+  it("restarts after a paged read timeout without reusing the partial generation", async () => {
+    const first = file(T0);
+    const second = file(T0 + H);
+    let page = 0;
+    const fetchJson = vi.fn(async (url: string) => {
+      const cursor = new URL(url, "http://x").searchParams.get("cursor");
+      page += 1;
+      if (page === 1) {
+        return {
+          files: [first],
+          next_cursor: "page-2",
+          complete: false,
+          catalog_generation: 7,
+        };
+      }
+      if (page === 2) throw new DOMException("object read timed out", "TimeoutError");
+      expect(cursor).toBeNull();
+      return {
+        files: [first, second],
+        next_cursor: null,
+        complete: true,
+        catalog_generation: 8,
+      };
+    });
+
+    await expect(
+      fetchManifest(fetchJson, iso(T0), iso(T0 + 2 * H)),
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+    const recovered = await fetchManifest(
+      fetchJson,
+      iso(T0),
+      iso(T0 + 2 * H),
+    );
+    expect(keys(recovered.files)).toEqual(keys([first, second]));
+    expect(recovered.catalogGeneration).toBe(8);
+  });
+
   it("re-lists only from the end of the closed hours while the generation holds", async () => {
     const state = {
       files: [file(T0), file(T0 + H + 5 * 60_000), file(T0 + 4 * H)],

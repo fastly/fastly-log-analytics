@@ -643,6 +643,38 @@ fn admin_routes_reject_analysts_and_admin_is_not_blocked() {
 }
 
 #[test]
+fn analyst_attachment_is_read_only_and_revocation_invalidates_the_session() {
+    let harness = Harness::new();
+
+    assert_eq!(
+        harness.send("GET", "/api/header-badge", "admin").status,
+        200
+    );
+    assert_eq!(
+        harness.send("GET", "/api/header-badge", "analyst").status,
+        200
+    );
+    assert_eq!(
+        harness
+            .send("POST", "/api/admin/users/u-victim/revoke", "analyst")
+            .status,
+        403
+    );
+
+    let mut current = harness.store.load().unwrap();
+    current.state.users.get_mut("u-analyst").unwrap().revoked = true;
+    assert!(harness
+        .store
+        .compare_and_swap(current.generation.as_deref(), &current.state)
+        .unwrap());
+
+    assert_eq!(
+        harness.send("GET", "/api/header-badge", "analyst").status,
+        401
+    );
+}
+
+#[test]
 fn admin_pages_redirect_anonymous_and_reject_analysts() {
     let harness = Harness::new();
     for page in [
