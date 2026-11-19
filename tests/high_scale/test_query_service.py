@@ -1398,6 +1398,162 @@ def test_network_health_and_quality_full_clickhouse_payload():
     assert q_resp.by_region and q_resp.by_country and q_resp.by_region[0].rtt_ms > 0
 
 
+def _real_ch_net_service(service_id: str, responder) -> tuple[HighScaleService, RecordingClient]:
+    client = RecordingClient(responder)
+    client._http = SimpleNamespace(_transport=SimpleNamespace())
+    return HighScaleService(
+        service_id=service_id, client=client, cursor_secret=b"secret", request_watermark=None
+    ), client
+
+
+def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shielding(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T00:00:00Z", "2026-09-15T00:00:00Z"
+
+    def responder(sql, params):
+        if "FROM request_aggregates" in sql:
+            return [{"asn": 7922, "cnt": 3000}]
+        if "FROM network_minute_dimensions" in sql:
+            return [
+                {
+                    "asn": 7922,
+                    "c_speed": "fast",
+                    "cnt": 2500,
+                    "p95_sum": 40000.0 * 2500,
+                    "p95_w": 2500,
+                    "p99_sum": 60000.0 * 2500,
+                    "p99_w": 2500,
+                },
+                {
+                    "asn": 7922,
+                    "c_speed": "medium",
+                    "cnt": 500,
+                    "p95_sum": 44000.0 * 500,
+                    "p95_w": 500,
+                    "p99_sum": 66000.0 * 500,
+                    "p99_w": 500,
+                },
+            ]
+        if "AS throughput_bps" in sql:
+            return [
+                {
+                    "asn": 7922,
+                    "bucket_ts": int(datetime(2026, 9, 14, 0, 0, tzinfo=UTC).timestamp()),
+                    "reqs": 100,
+                    "throughput_bps": 1_500_000.0,
+                    "rtt_med_us": 20000.0,
+                    "rtt_baseline_us": 18000.0,
+                    "rtt_congestion_us": 2000.0,
+                    "avg_ploss": 0.0,
+                    "rtt_jitter_us": 1000.0,
+                    "error_pct": 0.0,
+                }
+            ]
+        if "AS lat" in sql:
+            return [
+                {
+                    "country": "US",
+                    "city": "san jose",
+                    "region": "California",
+                    "metro": "807",
+                    "bucket_ts": int(datetime(2026, 9, 14, 0, 0, tzinfo=UTC).timestamp()),
+                    "lat": "37.33",
+                    "lon": "-121.89",
+                    "rtt_med_us": 20000.0,
+                    "avg_ploss": 0.0,
+                    "error_pct": 0.0,
+                    "reqs": 100,
+                }
+            ]
+        if "SELECT count() AS n" in sql:
+            return [{"n": 1}]
+        if "INNER JOIN" in sql:
+            return [
+                {
+                    "edge_pop": "DEN",
+                    "shield_pop": "IAD",
+                    "requests": 50,
+                    "p50_ms": 40.0,
+                    "p95_ms": 90.0,
+                    "p99_ms": 120.0,
+                }
+            ]
+        return []
+
+    svc, client = _real_ch_net_service("svc-realch-24h", responder)
+    req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=300, top_n=30)
+    resp = network_health(svc, req, start_s, end_s)
+
+    # Full 30x sampling (5m minute stride * 6x sub-minute stride) even when bucket_seconds=300.
+    assert resp.summary is not None and resp.summary.total_reqs == 3000
+    assert resp.heatmap[0].buckets[0].reqs == 3000
+    assert resp.cities[0].lat == 37.33 and resp.cities[0].lon == -121.89
+    assert resp.leaderboard[0].c_speed_mix == {"fast": 0.833, "medium": 0.167}
+    assert resp.leaderboard[0].p95_rtt_us == pytest.approx((40000.0 * 2500 + 44000.0 * 500) / 3000)
+    assert resp.leaderboard[0].p99_rtt_us == pytest.approx((60000.0 * 2500 + 66000.0 * 500) / 3000)
+
+    # Percentiles/c_speed came from network_minute_dimensions, not a 3rd request_facts scan.
+    assert client.matching("FROM network_minute_dimensions")
+    assert not client.matching("sumMap(")
+
+    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and sub-minute slice.
+    ((heatmap_sql, _),) = client.matching("AS throughput_bps")
+    assert "toSecond(event_timestamp) < 10" in heatmap_sql
+    assert "quantileTDigest(0.5)" in heatmap_sql
+    assert "position(custom_fields['cache'], 'HIT') > 0" in heatmap_sql
+
+    # Map avoids per-row Float64 parsing on lat/lon.
+    ((map_sql, _),) = client.matching("AS lat")
+    assert "anyIf(custom_fields['lat'], custom_fields['lat'] != '') AS lat" in map_sql
+
+    # Shielding uses PREWHERE + deterministic join-key hash sampling + single-pass quantilesTDigest.
+    ((shield_sql, _),) = client.matching("INNER JOIN")
+    assert "PREWHERE" in shield_sql
+    assert "cityHash64(custom_fields['rid']) % 20 = 0" in shield_sql
+    assert "cityHash64(custom_fields['prid']) % 20 = 0" in shield_sql
+    assert "count() * 20 AS requests" in shield_sql
+    assert "quantilesTDigest(0.50, 0.95, 0.99)" in shield_sql
+    assert resp.shielding_analysis is not None and resp.shielding_analysis.rows[0].requests == 50
+
+
+def test_network_health_real_ch_falls_back_when_network_rollup_empty(monkeypatch):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T23:00:00Z", "2026-09-15T00:00:00Z"
+
+    def responder(sql, params):
+        if "FROM request_aggregates" in sql:
+            return [{"asn": 7922, "cnt": 1000}]
+        if "FROM network_minute_dimensions" in sql:
+            return []
+        if "sumMap(" in sql:
+            return [{"asn": 7922, "p95": 45000.0, "p99": 70000.0, "speed_map": {"fast": 100}}]
+        if "AS throughput_bps" in sql:
+            return [
+                {
+                    "asn": 7922,
+                    "bucket_ts": int(datetime(2026, 9, 14, 23, 0, tzinfo=UTC).timestamp()),
+                    "reqs": 200,
+                    "throughput_bps": 1_000_000.0,
+                    "rtt_med_us": 20000.0,
+                    "rtt_baseline_us": 18000.0,
+                    "rtt_congestion_us": 2000.0,
+                    "avg_ploss": 0.0,
+                    "rtt_jitter_us": 1000.0,
+                    "error_pct": 0.0,
+                }
+            ]
+        return []
+
+    svc, client = _real_ch_net_service("svc-realch-fallback", responder)
+    req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=300, top_n=30)
+    resp = network_health(svc, req, start_s, end_s)
+
+    assert client.matching("FROM network_minute_dimensions")
+    assert client.matching("sumMap(")
+    assert resp.leaderboard[0].p95_rtt_us == 45000.0
+    assert resp.leaderboard[0].c_speed_mix == {"fast": 1.0}
+
+
 # ── Merged from tests/high_scale/test_dashboard.py ──
 
 _WINDOW = ("2026-09-15T00:00:00Z", "2026-09-16T00:00:00Z")

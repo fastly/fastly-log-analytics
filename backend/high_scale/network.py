@@ -237,9 +237,14 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
     shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
+    sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+    sh_join_stride = 1
     if is_real_ch:
-        sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-        sh_probe_stride = minute_stride_sql(start, end, 15) if sh_span_s >= 21600 else ""
+        sh_probe_stride = (
+            minute_stride_sql(start, end, 15)
+            if sh_span_s >= 21600
+            else (minute_stride_sql(start, end, 5) if sh_span_s >= 3600 else "")
+        )
         shield_prewhere = f"{_BASE_WHERE}{sh_probe_stride} AND custom_fields['prid'] != ''"
         shield_rows = service.client.execute(
             f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} "
@@ -250,24 +255,49 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
             return ShieldingAnalysis(
                 **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
             )
+        if sh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST"):
+            sh_join_stride = 20 if sh_span_s >= 43200 else (10 if sh_span_s >= 21600 else 4)
     filter_sql, filter_params = _filter_clause(filters)
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     hop_ms = "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
-    edge_sub = _ch_fact_query(
-        f"custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us",
-        f"{_BASE_WHERE}{filter_sql} AND lower(custom_fields['edge']) IN ('true', '1') AND custom_fields['rid'] != ''",
-    )
-    shield_sub = _ch_fact_query(
-        f"custom_fields['prid'] AS prid, custom_fields['pop'] AS shield_pop, {hop_ms} AS hop_us", shield_where
-    )
-    pairs = service.client.execute(
-        "SELECT e.edge_pop AS edge_pop, s.shield_pop AS shield_pop, count() AS requests, "
-        "quantile(0.50)(e.hop_us - s.hop_us) / 1000.0 AS p50_ms, "
-        "quantile(0.95)(e.hop_us - s.hop_us) / 1000.0 AS p95_ms, "
-        "quantile(0.99)(e.hop_us - s.hop_us) / 1000.0 AS p99_ms "
-        f"FROM ({edge_sub}) AS e INNER JOIN ({shield_sub}) AS s ON s.prid = e.rid GROUP BY edge_pop, shield_pop",
-        params,
-    )
+    if is_real_ch:
+        edge_hash = f" AND cityHash64(custom_fields['rid']) % {sh_join_stride} = 0" if sh_join_stride > 1 else ""
+        shield_hash = f" AND cityHash64(custom_fields['prid']) % {sh_join_stride} = 0" if sh_join_stride > 1 else ""
+        edge_sub = (
+            f"SELECT custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us "
+            f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{edge_hash} AND custom_fields['rid'] != '' "
+            "WHERE lower(custom_fields['edge']) IN ('true', '1')"
+        )
+        shield_sub = (
+            f"SELECT custom_fields['prid'] AS prid, custom_fields['pop'] AS shield_pop, {hop_ms} AS hop_us "
+            f"FROM request_facts PREWHERE {_BASE_WHERE}{shield_hash} AND custom_fields['prid'] != '' "
+            "WHERE lower(custom_fields['edge']) IN ('false', '0')"
+        )
+        pairs = service.client.execute(
+            "SELECT edge_pop, shield_pop, requests, "
+            "quants[1] / 1000.0 AS p50_ms, quants[2] / 1000.0 AS p95_ms, quants[3] / 1000.0 AS p99_ms "
+            "FROM (SELECT e.edge_pop AS edge_pop, s.shield_pop AS shield_pop, "
+            f"count() * {sh_join_stride} AS requests, "
+            "quantilesTDigest(0.50, 0.95, 0.99)(e.hop_us - s.hop_us) AS quants "
+            f"FROM ({edge_sub}) AS e INNER JOIN ({shield_sub}) AS s ON s.prid = e.rid GROUP BY edge_pop, shield_pop)",
+            params,
+        )
+    else:
+        edge_sub = _ch_fact_query(
+            f"custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us",
+            f"{_BASE_WHERE}{filter_sql} AND lower(custom_fields['edge']) IN ('true', '1') AND custom_fields['rid'] != ''",
+        )
+        shield_sub = _ch_fact_query(
+            f"custom_fields['prid'] AS prid, custom_fields['pop'] AS shield_pop, {hop_ms} AS hop_us", shield_where
+        )
+        pairs = service.client.execute(
+            "SELECT e.edge_pop AS edge_pop, s.shield_pop AS shield_pop, count() AS requests, "
+            "quantile(0.50)(e.hop_us - s.hop_us) / 1000.0 AS p50_ms, "
+            "quantile(0.95)(e.hop_us - s.hop_us) / 1000.0 AS p95_ms, "
+            "quantile(0.99)(e.hop_us - s.hop_us) / 1000.0 AS p99_ms "
+            f"FROM ({edge_sub}) AS e INNER JOIN ({shield_sub}) AS s ON s.prid = e.rid GROUP BY edge_pop, shield_pop",
+            params,
+        )
     if not pairs:
         if is_real_ch:
             return ShieldingAnalysis(
@@ -450,11 +480,23 @@ def network_health(
                 else (
                     15
                     if nh_span_s >= 21600
-                    else (2 if nh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
+                    else (5 if nh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST") else 1)
                 )
             )
-            sample_stride = min(raw_stride, max(1, bs // 60)) if raw_stride > 1 else 1
-            stride_sql = minute_stride_sql(start, end, sample_stride) if sample_stride > 1 else ""
+            minute_stride = min(raw_stride, max(1, bs // 60)) if raw_stride > 1 else 1
+            sub_factor = (
+                max(1, raw_stride // minute_stride)
+                if raw_stride > minute_stride and not os.getenv("PYTEST_CURRENT_TEST")
+                else 1
+            )
+            if sub_factor > 1:
+                sec_cutoff = max(1, 60 // sub_factor)
+                sub_factor = 60 // sec_cutoff
+                sec_slice_sql = f" AND toSecond(event_timestamp) < {sec_cutoff}"
+            else:
+                sec_slice_sql = ""
+            sample_stride = minute_stride * sub_factor
+            stride_sql = (minute_stride_sql(start, end, minute_stride) if minute_stride > 1 else "") + sec_slice_sql
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
@@ -515,43 +557,61 @@ def network_health(
                         a_int = int(r["asn"])
                         asn_totals[a_int] = asn_totals.get(a_int, 0) + int(r["cnt"])
                 top_asn_ints = sorted(asn_totals, key=lambda a: asn_totals[a], reverse=True)[:top_n]
-            asn_in_filter = (
-                f" AND custom_fields['asn'] IN ({', '.join(repr(str(a)) for a in top_asn_ints)})"
-                if top_asn_ints
-                else " AND 1=0"
-            )
+            asn_str_in = ", ".join(repr(str(a)) for a in top_asn_ints)
+            asn_in_filter = f" AND custom_fields['asn'] IN ({asn_str_in})" if top_asn_ints else " AND 1=0"
             combine_metro_in_map = map_asn == "all"
+            use_net_dim_rollup = not filter_sql and bool(top_asn_ints) and start is not None and end is not None
+            pct_fallback_sql = (
+                f"SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99, "
+                "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
+                "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
+                f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
+                f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn ORDER BY count() DESC LIMIT {top_n * 5}"
+            )
             fast_queries_list: list[tuple[str, str]] = [
                 (
                     "heatmap",
+                    f"WITH {_RTT} AS _rtt, {_RTT_MIN} AS _rtt_min, {_RTT_VAR} AS _rtt_var, {_ELAPSED} AS _elapsed "
                     f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
-                    f"median(if({_NET_HIT} AND {_ELAPSED} > 0, {_RESP_BYTES} * 1000000.0 / {_ELAPSED}, NULL)) AS throughput_bps, "
-                    f"median({_RTT}) AS rtt_med_us, median({_RTT_MIN}) AS rtt_baseline_us, "
-                    f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
-                    f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr} "
+                    f"quantileTDigest(0.5)(if(position(custom_fields['cache'], 'HIT') > 0 AND _elapsed > 0, {_RESP_BYTES} * 1000000.0 / _elapsed, NULL)) AS throughput_bps, "
+                    f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
+                    f"quantileTDigest(0.5)(_rtt - _rtt_min) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
+                    f"quantileTDigest(0.5)(_rtt_var) AS rtt_jitter_us, {err_pct_expr} "
                     f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                    f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
+                    f"WHERE {_ASN} IS NOT NULL AND _rtt > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
                 ),
                 (
                     "map",
                     f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
                     f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
-                    "anyIf(toFloat64OrNull(custom_fields['lat']), custom_fields['lat'] != '') AS lat, "
-                    "anyIf(toFloat64OrNull(custom_fields['lon']), custom_fields['lon'] != '') AS lon, "
+                    "anyIf(custom_fields['lat'], custom_fields['lat'] != '') AS lat, "
+                    "anyIf(custom_fields['lon'], custom_fields['lon'] != '') AS lon, "
                     f"avg({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
                     f"FROM request_facts PREWHERE {rtt_prewhere} AND country != ''{map_asn_sql} "
                     f"WHERE {_RTT} > 0 "
                     "GROUP BY country, city, region, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 100 BY bucket_ts LIMIT 20000",
                 ),
-                (
-                    "percentiles",
-                    f"SELECT {_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99, "
-                    "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
-                    "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
-                    f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                    f"WHERE {_ASN} IS NOT NULL AND {_RTT} > 0 GROUP BY asn ORDER BY count() DESC LIMIT {top_n * 5}",
-                ),
             ]
+            if use_net_dim_rollup:
+                net_dim_fence = visible_publication_fence_sql(
+                    "network_dimensions", client=service.client, service_id=service.service_id
+                )
+                fast_queries_list.append(
+                    (
+                        "net_dim_pct",
+                        "SELECT toInt32OrNull(value) AS asn, c_speed, sum(requests) AS cnt, "
+                        "sum(if(tcp_rtt_p95_us IS NOT NULL, tcp_rtt_p95_us * tcp_rtt_count, 0)) AS p95_sum, "
+                        "sumIf(tcp_rtt_count, tcp_rtt_p95_us IS NOT NULL) AS p95_w, "
+                        "sum(if(tcp_rtt_p99_us IS NOT NULL, tcp_rtt_p99_us * tcp_rtt_count, 0)) AS p99_sum, "
+                        "sumIf(tcp_rtt_count, tcp_rtt_p99_us IS NOT NULL) AS p99_w "
+                        "FROM network_minute_dimensions "
+                        f"WHERE service_id={{service_id:String}} AND dimension='asn' AND value IN ({asn_str_in}) "
+                        "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)} "
+                        f"AND {net_dim_fence} GROUP BY asn, c_speed HAVING asn IS NOT NULL ORDER BY cnt DESC",
+                    )
+                )
+            else:
+                fast_queries_list.append(("percentiles", pct_fallback_sql))
             if not combine_metro_in_map:
                 fast_queries_list.append(
                     (
@@ -580,13 +640,41 @@ def network_health(
                 thread_name_prefix="hs-net-health",
             )
             shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
-            heatmap_rows, raw_map_rows, pct_rows = (q_results.get(k, []) for k in ("heatmap", "map", "percentiles"))
+            heatmap_rows, raw_map_rows = (q_results.get(k, []) for k in ("heatmap", "map"))
+            net_dim_rows = q_results.get("net_dim_pct", []) if use_net_dim_rollup else []
+            if use_net_dim_rollup and net_dim_rows:
+                pct_acc: dict[int, list[float]] = {}
+                for nr in net_dim_rows:
+                    if nr.get("asn") is None:
+                        continue
+                    a_int = int(nr["asn"])
+                    acc = pct_acc.setdefault(a_int, [0.0, 0.0, 0.0, 0.0])
+                    acc[0] += float(nr.get("p95_sum") or 0.0)
+                    acc[1] += float(nr.get("p95_w") or 0.0)
+                    acc[2] += float(nr.get("p99_sum") or 0.0)
+                    acc[3] += float(nr.get("p99_w") or 0.0)
+                pct_rows = [
+                    {
+                        "asn": a_int,
+                        "p95": (v[0] / v[1]) if v[1] > 0 else None,
+                        "p99": (v[2] / v[3]) if v[3] > 0 else None,
+                    }
+                    for a_int, v in pct_acc.items()
+                ]
+            elif use_net_dim_rollup and top_asn_ints:
+                pct_rows = trace.run(
+                    "percentiles_fallback",
+                    lambda: service.client.execute(pct_fallback_sql, params),
+                    source="fact",
+                )
+            else:
+                pct_rows = q_results.get("percentiles", [])
             if sample_stride > 1:
                 heatmap_rows = [{**r, "reqs": int(r.get("reqs") or 0) * sample_stride} for r in heatmap_rows]
                 raw_map_rows = [{**mr, "reqs": int(mr.get("reqs") or 0) * sample_stride} for mr in raw_map_rows]
             coord_lookup: dict[tuple[str, str], tuple[Any, Any]] = {}
             for mr in raw_map_rows:
-                if mr.get("lat") is not None and mr.get("lon") is not None:
+                if _flt(mr.get("lat")) is not None and _flt(mr.get("lon")) is not None:
                     ckey = (str(mr.get("country") or ""), str(mr.get("city") or ""))
                     if ckey not in coord_lookup:
                         coord_lookup[ckey] = (mr.get("lat"), mr.get("lon"))
@@ -594,10 +682,10 @@ def network_health(
                 {
                     **mr,
                     "lat": mr.get("lat")
-                    if mr.get("lat") is not None
+                    if _flt(mr.get("lat")) is not None
                     else coord_lookup.get((str(mr.get("country") or ""), str(mr.get("city") or "")), (None, None))[0],
                     "lon": mr.get("lon")
-                    if mr.get("lon") is not None
+                    if _flt(mr.get("lon")) is not None
                     else coord_lookup.get((str(mr.get("country") or ""), str(mr.get("city") or "")), (None, None))[1],
                 }
                 for mr in raw_map_rows
@@ -605,6 +693,12 @@ def network_health(
             if raw_speed_rows is not None:
                 speed_rows = [
                     {**r, "cnt": int(r.get("cnt") or 0) * sample_stride} for r in raw_speed_rows if r.get("c_speed")
+                ]
+            elif use_net_dim_rollup and net_dim_rows:
+                speed_rows = [
+                    {"asn": r["asn"], "c_speed": str(r["c_speed"]), "cnt": int(r.get("cnt") or 0)}
+                    for r in net_dim_rows
+                    if r.get("asn") is not None and r.get("c_speed")
                 ]
             else:
                 speed_rows = []
