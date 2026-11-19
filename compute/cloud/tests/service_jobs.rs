@@ -6592,7 +6592,7 @@ fn attach_alongside(other_has_rum: bool) {
     );
     assert_eq!(
         validated["defaults"]["fos_bucket_name"],
-        "fos-fixtureservice-logs"
+        "fos-fixtureservice-cloud-logs"
     );
     assert_eq!(validated["defaults"]["fos_region"], "us-east-1");
 

@@ -275,7 +275,11 @@ fn route(
                 "defaults": {
                     "endpoint_name": "Fastly Object Storage Logs",
                     "fos_region": "us-east-1",
-                    "fos_bucket_name": format!("fos-{}-logs", safe_service_id(sid)),
+                    "fos_bucket_name": if capture == Capture::Attached {
+                        format!("fos-{}-cloud-logs", safe_service_id(sid))
+                    } else {
+                        format!("fos-{}-logs", safe_service_id(sid))
+                    },
                     "fos_prefix": "",
                     "sample_rate": 100,
                     "edge_only": true,
