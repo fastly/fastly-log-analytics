@@ -3,7 +3,7 @@
 import React, { useState, useMemo } from 'react'
 import { ArrowRight, AlertTriangle, HelpCircle } from 'lucide-react'
 import Link from 'next/link'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import type { components } from '@/types/api'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +13,7 @@ import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { useNowMs } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
+import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
 import { adminJson } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { formatCount, formatDate, buildServiceHref, cn } from '@/lib/utils'
@@ -327,8 +328,9 @@ export function CorrelatorLeaderboard({
   refreshInterval?: number
   limit?: number
 }) {
+  const correlateQueryKey = ['control-room', 'correlate', serviceId, dimension, limit] as const
   const { data, isFetching: loading } = useQuery<CorrelatorResult | null>({
-    queryKey: ['control-room', 'correlate', serviceId, dimension, limit],
+    queryKey: correlateQueryKey,
     queryFn: ({ signal }) =>
       adminJson<'/api/services/{service_id}/control-room/correlate', CorrelatorResult, 'post'>(
         '/api/services/{service_id}/control-room/correlate',
@@ -341,7 +343,7 @@ export function CorrelatorLeaderboard({
         },
       ),
     enabled: !!serviceId,
-    placeholderData: keepPreviousData,
+    placeholderData: keepPreviousWithinService(correlateQueryKey, 2),
     refetchInterval: refreshInterval,
     refetchIntervalInBackground: false,
     retry: false,

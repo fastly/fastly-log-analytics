@@ -279,8 +279,8 @@ export function useBootstrap() {
   const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: queryKeys.bootstrap(),
-    queryFn: async () => {
-      const data = await unwrapClient(client.GET('/api/bootstrap'))
+    queryFn: async ({ signal }) => {
+      const data = await unwrapClient(client.GET('/api/bootstrap', { signal }))
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )
@@ -318,9 +318,10 @@ export function useLogFieldsCatalog(serviceId?: string) {
 
   return useQuery({
     queryKey: queryKeys.logFieldsCatalog(sid),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       return await unwrapClient(
         client.GET('/api/log-fields/catalog', {
+          signal,
           params: { query: { service_id: sid } },
         }),
       )

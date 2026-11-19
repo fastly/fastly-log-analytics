@@ -183,7 +183,7 @@ async function redirectToShareLoginIfSessionDead(verifyCloudSession: boolean): P
   window.location.replace(`/share-login?return=${encodeURIComponent(returnTo)}`);
 }
 
-export async function handleApiStatusSideEffects(
+async function handleApiStatusSideEffects(
   status: number,
   bodyOrError: unknown,
   method?: string,
@@ -241,7 +241,8 @@ export async function adminFetch(input: string | URL | Request, init: RequestIni
   const r = await rawAdminFetch(input, init);
   if (!r.ok) {
     const errorText = typeof r.clone === "function" ? await r.clone().text().catch(() => "") : "";
-    await handleApiStatusSideEffects(r.status, errorText, init.method);
+    const method = init.method ?? (input instanceof Request ? input.method : undefined);
+    await handleApiStatusSideEffects(r.status, errorText, method);
   }
   return r;
 }

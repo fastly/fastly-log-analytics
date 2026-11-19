@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react'
 import { useQueryState, parseAsString } from 'nuqs'
-import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import Link from 'next/link'
 import {
   AlertCircle,
@@ -14,6 +14,7 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
+  keepPreviousWithinService,
   useDebouncedFilterPayload,
   useDebounce,
   useInsightsDefaults,
@@ -96,10 +97,11 @@ function InsightsBody({
   const [activeTab, setActiveTab] = useQueryState('tab', parseAsString.withDefault(normalizeTabKey(initialTab)))
   const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
 
+  const insightsQueryKey = hasActiveFilters
+    ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
+    : ['insights', activeServiceId, windowHours, baselineHours]
   const { data, isLoading: scanLoading, error, isSuccess, isFetching, isPlaceholderData } = useQuery({
-    queryKey: hasActiveFilters
-      ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
-      : ['insights', activeServiceId, windowHours, baselineHours],
+    queryKey: insightsQueryKey,
     queryFn: async ({ signal }) => {
       return unwrapClient(client.POST('/api/insights', {
         signal,
@@ -114,7 +116,7 @@ function InsightsBody({
     enabled: !!activeServiceId && scanReady,
     staleTime: (query) => (isEvaluating(query.state.data) ? 0 : 60000),
     refetchInterval: (query) => (isEvaluating(query.state.data) ? INSIGHTS_POLL_MS : false),
-    placeholderData: keepPreviousData,
+    placeholderData: keepPreviousWithinService(insightsQueryKey, 1),
   })
   const isLoading = scanLoading || (!!activeServiceId && !scanReady && !data && !error)
 

@@ -115,7 +115,7 @@ export function RumClient({
     serviceId,
     filterPayload,
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    queryFn: async ({ rangeBody }) => {
+    queryFn: async ({ rangeBody, signal }) => {
       if (!serviceId) return null
       const params = new URLSearchParams()
       for (const [k, v] of Object.entries(rangeBody)) if (v) params.append(k, v)
@@ -124,6 +124,7 @@ export function RumClient({
       const res = await adminJsonResult<'/api/services/{service_id}/rum/analytics', RumAnalytics>(
         '/api/services/{service_id}/rum/analytics',
         `/api/services/${serviceId}/rum/analytics${qs ? `?${qs}` : ''}`,
+        { signal },
       )
       if (!res.ok) throw new Error(res.errorText || `RUM analytics failed (HTTP ${res.status})`)
       return recordOrNull(res.data)
@@ -133,7 +134,7 @@ export function RumClient({
 
   const { data: liveEvents, isLoading: isLiveEventsLoading, isError: isLiveEventsError, refetch: refetchLiveEvents } = useQuery({
     queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!serviceId) return []
       const params = new URLSearchParams()
       if (startTime) params.append('start_time', startTime)
@@ -143,6 +144,7 @@ export function RumClient({
       const res = await adminJsonResult<'/api/services/{service_id}/rum/live-events', RumLiveEvent[]>(
         '/api/services/{service_id}/rum/live-events',
         qs ? `/api/services/${serviceId}/rum/live-events?${qs}` : `/api/services/${serviceId}/rum/live-events`,
+        { signal },
       )
       if (!res.ok) throw new Error(res.errorText || `RUM live events failed (HTTP ${res.status})`)
       return arrayOrEmpty(res.data)

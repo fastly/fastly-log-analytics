@@ -6,7 +6,7 @@ import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly } from '@/components/DataTable'
 import { AlertCircle, ArrowLeft, ArrowRight, Database, Filter, X } from 'lucide-react'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
-import { useTimeRange } from '@/hooks/useDashboardCards'
+import { keepPreviousWithinService, useTimeRange } from '@/hooks/useDashboardCards'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
 import { ELAPSED_FRESHNESS, formatElapsed } from '@/lib/utils'
@@ -107,7 +107,7 @@ export function useHighScaleRequestFacts({
       }
       return data
     },
-    placeholderData: (previousData) => previousData,
+    placeholderData: keepPreviousWithinService(queryKey, 2),
     retry: false,
   })
 

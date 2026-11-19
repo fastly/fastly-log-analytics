@@ -22,6 +22,7 @@ import {
   useBootstrapResolved,
   useIsAnalyst,
 } from '@/hooks/useBootstrap'
+import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
 import { useDateFormat, useDeferredDeleteWithUndo } from '@/hooks/useSSE'
 import { ReportShell } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
@@ -116,7 +117,7 @@ export default function AlertsClient() {
             }),
           )
         : unwrapClient(client.GET('/api/alerts/', { signal })),
-    placeholderData: (prev) => prev ?? queryClient.getQueryData(['alerts', null]),
+    placeholderData: keepPreviousWithinService(['alerts', activeServiceId], 1),
     enabled: !isAnalyst,
     refetchInterval: logPeriodSeconds * 1000,
     refetchIntervalInBackground: false,

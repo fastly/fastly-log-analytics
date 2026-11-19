@@ -1665,6 +1665,37 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
       })
     })
   })
+
+  describe('AbortSignal propagation in shared hooks', () => {
+    it('propagates AbortSignal from useLogFieldsCatalog, useInsightsDefaults, and useRumStatus', async () => {
+      const getSpy = vi.spyOn(client, 'GET').mockResolvedValue({
+        data: { fields: [], groups: [], earliest_log_at: null } as never,
+        response: new Response(null, { status: 200 }),
+      })
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        Response.json({ enabled: true }),
+      )
+
+      const { useRumStatus } = await import('@/hooks/useDashboardCards')
+      const qc = createTestQueryClient()
+      const wrapper = makeQueryWrapper(qc)
+
+      const { result: catalog } = renderHook(() => useLogFieldsCatalog('svc-sig'), { wrapper })
+      const { result: insights } = renderHook(() => useInsightsDefaults('svc-sig'), { wrapper })
+      const { result: rum } = renderHook(() => useRumStatus('svc-sig'), { wrapper })
+
+      await waitFor(() => {
+        expect(catalog.current.isSuccess).toBe(true)
+        expect(insights.current.windowHours).toBeTruthy()
+        expect(rum.current.data).toEqual({ enabled: true })
+      })
+
+      const getCalls = getSpy.mock.calls as Array<Array<unknown>>
+      expect(getCalls.some(([p, o]) => p === '/api/log-fields/catalog' && (o as { signal?: AbortSignal })?.signal instanceof AbortSignal)).toBe(true)
+      expect(getCalls.some(([p, o]) => p === '/api/log-extents' && (o as { signal?: AbortSignal })?.signal instanceof AbortSignal)).toBe(true)
+      expect(fetchSpy.mock.calls.some(([req]) => req instanceof Request && req.url.includes('/rum/status') && req.signal instanceof AbortSignal)).toBe(true)
+    })
+  })
 })
 
 // ============================================================================

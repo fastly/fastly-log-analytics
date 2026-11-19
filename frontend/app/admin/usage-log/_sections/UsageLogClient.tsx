@@ -1,7 +1,7 @@
 'use client'
 
 import React, { Suspense, useState, useMemo } from 'react'
-import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { parseAsString, useQueryStates } from 'nuqs'
 import { ArrowLeft, Download, DollarSign, Trash2, RefreshCw } from 'lucide-react'
@@ -13,6 +13,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { PageHeader, ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
+import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { LogAccountingPanel } from './LogAccountingPanel'
 import {
@@ -139,31 +140,34 @@ export function UsageLogClient(props?: UsageLogClientProps) {
     page_size: '500',
   })
 
-  const makeUsageQueryOpts = (kind: 'head' | 'full', pageSize: number, enabled: boolean) => ({
-    queryKey: ['usage-log', kind, activeServiceId, preset, usageType, processFilter, operationFilter],
-    queryFn: async ({ signal }: { signal: AbortSignal }) => {
-      const { start, end } = computeUsageWindow(preset, initialNowMs)
-      const { data, error } = await client.GET('/api/admin/usage-log', {
-        signal,
-        params: {
-          query: {
-            service_id: activeServiceId || '',
-            start,
-            end,
-            ...filterParams,
-            page_size: pageSize,
+  const makeUsageQueryOpts = (kind: 'head' | 'full', pageSize: number, enabled: boolean) => {
+    const queryKey = ['usage-log', kind, activeServiceId, preset, usageType, processFilter, operationFilter] as const
+    return {
+      queryKey,
+      queryFn: async ({ signal }: { signal: AbortSignal }) => {
+        const { start, end } = computeUsageWindow(preset, initialNowMs)
+        const { data, error } = await client.GET('/api/admin/usage-log', {
+          signal,
+          params: {
+            query: {
+              service_id: activeServiceId || '',
+              start,
+              end,
+              ...filterParams,
+              page_size: pageSize,
+            },
           },
-        },
-      })
-      if (error) throw new Error(extractApiError(error))
-      return data as UsageLogResponse
-    },
-    enabled,
-    placeholderData: keepPreviousData,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-  })
+        })
+        if (error) throw new Error(extractApiError(error))
+        return data as UsageLogResponse
+      },
+      enabled,
+      placeholderData: keepPreviousWithinService(queryKey, 2),
+      staleTime: 30_000,
+      refetchInterval: 30_000,
+      refetchIntervalInBackground: false,
+    }
+  }
 
   // Cloud reads the whole ops log for either page size, so a head-then-full pair would read it twice
   // and leave a second request pending right after the first one settles.

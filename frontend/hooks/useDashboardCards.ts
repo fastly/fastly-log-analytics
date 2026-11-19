@@ -184,11 +184,12 @@ export function useRumStatus(
 ) {
   return useQuery<RumStatus | null>({
     queryKey: queryKeys.rumStatus(serviceId),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!serviceId) return null
       const res = await adminJsonResult<'/api/services/{service_id}/rum/status', RumStatusWire>(
         '/api/services/{service_id}/rum/status',
         `/api/services/${serviceId}/rum/status`,
+        { signal },
       )
       if (res.status === 403) return { enabled: false, unauthorized: true }
       return res.ok ? res.data : null
@@ -353,8 +354,8 @@ export function useInsightsDefaults(
 ): InsightsDefaults {
   const { data } = useQuery({
     queryKey: queryKeys.logExtents(activeServiceId),
-    queryFn: async () => {
-      return await unwrapClient(client.GET('/api/log-extents'))
+    queryFn: async ({ signal }) => {
+      return await unwrapClient(client.GET('/api/log-extents', { signal }))
     },
     enabled: !!activeServiceId,
     staleTime: 60_000,

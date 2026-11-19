@@ -3,7 +3,7 @@
 import React, { useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { parseAsString, useQueryState } from 'nuqs'
-import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -16,6 +16,7 @@ import {
 import { client, queryKeys, unwrapClient } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { useMounted } from '@/hooks/useBootstrap'
+import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
 import { ClickHousePanelFallback } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -79,11 +80,12 @@ export function ClickHouseAdminClient({ initialServiceId }: ClickHouseAdminClien
   const [replayError, setReplayError] = useState<string | null>(null)
   const [replayResult, setReplayResult] = useState<ClickHouseReplayResponse | null>(null)
 
+  const statusQueryKey = queryKeys.admin.clickhouseStatus(resolvedServiceId || null)
   const statusQuery = useQuery({
-    queryKey: queryKeys.admin.clickhouseStatus(resolvedServiceId || null),
+    queryKey: statusQueryKey,
     queryFn: ({ signal }) => fetchClickHouseStatus(resolvedServiceId, signal),
     enabled: mounted && Boolean(resolvedServiceId),
-    placeholderData: keepPreviousData,
+    placeholderData: keepPreviousWithinService(statusQueryKey, 3),
     staleTime: 15_000,
     retry: false,
   })

@@ -132,6 +132,20 @@ describe("API Cloud isolation", () => {
     controller.abort();
     expect(request.signal.aborted).toBe(true);
   });
+
+  it("uses Request.method for mutation error side effects when init.method is omitted", async () => {
+    const utils = await import("@/lib/utils");
+    const toastSpy = vi.spyOn(utils, "showToast");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "delete blocked" }, { status: 400 })));
+    try {
+      const req = new Request("https://upstream.example.test/api/services/demo/views/1", { method: "DELETE" });
+      const res = await adminFetch(req);
+      expect(res.status).toBe(400);
+      expect(toastSpy).toHaveBeenCalledWith("delete blocked", "error");
+    } finally {
+      toastSpy.mockRestore();
+    }
+  });
 });
 
 describe("Cloud subresource 401 session verification", () => {

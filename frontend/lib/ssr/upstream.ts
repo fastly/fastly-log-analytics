@@ -56,7 +56,7 @@ export function resolveDefaultSsrRangeKey(
   return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
 }
 
-export async function fetchSsrRangePost(options: {
+async function fetchSsrRangePost(options: {
   serviceId: string | undefined
   path: string
   logPrefix: string
@@ -371,7 +371,7 @@ export function seedDehydratedState(key: QueryKey, data: unknown): DehydratedSta
 export const firstParam = (v: string | string[] | undefined): string | undefined =>
   Array.isArray(v) ? v[0] : v
 
-export function resolveServerServiceId(
+function resolveServerServiceId(
   params: { service?: string | string[] },
   bootstrap:
     | {
