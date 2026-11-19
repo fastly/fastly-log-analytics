@@ -365,7 +365,7 @@ def test_worker_autoscaling_follows_an_existing_secret():
 
 
 def test_worker_autoscaling_without_a_metadata_dsn_fails_at_template_time():
-    assert "secrets.metadataDsn" in _render_error("autoscaling.enabled=true")
+    assert "secrets.metadataDsn" in _render_error(_CURSOR, "autoscaling.enabled=true")
 
 
 def test_no_worker_scaledobject_without_a_worker_fleet():
