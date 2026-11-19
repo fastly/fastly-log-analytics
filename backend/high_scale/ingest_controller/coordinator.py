@@ -241,7 +241,7 @@ class HighScaleIngestController:
         if self._control is not None and not tokens_by_key and hasattr(self._control, "source"):
             for descriptor, _ in sources_payloads:
                 source = self._control.source(service_id, descriptor.object_key)
-                tokens_by_key[source.object_key] = source.claim_token
+                tokens_by_key[descriptor.object_key] = source.claim_token
         source_batches: list[tuple[ArchiveSourceObject, list[dict[str, Any]]]] = []
         all_events: list[dict[str, Any]] = []
         sibling_events: list[dict[str, Any]] = []
@@ -385,7 +385,7 @@ class HighScaleIngestController:
                                 poison_keys,
                                 expected_owner_epoch=owner.owner_epoch,
                                 error=poison_err,
-                                claim_tokens=tuple(tokens_by_key[key] for key in poison_keys),
+                                claim_tokens=tuple(tokens_by_key[key] for key in poison_keys if key in tokens_by_key),
                             )
                         elif self._control is None and hasattr(self._ledger, "mark_failed"):
                             for p_key in poison_keys:
@@ -476,7 +476,7 @@ class HighScaleIngestController:
                     object_keys,
                     manifest_id=manifest.manifest_id,
                     expected_owner_epoch=owner.owner_epoch,
-                    claim_tokens=tuple(tokens_by_key[key] for key in object_keys),
+                    claim_tokens=tuple(tokens_by_key[key] for key in object_keys if key in tokens_by_key),
                     next_cursor=next_cursor,
                     domain=domain,
                     partition_id=partition_id,
@@ -577,7 +577,7 @@ class HighScaleIngestController:
                 manifest_id=manifest_id,
                 expected_owner_epoch=owner_epoch,
                 error=error,
-                claim_tokens=tuple(tokens_by_key[key] for key in object_keys),
+                claim_tokens=tuple(tokens_by_key[key] for key in object_keys if key in tokens_by_key),
             )
         elif hasattr(control, "fail_sources_batch"):
             control.fail_sources_batch(
@@ -585,7 +585,7 @@ class HighScaleIngestController:
                 object_keys,
                 expected_owner_epoch=owner_epoch,
                 error=error,
-                claim_tokens=tuple(tokens_by_key[key] for key in object_keys),
+                claim_tokens=tuple(tokens_by_key[key] for key in object_keys if key in tokens_by_key),
             )
 
     def retry_archived_publications(
@@ -1408,8 +1408,9 @@ class HighScaleWorkerCoordinator:
                             )
                             if c.claimed:
                                 claimed_keys.add(s.object_key)
-                                source = self._control.source(service_id, s.object_key)
-                                claim_tokens_by_key[s.object_key] = source.claim_token
+                                if hasattr(self._control, "source"):
+                                    source = self._control.source(service_id, s.object_key)
+                                    claim_tokens_by_key[s.object_key] = source.claim_token
                         except ValueError:
                             if not self._already_terminal(service_id, s.object_key):
                                 failed += 1
@@ -1496,7 +1497,11 @@ class HighScaleWorkerCoordinator:
                                     else None
                                 ),
                                 claim_tokens=(
-                                    tuple(claim_tokens_by_key[src.object_key] for src, _ in valid_payloads)
+                                    tuple(
+                                        claim_tokens_by_key[src.object_key]
+                                        for src, _ in valid_payloads
+                                        if src.object_key in claim_tokens_by_key
+                                    )
                                     if self._control is not None
                                     else ()
                                 ),
@@ -1520,7 +1525,9 @@ class HighScaleWorkerCoordinator:
                                         expected_owner_epoch=epoch,
                                         error=str(exc),
                                         claim_tokens=tuple(
-                                            claim_tokens_by_key[src.object_key] for src, _ in valid_payloads
+                                            claim_tokens_by_key[src.object_key]
+                                            for src, _ in valid_payloads
+                                            if src.object_key in claim_tokens_by_key
                                         ),
                                     )
                                 except Exception:

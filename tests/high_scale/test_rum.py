@@ -1110,7 +1110,14 @@ def test_reinspection_failure_and_missing_object_cursor_handling(stage: str) -> 
         forward_cursor, (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL), page, epoch=5
     )
     control.discover_source.return_value = SimpleNamespace(status="discovered")
-    control.claim_sources_batch.return_value = (SimpleNamespace(object_key=descriptor.object_key),)
+    control.claim_sources_batch.return_value = (
+        SimpleNamespace(
+            object_key=descriptor.object_key,
+            claim_token=SimpleNamespace(
+                object_key=descriptor.object_key, owner="worker", owner_epoch=5, lease_generation=1
+            ),
+        ),
+    )
     reader, controller = MagicMock(), MagicMock()
     if stage == "read":
         reader.read_source_object.side_effect = RuntimeError("temporary FOS read failure")
