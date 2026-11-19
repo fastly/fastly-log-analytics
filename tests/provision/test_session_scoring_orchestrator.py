@@ -910,7 +910,7 @@ def test_ensure_cdn_service_and_redeploy_cdn_vcl():
     ):
         mock_rec.side_effect = lambda **_kw: (
             svcconfig.mutate_config(_MERGE_SID, lambda c: c.setdefault("fos_proxy", {}).update(service_id="cdn123")),
-            SimpleNamespace(activated_version=3),
+            SimpleNamespace(activated_version=3, created=True),
         )[1]
         out = fastly_api.ensure_cdn_service({"service_id": _MERGE_SID, "fos_bucket": "b"}, "AK", "SK", "tok")
         saved = _persisted()
@@ -927,7 +927,7 @@ def test_ensure_cdn_service_and_redeploy_cdn_vcl():
             _MERGE_SID, {"service_id": _MERGE_SID, "keep_me": 1, "rum": {"enabled": True, "cid_salt": salt}}
         )
         mock_rec.side_effect = None
-        mock_rec.return_value = SimpleNamespace(activated_version=3)
+        mock_rec.return_value = SimpleNamespace(activated_version=3, created=False)
         fastly_api.ensure_cdn_service(
             {"service_id": _MERGE_SID, "fos_bucket": "b", "rum": {"enabled": False}}, "AK", "SK", "tok"
         )
@@ -938,7 +938,7 @@ def test_ensure_cdn_service_and_redeploy_cdn_vcl():
             _MERGE_SID,
             {"service_id": _MERGE_SID, "cdn_service_id": "cdn9", "fos_proxy": {"service_id": "cdn9"}, "other": [1, 2]},
         )
-        mock_rec.return_value = SimpleNamespace(activated_version=4)
+        mock_rec.return_value = SimpleNamespace(activated_version=4, created=False)
         assert fastly_api.redeploy_cdn_vcl("cdn9", "tok", rate_limiting=False) == 4
         assert _persisted()["fos_proxy"] == {"service_id": "cdn9", "rate_limiting_enabled": False}
 

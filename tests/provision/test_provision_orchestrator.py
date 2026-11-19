@@ -905,7 +905,9 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
 
     with (
         _mocked_provision_steps(
-            logging_side_effect=lambda state, _token: (state.__setitem__("previous_logging_version", 5), 99)[1],
+            logging_side_effect=lambda state, _token, **_kwargs: (state.__setitem__("previous_logging_version", 5), 99)[
+                1
+            ],
             write_side_effect=raising_write,
             teardown_side_effect=fake_teardown,
         ),

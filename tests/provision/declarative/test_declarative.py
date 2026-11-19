@@ -706,12 +706,17 @@ def test_update_local_config_goes_through_the_locked_mutate_config(tmp_path, mon
     assert saved["last_activated_version"] == 7 and saved["other"] == "keep"
 
 
-def test_update_local_config_skips_a_read_only_volume(monkeypatch):
+def test_update_local_config_raises_on_oserror_and_missing_config(monkeypatch):
     def boom(*a, **k):
         raise OSError("read-only file system")
 
     monkeypatch.setattr(svcconfig, "mutate_config", boom)
-    reconciler._update_local_config("svc-x", lambda c: None)
+    with pytest.raises(OSError, match="read-only file system"):
+        reconciler._update_local_config("svc-x", lambda c: None)
+
+    monkeypatch.setattr(svcconfig, "mutate_config", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="No config found for service svc-x"):
+        reconciler._update_local_config("svc-x", lambda c: None)
 
 
 # ── Merged from tests/provision/declarative/test_state.py ──
@@ -881,6 +886,7 @@ def _reconcile_env(*, snippets=None, endpoints=None, backends=None, dicts=None, 
         patch("backend.provision.declarative.reconciler._activate_draft") as m_act,
         patch("backend.provision.declarative.reconciler.upload_rum_tracker_js") as m_upload,
         patch("backend.provision.declarative.reconciler._purge_rum_surrogate_key") as m_purge,
+        patch("backend.provision.declarative.reconciler._update_local_config"),
     ):
         yield {
             "validate": m_val,
