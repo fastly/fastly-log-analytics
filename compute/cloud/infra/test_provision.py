@@ -1265,6 +1265,59 @@ def test_package_upload_uses_multipart_binary_without_token_arguments(package, m
     assert b'name="package"; filename="flp.tar.gz"' in request.content
 
 
+def test_package_upload_retries_one_transient_transport_failure(package, monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ConnectError("airport uplink reset", request=request)
+        return httpx.Response(200, content=b'{"metadata":{"files_hash":"synthetic-files-hash"}}')
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(flaky))
+    monkeypatch.setattr(provision.time, "sleep", lambda _: None)
+    result = provision.FastlyAPI("deploy-token").upload_package("compute-id", 3, package)
+
+    assert result == {"metadata": {"files_hash": "synthetic-files-hash"}}
+    assert len(requests) == 2
+    assert requests[0].content == requests[1].content
+
+
+def test_package_upload_stops_after_three_transport_failures(package, monkeypatch) -> None:
+    attempts = 0
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("airport uplink stalled", request=request)
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(unavailable))
+    monkeypatch.setattr(provision.time, "sleep", lambda _: None)
+
+    with pytest.raises(provision.APIError, match="/version/3/package failed"):
+        provision.FastlyAPI("deploy-token").upload_package("compute-id", 3, package)
+    assert attempts == 3
+
+
+def test_package_upload_does_not_retry_malformed_json(package, monkeypatch, caplog) -> None:
+    attempts = 0
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, content=b'{"metadata":')
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(malformed))
+
+    with pytest.raises(provision.APIError, match="/version/3/package failed"):
+        provision.FastlyAPI("deploy-token").upload_package("compute-id", 3, package)
+
+    assert attempts == 1
+    terminal = json.loads(caplog.records[-1].message)
+    assert terminal["status"] == 200
+    assert terminal["error_type"] == "JSONDecodeError"
+
+
 def test_package_upload_allows_longer_than_default_api_timeout(package, monkeypatch) -> None:
     timeouts: dict[str, dict[str, float]] = {}
 

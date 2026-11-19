@@ -62,6 +62,8 @@ DICTIONARIES = {
 HTTP_TRANSPORT: httpx.BaseTransport | None = None
 # The ~25 MB package upload has taken over 90 s; Fastly ingests it slowly.
 PACKAGE_UPLOAD_TIMEOUT_S = 300.0
+PACKAGE_UPLOAD_ATTEMPTS = 3
+PACKAGE_UPLOAD_RETRY_BASE_DELAY_S = 1.0
 
 
 def _http_client(*, timeout: float, transport: httpx.BaseTransport | None = None) -> httpx.Client:
@@ -127,6 +129,8 @@ class FastlyAPI:
                 "Expect": "100-continue",
             },
             timeout=PACKAGE_UPLOAD_TIMEOUT_S,
+            attempts=PACKAGE_UPLOAD_ATTEMPTS,
+            retry_base_delay=PACKAGE_UPLOAD_RETRY_BASE_DELAY_S,
         )
 
     def _send(
@@ -137,21 +141,48 @@ class FastlyAPI:
         headers: dict[str, str],
         *,
         timeout: float = 90.0,
+        attempts: int | None = None,
+        retry_base_delay: float = 0.0,
     ) -> Any:
         started = time.monotonic()
         status: int | None = None
         received = 0
+        error_type: str | None = None
         url = API_BASE + path
 
         def _do_request() -> httpx.Response:
             with _http_client(timeout=timeout, transport=self._transport) as client:
                 return client.request(method, url, content=data, headers=headers)
 
+        retry_attempts = self._attempts if attempts is None else max(1, attempts)
+        retry_count = 0
+
+        def _before_retry(exc: BaseException) -> None:
+            nonlocal retry_count
+            retry_count += 1
+            LOG.warning(
+                json.dumps(
+                    {
+                        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+                        "event": "fastly.api_retry",
+                        "run_id": self._run_id,
+                        "method": method,
+                        "path": path.split("?")[0],
+                        "attempt": retry_count + 1,
+                        "max_attempts": retry_attempts,
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            )
+
         try:
             response = retry_call(
                 _do_request,
                 retry_on=lambda exc: isinstance(exc, (httpx.TransportError, TimeoutError)),
-                attempts=self._attempts,
+                attempts=retry_attempts,
+                base_delay=retry_base_delay,
+                sleep=time.sleep,
+                before_retry=_before_retry,
             )
             status = response.status_code
             body = response.content
@@ -159,13 +190,15 @@ class FastlyAPI:
             if status >= 400:
                 raise APIError(f"Fastly {method} {path.split('?')[0]} returned {status}")
             return json.loads(body) if body else None
-        except APIError:
+        except APIError as exc:
+            error_type = type(exc).__name__
             raise
-        except (httpx.HTTPError, TimeoutError, OSError, json.JSONDecodeError):
+        except (httpx.HTTPError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            error_type = type(exc).__name__
             raise APIError(f"Fastly {method} {path.split('?')[0]} failed") from None
         finally:
             LOG.log(
-                logging.INFO if status is not None and status < 400 else logging.ERROR,
+                (logging.INFO if error_type is None and status is not None and status < 400 else logging.ERROR),
                 json.dumps(
                     {
                         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -176,6 +209,7 @@ class FastlyAPI:
                         "status": status,
                         "duration_ms": round((time.monotonic() - started) * 1000, 1),
                         "received_bytes": received,
+                        "error_type": error_type,
                     }
                 ),
             )
