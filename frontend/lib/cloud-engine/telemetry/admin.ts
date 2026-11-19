@@ -1,4 +1,4 @@
-import type { paths } from "../cloud-api.generated";
+import type { components, paths } from "../cloud-api.generated";
 import { isNetworkFailure, retryNetwork } from "../fetch-retry";
 import type { OpsKind } from "./kinds";
 
@@ -24,34 +24,13 @@ export type OperationalLoggingChange = {
   dev_telemetry_available?: boolean;
 };
 
-export type FlushResult = {
-  status: string;
-  rows: number;
-  files: number;
-  purged: number;
-  outbox_depth: number;
-};
+export type FlushResult =
+  paths["/api/admin/logs/flush"]["post"]["responses"]["200"]["content"]["application/json"];
 
-export type HistoryJob = {
-  kind: string;
-  older_than_days: number | null;
-  cutoff_ts: number;
-  status: "deleting" | "purging" | "complete" | string;
-  actor: string;
-  started_at: number;
-  updated_at: number;
-  deleted: number;
-  error: string | null;
-};
+export type HistoryJob = components["schemas"]["LogHistoryJob"];
 
-export type SweepResult = {
-  deleted: number;
-  failed: number;
-  bytes: number;
-  more_pending: boolean;
-  datasets: unknown;
-  backend_calls: number;
-};
+export type SweepResult =
+  paths["/api/admin/logs/sweep"]["post"]["responses"]["200"]["content"]["application/json"];
 
 export type BackfillJob = {
   status: "running" | "complete" | string;

@@ -1,3 +1,4 @@
+import type { components } from "./cloud-api.generated";
 import { failure } from "./engine-utils";
 import { sseResponse } from "./sse-response";
 
@@ -7,13 +8,7 @@ import { sseResponse } from "./sse-response";
 // through the generation-checked native route and streams its status until it
 // reaches a terminal state.
 
-type DeleteDataStatus = {
-  status: "none" | "fencing" | "resetting" | "cleanup" | "complete" | "failed" | "cancelled";
-  error?: string | null;
-  messages?: { at: number; text: string }[];
-  deleted?: Record<string, number>;
-  bytes?: number;
-};
+type DeleteDataStatus = components["schemas"]["DeleteDataStatus"];
 
 const TERMINAL = new Set(["complete", "failed", "cancelled", "none"]);
 

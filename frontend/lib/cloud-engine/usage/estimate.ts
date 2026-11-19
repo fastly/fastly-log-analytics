@@ -16,6 +16,8 @@ export const MONTH_DAYS = 30;
 export const DEFAULT_MIN_BILLED_DAYS = LIST_RATES.min_billed_days;
 
 /** The logged service and its logging settings, as in v3's prefill. */
+import type { components } from "../cloud-api.generated";
+
 export interface EstimateInputs {
   requestsPerDay: number;
   edgeRequestsPerDay: number;
@@ -77,10 +79,7 @@ export interface UnitCosts {
 }
 
 /** Per-service compaction setting (`svc:<id>` `compaction`), server side in Task 23. */
-export interface CompactionSetting {
-  mode: "off" | "size_target";
-  size_target_mb: number;
-}
+export type CompactionSetting = components["schemas"]["CompactionSetting"];
 
 /** The calculator's compaction what-if. */
 export interface CompactionInputs {
