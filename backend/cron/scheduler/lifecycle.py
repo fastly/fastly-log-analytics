@@ -73,6 +73,8 @@ def dev_mode_no_crons() -> bool:
     return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
 
 
+# Watchdog threshold (seconds): logs an error and waits for worker cleanup before releasing
+# the APScheduler slot (does not forcibly kill the worker thread).
 _CRON_HARD_CAP_S = 300
 _WATCHDOG_MAX_WORKERS = 12
 _watchdog_lock = threading.Lock()

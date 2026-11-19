@@ -108,9 +108,16 @@ def discover_prefix(
     start_time: str | None = None,
     run_id: int | None = None,
     originating_task: str = "log_discovery",
+    max_files: int | None = None,
+    max_seconds: float | None = None,
 ) -> int:
     del start_time, run_id, originating_task
-    return _discover_high_scale_prefix(service_id, domain="request", prefix_subpath=prefix_subpath)
+    kwargs: dict[str, Any] = {}
+    if max_files is not None:
+        kwargs["max_files"] = max_files
+    if max_seconds is not None:
+        kwargs["max_seconds"] = max_seconds
+    return _discover_high_scale_prefix(service_id, domain="request", prefix_subpath=prefix_subpath, **kwargs)
 
 
 def _is_batch_due(service_id: str, cfg: dict[str, Any] | None = None) -> bool:
@@ -311,13 +318,12 @@ _FULL_SWEEP_DEFAULT_MAX_SECONDS = 900
 @cron_task("cron.full_sync", job_name="full_sync")
 def _run_full_sweep(
     service_id: str,
-    max_files: int = _FULL_SWEEP_DEFAULT_MAX_FILES,
-    max_seconds: int = _FULL_SWEEP_DEFAULT_MAX_SECONDS,
+    max_files: int | None = None,
+    max_seconds: int | None = None,
     run_id: int | None = None,
     force: bool = False,
 ) -> None:
     """Daily catch-net: full LIST over raw/request/ to pick up late-arriving files."""
-    del max_files, max_seconds
     if _refuse_if_dev_no_crons(service_id, "full_sweep"):
         return
 
@@ -326,6 +332,16 @@ def _run_full_sweep(
     src = get_source_for_service(service_id)
     if src is None or (not force and should_defer_cron("full_sync", service_id)):
         return
+
+    if max_files is None or max_seconds is None:
+        cfg = svcconfig.load_config(service_id) or {}
+        full_cfg = cfg.get("provisioning", {}).get("cron_full_sweep", {})
+        if max_files is None:
+            raw_files = full_cfg.get("max_files")
+            max_files = int(raw_files) if raw_files is not None else _FULL_SWEEP_DEFAULT_MAX_FILES
+        if max_seconds is None:
+            raw_secs = full_cfg.get("max_seconds")
+            max_seconds = int(raw_secs) if raw_secs is not None else _FULL_SWEEP_DEFAULT_MAX_SECONDS
 
     with cron_run(
         service_id,
@@ -341,7 +357,13 @@ def _run_full_sweep(
         run_id = run.run_id
         run.include_log_output = False
         try:
-            discovered = discover_prefix(service_id, run_id=run_id, originating_task="full_sync")
+            discovered = discover_prefix(
+                service_id,
+                run_id=run_id,
+                originating_task="full_sync",
+                max_files=max_files,
+                max_seconds=max_seconds,
+            )
             run.success(
                 f"Full-prefix sweep discovered {discovered} unseen file(s); dispatched to ingest workers"
                 if discovered

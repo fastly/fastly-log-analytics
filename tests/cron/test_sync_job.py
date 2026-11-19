@@ -189,7 +189,13 @@ def test_full_sweep_defers_unless_forced(monkeypatch, stub_sync_env):
     disc.assert_not_called()
 
     _run_full_sweep.__wrapped__("svc-1", force=True)
-    disc.assert_called_once_with("svc-1", run_id=11, originating_task="full_sync")
+    disc.assert_called_once_with(
+        "svc-1",
+        run_id=11,
+        originating_task="full_sync",
+        max_files=20_000,
+        max_seconds=900,
+    )
     args, kwargs = stub_sync_env["log"].call_args
     assert args[3] == "success"
     assert kwargs["files_downloaded"] == 4

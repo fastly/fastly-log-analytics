@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys as _sys
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,7 +27,13 @@ def _discover_high_scale_prefix(
     *,
     domain: str,
     prefix_subpath: str | None = None,
+    max_files: int | None = None,
+    max_seconds: float | None = None,
 ) -> int:
+    if max_files is not None and max_files <= 0:
+        return 0
+    if max_seconds is not None and max_seconds <= 0:
+        return 0
     src = get_source_for_service(service_id)
     if src is None or not src.get("bucket"):
         return 0
@@ -44,25 +51,54 @@ def _discover_high_scale_prefix(
                 clean = clean[len(base) :]
                 break
         sub_prefix = clean
-    page = lister.list_source_objects(
-        service_id,
-        domain,
-        page_size=MAX_SOURCE_PAGE_SIZE,
-        cursor=None,
-        partition_prefix=sub_prefix,
-    )
-    if not page.objects:
-        return 0
-    control = PostgresControlPlane()
-    owner = control.initialize_owner(service_id, owner="high_scale", source_cursor=INITIAL_SOURCE_CURSOR)
-    by_key = control.discover_sources_batch(
-        service_id,
-        domain,
-        page.objects,
-        expected_owner=owner.current_owner,
-        expected_owner_epoch=owner.owner_epoch,
-    )
-    return sum(1 for rec in by_key.values() if getattr(rec, "status", None) == "discovered")
+
+    deadline = (time.monotonic() + max_seconds) if max_seconds is not None else None
+    cursor: str | None = None
+    discovered_total = 0
+    control: PostgresControlPlane | None = None
+    owner: Any = None
+
+    while True:
+        if max_files is not None:
+            remaining = max_files - discovered_total
+            if remaining <= 0:
+                break
+            page_size = min(MAX_SOURCE_PAGE_SIZE, remaining)
+        else:
+            page_size = MAX_SOURCE_PAGE_SIZE
+
+        page = lister.list_source_objects(
+            service_id,
+            domain,
+            page_size=page_size,
+            cursor=cursor,
+            partition_prefix=sub_prefix,
+        )
+        if page.objects:
+            if control is None:
+                control = PostgresControlPlane()
+                owner = control.initialize_owner(service_id, owner="high_scale", source_cursor=INITIAL_SOURCE_CURSOR)
+            batch = page.objects[: max_files - discovered_total] if max_files is not None else page.objects
+            by_key = control.discover_sources_batch(
+                service_id,
+                domain,
+                batch,
+                expected_owner=owner.current_owner,
+                expected_owner_epoch=owner.owner_epoch,
+            )
+            discovered_total += sum(1 for rec in by_key.values() if getattr(rec, "status", None) == "discovered")
+
+        if max_files is None and max_seconds is None:
+            break
+        if not page.next_cursor:
+            break
+        if max_files is not None and discovered_total >= max_files:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        cursor = page.next_cursor
+
+    return discovered_total
 
 
 def discover_rum_prefix(

@@ -128,6 +128,10 @@ To maintain sub-second UI responsiveness while background jobs run:
 4. **Adaptive Gap Healing Throttle:**
    - If sustained log loss is detected by `gap_heal_{service_id}`, subsequent sweeps are throttled by severity band to prevent cascading full sweeps when losses are caused by upstream Fastly edge drop policies.
 
+5. **Watchdog Threshold (`_CRON_HARD_CAP_S` = 300s):**
+   - `@cron_task` runs each job in `_watchdog_executor` with a 300s `fut.result(timeout=...)` threshold. Exceeding it logs an error and keeps waiting on `fut.result()` so the worker finishes cleanup (`cron_run` finalization, `CronHeartbeat` stop + thread connection release, `flush_usage_log`, and attribution reset) before releasing the APScheduler slot.
+   - `full_sync` (`_run_full_sweep`) enforces `max_files` and `max_seconds` (from arguments, `gap_heal` severity bands, or `provisioning.cron_full_sweep`) inside paginated discovery, returning the partial sweep count cleanly when a budget is reached.
+
 ---
 
 ## 7. Automated Verification & Testing Runbook
