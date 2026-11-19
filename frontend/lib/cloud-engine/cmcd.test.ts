@@ -377,4 +377,102 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(res.object_type_dist[0]).toMatchObject({ object_type: "v", requests: 3 });
     expect(res.streaming_format_dist[0]).toMatchObject({ streaming_format: "h", session_count: 2 });
   });
+
+  it("bounds concurrent cmcd_summary file fetches across large ranges", async () => {
+    const t0 = 1_800_000_000_000;
+    const stepMs = 300_000;
+    const fileCount = 48;
+    const files = [];
+    const buffers: Record<string, ArrayBuffer> = {};
+    for (let i = 0; i < fileCount; i++) {
+      const start = t0 + i * stepMs;
+      const end = start + stepMs;
+      const key = `processed/request/cmcd_summary/year=2027/month=01/day=15/hour=08/window=${Math.floor(start / 1000)}-${Math.floor(end / 1000)}-p1s0-n1.parquet`;
+      files.push(manifestEntry(key, new Date(start).toISOString(), new Date(end).toISOString(), 1));
+      buffers[key] = parquetWriteBuffer({
+        codec: "SNAPPY",
+        columnData: [
+          { name: "kind", type: "STRING", data: ["bucket"] },
+          { name: "bucket", type: "INT64", data: [BigInt(start)] },
+          { name: "key", type: "STRING", data: [null] },
+          { name: "label", type: "STRING", data: [null] },
+          { name: "truncated", type: "BOOLEAN", data: [null] },
+          { name: "reqs", type: "INT64", data: [BigInt(1)] },
+          { name: "sid_hll", type: "BYTE_ARRAY", data: [null] },
+          { name: "rebuffer_events", type: "INT64", data: [BigInt(0)] },
+          { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: [null] },
+          { name: "has_bs", type: "INT64", data: [BigInt(1)] },
+          { name: "has_su", type: "INT64", data: [BigInt(0)] },
+          { name: "has_ot", type: "INT64", data: [BigInt(1)] },
+          { name: "has_bl", type: "INT64", data: [BigInt(1)] },
+          { name: "has_br", type: "INT64", data: [BigInt(1)] },
+          { name: "has_mtp", type: "INT64", data: [BigInt(0)] },
+          { name: "has_cid", type: "INT64", data: [BigInt(0)] },
+          { name: "br_sum", type: "DOUBLE", data: [2000] },
+          { name: "br_n", type: "INT64", data: [BigInt(1)] },
+          { name: "tb_sum", type: "DOUBLE", data: [4000] },
+          { name: "tb_n", type: "INT64", data: [BigInt(1)] },
+          { name: "bl_sum", type: "DOUBLE", data: [1000] },
+          { name: "bl_n", type: "INT64", data: [BigInt(1)] },
+          { name: "mtp_sum", type: "DOUBLE", data: [null] },
+          { name: "mtp_n", type: "INT64", data: [BigInt(0)] },
+          { name: "v_br_sum", type: "DOUBLE", data: [2000] },
+          { name: "v_br_n", type: "INT64", data: [BigInt(1)] },
+          { name: "v_tb_sum", type: "DOUBLE", data: [4000] },
+          { name: "v_tb_n", type: "INT64", data: [BigInt(1)] },
+          { name: "v_bl_sum", type: "DOUBLE", data: [1000] },
+          { name: "v_bl_n", type: "INT64", data: [BigInt(1)] },
+          { name: "util_sum", type: "DOUBLE", data: [0.5] },
+          { name: "util_n", type: "INT64", data: [BigInt(1)] },
+          { name: "util_all_sum", type: "DOUBLE", data: [0.5] },
+          { name: "util_all_n", type: "INT64", data: [BigInt(1)] },
+          { name: "startup_requests", type: "INT64", data: [BigInt(0)] },
+          { name: "su_bl_sum", type: "DOUBLE", data: [null] },
+          { name: "su_bl_n", type: "INT64", data: [BigInt(0)] },
+          { name: "su_ttfb_sum", type: "DOUBLE", data: [null] },
+          { name: "su_ttfb_n", type: "INT64", data: [BigInt(0)] },
+          { name: "v_bl_hist", type: "BYTE_ARRAY", data: [null] },
+          { name: "bl_hist", type: "BYTE_ARRAY", data: [null] },
+          { name: "v_mtp_hist", type: "BYTE_ARRAY", data: [null] },
+          { name: "mtp_hist", type: "BYTE_ARRAY", data: [null] },
+          { name: "min_ts", type: "INT64", data: [BigInt(start)] },
+          { name: "max_ts", type: "INT64", data: [BigInt(start)] },
+          { name: "first_ts", type: "INT64", data: [null] },
+          { name: "last_ts", type: "INT64", data: [null] },
+        ],
+      });
+    }
+
+    const cmcdPage = { files, next_cursor: null, complete: true };
+    const baseSource = fixtureSource([], buffers);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const rollupSource = {
+      async fetchJson(url: string, signal?: AbortSignal) {
+        const params = new URL(url, "http://x").searchParams;
+        if (params.get("dataset") === "cmcd_summary") return cmcdPage;
+        return baseSource.fetchJson(url, signal);
+      },
+      async fetchFile(key: string, signal?: AbortSignal) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          return await baseSource.fetchFile(key, signal);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+
+    const res = await queryCmcdAggregates({
+      start_time: new Date(t0).toISOString(),
+      end_time: new Date(t0 + fileCount * stepMs).toISOString(),
+      bucket_seconds: 300,
+      rollupSource,
+    });
+    expect(res.summary.total_requests).toBe(fileCount);
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(16);
+  });
 });

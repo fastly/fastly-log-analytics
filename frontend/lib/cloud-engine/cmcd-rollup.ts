@@ -6,8 +6,12 @@ import { Hll } from "./dashboard/hll";
 import { mergeHistogramBytes, mergeHllBytes } from "./rollup-merge";
 import { fetchManifest, filesOverlapping } from "./dashboard/manifest";
 import { readColumns } from "./dashboard/parquet";
+import { mapLimit } from "./dashboard/sources";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { fetchLanes } from "./fetch-lanes";
 import { hasFilterValues } from "./rollup-sections";
+
+const CMCD_FETCH_CONCURRENCY = 16;
 
 export type CmcdRollupSource = Pick<FileSource, "fetchJson" | "fetchFile">;
 
@@ -212,17 +216,6 @@ export async function cmcdFromRollup(
   const files = filesOverlapping(cmcdManifest.files, fromMs, toMs);
   if (files.length === 0) return null;
 
-  const decoded = await Promise.all(
-    files.map(async (file) => {
-      const { bytes } = await source.fetchFile(file.key, signal);
-      const [textNum, bin] = await Promise.all([
-        readColumns(bytes, TEXT_AND_NUM_COLS, true),
-        readColumns(bytes, BINARY_COLS, false),
-      ]);
-      return { rows: textNum.rows, cols: textNum.columns, bin: bin.columns };
-    }),
-  );
-
   const buckets = new Map<number, BucketAgg>();
   const sessions = new Map<string, { firstTs: number; lastTs: number; reqs: number }>();
   const contents = new Map<string, ContentAgg>();
@@ -232,9 +225,18 @@ export async function cmcdFromRollup(
   const sfs = new Map<string, { reqs: number; sidHll: Hll }>();
   const truncated = new Set<string>();
 
-  for (const part of decoded) {
-    const c = part.cols;
-    const b = part.bin;
+  await mapLimit(files, CMCD_FETCH_CONCURRENCY, async (file) => {
+    signal?.throwIfAborted();
+    const { bytes } = await fetchLanes.run("summary", () => {
+      signal?.throwIfAborted();
+      return source.fetchFile(file.key, signal);
+    });
+    const [textNum, bin] = await Promise.all([
+      readColumns(bytes, TEXT_AND_NUM_COLS, true),
+      readColumns(bytes, BINARY_COLS, false),
+    ]);
+    const c = textNum.columns;
+    const b = bin.columns;
     const kindCol = c.get("kind");
     const bucketCol = c.get("bucket");
     const keyCol = c.get("key");
@@ -283,7 +285,7 @@ export async function cmcdFromRollup(
     const firstTsCol = c.get("first_ts");
     const lastTsCol = c.get("last_ts");
 
-    for (let i = 0; i < part.rows; i++) {
+    for (let i = 0; i < textNum.rows; i++) {
       const kind = str(kindCol, i);
       const key = str(keyCol, i);
       if (kind === "totals") {
@@ -426,7 +428,7 @@ export async function cmcdFromRollup(
         mergeHll(agg.sidHll, sidHllCol?.[i]);
       }
     }
-  }
+  });
 
   const overall = newBucketAgg();
   for (const agg of buckets.values()) {
