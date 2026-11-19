@@ -172,7 +172,7 @@ export function SystemHealthCard() {
   if (cloud) {
     const runs = cloudSync?.cron_runs ?? []
     const clockInterval = cloudSync?.clock_interval_s ?? DEFAULT_CLOCK_INTERVAL_S
-    const tick = summarizeTickHealth(runs, Date.now(), clockInterval)
+    const tick = summarizeTickHealth(runs, cloudSyncUpdatedAt > 0 ? cloudSyncUpdatedAt : undefined, clockInterval)
     const lastTickAt = cloudSync?.last_tick_at ?? tick.last_tick_at
     const tickAgeSec =
       lastTickAt && cloudSyncUpdatedAt > 0
