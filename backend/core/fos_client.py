@@ -295,6 +295,13 @@ class _ProxyClientShim:
         return _span_wrapped
 
 
+def _close_fos_client(client: Any) -> None:
+    try:
+        client.close()
+    except Exception:
+        logger.warning("Failed to close FOS client", exc_info=True)
+
+
 def _get_fos_client(source: dict):
     source_key = (
         source.get("name", "default"),
@@ -319,6 +326,12 @@ def _get_fos_client(source: dict):
         raw_client = boto3.client("s3", endpoint_url=telemetry_proxy.proxy_endpoint(), config=proxy_config)
         telemetry_proxy.install_boto3_proxy_hook(raw_client, source)
         client = _ProxyClientShim(raw_client)
+        if len(_fos_client_cache) >= _fos_client_cache.maxsize:
+            oldest_key = next(iter(_fos_client_cache), None)
+            if oldest_key is not None:
+                evicted = _fos_client_cache.pop(oldest_key, None)
+                if evicted is not None:
+                    _close_fos_client(evicted)
         _fos_client_cache[source_key] = client
         return client
 
@@ -326,12 +339,22 @@ def _get_fos_client(source: dict):
 def clear_fos_client(source_or_name: Any = None) -> None:
     if source_or_name is None:
         with _fos_client_lock:
+            clients = _fos_client_cache.values()
             _fos_client_cache.clear()
+        for client in clients:
+            _close_fos_client(client)
         return
     name = source_or_name.get("name", "default") if isinstance(source_or_name, dict) else source_or_name
     with _fos_client_lock:
-        for k in [k for k in _fos_client_cache if (k[0] if isinstance(k, tuple) else k) == name]:
-            _fos_client_cache.pop(k, None)
+        clients = [
+            client
+            for k in list(_fos_client_cache)
+            if (k[0] if isinstance(k, tuple) else k) == name
+            for client in (_fos_client_cache.pop(k, None),)
+            if client is not None
+        ]
+    for client in clients:
+        _close_fos_client(client)
 
 
 def fos_reachable(source: dict) -> dict:

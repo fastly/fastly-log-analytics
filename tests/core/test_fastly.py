@@ -1047,20 +1047,44 @@ def test_cursor_three_pages_sends_cursor_and_stops_on_empty():
     assert all(c.kwargs["token"] == "t" and c.args[0] == "GET" for c in f.call_args_list)
 
 
-def test_cursor_repeat_is_cut_off():
+@pytest.mark.no_postgres
+def test_cursor_repeat_raises():
     f = _pages(*[{"data": [i], "meta": {"next_cursor": "same"}} for i in range(10)])
     with patch.object(fastly_client, "fastly", f):
-        pages = list(fastly_client.fastly_paginate("/x", token="t"))
+        with pytest.raises(RuntimeError, match="cursor.*repeated"):
+            list(fastly_client.fastly_paginate("/x", token="t"))
+    assert f.call_count == 2
+
+
+@pytest.mark.no_postgres
+def test_non_string_cursor_raises():
+    f = _pages({"data": [1], "meta": {"next_cursor": 42}})
+    with patch.object(fastly_client, "fastly", f):
+        with pytest.raises(RuntimeError, match="malformed cursor"):
+            list(fastly_client.fastly_paginate("/x", token="t"))
+
+
+@pytest.mark.no_postgres
+def test_max_pages_raises_while_more_pages_remain():
+    f = _pages(*[{"data": [i], "meta": {"next_cursor": f"c{i}"}} for i in range(10)])
+    with patch.object(fastly_client, "fastly", f):
+        with pytest.raises(RuntimeError, match="max_pages=3"):
+            list(fastly_client.fastly_paginate("/x", token="t", max_pages=3))
+    assert f.call_count == 3
+
+
+@pytest.mark.no_postgres
+def test_max_pages_does_not_raise_after_terminal_page():
+    f = _pages(
+        {"data": [1], "meta": {"next_cursor": "c1"}},
+        {"data": [2], "meta": {"next_cursor": ""}},
+    )
+    with patch.object(fastly_client, "fastly", f):
+        pages = list(fastly_client.fastly_paginate("/x", token="t", max_pages=2))
     assert len(pages) == 2
 
 
-def test_max_pages_bounds_iteration():
-    f = _pages(*[{"data": [i], "meta": {"next_cursor": f"c{i}"}} for i in range(10)])
-    with patch.object(fastly_client, "fastly", f):
-        pages = list(fastly_client.fastly_paginate("/x", token="t", max_pages=3))
-    assert len(pages) == 3
-
-
+@pytest.mark.no_postgres
 def test_page_style_stops_on_short_page():
     f = _pages({"data": [1, 2]}, {"data": [3, 4]}, {"data": [5]})
     with patch.object(fastly_client, "fastly", f):
@@ -1073,6 +1097,7 @@ def test_page_style_stops_on_short_page():
     ]
 
 
+@pytest.mark.no_postgres
 def test_link_style_follows_relative_and_api_host_links():
     f = _pages(
         {"data": [1], "links": {"next": "/x?page=2"}},
@@ -1085,11 +1110,12 @@ def test_link_style_follows_relative_and_api_host_links():
     assert [c.args[1] for c in f.call_args_list] == ["/x", "/x?page=2", "/x?page=3"]
 
 
+@pytest.mark.no_postgres
 def test_link_style_refuses_off_host_link():
     f = _pages({"data": [1], "links": {"next": "https://evil.example/x?page=2"}}, {"data": [2]})
     with patch.object(fastly_client, "fastly", f):
-        pages = list(fastly_client.fastly_paginate("/x", token="t", style="link"))
-    assert len(pages) == 1
+        with pytest.raises(RuntimeError, match="off-host"):
+            list(fastly_client.fastly_paginate("/x", token="t", style="link"))
     assert f.call_count == 1
 
 

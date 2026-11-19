@@ -35,3 +35,6 @@ Template-time coherence gates for the deployment topology.
 {{- fail "adminGateway.host must be one explicit DNS hostname without wildcard, scheme or port" }}
 {{- end }}
 {{- end }}
+{{- if not (or .Values.secrets.existingSecret .Values.secrets.cursorSecret) -}}
+{{- fail "High-scale pagination requires HIGH_SCALE_CURSOR_SECRET: set secrets.cursorSecret or provide it in secrets.existingSecret." -}}
+{{- end -}}

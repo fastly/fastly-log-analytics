@@ -3133,6 +3133,7 @@ def test_filtered_request_normalizes_list_shorthand_and_range_alias() -> None:
     assert "filter_mode" not in req.filters
 
 
+@pytest.mark.no_postgres
 def test_hourly_rollup_stitching_and_fallback() -> None:
     from datetime import UTC, datetime
 
@@ -3181,6 +3182,25 @@ def test_hourly_rollup_stitching_and_fallback() -> None:
     assert res["country"].request_count == 42
     assert len(queries) == 2
     assert any("FROM request_aggregates_1h" in q and "UNION ALL" in q for q in queries)
+    rollup_queries = [q for q in queries if "FROM request_aggregates_1h" in q]
+    assert rollup_queries
+    assert all(
+        "batch_id = toUUID('00000000-0000-0000-0000-000000000000')" in q
+        and "batch_id IN" in q
+        and "high_scale_batch_publications FINAL" in q
+        for q in rollup_queries
+    )
+
+
+@pytest.mark.no_postgres
+def test_legacy_hourly_rollup_fence_only_exempts_nil_batch_marker() -> None:
+    from backend.high_scale._common import visible_rollup_publication_fence_sql
+
+    fence = visible_rollup_publication_fence_sql("request_aggregate")
+
+    assert fence.startswith("(batch_id = toUUID('00000000-0000-0000-0000-000000000000') OR ")
+    assert fence.count("publication_state='visible'") == 1
+    assert "domain='request_aggregate'" in fence
 
 
 def test_legacy_range_shorthand_and_origin_drilldown() -> None:
@@ -3231,6 +3251,7 @@ def test_legacy_range_shorthand_and_origin_drilldown() -> None:
     assert any("FROM request_facts" in q and "custom_fields['obytes']" in q for q in queries)
 
 
+@pytest.mark.no_postgres
 def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimizations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3325,10 +3346,17 @@ def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimiza
 
     client = _RealClient()
     clauses = hs_common.visible_fact_clauses("request", client=client, service_id="svc-fast")
-    assert clauses == ["service_id={service_id:String}", "publication_state='visible'"]
+    assert clauses == [
+        "service_id={service_id:String}",
+        "publication_state='visible'",
+        "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain='request' AND publication_state='visible')",
+    ]
     assert (
         hs_common.visible_publication_fence_sql("request", client=client, service_id="svc-fast")
-        == "publication_state='visible'"
+        == "publication_state='visible' AND batch_id IN (SELECT batch_id FROM "
+        "high_scale_batch_publications FINAL WHERE service_id={service_id:String} "
+        "AND domain='request' AND publication_state='visible')"
     )
 
     wm = SimpleNamespace(
@@ -3345,7 +3373,11 @@ def test_fast_publication_fence_sessions_index_fast_and_filtered_bundle_optimiza
         "2026-01-02T00:00:00Z",
     )
     assert bundle_res["aggregates"].total_rows == 50
-    assert any("PREWHERE" in q for q in queries)
+    assert all(
+        "high_scale_batch_publications FINAL" in q
+        for q in queries
+        if "FROM request_facts" in q or "FROM request_aggregates" in q
+    )
     assert not any("/* hs_security:top_bots_ua */" in q for q in queries)
 
     wm.last_visible_event_id = "evt-2"

@@ -99,7 +99,7 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
     if !crate::ingest::worker::authorized(runtime, request) {
         return deny(403, "Forbidden");
     }
-    let Ok(body) = serde_json::from_slice::<StageRequest>(&request.body) else {
+    let Ok(body) = request.json::<StageRequest>() else {
         return deny(400, "Invalid request");
     };
     if !valid(&body) {
@@ -121,9 +121,7 @@ pub fn handle_worker_stage<R: Runtime>(runtime: &R, request: &http::Request) -> 
         let metrics = telemetry::execution::ExecutionMetrics::snapshot(runtime, execution_started);
         value["vcpu_ms"] = metrics.vcpu_ms.into();
         value["execution_metrics"] = json!(metrics);
-        http::Response::new(200, value.to_string())
-            .header("content-type", "application/json")
-            .private()
+        http::Response::json(200, &value)
     };
     let service = match load_installed_service(runtime) {
         Ok((_, Some(service), _)) if service.service_id == body.service_id => service,

@@ -9,6 +9,7 @@ import {
 import {
   fetchManifest,
   filesOverlapping,
+  IncompleteManifestError,
   type FetchJson,
   type Manifest,
   type ManifestFile,
@@ -1307,6 +1308,9 @@ async function collectAggregator(
       ).catch((error: unknown) => {
         // Summaries only save work; without them every window reads raw.
         if (signal?.aborted) throw error;
+        if (error instanceof IncompleteManifestError) {
+          return { files: [], complete: false };
+        }
         console.warn("flp: summary listing failed; reading raw Parquet", error);
         return null;
       }));

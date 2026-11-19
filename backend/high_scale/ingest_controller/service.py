@@ -129,6 +129,13 @@ class HighScaleServiceRegistration:
     delete_raw_after_commit: bool = True
 
 
+def _cursor_secret_from_environment() -> bytes:
+    value = os.getenv("HIGH_SCALE_CURSOR_SECRET")
+    if not value:
+        raise ValueError("HIGH_SCALE_CURSOR_SECRET is required for high-scale pagination")
+    return value.encode("utf-8")
+
+
 class HighScaleServiceRegistry:
     """Small injectable registry; services opt in by explicit registration."""
 
@@ -143,7 +150,7 @@ class HighScaleServiceRegistry:
 
             client = get_clickhouse_client()
             if client is not None:
-                cursor_secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET") or "fla-default-cursor-secret").encode("utf-8")
+                cursor_secret = _cursor_secret_from_environment()
                 register_high_scale_services(
                     self,
                     client=client,
@@ -240,7 +247,7 @@ def register_high_scale_services_from_environment(
         )
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS must contain at least one service id (none found in configs/)")
-    cursor_secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET") or "fla-default-cursor-secret").encode("utf-8")
+    cursor_secret = _cursor_secret_from_environment()
     manifest_catalog = (control_factory or _default_control_factory)()
 
     def _archive_for(service_id: str) -> ArchivePublication | None:

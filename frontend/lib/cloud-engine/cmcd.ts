@@ -1,12 +1,12 @@
 import {
   getDuckDBEngine,
-  compileFiltersToSql,
   type DuckDBAnalyticalEngine,
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
-import { parseEpochMs, roundTo } from "./engine-utils";
+import { roundTo } from "./engine-utils";
 import { cmcdFromRollup, cmcdRollupEligible, type CmcdRollupSource } from "./cmcd-rollup";
+import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
 
 export const CMCD_COLUMNS = [
   "cmcd_sid",
@@ -122,16 +122,10 @@ export function emptyCmcdAggregates() {
 
 function buildCmcdWhere(params: CmcdQueryParams): string {
   const clauses: string[] = [
-    "(cmcd_sid IS NOT NULL OR cmcd_br IS NOT NULL OR cmcd_bl IS NOT NULL OR cmcd_ot IS NOT NULL)",
+    rangeServiceSql(params, [
+      "(cmcd_sid IS NOT NULL OR cmcd_br IS NOT NULL OR cmcd_bl IS NOT NULL OR cmcd_ot IS NOT NULL)",
+    ]),
   ];
-  const startMs = parseEpochMs(params.start_time);
-  const endMs = parseEpochMs(params.end_time);
-  if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
-  if (params.service_id) {
-    const escaped = String(params.service_id).replaceAll("'", "''");
-    clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
-  }
   if (params.filter_sf) {
     const escaped = String(params.filter_sf).replaceAll("'", "''");
     clauses.push(`cmcd_sf = '${escaped}'`);
@@ -148,9 +142,7 @@ function buildCmcdWhere(params: CmcdQueryParams): string {
     const escaped = String(params.filter_cid).replaceAll("'", "''");
     clauses.push(`cmcd_cid = '${escaped}'`);
   }
-  clauses.push(compileFiltersToSql(Object.entries(params.filters ?? {}).flatMap(([field, spec]) =>
-    spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-  ), false, [], params.customColumnTypes));
+  clauses.push(analyticsFiltersToSql(params.filters, params.customColumnTypes));
   return clauses.join(" AND ");
 }
 

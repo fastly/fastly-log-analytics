@@ -198,18 +198,8 @@ pub fn delete<S: ViewStore>(store: &S, service_id: &str, view_id: &str) -> Resul
     })
 }
 
-fn query_param(request: &Request, name: &str) -> Option<String> {
-    let query = request.path.split_once('?').map_or("", |(_, query)| query);
-    url::form_urlencoded::parse(query.as_bytes())
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value.into_owned())
-        .filter(|value| !value.is_empty())
-}
-
 fn json_response(status: u16, value: Value) -> Response {
-    Response::new(status, value.to_string())
-        .header("content-type", "application/json")
-        .private()
+    Response::json(status, &value)
 }
 
 /// Serves `/api/views…` for the install's active service `service_id`. Every signed-in role may
@@ -240,7 +230,7 @@ pub fn handle<S: ViewStore>(
             if wanted != service_id {
                 return Err(Error::NotFound);
             }
-            let limit = match query_param(request, "limit") {
+            let limit = match request.query_param("limit") {
                 Some(value) => value
                     .parse::<usize>()
                     .ok()
@@ -262,7 +252,8 @@ pub fn handle<S: ViewStore>(
             Ok(json_response(201, json!({"id": id, "status": "success"})))
         }
         ("DELETE", Some(view_id)) => {
-            let scoped = query_param(request, "service_id")
+            let scoped = request
+                .query_param("service_id")
                 .or_else(|| request.header("x-service-id").map(str::to_owned));
             if scoped.is_some_and(|scoped| scoped != service_id) {
                 return Err(Error::NotFound);

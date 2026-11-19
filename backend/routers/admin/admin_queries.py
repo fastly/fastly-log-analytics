@@ -608,36 +608,9 @@ def purge_usage_log_endpoint(source: dict[str, Any] = Depends(get_source)) -> Ok
 )
 def get_system_jobs_endpoint() -> Any:
     """Return status and schedule info for global background jobs."""
-    from backend.cron.scheduler import get_scheduler, get_system_job_status
+    from backend.cron.scheduler import get_system_jobs_snapshot
 
-    statuses = get_system_job_status()
-    result = []
-    job_labels = {
-        "bot_data_refresh": "Bot Data Refresh",
-        "rdns_enrichment": "rDNS Enrichment",
-        "share_audit_purge": "Share Audit Purge",
-    }
-    sched = get_scheduler()
-    for job_id, label in job_labels.items():
-        entry = {
-            "id": job_id,
-            "name": label,
-            "next_run_at": None,
-            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
-        }
-        if sched is not None:
-            try:
-                job = sched.get_job(job_id)
-            except Exception:
-                job = None
-            next_run = getattr(job, "next_run_time", None) if job else None
-            if next_run:
-                from backend.utils.date_utils import iso_z
-
-                entry["next_run_at"] = iso_z(next_run)
-        result.append(entry)
-
-    return SystemJobsResponse.with_telemetry(jobs=result)
+    return SystemJobsResponse.with_telemetry(jobs=get_system_jobs_snapshot())
 
 
 _CacheRegistry.register("routers.admin_queries._cancel_history", _cancel_history)

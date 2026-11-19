@@ -168,11 +168,9 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
         let metrics = crate::telemetry::execution::ExecutionMetrics::snapshot(runtime, started);
         value["vcpu_ms"] = metrics.vcpu_ms.into();
         value["execution_metrics"] = serde_json::json!(metrics);
-        crate::http::Response::new(200, value.to_string())
-            .header("content-type", "application/json")
-            .private()
+        crate::http::Response::json(200, &value)
     };
-    let body: Value = match serde_json::from_slice(&request.body) {
+    let body: Value = match request.json() {
         Ok(body) => body,
         Err(_) => return crate::http::Response::new(400, "Invalid request").private(),
     };

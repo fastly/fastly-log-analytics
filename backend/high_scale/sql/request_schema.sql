@@ -143,12 +143,19 @@ CREATE TABLE IF NOT EXISTS request_aggregates_1h
     bucket_start DateTime('UTC'),
     dimension LowCardinality(String),
     value String,
-    request_count UInt64
+    request_count UInt64,
+    batch_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')
 )
 ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/request_aggregates_1h', '{replica}')
 PARTITION BY toYYYYMM(bucket_start)
-ORDER BY (service_id, dimension, bucket_start, value)
+ORDER BY (service_id, dimension, bucket_start, value, batch_id)
 TTL bucket_start + INTERVAL 90 DAY;
+
+ALTER TABLE request_aggregates_1h
+    ADD COLUMN IF NOT EXISTS batch_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000');
+ALTER TABLE request_aggregates_1h MODIFY ORDER BY (service_id, dimension, bucket_start, value, batch_id);
+
+DROP VIEW IF EXISTS request_aggregates_1h_mv;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS request_aggregates_1h_mv
 TO request_aggregates_1h
@@ -157,14 +164,16 @@ AS SELECT
     toStartOfHour(bucket_start) AS bucket_start,
     dimension,
     value,
-    sum(request_count) AS request_count
+    sum(request_count) AS request_count,
+    batch_id
 FROM request_aggregates
 WHERE publication_state = 'visible'
 GROUP BY
     service_id,
     bucket_start,
     dimension,
-    value;
+    value,
+    batch_id;
 
 CREATE TABLE IF NOT EXISTS request_insight_hourly
 (

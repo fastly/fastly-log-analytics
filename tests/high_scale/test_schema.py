@@ -1831,7 +1831,17 @@ def test_register_high_scale_services_rejects_empty_secret_and_missing_env_servi
         _reg_svc(cursor_secret=b"")
 
     monkeypatch.delenv("HIGH_SCALE_SERVICE_IDS", raising=False)
+    monkeypatch.delenv("HIGH_SCALE_CURSOR_SECRET", raising=False)
     with pytest.raises(ValueError, match="HIGH_SCALE_SERVICE_IDS"):
+        register_high_scale_services_from_environment(HighScaleServiceRegistry(), client=FakeClickHouse())
+
+
+@pytest.mark.no_postgres
+def test_environment_registration_requires_cursor_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HIGH_SCALE_SERVICE_IDS", "svc")
+    monkeypatch.delenv("HIGH_SCALE_CURSOR_SECRET", raising=False)
+
+    with pytest.raises(ValueError, match="HIGH_SCALE_CURSOR_SECRET"):
         register_high_scale_services_from_environment(HighScaleServiceRegistry(), client=FakeClickHouse())
 
 
@@ -2069,13 +2079,19 @@ def test_recommendation_is_logged_and_never_writes_config(client: Any, caplog: p
     )
 
 
+@pytest.mark.no_postgres
 def test_request_schema_defines_dimension_projection_and_hourly_rollup_mv() -> None:
     request_sql = (SQL_ROOT / "request_schema.sql").read_text()
     assert "ALTER TABLE request_aggregates ADD PROJECTION IF NOT EXISTS proj_by_dimension" in request_sql
     assert "CREATE TABLE IF NOT EXISTS request_aggregates_1h" in request_sql
     assert "ReplicatedSummingMergeTree" in request_sql
-    assert "ORDER BY (service_id, dimension, bucket_start, value)" in request_sql
+    assert "ORDER BY (service_id, dimension, bucket_start, value, batch_id)" in request_sql
     assert "CREATE MATERIALIZED VIEW IF NOT EXISTS request_aggregates_1h_mv" in request_sql
+    assert "batch_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')" in request_sql
+    assert (
+        "ADD COLUMN IF NOT EXISTS batch_id UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000')" in request_sql
+    )
+    assert "sum(request_count) AS request_count" in request_sql
     assert (
         "ADD COLUMN IF NOT EXISTS `_cf_cache` LowCardinality(String) MATERIALIZED custom_fields['cache']" in request_sql
     )

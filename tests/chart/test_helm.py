@@ -18,19 +18,22 @@ install, and every incoherent configuration is a `helm template` error.
 
 import subprocess
 
+import pytest
 import yaml
 
 CHART = "./deploy/chart/fastly-log-analytics/"
 
 _PG = "postgresql://fla:pw@postgres:5432/fla"
 
-STANDARD = (f"secrets.metadataDsn={_PG}",)
+_CURSOR = "secrets.cursorSecret=helm-test-cursor-secret"
+STANDARD = (f"secrets.metadataDsn={_PG}", _CURSOR)
 
 # The minimum an operator must supply to select the scaled Valkey SSE backplane topology.
 VALKEY = (
     "config.sseBackplane=valkey",
     f"secrets.metadataDsn={_PG}",
     "secrets.celeryBrokerUrl=redis://valkey-master:6379/0",
+    _CURSOR,
 )
 
 
@@ -77,6 +80,13 @@ def _autoscaler_targets(docs: list[dict]) -> set[str]:
         for doc in docs
         if doc["kind"] in ("HorizontalPodAutoscaler", "ScaledObject")
     }
+
+
+@pytest.mark.no_postgres
+def test_cursor_secret_is_required_for_high_scale_backends() -> None:
+    error = _render_error(f"secrets.metadataDsn={_PG}")
+
+    assert "HIGH_SCALE_CURSOR_SECRET" in error
 
 
 # ── Installable defaults ──────────────────────────────────────────────────────

@@ -13,6 +13,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json --refresh-ts",
+    "gen:cloud-types": "openapi-typescript lib/cloud-engine/cloud-openapi.json -o lib/cloud-engine/cloud-api.generated.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test --project=chromium",

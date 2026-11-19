@@ -674,6 +674,26 @@ describe('fetchBootstrapServerSide & fetchTosServerSide', () => {
       expect(await fetchTosServerSide()).toBe('unauthenticated')
     }, 401)
   })
+
+  it('never shares an admin SSR bootstrap cache across request cookie identities', async () => {
+    setCookies('admin_session=first')
+    inbound({ host: 'localhost:3001', 'x-service-id': 'svc-cache-identity' })
+    await withTestHttpServer(
+      (req, res) => {
+        const value = String(req.headers.cookie)
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ active_service_id: value }))
+      },
+      async () => {
+        const first = await fetchBootstrapServerSide()
+        expect(first).toMatchObject({ active_service_id: 'admin_session=first' })
+
+        setCookies('admin_session=second')
+        const second = await fetchBootstrapServerSide()
+        expect(second).toMatchObject({ active_service_id: 'admin_session=second' })
+      },
+    )
+  })
 })
 
 describe('Streaming SSR fixture contract', () => {
@@ -983,7 +1003,7 @@ describe('certificate gateway SSR trust', () => {
         srv.clearRequests()
         setCookies('')
         expect(await fetchBootstrapServerSide()).toEqual({})
-        expect(srv.lastRequest).toBeUndefined()
+        expect(srv.lastRequest?.headers).not.toHaveProperty('cookie')
 
         inbound({ host: 'admin.example.com', 'x-admin-gateway-token': secret, 'x-service-id': 'analyst-response-cache-test' })
         upstreamBody = { settings: { is_remote_analyst: true } }

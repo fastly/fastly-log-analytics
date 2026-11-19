@@ -80,6 +80,7 @@ def test_usage_logging_helper(fos_source, monkeypatch):
 
 
 # ── FOS Client & Robust Delete Tests ──
+@pytest.mark.no_postgres
 def test_get_fos_client_pooling_eviction_and_instrumentation(fos_source, monkeypatch):
     clear_fos_client()
     fake_raw_client = MagicMock()
@@ -109,6 +110,31 @@ def test_get_fos_client_pooling_eviction_and_instrumentation(fos_source, monkeyp
 
     clear_fos_client(fos_source)
     assert len(fos_mod._fos_client_cache) == 0
+    fake_raw_client.close.assert_called_once_with()
+
+
+@pytest.mark.no_postgres
+def test_fos_client_is_closed_on_lru_eviction(fos_source, monkeypatch):
+    clear_fos_client()
+    monkeypatch.setattr(fos_mod._fos_client_cache, "maxsize", 1)
+    raw_clients = []
+
+    def build_client(*_args, **_kwargs):
+        client = MagicMock()
+        raw_clients.append(client)
+        return client
+
+    monkeypatch.setattr("boto3.client", build_client)
+    monkeypatch.setattr("backend.utils.telemetry.start_proxy_server", lambda: None)
+    monkeypatch.setattr("backend.utils.telemetry.proxy_endpoint", lambda: "http://127.0.0.1:19999")
+    monkeypatch.setattr("backend.utils.telemetry.install_boto3_proxy_hook", lambda *_a: None)
+
+    _get_fos_client({**fos_source, "name": "first"})
+    _get_fos_client({**fos_source, "name": "second"})
+
+    raw_clients[0].close.assert_called_once_with()
+    raw_clients[1].close.assert_not_called()
+    clear_fos_client()
 
 
 def test_get_fos_client_paginator_and_errors(fos_source, monkeypatch):

@@ -24,6 +24,7 @@ from backend.models.analytics import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories.utils.response_cache import cache_result
+from backend.repositories.utils.response_shaping import build_telemetry_response_envelope
 from backend.utils.auth import mask_ips_for
 from backend.utils.router_utils import (
     make_section_expander,
@@ -107,10 +108,12 @@ def _assemble_dashboard_bundle_response(
         **cache_result({}, state="bypass", prewarmer=False),
         "aggregates": aggregates,
         "top_bots": top_bots,
-        "section_timings": section_timings,
-        "debug_queries": all_debug_queries,
-        "debug_calls": all_debug_calls,
-        "debug_sqlite": list(get_sqlite_queries()),
+        **build_telemetry_response_envelope(
+            debug_queries=all_debug_queries,
+            debug_calls=all_debug_calls,
+            section_timings=section_timings,
+            debug_sqlite=list(get_sqlite_queries()),
+        ),
     }
 
 

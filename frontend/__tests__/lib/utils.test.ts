@@ -225,6 +225,15 @@ describe('toUTCDate, formatTimeAgo & formatLocalDateTime', () => {
     expect(formatLocalDateTime('not-a-date')).toBe(new Date('not-a-date').toLocaleString())
     expect(formatLocalDateTime(iso, opts)).toBe(new Date(iso).toLocaleString(undefined, opts))
   })
+
+  it('treats timestamp strings without an offset as UTC consistently', () => {
+    const naive = '2026-07-01 12:34:56'
+    const utc = new Date('2026-07-01T12:34:56Z')
+    expect(formatLocalDateTime(naive)).toBe(utc.toLocaleString())
+    expect(formatLocalDateTime(naive, { dateStyle: 'short' })).toBe(
+      utc.toLocaleString(undefined, { dateStyle: 'short' }),
+    )
+  })
 })
 
 const ANCHOR = '2026-06-29T12:00:00Z', START = '2026-06-10T00:00:00Z', END = '2026-06-12T00:00:00Z', NOW = new Date(ANCHOR)
@@ -689,6 +698,21 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
       expect(await jsRes.text()).toBe('window.__RUM__=1;')
     } finally {
       errorSpy.mockRestore()
+      await server.close()
+    }
+  })
+
+  it('surfaces a truncated upstream response as a stream error', async () => {
+    const server = await withUpstreamServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '24' })
+      res.end('{"short":true}')
+    })
+    try {
+      const res = await apiGet(new NextRequest('http://localhost:3002/api/truncated'))
+      const reader = res.body!.getReader()
+      expect((await reader.read()).done).toBe(false)
+      await expect(reader.read()).rejects.toThrow()
+    } finally {
       await server.close()
     }
   })

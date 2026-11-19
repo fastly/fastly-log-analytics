@@ -138,17 +138,19 @@ export async function fetchWithTimeout(
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   const callerSignal = init.signal
+  const abortFromCaller = () => ctrl.abort()
   if (callerSignal) {
     if (callerSignal.aborted) {
       ctrl.abort()
     } else {
-      callerSignal.addEventListener('abort', () => ctrl.abort(), { once: true })
+      callerSignal.addEventListener('abort', abortFromCaller, { once: true })
     }
   }
   try {
     return await fetch(url, { ...init, signal: ctrl.signal })
   } finally {
     clearTimeout(timer)
+    callerSignal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
@@ -200,14 +202,18 @@ export function useAnalystHeartbeat({
 
     let timer: ReturnType<typeof setInterval> | null = null
     let cancelled = false
+    let inFlight = false
+    const controller = new AbortController()
     let consecutiveFailures = 0
 
     const tick = async () => {
-      if (cancelled) return
+      if (cancelled || inFlight) return
       if (document.hidden) return
       if (msSinceLastInteraction() < idleAfterMs) return
+      inFlight = true
       try {
-        const res = await analystFetch('/api/share/heartbeat', {}, 10_000)
+        const res = await analystFetch('/api/share/heartbeat', { signal: controller.signal }, 10_000)
+        if (cancelled) return
         if (res.status === 401 || res.status === 403) {
           cancelled = true
           if (timer) clearInterval(timer)
@@ -221,9 +227,11 @@ export function useAnalystHeartbeat({
           setDisconnected(false)
         }
       } catch {
-        consecutiveFailures++
+        if (!cancelled) consecutiveFailures++
+      } finally {
+        inFlight = false
       }
-      if (consecutiveFailures >= failuresBeforeOverlay) {
+      if (!cancelled && consecutiveFailures >= failuresBeforeOverlay) {
         setDisconnected(true)
       }
     }
@@ -232,6 +240,7 @@ export function useAnalystHeartbeat({
 
     return () => {
       cancelled = true
+      controller.abort()
       if (timer) clearInterval(timer)
     }
   }, [enabled, idleAfterMs, intervalMs, failuresBeforeOverlay, router])

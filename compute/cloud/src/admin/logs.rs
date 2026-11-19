@@ -41,9 +41,7 @@ pub struct Outcome {
 }
 
 fn reply(status: u16, body: Value) -> Response {
-    Response::new(status, body.to_string())
-        .header("content-type", "application/json")
-        .private()
+    Response::json(status, &body)
 }
 
 fn fail(status: u16, detail: &str) -> Outcome {
@@ -81,7 +79,7 @@ fn body_of(request: &Request) -> Result<Value, Outcome> {
     if request.body.len() > 65_536 {
         return Err(fail(413, "body_too_large"));
     }
-    serde_json::from_slice(&request.body).map_err(|_| fail(400, "invalid_input"))
+    request.json().map_err(|_| fail(400, "invalid_input"))
 }
 
 struct Installed {

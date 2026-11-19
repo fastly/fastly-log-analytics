@@ -419,6 +419,7 @@ class ReconciliationResult:
     error: str | None = None
     duration_ms: int = 0
     audit_log_id: int | None = None
+    created: bool = False
 
     def __post_init__(self) -> None:
         if self.changes_applied is None:

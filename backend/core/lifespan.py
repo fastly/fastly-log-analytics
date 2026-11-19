@@ -336,6 +336,10 @@ async def lifespan(app: FastAPI):
             yield
     finally:
         await asyncio.to_thread(request_telemetry.force_flush)
+        await asyncio.to_thread(_fos.clear_fos_client)
+        from backend.utils import telemetry as telemetry_proxy
+
+        await asyncio.to_thread(telemetry_proxy.stop_proxy_server)
         await asyncio.to_thread(clickhouse_observer.stop_clickhouse_observer)
         await asyncio.to_thread(console_access.close_console_clients)
         await asyncio.to_thread(clickhouse_client.close_clickhouse_client)

@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -166,6 +166,7 @@ class HighScaleControlPlane(Protocol):
         *,
         manifest_id: str,
         expected_owner_epoch: int,
+        claim_tokens: Sequence[Any],
         next_cursor: str | None = None,
         domain: str = "request",
         partition_id: str = "default",
@@ -223,6 +224,7 @@ class HighScaleIngestController:
         sources_payloads: Sequence[tuple[SourceObjectDescriptor, bytes]],
         next_cursor: str | None = None,
         partition_id: str = "default",
+        claim_tokens: Sequence[Any] = (),
         now: datetime | None = None,
         max_dead_letter_ratio: float = HIGH_SCALE_MAX_DEAD_LETTER_RATIO,
     ) -> BatchIngestResult:
@@ -235,6 +237,11 @@ class HighScaleIngestController:
         owner = self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
         if owner.current_owner != "high_scale":
             raise RuntimeError(f"high-scale ingest rejected for {service_id}: owner is {owner.current_owner}")
+        tokens_by_key = {token.object_key: token for token in claim_tokens}
+        if self._control is not None and not tokens_by_key and hasattr(self._control, "source"):
+            for descriptor, _ in sources_payloads:
+                source = self._control.source(service_id, descriptor.object_key)
+                tokens_by_key[source.object_key] = source.claim_token
         source_batches: list[tuple[ArchiveSourceObject, list[dict[str, Any]]]] = []
         all_events: list[dict[str, Any]] = []
         sibling_events: list[dict[str, Any]] = []
@@ -378,6 +385,7 @@ class HighScaleIngestController:
                                 poison_keys,
                                 expected_owner_epoch=owner.owner_epoch,
                                 error=poison_err,
+                                claim_tokens=tuple(tokens_by_key[key] for key in poison_keys),
                             )
                         elif self._control is None and hasattr(self._ledger, "mark_failed"):
                             for p_key in poison_keys:
@@ -453,7 +461,12 @@ class HighScaleIngestController:
         except Exception as exc:
             if self._control is not None:
                 self._hold_sources_on_archive(
-                    service_id, object_keys, manifest.manifest_id, owner.owner_epoch, str(exc)
+                    service_id,
+                    object_keys,
+                    manifest.manifest_id,
+                    owner.owner_epoch,
+                    str(exc),
+                    tokens_by_key,
                 )
             raise
         if self._control is not None:
@@ -463,13 +476,19 @@ class HighScaleIngestController:
                     object_keys,
                     manifest_id=manifest.manifest_id,
                     expected_owner_epoch=owner.owner_epoch,
+                    claim_tokens=tuple(tokens_by_key[key] for key in object_keys),
                     next_cursor=next_cursor,
                     domain=domain,
                     partition_id=partition_id,
                 )
             else:
                 self._hold_sources_on_archive(
-                    service_id, object_keys, manifest.manifest_id, owner.owner_epoch, derived_err
+                    service_id,
+                    object_keys,
+                    manifest.manifest_id,
+                    owner.owner_epoch,
+                    derived_err,
+                    tokens_by_key,
                 )
         else:
             for desc, _ in sources_payloads:
@@ -542,15 +561,32 @@ class HighScaleIngestController:
         return publication, derived_ok, agg_err or cmcd_err or sibling_err or "derived publication failed"
 
     def _hold_sources_on_archive(
-        self, service_id: str, object_keys: Sequence[str], manifest_id: str, owner_epoch: int, error: str
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        manifest_id: str,
+        owner_epoch: int,
+        error: str,
+        tokens_by_key: Mapping[str, Any],
     ) -> None:
         control: Any = self._control
         if hasattr(control, "bind_sources_to_archive_manifest"):
             control.bind_sources_to_archive_manifest(
-                service_id, object_keys, manifest_id=manifest_id, expected_owner_epoch=owner_epoch, error=error
+                service_id,
+                object_keys,
+                manifest_id=manifest_id,
+                expected_owner_epoch=owner_epoch,
+                error=error,
+                claim_tokens=tuple(tokens_by_key[key] for key in object_keys),
             )
         elif hasattr(control, "fail_sources_batch"):
-            control.fail_sources_batch(service_id, object_keys, expected_owner_epoch=owner_epoch, error=error)
+            control.fail_sources_batch(
+                service_id,
+                object_keys,
+                expected_owner_epoch=owner_epoch,
+                error=error,
+                claim_tokens=tuple(tokens_by_key[key] for key in object_keys),
+            )
 
     def retry_archived_publications(
         self, service_id: str, *, limit: int = 4, min_idle_seconds: float = 30.0
@@ -624,6 +660,7 @@ class HighScaleIngestController:
                         claim.object_keys,
                         manifest_id=manifest_id,
                         expected_owner_epoch=owner_epoch,
+                        claim_tokens=claim.claim_tokens,
                         domain=manifest.domain,
                     )
                     self._publication_retry_backoff.pop(manifest_id, None)
@@ -1155,6 +1192,7 @@ class SourceObjectReader(Protocol):
 
 class SourceControlPlane(Protocol):
     def owner(self, service_id: str) -> Any: ...
+    def source(self, service_id: str, object_key: str) -> Any: ...
     def source_cursor_for(self, service_id: str, domain: str, *, partition_id: str = "default") -> str: ...
     def source_reinspection_state_for(self, service_id: str, domain: str) -> tuple[str, int]: ...
     def advance_reinspection_state(
@@ -1339,6 +1377,7 @@ class HighScaleWorkerCoordinator:
             for chunk_idx, source_chunk in enumerate(source_chunks):
                 is_final_chunk = chunk_idx == len(source_chunks) - 1
                 unclaimable_keys: set[str] = set()
+                claim_tokens_by_key: dict[str, Any] = {}
                 if self._control is not None and (
                     getattr(type(self._control), "claim_sources_batch", None) is not None
                     or "claim_sources_batch" in vars(self._control)
@@ -1353,6 +1392,7 @@ class HighScaleWorkerCoordinator:
                         now=now,
                     )
                     claimed_keys = {c.object_key for c in claims}
+                    claim_tokens_by_key = {c.object_key: c.claim_token for c in claims}
                 elif self._control is not None:
                     claimed_keys = set()
                     for s in source_chunk:
@@ -1368,6 +1408,8 @@ class HighScaleWorkerCoordinator:
                             )
                             if c.claimed:
                                 claimed_keys.add(s.object_key)
+                                source = self._control.source(service_id, s.object_key)
+                                claim_tokens_by_key[s.object_key] = source.claim_token
                         except ValueError:
                             if not self._already_terminal(service_id, s.object_key):
                                 failed += 1
@@ -1453,6 +1495,7 @@ class HighScaleWorkerCoordinator:
                                     if is_final_chunk and failed == 0 and not page.reinspection_page
                                     else None
                                 ),
+                                claim_tokens=tuple(claim_tokens_by_key[src.object_key] for src, _ in valid_payloads),
                                 now=now,
                                 **ingest_kwargs,
                             )
@@ -1472,6 +1515,9 @@ class HighScaleWorkerCoordinator:
                                         tuple(src.object_key for src, _ in valid_payloads),
                                         expected_owner_epoch=epoch,
                                         error=str(exc),
+                                        claim_tokens=tuple(
+                                            claim_tokens_by_key[src.object_key] for src, _ in valid_payloads
+                                        ),
                                     )
                                 except Exception:
                                     logger.debug("fail_sources_batch after ingest_batch error failed", exc_info=True)

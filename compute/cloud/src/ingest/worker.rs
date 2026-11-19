@@ -239,7 +239,7 @@ pub fn handle_worker_relay<R: Runtime>(runtime: &R, request: &http::Request) -> 
     if !authorized(runtime, request) {
         return deny(403, "Forbidden");
     }
-    let Ok(relay) = serde_json::from_slice::<RelayRequest>(&request.body) else {
+    let Ok(relay) = request.json::<RelayRequest>() else {
         return deny(400, "Invalid request");
     };
     if request.body.len() > RELAY_BODY_LIMIT
@@ -272,9 +272,7 @@ pub fn handle_worker_relay<R: Runtime>(runtime: &R, request: &http::Request) -> 
         "worker_requests": runtime.worker_requests(),
         "execution_metrics": metrics,
     });
-    http::Response::new(200, body.to_string())
-        .header("content-type", "application/json")
-        .private()
+    http::Response::json(200, &body)
 }
 
 /// Converts one shard. Response `status` is `ok`, `split`, `schema_mismatch` or `error`.
@@ -286,13 +284,14 @@ pub fn handle_worker_ingest<R: Runtime>(runtime: &R, request: &http::Request) ->
         return deny(403, "Forbidden");
     }
     if request.path == PATH
-        && serde_json::from_slice::<Value>(&request.body)
+        && request
+            .json::<Value>()
             .is_ok_and(|value| value["maintenance"] == "source_index")
     {
         return super::source_index::handle_authorized_worker(runtime, request, started);
     }
     if request.path == PATH
-        && serde_json::from_slice::<Value>(&request.body).is_ok_and(|value| {
+        && request.json::<Value>().is_ok_and(|value| {
             matches!(
                 value["maintenance"].as_str(),
                 Some("request_compact" | "rum_compact")
@@ -301,7 +300,7 @@ pub fn handle_worker_ingest<R: Runtime>(runtime: &R, request: &http::Request) ->
     {
         return super::compaction::handle_authorized_worker(runtime, request, started);
     }
-    let Ok(shard) = serde_json::from_slice::<ShardRequest>(&request.body) else {
+    let Ok(shard) = request.json::<ShardRequest>() else {
         return deny(400, "Invalid request");
     };
     if !valid(&shard) || shard.segment.is_some() != (request.path == RANGE_PATH) {
@@ -326,9 +325,7 @@ pub fn handle_worker_ingest<R: Runtime>(runtime: &R, request: &http::Request) ->
         metrics.summary_vcpu_ms = metrics.vcpu_ms.map(|_| summary_vcpu.get());
         body["vcpu_ms"] = metrics.vcpu_ms.into();
         body["execution_metrics"] = json!(metrics);
-        http::Response::new(200, body.to_string())
-            .header("content-type", "application/json")
-            .private()
+        http::Response::json(200, &body)
     };
     let rum = shard.stream == super::rum::STREAM;
     let schema = convert::RequestSchema::new(shard.custom.clone());

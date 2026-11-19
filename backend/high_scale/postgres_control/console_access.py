@@ -16,6 +16,7 @@ from typing import Any
 from backend import config
 from backend.core.clickhouse import ClickHouseClient
 from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.high_scale._common import clickhouse_string_literal
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
 
@@ -49,7 +50,7 @@ _PROFILE_SETTINGS = (
 
 
 def _literal(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return clickhouse_string_literal(value)
 
 
 def _service_hash(service_id: str) -> str:

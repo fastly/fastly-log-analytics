@@ -15,6 +15,7 @@ import {
   applySystemMetrics,
   applyShare,
   makeCronRunsApplier,
+  parseSSEJson,
 } from './sseStreamAppliers'
 import { useEventStream } from './useEventStream'
 import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
@@ -143,8 +144,8 @@ export function useHeaderBadgeStream(enabled: boolean) {
   }, [enabled, cloudActive, activeServiceId, queryClient])
 
   return useServiceStream(enabled && !cloudActive, '/api/log-extents/stream', (raw) => {
-    try {
-      const payload = JSON.parse(raw) as BadgeStreamEvent
+    const payload = parseSSEJson<BadgeStreamEvent>(raw)
+    if (payload) {
       queryClient.setQueryData<BootstrapShape | undefined>(queryKeys.bootstrap(), (prev) => {
         if (!prev) return prev
         return {
@@ -169,8 +170,6 @@ export function useHeaderBadgeStream(enabled: boolean) {
           },
         }
       })
-    } catch {
-      /* ignore */
     }
   })
 }
@@ -199,13 +198,8 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
     enabled && !cloudActive && bootstrapSettled && channelsParam.length > 0,
     `/api/admin/events/stream?channels=${channelsParam}`,
     (raw) => {
-      let env: { channel?: string; data?: unknown }
-      try {
-        env = JSON.parse(raw) as { channel?: string; data?: unknown }
-      } catch {
-        return
-      }
-      if (!env || typeof env !== 'object') return
+      const env = parseSSEJson<{ channel?: string; data?: unknown }>(raw)
+      if (!env) return
       switch (env.channel) {
         case 'sync-status':
           adminStreamHooks.applySyncStatus(queryClient, activeServiceId, env.data)

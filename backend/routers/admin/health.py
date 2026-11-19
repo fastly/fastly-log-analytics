@@ -178,35 +178,9 @@ def _sample_metadata_storage(service_id: str | None) -> dict[str, Any] | None:
 
 
 def _sample_system_jobs() -> dict[str, Any]:
-    from backend.cron.scheduler import get_scheduler, get_system_job_status
+    from backend.cron.scheduler import get_system_jobs_snapshot
 
-    statuses = get_system_job_status()
-    job_labels = {
-        "bot_data_refresh": "Bot Data Refresh",
-        "rdns_enrichment": "rDNS Enrichment",
-        "share_audit_purge": "Share Audit Purge",
-    }
-    sched = get_scheduler()
-    result: list[dict[str, Any]] = []
-    for job_id, label in job_labels.items():
-        entry: dict[str, Any] = {
-            "id": job_id,
-            "name": label,
-            "next_run_at": None,
-            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
-        }
-        if sched is not None:
-            try:
-                job = sched.get_job(job_id)
-            except Exception:
-                job = None
-            next_run = getattr(job, "next_run_time", None) if job else None
-            if next_run:
-                from backend.utils.date_utils import iso_z
-
-                entry["next_run_at"] = iso_z(next_run)
-        result.append(entry)
-    return {"jobs": result}
+    return {"jobs": get_system_jobs_snapshot()}
 
 
 _CacheRegistry.register("routers.admin.health._cache", _cache)

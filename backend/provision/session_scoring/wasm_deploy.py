@@ -232,6 +232,12 @@ def ensure_scoring_service(logging_service_id: str, token: str, *, status_cb=Non
             "scoring_matrix_store_id": _store_id(matrix_store),
             "aes_key_hex": aes_key_hex,
             "request_secret": request_secret,
+            "created_resources": {
+                "scoring_service_id": scoring_service_id,
+                "scoring_keys_store_id": keys_store["id"],
+                "scoring_config_store_id": cfg_store["id"],
+                "scoring_matrix_store_id": _store_id(matrix_store),
+            },
         }
     except Exception:
         if scoring_service_id:

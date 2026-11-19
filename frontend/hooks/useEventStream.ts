@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBootstrapPending, useIsAnalyst } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
-import type { components } from '@/types/api.generated'
+import type { Schema } from '@/types/api'
 import {
   type SSEConnectionState,
   type SyncStatus,
@@ -44,6 +44,7 @@ export async function runEventStream(opts: RunEventStreamOptions): Promise<void>
   const fetchFn = opts.fetchImpl ?? (IS_CLOUD_MODE || isCloudMode()
     ? (await import('@/lib/cloud-engine/adapter')).cloudStreamFetch
     : fetch)
+  if (signal.aborted) throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
   const response = await fetchFn(url, { method, ...(cache ? { cache } : {}), headers, body, signal })
 
   if (isActive && !isActive()) {
@@ -82,11 +83,24 @@ export async function runEventStream(opts: RunEventStreamOptions): Promise<void>
         buffer += decoder.decode(value, { stream: true })
         const { frames, remainder } = parseSSEFrames(buffer)
         buffer = remainder
-        for (const frame of frames) onFrame(frame)
+        for (const frame of frames) {
+          if (isActive && !isActive()) {
+            onAbort()
+            return
+          }
+          onFrame(frame)
+        }
       }
+    }
+    buffer += decoder.decode()
+    const { frames } = parseSSEFrames(buffer)
+    for (const frame of frames) {
+      if (isActive && !isActive()) break
+      onFrame(frame)
     }
   } finally {
     signal.removeEventListener('abort', onAbort)
+    reader.releaseLock()
   }
 }
 
@@ -148,17 +162,26 @@ export function useEventStream(
               const raw = extractSSEFrameData(frame)
               if (raw) emitEvent(raw)
             },
+            isActive: () => !cancelled,
           })
         } catch (err) {
           if (cancelled) return
           if (err instanceof EventStreamHttpError && (err.status === 401 || err.status === 403)) {
+            safeSetState('idle')
             cancelled = true
             return
           }
         }
         if (cancelled) return
         safeSetState('reconnecting')
-        await new Promise((resolve) => setTimeout(resolve, Math.min(30_000, 1_000 * 2 ** attempt++)))
+        await new Promise<void>((resolve) => {
+          const delay = Math.min(30_000, 1_000 * 2 ** attempt++)
+          const timer = setTimeout(resolve, delay)
+          abort.signal.addEventListener('abort', () => {
+            clearTimeout(timer)
+            resolve()
+          }, { once: true })
+        })
       }
     }
 
@@ -199,7 +222,7 @@ export function useSeededReady(
 
 const SEED_KEYS = [queryKeys.syncStatus] as const
 const LAST_SYNC_SEED_KEYS = [queryKeys.lastSync] as const
-type CronRunEntry = components['schemas']['CronRunEntry']
+type CronRunEntry = Schema<'CronRunEntry'>
 type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
 
 export function useSyncStatus() {

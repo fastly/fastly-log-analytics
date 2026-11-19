@@ -21,7 +21,7 @@ from backend.cron.scheduler.progress import (
     start_progress,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import iso_z_now
+from backend.utils.date_utils import iso_z, iso_z_now
 
 logger = logging.getLogger("backend.scheduler")
 
@@ -176,6 +176,36 @@ def record_job_run(job_id: str, status: str, duration_s: float, detail: str = ""
 def get_system_job_status() -> dict[str, dict]:
     with _status_lock:
         return dict(_status)
+
+
+def get_system_jobs_snapshot() -> list[dict[str, Any]]:
+    from backend.cron.scheduler.runner import get_scheduler
+
+    statuses = get_system_job_status()
+    job_labels = {
+        "bot_data_refresh": "Bot Data Refresh",
+        "rdns_enrichment": "rDNS Enrichment",
+        "share_audit_purge": "Share Audit Purge",
+    }
+    sched = get_scheduler()
+    result: list[dict[str, Any]] = []
+    for job_id, label in job_labels.items():
+        entry: dict[str, Any] = {
+            "id": job_id,
+            "name": label,
+            "next_run_at": None,
+            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
+        }
+        if sched is not None:
+            try:
+                job = sched.get_job(job_id)
+            except Exception:
+                job = None
+            next_run = getattr(job, "next_run_time", None) if job else None
+            if next_run:
+                entry["next_run_at"] = iso_z(next_run)
+        result.append(entry)
+    return result
 
 
 _CacheRegistry.register("utils.system_jobs._status", _status)
@@ -578,6 +608,7 @@ __all__ = [
     "end_progress",
     "get_progress",
     "get_system_job_status",
+    "get_system_jobs_snapshot",
     "global_job",
     "iso_z_now",
     "logger",

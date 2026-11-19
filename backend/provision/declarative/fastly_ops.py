@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -46,9 +47,35 @@ def upload_rum_tracker_js(*args: Any, **kwargs: Any) -> dict[str, Any]:
 class FileLock:
     """File-based lock for concurrency control backed by ``filelock.SoftFileLock``."""
 
-    def __init__(self, lock_path: Path, _lock: Any | None = None) -> None:
+    def __init__(
+        self,
+        lock_path: Path,
+        _lock: Any | None = None,
+        *,
+        heartbeat_interval: float | None = None,
+        owner: str | None = None,
+    ) -> None:
         self.lock_path = lock_path
         self._lock = _lock
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+        self._heartbeat_interval = heartbeat_interval
+        self._owner = owner
+
+    def start_heartbeat(self) -> None:
+        if self._heartbeat_interval is None or self._owner is None:
+            return
+
+        def _beat() -> None:
+            while not self._heartbeat_stop.wait(self._heartbeat_interval):
+                try:
+                    if self.lock_path.read_text() == self._owner:
+                        self.lock_path.touch()
+                except OSError:
+                    return
+
+        self._heartbeat = threading.Thread(target=_beat, name="fdt-vcl-lock-heartbeat", daemon=True)
+        self._heartbeat.start()
 
     def __enter__(self) -> FileLock:
         return self
@@ -56,6 +83,9 @@ class FileLock:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         from contextlib import suppress
 
+        self._heartbeat_stop.set()
+        if self._heartbeat is not None:
+            self._heartbeat.join(timeout=1)
         if self._lock is not None:
             with suppress(OSError):
                 self._lock.release()
@@ -86,9 +116,17 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
                     lock_path.unlink(missing_ok=True)
             try:
                 flock.acquire(timeout=0)
+                owner = f"{os.getpid()} {time.time_ns()}"
                 with suppress(OSError):
-                    lock_path.write_text(f"{os.getpid()} {int(time.time())}")
-                return FileLock(lock_path, _lock=flock)
+                    lock_path.write_text(owner)
+                held = FileLock(
+                    lock_path,
+                    _lock=flock,
+                    heartbeat_interval=max(0.01, min(30.0, stale_seconds / 3)),
+                    owner=owner,
+                )
+                held.start_heartbeat()
+                return held
             except _FileLockTimeout:
                 if (elapsed := time.time() - start) > timeout_sec:
                     raise LockAcquisitionTimeout(service_id, elapsed) from None
@@ -109,13 +147,11 @@ def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Call
 
 
 def _update_local_config(service_id: str, mutate: Callable[[dict[str, Any]], None]) -> None:
-    """Best-effort locked edit of the local config cache."""
+    """Apply a required locked edit of the persisted local configuration."""
     from backend.config import mutate_config
 
-    try:
-        mutate_config(service_id, mutate)
-    except OSError as e:
-        logger.info("Skipped updating read-only config cache: %s", e)
+    if mutate_config(service_id, mutate) is None:
+        raise RuntimeError(f"No config found for service {service_id}")
 
 
 def fetch_active_version(service_id: str, token: str) -> int | None:

@@ -67,9 +67,7 @@ pub fn handle_audited(
         ),
     };
     let audit = (status == 200).then(|| admin_audit(request)).flatten();
-    let response = Response::new(status, body.to_string())
-        .header("content-type", "application/json")
-        .private();
+    let response = Response::json(status, &body);
     (response, audit)
 }
 
@@ -94,7 +92,7 @@ fn body<T: DeserializeOwned>(request: &Request) -> Result<T, Error> {
     if request.body.len() > 65_536 {
         return Err(Error::new(413, "body_too_large"));
     }
-    serde_json::from_slice(&request.body).map_err(|_| Error::new(400, "invalid_input"))
+    request.json().map_err(|_| Error::new(400, "invalid_input"))
 }
 fn serialize(value: &impl Serialize) -> Result<Value, Error> {
     serde_json::to_value(value).map_err(|_| Error::new(500, "state_encoding_failed"))

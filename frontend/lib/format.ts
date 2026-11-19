@@ -250,7 +250,7 @@ export function getTimezoneAbbr(date: Date, tz: string) {
 }
 
 export function formatLocalDateTime(value: string | number | Date, options?: Intl.DateTimeFormatOptions): string {
-  const d = value instanceof Date ? value : new Date(value)
+  const d = value instanceof Date || typeof value === 'number' ? value instanceof Date ? value : new Date(value) : toUTCDate(value)
   if (isNaN(d.getTime())) return d.toLocaleString(undefined, options)
   return options ? getDateTimeFormat(undefined, options).format(d) : d.toLocaleString()
 }
@@ -277,7 +277,7 @@ export function formatDuration(seconds: number | null | undefined, options?: { r
 export function formatDeterministicUTC(iso: string | null | undefined): string {
   if (!iso) return '—'
   try {
-    const d = new Date(iso)
+    const d = toUTCDate(iso)
     if (isNaN(d.getTime())) return iso
     const formatted = getDateTimeFormat('en-US', {
       timeZone: 'UTC',

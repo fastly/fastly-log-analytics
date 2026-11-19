@@ -202,7 +202,8 @@ fn handle_test_endpoint(
     }
     match (request.method.as_str(), path) {
         ("POST", "/__test/csp-reports") => {
-            let payload = serde_json::from_slice::<Value>(&request.body)
+            let payload = request
+                .json::<Value>()
                 .unwrap_or_else(|_| serde_json::json!({}));
             if let Ok(mut reports) = runtime.csp_reports.lock() {
                 reports.push(payload);

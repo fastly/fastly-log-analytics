@@ -2,12 +2,12 @@
 
 import type { QueryClient } from '@tanstack/react-query'
 import { getApiBase, queryKeys } from '@/lib/api'
-import type { components } from '@/types/api.generated'
+import type { Schema } from '@/types/api'
 
 // ── SSE Frame Parsing & Stream Request Builder ───────────────────────────────
 
 export type SSEConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting'
-export type SyncStatus = components['schemas']['SyncStatusResponse']
+export type SyncStatus = Schema<'SyncStatusResponse'>
 
 export interface EventStreamRequest {
   url: string
@@ -24,6 +24,15 @@ export interface BuildStreamRequestOptions {
   body?: BodyInit
   extraHeaders?: Record<string, string>
   cache?: RequestCache
+}
+
+export function parseSSEJson<T>(raw: string): T | null {
+  try {
+    const value = JSON.parse(raw) as T
+    return value && typeof value === 'object' ? value : null
+  } catch {
+    return null
+  }
 }
 
 export function buildStreamRequest({

@@ -153,6 +153,7 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
       return (data as { transport?: TransportMetrics } | undefined)?.transport ?? null
     },
     { enabled: Boolean(activeServiceId && startTime && endTime) },
+    3,
   )
 
   const transport = transportQuery.data

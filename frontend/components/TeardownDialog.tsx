@@ -1,9 +1,9 @@
 'use client'
 
-import { useForm } from 'react-hook-form'
+import { Controller, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import React, { useState } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -168,25 +168,9 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
       apiToken: '',
     },
   })
-  const [removeLogging, setRemoveLoggingState] = useState(true)
-  // Follows the service's RUM flag until the operator toggles it.
-  const [removeRum, setRemoveRumState] = useDerivedState(service?.rum_enabled || false)
-  const [removeBucket, setRemoveBucketState] = useState(true)
-  const [removeCloudFiles, setRemoveCloudFilesState] = useState(true)
-  const [removeCache, setRemoveCacheState] = useState(true)
   const [isExecuting, setIsExecuting] = useState(false)
-  // Security: backend now requires a caller-supplied Fastly token with the
-  // `global` scope for any teardown that touches Fastly (logging/CDN/bucket).
-  // Server-stored credentials are no longer accepted as a fallback. The admin
-  // must paste their own token each time so a CSRF or stolen-session attacker
-  // cannot trigger a customer outage without also having a valid Fastly token.
-  const [apiToken, setApiTokenState] = useState('')
-  const setRemoveLogging = (v: boolean) => { setRemoveLoggingState(v); form.setValue('removeLogging', v) }
-  const setRemoveRum = (v: boolean) => { setRemoveRumState(v); form.setValue('removeRum', v) }
-  const setRemoveBucket = (v: boolean) => { setRemoveBucketState(v); form.setValue('removeBucket', v) }
-  const setRemoveCloudFiles = (v: boolean) => { setRemoveCloudFilesState(v); form.setValue('removeCloudFiles', v) }
-  const setRemoveCache = (v: boolean) => { setRemoveCacheState(v); form.setValue('removeCache', v) }
-  const setApiToken = (v: string) => { setApiTokenState(v); form.setValue('apiToken', v) }
+  const { removeLogging, removeRum, removeBucket, removeCloudFiles, removeCache, apiToken } =
+    useWatch({ control: form.control }) as z.infer<typeof teardownFormSchema>
 
   const { lines, status, error: sseError, start, stop } = useSSE()
 
@@ -278,16 +262,16 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                     <Label htmlFor="toggle-remove-logging" className="text-sm font-semibold cursor-pointer">Remove Request Logging</Label>
                     <p className="text-[11px] text-muted-foreground">Endpoints and VCL capture snippets for request logs.</p>
                   </div>
-                  <Switch
-                    id="toggle-remove-logging"
-                    checked={removeLogging}
-                    onCheckedChange={(checked) => {
-                      setRemoveLogging(checked)
-                      if (!checked) {
-                        setRemoveBucket(false)
-                      }
-                    }}
-                  />
+                  <Controller control={form.control} name="removeLogging" render={({ field }) => (
+                    <Switch
+                      id="toggle-remove-logging"
+                      checked={field.value}
+                      onCheckedChange={(checked) => {
+                        field.onChange(checked)
+                        if (!checked) form.setValue('removeBucket', false)
+                      }}
+                    />
+                  )} />
                 </div>
 
                 <div className="flex items-center justify-between group">
@@ -295,16 +279,16 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                     <Label htmlFor="toggle-remove-rum" className="text-sm font-semibold cursor-pointer">Remove Real User Monitoring (RUM)</Label>
                     <p className="text-[11px] text-muted-foreground">Tracking snippets and collector endpoints for Faro RUM.</p>
                   </div>
-                  <Switch
-                    id="toggle-remove-rum"
-                    checked={removeRum}
-                    onCheckedChange={(checked) => {
-                      setRemoveRum(checked)
-                      if (!checked) {
-                        setRemoveBucket(false)
-                      }
-                    }}
-                  />
+                  <Controller control={form.control} name="removeRum" render={({ field }) => (
+                    <Switch
+                      id="toggle-remove-rum"
+                      checked={field.value}
+                      onCheckedChange={(checked) => {
+                        field.onChange(checked)
+                        if (!checked) form.setValue('removeBucket', false)
+                      }}
+                    />
+                  )} />
                 </div>
               </div>
             </div>
@@ -348,7 +332,9 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                       <Label htmlFor="rem-cloud-files" className="text-sm font-medium cursor-pointer">Delete standard logs from cloud storage</Label>
                       <p className="text-[10px] text-muted-foreground">Deletes raw logs under standard prefix, preserving RUM logs.</p>
                     </div>
-                    <Switch id="rem-cloud-files" checked={removeLogging && removeCloudFiles} disabled={!removeLogging} onCheckedChange={setRemoveCloudFiles} />
+                    <Controller control={form.control} name="removeCloudFiles" render={({ field }) => (
+                      <Switch id="rem-cloud-files" checked={removeLogging && field.value} disabled={!removeLogging} onCheckedChange={field.onChange} />
+                    )} />
                   </div>
 
                   <div className={cn("flex items-center justify-between group", bucketDisabled && "opacity-60")}>
@@ -369,7 +355,9 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                         <p className="text-[10px] text-muted-foreground text-destructive font-medium">Warning: This cannot be undone. All logs will be lost.</p>
                       )}
                     </div>
-                    <Switch id="rem-buck-new" checked={effectiveRemoveBucket} disabled={bucketDisabled} onCheckedChange={setRemoveBucket} />
+                    <Controller control={form.control} name="removeBucket" render={({ field }) => (
+                      <Switch id="rem-buck-new" checked={effectiveRemoveBucket} disabled={bucketDisabled} onCheckedChange={field.onChange} />
+                    )} />
                   </div>
 
                   {!cloud && (
@@ -378,7 +366,9 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                         <Label htmlFor="rem-cache-new" className="text-sm font-medium cursor-pointer">Purge local database and cache</Label>
                         <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes ClickHouse table rows, FOS Archive Parquet manifests, and service metadata.</p>
                       </div>
-                      <Switch id="rem-cache-new" checked={removeCache} onCheckedChange={setRemoveCache} />
+                      <Controller control={form.control} name="removeCache" render={({ field }) => (
+                        <Switch id="rem-cache-new" checked={field.value} onCheckedChange={field.onChange} />
+                      )} />
                     </div>
                   )}
                 </div>
@@ -400,15 +390,16 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                   The server no longer falls back to a stored token for destructive teardown.
                   Provide a token validated to have full permissions on this service.
                 </p>
-                <Input
-                  id="teardown-api-token"
-                  type="password"
-                  placeholder="Fastly API token"
-                  value={apiToken}
-                  onChange={(e) => setApiToken(e.target.value)}
-                  className="font-mono text-sm"
-                  autoComplete="off"
-                />
+                <Controller control={form.control} name="apiToken" render={({ field }) => (
+                  <Input
+                    id="teardown-api-token"
+                    type="password"
+                    placeholder="Fastly API token"
+                    className="font-mono text-sm"
+                    autoComplete="off"
+                    {...field}
+                  />
+                )} />
               </div>
             </div>
           )}

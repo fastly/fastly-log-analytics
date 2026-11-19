@@ -2390,9 +2390,7 @@ pub fn worker(request: &crate::http::Request, runtime: &FastlyRuntime) -> crate:
         }
         _ => return crate::http::Response::new(404, "Not found").private(),
     };
-    crate::http::Response::new(200, data.to_string())
-        .header("content-type", "application/json")
-        .private()
+    crate::http::Response::json(200, &data)
 }
 
 #[cfg(test)]

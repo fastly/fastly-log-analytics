@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { useForm } from 'react-hook-form'
+import { Controller, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQueryClient } from '@tanstack/react-query'
@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
 import { RumVersionPicker } from '@/components/ProvisionWizard/ProvisionWizard'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
-import { useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
+import { useOpenGeneration } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
 import { adminFetch, queryKeys } from "@/lib/api";
 import { useRumStatus } from '@/hooks/useDashboardCards'
@@ -72,6 +72,7 @@ const rumSettingsSchema = z.object({
   capture_errors: z.boolean(),
   capture_events: z.boolean(),
   custom_condition: z.string(),
+  selected_version: z.string(),
 })
 
 function RumSettingsDialogBody({
@@ -85,9 +86,6 @@ function RumSettingsDialogBody({
 }: RumSettingsDialogProps) {
   const queryClient = useQueryClient()
   const [isExecuting, setIsExecuting] = useState(false)
-  const [selectedVersion, setSelectedVersion] = useDerivedState<string>(
-    currentVersion ?? latestVersion ?? availableVersions[0] ?? ''
-  )
   const form = useForm<z.infer<typeof rumSettingsSchema>>({
     resolver: zodResolver(rumSettingsSchema),
     defaultValues: {
@@ -96,20 +94,17 @@ function RumSettingsDialogBody({
       capture_errors: true,
       capture_events: true,
       custom_condition: '',
+      selected_version: currentVersion ?? latestVersion ?? availableVersions[0] ?? '',
     },
   })
-
-  // Local settings toggles
-  const [captureVitals, setCaptureVitalsState] = useState(true)
-  const [capturePerformance, setCapturePerformanceState] = useState(true)
-  const [captureErrors, setCaptureErrorsState] = useState(true)
-  const [captureEvents, setCaptureEventsState] = useState(true)
-  const [customCondition, setCustomConditionState] = useState('')
-  const setCaptureVitals = (v: boolean) => { setCaptureVitalsState(v); form.setValue('capture_vitals', v) }
-  const setCapturePerformance = (v: boolean) => { setCapturePerformanceState(v); form.setValue('capture_performance', v) }
-  const setCaptureErrors = (v: boolean) => { setCaptureErrorsState(v); form.setValue('capture_errors', v) }
-  const setCaptureEvents = (v: boolean) => { setCaptureEventsState(v); form.setValue('capture_events', v) }
-  const setCustomCondition = (v: string) => { setCustomConditionState(v); form.setValue('custom_condition', v) }
+  const {
+    capture_vitals: captureVitals,
+    capture_performance: capturePerformance,
+    capture_errors: captureErrors,
+    capture_events: captureEvents,
+    custom_condition: customCondition,
+    selected_version: selectedVersion,
+  } = useWatch({ control: form.control }) as z.infer<typeof rumSettingsSchema>
 
   // Local log lines to show during synchronous settings saving
   const [localLogs, setLocalLogs] = useState<string[]>([])
@@ -144,15 +139,18 @@ function RumSettingsDialogBody({
   // Fetch full status which includes capture toggles
   const { data: statusData, isLoading: isStatusLoading } = useRumStatus(serviceId, { enabled: open })
 
-  const [initializedServiceId, setInitializedServiceId] = useState<string | null>(null)
-  if (statusData && !statusData.unauthorized && serviceId && initializedServiceId !== serviceId) {
-    setInitializedServiceId(serviceId)
-    setCaptureVitals(statusData.capture_vitals ?? true)
-    setCapturePerformance(statusData.capture_performance ?? true)
-    setCaptureErrors(statusData.capture_errors ?? true)
-    setCaptureEvents(statusData.capture_events ?? true)
-    setCustomCondition(statusData.custom_condition ?? '')
-  }
+  useEffect(() => {
+    if (statusData && !statusData.unauthorized && serviceId) {
+      form.reset({
+        capture_vitals: statusData.capture_vitals ?? true,
+        capture_performance: statusData.capture_performance ?? true,
+        capture_errors: statusData.capture_errors ?? true,
+        capture_events: statusData.capture_events ?? true,
+        custom_condition: statusData.custom_condition ?? '',
+        selected_version: currentVersion ?? latestVersion ?? availableVersions[0] ?? '',
+      })
+    }
+  }, [availableVersions, currentVersion, form, latestVersion, serviceId, statusData])
 
   const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop } = useSSE()
 
@@ -320,12 +318,9 @@ function RumSettingsDialogBody({
                   <Label htmlFor="toggle-vitals" className="text-sm font-semibold leading-none cursor-pointer">Core Web Vitals</Label>
                   <p className="text-xs text-muted-foreground">Track page paint, shift, and response metrics (LCP, CLS, INP, FCP).</p>
                 </div>
-                <Switch
-                  id="toggle-vitals"
-                  checked={captureVitals}
-                  onCheckedChange={setCaptureVitals}
-                  size="default"
-                />
+                <Controller control={form.control} name="capture_vitals" render={({ field }) => (
+                  <Switch id="toggle-vitals" checked={field.value} onCheckedChange={field.onChange} size="default" />
+                )} />
               </div>
 
               <div className="flex items-start justify-between gap-4 border-t pt-4">
@@ -333,12 +328,9 @@ function RumSettingsDialogBody({
                   <Label htmlFor="toggle-perf" className="text-sm font-semibold leading-none cursor-pointer">Performance Timings</Label>
                   <p className="text-xs text-muted-foreground">Record navigation timelines and page load/rendering budgets.</p>
                 </div>
-                <Switch
-                  id="toggle-perf"
-                  checked={capturePerformance}
-                  onCheckedChange={setCapturePerformance}
-                  size="default"
-                />
+                <Controller control={form.control} name="capture_performance" render={({ field }) => (
+                  <Switch id="toggle-perf" checked={field.value} onCheckedChange={field.onChange} size="default" />
+                )} />
               </div>
 
               <div className="flex items-start justify-between gap-4 border-t pt-4">
@@ -346,12 +338,9 @@ function RumSettingsDialogBody({
                   <Label htmlFor="toggle-errors" className="text-sm font-semibold leading-none cursor-pointer">JavaScript Errors</Label>
                   <p className="text-xs text-muted-foreground">Capture uncaught script exceptions and runtime crash details.</p>
                 </div>
-                <Switch
-                  id="toggle-errors"
-                  checked={captureErrors}
-                  onCheckedChange={setCaptureErrors}
-                  size="default"
-                />
+                <Controller control={form.control} name="capture_errors" render={({ field }) => (
+                  <Switch id="toggle-errors" checked={field.value} onCheckedChange={field.onChange} size="default" />
+                )} />
               </div>
 
               <div className="flex items-start justify-between gap-4 border-t pt-4">
@@ -359,12 +348,9 @@ function RumSettingsDialogBody({
                   <Label htmlFor="toggle-events" className="text-sm font-semibold leading-none cursor-pointer">Custom Events</Label>
                   <p className="text-xs text-muted-foreground">Record standard button clicks, user sessions, and custom events.</p>
                 </div>
-                <Switch
-                  id="toggle-events"
-                  checked={captureEvents}
-                  onCheckedChange={setCaptureEvents}
-                  size="default"
-                />
+                <Controller control={form.control} name="capture_events" render={({ field }) => (
+                  <Switch id="toggle-events" checked={field.value} onCheckedChange={field.onChange} size="default" />
+                )} />
               </div>
             </div>
           )}
@@ -389,26 +375,29 @@ function RumSettingsDialogBody({
                 <code>client.geo.country_code != &quot;US&quot;</code>. Strings must use double quotes.
               </p>
             </div>
-            <Input
-              id="rum-custom-condition"
-              placeholder='e.g. req.http.User-Agent !~ "(bot|crawler)"'
-              value={customCondition}
-              onChange={(e) => setCustomCondition(e.target.value)}
-              className="h-9 font-mono text-xs mt-2"
-            />
+            <Controller control={form.control} name="custom_condition" render={({ field }) => (
+              <Input
+                id="rum-custom-condition"
+                placeholder='e.g. req.http.User-Agent !~ "(bot|crawler)"'
+                className="h-9 font-mono text-xs mt-2"
+                {...field}
+              />
+            )} />
           </div>
         </div>
 
         {/* Version picker section */}
         <div className="space-y-4 border-t pt-5">
-          <RumVersionPicker
-            serviceId={serviceId}
-            value={selectedVersion || null}
-            onChange={(v) => setSelectedVersion(v ?? '')}
-            availableVersions={availableVersions}
-            currentVersion={currentVersion}
-            latestVersion={latestVersion}
-          />
+          <Controller control={form.control} name="selected_version" render={({ field }) => (
+            <RumVersionPicker
+              serviceId={serviceId}
+              value={field.value || null}
+              onChange={(value) => field.onChange(value ?? '')}
+              availableVersions={availableVersions}
+              currentVersion={currentVersion}
+              latestVersion={latestVersion}
+            />
+          )} />
 
           {selectedVersion !== currentVersion && (
             <div className="flex items-center justify-center gap-3 rounded-md bg-muted/40 border p-4 text-sm font-mono animate-in fade-in duration-300">

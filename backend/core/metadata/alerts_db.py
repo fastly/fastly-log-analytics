@@ -46,15 +46,17 @@ def _row_to_alert(r: Any) -> dict:
     return _AlertRowModel.model_validate(dict(r)).model_dump()
 
 
+def _select_alerts_query(where: str = "", *, limit: bool = False) -> str:
+    suffix = " LIMIT ?" if limit else ""
+    return f"SELECT {_ALERT_COLUMNS} FROM alerts{where} ORDER BY created_at DESC{suffix}"
+
+
 def list_alerts(service_id: str, filter_service_id: str | None = None) -> list[dict]:
     """Return all alerts, optionally filtered by service_id."""
     con = get_con(service_id)
-    where = "WHERE service_id = ? " if filter_service_id else ""
+    where = " WHERE service_id = ?" if filter_service_id else ""
     params: list = [filter_service_id] if filter_service_id else []
-    rows = con.execute(
-        f"SELECT {_ALERT_COLUMNS} FROM alerts {where}ORDER BY created_at DESC",
-        params,
-    ).fetchall()
+    rows = con.execute(_select_alerts_query(where), params).fetchall()
     return [_row_to_alert(r) for r in rows]
 
 
@@ -67,10 +69,8 @@ def list_alerts_cross_service(service_ids: list[str], limit: int = 500) -> list[
 
     con = get_con(service_ids[0])
     placeholders = ", ".join("?" for _ in service_ids)
-    rows = con.execute(
-        f"SELECT {_ALERT_COLUMNS} FROM alerts WHERE service_id IN ({placeholders}) ORDER BY created_at DESC LIMIT ?",
-        [*service_ids, limit],
-    ).fetchall()
+    query = _select_alerts_query(f" WHERE service_id IN ({placeholders})", limit=True)
+    rows = con.execute(query, [*service_ids, limit]).fetchall()
     return [_row_to_alert(r) for r in rows]
 
 

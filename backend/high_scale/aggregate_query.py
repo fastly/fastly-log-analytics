@@ -6,12 +6,13 @@ import concurrent.futures
 import contextvars
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from backend.core.clickhouse import ClickHouseError
-from backend.high_scale._common import visible_publication_fence_sql
+from backend.high_scale._common import visible_publication_fence_sql, visible_rollup_publication_fence_sql
 
 if TYPE_CHECKING:
     from backend.high_scale.archive import ServingWatermark
@@ -50,8 +51,48 @@ class AggregateRequest:
             raise ValueError("aggregate range is inverted")
 
 
+def _aggregate_response(
+    *,
+    service_id: str,
+    domain: str,
+    request_count: int,
+    top_values: tuple[tuple[str, int], ...],
+    watermark: ServingWatermark,
+    now: datetime | None = None,
+) -> AggregateResponse:
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
+    return AggregateResponse(
+        service_id=service_id,
+        domain=domain,
+        request_count=request_count,
+        top_values=top_values,
+        coverage=1.0 if top_values or watermark.coverage_end is not None else 0.0,
+        watermark=watermark,
+        freshness_lag_seconds=freshness,
+        exact=True,
+        approximation_error=None,
+        counters=((f"{domain}_events", request_count),),
+    )
+
+
 class AggregateQueryClient(Protocol):
     def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]: ...
+
+
+def _dimension_query_params(
+    base_params: Mapping[str, Any],
+    dimensions: tuple[str, ...],
+    *,
+    prefix: str = "dim",
+) -> tuple[list[str], dict[str, Any]]:
+    params = {key: value for key, value in base_params.items() if not key.startswith("dim_")}
+    placeholders: list[str] = []
+    for idx, dimension in enumerate(dimensions):
+        key = f"{prefix}_{idx}"
+        params[key] = dimension
+        placeholders.append(f"{{{key}:String}}")
+    return placeholders, params
 
 
 _DOMAIN_TABLES = {
@@ -275,15 +316,18 @@ def query_clickhouse_aggregate(
                 h_params = {**params, "h_start": h_start, "h_end": h_end}
                 edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
                 fence = visible_publication_fence_sql("request_aggregate")
+                rollup_fence = visible_rollup_publication_fence_sql("request_aggregate")
                 tot_union = (
                     "SELECT sum(request_count) AS request_count FROM request_aggregates_1h "
                     "WHERE service_id={service_id:String} AND dimension={dimension:String} "
-                    "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+                    f"AND bucket_start >= {{h_start:DateTime64(3)}} AND bucket_start < {{h_end:DateTime64(3)}} "
+                    f"AND {rollup_fence}"
                 )
                 top_union = (
                     "SELECT value, sum(request_count) AS request_count FROM request_aggregates_1h "
                     "WHERE service_id={service_id:String} AND dimension={dimension:String} "
-                    "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                    f"AND bucket_start >= {{h_start:DateTime64(3)}} AND bucket_start < {{h_end:DateTime64(3)}} "
+                    f"AND {rollup_fence} "
                     "GROUP BY value"
                 )
                 if edge_clause is not None:
@@ -321,19 +365,13 @@ def query_clickhouse_aggregate(
     values = tuple((str(row["value"]), max(0, int(row["aggregate_count"]))) for row in rows)
     total_row = totals[0] if totals else {}
     request_count = max(0, int(total_row.get("total_count") or 0))
-    observed = (now or datetime.now(UTC)).astimezone(UTC)
-    freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
-    return AggregateResponse(
+    return _aggregate_response(
         service_id=request.service_id,
         domain=request.domain,
         request_count=request_count,
         top_values=values,
-        coverage=1.0 if values or watermark.coverage_end is not None else 0.0,
         watermark=watermark,
-        freshness_lag_seconds=freshness,
-        exact=True,
-        approximation_error=None,
-        counters=((f"{request.domain}_events", request_count),),
+        now=now,
     )
 
 
@@ -393,20 +431,14 @@ def query_clickhouse_aggregates_batch(
             dimension = str(row.get("dimension") or "")
             if dimension in fact_tops_by_dim and len(fact_tops_by_dim[dimension]) < 10:
                 fact_tops_by_dim[dimension].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
-        observed = (now or datetime.now(UTC)).astimezone(UTC)
-        freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
         return {
-            dimension: AggregateResponse(
+            dimension: _aggregate_response(
                 service_id=service_id,
                 domain=domain,
                 request_count=fact_totals_by_dim.get(dimension, 0),
                 top_values=tuple(fact_tops_by_dim.get(dimension, ())),
-                coverage=1.0 if fact_tops_by_dim.get(dimension) or watermark.coverage_end is not None else 0.0,
                 watermark=watermark,
-                freshness_lag_seconds=freshness,
-                exact=True,
-                approximation_error=None,
-                counters=((f"{domain}_events", fact_totals_by_dim.get(dimension, 0)),),
+                now=now,
             )
             for dimension in unique_dims
         }
@@ -461,19 +493,16 @@ def query_clickhouse_aggregates_batch(
                 h_params = {**params, "h_start": h_start, "h_end": h_end}
                 edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
                 fence = visible_publication_fence_sql("request_aggregate")
+                rollup_fence = visible_rollup_publication_fence_sql("request_aggregate")
 
                 def _build_hourly_fast_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-                    sub_params = {k: v for k, v in h_params.items() if not k.startswith("dim_")}
-                    sub_placeholders: list[str] = []
-                    for idx, dim in enumerate(dims_subset):
-                        k = f"dim_{idx}"
-                        sub_params[k] = dim
-                        sub_placeholders.append(f"{{{k}:String}}")
+                    sub_placeholders, sub_params = _dimension_query_params(h_params, dims_subset)
                     dim_in = f"dimension IN ({', '.join(sub_placeholders)})"
                     union_sql = (
                         "SELECT dimension, value, request_count FROM request_aggregates_1h "
                         f"WHERE service_id={{service_id:String}} AND {dim_in} "
-                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                        f"AND {rollup_fence}"
                     )
                     if edge_clause is not None:
                         union_sql += (
@@ -491,7 +520,7 @@ def query_clickhouse_aggregates_batch(
                     return sql, sub_params
 
                 def _build_hourly_heavy_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-                    sub_params = {k: v for k, v in h_params.items() if not k.startswith("dim_")}
+                    _, sub_params = _dimension_query_params(h_params, ())
                     branches: list[str] = []
                     for idx, dim in enumerate(dims_subset):
                         k = f"hdim_{idx}"
@@ -499,7 +528,8 @@ def query_clickhouse_aggregates_batch(
                         u_sql = (
                             "SELECT value, request_count FROM request_aggregates_1h "
                             f"WHERE service_id={{service_id:String}} AND dimension={{{k}:String}} "
-                            "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+                            "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                            f"AND {rollup_fence}"
                         )
                         if edge_clause is not None:
                             u_sql += (
@@ -573,12 +603,7 @@ def query_clickhouse_aggregates_batch(
                 if "client_ip" in unique_dims and len(unique_dims) > 2:
 
                     def _build_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-                        sub_params = {k: v for k, v in params.items() if not k.startswith("dim_")}
-                        sub_placeholders: list[str] = []
-                        for idx, dim in enumerate(dims_subset):
-                            k = f"dim_{idx}"
-                            sub_params[k] = dim
-                            sub_placeholders.append(f"{{{k}:String}}")
+                        sub_placeholders, sub_params = _dimension_query_params(params, dims_subset)
                         sub_clauses = [
                             f"dimension IN ({', '.join(sub_placeholders)})" if c.startswith("dimension IN (") else c
                             for c in clauses
@@ -637,23 +662,17 @@ def query_clickhouse_aggregates_batch(
         d = str(row.get("dimension") or "")
         if d in tops_by_dim and len(tops_by_dim[d]) < 10:
             tops_by_dim[d].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
-    observed = (now or datetime.now(UTC)).astimezone(UTC)
-    freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
     out: dict[str, AggregateResponse] = {}
     for dim in unique_dims:
         values = tuple(tops_by_dim.get(dim, ()))
         req_count = totals_by_dim.get(dim, 0)
-        out[dim] = AggregateResponse(
+        out[dim] = _aggregate_response(
             service_id=service_id,
             domain=domain,
             request_count=req_count,
             top_values=values,
-            coverage=1.0 if values or watermark.coverage_end is not None else 0.0,
             watermark=watermark,
-            freshness_lag_seconds=freshness,
-            exact=True,
-            approximation_error=None,
-            counters=((f"{domain}_events", req_count),),
+            now=now,
         )
     return out
 

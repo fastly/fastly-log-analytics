@@ -214,20 +214,18 @@ export async function handleApiStatusSideEffects(
 }
 
 async function rawAdminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
-  const headers = new Headers(init.headers ?? {});
-  stampClientContextHeaders(headers);
+  const origin = globalThis.window?.location.origin ?? "http://localhost";
+  const target = input instanceof Request ? input : new URL(String(input), origin);
+  const { headers: initHeaders, ...requestInit } = init;
+  const request = new Request(target, requestInit);
+  new Headers(initHeaders).forEach((value, key) => request.headers.set(key, value));
+  stampClientContextHeaders(request.headers);
   if (IS_CLOUD_MODE || isCloudMode()) {
     const { handleCloudAnalyticalRequest } = await getCloudAdapter();
-    const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const origin = globalThis.window?.location.origin ?? "http://localhost";
-    const req = new Request(new URL(urlStr, origin), {
-      ...init,
-      headers,
-    });
-    const intercepted = await handleCloudAnalyticalRequest(req);
+    const intercepted = await handleCloudAnalyticalRequest(request);
     if (intercepted) return intercepted;
   }
-  return fetch(input, { ...init, headers });
+  return fetch(request);
 }
 
 export async function adminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {

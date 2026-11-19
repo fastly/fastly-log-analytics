@@ -342,10 +342,43 @@ def _state_file_path() -> str:
     return str(svcconfig.SYSTEM_DATA_DIR / "setup-state.json")
 
 
+_RESUME_CREDENTIAL_KEYS = {
+    "admin_token",
+    "fastly_api_key",
+    "access_key",
+    "secret_key",
+    "fos_access_key",
+    "fos_secret_key",
+    "fos_access_key_id",
+    "fos_secret_access_key",
+    "temp_admin_access_key",
+    "temp_admin_secret_key",
+    "request_secret",
+    "aes_key_hex",
+    "cdn_secret",
+    "token",
+}
+
+
+def _without_resume_credentials(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_resume_credentials(item)
+            for key, item in value.items()
+            if key not in _RESUME_CREDENTIAL_KEYS
+            and "secret_key" not in key.lower()
+            and "access_key" not in key.lower()
+            and "token" not in key.lower()
+        }
+    if isinstance(value, list):
+        return [_without_resume_credentials(item) for item in value]
+    return value
+
+
 def save_state(state: dict):
     try:
         with open(_state_file_path(), "w") as f:
-            json.dump(state, f, indent=2)
+            json.dump(_without_resume_credentials(state), f, indent=2)
     except Exception as e:
         logger.debug("Failed to save provisioning state: %s", e)
 
@@ -355,7 +388,13 @@ def load_state() -> dict:
         path = _state_file_path()
         if os.path.exists(path):
             with open(path) as f:
-                return json.load(f)
+                state = _without_resume_credentials(json.load(f))
+                try:
+                    with open(path, "w") as fw:
+                        json.dump(state, fw, indent=2)
+                except OSError:
+                    pass
+                return state
     except Exception as e:
         logger.debug("Failed to load provisioning state: %s", e)
     return {}
@@ -369,6 +408,7 @@ def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> in
     service_id = state.get("logging_service_id")
     if not service_id:
         raise ValueError("state missing logging_service_id")
+    state["previous_logging_version"] = get_active_version(service_id, token)
     info("Reconciling VCL state via declarative model…")
     if status_cb:
         status_cb(f"🔄 Reconciling VCL state for {service_id}...")
@@ -398,19 +438,22 @@ def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> in
 
 
 def provision(cfg: dict, _resume_from_state: bool = False):
+    from backend import config as svcconfig
+    from backend.core.fastly.client import fastly
+
     token = cfg["admin_token"]
     state = load_state() if _resume_from_state else {}
     state.update(cfg)
+    state.setdefault("_created_resources", {"fos_key_ids": []})
     config_existed = False
     _check_service_id = cfg.get("logging_service_id")
     if _check_service_id:
         try:
-            from backend import config as svcconfig
-
             if os.path.exists(svcconfig.config_path(_check_service_id)):
                 config_existed = True
         except Exception:
             pass
+    original_config = svcconfig.snapshot_config(_check_service_id) if config_existed and _check_service_id else None
     if cfg.get("fos_access_key_id") and cfg.get("fos_secret_access_key"):
         state.setdefault("fos_access_key", cfg["fos_access_key_id"])
         state.setdefault("fos_secret_key", cfg["fos_secret_access_key"])
@@ -442,17 +485,28 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         state["temp_admin_access_key"] = temp_key["access_key"]
         state["temp_admin_secret_key"] = temp_key["secret_key"]
         state["temp_admin_key_id"] = temp_key["id"]
+        state["_created_resources"]["fos_key_ids"].append(temp_key["id"])
         save_state(state)
         yield {"type": "progress", "current": 2, "total": total}
         yield {"type": "status", "message": "🪣 Step 3/8: Creating Fastly Object Storage bucket..."}
         step(3, total, "Creating Fastly Object Storage bucket")
+
+        def _record_bucket_created():
+            state["_created_resources"]["fos_bucket"] = cfg["fos_bucket_name"]
+            save_state(state)
+
+        import inspect
+
+        bucket_kwargs = {"service_id": cfg["logging_service_id"]}
+        if "on_created" in inspect.signature(ensure_fos_bucket).parameters:
+            bucket_kwargs["on_created"] = _record_bucket_created
         yield from run_with_events(
             ensure_fos_bucket,
             cfg["fos_bucket_name"],
             cfg["fos_region"],
             state["temp_admin_access_key"],
             state["temp_admin_secret_key"],
-            service_id=cfg["logging_service_id"],
+            **bucket_kwargs,
         )
         save_state(state)
         yield {"type": "progress", "current": 3, "total": total}
@@ -471,19 +525,21 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         state["fos_secret_key"] = key["secret_key"]
         state["fos_key_id"] = key["id"]
         state["fos_key_description"] = key_desc
+        state["_created_resources"]["fos_key_ids"].append(key["id"])
         save_state(state)
-        try:
-            write_service_config(state)
-            ok("Service config persisted early (FOS ready) — survives stream interruption")
-        except Exception as early_cfg_exc:  # noqa: BLE001
-            warn(f"Early service-config write failed (non-fatal, retried at finalize): {early_cfg_exc}")
+        write_service_config(state)
+        ok("Service config persisted early (FOS ready) — survives stream interruption")
         yield {"type": "progress", "current": 4, "total": total}
         yield {"type": "status", "message": "🧹 Step 5/8: Cleaning up temporary admin key..."}
         step(5, total, "Cleaning up temporary admin key")
         if state.get("temp_admin_key_id"):
-            yield from run_with_events(delete_fos_access_key, state["temp_admin_key_id"], token)
+            temp_admin_key_id = state["temp_admin_key_id"]
+            yield from run_with_events(delete_fos_access_key, temp_admin_key_id, token)
             for k in ["temp_admin_access_key", "temp_admin_secret_key", "temp_admin_key_id"]:
                 state.pop(k, None)
+            state["_created_resources"]["fos_key_ids"] = [
+                key_id for key_id in state["_created_resources"]["fos_key_ids"] if key_id != temp_admin_key_id
+            ]
             save_state(state)
         else:
             ok("Temporary key already removed")
@@ -496,6 +552,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
 
         def _record_cdn_service_id(svc_id):
             state["cdn_service_id"] = svc_id
+            state["_created_resources"]["cdn_service_id"] = svc_id
             save_state(state)
 
         cdn_svc = yield from run_with_events(
@@ -601,21 +658,74 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             logger.exception("[provision] post-provision audit step failed (non-fatal)")
         yield {"type": "progress", "current": 8, "total": total}
         yield {"type": "done", "message": "🎉 Provisioning complete!"}
+        try:
+            os.remove(_state_file_path())
+        except FileNotFoundError:
+            pass
     except _PreflightError as e:
         yield {"type": "error", "message": str(e)}
         return
     except Exception as e:
         yield {"type": "status", "message": f"Provisioning failed: {str(e)}. Starting full cleanup rollback..."}
-        yield from perform_teardown(state, token)
         service_id = state.get("logging_service_id")
-        if service_id and not config_existed:
-            from backend import config as svcconfig
-
-            cfg_path = svcconfig.config_path(service_id)
-            if os.path.exists(cfg_path):
-                os.remove(cfg_path)
+        rollback_failed = False
+        previous_version = state.get("previous_logging_version")
+        if previous_version is not None or state.get("activated_logging_version") is not None:
+            if previous_version is None:
+                rollback_failed = True
+                yield {
+                    "type": "status",
+                    "message": "Rollback aborted: no previous logging version was recorded; created resources were left in place.",
+                }
+            else:
+                try:
+                    fastly(
+                        "PUT",
+                        f"/service/{service_id}/version/{previous_version}/activate",
+                        token=token,
+                    )
+                    yield {
+                        "type": "status",
+                        "message": f"Restored logging service active version {previous_version}.",
+                    }
+                except Exception as rollback_exc:
+                    rollback_failed = True
+                    yield {
+                        "type": "status",
+                        "message": f"Rollback aborted: could not restore logging version {previous_version}: {rollback_exc}",
+                    }
+        if not rollback_failed:
+            try:
+                if original_config is None:
+                    cfg_path = svcconfig.config_path(service_id) if service_id else None
+                    if cfg_path and os.path.exists(cfg_path):
+                        os.remove(cfg_path)
+                elif service_id:
+                    svcconfig.restore_config_snapshot(service_id, original_config)
+                else:
+                    raise RuntimeError("service id missing while restoring config")
+            except Exception as rollback_exc:
+                rollback_failed = True
+                yield {
+                    "type": "status",
+                    "message": f"Rollback aborted: could not restore service config: {rollback_exc}",
+                }
+        created = state.get("_created_resources") or {}
+        opts = {
+            "remove_logging": False,
+            "remove_rum": False,
+            "remove_cdn": bool(created.get("cdn_service_id")),
+            "remove_bucket": bool(created.get("fos_bucket")),
+            "remove_scoring": False,
+            "remove_fos_tokens": False,
+            "fos_key_ids": list(created.get("fos_key_ids") or []),
+        }
+        if not rollback_failed:
+            yield from perform_teardown(state, token, opts)
         yield {"type": "error", "message": str(e)}
-        raise e
+        if rollback_failed:
+            raise RuntimeError(f"{e}; provisioning rollback failed, created resources retained") from e
+        raise
 
 
 def perform_teardown(state: dict, token: str, opts: dict | None = None):
@@ -680,7 +790,13 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         total_steps,
         "Deleting FOS access keys" if opts.get("remove_fos_tokens") else "Skipping FOS access keys deletion",
     )
-    if opts.get("remove_fos_tokens"):
+    if opts.get("fos_key_ids"):
+        for key_id in opts["fos_key_ids"]:
+            try:
+                yield from run_with_events(delete_fos_access_key, key_id, token)
+            except Exception as exc:
+                yield {"type": "status", "message": f"Warning: failed to delete created FOS key {key_id}: {exc}"}
+    elif opts.get("remove_fos_tokens"):
         try:
             from backend.provision import fos_setup as _fos_setup_mod
 

@@ -22,7 +22,7 @@ import zstandard as zstd
 from backend.core.log_fields import SqlType, try_get
 from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
 from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
-from backend.high_scale._common import _FIELD_DIMENSIONS
+from backend.high_scale._common import _FIELD_DIMENSIONS, clickhouse_string_literal
 from backend.high_scale._common import range_value as _range_value
 from backend.high_scale.archive import (
     ArchiveSourceObject,
@@ -504,11 +504,12 @@ _FACT_DOMAINS = {"request_facts": "request", "rum_vitals_facts": "rum_vitals", "
 
 
 def _literal(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return clickhouse_string_literal(value)
 
 
 def _instant(value: datetime) -> str:
-    return f"toDateTime64({_literal(value.astimezone(UTC).strftime('%Y-%m-%d %H:%M:%S.%f'))}, 6, 'UTC')"
+    value_literal = clickhouse_string_literal(value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f"))
+    return f"toDateTime64({value_literal}, 6, 'UTC')"
 
 
 def _table_filters(

@@ -523,6 +523,37 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     expect(result.current).toMatchObject({ windowHours: '24', baselineHours: '168' })
   })
 
+  it('does not reuse a long-namespace placeholder after the service changes', async () => {
+    let resolveSecond!: (value: { service: string }) => void
+    const second = new Promise<{ service: string }>((resolve) => { resolveSecond = resolve })
+    const { result, rerender } = renderHook(
+      ({ serviceId }) => useAnalyticsReportQuery<{ service: string }>({
+        namespace: ['network', 'health', 'shielding'],
+        serviceId,
+        filterPayload: {},
+        range: {
+          relativeRange: '24h',
+          isAutoRange: true,
+          startTime: null,
+          endTime: null,
+          anchor: '2026-06-29T12:00:00Z',
+        },
+        queryFn: () => serviceId === 'svc-a'
+          ? Promise.resolve({ service: 'svc-a' })
+          : second,
+      }),
+      {
+        wrapper: makeQueryWrapper(createTestQueryClient({ queries: { gcTime: 5_000 } })),
+        initialProps: { serviceId: 'svc-a' },
+      },
+    )
+    await waitFor(() => expect(result.current.data).toEqual({ service: 'svc-a' }))
+    rerender({ serviceId: 'svc-b' })
+    expect(result.current.data).toBeUndefined()
+    resolveSecond({ service: 'svc-b' })
+    await waitFor(() => expect(result.current.data).toEqual({ service: 'svc-b' }))
+  })
+
   it('useAnalyticsReportQuery matches SSR seed key in token mode, keys on abs: in custom mode, and forwards AbortSignal', async () => {
     const captured: Array<Record<string, unknown>> = []
     let seenSignal: AbortSignal | undefined
@@ -1779,6 +1810,41 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       renderHook(() => useEventStream(true, req, () => {}))
       await new Promise((r) => setTimeout(r, 50))
       expect(f).toHaveBeenCalledTimes(1)
+    })
+
+    it('resets to idle after a terminal auth failure', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 401 })))
+      const { result } = renderHook(() => useEventStream(true, req, () => {}))
+      await waitFor(() => expect(result.current.state).toBe('idle'))
+    })
+
+    it('cancels and ignores an older request after the latest request starts', async () => {
+      let resolveFirst!: (response: Response) => void
+      const first = new Promise<Response>((resolve) => { resolveFirst = resolve })
+      vi.stubGlobal('fetch', vi.fn()
+        .mockImplementationOnce(() => first)
+        .mockImplementationOnce(() => Promise.resolve(
+          makeNeverClosingStreamResponse(['data: latest\r\n\r\n']),
+        )))
+      const events: string[] = []
+      const { rerender } = renderHook(
+        ({ url }) => useEventStream(true, { url }, raw => events.push(raw)),
+        { initialProps: { url: 'http://test/first' } },
+      )
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+      rerender({ url: 'http://test/second' })
+      await waitFor(() => expect(events).toEqual(['latest']))
+
+      const staleCancel = vi.fn()
+      resolveFirst(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: stale\r\n\r\n'))
+        },
+        cancel: staleCancel,
+      })))
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(events).toEqual(['latest'])
+      expect(staleCancel).toHaveBeenCalled()
     })
 
     it('reconnects with exponential backoff after a dropped connection', async () => {

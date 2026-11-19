@@ -1095,8 +1095,12 @@ def fastly_paginate(
             node: Any = page
             for key in next_cursor_path:
                 node = node.get(key) if isinstance(node, dict) else None
-            if not node or not isinstance(node, str) or node in seen:
+            if node is None or node == "":
                 return
+            if not isinstance(node, str):
+                raise RuntimeError("Fastly pagination returned a malformed cursor")
+            if node in seen:
+                raise RuntimeError("Fastly pagination cursor repeated")
             seen.add(node)
             cursor = node
         elif style == "page":
@@ -1109,12 +1113,16 @@ def fastly_paginate(
             if not link or not isinstance(link, str):
                 return
             next_path = _next_path_from_link(link)
-            if next_path is None or next_path in seen:
-                return
+            if next_path is None:
+                raise RuntimeError("Fastly pagination returned an off-host next link")
+            if next_path in seen:
+                raise RuntimeError("Fastly pagination next link repeated")
             seen.add(next_path)
 
         if page_delay:
             time.sleep(page_delay)
+    else:
+        raise RuntimeError(f"Fastly pagination truncated at max_pages={max_pages}")
 
 
 def _count(value: Any) -> int:

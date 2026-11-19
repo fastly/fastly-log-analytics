@@ -99,6 +99,9 @@ function sendUpstreamOnce(
           return;
         }
         let streamClosed = false;
+        let responseComplete = false;
+        const expectedLength = Number(upstreamRes.headers["content-length"]);
+        let receivedLength = 0;
         const closeCleanly = (controller: ReadableStreamDefaultController<Uint8Array>) => {
           if (streamClosed) return;
           streamClosed = true;
@@ -112,6 +115,7 @@ function sendUpstreamOnce(
           start(controller) {
             upstreamRes.on("data", (chunk: Buffer) => {
               if (streamClosed) return;
+              receivedLength += chunk.byteLength;
               try {
                 controller.enqueue(new Uint8Array(chunk));
               } catch {
@@ -119,10 +123,39 @@ function sendUpstreamOnce(
                 upstreamReq.destroy();
               }
             });
-            upstreamRes.on("end", () => closeCleanly(controller));
-            upstreamRes.on("close", () => closeCleanly(controller));
+            upstreamRes.on("end", () => {
+              const lengthMatches =
+                !Number.isFinite(expectedLength) || expectedLength < 0 || receivedLength === expectedLength;
+              responseComplete = upstreamRes.complete && lengthMatches;
+              if (responseComplete) closeCleanly(controller);
+              else {
+                streamClosed = true;
+                try {
+                  controller.error(new Error("Upstream response ended before the declared content length"));
+                } catch {
+                  /* already closed */
+                }
+              }
+            });
+            upstreamRes.on("close", () => {
+              const hasDeclaredLength = Number.isFinite(expectedLength) && expectedLength >= 0;
+              if (hasDeclaredLength && !responseComplete) {
+                streamClosed = true;
+                try {
+                  controller.error(new Error("Upstream response closed before completion"));
+                } catch {
+                  /* already closed */
+                }
+                return;
+              }
+              closeCleanly(controller);
+            });
             upstreamRes.on("error", (err) => {
-              if (isBenignDisconnectError(err) || signal?.aborted) {
+              const declaredLengthIncomplete =
+                Number.isFinite(expectedLength) &&
+                expectedLength >= 0 &&
+                receivedLength !== expectedLength;
+              if ((isBenignDisconnectError(err) || signal?.aborted) && !declaredLengthIncomplete) {
                 closeCleanly(controller);
                 return;
               }

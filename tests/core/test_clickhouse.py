@@ -1702,7 +1702,11 @@ def test_postgres_control_plane_end_to_end() -> None:
                 expected_owner_epoch=owner.owner_epoch,
             )
         store.acknowledge_sources_batch(
-            service_id, [source.object_key], manifest_id=manifest.manifest_id, expected_owner_epoch=owner.owner_epoch
+            service_id,
+            [source.object_key],
+            manifest_id=manifest.manifest_id,
+            expected_owner_epoch=owner.owner_epoch,
+            claim_tokens=(store.source(service_id, source.object_key).claim_token,),
         )
         store.transition_archive_manifest(
             manifest.manifest_id,

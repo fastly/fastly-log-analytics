@@ -1525,9 +1525,7 @@ fn authorize_admin(role: Role) -> Result<(), AuthError> {
 }
 
 fn json_response(value: Value) -> Response {
-    Response::new(200, value.to_string())
-        .header("content-type", "application/json")
-        .private()
+    Response::json(200, &value)
 }
 
 fn api_json(result: crate::ingest::api::Api) -> Response {
@@ -1805,7 +1803,7 @@ fn parse<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, AuthErr
     if request.body.len() > 65536 {
         return Err(AuthError::InvalidInput);
     }
-    serde_json::from_slice(&request.body).map_err(|_| AuthError::InvalidInput)
+    request.json().map_err(|_| AuthError::InvalidInput)
 }
 
 #[derive(Deserialize)]

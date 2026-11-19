@@ -123,6 +123,10 @@ def finite_float(value: object) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def clickhouse_string_literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def _flt(value: Any, *, precision: int | None = None) -> float:
     if value is None or value == "":
         return 0.0
@@ -269,6 +273,7 @@ VISIBLE_PUBLICATION_FENCE_SQL = (
     "SELECT batch_id FROM high_scale_batch_publications FINAL "
     "WHERE service_id={service_id:String} AND publication_state='visible')"
 )
+LEGACY_ROLLUP_BATCH_UUID = "00000000-0000-0000-0000-000000000000"
 
 _all_visible_cache: BoundedTTLCache[str, bool] = BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
 CacheRegistry.register("hs_all_visible_fence_cache", _all_visible_cache)
@@ -311,8 +316,6 @@ def visible_publication_fence_sql(
         return VISIBLE_PUBLICATION_FENCE_SQL
     if not _DOMAIN_IDENT_RE.fullmatch(domain):
         raise ValueError(f"Invalid publication domain identifier: {domain!r}")
-    if _is_all_batches_visible(client, service_id, domain):
-        return "publication_state='visible'"
     return (
         "publication_state='visible' AND batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
@@ -320,15 +323,21 @@ def visible_publication_fence_sql(
     )
 
 
+def visible_rollup_publication_fence_sql(domain: str) -> str:
+    """Fence new rollup rows by receipt while retaining pre-batch-id rollups."""
+    if not _DOMAIN_IDENT_RE.fullmatch(domain):
+        raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    receipt_fence = (
+        "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' AND publication_state='visible')"
+    )
+    return f"(batch_id = toUUID('{LEGACY_ROLLUP_BATCH_UUID}') OR {receipt_fence})"
+
+
 def visible_fact_clauses(domain: str, *, client: Any = None, service_id: str | None = None) -> list[str]:
     """Predicates (with a ``{service_id:String}`` parameter) limiting a fact table to visible batches of ``domain``."""
     if not _DOMAIN_IDENT_RE.fullmatch(domain):
         raise ValueError(f"Invalid publication domain identifier: {domain!r}")
-    if _is_all_batches_visible(client, service_id, domain):
-        return [
-            "service_id={service_id:String}",
-            "publication_state='visible'",
-        ]
     return [
         "service_id={service_id:String}",
         "publication_state='visible'",

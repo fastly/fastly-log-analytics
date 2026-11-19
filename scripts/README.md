@@ -51,15 +51,17 @@ from env vars or config, never hard-coded infra.
 
 Live load tests run through the shared tool in
 `~/Projects/fastly-log-analytics-load-testing` (override with `LT_REPO=...`),
-configured by a private config, `local/fla.toml` in that repo (git-ignored; override with
-`LT_CONFIG=...`). It drives
+configured by an existing private file outside this repository. Copy
+[`fastly-lt.example.toml`](../fastly-lt.example.toml) to private local state,
+replace every placeholder, and set its path with `LT_CONFIG=...`. The Make
+targets reject missing files and any config path inside this repository. The tool drives
 fdlt against the monitored service, reconciles every request id against the
 logged rows, and prices the run with FLA's own cost model (`priceQuantities`):
 
 ```bash
-make loadtest-deploy-check                      # one short stage at the current log period
-make loadtest-campaign CAMPAIGN=c1              # the full ladder at each log period
-make loadtest-campaign CAMPAIGN=c1 LT_ARGS=--dry-run   # print the plan and fdlt commands; send nothing
+make loadtest-deploy-check LT_CONFIG=/private/path/fla.toml
+make loadtest-campaign CAMPAIGN=c1 LT_CONFIG=/private/path/fla.toml
+make loadtest-campaign CAMPAIGN=c1 LT_CONFIG=/private/path/fla.toml LT_ARGS=--dry-run
 ```
 
 Both targets send billed live traffic, so run them only with explicit approval.
