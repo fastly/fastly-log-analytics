@@ -228,6 +228,7 @@ timeout = 60
 # method requires the main thread and breaks pytest-xdist.
 timeout_method = "thread"
 markers = [
+    "no_postgres: unit test intentionally runs without metadata PostgreSQL",
     # Tests covering a verified security fix or invariant that refactors must
     # not silently regress. CI asserts the count is monotonically >= the
     # baseline so a refactor can't delete coverage of a verified fix without

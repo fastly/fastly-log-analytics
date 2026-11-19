@@ -13,6 +13,8 @@ export type FixtureRow = {
   age?: number | null;
   /** A custom string field, written only when some row sets it. */
   tenant?: string | null;
+  /** A custom numeric field, written only when some row sets it. */
+  score?: number | null;
 };
 
 const OPTIONAL_DOUBLE_COLUMNS = ["ttl", "age"] as const;
@@ -61,6 +63,15 @@ export function parquetFixture(rows: FixtureRow[], omit: string[] = []) {
             name: "tenant",
             type: "STRING" as const,
             data: rows.map((r) => r.tenant ?? null),
+          },
+        ]
+      : []),
+    ...(rows.some((r) => r.score !== undefined)
+      ? [
+          {
+            name: "score",
+            type: "INT64" as const,
+            data: rows.map((r) => (r.score == null ? null : BigInt(r.score))),
           },
         ]
       : []),

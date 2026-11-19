@@ -137,6 +137,11 @@ async function listPages(
           : null;
     cursor = body.next_cursor;
     if (!cursor) {
+      if (!body.complete) {
+        throw new IncompleteManifestError(
+          "File manifest ended incomplete without a cursor",
+        );
+      }
       return {
         files: [...files.values()],
         complete: body.complete,
@@ -338,8 +343,11 @@ import {
   accountManifestPage,
   clearCatalogManifests,
   fetchCatalogManifest,
+  IncompleteManifestError,
   manifestCacheKey,
   manifestGeneration,
   observeCatalogCommit,
   type ManifestBudget,
 } from "./catalog-manifest";
+
+export { IncompleteManifestError } from "./catalog-manifest";

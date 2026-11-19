@@ -954,9 +954,9 @@ describe("runDashboard", () => {
   it("counts custom card fields, keeping their rollups apart from built-in ones", async () => {
     const buffers = {
       f1: await parquetFixture([
-        row(10, { tenant: "acme" }),
-        row(20, { tenant: "acme" }),
-        row(30, { tenant: "globex" }),
+        row(10, { tenant: "acme", score: 2 }),
+        row(20, { tenant: "acme", score: 2 }),
+        row(30, { tenant: "globex", score: 7 }),
       ]),
       f2: await parquetFixture([row(75, { tenant: null })]),
     };
@@ -989,13 +989,24 @@ describe("runDashboard", () => {
     const plain = await runDashboard(source, range);
     expect(plain.cards.tenant).toBeUndefined();
 
-    const customFields = [{ id: "tenant", type: "string" as const }];
+    const customFields = [
+      { id: "tenant", type: "string" as const },
+      { id: "score", type: "number" as const },
+    ];
     const custom = await runDashboard(source, { ...range, customFields });
     expect(custom.cards.tenant).toMatchObject({
       total: 3,
       top: [
         { value: "acme", count: 2 },
         { value: "globex", count: 1 },
+      ],
+    });
+    expect(custom.cards.score).toEqual({
+      total: 3,
+      distinct: 2,
+      top: [
+        { value: 2, count: 2 },
+        { value: 7, count: 1 },
       ],
     });
     // Rollups cached without the custom field can't answer it, so files are read again.
@@ -1128,7 +1139,7 @@ describe("manifest paging and ranges", () => {
   const file = (n: number) =>
     manifestEntry(`k${n}`, "2026-10-29T10:00:00Z", "2026-10-29T10:01:00Z", 1);
 
-  it("follows cursors until none remains and takes the final page completeness", async () => {
+  it("rejects an incomplete final page after following its cursors", async () => {
     const source = fixtureSource(
       [
         { files: [file(1), file(2)], next_cursor: "1", complete: true },
@@ -1136,13 +1147,13 @@ describe("manifest paging and ranges", () => {
       ],
       {},
     );
-    const manifest = await fetchManifest(
-      source.fetchJson,
-      "2026-10-29T10:00:00Z",
-      "2026-10-29T11:00:00Z",
-    );
-    expect(manifest.files.map((f) => f.key)).toEqual(["k1", "k2", "k3"]);
-    expect(manifest.complete).toBe(false);
+    await expect(
+      fetchManifest(
+        source.fetchJson,
+        "2026-10-29T10:00:00Z",
+        "2026-10-29T11:00:00Z",
+      ),
+    ).rejects.toThrow(/incomplete/);
     expect(source.log.json[1]).toContain("cursor=1");
   });
 

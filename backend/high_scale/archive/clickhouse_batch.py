@@ -29,6 +29,7 @@ from backend.core.clickhouse import ClickHouseClient as HttpClickHouseClient
 logger = structlog.get_logger("backend.high_scale.archive")
 
 from backend.high_scale._common import _parse_iso_utc_cached
+from backend.high_scale._common import finite_float as _finite
 from backend.high_scale.archive.manifests import PublicationResult, build_cmcd_projection_key
 
 _SCHEMA_FILES = [
@@ -278,16 +279,6 @@ def _first_text(row: Mapping[str, Any], keys: tuple[str, ...]) -> str:
         if text := _text(row.get(key)):
             return text
     return ""
-
-
-def _finite(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        number = float(str(value).strip())
-    except ValueError:
-        return None
-    return number if math.isfinite(number) else None
 
 
 def rum_environment(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -596,7 +587,19 @@ _CORE_FACT_KEYS = frozenset(
 
 
 def _extract_custom_fields(row: Mapping[str, Any]) -> dict[str, str]:
-    base = _string_map(row, "custom_fields")
+    nested = row.get("custom_fields") or {}
+    if not isinstance(nested, Mapping):
+        raise ValueError("custom_fields must be a mapping")
+    base: dict[str, str] = {}
+    for key, value in nested.items():
+        if not isinstance(key, str):
+            raise ValueError("custom_fields keys and values must be scalar strings or numbers")
+        if value is None:
+            base[key] = ""
+        elif isinstance(value, (str, int, float, bool)):
+            base[key] = str(value)
+        else:
+            raise ValueError("custom_fields keys and values must be scalar strings or numbers")
     for k, v in row.items():
         if k not in _CORE_FACT_KEYS and not k.startswith("_"):
             if isinstance(v, (str, int, float, bool)) and v not in (None, ""):

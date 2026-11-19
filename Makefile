@@ -1,10 +1,10 @@
-.PHONY: help test test-ci fast-ci lint lint-frontend format typecheck ci install install-hooks dev clean gen-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit compute-test compute-lint compute-audit cloud-sync-catalog cloud-test cloud-lint cloud-audit cloud-soak cloud-build cloud-deploy cloud-deploy-check cloud-loadtest-campaign admin-reset trim-target test-frontend-ci openapi-drift test-browser-measurements e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch
+.PHONY: help test test-ci fast-ci release-confidence-tests release-confidence-offline lint lint-frontend format typecheck ci install install-hooks dev clean gen-types gen-cloud-types openapi-types verify-deps secret-scan security-scan-bandit deps-check knip osv outdated perf perf-ci security-regression baseline verify ratchet scorer-package scorer-test scorer-audit compute-test compute-lint compute-audit cloud-sync-catalog cloud-test cloud-lint cloud-audit cloud-soak cloud-build cloud-deploy cloud-deploy-check cloud-loadtest-campaign admin-reset trim-target test-frontend-ci openapi-drift test-browser-measurements e2e e2e-all deploy-validate stray-file-gate stack-restart stack-up stack-down stack-ps stack-logs stack-health otel-guard urllib-guard dateparse-guard retry-guard coalesce-guard audit audit-watch require-lt-config
 
 # Prevent a VIRTUAL_ENV from another project leaking into uv commands
 unexport VIRTUAL_ENV
 
 help:
-	@echo "Targets: make test, make ci, make cloud-test, make admin-reset [NAME=flp] [VERBOSE=1]"
+	@echo "Targets: make test, make fast-ci, make release-confidence-offline, make ci, make cloud-test, make admin-reset [NAME=flp] [VERBOSE=1]"
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +79,7 @@ cloud-e2e:
 cloud-ci:
 	$(MAKE) cloud-sync-catalog
 	git diff --exit-code compute/cloud/src/logging/catalog.json compute/cloud/vcl/capture/templates.json
+	$(MAKE) openapi-drift
 	$(MAKE) compute-lint
 	$(MAKE) compute-test
 	$(MAKE) compute-wasm-check
@@ -177,11 +178,7 @@ gen-types:
 	cd frontend && npm run gen:types
 
 gen-cloud-types:
-	@tmp=$$(mktemp "$${TMPDIR:-/tmp}/cloud-api-generated.XXXXXX.ts") && \
-		trap 'rm -f "$$tmp"' EXIT && \
-		cd frontend && npx openapi-typescript lib/cloud-engine/cloud-openapi.json -o "$$tmp" && \
-		npx prettier --write "$$tmp" >/dev/null && \
-		cp "$$tmp" lib/cloud-engine/cloud-api.generated.ts
+	cd frontend && npm run gen:cloud-types
 
 openapi-types: gen-types
 
@@ -355,6 +352,24 @@ fast-ci:
 	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
 	cd frontend && npx vitest run hooks/ lib/ stores/ __tests__/contract/backend-contract.test.ts
 	uv run pytest tests/contract tests/security tests/models tests/architecture tests/utils
+	$(MAKE) release-confidence-tests
+
+# Deterministic cross-stack release assertions omitted by the directory-scoped
+# fast suites above. Cloud browser-side assertions remain in `hooks/ lib/`.
+release-confidence-tests:
+	uv run pytest \
+		tests/high_scale/test_ingest_controller.py::test_canonical_fixture_ingest_and_query_parity \
+		tests/remote_access/test_middleware.py::test_admin_attachment_analyst_scope_and_revocation_lifecycle \
+		tests/routers/test_services_router.py::test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest canonical_fixture_has_cross_stack_ingest_parity
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest storage_tree_replays_the_same_cursor_after_a_failed_list
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test route_auth analyst_attachment_is_read_only_and_revocation_invalidates_the_session
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test service_jobs custom_field_lifecycle_rejects_bad_types_and_allows_change_and_removal_before_commit
+
+# Offline release soak: no deploy, browser, or generated live traffic. The
+# ignored simulation asserts sustained-ingest backlog, scan lag, and latency.
+release-confidence-offline:
+	$(MAKE) cloud-soak
 
 # Native Chromium measurement regressions; reuses the E2E Playwright install.
 # Serialize files so timing-sensitive paint tests do not contend for browsers.
@@ -434,15 +449,32 @@ coalesce-guard:
 
 # ── Load testing (shared tool) ───────────────────────────────────────────────
 # Live, billed traffic through ~/Projects/fastly-log-analytics-load-testing:
-# run only with explicit approval. LT_ARGS passes extra flags, e.g. --dry-run.
+# run only with explicit approval. LT_CONFIG must name an existing private
+# config outside this repository. LT_ARGS passes extra flags, e.g. --dry-run.
 .PHONY: loadtest-deploy-check loadtest-campaign
 LT_REPO ?= $(HOME)/Projects/fastly-log-analytics-load-testing
-LT_CONFIG ?= $(LT_REPO)/local/fla.toml
+LT_CONFIG ?=
 
-loadtest-deploy-check:
+require-lt-config:
+	@if [ -z "$(strip $(LT_CONFIG))" ]; then \
+		echo "LT_CONFIG is required; point it at a private config outside this repository." >&2; \
+		exit 2; \
+	fi
+	@case "$(abspath $(LT_CONFIG))" in \
+		"$(CURDIR)"|"$(CURDIR)"/*) \
+			echo "LT_CONFIG must be outside this repository: $(abspath $(LT_CONFIG))" >&2; \
+			exit 2; \
+			;; \
+	esac
+	@if [ ! -f "$(LT_CONFIG)" ]; then \
+		echo "LT_CONFIG file does not exist: $(LT_CONFIG)" >&2; \
+		exit 2; \
+	fi
+
+loadtest-deploy-check: require-lt-config
 	uv run --project $(LT_REPO) lt deploy-check --config $(LT_CONFIG) $(LT_ARGS)
 
-loadtest-campaign:
+loadtest-campaign: require-lt-config
 	$(if $(strip $(CAMPAIGN)),,$(error CAMPAIGN is required, e.g. make loadtest-campaign CAMPAIGN=c1))
 	uv run --project $(LT_REPO) lt campaign --config $(LT_CONFIG) --campaign $(CAMPAIGN) $(LT_ARGS)
 

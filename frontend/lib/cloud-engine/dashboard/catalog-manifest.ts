@@ -67,6 +67,13 @@ export class ManifestRequestError extends Error {
   }
 }
 
+export class IncompleteManifestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IncompleteManifestError";
+  }
+}
+
 export type ManifestBudget = { bytes: number; identities: Set<string> };
 type Snapshot = {
   from: string;
@@ -293,7 +300,9 @@ async function delta(
     cursor = body.next_cursor;
     if (!cursor) {
       if (body.complete !== true)
-        throw new Error("Incremental file manifest is incomplete");
+        throw new IncompleteManifestError(
+          "Incremental file manifest is incomplete",
+        );
       break;
     }
     if (typeof cursor !== "string" || seen.has(cursor))

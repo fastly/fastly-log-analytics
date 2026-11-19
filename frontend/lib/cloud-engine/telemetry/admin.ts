@@ -1,4 +1,5 @@
 import type { paths } from "../cloud-api.generated";
+import { isNetworkFailure, retryNetwork } from "../fetch-retry";
 import type { OpsKind } from "./kinds";
 
 export type OperationalLogSettings = {
@@ -125,20 +126,41 @@ export async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(base() + path, {
+  const request = {
     credentials: "same-origin",
     ...init,
-  });
+  } satisfies RequestInit;
+  const method = request.method?.toUpperCase() ?? "GET";
+  const idempotent = method === "GET" || method === "HEAD";
+  const readResponse = async () => {
+    const response = await fetch(base() + path, request);
+    if (
+      method === "HEAD" ||
+      response.status === 204 ||
+      response.status === 205
+    ) {
+      return { response, body: {} };
+    }
+    try {
+      return { response, body: (await response.json()) as unknown };
+    } catch (error) {
+      if (response.ok || (idempotent && isNetworkFailure(error))) throw error;
+      return { response, body: null };
+    }
+  };
+  const { response, body } = await (idempotent
+    ? retryNetwork(readResponse, request.signal)
+    : readResponse());
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as {
+    const errorBody = body as {
       detail?: unknown;
       error?: unknown;
     } | null;
     const code =
-      typeof body?.error === "string"
-        ? body.error
-        : typeof body?.detail === "string"
-          ? body.detail
+      typeof errorBody?.error === "string"
+        ? errorBody.error
+        : typeof errorBody?.detail === "string"
+          ? errorBody.detail
           : null;
     throw new AdminApiError(
       (code && MESSAGES[code]) ?? code ?? `Request failed (${response.status})`,
@@ -146,7 +168,7 @@ export async function adminRequest<T>(
       code,
     );
   }
-  return (await response.json().catch(() => ({}))) as T;
+  return body as T;
 }
 
 const json = (method: string, body: unknown): RequestInit => ({

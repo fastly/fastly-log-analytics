@@ -1,6 +1,7 @@
 """Keep the dedicated Cloud job and local gate wired to the same checks."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,71 @@ def test_cloud_ci_mirrors_every_workflow_make_gate() -> None:
     )
     assert "git diff --exit-code compute/cloud/src/logging/catalog.json" in recipe
     assert "\t$(MAKE) cloud-ci\n" in make.split("\nci:\n", 1)[1].split("\n\n", 1)[0]
+
+
+def test_cloud_ci_checks_openapi_drift() -> None:
+    make = (ROOT / "Makefile").read_text()
+    recipe = make.split("\ncloud-ci:\n", 1)[1].split("\n\n", 1)[0]
+    workflow_commands = "\n".join(step.get("run", "") for step in cloud_job()["steps"])
+    assert "$(MAKE) openapi-drift" in recipe
+    assert re.search(r"^\s*make openapi-drift\s*$", workflow_commands, re.MULTILINE)
+
+
+def test_fast_ci_runs_deterministic_release_confidence_tests() -> None:
+    make = (ROOT / "Makefile").read_text()
+    fast_ci = make.split("\nfast-ci:\n", 1)[1].split("\n\n", 1)[0]
+    recipe = make.split("\nrelease-confidence-tests:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert "$(MAKE) release-confidence-tests" in fast_ci
+    for test in (
+        "test_canonical_fixture_ingest_and_query_parity",
+        "test_admin_attachment_analyst_scope_and_revocation_lifecycle",
+        "test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes",
+        "canonical_fixture_has_cross_stack_ingest_parity",
+        "storage_tree_replays_the_same_cursor_after_a_failed_list",
+        "analyst_attachment_is_read_only_and_revocation_invalidates_the_session",
+        "custom_field_lifecycle_rejects_bad_types_and_allows_change_and_removal_before_commit",
+    ):
+        assert test in recipe
+
+
+def test_release_confidence_offline_uses_existing_cloud_soak() -> None:
+    make = (ROOT / "Makefile").read_text()
+    recipe = make.split("\nrelease-confidence-offline:\n", 1)[1].split("\n\n", 1)[0]
+    assert "$(MAKE) cloud-soak" in recipe
+    assert (ROOT / "CONTRIBUTING.md").read_text().count("make release-confidence-offline") >= 1
+
+
+@pytest.mark.parametrize("makefile", [ROOT / "Makefile", ROOT / "compute/cloud/Makefile"])
+def test_load_targets_require_an_existing_external_config(makefile: Path) -> None:
+    make = makefile.read_text()
+    load_targets = "\n".join(
+        line
+        for line in make.splitlines()
+        if line.startswith(("loadtest-deploy-check:", "loadtest-campaign:", "deploy-test:", "deploy-check:"))
+    )
+    assert "require-lt-config" in load_targets
+    target_dir = makefile.parent
+    command = [
+        "make",
+        "--no-print-directory",
+        "-f",
+        str(makefile),
+        "require-lt-config",
+    ]
+    result = subprocess.run(command, cwd=target_dir, text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0
+    assert "LT_CONFIG is required" in result.stderr + result.stdout
+
+    result = subprocess.run(
+        [*command, f"LT_CONFIG={ROOT / 'fastly-lt.example.toml'}"],
+        cwd=target_dir,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "must be outside this repository" in result.stderr + result.stdout
 
 
 def test_cloud_job_supplies_database_required_by_shared_vcl_tests() -> None:

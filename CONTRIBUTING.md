@@ -26,6 +26,13 @@ make test            # backend pytest
 make test-frontend   # frontend vitest
 ```
 
+For release confidence, `make fast-ci` runs the deterministic cross-stack
+canonical-ingest, storage-cursor, access-revocation, and custom-field
+assertions. Run the heavier `make release-confidence-offline` before a release
+to exercise the existing two-day Cloud ingestion simulation. It is fully local
+and checks backlog, scan lag, and representative ingest latency; it does not
+deploy, open a browser, or generate live traffic.
+
 Backend dependencies live in `.venv` via `uv.lock`, so always invoke pytest through uv — `uv run pytest` — rather than a system `pytest`, which drifts off the locked deps. The frontend suite is `cd frontend && npm test`.
 
 ## Before you open a PR

@@ -5,12 +5,14 @@ import json
 import logging
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
 from backend.high_scale.archive import (
     ArchivePublication,
     ArchiveState,
@@ -18,11 +20,14 @@ from backend.high_scale.archive import (
     InMemoryBatchManifestStore,
     InMemoryObjectStore,
     InsertReceipt,
+    ServingWatermark,
     replay_manifest,
 )
 from backend.high_scale.ingest_controller import HighScaleIngestController, SourceObjectDescriptor
 from backend.high_scale.postgres_control import DeletionController
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
+
+CANONICAL_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "canonical_ingest.ndjson"
 
 
 class _ClickHouse:
@@ -157,6 +162,113 @@ def test_source_flows_through_fenced_archive_and_visible_serving() -> None:
             current_owner_epoch=owner.owner_epoch,
             now=result.manifest.deletion_authorization_deadline - timedelta(seconds=1),
         )
+
+
+@pytest.mark.no_postgres
+def test_canonical_fixture_ingest_and_query_parity() -> None:
+    ownership = OwnershipStore()
+    ledger = HighScaleLedger()
+    objects = InMemoryObjectStore()
+    clickhouse = _ClickHouse()
+    aggregates = _ClickHouse()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=ledger,
+        archive=ArchivePublication(objects),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        aggregates=ClickHousePublication(InMemoryBatchManifestStore(), aggregates),
+        worker_id="worker-canonical",
+        deletion_grace_seconds=60,
+    )
+    payload = CANONICAL_FIXTURE.read_bytes()
+    kwargs = dict(
+        service_id="svc",
+        domain="request",
+        object_key="raw/request/canonical.ndjson",
+        checksum="sha256:canonical",
+        payload=payload,
+        version="canonical-v1",
+        now=datetime(2027, 1, 15, 8, 2, tzinfo=UTC),
+        max_dead_letter_ratio=1.0,
+    )
+
+    result = _ingest_one(controller, **kwargs)
+
+    assert (result.total_events, result.quarantined_events, result.publication.rows_visible) == (5, 2, 5)
+    assert result.publication.duplicate is False
+    events = clickhouse.batches[0].rows
+    assert [event["line_ordinal"] for event in events] == [0, 1, 2, 3, 5]
+    assert [event["event_id"] for event in events] == [
+        "48b96d60-33c4-5514-afa0-67e10e4bc1e0",
+        "d8232d4b-8050-dafe-64fa-fd315237b4b3",
+        "6591d97c-a550-24dd-020e-77be57ff44bc",
+        "26cd31a7-ee93-3279-5541-b156af5b728d",
+        "70b59335-4641-5b74-6197-b9f7d84163a8",
+    ]
+    assert [event["rid"] for event in events] == [
+        "canonical-boundary",
+        "canonical-stable",
+        "canonical-stable",
+        "canonical-start",
+        "canonical-null",
+    ]
+    windows = Counter(
+        int(datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()) // 60 * 60
+        for event in events
+    )
+    assert windows == Counter({1_800_000_000: 4, 1_800_000_060: 1})
+    assert [(event["status"], event["resp_bytes"]) for event in events] == [
+        (204, 20),
+        (200, 10),
+        (200, 10),
+        (503, 30),
+        (None, None),
+    ]
+    assert events[0]["custom_fields"] == {
+        "tenant": "alpha",
+        "score": "7",
+        "optional": "",
+    }
+    assert events[-1]["custom_fields"] == {"nullable": ""}
+
+    aggregate_rows = next(batch.rows for batch in aggregates.batches if batch.domain == "request_aggregate")
+
+    class _FixtureAggregateQuery:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            rows = [row for row in aggregate_rows if row["dimension"] == params["dimension"]]
+            if "GROUP BY value" in sql:
+                return [
+                    {"value": value, "aggregate_count": count}
+                    for value, count in sorted(
+                        Counter(row["value"] for row in rows for _ in range(row["count"])).items(),
+                        key=lambda pair: (-pair[1], pair[0]),
+                    )
+                ]
+            return [{"total_count": sum(row["count"] for row in rows)}]
+
+    aggregate = query_clickhouse_aggregate(
+        _FixtureAggregateQuery(),
+        AggregateRequest("svc", "request", dimension="url"),
+        watermark=ServingWatermark(
+            "svc",
+            "request",
+            1,
+            datetime(2027, 1, 15, 8, 0, tzinfo=UTC),
+            datetime(2027, 1, 15, 8, 1, tzinfo=UTC),
+            "cursor",
+            "event",
+            "event",
+            True,
+        ),
+        now=datetime(2027, 1, 15, 8, 2, 1, tzinfo=UTC),
+    )
+    assert aggregate.request_count == 5
+    assert aggregate.top_values == (("/dup", 2), ("/boundary", 1), ("/null", 1), ("/numeric", 1))
+
+    replay = _ingest_one(controller, **kwargs)
+    assert replay.publication.duplicate is True
+    assert len(clickhouse.batches) == 1
 
 
 def test_ingest_writes_dimension_aggregates_alongside_facts() -> None:
@@ -1533,7 +1645,6 @@ from backend.high_scale import dashboard as hs_dashboard
 from backend.high_scale import security as hs
 from backend.high_scale.archive import (
     PartialInsert,
-    ServingWatermark,
     _batch_uuid,
     _rows_for_domain,
     build_batch_id_from_manifest_id,
@@ -1555,10 +1666,8 @@ from backend.high_scale.ingest_controller import (
     text,
 )
 from backend.high_scale.query_service import (
-    AggregateRequest,
     cmcd_aggregates,
     project_cmcd,
-    query_clickhouse_aggregate,
     query_clickhouse_aggregates_batch,
 )
 from backend.models.analytics import CmcdAggregatesResponse, CmcdRequest
@@ -2090,6 +2199,34 @@ def test_duplicate_retry_does_not_insert_twice() -> None:
     assert len([call for call in client.inserts if call[0] == "request_aggregates"]) == 1
 
 
+@pytest.mark.no_postgres
+def test_interrupted_publication_replay_does_not_duplicate_rows() -> None:
+    class InterruptedClickHouse:
+        def __init__(self) -> None:
+            self.rows: list[dict[str, object]] = []
+            self.attempts = 0
+
+        def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+            self.attempts += 1
+            if not self.rows:
+                self.rows.extend(batch.rows)
+                raise TimeoutError("receipt lost after rows were written")
+            return InsertReceipt(batch.batch_id, len(self.rows), batch.digest)
+
+    batch = HighScaleBatch("batch-1", "svc", "request", "epoch-1", ({"event_id": "one"},))
+    client = InterruptedClickHouse()
+    manifests = InMemoryBatchManifestStore()
+    publication = ClickHousePublication(manifests, client)
+
+    with pytest.raises(TimeoutError):
+        publication.publish(batch)
+    replay = publication.publish(batch)
+
+    assert replay.rows_visible == 1
+    assert len(client.rows) == 1
+    assert client.attempts == 2
+
+
 def test_partial_insert_is_cleaned_up_and_raised() -> None:
     client = FakeHttpClickHouse()
     batch = _batch()
@@ -2564,6 +2701,68 @@ def test_enrichment_tags_events_whose_waf_req_id_is_in_the_bot_cache():
         "ngwaf_wellknown_bot": "bing",
     }
     assert not {k for u in (unknown, bare) for k in u if "ngwaf" in k}
+
+
+@pytest.mark.no_postgres
+def test_custom_field_ingest_preserves_scalar_types_and_tolerates_old_or_null_rows():
+    rows = [
+        {"custom_fields": {"tenant": "acme", "score": 42, "ratio": 1.5, "missing": None}},
+        {"timestamp": NOW.isoformat()},
+    ]
+
+    assert persisted_fact_fields(rows[0]) == {
+        "tenant": "acme",
+        "score": "42",
+        "ratio": "1.5",
+        "missing": "",
+    }
+    assert persisted_fact_fields(rows[1]) == {}
+
+    with pytest.raises(ValueError, match="custom_fields"):
+        persisted_fact_fields({"custom_fields": {"unsupported": ["not", "a", "scalar"]}})
+
+
+@pytest.mark.no_postgres
+def test_custom_field_rows_survive_ingest_and_raw_query_across_removal_and_type_evolution():
+    from types import SimpleNamespace
+
+    from backend.high_scale.dashboard import raw_df
+    from backend.models.analytics.dashboard import RawRequest
+
+    custom_values = [
+        persisted_fact_fields({"custom_fields": {"tenant": "old", "score": "legacy", "retired": True}}),
+        persisted_fact_fields({"custom_fields": {"tenant": None, "score": None}}),
+        persisted_fact_fields({"custom_fields": {"tenant": "new", "score": 42}}),
+    ]
+    rows = [
+        {
+            "timestamp": NOW - timedelta(minutes=index),
+            "ip": f"192.0.2.{index + 1}",
+            "url": f"/{index}",
+            "country": "US",
+            "custom_fields": custom,
+        }
+        for index, custom in enumerate(custom_values)
+    ]
+
+    class _RawClient:
+        def execute(self, sql: str, params: dict) -> list[dict]:
+            assert "SELECT event_timestamp AS timestamp" in sql
+            assert params["service_id"] == "svc"
+            return rows
+
+    result = raw_df(
+        SimpleNamespace(service_id="svc", client=_RawClient()),
+        RawRequest(columns=["tenant", "score", "retired", "ip", "url"]),
+        None,
+        None,
+    )
+
+    assert result.fillna("").to_dict(orient="records") == [
+        {"tenant": "old", "score": "legacy", "retired": "True", "ip": "192.0.2.1", "url": "/0"},
+        {"tenant": "", "score": "", "retired": "", "ip": "192.0.2.2", "url": "/1"},
+        {"tenant": "new", "score": "42", "retired": "", "ip": "192.0.2.3", "url": "/2"},
+    ]
 
 
 def test_enrichment_never_invents_bots_for_synthetic_looking_ids():

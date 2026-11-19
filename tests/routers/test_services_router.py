@@ -364,6 +364,38 @@ def test_custom_field_patch_allows_type_change_before_storage_write():
     assert saved
 
 
+@pytest.mark.no_postgres
+def test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes():
+    cfg = _cfg(log_fields={"preset": "standard", "groups": ["A"], "schema_version": 2, "custom_fields": []})
+    with _mutate_cfg_ctx(
+        cfg,
+        patch("backend.provision.validate_log_format", return_value=[]),
+        patch("backend.core.fos_client.get_source_for_service", return_value={"name": "svc1", "bucket": "b"}),
+        patch("backend.routers.services.core._committed_field_types", return_value={}),
+    ) as saved:
+        created = _client().post("/api/services/svc1/custom-fields", json=_FIELD_CREATE_BODY)
+        assert created.status_code == 200
+
+        changed = _client().patch(
+            "/api/services/svc1/custom-fields/cf_env",
+            json={"label": "Changed", "sql_type": "BIGINT", "value_type": "numeric"},
+        )
+        assert changed.status_code == 200
+        assert changed.json()["field"]["sql_type"] == "BIGINT"
+
+        before_rejection = copy.deepcopy(saved)
+        rejected = _client().patch(
+            "/api/services/svc1/custom-fields/cf_env",
+            json={"sql_type": "BOOLEAN", "value_type": "numeric"},
+        )
+        assert rejected.status_code == 422
+        assert saved == before_rejection
+
+        removed = _client().delete("/api/services/svc1/custom-fields/cf_env")
+        assert removed.status_code == 200
+        assert saved["log_fields"]["custom_fields"] == []
+
+
 # ── API Token Rotation ──
 def test_credentials_api_token_rotation_creates_new_fos_key_and_saves():
     starting_cfg = _cfg()

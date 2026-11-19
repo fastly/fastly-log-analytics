@@ -1,0 +1,7 @@
+{"timestamp":"2027-01-15T08:01:00Z","rid":"canonical-boundary","url":"/boundary","status":"204","resp_bytes":"20","tenant":"alpha","score":"7","optional":null}
+{"timestamp":"2027-01-15T08:00:02Z","rid":"canonical-stable","url":"/dup","status":200,"resp_bytes":10}
+{"timestamp":"2027-01-15T08:00:01Z","rid":"canonical-stable","url":"/dup","status":"200","resp_bytes":"10"}
+{"timestamp":"2027-01-15T08:00:00Z","rid":"canonical-start","url":"/numeric","status":503,"resp_bytes":30}
+"quarantine: non-object"
+{"timestamp":"2027-01-15T08:00:59Z","rid":"canonical-null","url":"/null","status":null,"resp_bytes":null,"nullable":null}
+{"timestamp":
