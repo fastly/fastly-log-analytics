@@ -316,11 +316,18 @@ describe("compaction", () => {
   };
   const on = { ...DEFAULT_COMPACTION, enabled: true, targetMb: 64 };
 
-  it("is off by default and costs nothing", () => {
-    expect(DEFAULT_COMPACTION).toMatchObject({ enabled: false, targetMb: 64 });
-    const estimate = estimateMonthly(inputs, units, LIST_PRICE_RATES);
-    expect(estimate.compaction).toBeNull();
-    expect(estimate.lines.find((l) => l.id === "compaction")).toBeUndefined();
+  it("defaults to 128 MB compaction and costs nothing when explicitly off", () => {
+    expect(DEFAULT_COMPACTION).toMatchObject({ enabled: true, targetMb: 128 });
+    const defaultEstimate = estimateMonthly(inputs, units, LIST_PRICE_RATES);
+    expect(defaultEstimate.compaction).not.toBeNull();
+    expect(defaultEstimate.lines.find((l) => l.id === "compaction")).toBeDefined();
+
+    const offEstimate = estimateMonthly(inputs, units, LIST_PRICE_RATES, {
+      ...DEFAULT_COMPACTION,
+      enabled: false,
+    });
+    expect(offEstimate.compaction).toBeNull();
+    expect(offEstimate.lines.find((l) => l.id === "compaction")).toBeUndefined();
   });
 
   it("merges up to 13 sources per execution, level by level, until the hour reaches its target count", () => {

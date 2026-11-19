@@ -90,8 +90,8 @@ export interface CompactionInputs {
 }
 
 export const DEFAULT_COMPACTION: CompactionInputs = {
-  enabled: false,
-  targetMb: 64,
+  enabled: true,
+  targetMb: 128,
   hoursReadPerDay: 24,
 };
 
