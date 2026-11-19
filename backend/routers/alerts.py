@@ -252,7 +252,7 @@ def _ch_metric_expr(metric: str, status_codes: list[int] | None = None) -> str:
         return f"countIf({status_col} IN {codes_sql})" if codes else "0"
     if metric == "specific_status_rate":
         return f"if(count() = 0, 0.0, countIf({status_col} IN {codes_sql}) * 100.0 / count())" if codes else "0.0"
-    if metric == "latency_p95":
+    if metric in ("p95_latency", "latency_p95"):
         return "coalesce(quantile(0.95)(toFloat64OrNull(custom_fields['elapsed'])) / 1000.0, 0.0)"
     if metric == "hit_rate":
         return "if(count() = 0, 0.0, countIf(startsWith(upper(custom_fields['cache']), 'HIT')) * 100.0 / count())"
@@ -600,7 +600,9 @@ def _preview_alert_series(
             ts_val = r.get("ts")
             if isinstance(ts_val, datetime):
                 shifted = ts_val + timedelta(minutes=float(comp_period))
-                hist_map[shifted.isoformat()] = float(r.get("val") or 0.0)
+                shifted_iso = safe_iso(shifted)
+                if shifted_iso:
+                    hist_map[shifted_iso] = float(r.get("val") or 0.0)
         res["hist_values"] = [hist_map.get(t or "", 0.0) for t in times]
 
     if not os.getenv("PYTEST_CURRENT_TEST"):

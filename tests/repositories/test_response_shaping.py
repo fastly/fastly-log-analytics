@@ -183,14 +183,34 @@ def test_chart_interval_normalization_and_bucket_alignment() -> None:
 
 def test_latency_and_percentile_normalization() -> None:
     assert rs.opt_float("12.3456", 2) == 12.35
+    assert rs.opt_float(None) is None
+    assert rs.opt_float("not-a-number") is None
     assert rs.opt_float(float("nan"), reject_non_finite=True) is None
+    assert rs.opt_float(float("-inf"), reject_non_finite=True) is None
     assert rs.float_or_zero(None) == 0.0
     assert rs.float_or_zero(float("inf")) == 0.0
+    assert rs.float_or_zero(float("-inf"), 2) == 0.0
+    assert rs.float_or_zero(float("nan"), 2) == 0.0
+    assert rs.float_or_zero("3.456", 2) == 3.46
     assert rs.us_to_ms(12500, 2) == 12.5
+    assert rs.us_to_ms("2500", 1) == 2.5
+    assert rs.us_to_ms(float("nan")) is None
     assert rs.us_to_ms(None) is None
 
     pct = rs.shape_latency_percentiles(10.123, 8.0, 20.0, 35.0, p75=14.0, include_p75=True, ndigits=1)
     assert pct == {"avg": 10.1, "p50": 8.0, "p75": 14.0, "p95": 20.0, "p99": 35.0}
+    assert rs.shape_latency_percentiles(None, None, None, None, default_zero=True) == {
+        "avg": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+    }
+    assert rs.shape_latency_percentiles(
+        {"req_count": 42, "avg_ms": 1.234, "p50_ms": None, "p95_ms": 9.876, "p99_ms": float("nan")},
+        ndigits=2,
+    ) == {"requests": 42, "avg": 1.23, "p50": 0.0, "p95": 9.88, "p99": 0.0}
+    assert rs.compute_share_pct(1, 3, ndigits=2) == 33.33
+    assert rs.compute_share_pct(5, 0) == 0.0
 
     pop_res = rs.shape_pop_latency_rows(
         [("SJC", 100, 5.0, 10.0), ("IAD", 80, 6.0, 12.0), ("NRT", 20, 30.0, 50.0)],
