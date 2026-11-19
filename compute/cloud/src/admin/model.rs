@@ -165,8 +165,8 @@ pub struct Compaction {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionMode {
-    Off,
     #[default]
+    Off,
     SizeTarget,
 }
 
@@ -179,13 +179,19 @@ fn default_size_target_mb() -> u32 {
 impl Default for Compaction {
     fn default() -> Self {
         Self {
-            mode: CompactionMode::SizeTarget,
+            mode: CompactionMode::Off,
             size_target_mb: default_size_target_mb(),
         }
     }
 }
 
 impl Compaction {
+    pub fn default_provision() -> Self {
+        Self {
+            mode: CompactionMode::SizeTarget,
+            size_target_mb: default_size_target_mb(),
+        }
+    }
     pub fn valid(&self) -> bool {
         (1..=MAX_SIZE_TARGET_MB).contains(&self.size_target_mb)
     }
@@ -404,7 +410,7 @@ pub struct Provision {
         deserialize_with = "deserialize_retention"
     )]
     pub rum_retention_days: u32,
-    #[serde(default)]
+    #[serde(default = "Compaction::default_provision")]
     pub compaction: Compaction,
     #[serde(default = "default_compression_codec")]
     pub compression_codec: String,
