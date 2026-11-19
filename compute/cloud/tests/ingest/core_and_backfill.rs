@@ -251,6 +251,185 @@ fn canonical_fixture_has_cross_stack_ingest_parity() {
 }
 
 #[test]
+fn canonical_fixture_six_paginated_objects_interrupted_publication_parity() {
+    const FIXTURE: &str = include_str!("../../../../tests/fixtures/canonical_ingest.ndjson");
+
+    let fake = Fake::new(BASE + 3600);
+    fake.max_list_keys.set(Some(2));
+    let mut fixture_service = service();
+    fixture_service.log_fields = json!({
+        "groups": [],
+        "field_overrides": {},
+        "custom_fields": [
+            {"name": "tenant", "duckdb_type": "VARCHAR", "enabled": true, "committed": true},
+            {"name": "score", "duckdb_type": "BIGINT", "enabled": true, "committed": true},
+            {"name": "optional", "duckdb_type": "BOOLEAN", "enabled": true, "committed": true},
+            {"name": "nullable", "duckdb_type": "VARCHAR", "enabled": true, "committed": true}
+        ]
+    });
+
+    let lines: Vec<String> = FIXTURE.lines().map(str::to_owned).collect();
+    assert_eq!(lines.len(), 7);
+    let groups: [&[String]; 6] = [
+        &lines[0..1],
+        &lines[1..2],
+        &lines[2..3],
+        &lines[3..4],
+        &lines[4..6],
+        &lines[6..7],
+    ];
+    for (idx, group) in groups.iter().enumerate() {
+        put_raw(&fake, BASE, &format!("p{}", idx + 1), group);
+    }
+
+    let mut total_rows = 0u64;
+    let mut total_bad_lines = 0u64;
+    let mut total_lines_read = 0u64;
+
+    // Page 1: interrupt at archive/worker PUT, then recover.
+    fake.fail_put_number.set(Some(1));
+    let failed_p1 = tick_with_service(&fake, &fixture_service).unwrap();
+    assert!(failed_p1.more_pending);
+    assert_eq!(failed_p1.converted, 0);
+    fake.fail_put_number.set(None);
+    let ok_p1 = tick_with_service(&fake, &fixture_service).unwrap();
+    assert_eq!(ok_p1.converted, 2);
+    total_rows += ok_p1.rows;
+    total_bad_lines += ok_p1.bad_lines;
+    total_lines_read += ok_p1.lines_read;
+
+    // Page 2: interrupt coordinator mid-tick (manifest/plan phase), then recover after lease expiry.
+    fake.crash_after.set(Some(5));
+    assert!(tick_with_service(&fake, &fixture_service).is_err());
+    fake.now
+        .set(fake.now.get() + ingest::coordinator::LEASE_S + 1);
+    fake.crash_after.set(None);
+    let ok_p2 = tick_with_service(&fake, &fixture_service).unwrap();
+    assert!(ok_p2.resumed);
+    assert_eq!(ok_p2.converted, 2);
+    total_rows += ok_p2.rows;
+    total_bad_lines += ok_p2.bad_lines;
+    total_lines_read += ok_p2.lines_read;
+
+    // Page 3: interrupt at watermark commit (serving), then recover after lease expiry.
+    fake.fail_watermark.set(true);
+    let failed_p3 = tick_with_service(&fake, &fixture_service);
+    assert!(failed_p3.is_err());
+    fake.now
+        .set(fake.now.get() + ingest::coordinator::LEASE_S + 1);
+    fake.fail_watermark.set(false);
+    let mut ok_p3 = tick_with_service(&fake, &fixture_service).unwrap();
+    assert!(ok_p3.resumed);
+    assert_eq!(ok_p3.converted, 2);
+    total_rows += ok_p3.rows;
+    total_bad_lines += ok_p3.bad_lines;
+    total_lines_read += ok_p3.lines_read;
+
+    while ok_p3.more_pending {
+        ok_p3 = tick_with_service(&fake, &fixture_service).unwrap();
+        total_rows += ok_p3.rows;
+        total_bad_lines += ok_p3.bad_lines;
+        total_lines_read += ok_p3.lines_read;
+    }
+
+    assert_eq!((total_rows, total_bad_lines, total_lines_read), (5, 2, 7));
+
+    // Idempotent replay after full completion writes nothing new.
+    let replay = tick_with_service(&fake, &fixture_service).unwrap();
+    assert_eq!(replay.converted, 0);
+
+    let visible =
+        fastly_log_analytics::telemetry::compact::visible(&fake.keys("processed/request/"), &[]);
+    let mut visible_rows = 0usize;
+    let mut status_counts: BTreeMap<Option<i64>, usize> = BTreeMap::new();
+    let mut count_5xx = 0usize;
+    let mut total_bytes = 0i64;
+    let mut distinct_ips: BTreeSet<String> = BTreeSet::new();
+    for key in &visible {
+        for batch in batches(&fake.bucket.borrow()[key]) {
+            visible_rows += batch.num_rows();
+            let status = batch
+                .column_by_name("status")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let resp_bytes = batch
+                .column_by_name("resp_bytes")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let client_ip = batch
+                .column_by_name("client_ip")
+                .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+            for i in 0..batch.num_rows() {
+                let s = status.iter().nth(i).flatten();
+                *status_counts.entry(s).or_default() += 1;
+                if s.is_some_and(|code| (500..=599).contains(&code)) {
+                    count_5xx += 1;
+                }
+                total_bytes += resp_bytes.iter().nth(i).flatten().unwrap_or(0);
+                if let Some(ip_col) = client_ip {
+                    if ip_col.is_valid(i) && !ip_col.value(i).is_empty() {
+                        distinct_ips.insert(ip_col.value(i).to_owned());
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(visible_rows, 5);
+    assert_eq!(
+        status_counts,
+        BTreeMap::from([(None, 1), (Some(200), 2), (Some(204), 1), (Some(503), 1)])
+    );
+    assert_eq!(count_5xx, 1);
+    assert_eq!(distinct_ips.len(), 0);
+    assert_eq!(total_bytes, 70);
+
+    let (mut ov_requests, mut ov_bandwidth, mut ov_ips) = (0i64, 0i64, 0i64);
+    let (mut ts_requests, mut ts_5xx, mut ts_bytes) = (0i64, 0i64, 0i64);
+    for key in fake.keys("processed/summary/request/") {
+        for batch in batches(&fake.bucket.borrow()[&key]) {
+            let bundles = batch.column_by_name("bundle").unwrap().as_string::<i32>();
+            let req_col = batch
+                .column_by_name("requests")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let bw_col = batch
+                .column_by_name("total_bandwidth_bytes")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let ip_col = batch
+                .column_by_name("ip_count_observed")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let s5xx_col = batch
+                .column_by_name("status_5xx")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let bytes_col = batch
+                .column_by_name("resp_bytes_sum")
+                .unwrap()
+                .as_primitive::<arrow_array::types::Int64Type>();
+            for i in 0..batch.num_rows() {
+                match bundles.value(i) {
+                    "overview" => {
+                        ov_requests += req_col.value(i);
+                        ov_bandwidth += bw_col.value(i);
+                        ov_ips += ip_col.value(i);
+                    }
+                    "time_series" => {
+                        ts_requests += req_col.value(i);
+                        ts_5xx += s5xx_col.value(i);
+                        ts_bytes += bytes_col.value(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!((ov_requests, ov_bandwidth, ov_ips), (5, 70, 0));
+    assert_eq!((ts_requests, ts_5xx, ts_bytes), (5, 1, 70));
+}
+
+#[test]
 fn every_row_lands_exactly_once_and_routes_by_window() {
     let fake = Fake::new(BASE + 3600);
     let mut expected = Vec::new();

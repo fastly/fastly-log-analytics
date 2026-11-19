@@ -359,9 +359,11 @@ fast-ci:
 release-confidence-tests:
 	uv run pytest \
 		tests/high_scale/test_ingest_controller.py::test_canonical_fixture_ingest_and_query_parity \
+		tests/high_scale/test_canonical_parity.py::test_canonical_fixture_six_paginated_objects_interrupted_publication_parity \
 		tests/remote_access/test_middleware.py::test_admin_attachment_analyst_scope_and_revocation_lifecycle \
 		tests/routers/test_services_router.py::test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes
 	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest canonical_fixture_has_cross_stack_ingest_parity
+	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest canonical_fixture_six_paginated_objects_interrupted_publication_parity
 	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test ingest storage_tree_replays_the_same_cursor_after_a_failed_list
 	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test route_auth analyst_attachment_is_read_only_and_revocation_invalidates_the_session
 	cd compute && PATH="$$HOME/.cargo/bin:$$PATH" cargo test --locked -p fastly-logs-parquet-shell --test service_jobs custom_field_lifecycle_rejects_bad_types_and_allows_change_and_removal_before_commit

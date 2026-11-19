@@ -37,6 +37,7 @@ pub(super) struct Fake {
     pub(super) worker_calls: RefCell<Vec<usize>>,
     pub(super) fail_delete_keys: RefCell<BTreeSet<String>>,
     pub(super) fail_put_number: Cell<Option<u32>>,
+    pub(super) max_list_keys: Cell<Option<usize>>,
     pub(super) fail_watermark: Cell<bool>,
     pub(super) conflict_watermark: Cell<bool>,
     /// Plan writes left whose next read answers with the record they replaced, as an
@@ -196,6 +197,7 @@ impl Fake {
             worker_calls: Default::default(),
             fail_delete_keys: Default::default(),
             fail_put_number: Cell::new(None),
+            max_list_keys: Cell::new(None),
             fail_watermark: Cell::new(false),
             conflict_watermark: Cell::new(false),
             stale_plan_reads: Cell::new(0),
@@ -1227,6 +1229,7 @@ impl Fake {
             .get("max-keys")
             .and_then(|m| m.parse().ok())
             .unwrap_or(1000);
+        let max = self.max_list_keys.get().map_or(max, |cap| max.min(cap));
         let after = q
             .get("continuation-token")
             .or_else(|| q.get("start-after"))
