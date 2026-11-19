@@ -63,7 +63,8 @@ HTTP_TRANSPORT: httpx.BaseTransport | None = None
 # The ~25 MB package upload has taken over 90 s; Fastly ingests it slowly.
 PACKAGE_UPLOAD_TIMEOUT_S = 300.0
 PACKAGE_UPLOAD_ATTEMPTS = 3
-PACKAGE_UPLOAD_RETRY_BASE_DELAY_S = 1.0
+API_READ_ATTEMPTS = 3
+API_RETRY_BASE_DELAY_S = 1.0
 
 
 def _http_client(*, timeout: float, transport: httpx.BaseTransport | None = None) -> httpx.Client:
@@ -105,7 +106,15 @@ class FastlyAPI:
         if payload is not None:
             data = str(httpx.QueryParams(payload)).encode() if form else json.dumps(payload).encode()
             headers["Content-Type"] = "application/x-www-form-urlencoded" if form else "application/json"
-        return self._send(method, path, data, headers)
+        is_idempotent_read = method.upper() in {"GET", "HEAD"}
+        return self._send(
+            method,
+            path,
+            data,
+            headers,
+            attempts=API_READ_ATTEMPTS if is_idempotent_read else None,
+            retry_base_delay=API_RETRY_BASE_DELAY_S if is_idempotent_read else 0.0,
+        )
 
     def upload_package(self, service_id: str, version: int, package: Path) -> Any:
         boundary = "flp-" + uuid.uuid4().hex
@@ -130,7 +139,7 @@ class FastlyAPI:
             },
             timeout=PACKAGE_UPLOAD_TIMEOUT_S,
             attempts=PACKAGE_UPLOAD_ATTEMPTS,
-            retry_base_delay=PACKAGE_UPLOAD_RETRY_BASE_DELAY_S,
+            retry_base_delay=API_RETRY_BASE_DELAY_S,
         )
 
     def _send(

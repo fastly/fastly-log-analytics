@@ -1283,6 +1283,24 @@ def test_package_upload_retries_one_transient_transport_failure(package, monkeyp
     assert requests[0].content == requests[1].content
 
 
+def test_read_request_retries_one_transient_transport_failure(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ConnectError("uplink reset before response", request=request)
+        return httpx.Response(200, json={"id": "compute-id"})
+
+    monkeypatch.setattr(provision, "HTTP_TRANSPORT", httpx.MockTransport(flaky))
+    monkeypatch.setattr(provision.time, "sleep", lambda _: None)
+
+    result = provision.FastlyAPI("deploy-token").request("GET", "/service/compute-id")
+
+    assert result == {"id": "compute-id"}
+    assert len(requests) == 2
+
+
 def test_package_upload_stops_after_three_transport_failures(package, monkeypatch) -> None:
     attempts = 0
 
