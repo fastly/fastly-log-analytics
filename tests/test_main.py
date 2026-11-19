@@ -39,6 +39,36 @@ from backend.utils.remote_access import _new_request_id
 # ── Shared Helpers ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.no_postgres
+@pytest.mark.asyncio
+async def test_lifespan_closes_fos_and_telemetry_resources(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    import backend.core.lifespan as lifespan_module
+
+    events = []
+
+    @asynccontextmanager
+    async def application_lifespan(_app):
+        yield
+
+    monkeypatch.setattr(lifespan_module, "_application_lifespan", application_lifespan)
+    monkeypatch.setattr(lifespan_module.request_telemetry, "force_flush", lambda: events.append("flush"))
+    monkeypatch.setattr(lifespan_module.clickhouse_observer, "stop_clickhouse_observer", lambda: None)
+    monkeypatch.setattr(lifespan_module.console_access, "close_console_clients", lambda: None)
+    monkeypatch.setattr(lifespan_module.clickhouse_client, "close_clickhouse_client", lambda: None)
+    monkeypatch.setattr(lifespan_module._fos, "clear_fos_client", lambda: events.append("fos"))
+    monkeypatch.setattr(
+        "backend.utils.telemetry.stop_proxy_server",
+        lambda: events.append("telemetry"),
+    )
+
+    async with lifespan_module.lifespan(MagicMock()):
+        pass
+
+    assert events == ["flush", "fos", "telemetry"]
+
+
 def _make_health_db(
     service_id: str = "svc",
     ingest_minutes_ago: int | None = 1,

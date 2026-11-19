@@ -898,6 +898,35 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(screen.getByText(/423 B/i)).toBeInTheDocument()
     })
 
+    it('submits the zero-capture configuration and surfaces settings errors', async () => {
+      const user = userEvent.setup()
+      const { onComplete } = renderDialog({ currentVersion: '1.9.0', latestVersion: '1.9.0' })
+
+      for (const label of [/core web vitals/i, /performance timings/i, /javascript errors/i, /custom events/i]) {
+        await user.click(screen.getByRole('switch', { name: label }))
+      }
+      expect(screen.getByText(/Est\. ~0 B/i)).toBeInTheDocument()
+
+      mockAdminFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({ detail: 'At least one capture category must remain enabled' }),
+      })
+      await user.click(screen.getByRole('button', { name: /apply settings/i }))
+
+      expect(mockAdminFetch).toHaveBeenCalledWith('/api/services/svc-1/rum/settings', expect.objectContaining({
+        body: JSON.stringify({
+          capture_vitals: false,
+          capture_performance: false,
+          capture_errors: false,
+          capture_events: false,
+          custom_condition: '',
+        }),
+      }))
+      expect(await screen.findByText(/At least one capture category must remain enabled/i)).toBeInTheDocument()
+      expect(onComplete).not.toHaveBeenCalled()
+    })
+
     it('returns null without a serviceId', () => {
       const { container } = renderDialog({ serviceId: null })
       expect(container).toBeEmptyDOMElement()

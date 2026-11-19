@@ -1,12 +1,12 @@
 import {
   getDuckDBEngine,
-  compileFiltersToSql,
   type DuckDBAnalyticalEngine,
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { buildOriginShieldingAnalysisSql, enrichShieldingRouteWithPopDistance } from "./origin";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
 export { parseEpochMs, roundTo };
 
 export const TCP_FIELDS = [
@@ -385,19 +385,7 @@ export function networkScanColumns(path: string, params: Record<string, unknown>
 }
 
 function buildWhereClause(params: NetworkQueryParams): string {
-  const clauses: string[] = ["1=1"];
-  const startMs = parseEpochMs(params.start_time);
-  const endMs = parseEpochMs(params.end_time);
-  if (startMs !== null) {
-    clauses.push(`ts_ms >= ${startMs}`);
-  }
-  if (endMs !== null) {
-    clauses.push(`ts_ms < ${endMs}`);
-  }
-  if (params.service_id) {
-    const escaped = String(params.service_id).replaceAll("'", "''");
-    clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
-  }
+  const clauses: string[] = [rangeServiceSql(params)];
   if (params.filter_country) {
     const escaped = String(params.filter_country).replaceAll("'", "''");
     clauses.push(`COALESCE(geo_country, country) = '${escaped}'`);
@@ -412,9 +400,7 @@ function buildWhereClause(params: NetworkQueryParams): string {
     const escaped = String(params.filter_pop).replaceAll("'", "''");
     clauses.push(`COALESCE(fastly_pop, pop) = '${escaped}'`);
   }
-  clauses.push(compileFiltersToSql(Object.entries(params.filters ?? {}).flatMap(([field, spec]) =>
-    spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-  ), false, [], params.customColumnTypes));
+  clauses.push(analyticsFiltersToSql(params.filters, params.customColumnTypes));
   return clauses.join(" AND ");
 }
 

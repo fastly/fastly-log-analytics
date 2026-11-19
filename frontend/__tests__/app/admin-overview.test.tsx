@@ -211,6 +211,7 @@ import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDia
 import { AuditLogPanel, useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
 import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
 import { LabelsTab, AuditLogTab, MatrixVersionsCard, ThresholdSlider, useScorerTimeseries } from '@/components/SessionScoring/ScoringAdminPanels'
+import { PricingSettings } from '@/app/admin/_sections/AdminGlobalSettings'
 
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -771,6 +772,35 @@ describe('InvitationsPanel, CreateInviteDialog & useTableSort', () => {
     expect(screen.getByRole('button', { name: /create invite/i })).toBeDisabled()
   })
 
+  test('CreateInviteDialog rejects invalid invite details, preserves zero duration, and surfaces API errors', async () => {
+    const user = userEvent.setup()
+    const services: ShareStatus['services'] = [{ service_id: 'svcA', name: 'Service A' }]
+    let posted: Record<string, unknown> | undefined
+    server.use(
+      http.get('*/api/admin/share/oauth-providers', () => HttpResponse.json({ providers: [] })),
+      http.post('*/api/admin/share/invites', async ({ request }) => {
+        posted = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ detail: 'Invite storage unavailable' }, { status: 503 })
+      }),
+    )
+    render(<CreateInviteDialog open onOpenChange={vi.fn()} services={services} onCreated={vi.fn()} />)
+
+    await user.type(screen.getByLabelText('Name'), 'Jane')
+    await user.type(screen.getByLabelText('Email'), 'not-an-email')
+    await user.type(screen.getByLabelText('Passcode'), 'ocean-breeze-cabin-42')
+    await user.click(screen.getByRole('checkbox', { name: /Service A/i }))
+    expect(screen.getByRole('button', { name: /create invite/i })).toBeDisabled()
+
+    await user.clear(screen.getByLabelText('Email'))
+    await user.type(screen.getByLabelText('Email'), 'jane@example.com')
+    await user.click(screen.getByLabelText('Expiration'))
+    await user.click(await screen.findByRole('option', { name: 'Unlimited' }))
+    await user.click(screen.getByRole('button', { name: /create invite/i }))
+
+    await waitFor(() => expect(posted?.duration_hours).toBeNull())
+    expect(await screen.findByText(/Invite storage unavailable/i)).toBeInTheDocument()
+  })
+
   test('useTableSort sorts ascending/descending, keeps nulls last, and resets direction on key change', () => {
     type SortRow = { name: string; n: number | null }
     const sortRows: SortRow[] = [{ name: 'bravo', n: 2 }, { name: 'alpha', n: null }, { name: 'charlie', n: 1 }]
@@ -786,6 +816,69 @@ describe('InvitationsPanel, CreateInviteDialog & useTableSort', () => {
     expect(names(result.current.sorted)).toEqual(['bravo', 'charlie', 'alpha'])
     act(() => result.current.toggle('n'))
     expect(names(result.current.sorted)).toEqual(['charlie', 'bravo', 'alpha'])
+  })
+})
+
+describe('PricingSettings', () => {
+  const settings = {
+    enabled: true,
+    retention_days: 30,
+    class_a_rate_per_1k: 0.005,
+    class_b_rate_per_10k: 0.01,
+    cdn_egress_rate_per_gb: 0.12,
+    storage_rate_per_gb_month: 0.02,
+    min_billed_days: 30,
+  }
+
+  test('rejects invalid values, permits zero rates, and preserves the numeric payload', async () => {
+    const user = userEvent.setup()
+    let body: Record<string, unknown> | undefined
+    server.use(
+      http.get('*/api/admin/usage-logging', () => HttpResponse.json(settings)),
+      http.patch('*/api/admin/usage-logging', async ({ request }) => {
+        body = await request.json() as Record<string, unknown>
+        return HttpResponse.json(settings)
+      }),
+    )
+    renderWithQuery(<PricingSettings />)
+    await screen.findByLabelText('Class A Ops ($/1k)')
+    await user.click(screen.getByRole('button', { name: /edit/i }))
+
+    const rateA = screen.getByLabelText('Class A Ops ($/1k)')
+    const minDays = screen.getByLabelText('Min. Days Billed/Object')
+    await user.clear(rateA)
+    await user.type(rateA, 'invalid')
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeDisabled()
+
+    await user.clear(rateA)
+    await user.type(rateA, '0')
+    await user.clear(minDays)
+    await user.type(minDays, '0')
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeDisabled()
+
+    await user.clear(minDays)
+    await user.type(minDays, '1')
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+    await waitFor(() => expect(body).toMatchObject({
+      class_a_rate_per_1k: 0,
+      min_billed_days: 1,
+    }))
+  })
+
+  test('shows a failed pricing save without leaving edit mode', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('*/api/admin/usage-logging', () => HttpResponse.json(settings)),
+      http.patch('*/api/admin/usage-logging', () =>
+        HttpResponse.json({ detail: 'Pricing update rejected' }, { status: 400 })),
+    )
+    renderWithQuery(<PricingSettings />)
+    await screen.findByLabelText('Class A Ops ($/1k)')
+    await user.click(screen.getByRole('button', { name: /edit/i }))
+    await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+    expect(await screen.findByText(/Pricing update rejected/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
   })
 })
 

@@ -390,6 +390,7 @@ def scoring_not_desired():
         yield build
 
 
+@pytest.mark.no_postgres
 def test_enable_persists_only_scoring_and_keeps_concurrent_writes(enable_stubs, scoring_desired):
     seeded = _seed(scoring={"enabled": True, "request_secret": "r" * 8})
 
@@ -424,6 +425,7 @@ def test_enable_does_not_hold_the_config_lock_across_fastly_calls(enable_stubs, 
     assert held == [False, False]
 
 
+@pytest.mark.no_postgres
 def test_failure_after_persist_rolls_back_only_scoring_and_keeps_concurrent_writes(enable_stubs, scoring_desired):
     original_scoring = {"enabled": True, "scoring_domain": "old.example.test"}
     seeded = _seed(scoring=original_scoring)
@@ -434,16 +436,28 @@ def test_failure_after_persist_rolls_back_only_scoring_and_keeps_concurrent_writ
         raise RuntimeError("vcl sync failed")
 
     enable_stubs.reconcile.side_effect = _boom
+    created = {
+        "scoring_service_id": "compute_id",
+        "scoring_keys_store_id": "keys_id",
+        "scoring_config_store_id": "config_id",
+        "scoring_matrix_store_id": "matrix_id",
+    }
+    enable_stubs.ensure.return_value["created_resources"] = created
 
-    with pytest.raises(RuntimeError, match="vcl sync failed"):
+    with (
+        patch(f"{MOD}.delete_scoring_service") as delete,
+        pytest.raises(RuntimeError, match="vcl sync failed"),
+    ):
         reconcile_infrastructure(SID, "tok")
 
     saved = _persisted()
     assert saved["scoring"] == original_scoring
     assert saved["concurrent_key"] == "kept"
     assert saved["rum"]["cid_salt"] == seeded["rum"]["cid_salt"]
+    delete.assert_called_once_with(token="tok", **created)
 
 
+@pytest.mark.no_postgres
 def test_failure_after_persist_removes_scoring_that_did_not_exist_before(enable_stubs, scoring_desired):
     _seed()
     enable_stubs.reconcile.side_effect = RuntimeError("vcl sync failed")
@@ -482,6 +496,7 @@ def test_disable_strips_scoring_fields_and_block_and_keeps_concurrent_writes(dis
     assert disable_stubs.delete.call_args.kwargs["scoring_keys_store_id"] == "k"
 
 
+@pytest.mark.no_postgres
 def test_disable_failure_restores_scoring_block_and_fields_and_keeps_concurrent_writes(
     disable_stubs, scoring_not_desired
 ):

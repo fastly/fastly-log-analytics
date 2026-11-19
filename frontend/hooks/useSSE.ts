@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { buildServiceHref } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
-import { buildStreamRequest, extractSSEFrameData } from './sseStreamAppliers'
+import { buildStreamRequest, extractSSEFrameData, parseSSEJson } from './sseStreamAppliers'
 import { runEventStream } from './useEventStream'
 
 export * from './sseStreamAppliers'
@@ -71,6 +71,7 @@ export function useSSE<T = SSELine>({ maxLines, transform }: UseSSEOptions<T> = 
       const abort = new AbortController()
       abortRef.current = abort
       const isActive = () => currentReqId === requestIdRef.current && mountedRef.current
+      let terminal = false
 
       try {
         const request = buildStreamRequest({
@@ -86,13 +87,12 @@ export function useSSE<T = SSELine>({ maxLines, transform }: UseSSEOptions<T> = 
           signal: abort.signal,
           isActive,
           onFrame: (frame) => {
+            if (!isActive()) return
             const dataStr = extractSSEFrameData(frame)
             if (!dataStr) return
-            let data: SSELine
-            try {
-              data = JSON.parse(dataStr) as SSELine
-            } catch (e) {
-              console.error('Failed to parse SSE message:', dataStr, e)
+            const data = parseSSEJson<SSELine>(dataStr)
+            if (!data) {
+              console.error('Failed to parse SSE message:', dataStr)
               return
             }
             let finalStatus: SSEStatus | null = null
@@ -112,13 +112,16 @@ export function useSSE<T = SSELine>({ maxLines, transform }: UseSSEOptions<T> = 
                 })
               }
               if (finalStatus) {
+                terminal = true
                 setStatus(finalStatus)
                 if (finalError) setError(finalError)
+                abort.abort()
               }
             }
           },
         })
         if (!isActive()) return
+        if (terminal) return
         setStatus((prev) => {
           if (prev === 'streaming') {
             setError('Connection closed unexpectedly before completion.')
@@ -127,7 +130,7 @@ export function useSSE<T = SSELine>({ maxLines, transform }: UseSSEOptions<T> = 
           return prev
         })
       } catch (err) {
-        if (!isActive()) return
+        if (!isActive() || terminal) return
         setStatus('error')
         if (err instanceof TypeError && (err.message === 'Failed to fetch' || err.message.includes('network error'))) {
           setError('Backend API unreachable. Ensure the FastAPI server is running (usually on port 8000).')

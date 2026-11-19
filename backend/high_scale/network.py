@@ -30,6 +30,7 @@ from backend.high_scale._common import (
     parse_time_window,
     resolve_asn_display_labels,
     visible_publication_fence_sql,
+    visible_rollup_publication_fence_sql,
 )
 from backend.high_scale._common import (
     percentiles as _percentiles,
@@ -467,10 +468,12 @@ def network_health(
                 if hourly_bounds is not None:
                     h_start, h_end = hourly_bounds
                     edge_clause = _hourly_edge_time_clause(start, end, h_start, h_end)
+                    rollup_fence = visible_rollup_publication_fence_sql("request_aggregate")
                     union_sql = (
                         "SELECT value AS asn_s, sum(request_count) AS cnt FROM request_aggregates_1h "
                         "WHERE service_id={service_id:String} AND dimension='asn' AND value != '' "
-                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} GROUP BY asn_s"
+                        "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                        f"AND {rollup_fence} GROUP BY asn_s"
                     )
                     if edge_clause is not None:
                         union_sql += (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import urllib.parse
 from collections.abc import Callable
@@ -213,6 +214,7 @@ def enable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> di
         status_cb("▸ Phase 1/2 — Compute scorer service")
     prior_scoring = cfg.get("scoring") or {}
     scoring_meta = ensure_scoring_service(logging_service_id, token, status_cb=status_cb)
+    created_resources = dict(scoring_meta.get("created_resources") or {})
     scoring_service_id = scoring_meta["scoring_service_id"]
     scoring_domain = scoring_meta["scoring_domain"]
     request_secret = scoring_meta.get("request_secret") or prior_scoring.get("request_secret") or ""
@@ -221,78 +223,85 @@ def enable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> di
 
         request_secret = _secrets.token_hex(32)
         info("Generated fresh request_secret (none in store or cfg)")
-    keys_store_id = scoring_meta.get("scoring_keys_store_id") or prior_scoring.get("scoring_keys_store_id")
-    if not keys_store_id:
-        raise RuntimeError("Cannot sync request_secret: no scoring_keys_store_id available.")
+    persisted = False
+    original_scoring = copy.deepcopy(cfg.get("scoring"))
+    original_scoring_fields = [
+        copy.deepcopy(field)
+        for field in (cfg.get("log_fields") or {}).get("custom_fields") or []
+        if field.get("name") in _SCORING_FIELD_NAMES
+    ]
     try:
-        fastly(
-            "POST",
-            f"/resources/stores/config/{keys_store_id}/item",
-            {"item_key": "request_secret", "item_value": request_secret},
-            token=token,
+        keys_store_id = scoring_meta.get("scoring_keys_store_id") or prior_scoring.get("scoring_keys_store_id")
+        if not keys_store_id:
+            raise RuntimeError("Cannot sync request_secret: no scoring_keys_store_id available.")
+        try:
+            fastly(
+                "POST",
+                f"/resources/stores/config/{keys_store_id}/item",
+                {"item_key": "request_secret", "item_value": request_secret},
+                token=token,
+            )
+        except RuntimeError:
+            fastly(
+                "PATCH",
+                f"/resources/stores/config/{keys_store_id}/item/request_secret",
+                {"item_value": request_secret},
+                token=token,
+            )
+        info("Synced request_secret to scoring_keys store (store == VCL)")
+        matrix_store_id = (
+            scoring_meta.get("scoring_matrix_store_id")
+            or (cfg.get("scoring") or {}).get("scoring_matrix_store_id")
+            or ""
         )
-    except RuntimeError:
-        fastly(
-            "PATCH",
-            f"/resources/stores/config/{keys_store_id}/item/request_secret",
-            {"item_value": request_secret},
-            token=token,
+        _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
+        deployed = _deploy_wasm_package(
+            scoring_service_id,
+            matrix_store_id,
+            token,
+            status_cb=status_cb,
+            prior_package_sha=prior_scoring.get("deployed_package_sha", ""),
+            prior_files_hash=prior_scoring.get("deployed_package_files_hash", ""),
         )
-    info("Synced request_secret to scoring_keys store (store == VCL)")
-    # ── Stage 2: deploy the prebuilt Wasm package + seed the matrix KV. ─────
-    matrix_store_id = (
-        scoring_meta.get("scoring_matrix_store_id") or (cfg.get("scoring") or {}).get("scoring_matrix_store_id") or ""
-    )
-    deployed = _deploy_wasm_package(
-        scoring_service_id,
-        matrix_store_id,
-        token,
-        status_cb=status_cb,
-        prior_package_sha=prior_scoring.get("deployed_package_sha", ""),
-        prior_files_hash=prior_scoring.get("deployed_package_files_hash", ""),
-    )
-    deployed_package_sha = deployed["sha"]
-    deployed_files_hash = deployed.get("files_hash", "")
-    compute_ver = deployed["version"]
-    _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
+        deployed_package_sha = deployed["sha"]
+        deployed_files_hash = deployed.get("files_hash", "")
+        compute_ver = deployed["version"]
 
-    # ── Stage 3: write scoring metadata into the LOGGING service config. ────
-    def _apply_scoring(target: dict) -> None:
-        fresh_prior = target.get("scoring") or {}
-        target["scoring"] = _build_scoring_block(fresh_prior)
-        _add_scoring_custom_fields(target)
+        def _build_scoring_block(current: dict) -> dict[str, Any]:
+            block = {
+                "enabled": True,
+                "scoring_service_id": scoring_service_id,
+                "scoring_service_name": scoring_meta["scoring_service_name"],
+                "scoring_domain": scoring_domain,
+                "scoring_keys_store_id": scoring_meta["scoring_keys_store_id"],
+                "scoring_config_store_id": scoring_meta["scoring_config_store_id"],
+                "scoring_matrix_store_id": matrix_store_id or scoring_meta.get("scoring_matrix_store_id", ""),
+                "request_secret": request_secret,
+                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+                "deployed_package_sha": deployed_package_sha,
+                "deployed_package_files_hash": deployed_files_hash,
+                "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
+                "exclude_url_regex": current.get("exclude_url_regex") or DEFAULT_ASSET_EXT_REGEX,
+            }
+            if current.get("enforce_status_code") is not None:
+                block["enforce_status_code"] = current["enforce_status_code"]
+            return block
 
-    def _build_scoring_block(prior_scoring: dict) -> dict[str, Any]:
-        block = {
-            "enabled": True,
-            "scoring_service_id": scoring_service_id,
-            "scoring_service_name": scoring_meta["scoring_service_name"],
-            "scoring_domain": scoring_domain,
-            "scoring_keys_store_id": scoring_meta["scoring_keys_store_id"],
-            "scoring_config_store_id": scoring_meta["scoring_config_store_id"],
-            "scoring_matrix_store_id": matrix_store_id or scoring_meta.get("scoring_matrix_store_id", ""),
-            "request_secret": request_secret,
-            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-            "deployed_package_sha": deployed_package_sha,
-            "deployed_package_files_hash": deployed_files_hash,
-            "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
-            "exclude_url_regex": prior_scoring.get("exclude_url_regex") or DEFAULT_ASSET_EXT_REGEX,
-        }
-        if prior_scoring.get("enforce_status_code") is not None:
-            block["enforce_status_code"] = prior_scoring["enforce_status_code"]
-        return block
+        def _apply_scoring(target: dict) -> None:
+            target["scoring"] = _build_scoring_block(target.get("scoring") or {})
+            _add_scoring_custom_fields(target)
 
-    if svcconfig.mutate_config(logging_service_id, _apply_scoring) is None:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-    n_scoring = len(_SCORING_FIELD_NAMES)
-    ok(f"Stashed scoring metadata + {n_scoring} custom_fields into service config")
-    # ── Phase 2/2: Logging Service (Declarative VCL + log fields) ───────────
-    active_ver = get_active_version(logging_service_id, token)
-    if active_ver is None:
-        raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    if status_cb:
-        status_cb("▸ Phase 2/2 — Logging service (VCL + log fields) via Declarative Reconciler")
-    try:
+        if svcconfig.mutate_config(logging_service_id, _apply_scoring) is None:
+            raise RuntimeError(f"No config found for logging service {logging_service_id}")
+        persisted = True
+        n_scoring = len(_SCORING_FIELD_NAMES)
+        ok(f"Stashed scoring metadata + {n_scoring} custom_fields into service config")
+        # ── Phase 2/2: Logging Service (Declarative VCL + log fields) ───────────
+        active_ver = get_active_version(logging_service_id, token)
+        if active_ver is None:
+            raise RuntimeError(f"Logging service {logging_service_id} has no active version")
+        if status_cb:
+            status_cb("▸ Phase 2/2 — Logging service (VCL + log fields) via Declarative Reconciler")
         from backend.provision.declarative.reconciler import reconcile_vcl_state
 
         res = reconcile_vcl_state(logging_service_id, token, status_cb=status_cb)
@@ -308,10 +317,18 @@ def enable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> di
         fail(f"enable_scoring failed: {exc}")
 
         def _revert(target: dict) -> None:
-            target.pop("scoring", None)
+            if original_scoring is None:
+                target.pop("scoring", None)
+            else:
+                target["scoring"] = original_scoring
             _remove_scoring_custom_fields(target)
+            if original_scoring_fields:
+                target.setdefault("log_fields", {}).setdefault("custom_fields", []).extend(original_scoring_fields)
 
-        svcconfig.mutate_config(logging_service_id, _revert)
+        if persisted and svcconfig.mutate_config(logging_service_id, _revert) is None:
+            raise RuntimeError("enable_scoring failed and its configuration rollback also failed") from exc
+        if created_resources:
+            delete_scoring_service(token=token, **created_resources)
         raise
 
 
@@ -352,12 +369,8 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
         _remove_scoring_backend(logging_service_id, new_ver, token)
 
         # ── Stage 3: drop the 6 custom_fields + regen log format. ───────────
-        def _strip_fields(target: dict) -> None:
-            _remove_scoring_custom_fields(target)
-
-        stripped = svcconfig.mutate_config(logging_service_id, _strip_fields)
-        if stripped is not None:
-            cfg = stripped
+        cfg = copy.deepcopy(cfg)
+        _remove_scoring_custom_fields(cfg)
         from backend.core.fastly.client import list_log_endpoints
         from backend.provision.fastly_api import generate_capture_vcl, load_log_format
 
@@ -387,6 +400,14 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
                 token=token,
             )
     ok(f"Logging service version {new_ver} active (scoring stripped)")
+
+    def _clear_scoring(target: dict) -> None:
+        _remove_scoring_custom_fields(target)
+        target.pop("scoring", None)
+
+    if svcconfig.mutate_config(logging_service_id, _clear_scoring) is None:
+        raise RuntimeError(f"No config found while persisting scoring disable for {logging_service_id}")
+
     # ── Stage 5: tear down the Compute service + stores. ───────────────────
     failed_stores = delete_scoring_service(
         scoring_service_id,
@@ -399,7 +420,6 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
     # ── Stage 5.5: remove the FOS-published matrix + local tenant file. ─────
     _delete_scoring_matrix_from_fos(logging_service_id)
     # ── Stage 6: clear the scoring block from config. ──────────────────────
-    svcconfig.mutate_config(logging_service_id, lambda target: target.pop("scoring", None))
     try:
         from backend.core.metadata.base import export_admin_state
 

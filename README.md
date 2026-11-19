@@ -304,11 +304,14 @@ make install-hooks   # runs uv run pre-commit install once
 
 After this, every `git commit` runs ruff (lint + format), mypy, and standard file checks.
 
-The Next.js frontend uses a typed API client generated from the FastAPI OpenAPI schema. `run.sh` and production builds regenerate types on startup; after manual backend model changes, regenerate manually:
+The Next.js frontend uses typed API clients generated from the High-Scale FastAPI schema and the checked-in Cloud Compute contract. `run.sh` and production builds regenerate the High-Scale types on startup. Regenerate either surface manually when its contract changes:
 
 ```bash
 cd frontend && npm run gen:types
+cd frontend && npm run gen:cloud-types
 ```
+
+`make openapi-drift` regenerates both clients and fails if either tracked output has changed.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system design, and [AGENTS.md](AGENTS.md) for the deeper contributor notes: canonical patterns and the list of known traps.
 

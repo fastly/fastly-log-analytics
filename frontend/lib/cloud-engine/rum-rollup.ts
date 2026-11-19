@@ -8,6 +8,7 @@ import type { queryRollup } from "./dashboard/rollup-query";
 export type RumRollupSource = Parameters<typeof queryRollup>[0];
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { parseParquetPartitionWindow } from "./parquet-key";
+import { mergeNullableHistogram, mergeNullableHll, mergeNumberMap } from "./rollup-merge";
 import {
   emptyRumAnalytics,
   shapeRumEnvironments,
@@ -97,23 +98,8 @@ function tsMs(value: unknown): number | null {
   return null;
 }
 
-function mergeHist(into: Histogram | null, from: Histogram | null): Histogram | null {
-  if (!from) return into;
-  if (!into) {
-    const copy = new Histogram();
-    copy.merge(from);
-    return copy;
-  }
-  into.merge(from);
-  return into;
-}
-
-function mergeHll(into: Hll | null, from: Hll | null): Hll | null {
-  if (!from) return into;
-  if (!into) return from.clone();
-  into.merge(from);
-  return into;
-}
+const mergeHist = mergeNullableHistogram;
+const mergeHll = mergeNullableHll;
 
 function readHist(col: ArrayLike<unknown> | undefined, i: number): Histogram | null {
   const blob = col?.[i];
@@ -315,9 +301,7 @@ export function mergeRumSummaries(parts: readonly RumSummary[]): RumSummary {
     }
 
     for (const dim of ["browser", "os", "device"] as const) {
-      for (const [val, cnt] of part.envs[dim]) {
-        out.envs[dim].set(val, (out.envs[dim].get(val) ?? 0) + cnt);
-      }
+      mergeNumberMap(out.envs[dim], part.envs[dim]);
     }
 
     for (const [key, err] of part.errors) {

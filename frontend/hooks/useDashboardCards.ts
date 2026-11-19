@@ -154,7 +154,8 @@ export function keepPreviousWithinService(currentKey: QueryKey, serviceIdIndex =
 export function useServiceQuery<T>(
   queryKey: unknown[],
   queryFn: (context: QueryFunctionContext) => Promise<T>,
-  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>
+  options?: Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, 'queryKey' | 'queryFn' | 'placeholderData'>,
+  serviceIdIndex = 2,
 ) {
   const isReady = useIsDataReady()
   return useQuery<T, Error, T>({
@@ -162,7 +163,7 @@ export function useServiceQuery<T>(
     queryKey,
     queryFn,
     enabled: isReady && (options?.enabled ?? true),
-    placeholderData: keepPreviousWithinService(queryKey),
+    placeholderData: keepPreviousWithinService(queryKey, serviceIdIndex),
   })
 }
 
@@ -246,6 +247,7 @@ export function useAnalyticsReportQuery<TData>({
       serviceId,
     ),
     queryOptions,
+    namespace.length,
   )
 }
 

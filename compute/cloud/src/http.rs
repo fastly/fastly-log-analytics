@@ -41,14 +41,18 @@ impl Request {
 
     pub fn query_param(&self, name: &str) -> Option<String> {
         let (_, query) = self.path.split_once('?')?;
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .filter(|value| !value.is_empty())
     }
 
     pub fn cookie(&self, name: &str) -> Option<String> {
         compute_common::http::extract_cookie_value(self.header("cookie")?, name).map(str::to_owned)
+    }
+
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.body)
     }
 }
 
@@ -213,5 +217,38 @@ mod tests {
         );
         assert_eq!(request.cookie("flp_session").as_deref(), Some("verified"));
         assert_eq!(request.cookie("missing"), None);
+    }
+
+    #[test]
+    fn requests_and_responses_share_json_encoding() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Payload {
+            count: u32,
+        }
+
+        let response = Response::json(200, &serde_json::json!({"count": 3}));
+        let request = Request {
+            body: response.body.clone(),
+            ..Default::default()
+        };
+
+        assert_eq!(request.json::<Payload>().unwrap(), Payload { count: 3 });
+        assert_eq!(response.headers["content-type"], "application/json");
+        assert!(response.headers.contains_key("cache-control"));
+    }
+
+    #[test]
+    fn query_params_are_decoded_and_empty_values_are_ignored() {
+        let request = Request {
+            path: "/api?service_id=hello%20world&limit=&filter=a%2Bb".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            request.query_param("service_id").as_deref(),
+            Some("hello world")
+        );
+        assert_eq!(request.query_param("limit"), None);
+        assert_eq!(request.query_param("filter").as_deref(), Some("a+b"));
     }
 }

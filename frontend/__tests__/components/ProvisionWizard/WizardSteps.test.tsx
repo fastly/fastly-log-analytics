@@ -1569,6 +1569,27 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     })
   })
 
+  test('TeardownDialog blocks whitespace tokens and a zero-action selection', async () => {
+    const user = userEvent.setup()
+    render(
+      <TeardownDialog
+        service={{ service_id: 'test-svc', name: 'Test Service', rum_enabled: true } as ServiceConfig}
+        open={true}
+        onOpenChange={vi.fn()}
+      />,
+    )
+
+    const execute = screen.getByRole('button', { name: /execute teardown/i })
+    const token = screen.getByLabelText(/fastly token with the/i)
+    await user.type(token, '   ')
+    expect(execute).toBeDisabled()
+
+    await user.click(screen.getByRole('switch', { name: /remove request logging/i }))
+    await user.click(screen.getByRole('switch', { name: /remove real user monitoring/i }))
+    await user.click(screen.getByRole('switch', { name: /purge local database and cache/i }))
+    expect(execute).toBeDisabled()
+  })
+
   test('TeardownDialog hides the CDN proxy and local-cache rows in Cloud, which has neither', () => {
     setCloudModeRuntime(true)
     try {

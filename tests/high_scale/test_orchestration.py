@@ -50,6 +50,7 @@ from backend.high_scale.ingest_controller import (
     SourceObjectPage,
 )
 from backend.high_scale.postgres_control import PostgresControlPlane
+from backend.high_scale.postgres_control import control_plane as control_plane_module
 from tests.high_scale.conftest import (
     HighScaleLedger,
     OwnershipStore,
@@ -711,6 +712,9 @@ def test_partitioned_cursors_advance_independently() -> None:
 
     connection.execute.side_effect = record_execute
 
+    token_a = SimpleNamespace(object_key="raw/00/a.gz", owner="mock", owner_epoch=1, lease_generation=1)
+    token_b = SimpleNamespace(object_key="raw/10/b.gz", owner="mock", owner_epoch=1, lease_generation=1)
+    control._locked_claim_rows = MagicMock(return_value={})  # type: ignore[method-assign]
     control.acknowledge_sources_batch(
         "svc1",
         ["raw/00/a.gz"],
@@ -719,6 +723,7 @@ def test_partitioned_cursors_advance_independently() -> None:
         next_cursor="cursor_a",
         domain="request",
         partition_id="00-09",
+        claim_tokens=(token_a,),
     )
     control.acknowledge_sources_batch(
         "svc1",
@@ -728,6 +733,7 @@ def test_partitioned_cursors_advance_independently() -> None:
         next_cursor="cursor_b",
         domain="request",
         partition_id="10-19",
+        claim_tokens=(token_b,),
     )
 
     assert cursors.get(("svc1", "request", "00-09")) == "cursor_a"
@@ -737,6 +743,7 @@ def test_partitioned_cursors_advance_independently() -> None:
 
 def test_stale_epoch_fences_all_partition_cursors() -> None:
     control, _ = _mock_control(owner_epoch=2)
+    token = SimpleNamespace(object_key="raw/00/a.gz", owner="mock", owner_epoch=1, lease_generation=1)
     with pytest.raises(ValueError, match="owner epoch"):
         control.acknowledge_sources_batch(
             "svc1",
@@ -746,6 +753,36 @@ def test_stale_epoch_fences_all_partition_cursors() -> None:
             next_cursor="cursor_a",
             domain="request",
             partition_id="00-09",
+            claim_tokens=(token,),
+        )
+
+
+@pytest.mark.no_postgres
+def test_claim_rows_require_immutable_owner_epoch_and_lease_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = SimpleNamespace(
+        object_key="raw/a.log",
+        status="claimed",
+        owner="worker-new",
+        owner_epoch=4,
+        lease_generation=8,
+    )
+    monkeypatch.setattr(control_plane_module, "_source_from_row", lambda _row: source)
+    connection = MagicMock()
+    connection.execute.return_value.fetchall.return_value = [object()]
+    token = SimpleNamespace(
+        object_key="raw/a.log",
+        owner="worker-old",
+        owner_epoch=4,
+        lease_generation=7,
+    )
+
+    with pytest.raises(RuntimeError, match="stale or missing claim"):
+        PostgresControlPlane._locked_claim_rows(
+            connection,
+            "svc",
+            ("raw/a.log",),
+            claim_tokens=(token,),
+            expected_owner_epoch=4,
         )
 
 
@@ -3975,6 +4012,7 @@ def test_postgres_batch_discovery_source_counts_and_retryable_discovered_claims(
             [descriptors[0].object_key],
             expected_owner_epoch=owner.owner_epoch,
             error="Memory limit exceeded",
+            claim_tokens=(claimed[0].claim_token,),
         )
         retryable = control.expired_claims(sid, "request", limit=10)
         assert [r.object_key for r in retryable] == [descriptors[0].object_key]
@@ -3999,6 +4037,67 @@ def test_postgres_batch_discovery_source_counts_and_retryable_discovered_claims(
         )
         refreshed = control.source(sid, descriptors[0].object_key)
         assert (refreshed.accepted_rows, refreshed.malformed_rows) == (490, 10)
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+            connection.execute("DELETE FROM high_scale_ownership WHERE service_id = %s", (sid,))
+
+
+@pytest.mark.parametrize("operation", ["acknowledge", "fail", "bind"])
+def test_postgres_batch_terminal_transitions_reject_stale_claim_tokens(operation: str) -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = f"svc-fence-{uuid4().hex[:8]}"
+    descriptor = SourceObjectDescriptor("raw/request/fenced.log.zst", "etag-fenced", 100, "v1")
+    try:
+        owner = control.initialize_owner(sid, owner="high_scale", source_cursor="initial")
+        control.discover_sources_batch(
+            sid,
+            "request",
+            (descriptor,),
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        stale = control.claim_sources_batch(
+            sid,
+            (descriptor.object_key,),
+            "worker-old",
+            lease_seconds=60,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )[0].claim_token
+        with control.transaction() as connection:
+            connection.execute(
+                "UPDATE high_scale_source_objects SET lease_until=clock_timestamp() - interval '1 second' "
+                "WHERE service_id=%s AND object_key=%s",
+                (sid, descriptor.object_key),
+            )
+        control.claim_sources_batch(
+            sid,
+            (descriptor.object_key,),
+            "worker-new",
+            lease_seconds=60,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+
+        kwargs = {
+            "expected_owner_epoch": owner.owner_epoch,
+            "claim_tokens": (stale,),
+        }
+        with pytest.raises(RuntimeError, match="stale or missing claim"):
+            if operation == "acknowledge":
+                control.acknowledge_sources_batch(
+                    sid, (descriptor.object_key,), manifest_id="manifest-fenced", **kwargs
+                )
+            elif operation == "fail":
+                control.fail_sources_batch(sid, (descriptor.object_key,), error="stale failure", **kwargs)
+            else:
+                control.bind_sources_to_archive_manifest(
+                    sid, (descriptor.object_key,), manifest_id="manifest-fenced", error="stale bind", **kwargs
+                )
+
+        assert control.source(sid, descriptor.object_key).owner == "worker-new"
     finally:
         with control.transaction() as connection:
             connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))

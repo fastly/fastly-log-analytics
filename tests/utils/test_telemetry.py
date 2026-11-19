@@ -1629,6 +1629,7 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
     ]
 
 
+@pytest.mark.no_postgres
 async def test_reset_for_tests_stops_log_flusher(proxy_server):
     with patch("backend.core.metadata.log_usage_calls"):
         proxy_server._submit_log_write("test-svc", {"method": "GET"}, None)
@@ -1636,6 +1637,7 @@ async def test_reset_for_tests_stops_log_flusher(proxy_server):
     flusher = proxy_server._LOG_FLUSHER_THREAD
     assert flusher is not None and flusher.is_alive()
     proxy_server.stop_proxy_server()
+    assert not flusher.is_alive()
     proxy_server._reset_for_tests()
     assert not flusher.is_alive()
 

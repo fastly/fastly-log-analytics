@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { useForm } from "react-hook-form"
+import { Controller, useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import { Eye, EyeOff, KeyRound, Loader2, Sparkles } from "lucide-react"
@@ -45,63 +45,51 @@ export function CreateInviteDialog(props: CreateInviteDialogProps) {
 }
 
 export const createInviteSchema = z.object({
-  name: z.string().min(1),
-  email: z.string().email(),
+  name: z.string().trim().min(1),
+  email: z.string(),
   passcode: z.string(),
   duration: z.number(),
   ipWhitelist: z.string(),
   maskIps: z.boolean(),
   allowConcurrent: z.boolean(),
   queryWindow: z.number(),
-  serviceIds: z.array(z.string()).min(1),
+  serviceIds: z.array(z.string()),
   authMode: z.enum(['passcode', 'oauth']),
   oauthProvider: z.string(),
+  cloudRole: z.enum(['analyst', 'analyst-no-pii', 'admin']),
+}).superRefine((values, context) => {
+  if (IS_CLOUD_MODE) return
+  if (!z.string().email().safeParse(values.email).success) {
+    context.addIssue({ code: 'custom', path: ['email'], message: 'Enter a valid email address' })
+  }
+  if (values.authMode === 'passcode' && !values.passcode.trim()) {
+    context.addIssue({ code: 'custom', path: ['passcode'], message: 'Enter a passcode' })
+  }
+  if (values.authMode === 'oauth' && !values.oauthProvider) {
+    context.addIssue({ code: 'custom', path: ['oauthProvider'], message: 'Select an identity provider' })
+  }
+  if (values.serviceIds.length === 0) {
+    context.addIssue({ code: 'custom', path: ['serviceIds'], message: 'Select a service' })
+  }
 })
 
 function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: CreateInviteDialogProps) {
   const form = useForm<z.infer<typeof createInviteSchema>>({
     resolver: zodResolver(createInviteSchema),
+    mode: 'onChange',
     defaultValues: {
       name: '', email: '', passcode: '', duration: 24, ipWhitelist: '',
       maskIps: false, allowConcurrent: false, queryWindow: 0, serviceIds: [],
-      authMode: 'passcode', oauthProvider: '',
+      authMode: 'passcode', oauthProvider: '', cloudRole: 'analyst',
     },
   })
-  const [name, setNameState] = React.useState('')
-  const [email, setEmailState] = React.useState('')
-  const [passcode, setPasscodeState] = React.useState('')
   const [revealPasscode, setRevealPasscode] = React.useState(false)
-  const [duration, setDurationState] = React.useState(24)
-  const [ipWhitelist, setIpWhitelistState] = React.useState('')
-  const [maskIps, setMaskIpsState] = React.useState(false)
-  const [allowConcurrent, setAllowConcurrentState] = React.useState(false)
-  const [queryWindow, setQueryWindowState] = React.useState(0)
-  const [serviceIds, setServiceIdsState] = React.useState<string[]>([])
   const [creating, setCreating] = React.useState(false)
   const [error, setError] = React.useState('')
-  const [authMode, setAuthModeState] = React.useState<'passcode' | 'oauth'>('passcode')
-  const [oauthProvider, setOauthProviderState] = React.useState('')
-  const [cloudRole, setCloudRole] = React.useState<'analyst' | 'analyst-no-pii' | 'admin'>('analyst')
   const [createdCloudInviteUrl, setCreatedCloudInviteUrl] = React.useState<string | null>(null)
   const [copiedCloudLink, setCopiedCloudLink] = React.useState(false)
-
-  const setName = (v: string) => { setNameState(v); form.setValue('name', v) }
-  const setEmail = (v: string) => { setEmailState(v); form.setValue('email', v) }
-  const setPasscode = (v: string) => { setPasscodeState(v); form.setValue('passcode', v) }
-  const setDuration = (v: number) => { setDurationState(v); form.setValue('duration', v) }
-  const setIpWhitelist = (v: string) => { setIpWhitelistState(v); form.setValue('ipWhitelist', v) }
-  const setMaskIps = (v: boolean) => { setMaskIpsState(v); form.setValue('maskIps', v) }
-  const setAllowConcurrent = (v: boolean) => { setAllowConcurrentState(v); form.setValue('allowConcurrent', v) }
-  const setQueryWindow = (v: number) => { setQueryWindowState(v); form.setValue('queryWindow', v) }
-  const setServiceIds: React.Dispatch<React.SetStateAction<string[]>> = (updater) => {
-    setServiceIdsState((prev) => {
-      const next = typeof updater === 'function' ? updater(prev) : updater
-      form.setValue('serviceIds', next)
-      return next
-    })
-  }
-  const setAuthMode = (v: 'passcode' | 'oauth') => { setAuthModeState(v); form.setValue('authMode', v) }
-  const setOauthProvider = (v: string) => { setOauthProviderState(v); form.setValue('oauthProvider', v) }
+  const watched = useWatch({ control: form.control }) as z.infer<typeof createInviteSchema>
+  const { name, authMode, oauthProvider, serviceIds } = watched
   const [providers, setProviders] = React.useState<Array<{ id: string; display_name: string; enabled: boolean }>>([])
 
   React.useEffect(() => {
@@ -120,13 +108,13 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
   const handleWordphrase = async () => {
     try {
       const data = await unwrapClient(client.GET('/api/admin/share/wordphrase', {}))
-      setPasscode(data?.passcode ?? '')
+      form.setValue('passcode', data?.passcode ?? '', { shouldValidate: true, shouldDirty: true })
     } catch (e) {
       setError(extractApiError(e))
     }
   }
 
-  const handleSubmit = async () => {
+  const handleSubmit = form.handleSubmit(async (values) => {
     setError('')
     setCreating(true)
     try {
@@ -135,7 +123,7 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ display_name: name, role: cloudRole }),
+          body: JSON.stringify({ display_name: values.name, role: values.cloudRole }),
         })
         const data = (await res.json().catch(() => ({}))) as { token?: string; detail?: string; error?: string }
         if (!res.ok) {
@@ -152,16 +140,16 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
       await unwrapClient(
         client.POST('/api/admin/share/invites', {
           body: {
-            name, email,
-            ...(authMode === 'passcode' ? { passcode } : {}),
-            auth_method: authMode,
-            ...(authMode === 'oauth' ? { oauth_provider: oauthProvider } : {}),
-            duration_hours: duration || null,
-            ip_whitelist: ipWhitelist || null,
-            service_ids: serviceIds,
-            pii_policy: { mask_ips: maskIps },
-            query_window_hours: queryWindow || null,
-            allow_concurrent_sessions: allowConcurrent,
+            name: values.name, email: values.email,
+            ...(values.authMode === 'passcode' ? { passcode: values.passcode } : {}),
+            auth_method: values.authMode,
+            ...(values.authMode === 'oauth' ? { oauth_provider: values.oauthProvider } : {}),
+            duration_hours: values.duration || null,
+            ip_whitelist: values.ipWhitelist || null,
+            service_ids: values.serviceIds,
+            pii_policy: { mask_ips: values.maskIps },
+            query_window_hours: values.queryWindow || null,
+            allow_concurrent_sessions: values.allowConcurrent,
           },
         }),
       )
@@ -172,12 +160,9 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
     } finally {
       setCreating(false)
     }
-  }
+  })
 
-  const canSubmit = IS_CLOUD_MODE
-    ? !creating && !!name.trim()
-    : !creating && !!name && !!email && serviceIds.length > 0 &&
-      (authMode === 'passcode' ? !!passcode : !!oauthProvider)
+  const canSubmit = !creating && form.formState.isValid
   const providerLabel = providers.find((p) => p.id === oauthProvider)?.display_name ?? ''
 
   return (
@@ -218,18 +203,20 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
               <div className="space-y-3">
                 <div className="space-y-1">
                   <Label htmlFor="invite-name" className="text-xs">Display Name</Label>
-                  <Input id="invite-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Jane Doe" />
+                  <Controller control={form.control} name="name" render={({ field }) => <Input id="invite-name" placeholder="Jane Doe" {...field} />} />
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor="cloud-invite-role" className="text-xs">Role</Label>
-                  <Select value={cloudRole} onValueChange={(v) => v && setCloudRole(v as 'analyst' | 'analyst-no-pii' | 'admin')}>
-                    <SelectTrigger id="cloud-invite-role"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="analyst">Analyst (read-only dashboard access)</SelectItem>
-                      <SelectItem value="analyst-no-pii">Analyst — No PII (client IPs masked)</SelectItem>
-                      <SelectItem value="admin">Administrator (full control plane access)</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Controller control={form.control} name="cloudRole" render={({ field }) => (
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger id="cloud-invite-role"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="analyst">Analyst (read-only dashboard access)</SelectItem>
+                        <SelectItem value="analyst-no-pii">Analyst — No PII (client IPs masked)</SelectItem>
+                        <SelectItem value="admin">Administrator (full control plane access)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )} />
                 </div>
               </div>
             )
@@ -237,11 +224,11 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="invite-name" className="text-xs">Name</Label>
-              <Input id="invite-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Jane Doe" />
+              <Controller control={form.control} name="name" render={({ field }) => <Input id="invite-name" placeholder="Jane Doe" {...field} />} />
             </div>
             <div className="space-y-1">
               <Label htmlFor="invite-email" className="text-xs">Email</Label>
-              <Input id="invite-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="jane@example.com" />
+              <Controller control={form.control} name="email" render={({ field }) => <Input id="invite-email" type="email" placeholder="jane@example.com" {...field} />} />
               {authMode === 'oauth' && (
                 <p className="text-[11px] text-muted-foreground">
                   The analyst must sign in with the {providerLabel || 'provider'} account for this exact address.
@@ -253,11 +240,15 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
               <legend className="text-xs font-medium">Sign-in method</legend>
               <div className="flex gap-6 pt-1" role="radiogroup" aria-label="Sign-in method">
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input type="radio" name="invite-auth-mode" value="passcode" checked={authMode === 'passcode'} onChange={() => setAuthMode('passcode')} />
+                  <Controller control={form.control} name="authMode" render={({ field }) => (
+                    <input type="radio" value="passcode" checked={field.value === 'passcode'} onChange={() => field.onChange('passcode')} name={field.name} />
+                  )} />
                   Passcode (local)
                 </label>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input type="radio" name="invite-auth-mode" value="oauth" checked={authMode === 'oauth'} onChange={() => setAuthMode('oauth')} />
+                  <Controller control={form.control} name="authMode" render={({ field }) => (
+                    <input type="radio" value="oauth" checked={field.value === 'oauth'} onChange={() => field.onChange('oauth')} name={field.name} />
+                  )} />
                   SSO / OIDC
                 </label>
               </div>
@@ -267,13 +258,14 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
               <div className="space-y-1 md:col-span-2">
                 <Label htmlFor="invite-passcode" className="text-xs">Passcode</Label>
                 <div className="flex items-center gap-2">
-                  <Input
-                    id="invite-passcode"
-                    type={revealPasscode ? 'text' : 'password'}
-                    value={passcode}
-                    onChange={(e) => setPasscode(e.target.value)}
-                    placeholder="ocean-breeze-cabin-42"
-                  />
+                  <Controller control={form.control} name="passcode" render={({ field }) => (
+                    <Input
+                      id="invite-passcode"
+                      type={revealPasscode ? 'text' : 'password'}
+                      placeholder="ocean-breeze-cabin-42"
+                      {...field}
+                    />
+                  )} />
                   <Button
                     type="button"
                     variant="ghost"
@@ -296,18 +288,20 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
               <div className="space-y-1 md:col-span-2">
                 <Label htmlFor="invite-oauth-provider" className="text-xs">Identity provider</Label>
                 {providers.length > 0 ? (
-                  <Select value={oauthProvider} onValueChange={(v) => setOauthProvider(v ?? '')}>
-                    <SelectTrigger id="invite-oauth-provider">
-                      <SelectValue placeholder="Select a provider" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providers.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.display_name}{!p.enabled ? ' (disabled)' : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Controller control={form.control} name="oauthProvider" render={({ field }) => (
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger id="invite-oauth-provider">
+                        <SelectValue placeholder="Select a provider" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {providers.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.display_name}{!p.enabled ? ' (disabled)' : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )} />
                 ) : (
                   <>
                     <Select disabled>
@@ -325,29 +319,33 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
             )}
             <div className="space-y-1">
               <Label htmlFor="invite-expiration" className="text-xs">Expiration</Label>
-              <Select value={String(duration)} onValueChange={(v) => setDuration(Number(v))}>
-                <SelectTrigger id="invite-expiration"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {DURATION_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={String(opt.value)}>{opt.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Controller control={form.control} name="duration" render={({ field }) => (
+                <Select value={String(field.value)} onValueChange={(value) => field.onChange(Number(value))}>
+                  <SelectTrigger id="invite-expiration"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {DURATION_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={String(opt.value)}>{opt.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )} />
             </div>
             <div className="space-y-1">
               <Label htmlFor="invite-query-window" className="text-xs">Query window</Label>
-              <Select value={String(queryWindow)} onValueChange={(v) => setQueryWindow(Number(v))}>
-                <SelectTrigger id="invite-query-window"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {QUERY_WINDOW_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={String(opt.value)}>{opt.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Controller control={form.control} name="queryWindow" render={({ field }) => (
+                <Select value={String(field.value)} onValueChange={(value) => field.onChange(Number(value))}>
+                  <SelectTrigger id="invite-query-window"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {QUERY_WINDOW_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={String(opt.value)}>{opt.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )} />
             </div>
             <div className="space-y-1 md:col-span-2">
               <Label htmlFor="invite-ipwl" className="text-xs">IP whitelist (optional)</Label>
-              <Input id="invite-ipwl" value={ipWhitelist} onChange={(e) => setIpWhitelist(e.target.value)} placeholder="192.168.1.50, 10.0.0.0/24" />
+              <Controller control={form.control} name="ipWhitelist" render={({ field }) => <Input id="invite-ipwl" placeholder="192.168.1.50, 10.0.0.0/24" {...field} />} />
             </div>
             <div className="md:col-span-2 space-y-2">
               <Label className="text-xs">Authorized services <span className="text-destructive">*</span></Label>
@@ -356,12 +354,14 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
                   const checked = serviceIds.includes(svc.service_id)
                   return (
                     <label key={svc.service_id} className="flex items-center gap-2 text-sm cursor-pointer">
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={(v) =>
-                          setServiceIds((prev) => v ? [...prev, svc.service_id] : prev.filter((id) => id !== svc.service_id))
-                        }
-                      />
+                      <Controller control={form.control} name="serviceIds" render={({ field }) => (
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(value) =>
+                            field.onChange(value ? [...field.value, svc.service_id] : field.value.filter((id) => id !== svc.service_id))
+                          }
+                        />
+                      )} />
                       <span className="truncate">{svc.name}</span>
                     </label>
                   )
@@ -377,12 +377,16 @@ function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: Cr
               )}
             </div>
             <div className="md:col-span-2 flex items-center gap-2">
-              <Checkbox id="invite-mask-ips" checked={maskIps} onCheckedChange={(v) => setMaskIps(!!v)} />
+              <Controller control={form.control} name="maskIps" render={({ field }) => (
+                <Checkbox id="invite-mask-ips" checked={field.value} onCheckedChange={(value) => field.onChange(!!value)} />
+              )} />
               <Label htmlFor="invite-mask-ips" className="text-xs cursor-pointer">Anonymize client IPs (mask PII)</Label>
             </div>
             <div className="md:col-span-2 space-y-1">
               <div className="flex items-center gap-2">
-                <Checkbox id="invite-allow-concurrent" checked={allowConcurrent} onCheckedChange={(v) => setAllowConcurrent(!!v)} />
+                <Controller control={form.control} name="allowConcurrent" render={({ field }) => (
+                  <Checkbox id="invite-allow-concurrent" checked={field.value} onCheckedChange={(value) => field.onChange(!!value)} />
+                )} />
                 <Label htmlFor="invite-allow-concurrent" className="text-xs cursor-pointer">
                   Allow multiple people to use this link at the same time
                 </Label>

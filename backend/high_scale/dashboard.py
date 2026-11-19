@@ -14,6 +14,7 @@ from backend.high_scale._common import (
     normalize_cache_bound,
     request_filter_clauses,
     visible_fact_clauses,
+    visible_rollup_publication_fence_sql,
 )
 from backend.high_scale._common import (
     range_value as _range_value,
@@ -310,10 +311,12 @@ def _time_series(
         end_utc = end.astimezone(UTC)
         h_params = {**params, "h_start": h_start, "h_end": h_end}
         edge_clause = _hourly_edge_time_clause(start_utc, end_utc, h_start, h_end)
+        rollup_fence = visible_rollup_publication_fence_sql("request_aggregate")
         union_sql = (
             "SELECT bucket_start, sum(request_count) AS request_count FROM request_aggregates_1h "
             "WHERE service_id={service_id:String} AND dimension='url' "
             "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+            f"AND {rollup_fence} "
             "GROUP BY bucket_start"
         )
         if edge_clause is not None:

@@ -1052,6 +1052,7 @@ def test_rebuild_rum_facts_from_fos_auto_wraps_aggregate_batch_adapter() -> None
     assert "rum_vitals_aggregates" in inserted_tables
 
 
+@pytest.mark.no_postgres
 def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
     from backend.high_scale.archive import ArchiveState
     from backend.high_scale.ingest_controller import HighScaleIngestController, SourceObjectDescriptor
@@ -1090,7 +1091,7 @@ def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
         def transition_archive_manifest(self, *_a, **_kw):
             return None
 
-        def fail_sources_batch(self, service_id, object_keys, error, *, expected_owner_epoch):
+        def fail_sources_batch(self, service_id, object_keys, error, *, expected_owner_epoch, **_kwargs):
             failed_calls.append((service_id, tuple(object_keys), error, expected_owner_epoch))
             return []
 
@@ -1132,6 +1133,14 @@ def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
         service_id="svc",
         domain="rum_vitals",
         sources_payloads=((src_desc, payload),),
+        claim_tokens=(
+            SimpleNamespace(
+                object_key=src_desc.object_key,
+                owner="worker-test",
+                owner_epoch=7,
+                lease_generation=1,
+            ),
+        ),
         now=NOW,
     )
     assert outcome.derived_publication_complete is False

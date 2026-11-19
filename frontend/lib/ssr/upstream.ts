@@ -334,7 +334,8 @@ export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | nu
     return _fetchBootstrapUpstream(serviceId)
   }
 
-  const cacheKey = serviceId || '__default__'
+  const requestIdentity = cookieJar.toString() || '__anonymous__'
+  const cacheKey = JSON.stringify([serviceId || null, requestIdentity])
   const now = Date.now()
   const cached = _adminCachedMap.get(cacheKey)
   if (cached && now - cached.at < _ADMIN_SSR_TTL_MS) {

@@ -645,31 +645,31 @@ def ensure_cdn_service(
         updated = json.loads(config_path.read_text())
         return updated, updated.get("fos_proxy", {}).get("service_id") or updated.get("cdn_service_id", "")
 
-    try:
-        reconcile_cdn_service_state(
-            logging_service_id=logging_service_id,
-            token=token,
-            status_cb=status_cb,
-            activate=True,
-        )
-    except Exception:
-        if config_path.exists():
-            try:
-                _, cdn_sid = _read_cdn_sid()
-                if on_created and cdn_sid:
-                    on_created(cdn_sid)
-            except Exception:
-                pass
-        raise
+    creation_notified = False
+
+    def _created(service_id: str) -> None:
+        nonlocal creation_notified
+        if on_created and not creation_notified:
+            creation_notified = True
+            on_created(service_id)
+
+    reconciliation = reconcile_cdn_service_state(
+        logging_service_id=logging_service_id,
+        token=token,
+        status_cb=status_cb,
+        activate=True,
+        on_created=_created if on_created else None,
+    )
 
     updated_cfg, cdn_sid = _read_cdn_sid()
-    if on_created and cdn_sid:
-        on_created(cdn_sid)
+    if cdn_sid and reconciliation.created:
+        _created(cdn_sid)
 
     return {
         "id": cdn_sid,
         "name": updated_cfg.get("cdn_service_name") or f"Log Analysis CDN Service for {logging_service_id}",
         "rate_limiting": account_has_rate_limiting(token, logging_service_id),
+        "created": reconciliation.created,
     }
 
 

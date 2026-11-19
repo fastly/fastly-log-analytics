@@ -20,6 +20,7 @@ from backend.high_scale._common import (
     normalize_cache_bound,
     parse_time_window,
     visible_publication_fence_sql,
+    visible_rollup_publication_fence_sql,
 )
 from backend.high_scale._common import (
     bucket as _bucket,
@@ -361,10 +362,12 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         if hourly_bounds is not None:
             h_start, h_end = hourly_bounds
             edge_clause = _hourly_edge_time_clause(scope.start, scope.end, h_start, h_end)
+            rollup_fence = visible_rollup_publication_fence_sql("request_aggregate")
             ua_union = (
                 "SELECT DISTINCT value AS ua FROM request_aggregates_1h "
                 "WHERE service_id={service_id:String} AND dimension='ua' AND value != '' "
-                "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)}"
+                "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+                f"AND {rollup_fence}"
             )
             if edge_clause is not None:
                 agg_fence = visible_publication_fence_sql(
@@ -896,10 +899,12 @@ def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str
     elif hourly_bounds is not None and scope.start is not None and scope.end is not None:
         h_start, h_end = hourly_bounds
         edge_clause = _hourly_edge_time_clause(scope.start, scope.end, h_start, h_end)
+        rollup_fence = visible_rollup_publication_fence_sql("request_aggregate")
         union_sql = (
             "SELECT value AS ua, sum(request_count) AS cnt FROM request_aggregates_1h "
             "WHERE service_id={service_id:String} AND dimension='ua' AND value != '' "
             "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
+            f"AND {rollup_fence} "
             "GROUP BY ua"
         )
         if edge_clause is not None:

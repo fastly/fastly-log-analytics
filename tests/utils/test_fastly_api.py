@@ -1746,8 +1746,18 @@ ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
 _INSIGHTS_NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
 _TS_SOURCE = ROOT / "frontend" / "lib" / "chartUtils.ts"
-_HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12", "2026-1-5-3"]
-_BAD_KEYS = ["", "2026-10-19", "2026-10-19-24", "2026-13-01-00", "garbage", "2026-10-19T05", "2026-10-19-05-00"]
+_HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12"]
+_BAD_KEYS = [
+    "",
+    "2026-10-19",
+    "2026-10-19-24",
+    "2026-13-01-00",
+    "garbage",
+    "2026-10-19T05",
+    "2026-10-19-05-00",
+    "2026-1-5-3",
+    "2026-01-05-3",
+]
 _DROP_TABLE_FILES = sorted((ROOT / "backend" / "repositories").glob("*.py"))
 
 
@@ -2294,6 +2304,7 @@ def test_parse_window_valid_and_invalid():
         assert parse_window(start, end) is None
 
 
+@pytest.mark.no_postgres
 def test_hour_and_day_key_parsers_and_ensure_utc():
     for key in _HOUR_KEYS:
         raw = datetime.strptime(key, "%Y-%m-%d-%H").replace(tzinfo=UTC)
@@ -2302,9 +2313,9 @@ def test_hour_and_day_key_parsers_and_ensure_utc():
         assert parse_hour_key(key) is None
         with pytest.raises(ValueError):
             parse_hour_key_strict(key)
-    for key in ("2026-10-19", "2024-02-29", "2026-1-5"):
+    for key in ("2026-10-19", "2024-02-29"):
         assert parse_day_key_strict(key) == datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=UTC)
-    for key in ("", "2026-02-30", "2026-10-19-05", "x"):
+    for key in ("", "2026-02-30", "2026-10-19-05", "x", "2026-1-5", "2026-01-5"):
         with pytest.raises(ValueError):
             parse_day_key_strict(key)
 

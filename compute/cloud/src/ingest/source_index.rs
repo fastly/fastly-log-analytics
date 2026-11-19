@@ -113,7 +113,7 @@ pub(crate) fn handle_authorized_worker<R: Runtime>(
     if request.body.len() > REQUEST_LIMIT {
         return deny();
     }
-    let Ok(input) = serde_json::from_slice::<Request>(&request.body) else {
+    let Ok(input) = request.json::<Request>() else {
         return deny();
     };
     let prefix = format!("{}raw/request/", input.prefix);
@@ -221,9 +221,7 @@ pub(crate) fn handle_authorized_worker<R: Runtime>(
     let metrics = crate::telemetry::execution::ExecutionMetrics::snapshot(runtime, started);
     reply["vcpu_ms"] = metrics.vcpu_ms.into();
     reply["execution_metrics"] = json!(metrics);
-    http::Response::new(200, reply.to_string())
-        .header("content-type", "application/json")
-        .private()
+    http::Response::json(200, &reply)
 }
 
 type Directory = BTreeMap<i64, String>;

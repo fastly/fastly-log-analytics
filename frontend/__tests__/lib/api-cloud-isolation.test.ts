@@ -79,6 +79,30 @@ describe("API Cloud isolation", () => {
     const [request] = vi.mocked(globalThis.fetch).mock.calls[0];
     expect((request as Request).url).toBe("http://localhost/api/services");
   });
+
+  it("preserves Request method, body, headers, and signal through Cloud normalization", async () => {
+    setCloudModeRuntime(true);
+    const controller = new AbortController();
+    const input = new Request("https://upstream.example.test/api/services/demo/rum/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-original": "yes" },
+      body: JSON.stringify({ enabled: true }),
+      signal: controller.signal,
+    });
+    const fetch = vi.fn(async () => Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetch);
+    adapter.handle.mockImplementation((request: Request) => globalThis.fetch(request));
+
+    await adminFetch(input, { headers: { "x-override": "yes" } });
+
+    const request = vi.mocked(globalThis.fetch).mock.calls[0][0] as Request;
+    expect(request.method).toBe("POST");
+    expect(await request.json()).toEqual({ enabled: true });
+    expect(request.headers.get("x-original")).toBe("yes");
+    expect(request.headers.get("x-override")).toBe("yes");
+    controller.abort();
+    expect(request.signal.aborted).toBe(true);
+  });
 });
 
 describe("Cloud subresource 401 session verification", () => {

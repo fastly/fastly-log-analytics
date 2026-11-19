@@ -1,6 +1,5 @@
 import {
   getDuckDBEngine,
-  compileFiltersToSql,
   RUM_VITALS_COLUMNS,
   RUM_ERRORS_COLUMNS,
   type DuckDBAnalyticalEngine,
@@ -8,6 +7,7 @@ import {
 import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { queryRumFromRollup, rumRollupEligible, type RumRollupSource } from "./rum-rollup";
+import { dashboardFiltersToSql, rangeServiceSql } from "./query-params";
 
 export const CWV_THRESHOLDS = {
   LCP: { good: 2500, poor: 4000 },
@@ -168,15 +168,7 @@ export function buildRumWhere(
   params: RumQueryParams,
   table: "client_vitals" | "client_errors" = "client_vitals",
 ): string {
-  const clauses: string[] = ["1=1"];
-  const startMs = parseEpochMs(params.start_time);
-  const endMs = parseEpochMs(params.end_time);
-  if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
-  if (params.service_id) {
-    const escaped = String(params.service_id).replaceAll("'", "''");
-    clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
-  }
+  const clauses: string[] = [rangeServiceSql(params)];
   if (params.device_type) {
     const escaped = String(params.device_type).replaceAll("'", "''");
     clauses.push(`device_type = '${escaped}'`);
@@ -214,7 +206,7 @@ export function buildRumWhere(
       field, value: String(value), mode: spec.mode === "exclude" ? "exclude" as const : "include" as const,
     }));
   });
-  clauses.push(compileFiltersToSql(predicates, false, [], new Map(Object.entries(columns))));
+  clauses.push(dashboardFiltersToSql(predicates, new Map(Object.entries(columns))));
   return clauses.join(" AND ");
 }
 

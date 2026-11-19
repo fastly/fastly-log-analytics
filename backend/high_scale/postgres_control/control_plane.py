@@ -234,11 +234,27 @@ class SourceObjectRecord:
     accepted_rows: int
     last_error: str | None = None
 
+    @property
+    def claim_token(self) -> SourceClaimToken:
+        if self.status != "claimed" or not self.owner or self.owner_epoch is None:
+            raise ValueError(f"source {self.object_key} does not have an active claim")
+        return SourceClaimToken(self.object_key, self.owner, self.owner_epoch, self.lease_generation)
+
 
 @dataclass(frozen=True)
 class SourceClaim:
     object_id: str
     claimed: bool
+    lease_generation: int
+    owner: str | None = None
+    owner_epoch: int | None = None
+
+
+@dataclass(frozen=True)
+class SourceClaimToken:
+    object_key: str
+    owner: str
+    owner_epoch: int
     lease_generation: int
 
 
@@ -256,6 +272,7 @@ class ArchivedPublicationClaim:
     manifest_id: str
     object_keys: tuple[str, ...]
     publication_epoch: int
+    claim_tokens: tuple[SourceClaimToken, ...] = ()
 
 
 class PostgresControlPlane:
@@ -668,7 +685,13 @@ class PostgresControlPlane:
             if source.status not in {"discovered", "claimed"}:
                 raise ValueError(f"source object is not claimable: {object_key}")
             if source.lease_until is not None and source.lease_until > observed:
-                return SourceClaim(source.object_id, source.owner == worker_id, source.lease_generation)
+                return SourceClaim(
+                    source.object_id,
+                    source.owner == worker_id,
+                    source.lease_generation,
+                    source.owner,
+                    source.owner_epoch,
+                )
             generation = source.lease_generation + 1
             connection.execute(
                 "UPDATE high_scale_source_objects SET status='claimed', owner=%s, lease_until=%s, "
@@ -681,7 +704,7 @@ class PostgresControlPlane:
                     source.object_id,
                 ),
             )
-            return SourceClaim(source.object_id, True, generation)
+            return SourceClaim(source.object_id, True, generation, worker_id, expected_owner_epoch)
 
     def claim_sources_batch(
         self,
@@ -1279,6 +1302,45 @@ class PostgresControlPlane:
                 (manifest_id,),
             )
 
+    @staticmethod
+    def _locked_claim_rows(
+        connection: Any,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        claim_tokens: Sequence[SourceClaimToken],
+        expected_owner_epoch: int,
+    ) -> dict[str, SourceObjectRecord]:
+        expected_keys = list(dict.fromkeys(object_keys))
+        if not claim_tokens:
+            raise RuntimeError("source claim tokens are required")
+        tokens = {token.object_key: token for token in claim_tokens}
+        if len(tokens) != len(claim_tokens) or set(tokens) != set(expected_keys):
+            raise RuntimeError("source claim tokens do not match the requested objects")
+        if any(token.owner_epoch != expected_owner_epoch or not token.owner for token in tokens.values()):
+            raise RuntimeError("stale or missing claim")
+        rows = (
+            connection.execute(
+                "SELECT * FROM high_scale_source_objects WHERE service_id=%s AND object_key = ANY(%s) FOR UPDATE",
+                (service_id, expected_keys),
+            ).fetchall()
+            if expected_keys
+            else ()
+        )
+        sources = {source.object_key: source for source in (_source_from_row(row) for row in rows)}
+        if len(sources) != len(expected_keys):
+            raise RuntimeError("stale or missing claim")
+        for key, token in tokens.items():
+            source = sources[key]
+            if (
+                source.status not in {"claimed", "archived"}
+                or source.owner != token.owner
+                or source.owner_epoch != token.owner_epoch
+                or source.lease_generation != token.lease_generation
+            ):
+                raise RuntimeError(f"stale or missing claim for {key}")
+        return sources
+
     def acknowledge_sources_batch(
         self,
         service_id: str,
@@ -1286,6 +1348,7 @@ class PostgresControlPlane:
         *,
         manifest_id: str,
         expected_owner_epoch: int,
+        claim_tokens: Sequence[SourceClaimToken],
         next_cursor: str | None = None,
         domain: str = "request",
         partition_id: str = "default",
@@ -1295,6 +1358,13 @@ class PostgresControlPlane:
             raise ValueError("owner epoch must be positive")
         with self.transaction() as connection:
             self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
             if object_keys:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='acknowledged', archive_manifest_id=%s, "
@@ -1320,12 +1390,20 @@ class PostgresControlPlane:
         *,
         expected_owner_epoch: int,
         error: str,
+        claim_tokens: Sequence[SourceClaimToken],
     ) -> None:
         _require_texts(service_id=service_id, error=error)
         if expected_owner_epoch <= 0:
             raise ValueError("owner epoch must be positive")
         with self.transaction() as connection:
             self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
             if object_keys:
                 connection.execute(
                     "UPDATE high_scale_source_objects SET status='discovered', owner=NULL, lease_until=NULL, "
@@ -1342,6 +1420,7 @@ class PostgresControlPlane:
         manifest_id: str,
         expected_owner_epoch: int,
         error: str,
+        claim_tokens: Sequence[SourceClaimToken],
     ) -> None:
         """Hold claimed sources on their committed archive so a failed publication retries from it, not from raw."""
         _require_texts(service_id=service_id, manifest_id=manifest_id, error=error)
@@ -1349,6 +1428,13 @@ class PostgresControlPlane:
             raise ValueError("owner epoch must be positive")
         with self.transaction() as connection:
             self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            self._locked_claim_rows(
+                connection,
+                service_id,
+                object_keys,
+                claim_tokens=claim_tokens,
+                expected_owner_epoch=expected_owner_epoch,
+            )
             state = self._archive_manifest(connection, manifest_id).state
             if state not in {ArchiveState.MANIFEST_COMMITTED, ArchiveState.DELETION_ELIGIBLE}:
                 raise ValueError(f"archive manifest {manifest_id} is not committed: {state.value}")
@@ -1402,23 +1488,31 @@ class PostgresControlPlane:
             ).fetchall()
             for (manifest_id,) in candidates:
                 rows = connection.execute(
-                    "SELECT object_key, owner_epoch, COALESCE(lease_until > clock_timestamp(), FALSE) "
+                    "SELECT object_key, owner_epoch, lease_generation, COALESCE(lease_until > clock_timestamp(), FALSE) "
                     "FROM high_scale_source_objects WHERE service_id = %s AND archive_manifest_id = %s "
                     "AND status = 'archived' ORDER BY object_key FOR UPDATE",
                     (service_id, manifest_id),
                 ).fetchall()
-                if not rows or any(row[2] for row in rows):
+                if not rows or any(row[3] for row in rows):
                     continue
                 keys = [str(row[0]) for row in rows]
                 connection.execute(
                     "UPDATE high_scale_source_objects SET owner=%s, "
+                    "lease_generation=lease_generation+1, "
                     "lease_until=clock_timestamp() + make_interval(secs => %s) "
                     "WHERE service_id=%s AND object_key = ANY(%s)",
                     (worker_id, lease_seconds, service_id, keys),
                 )
+                tokens = tuple(
+                    SourceClaimToken(str(row[0]), worker_id, int(row[1] or expected_owner_epoch), int(row[2]) + 1)
+                    for row in rows
+                )
                 claims.append(
                     ArchivedPublicationClaim(
-                        str(manifest_id), tuple(keys), max(int(row[1] or expected_owner_epoch) for row in rows)
+                        str(manifest_id),
+                        tuple(keys),
+                        max(int(row[1] or expected_owner_epoch) for row in rows),
+                        tokens,
                     )
                 )
         return tuple(claims)

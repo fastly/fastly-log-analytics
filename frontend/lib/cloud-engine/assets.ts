@@ -1,12 +1,12 @@
 import {
   getDuckDBEngine,
-  compileFiltersToSql,
   type DuckDBAnalyticalEngine,
   type DuckDBReadContext,
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import type { AssetsSection } from "./rollup-sections";
-import { parseEpochMs, roundTo } from "./engine-utils";
+import { roundTo } from "./engine-utils";
+import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
 
 export const LARGE_UNCOMPRESSED_THRESHOLD_BYTES = 10240; // 10 KB
 export const LOW_TTL_THRESHOLD_SECONDS = 3600; // 1 hour
@@ -277,19 +277,9 @@ const ALLOWED_FILTER_COLS = new Set([
 ]);
 
 function buildAssetsWhere(params: AssetsQueryParams): string {
-  const clauses: string[] = ["1=1"];
-  const startMs = parseEpochMs(params.start_time);
-  const endMs = parseEpochMs(params.end_time);
-  if (startMs !== null) clauses.push(`ts_ms >= ${startMs}`);
-  if (endMs !== null) clauses.push(`ts_ms < ${endMs}`);
-  if (params.service_id) {
-    const escaped = String(params.service_id).replaceAll("'", "''");
-    clauses.push(`(service_id = '${escaped}' OR service_id IS NULL)`);
-  }
+  const clauses: string[] = [rangeServiceSql(params)];
   if (params.filters && !Array.isArray(params.filters)) {
-    clauses.push(compileFiltersToSql(Object.entries(params.filters as FiltersPayload).flatMap(([field, spec]) =>
-      spec.values.map((value) => ({ field, value: String(value), mode: spec.mode })),
-    ), false, [], params.customColumnTypes));
+    clauses.push(analyticsFiltersToSql(params.filters as FiltersPayload, params.customColumnTypes));
   }
   for (const f of Array.isArray(params.filters) ? params.filters : []) {
     if (!ALLOWED_FILTER_COLS.has(f.column)) continue;

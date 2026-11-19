@@ -336,7 +336,7 @@ _PER_TEST_RESET_TABLES = (
 
 
 @pytest.fixture(autouse=True)
-def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
+def isolate_metadata_db(tmp_path, monkeypatch, request):
     """Point metadata storage at this worker's isolated Postgres schema, and
     service-config/data dirs at a per-test sandbox.
     """
@@ -356,24 +356,26 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     for d in (sandbox_data, sandbox_services, sandbox_configs, sandbox_ngwaf, sandbox_cache, sandbox_system):
         d.mkdir(parents=True, exist_ok=True)
 
-    try:
-        import backend.core.metadata.base as pg_connection
-
-        _pg_con = pg_connection.get_pg_thread_connection()
-        _dirty = [
-            r[0]
-            for r in _pg_con.execute(
-                " UNION ALL ".join(f"SELECT '{t}' WHERE EXISTS (SELECT 1 FROM {t})" for t in _PER_TEST_RESET_TABLES)
-            ).fetchall()
-        ]
-        if _dirty:
-            _pg_con.execute(f"TRUNCATE TABLE {', '.join(_dirty)} CASCADE")
-        _pg_con.commit()
-    except Exception:
+    if request.node.get_closest_marker("no_postgres") is None:
+        request.getfixturevalue("_pg_worker_schema")
         try:
-            _pg_con.rollback()
+            import backend.core.metadata.base as pg_connection
+
+            _pg_con = pg_connection.get_pg_thread_connection()
+            _dirty = [
+                r[0]
+                for r in _pg_con.execute(
+                    " UNION ALL ".join(f"SELECT '{t}' WHERE EXISTS (SELECT 1 FROM {t})" for t in _PER_TEST_RESET_TABLES)
+                ).fetchall()
+            ]
+            if _dirty:
+                _pg_con.execute(f"TRUNCATE TABLE {', '.join(_dirty)} CASCADE")
+            _pg_con.commit()
         except Exception:
-            pass
+            try:
+                _pg_con.rollback()
+            except Exception:
+                pass
 
     metadata_db._clear_ingested_filenames_cache()
 
@@ -408,12 +410,14 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_caches():
+def _reset_module_caches(request):
     """Reset module-level caches between tests."""
     from backend.utils.bounded_cache import CacheRegistry
 
     CacheRegistry.clear_all()
     yield
+    if request.node.get_closest_marker("no_postgres") is not None:
+        return
     from backend.main import app
 
     app.dependency_overrides.clear()

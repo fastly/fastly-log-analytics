@@ -135,6 +135,25 @@ def persist_direct_state(state: TunnelState) -> None:
         logger.exception("[tunnel] failed to persist direct-mode state")
 
 
+def persist_stopped_state(state: TunnelState) -> None:
+    """Persist an explicit stop so restart cannot fall back to legacy config."""
+    try:
+        import json
+
+        with open(_state_file_path(), "w") as f:
+            json.dump(
+                {
+                    "public_endpoint": None,
+                    "forward_port": state.forward_port,
+                    "stopped": True,
+                    "disabled_at": iso_z_now(),
+                },
+                f,
+            )
+    except Exception:
+        logger.exception("[tunnel] failed to persist stopped state")
+
+
 def clear_persisted_state() -> None:
     """Remove the persisted state file (called on stop / panic)."""
     try:
@@ -175,6 +194,8 @@ def restore_direct_state(state: TunnelState) -> bool:
             return False
         with open(path) as f:
             data = json.load(f)
+        if data.get("stopped") is True:
+            return False
         endpoint = data.get("public_endpoint")
         if not endpoint:
             return False
@@ -648,8 +669,7 @@ class TunnelManager:
             self._record_uptime_history(reason="stop")
             self._state.public_endpoint = None
             self._state.started_at = None
-            # Clear persisted state so a restart doesn't re-arm.
-            clear_persisted_state()
+            persist_stopped_state(self._state)
             # Boot all sessions.
             ids = list(self._sessions.keys())
             for sid in ids:
@@ -672,7 +692,7 @@ class TunnelManager:
                 self.boot_session(sid, reason="panic")
             self._state.public_endpoint = None
             self._state.started_at = None
-            clear_persisted_state()
+            persist_stopped_state(self._state)
         try:
             share_db.log_share_audit_event(
                 event_type="PANIC_TRIGGERED",

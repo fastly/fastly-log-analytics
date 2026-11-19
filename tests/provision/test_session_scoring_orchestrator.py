@@ -150,6 +150,7 @@ def test_scoring_custom_fields_and_removal_helpers():
 
 
 # ── Enable / Disable / Teardown / Matrix / Wasm ──
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_no_local_config_writes")
 def test_enable_scoring_stages_identity_and_overrides():
     a = sso.scorer_vcl_fingerprint(LOG_SVC)
@@ -166,13 +167,18 @@ def test_enable_scoring_stages_identity_and_overrides():
         "log_fields": {"custom_fields": []},
         "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
     }
+    order: list[str] = []
     fastly_mock = _happy_path_fastly_mock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
-        patch.object(sso, "_deploy_wasm_package", return_value={"sha": "deadbeef_pkg_sha", "version": 7}) as wasm_mock,
-        patch.object(sso, "_write_matrix_to_kv") as kv_mock,
+        patch.object(
+            sso,
+            "_deploy_wasm_package",
+            side_effect=lambda *_a, **_k: (order.append("deploy"), {"sha": "deadbeef_pkg_sha", "version": 7})[1],
+        ) as wasm_mock,
+        patch.object(sso, "_write_matrix_to_kv", side_effect=lambda *_a, **_k: order.append("matrix")) as kv_mock,
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.client.fastly", fastly_mock),
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
@@ -181,6 +187,7 @@ def test_enable_scoring_stages_identity_and_overrides():
         result = sso.enable_scoring(LOG_SVC, TOKEN)
 
     assert (result["scoring_service_id"], result["logging_service_active_version"]) == (SCORE_SVC, 101)
+    assert order == ["matrix", "deploy"]
     wasm_mock.assert_called_once_with(
         SCORE_SVC, "MATRIX_STORE", TOKEN, status_cb=None, prior_package_sha="", prior_files_hash=""
     )
@@ -233,6 +240,7 @@ def test_enable_scoring_stages_identity_and_overrides():
     assert saved_re["scoring"]["enforce_status_code"] == 403
 
 
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_no_local_config_writes")
 def test_enable_scoring_secret_healing_status_cb_and_rollback():
     for post_409, exp_method, exp_path in (
@@ -282,6 +290,13 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
     # Rollback on validation failure
     save_calls = []
     fm_rb = _happy_path_fastly_mock()
+    created_meta = _scoring_meta()
+    created_meta["created_resources"] = {
+        "scoring_service_id": SCORE_SVC,
+        "scoring_keys_store_id": KEYS_STORE,
+        "scoring_config_store_id": CFG_STORE,
+        "scoring_matrix_store_id": "MATRIX_STORE",
+    }
     with (
         patch.object(
             sso.svcconfig, "load_config", return_value={"service_id": LOG_SVC, "log_fields": {"custom_fields": []}}
@@ -289,9 +304,10 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
         patch.object(
             sso.svcconfig, "_save_config_unlocked", side_effect=lambda _s, c, **_k: save_calls.append(dict(c))
         ),
-        patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
+        patch.object(sso, "ensure_scoring_service", return_value=created_meta),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
+        patch.object(sso, "delete_scoring_service") as delete_mock,
         patch.object(sso, "fastly", fm_rb),
         patch("backend.core.fastly.client.fastly", fm_rb),
         patch(
@@ -302,8 +318,10 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
     ):
         sso.enable_scoring(LOG_SVC, TOKEN)
     assert "scoring" not in save_calls[-1]
+    delete_mock.assert_called_once_with(token=TOKEN, **created_meta["created_resources"])
 
 
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_no_local_config_writes")
 def test_disable_and_teardown_scoring():
     # No-op when not enabled

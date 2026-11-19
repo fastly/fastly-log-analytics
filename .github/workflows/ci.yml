@@ -565,6 +565,9 @@ jobs:
           make cloud-sync-catalog
           git diff --exit-code compute/cloud/src/logging/catalog.json compute/cloud/vcl/capture/templates.json
 
+      - name: Detect OpenAPI drift
+        run: make openapi-drift
+
       - name: Compute workspace lint, tests, and VCL tests
         run: |
           make compute-lint

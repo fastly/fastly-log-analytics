@@ -3,6 +3,7 @@ import { classifySessionDurationBucket, CMCD_SESSION_DURATION_BUCKETS, emptyCmcd
 import type { FileSource } from "./dashboard/engine";
 import { Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
+import { mergeHistogramBytes, mergeHllBytes } from "./rollup-merge";
 import { fetchManifest, filesOverlapping } from "./dashboard/manifest";
 import { readColumns } from "./dashboard/parquet";
 import { parseEpochMs, roundTo } from "./engine-utils";
@@ -157,15 +158,11 @@ function newBucketAgg(): BucketAgg {
 }
 
 function mergeHll(target: Hll, blob: unknown) {
-  if (!(blob instanceof Uint8Array)) return;
-  const parsed = Hll.fromBytes(blob);
-  if (parsed) target.merge(parsed);
+  mergeHllBytes(target, blob);
 }
 
 function mergeHist(target: Histogram, blob: unknown) {
-  if (!(blob instanceof Uint8Array)) return;
-  const parsed = Histogram.fromBytes(blob);
-  if (parsed) target.merge(parsed);
+  mergeHistogramBytes(target, blob);
 }
 
 function num(col: ArrayLike<unknown> | undefined, i: number): number {

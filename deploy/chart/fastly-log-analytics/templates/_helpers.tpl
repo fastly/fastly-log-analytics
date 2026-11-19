@@ -57,7 +57,7 @@ Whether this chart templates its own connection-string Secret.
 */}}
 {{- define "fastly-log-analytics.managedSecret" -}}
 {{- if .Values.secrets.existingSecret -}}
-{{- else if or .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl .Values.secrets.clickhousePassword -}}
+{{- else if or .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl .Values.secrets.clickhousePassword .Values.secrets.cursorSecret -}}
 true
 {{- end -}}
 {{- end }}
@@ -133,6 +133,11 @@ plus ClickHouse analytical store settings.
       name: {{ include "fastly-log-analytics.secretName" . }}
       key: CLICKHOUSE_PASSWORD
       optional: true
+- name: HIGH_SCALE_CURSOR_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "fastly-log-analytics.secretName" . }}
+      key: HIGH_SCALE_CURSOR_SECRET
 {{- end }}
 {{- if .Values.config.hotS3Endpoint }}
 - name: HOT_S3_ENDPOINT

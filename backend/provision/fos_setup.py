@@ -187,7 +187,14 @@ def _get_fos_s3_client(
 
 
 def ensure_fos_bucket(
-    name: str, region: str, access_key: str, secret_key: str, status_cb=None, *, service_id: str | None = None
+    name: str,
+    region: str,
+    access_key: str,
+    secret_key: str,
+    status_cb=None,
+    *,
+    service_id: str | None = None,
+    on_created=None,
 ) -> bool:
     """Create the bucket via Boto3 (S3 API). Returns True on success."""
     s3 = _get_fos_s3_client(
@@ -220,6 +227,8 @@ def ensure_fos_bucket(
             else:
                 s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": region})
             ok("FOS bucket created")
+            if on_created:
+                on_created()
             if status_cb:
                 status_cb("✅ Bucket created.")
             return True

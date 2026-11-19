@@ -130,7 +130,7 @@ pub fn handle_worker_delete<R: Runtime>(runtime: &R, request: &http::Request) ->
     if !super::worker::authorized(runtime, request) {
         return deny(403, "Forbidden");
     }
-    let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+    let Ok(body) = request.json::<Value>() else {
         return deny(400, "Invalid request");
     };
     let text = |field: &str| body[field].as_str().unwrap_or_default().to_owned();

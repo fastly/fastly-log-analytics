@@ -23,7 +23,7 @@ Routes in [`backend/routers/admin/high_scale.py`](../../backend/routers/admin/hi
 - `GET` and `POST /api/high-scale/request-facts`: aliases that resolve the active service from the request context and default to the last 24 hours.
 - Other routes in the same router (not used by this page): `rum-facts/{domain}`, `cmcd-facts`, `aggregates`, `queries` and `exports` per service.
 
-A service must be bound through `HighScaleServiceRegistry`. Pagination uses HMAC-signed opaque cursors; ClickHouse readers require the batch's publication row to be `visible`. Cursor signing uses `HIGH_SCALE_CURSOR_SECRET` when set.
+A service must be bound through `HighScaleServiceRegistry`. Pagination uses HMAC-signed opaque cursors; ClickHouse readers require the batch's publication row to be `visible`. High-scale startup requires `HIGH_SCALE_CURSOR_SECRET`; use a stable, long, random value across all API replicas so existing cursors remain verifiable.
 
 ## Tests
 

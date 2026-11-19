@@ -522,6 +522,19 @@ def snapshot_config(service_id: str) -> str | None:
             return None
 
 
+def restore_config_snapshot(service_id: str, raw: str) -> None:
+    """Atomically restore a previously captured raw service config."""
+    global _cdn_service_id_map
+
+    snapshot = json.loads(raw)
+    with config_lock(service_id):
+        _atomic_write_json(config_path(service_id), snapshot)
+    with _config_cache_lock:
+        _config_cache.pop(service_id, None)
+    _cdn_service_id_map = None
+    _invalidate_service_ids_cache()
+
+
 def update_status(service_id: str, status: dict):
     """Partially update the 'status' section of a service config."""
 

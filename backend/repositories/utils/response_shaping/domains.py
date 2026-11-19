@@ -554,6 +554,22 @@ def build_insights_envelope(
     }
 
 
+def build_telemetry_response_envelope(
+    *,
+    debug_queries: list[dict[str, Any]],
+    debug_calls: list[dict[str, Any]],
+    section_timings: list[dict[str, Any]],
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "debug_queries": debug_queries,
+        "_debug_queries": debug_queries,
+        "debug_calls": debug_calls,
+        "section_timings": section_timings,
+        **extra,
+    }
+
+
 def build_query_response_envelope(
     *,
     columns: list[str],
@@ -568,19 +584,20 @@ def build_query_response_envelope(
     **extra: Any,
 ) -> dict[str, Any]:
     """Build the canonical ``/api/query`` response envelope."""
-    resp: dict[str, Any] = {
-        "columns": columns,
-        "data": data,
-        "row_count": len(data),
-        "total_rows": total_rows,
-        "truncated": truncated,
-        "elapsed_ms": int(elapsed_ms),
-        "debug_queries": debug_queries,
-        "_debug_queries": debug_queries,
-        "debug_calls": debug_calls,
-        "section_timings": section_timings,
-        **extra,
-    }
+    resp: dict[str, Any] = build_telemetry_response_envelope(
+        debug_queries=debug_queries,
+        debug_calls=debug_calls,
+        section_timings=section_timings,
+        **{
+            "columns": columns,
+            "data": data,
+            "row_count": len(data),
+            "total_rows": total_rows,
+            "truncated": truncated,
+            "elapsed_ms": int(elapsed_ms),
+            **extra,
+        },
+    )
     if explain_plan is not None:
         resp["explain_plan"] = explain_plan
     return resp

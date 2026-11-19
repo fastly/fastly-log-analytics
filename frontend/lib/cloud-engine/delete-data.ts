@@ -1,4 +1,5 @@
 import { failure } from "./engine-utils";
+import { sseResponse } from "./sse-response";
 
 // Cloud bridge for the admin Delete Data dialog. The dialog streams the
 // self-hosted route (`POST /api/admin/reset-logs?service_id=…`); Cloud runs
@@ -72,46 +73,35 @@ export async function cloudDeleteData(request: Request): Promise<Response | null
   const { job: initial } = await started.json() as { job?: DeleteDataStatus };
   if (!initial) return failure("Missing native Delete Data job");
 
-  const encoder = new TextEncoder();
-  return new Response(new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const emit = (payload: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
-      };
-      try {
-        let job = initial;
-        let seen = 0;
-        let lastStatus = "";
-        for (;;) {
-          for (const entry of (job.messages ?? []).slice(seen)) emit({ type: "status", message: entry.text });
-          seen = job.messages?.length ?? seen;
-          if (job.status !== lastStatus && !TERMINAL.has(job.status)) {
-            emit({ type: "status", status: job.status, message: `${job.status}: waiting for the edge clock to advance the job` });
-            lastStatus = job.status;
-          }
-          if (job.status === "complete") {
-            emit({ type: "done", status: "complete", message: summarize(job) });
-            break;
-          }
-          if (TERMINAL.has(job.status)) {
-            const message = job.error ?? (job.status === "cancelled" ? "Delete Data was cancelled." : "Delete Data job disappeared.");
-            emit({ type: "error", status: job.status, error: message, message });
-            break;
-          }
-          await sleep(pollMs, signal);
-          if (signal.aborted) break;
-          const poll = await fetch(`${base}/delete-data`, { credentials: "include", signal });
-          if (!poll.ok) {
-            const message = `Delete Data status read failed (${poll.status})`;
-            emit({ type: "error", status: "failed", error: message, message });
-            break;
-          }
-          job = await poll.json() as DeleteDataStatus;
-        }
-        controller.close();
-      } catch (error) {
-        controller.error(error);
+  return sseResponse(async (emit) => {
+    let job = initial;
+    let seen = 0;
+    let lastStatus = "";
+    for (;;) {
+      for (const entry of (job.messages ?? []).slice(seen)) emit({ type: "status", message: entry.text });
+      seen = job.messages?.length ?? seen;
+      if (job.status !== lastStatus && !TERMINAL.has(job.status)) {
+        emit({ type: "status", status: job.status, message: `${job.status}: waiting for the edge clock to advance the job` });
+        lastStatus = job.status;
       }
-    },
-  }), { headers: { "content-type": "text/event-stream" } });
+      if (job.status === "complete") {
+        emit({ type: "done", status: "complete", message: summarize(job) });
+        break;
+      }
+      if (TERMINAL.has(job.status)) {
+        const message = job.error ?? (job.status === "cancelled" ? "Delete Data was cancelled." : "Delete Data job disappeared.");
+        emit({ type: "error", status: job.status, error: message, message });
+        break;
+      }
+      await sleep(pollMs, signal);
+      if (signal.aborted) break;
+      const poll = await fetch(`${base}/delete-data`, { credentials: "include", signal });
+      if (!poll.ok) {
+        const message = `Delete Data status read failed (${poll.status})`;
+        emit({ type: "error", status: "failed", error: message, message });
+        break;
+      }
+      job = await poll.json() as DeleteDataStatus;
+    }
+  }, signal);
 }

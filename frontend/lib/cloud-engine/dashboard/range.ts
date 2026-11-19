@@ -1,5 +1,10 @@
 import { MINUTE_MS, type MinuteBucket } from "./engine";
-import { fetchManifest, type FetchJson, type Manifest } from "./manifest";
+import {
+  fetchManifest,
+  IncompleteManifestError,
+  type FetchJson,
+  type Manifest,
+} from "./manifest";
 
 export const PRESETS = [
   { id: "1h", label: "1h", hours: 1 },
@@ -67,15 +72,21 @@ export async function discoverPresetsWithManifest(
   let discovered: { range: Range; manifest: Manifest } | null = null;
   for (let i = DISCOVERY_PRESETS.length - 1; i >= 0; i--) {
     const range = presetRange(DISCOVERY_PRESETS[i].hours, anchorMs, options);
-    const manifest = await fetchManifest(
-      fetchJson,
-      range.from,
-      range.to,
-      signal,
-      undefined,
-      undefined,
-      true,
-    );
+    let manifest: Manifest;
+    try {
+      manifest = await fetchManifest(
+        fetchJson,
+        range.from,
+        range.to,
+        signal,
+        undefined,
+        undefined,
+        true,
+      );
+    } catch (error) {
+      if (error instanceof IncompleteManifestError) continue;
+      throw error;
+    }
     if (manifest.complete) {
       for (let j = 0; j <= i; j++) available[DISCOVERY_PRESETS[j].id] = true;
       discovered = { range, manifest };

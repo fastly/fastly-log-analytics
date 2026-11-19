@@ -14,7 +14,6 @@ import { assetsRollupEligible } from "./assets-rollup";
 import { classifyUserAgentCounts } from "./bots/classify";
 import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import { cmcdRollupEligible } from "./cmcd-rollup";
-import type { DashboardFilter } from "./dashboard/filters";
 import type { MinuteBucket } from "./dashboard/engine";
 import { parseVcpuMsHeader } from "./dashboard/sources";
 import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
@@ -62,6 +61,12 @@ import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import {
   bindCloudReadContext, CloudBudgetError, cloudFileSource, cloudReadContext, ensureCloudRange, formatBudgetAmount,
 } from "./range-loader";
+import {
+  filtersPayloadToPredicates,
+  queryRange,
+  readRequestParams,
+} from "./query-params";
+import { sseResponse, type SseEmit } from "./sse-response";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { components } from "@/types/api.generated";
@@ -267,29 +272,6 @@ function toBucketInterval(
   return "1d";
 }
 
-function parseFiltersPayload(
-  rawFilters: Record<string, { mode?: string; values?: string[] }> | undefined,
-  customFilters: Record<string, { mode?: string; values?: string[] }> | undefined,
-): DashboardFilter[] {
-  const out: DashboardFilter[] = [];
-  const pushAll = (
-    source: Record<string, { mode?: string; values?: string[] }> | undefined,
-  ) => {
-    if (!source || typeof source !== "object") return;
-    for (const [rawKey, entry] of Object.entries(source)) {
-      const field = rawKey.replace(/_\d+$/, "");
-      const vals = Array.isArray(entry?.values) ? entry.values.map(String) : [];
-      const mode = entry?.mode === "exclude" ? "exclude" : "include";
-      for (const value of vals) {
-        if (value) out.push({ field, value, mode });
-      }
-    }
-  };
-  pushAll(rawFilters);
-  pushAll(customFilters);
-  return out;
-}
-
 function unsupportedCloudEndpoint(request: Request): Response {
   return jsonResponse({
     detail: { error: "cloud_endpoint_unsupported", method: request.method,
@@ -408,9 +390,7 @@ function rollupAnswer(path: string, params: Record<string, unknown>, serviceId: 
  * partial answer has only its missing parts read raw, over the summaries' range.
  */
 async function cloudNetworkRollup(request: Request, path: string, origin?: CloudQueryContext): Promise<Response | null> {
-  const url = new URL(request.url);
-  const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : {};
-  const params = { ...Object.fromEntries(url.searchParams), ...body } as NetworkQueryParams & Record<string, unknown>;
+  const params = await readRequestParams(request) as NetworkQueryParams & Record<string, unknown>;
   if (!networkRollupEligible(path, params)) return null;
   let end = String(params.end_time ?? params.end ?? "");
   if (!end) {
@@ -418,7 +398,7 @@ async function cloudNetworkRollup(request: Request, path: string, origin?: Cloud
     if (!response.ok) return null;
     end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
   }
-  const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
+  const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
   let answer: unknown;
@@ -468,8 +448,8 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
  */
 async function cloudSectionRollup(request: Request, path: string, route: SectionRollup): Promise<Response | null> {
   const url = new URL(request.url);
-  const body = request.method === "POST" ? await request.clone().json() as Record<string, unknown> : {};
-  const params: Record<string, unknown> = { ...Object.fromEntries(url.searchParams), ...body };
+  const params = await readRequestParams(request);
+  const body = request.method === "POST" ? params : {};
   if (route.label === "/security") params.mask_ips = securityMaskIps(request, url, body);
   if (!route.eligible(path, params)) return null;
   let end = String(params.end_time ?? params.end ?? "");
@@ -478,7 +458,7 @@ async function cloudSectionRollup(request: Request, path: string, route: Section
     if (!response.ok) return null;
     end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
   }
-  const start = String(params.start_time ?? params.start ?? new Date(Date.parse(end) - 24 * 3_600_000).toISOString());
+  const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
   const finish = route.decorate?.(start, end, { ...params, ...serviceId ? { service_id: serviceId } : {} });
@@ -542,7 +522,7 @@ async function cloudInsightsBaseline(request: Request): Promise<RollupResult | n
   const body = await request.clone().json() as Record<string, unknown>;
   // A detector-restricted request is the raw follow-up for detectors the summaries can't answer.
   if (Array.isArray(body.detectors)) return null;
-  const filters = parseFiltersPayload(body.filters as Parameters<typeof parseFiltersPayload>[0], undefined);
+  const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
   if (filters.length) return null;
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
   if (!end) {
@@ -568,11 +548,9 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
   generation.assertCurrent();
   request.signal.throwIfAborted();
   const url = new URL(request.url);
-  const body = request.method === "POST"
-    ? await request.clone().json() as Record<string, unknown> : {};
+  const params = await readRequestParams(request);
   generation.assertCurrent();
   request.signal.throwIfAborted();
-  const params = { ...Object.fromEntries(url.searchParams), ...body };
   const token = typeof params.session_token === "string" ? openSessionToken(params.session_token) : null;
   let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
   if (!end) {
@@ -620,7 +598,7 @@ async function prepareCloudScan(request: Request, insightBaseline?: RollupResult
   const insights = url.pathname === "/api/insights" || url.pathname === "/api/insight-availability" ||
     url.pathname === "/api/insights/cache-collapse-detail";
   const filters = url.pathname === "/api/insights"
-    ? parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined) : [];
+    ? filtersPayloadToPredicates(params.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined) : [];
   const network = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname);
   const scanColumns = network ? networkScanColumns(url.pathname, params)
     : url.pathname.startsWith("/api/origin/") ? originScanColumns(url.pathname, params)
@@ -745,17 +723,7 @@ async function handleCloudRequest(
     resetUsageSettingsCache();
   }
   const runJobStream = (jobId: string, signal: AbortSignal) => {
-    const encoder = new TextEncoder();
-    return new Response(new ReadableStream<Uint8Array>({
-      async start(controller) {
-        try {
-          await stepJobToCompletion(jobId, controller, encoder, signal);
-          controller.close();
-        } catch (error) {
-          controller.error(error);
-        }
-      },
-    }), { headers: { "content-type": "text/event-stream" } });
+    return sseResponse((emit) => stepJobToCompletion(jobId, emit, signal), signal);
   };
   if (request.method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
     return cloudRumMutation(request, runJobStream);
@@ -1358,7 +1326,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     if (!ROLLUP_CHART_METRICS.has(metric) && !RAW_CHART_METRICS.has(metric)) {
       return jsonResponse({ detail: { error: "unsupported_chart_metric" } }, request, undefined, 400);
     }
-    const filters = parseFiltersPayload(body.filters, body.custom_filters);
+    const filters = filtersPayloadToPredicates(body.filters, body.custom_filters);
     const customFields = customCards((body.fields ?? []).map((id) => ({
       id, label: id, type: "string" as const,
     })));
@@ -1579,7 +1547,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const now = Date.now();
     const fromIso = body.start_time ?? new Date(now - 86_400_000).toISOString();
     const toIso = body.end_time ?? new Date(now).toISOString();
-    const filters = parseFiltersPayload(body.filters, body.custom_filters);
+    const filters = filtersPayloadToPredicates(body.filters, body.custom_filters);
     const serviceId = searchParams.get("service_id") ?? request.headers.get("x-service-id") ?? undefined;
     const fieldName = (body.fields?.[0] ?? body.field ?? "url") as CardField;
     const customIds = new Set([fieldName, ...filters.map((filter) => filter.field)]
@@ -2071,7 +2039,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
     const data = await queryCloudInsights(params as unknown as InsightsRequest, {
       signal: request.signal,
       maskIps,
-      filters: parseFiltersPayload(params.filters as Parameters<typeof parseFiltersPayload>[0], undefined),
+      filters: filtersPayloadToPredicates(params.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined),
       engine: read,
       baseline: insightBaselines.get(request),
     });
@@ -2102,14 +2070,9 @@ const TRANSIENT_JOB_ERRORS = new Set([
 
 async function stepJobToCompletion(
   jobId: string,
-  controller: ReadableStreamDefaultController<Uint8Array>,
-  encoder: TextEncoder,
+  emit: SseEmit,
   signal?: AbortSignal,
 ): Promise<void> {
-  const emit = (payload: Record<string, unknown>) => {
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
-  };
-
   let transientRetries = 0;
   while (!signal?.aborted) {
     const res = await fetch(
@@ -2225,17 +2188,10 @@ export async function cloudStreamFetch(
       unsupportedCloudEndpoint(localRequest());
   }
 
-  const encoder = new TextEncoder();
   const signal = init?.signal ?? undefined;
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const emit = (payload: Record<string, unknown>) => {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
-        );
-      };
-      try {
+  return sseResponse(async (emit) => {
+    try {
         if (
           pathname === "/api/provision/ingest" ||
           pathname === "/api/cron-runs/cloud-tick/stream"
@@ -2252,7 +2208,6 @@ export async function cloudStreamFetch(
           }
           emit({ type: "status", status: "complete", message: "Triggered ingest tick" });
           emit({ type: "done", status: "complete" });
-          controller.close();
           return;
         }
 
@@ -2273,7 +2228,6 @@ export async function cloudStreamFetch(
               errJson.error ??
               `Request failed (${initRes.status})`,
           });
-          controller.close();
           return;
         }
 
@@ -2283,8 +2237,7 @@ export async function cloudStreamFetch(
         if (initPayload.job?.id) {
           await stepJobToCompletion(
             initPayload.job.id,
-            controller,
-            encoder,
+            emit,
             signal,
           );
         } else {
@@ -2299,20 +2252,8 @@ export async function cloudStreamFetch(
             error: err instanceof Error ? err.message : String(err),
           });
         }
-      } finally {
-        try {
-          controller.close();
-        } catch {
-          /* already closed */
-        }
-      }
-    },
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
+    }
+  }, signal);
 }
 
 export {

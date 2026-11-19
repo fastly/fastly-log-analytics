@@ -266,6 +266,7 @@ def reconcile_cdn_service_state(
     dry_run: bool = False,
     status_cb: Callable[[str], None] | None = None,
     activate: bool = True,
+    on_created: Callable[[str], None] | None = None,
 ) -> ReconciliationResult:
     """Execute the complete reconciliation control loop for the FOS Proxy / CDN service (Steps 1-8)."""
     from backend.config import config_path as _config_path
@@ -302,6 +303,7 @@ def reconcile_cdn_service_state(
     if not cdn_url:
         raise ValueError("CDN URL is required to reconcile CDN service state.")
     domain = cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
+    created_cdn_service = False
     if not cdn_service_id:
         if status_cb:
             status_cb(f"⏳ Finding existing CDN service named '{cdn_service_name}'...")
@@ -334,6 +336,9 @@ def reconcile_cdn_service_state(
                 status_cb(f"⏳ Creating new Fastly CDN service '{cdn_service_name}'...")
             svc = fastly("POST", "/service", {"name": cdn_service_name, "type": "vcl"}, token=token)
             cdn_service_id = svc["id"]
+            created_cdn_service = True
+            if on_created:
+                on_created(cdn_service_id)
             if status_cb:
                 status_cb(f"✓ Created CDN service {cdn_service_id}")
             service_comment = (
@@ -366,7 +371,7 @@ def reconcile_cdn_service_state(
             c["cdn_service_id"] = cdn_service_id
 
         _update_local_config(logging_service_id, _persist_cdn)
-    result = ReconciliationResult(service_id=cdn_service_id)
+    result = ReconciliationResult(service_id=cdn_service_id, created=created_cdn_service)
     try:
         with acquire_vcl_lock(cdn_service_id):
             if status_cb:
@@ -662,6 +667,7 @@ def reconcile_infrastructure(
         if cf.get("name") in _SCORING_FIELD_NAMES
     ]
     persisted = False
+    created_scoring_resources: dict[str, str] = {}
 
     def _persist(apply: Callable[[dict[str, Any]], None]) -> None:
         nonlocal persisted
@@ -686,6 +692,7 @@ def reconcile_infrastructure(
                 status_cb("⏳ Phase 1: Reconciling edge KV Stores...")
                 status_cb("⏳ Phase 2: Reconciling Compute Scorer Service and uploading WASM package...")
             scoring_meta = ensure_scoring_service(logging_service_id, token, status_cb=status_cb)
+            created_scoring_resources = dict(scoring_meta.get("created_resources") or {})
             scoring_service_id, matrix_store_id = (
                 scoring_meta["scoring_service_id"],
                 scoring_meta.get("scoring_matrix_store_id", ""),
@@ -769,6 +776,12 @@ def reconcile_infrastructure(
         logger.error("IaC reconciliation failure, executing transactional configuration rollback", exc_info=True)
         if status_cb:
             status_cb(f"❌ Error during reconciliation: {err}. Rolling back to previous configuration...")
+        rollback_error: RuntimeError | None = None
         if persisted:
-            mutate_config(logging_service_id, _rollback_owned_keys)
+            if mutate_config(logging_service_id, _rollback_owned_keys) is None:
+                rollback_error = RuntimeError("IaC rollback failed because the service configuration disappeared")
+        if created_scoring_resources:
+            delete_scoring_service(token=token, **created_scoring_resources)
+        if rollback_error:
+            raise rollback_error from err
         raise err

@@ -1864,6 +1864,23 @@ def test_restore_returns_false_when_no_file(state_file: Path):
     assert s.public_endpoint is None
 
 
+@pytest.mark.no_postgres
+def test_explicit_stop_tombstone_blocks_config_fallback_across_restart(monkeypatch, state_file: Path):
+    mgr = tunnel.get_tunnel_manager()
+    mgr.start_sharing(public_endpoint="https://share.example.com")
+    mgr.stop_sharing()
+
+    monkeypatch.setattr(
+        "backend.config.list_configs",
+        lambda: [{"remote_frontend": {"domain_name": "stale.example.com"}}],
+    )
+    tunnel.reset_for_tests()
+
+    assert tunnel.get_tunnel_manager().public_url() is None
+    persisted = json.loads(state_file.read_text())
+    assert persisted["stopped"] is True
+
+
 def test_restore_returns_false_when_endpoint_empty(state_file: Path):
     state_file.write_text(json.dumps({"forward_port": 3000}))
     s = TunnelState()

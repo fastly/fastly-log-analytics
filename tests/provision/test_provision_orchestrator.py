@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -304,6 +305,38 @@ def test_run_with_events_and_state_persistence():
         orchestrator.save_state({"k": "v"})
 
 
+@pytest.mark.no_postgres
+def test_resume_state_is_persisted_without_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator, "_state_file_path", lambda: str(tmp_path / "setup-state.json"))
+    orchestrator.save_state(
+        {
+            "logging_service_id": "svc",
+            "admin_token": "fastly-token",
+            "fos_access_key": "access",
+            "fos_secret_key": "secret",
+            "nested": {"request_secret": "request", "keep": 1},
+            "step": 4,
+        }
+    )
+
+    persisted = json.loads((tmp_path / "setup-state.json").read_text())
+    assert persisted == {"logging_service_id": "svc", "nested": {"keep": 1}, "step": 4}
+    assert orchestrator.load_state() == persisted
+
+
+@pytest.mark.no_postgres
+def test_vcl_lock_heartbeats_while_held(tmp_path, monkeypatch):
+    from backend.provision.declarative.fastly_ops import acquire_vcl_lock
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FASTLY_VCL_LOCK_STALE_SECONDS", "0.05")
+
+    with acquire_vcl_lock("svc", timeout_sec=1) as lock:
+        first_mtime = lock.lock_path.stat().st_mtime
+        time.sleep(0.08)
+        assert lock.lock_path.stat().st_mtime > first_mtime
+
+
 # ── cleanup_local_data tests ──
 
 
@@ -506,12 +539,13 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
     ) == ("1.2.3", "sha256-fake-content-hash", "fake-etag-md5")
 
 
+@pytest.mark.no_postgres
 def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     teardown_called = []
 
     def fake_teardown(state, token, opts=None):
-        teardown_called.append(True)
+        teardown_called.append(opts)
         yield {"type": "status", "message": "rollback step"}
 
     with (
@@ -521,7 +555,18 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
-    assert isinstance(exc, RuntimeError) and "BucketAlreadyExists" in str(exc) and teardown_called == [True]
+    assert isinstance(exc, RuntimeError) and "BucketAlreadyExists" in str(exc)
+    assert teardown_called == [
+        {
+            "remove_logging": False,
+            "remove_rum": False,
+            "remove_cdn": False,
+            "remove_bucket": False,
+            "remove_scoring": False,
+            "remove_fos_tokens": False,
+            "fos_key_ids": ["ID_T"],
+        }
+    ]
     assert any("BucketAlreadyExists" in e["message"] for e in events if e["type"] == "error")
 
     orchestrator.save_state(
@@ -859,8 +904,13 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
             raise RuntimeError("config write failed mid-flow")
 
     with (
-        _mocked_provision_steps(logging_return=99, write_side_effect=raising_write, teardown_side_effect=fake_teardown),
+        _mocked_provision_steps(
+            logging_side_effect=lambda state, _token: (state.__setitem__("previous_logging_version", 5), 99)[1],
+            write_side_effect=raising_write,
+            teardown_side_effect=fake_teardown,
+        ),
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.core.fastly.client.fastly", return_value={}),
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
 
@@ -886,6 +936,123 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
         finally:
             gen.close()
     assert calls_before_cdn is not None and calls_before_cdn >= 1
+
+
+@pytest.mark.no_postgres
+def test_provision_failure_after_activation_restores_vcl_and_config_before_cleanup(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    service_id = "SU3xxxxxxxxxxxxxx0000"
+    config_file = tmp_path / f"{service_id}.json"
+    original = {"service_id": service_id, "rum_enabled": True, "marker": "preexisting"}
+    config_file.write_text(json.dumps(original))
+    calls: list[str] = []
+    writes = 0
+
+    def activate_side_effect(state, _token, **_kwargs):
+        state["previous_logging_version"] = 5
+        return 99
+
+    def write_and_fail(_state):
+        nonlocal writes
+        writes += 1
+        if writes >= 3:
+            raise RuntimeError("finalize failed")
+        svcconfig.save_config(service_id, {"service_id": service_id, "marker": "new"})
+
+    def fastly_call(method, path, **_kwargs):
+        calls.append(f"{method} {path}")
+        return {}
+
+    def fake_teardown(state, _token, opts=None):
+        calls.append("teardown")
+        assert json.loads(config_file.read_text()) == original
+        yield {"type": "status", "message": "cleanup"}
+
+    with (
+        _mocked_provision_steps(
+            logging_side_effect=activate_side_effect,
+            write_side_effect=write_and_fail,
+            teardown_side_effect=fake_teardown,
+        ),
+        patch("backend.config.config_path", return_value=config_file),
+        patch("backend.core.fastly.client.fastly", side_effect=fastly_call),
+    ):
+        _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
+
+    assert isinstance(exc, RuntimeError) and "finalize failed" in str(exc)
+    assert calls == [f"PUT /service/{service_id}/version/5/activate", "teardown"]
+    assert json.loads(config_file.read_text()) == original
+
+
+@pytest.mark.no_postgres
+def test_provision_reconciler_failure_after_activation_still_restores_vcl(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    service_id = "SU3xxxxxxxxxxxxxx0000"
+    config_file = tmp_path / f"{service_id}.json"
+    original = {"service_id": service_id, "marker": "preexisting"}
+    config_file.write_text(json.dumps(original))
+    calls: list[str] = []
+
+    def activate_then_fail(state, _token, **_kwargs):
+        state["previous_logging_version"] = 5
+        raise RuntimeError("reconciler finalization failed")
+
+    def fastly_call(method, path, **_kwargs):
+        calls.append(f"{method} {path}")
+        return {}
+
+    def fake_teardown(state, _token, opts=None):
+        calls.append("teardown")
+        assert json.loads(config_file.read_text()) == original
+        yield {"type": "status", "message": "cleanup"}
+
+    with (
+        _mocked_provision_steps(
+            logging_side_effect=activate_then_fail,
+            teardown_side_effect=fake_teardown,
+        ),
+        patch("backend.config.config_path", return_value=config_file),
+        patch("backend.core.fastly.client.fastly", side_effect=fastly_call),
+    ):
+        _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
+
+    assert isinstance(exc, RuntimeError) and "reconciler finalization failed" in str(exc)
+    assert calls == [f"PUT /service/{service_id}/version/5/activate", "teardown"]
+    assert json.loads(config_file.read_text()) == original
+
+
+@pytest.mark.no_postgres
+def test_provision_keeps_created_resources_when_active_vcl_rollback_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    service_id = "SU3xxxxxxxxxxxxxx0000"
+    config_file = tmp_path / f"{service_id}.json"
+    config_file.write_text(json.dumps({"service_id": service_id, "marker": "preexisting"}))
+    teardown = MagicMock(return_value=iter([]))
+    writes = 0
+
+    def activate_side_effect(state, _token, **_kwargs):
+        state["previous_logging_version"] = 5
+        return 99
+
+    def fail_finalize(_state):
+        nonlocal writes
+        writes += 1
+        if writes >= 3:
+            raise RuntimeError("finalize failed")
+
+    with (
+        _mocked_provision_steps(
+            logging_side_effect=activate_side_effect,
+            write_side_effect=fail_finalize,
+            teardown_side_effect=teardown,
+        ),
+        patch("backend.config.config_path", return_value=config_file),
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("activation denied")),
+    ):
+        _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
+
+    assert isinstance(exc, RuntimeError) and "created resources retained" in str(exc)
+    teardown.assert_not_called()
 
 
 # ── Merged from tests/provision/test_vcl_builder.py ──
@@ -1852,7 +2019,8 @@ def test_enable_rum_ordering_and_non_blocking_tracker_upload():
     assert result["activated"] is True and _disk(service_id)["rum_enabled"] is True
 
 
-def test_enable_and_disable_rum_activate_false_and_non_blocking_delete():
+@pytest.mark.no_postgres
+def test_enable_and_disable_rum_activate_false_and_preserves_live_state():
     service_id = "srv_test"
     _seed({"service_id": service_id, "rum_enabled": False, "last_activated_version": 1, **_FOS_CFG})
     with (
@@ -1871,19 +2039,30 @@ def test_enable_and_disable_rum_activate_false_and_non_blocking_delete():
 
     _seed({"service_id": service_id, "rum_enabled": True, "last_activated_version": 5, **_FOS_CFG})
     with (
-        patch("backend.provision.rum_assets.delete_rum_tracker_js", side_effect=RuntimeError("FOS unreachable")),
+        patch("backend.provision.rum_assets.delete_rum_tracker_js") as delete_js,
+        patch("backend.provision.fos_setup.delete_fos_prefix") as delete_prefix,
+        patch("backend.provision.fos_setup.delete_fos_bucket") as delete_bucket,
         patch(
             "backend.provision.rum_orchestrator.reconcile_vcl_state",
             return_value=MagicMock(activated_version=None, draft_version=6),
         ) as mock_rec_dis,
     ):
-        res_dis = disable_rum(service_id, "test_token", activate=False)
+        res_dis = disable_rum(
+            service_id,
+            "test_token",
+            activate=False,
+            remove_cloud_files=True,
+            remove_bucket=True,
+        )
         mock_rec_dis.assert_called_once_with(service_id, "test_token", dry_run=False, status_cb=None, activate=False)
         assert (
             res_dis["deactivated"] is False
             and res_dis["logging_service_active_version"] == 6
-            and _disk(service_id)["rum_enabled"] is False
+            and _disk(service_id)["rum_enabled"] is True
         )
+        delete_js.assert_not_called()
+        delete_prefix.assert_not_called()
+        delete_bucket.assert_not_called()
 
 
 def test_upgrade_faro_version_orchestration():
@@ -2029,10 +2208,20 @@ def stubs():
         yield MagicMock(upload=upload, reconcile=reconcile, tracker=tracker, delete_js=delete_js)
 
 
+@pytest.mark.no_postgres
 def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg, stubs):
     salt = disabled_cfg["rum"]["cid_salt"]
     held: list[bool] = []
-    stubs.upload.side_effect = AsyncMock(side_effect=lambda *_a, **_kw: held.append(_lock_held()))
+
+    def assert_upload_precedes_enable() -> None:
+        assert _persisted()["rum_enabled"] is False
+
+    stubs.upload.side_effect = AsyncMock(
+        side_effect=lambda *_a, **_kw: (
+            assert_upload_precedes_enable(),
+            held.append(_lock_held()),
+        )
+    )
     stubs.reconcile.side_effect = lambda *_a, **_kw: (
         held.append(_lock_held()),
         MagicMock(activated_version=7, draft_version=None),
@@ -2054,6 +2243,7 @@ def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg
     assert saved_dis["rum_enabled"] is False and "rum_vcl_sha" not in saved_dis and saved_dis["keep_me"] == 1
 
 
+@pytest.mark.no_postgres
 @pytest.mark.parametrize("fail_stage", ["upload", "reconcile"])
 def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, stubs, fail_stage):
     salt = disabled_cfg["rum"]["cid_salt"]
@@ -2092,6 +2282,7 @@ def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, 
     assert _persisted()["rum"]["faro_version"] == OLD_VERSION
 
 
+@pytest.mark.no_postgres
 def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
     stubs.upload.side_effect = AsyncMock(
         side_effect=lambda *_a, **_kw: svcconfig.mutate_config(
