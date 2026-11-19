@@ -30,6 +30,17 @@ fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history
         }
     });
     assert!(platform.adapter.cas("cron:state", None, &state).unwrap());
+    let svc_off = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
+    let mut svc_off_val = svc_off.value;
+    svc_off_val["compaction"] = json!({"mode": "off", "size_target_mb": 128});
+    assert!(platform
+        .adapter
+        .cas(
+            "svc:fixtureService",
+            Some(&svc_off.generation),
+            &svc_off_val
+        )
+        .unwrap());
     let before = platform.adapter.get("cron:state").unwrap().unwrap();
     let snapshot = admin::cron_audit_snapshot(&platform);
     let find = |task: &str| {

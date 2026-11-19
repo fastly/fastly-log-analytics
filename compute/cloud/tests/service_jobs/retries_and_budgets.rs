@@ -525,13 +525,13 @@ fn provision_persists_non_default_auto_delete_and_retention_settings() {
 }
 
 #[test]
-fn compaction_setting_defaults_off_and_patch_validates_it() {
+fn compaction_setting_defaults_to_size_target_and_patch_validates_it() {
     let platform = Platform::new();
     platform.drain(platform.provision()["job"].clone());
     let current = platform.service();
     assert_eq!(
         current["service"]["compaction"],
-        json!({"mode": "off", "size_target_mb": 128})
+        json!({"mode": "size_target", "size_target_mb": 128})
     );
     for bad in [
         json!({"mode": "always", "size_target_mb": 64}),

@@ -165,8 +165,8 @@ pub struct Compaction {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionMode {
-    #[default]
     Off,
+    #[default]
     SizeTarget,
 }
 
@@ -179,7 +179,7 @@ fn default_size_target_mb() -> u32 {
 impl Default for Compaction {
     fn default() -> Self {
         Self {
-            mode: CompactionMode::Off,
+            mode: CompactionMode::SizeTarget,
             size_target_mb: default_size_target_mb(),
         }
     }
