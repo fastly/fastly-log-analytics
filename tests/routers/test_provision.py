@@ -499,9 +499,13 @@ def _fake_ensure_fos_access_key(
     return {"id": f"AKIA_TEST_{suffix}", "access_key": f"AKIA_TEST_{suffix}", "secret_key": f"SECRET_TEST_{suffix}"}
 
 
-def _fake_ensure_fos_bucket(bucket, region, access_key, secret_key, *, service_id=None, status_cb=None):
+def _fake_ensure_fos_bucket(
+    bucket, region, access_key, secret_key, *, service_id=None, status_cb=None, on_created=None
+):
     if status_cb:
         status_cb(f"🪣 Bucket {bucket} in {region} (mock)…")
+    if on_created:
+        on_created()
     return True
 
 
@@ -531,7 +535,11 @@ def _wizard_env(tmp_path, monkeypatch, *, service_name="Wizard E2E Service", ext
     base_patches = [
         patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None),
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
-        patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
+        patch(
+            "backend.provision.orchestrator.ensure_fos_bucket",
+            side_effect=_fake_ensure_fos_bucket,
+            autospec=True,
+        ),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
         patch(
             "backend.provision.orchestrator.ensure_logging_via_reconciler",
@@ -720,8 +728,9 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
     assert "Step 6/8" in status_msgs
 
     called_names = [name for name, _ in teardown_calls]
-    for expected in ("delete_cdn_service", "remove_logging_endpoint", "delete_fos_bucket", "delete_fos_access_key"):
+    for expected in ("delete_cdn_service", "delete_fos_bucket", "delete_fos_access_key"):
         assert expected in called_names, f"expected {expected} in {called_names}"
+    assert "remove_logging_endpoint" not in called_names
     assert not os.path.exists(svcconfig.config_path(sid))
 
 
