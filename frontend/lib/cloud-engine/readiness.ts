@@ -76,8 +76,11 @@ export async function measureCloudQuery<T>(
     }));
     return data;
   } catch (error) {
+    const cancelled = typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError";
     globalThis.dispatchEvent(new CustomEvent("fla:cloud-query", {
-      detail: { ...detail, state: "error", totalRows: null, error: failureReason(error) },
+      detail: cancelled
+        ? { ...detail, state: "cancelled", totalRows: null }
+        : { ...detail, state: "error", totalRows: null, error: failureReason(error) },
     }));
     throw error;
   }

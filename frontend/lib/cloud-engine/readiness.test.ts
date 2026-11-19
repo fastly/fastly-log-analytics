@@ -77,6 +77,20 @@ it("names a dropped connection a network error without exposing the failing URL"
   }
 });
 
+it("emits cancelled instead of error on AbortError without poisoning readiness", async () => {
+  setCloudModeRuntime(true);
+  const events: unknown[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const error = new DOMException("Aborted", "AbortError");
+    await expect(measureCloudQuery("api./api/services/svc/scoring/labels", async () => { throw error; })).rejects.toBe(error);
+    expect(events).toMatchObject([{ state: "pending" }, { state: "cancelled", totalRows: null }]);
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
 it("reports failed local API responses as errors without exposing response bodies", async () => {
   setCloudModeRuntime(true);
   const events: unknown[] = [];
