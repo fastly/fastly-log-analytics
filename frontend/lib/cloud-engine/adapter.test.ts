@@ -18,7 +18,7 @@ import { setCloudModeRuntime } from "./mode";
 import { networkFromRollup } from "./network-rollup";
 import { originFromRollup } from "./origin-rollup";
 import { performanceFromRollup } from "./performance-rollup";
-import { insightsBaselineFromRollup } from "./insights-rollup";
+import { insightsBaselineFromRollup, insightsFromRollup } from "./insights-rollup";
 import { securityFromRollup } from "./security-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
 
@@ -50,6 +50,7 @@ vi.mock("./security-rollup", async (importOriginal) => ({
 vi.mock("./insights-rollup", async (importOriginal) => ({
   ...await importOriginal<typeof import("./insights-rollup")>(),
   insightsBaselineFromRollup: vi.fn(async () => null),
+  insightsFromRollup: vi.fn(async () => null),
 }));
 
 describe("adapter.ts Milestone 3 domain route dispatching", () => {
@@ -969,6 +970,53 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     vi.mocked(originFromRollup).mockClear();
     await origin({ body: JSON.stringify({ sections: ["ip_health"], filters: { pop: { mode: "include", values: ["IAD"] } } }) });
     expect(originFromRollup).not.toHaveBeenCalled();
+  });
+
+  it("serves unfiltered /api/insights directly from v3 summaries without downloading raw Parquet", async () => {
+    const fakeResponse = {
+      insights: [{ id: "error_spikes", title: "Error Spikes", description: "", category: "origin",
+        severity: "clean", summary: "No issues", items: [] }],
+      window_start: "2026-11-05T00:00:00.000Z",
+      window_end: "2026-11-06T00:00:00.000Z",
+      baseline_start: "2026-10-29T00:00:00.000Z",
+      baseline_end: "2026-11-05T00:00:00.000Z",
+      computed_at: "2026-11-06T00:00:00.000Z",
+      window_hours: 24,
+      baseline_hours: 168,
+      window_total_requests: 100,
+      rollup: {
+        data_from: "2026-10-29T00:00:00.000Z",
+        data_through: "2026-11-06T00:00:00.000Z",
+        approximate: [],
+        lower_bound: [],
+      },
+      deferred_detectors: ["credential_enumeration", "content_discovery"],
+      unsupported_detectors: [],
+      unavailable_detectors: [],
+    };
+    vi.mocked(ensureCloudRange).mockClear();
+    vi.mocked(insightsBaselineFromRollup).mockClear();
+    vi.mocked(insightsFromRollup).mockClear().mockResolvedValueOnce(fakeResponse as never);
+
+    const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {} }),
+    }));
+    expect(res?.status).toBe(200);
+    expect(await res!.json()).toEqual(fakeResponse);
+    expect(ensureCloudRange).not.toHaveBeenCalled();
+    expect(insightsBaselineFromRollup).not.toHaveBeenCalled();
+
+    // Follow-up with explicit detectors bypasses insightsFromRollup and reads raw Parquet.
+    vi.mocked(insightsFromRollup).mockClear();
+    const followUp = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST", headers: { "content-type": "application/json", "x-service-id": "svc-1" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {},
+        end_time: "2026-11-06T00:00:00Z", detectors: ["credential_enumeration"] }),
+    }));
+    expect(followUp?.status).toBe(200);
+    expect(insightsFromRollup).not.toHaveBeenCalled();
+    expect(ensureCloudRange).toHaveBeenCalledTimes(1);
   });
 
   it("reads only the Insights window raw when summaries answer its unfiltered baseline", async () => {

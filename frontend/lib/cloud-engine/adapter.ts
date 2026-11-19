@@ -514,6 +514,39 @@ function networkBudgetError(error: CloudBudgetError, scans: readonly string[] | 
 }
 
 /**
+ * Serves an unfiltered /api/insights read (without explicit `detectors`) from
+ * v3 summaries for both window and baseline, deferring only IP detectors to
+ * the raw follow-up. Null (or a summary failure) falls back to the raw path.
+ */
+async function cloudInsightsRollup(request: Request): Promise<Response | null> {
+  const body = await request.clone().json() as Record<string, unknown>;
+  if (Array.isArray(body.detectors)) return null;
+  const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
+  if (filters.length) return null;
+  let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
+  if (!end) {
+    const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
+    if (!response.ok) return null;
+    end = (await response.json() as { latest_log_at?: string | null }).latest_log_at ?? new Date().toISOString();
+  }
+  const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
+  const serviceId = rawServiceId ? decodeURIComponent(String(rawServiceId)) : undefined;
+  const headerRole = request.headers.get("x-session-role");
+  const maskIps = Boolean(body.mask_ips) || request.headers.get("x-mask-ips") === "1" ||
+    headerRole === "analyst-no-pii" || useSessionRoleStore.getState().isRemoteAnalyst;
+  try {
+    const answer = await rollupAnswer("/api/insights/rollup", {
+      ...body, clamp_end: end, ...(serviceId ? { service_id: serviceId } : {}), mask_ips: maskIps,
+    }, serviceId, request.signal);
+    return answer ? jsonResponse(answer, request) : null;
+  } catch (error) {
+    if (request.signal.aborted) throw error;
+    console.warn("flp: /insights summaries failed; reading raw Parquet", error);
+    return null;
+  }
+}
+
+/**
  * Merges the v3 summaries for an /insights baseline over the range the raw
  * scan would use, so only the window needs raw Parquet. Null (or a summary
  * failure) leaves the baseline to the raw scan.
@@ -810,6 +843,10 @@ async function handleCloudRequest(
     const sectionRollup = localScan ? SECTION_ROLLUPS[path] : undefined;
     if (sectionRollup) {
       const answer = await cloudSectionRollup(request, path, sectionRollup);
+      if (answer) return answer;
+    }
+    if (localScan && path === "/api/insights" && request.method === "POST") {
+      const answer = await cloudInsightsRollup(request);
       if (answer) return answer;
     }
     if (localScan) {

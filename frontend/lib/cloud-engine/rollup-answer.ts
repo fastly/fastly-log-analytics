@@ -3,7 +3,7 @@ import type { CmcdQueryParams } from "./cmcd";
 import { cmcdFromRollup } from "./cmcd-rollup";
 import type { RollupResult } from "./dashboard/rollup-query";
 import type { InsightsRequest } from "./insights";
-import { insightsBaselineFromRollup, insightsBaselineRollup } from "./insights-rollup";
+import { insightsBaselineFromRollup, insightsBaselineRollup, insightsFromRollup, type InsightsRollupRequest } from "./insights-rollup";
 import type { NetworkQueryParams } from "./network";
 import { networkFromRollup } from "./network-rollup";
 import { originFromRollup, type OriginRollupBody } from "./origin-rollup";
@@ -53,6 +53,8 @@ const ANSWERS: Record<string, Answer> = {
     const result = await insightsBaselineFromRollup(body as InsightsRequest, [], source, signal);
     return result && insightsBaselineRollup(result);
   },
+  "/api/insights/rollup": (_path, body, source, signal) =>
+    insightsFromRollup(body as InsightsRollupRequest, [], source, signal),
 };
 
 /**

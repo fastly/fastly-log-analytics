@@ -1,7 +1,14 @@
 import type { DashboardFilter } from "./dashboard/filters";
 import { Histogram } from "./dashboard/histogram";
 import { emptyAgg, queryRollup, rollupGroup, type Rollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
-import { resolveInsightWindow, type InsightsRequest } from "./insights";
+import {
+  CLOUD_INSIGHT_DETECTORS,
+  handleInsightAvailability,
+  handleInsights,
+  INSIGHT_DEFINITIONS,
+  resolveInsightWindow,
+  type InsightsRequest,
+} from "./insights";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 
@@ -344,5 +351,257 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
       approximate: [...approximate],
       lower_bound: [...lowerBound],
     },
+  };
+}
+
+export type InsightsRollupRequest = InsightsRequest & { mask_ips?: boolean };
+
+const ROLLUP_INSIGHT_COLUMNS = new Set(
+  INSIGHT_DEFINITIONS.filter((d) => CLOUD_INSIGHT_DETECTORS.has(d.id)).flatMap((d) => d.required_fields),
+);
+
+/**
+ * Answers an unfiltered /insights request (without explicit `detectors`) from
+ * v3 summaries for both window and baseline, deferring only the IP detectors
+ * (`credential_enumeration`, `content_discovery`) and any detector whose group
+ * is absent from either rollup. Returns null when summaries cannot cover both
+ * ranges so the caller falls back to the raw scan.
+ */
+export async function insightsFromRollup(
+  body: InsightsRollupRequest,
+  filters: readonly DashboardFilter[],
+  source: Parameters<typeof queryRollup>[0],
+  signal?: AbortSignal,
+  spec: SummarySpec | null = INSIGHTS_SUMMARY_SPEC,
+) {
+  if (filters.length || Array.isArray(body.detectors)) return null;
+  const { end, windowStart, start } = resolveInsightWindow(body);
+  const [windowResult, baselineResult] = await Promise.all([
+    queryRollup(source, { fromMs: windowStart, toMs: end, signal, spec: spec ?? undefined }),
+    queryRollup(source, { fromMs: start, toMs: windowStart, signal, spec: spec ?? undefined }),
+  ]);
+  if (!windowResult || !baselineResult) return null;
+
+  const wRollup = windowResult.rollup;
+  const bRollup = baselineResult.rollup;
+  const sumOverall = (rollup: Rollup) => {
+    let total = 0;
+    for (const agg of rollup.series.get("overall")?.get("")?.values() ?? []) total += agg.requests;
+    return total;
+  };
+  const windowRequests = sumOverall(wRollup);
+  const baselineRequests = sumOverall(bRollup);
+
+  const histOf = (agg: RollupAgg | undefined) =>
+    agg && agg.elapsedCount > 0
+      ? (agg.hists.elapsed ?? (agg.elapsedHist ? Histogram.fromBytes(agg.elapsedHist) : null))
+      : null;
+  const p95Ms = (agg: RollupAgg | undefined) => {
+    const q95 = histOf(agg)?.quantile(0.95) ?? null;
+    return q95 == null ? null : q95 / 1000;
+  };
+
+  const wCities = wRollup.dims.get("city");
+  const bCities = bRollup.dims.get("city");
+  const city: Row[] = [];
+  for (const [key, wAgg] of wCities ?? []) {
+    if (wAgg.requests < 5) continue;
+    const [country, name] = JSON.parse(key) as [string, string];
+    if (name === "Unknown") continue;
+    const bAgg = bCities?.get(key);
+    city.push({
+      city: name,
+      region: null,
+      country: country === "Unknown" ? null : country,
+      w_cnt: wAgg.requests,
+      b_cnt: bAgg?.requests ?? 0,
+      w_errors_4xx: wAgg.errors,
+      b_errors_4xx: bAgg?.errors ?? 0,
+    });
+  }
+  const wInsLatCity = rollupGroup(wRollup, "ins_lat", "city");
+  const bInsLatCity = rollupGroup(bRollup, "ins_lat", "city");
+  if (wInsLatCity && bInsLatCity) {
+    for (const [key, wAgg] of wInsLatCity) {
+      if (wAgg.elapsedCount < 10) continue;
+      const [name, region, country] = JSON.parse(key) as [string, string | null, string | null];
+      const bAgg = bInsLatCity.get(key);
+      city.push({
+        city: name,
+        region,
+        country,
+        w_cnt: 0,
+        b_cnt: 0,
+        w_errors_4xx: 0,
+        b_errors_4xx: 0,
+        w_lat_total: wAgg.elapsedCount,
+        b_lat_total: bAgg?.elapsedCount ?? 0,
+        w_p95: p95Ms(wAgg),
+        b_p95: p95Ms(bAgg),
+      });
+    }
+  }
+
+  const dimension: Row[] = [];
+  for (const key of DIMENSIONS) {
+    const wCounts = wRollup.fields.get(key) ?? new Map<string, number>();
+    const bCounts = bRollup.fields.get(key) ?? new Map<string, number>();
+    let wNamed = 0;
+    let bNamed = 0;
+    for (const [value, n] of wCounts) {
+      wNamed += n;
+      dimension.push({ dimension: key, [key]: value, w_cnt: n, b_cnt: bCounts.get(value) ?? 0 });
+    }
+    for (const [value, n] of bCounts) {
+      bNamed += n;
+      if (!wCounts.has(value)) dimension.push({ dimension: key, [key]: value, w_cnt: 0, b_cnt: n });
+    }
+    dimension.push({
+      dimension: key,
+      [key]: null,
+      w_cnt: Math.max(0, windowRequests - wNamed),
+      b_cnt: Math.max(0, baselineRequests - bNamed),
+    });
+  }
+
+  const wAsn = wRollup.fields.get("asn") ?? new Map<string, number>();
+  const bAsn = bRollup.fields.get("asn") ?? new Map<string, number>();
+  const wInsAsn = rollupGroup(wRollup, "ins_asn", "asn");
+  const bInsAsn = rollupGroup(bRollup, "ins_asn", "asn");
+  const asn: Row[] = [];
+  for (const [key, wCnt] of wAsn) {
+    const wH = wInsAsn?.get(key);
+    const bH = bInsAsn?.get(key);
+    asn.push({
+      asn: /^\d+$/.test(key) ? Number(key) : key,
+      w_cnt: wCnt,
+      b_cnt: bAsn.get(key) ?? 0,
+      ...(wInsAsn && bInsAsn ? {
+        w_proxy_total: wH?.requests ?? 0,
+        w_hosting: wH?.count ?? 0,
+        b_proxy_total: bH?.requests ?? 0,
+        b_hosting: bH?.count ?? 0,
+      } : {}),
+    });
+  }
+
+  const wInsLatPop = rollupGroup(wRollup, "ins_lat", "pop");
+  const bInsLatPop = rollupGroup(bRollup, "ins_lat", "pop");
+  const geo: Row[] = [];
+  if (wInsLatPop && bInsLatPop) {
+    for (const [pop, wAgg] of wInsLatPop) {
+      const bAgg = bInsLatPop.get(pop);
+      geo.push({
+        pop,
+        w_lat_total: wAgg.elapsedCount,
+        b_lat_total: bAgg?.elapsedCount ?? 0,
+        w_p95: p95Ms(wAgg),
+        b_p95: p95Ms(bAgg),
+      });
+    }
+  }
+
+  const sum = (counts: Map<string, number>, pred: (value: string) => boolean) =>
+    [...counts].reduce((total, [value, n]) => total + (pred(value) ? n : 0), 0);
+  const wCache = wRollup.fields.get("cache") ?? new Map<string, number>();
+  const bCache = bRollup.fields.get("cache") ?? new Map<string, number>();
+  const wTransport = wRollup.fields.get("transport") ?? new Map<string, number>();
+  const bTransport = bRollup.fields.get("transport") ?? new Map<string, number>();
+  const scalar: Row[] = [{
+    w_quic: sum(wTransport, (v) => v.toLowerCase() === "quic"),
+    w_tr_total: sum(wTransport, (v) => v !== ""),
+    b_quic: sum(bTransport, (v) => v.toLowerCase() === "quic"),
+    b_tr_total: sum(bTransport, (v) => v !== ""),
+    w_hits: sum(wCache, (v) => v.startsWith("HIT")),
+    w_cacheable: sum(wCache, (v) => v.startsWith("HIT") || v.startsWith("MISS")),
+    b_hits: sum(bCache, (v) => v.startsWith("HIT")),
+    b_cacheable: sum(bCache, (v) => v.startsWith("HIT") || v.startsWith("MISS")),
+  }];
+
+  const wInsUrl = rollupGroup(wRollup, "ins_url", "url");
+  const bInsUrl = rollupGroup(bRollup, "ins_url", "url");
+  const wUrls = rollupGroup(wRollup, "urls", "url");
+  const bUrls = rollupGroup(bRollup, "urls", "url");
+  const insUrlTruncated = bRollup.truncated.has("ins_url/url");
+  const url: Row[] = [];
+  if (wInsUrl && bInsUrl && wUrls && bUrls) {
+    for (const key of new Set([...wInsUrl.keys(), ...wUrls.keys()])) {
+      const wIns = wInsUrl.get(key);
+      const bIns = bInsUrl.get(key);
+      const wU = wUrls.get(key);
+      const bU = bUrls.get(key);
+      if ((wIns?.requests ?? 0) < 3 && (wU?.elapsedCount ?? 0) < 5) continue;
+      const wHist = histOf(wU);
+      const wQ99 = wHist && wU && wU.elapsedCount > 0 ? wHist.quantile(0.99) : null;
+      const wQ50 = wHist && wU && wU.elapsedCount > 0 ? wHist.quantile(0.5) : null;
+      url.push({
+        url: key,
+        w_total: wIns?.requests ?? 0,
+        b_total: bIns?.requests ?? 0,
+        w_5xx: wIns?.status5xx ?? 0,
+        b_5xx: bIns?.status5xx ?? 0,
+        w_hits: wIns?.hitRequests ?? 0,
+        b_hits: bIns?.hitRequests ?? 0,
+        w_miss: wIns?.missRequests ?? 0,
+        b_miss: bIns?.missRequests ?? 0,
+        w_pass: wIns?.passRequests ?? 0,
+        b_pass: bIns?.passRequests ?? 0,
+        w_lat_total: wU?.elapsedCount ?? 0,
+        b_lat_total: bU?.elapsedCount ?? 0,
+        w_p95: p95Ms(wU),
+        b_p95: p95Ms(bU),
+        w_p99: wQ99 == null ? null : Math.round(wQ99 / 1000),
+        w_p50: wQ50 == null ? null : Math.round(wQ50 / 1000),
+        ...(insUrlTruncated && !bIns ? { b_ins_url_absent: true } : {}),
+      });
+    }
+  }
+
+  const deferred = new Set<string>([
+    ...INS_IP_DETECTORS,
+    ...insightsDeferredDetectors(wRollup),
+    ...insightsDeferredDetectors(bRollup),
+  ]);
+  const approximate = new Set(ALWAYS_APPROXIMATE);
+  for (const id of ["latency_regression", "tail_latency", "city_latency_regressions", "pop_latency_regression"]) {
+    if (!deferred.has(id)) approximate.add(id);
+  }
+  const lowerBound = new Set<string>();
+  for (const [id, group] of Object.entries(BASELINE_FIELDS)) {
+    if (deferred.has(id) || (!wRollup.truncated.has(group) && !bRollup.truncated.has(group)) || approximate.has(id)) continue;
+    (RATIO_DETECTORS.has(id) ? approximate : lowerBound).add(id);
+  }
+
+  const availability = handleInsightAvailability(body.service_id, ROLLUP_INSIGHT_COLUMNS);
+  const historyHours = Math.max(0, (windowStart - baselineResult.dataFromMs) / 3_600_000);
+  const envelope = await handleInsights(body, {
+    now: new Date(end),
+    maskIps: Boolean(body.mask_ips),
+    availableColumns: ROLLUP_INSIGHT_COLUMNS,
+    availableHistoryHours: historyHours,
+    urlAggregateRows: url,
+    ipSecurityRows: [],
+    cityAggregateRows: city,
+    dimensionAggregateRows: dimension,
+    asnAggregateRows: asn,
+    geoLatencyRows: geo,
+    scalarAggregateRows: scalar,
+    windowTotalRequests: windowRequests,
+    baselineTotalRequests: baselineRequests,
+    baselineSource: { approximate, lowerBound, deferred },
+  });
+  return {
+    ...envelope,
+    rollup: {
+      data_from: new Date(baselineResult.dataFromMs).toISOString(),
+      data_through: new Date(windowResult.dataThroughMs).toISOString(),
+      approximate: [...approximate],
+      lower_bound: [...lowerBound],
+    },
+    deferred_detectors: envelope.insights.filter((card) => card.placeholder).map((card) => card.id),
+    unsupported_detectors: availability.unavailable
+      .filter((d) => d.reason === "cloud_detector_unsupported")
+      .map(({ id, reason }) => ({ id, reason })),
+    unavailable_detectors: availability.unavailable,
   };
 }

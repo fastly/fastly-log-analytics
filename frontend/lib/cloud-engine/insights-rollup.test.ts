@@ -18,7 +18,7 @@ import {
   _coalesced_scalar_aggregates,
   handleInsights,
 } from "./insights";
-import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_DEFERRED, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, rollupInsightsBaseline } from "./insights-rollup";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -514,5 +514,49 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
     expect(fromCloned.rows.url?.[0].b_p95).toBeGreaterThan(0);
     expect(fromCloned.rows.city[0].b_p95).toBeGreaterThan(0);
     expect(fromCloned.rows.geo?.[0].b_p95).toBeGreaterThan(0);
+  });
+
+  it("answers window and baseline from v3 summaries without raw Parquet, deferring only IP detectors", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: T1 });
+    try {
+      const src = fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(fixtureFiles("window"))]);
+      const [raw, rolled] = await Promise.all([
+        queryCloudInsights(body, { signal, maskIps: false, filters: [], engine: read }),
+        insightsFromRollup(body, [], src, signal),
+      ]);
+      expect(rolled).not.toBeNull();
+      expect(rolled!.rollup).toMatchObject({
+        data_from: new Date(T0).toISOString(),
+        data_through: new Date(T1).toISOString(),
+      });
+      expect(rolled!.window_total_requests).toBe(raw.window_total_requests);
+      expect(rolled!.deferred_detectors).toEqual(["credential_enumeration", "content_discovery"]);
+      expect(rolled!.insights.map((c) => c.id)).toEqual(raw.insights.map((c) => c.id));
+      expect(rolled!.unsupported_detectors).toEqual(raw.unsupported_detectors);
+
+      const strip = (items: { baseline_val: number; baseline_label?: string }[], dropBaseline: boolean) =>
+        items.map(({ baseline_label: _, baseline_val, ...rest }) => (dropBaseline ? rest : { ...rest, baseline_val }));
+      for (const card of rolled!.insights) {
+        const rawCard = raw.insights.find((c) => c.id === card.id)!;
+        if (rolled!.deferred_detectors.includes(card.id)) {
+          expect(card, card.id).toMatchObject({ severity: "info", summary: "Computing baseline…", items: [], placeholder: true });
+          continue;
+        }
+        const approximate = rolled!.rollup.approximate.includes(card.id);
+        expect(card.severity, card.id).toBe(rawCard.severity);
+        if (card.id === "city_error_spikes") {
+          // dims/city merges regions and counts status 0 as an error.
+          expect(card.items.length).toBeGreaterThan(0);
+          continue;
+        }
+        expect(strip(card.items, approximate), card.id).toEqual(strip(rawCard.items, approximate));
+      }
+
+      // Filters or explicit detectors must return null so raw DuckDB handles them.
+      expect(await insightsFromRollup(body, [{ field: "country", mode: "include", value: "US" }], src, signal)).toBeNull();
+      expect(await insightsFromRollup({ ...body, detectors: ["error_spikes"] }, [], src, signal)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

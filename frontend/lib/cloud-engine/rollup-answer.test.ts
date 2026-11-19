@@ -93,6 +93,17 @@ describe("answerFromRollup", () => {
     expect(rollupInsightsBaseline(structuredClone(answer), rows)).toStrictEqual(rollupInsightsBaseline(full, rows));
   });
 
+  it("answers full /api/insights/rollup with window and baseline from summaries, unchanged by structured cloning", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: T1 });
+    const answer = await answerFromRollup("/api/insights/rollup", insights, source());
+    expect(answer).not.toBeNull();
+    expect(structuredClone(answer)).toStrictEqual(answer);
+    expect(answer).toMatchObject({
+      deferred_detectors: ["credential_enumeration", "content_discovery"],
+      rollup: { data_from: new Date(T0).toISOString(), data_through: new Date(T1).toISOString() },
+    });
+  });
+
   it("leaves paths summaries don't answer to the raw scan", async () => {
     expect(await answerFromRollup("/api/network-health", { ...health, filter_country: "US" }, source())).toBeNull();
     expect(await answerFromRollup("/api/network/bundle", { ...health, sections: ["quality"] }, source())).toBeNull();
