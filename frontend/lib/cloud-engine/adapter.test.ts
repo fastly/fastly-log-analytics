@@ -1223,9 +1223,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         method: "GET",
       }),
     );
-    expect(scoreRes).not.toBeNull();
-    expect(scoreRes!.status).toBe(200);
-    expect(await scoreRes!.json()).toMatchObject({ enabled: false, supported: false });
+    expect(scoreRes).toBeNull();
 
     const presetsRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/presets", { method: "GET" }),

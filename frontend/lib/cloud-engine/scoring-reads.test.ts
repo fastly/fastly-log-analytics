@@ -33,24 +33,13 @@ function scoringFixture(optional = false) {
 }
 
 describe("Cloud scoring reads", () => {
-  it("reports absent scorer control-plane capabilities without fabricated configuration or label counts", async () => {
-    const fetcher = vi.fn(async () => Response.json({
-      services: [{ service_id: "fixture-service", scoring: { enabled: false } }],
-    }));
-    vi.stubGlobal("fetch", fetcher);
-    const config = await (await cloudScoringRead(request("config")))!.json();
-    expect(config).toMatchObject({
-      status: { enabled: false, drift_known: false, supported: false },
-      capabilities: { historical_analytics: true, management: false, labels: false, thresholds: false },
-    });
-    expect(config).not.toHaveProperty("threshold");
-    const labels = await (await cloudScoringRead(request("labels")))!.json();
-    expect(labels).toMatchObject({ supported: false, reason: "cloud_scoring_control_plane_unavailable" });
-    expect(labels).not.toHaveProperty("labels");
-    expect(labels).not.toHaveProperty("counts");
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    fetcher.mockImplementation(async () => Response.json({ error: "unauthorized" }, { status: 401 }));
-    expect((await cloudScoringRead(request("status")))!.status).toBe(401);
+  it("passes native scoring control-plane routes through to Compute while scanning Parquet locally", async () => {
+    expect(await cloudScoringRead(request("config"))).toBeNull();
+    expect(await cloudScoringRead(request("status"))).toBeNull();
+    expect(await cloudScoringRead(request("labels"))).toBeNull();
+    await engine.syncWindow([{ key: "scored", bytes: scoringFixture() }]);
+    const preview = await queryCloudScoring(request("threshold-preview?threshold=50"), "threshold-preview");
+    expect(preview).toMatchObject({ threshold: 50, total_scored: 2, flagged_count: 1, flagged_pct: 50 });
   });
 
   it("does not turn a dataset with no scoring fields into successful empty analytics", async () => {

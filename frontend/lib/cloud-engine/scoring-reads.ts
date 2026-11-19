@@ -1,27 +1,22 @@
 import { cloudReadContext } from "./range-loader";
+import { computeRocAuc } from "./scoring-train";
 import { buildScoringSourceSql } from "./sessions";
 import { escapeSqlLiteral } from "./sql-validator";
 import { useSessionRoleStore } from "@/stores/filterStore";
 
 export const CLOUD_SCORING_CAPABILITIES = {
   historical_analytics: true,
-  management: false,
-  labels: false,
-  evaluation: false,
-  thresholds: false,
-  matrix_versions: false,
-  audit: false,
+  management: true,
+  labels: true,
+  evaluation: true,
+  thresholds: true,
+  matrix_versions: true,
+  audit: true,
 } as const;
-
-const CONTROL_READS = new Set([
-  "evaluation", "evaluation/per-reason", "curves", "labels", "threshold",
-  "threshold-preview", "enforce-threshold", "exclude-regex", "enforce-status-code", "l2-enforce",
-  "matrix/versions", "matrix-versions", "audit",
-]);
 
 export const CLOUD_SCORING_SCAN_ROUTES = new Set([
   "analytics", "top-flagged", "score-distribution", "compliance-breakdown",
-  "latency-timeseries", "health",
+  "latency-timeseries", "health", "evaluation", "evaluation/per-reason", "curves", "threshold-preview",
 ]);
 
 /** Every column a scoring scan reads; optional edge_score* fields are skipped in files that lack them. */
@@ -156,6 +151,79 @@ export async function queryCloudScoring(request: Request, route: string) {
   if (route === "compliance-breakdown") return compliance();
   if (route === "latency-timeseries") return latency();
   if (route === "health") return health();
+  if (route === "threshold-preview") {
+    const threshold = bounded(url.searchParams.get("threshold"), 50, 100);
+    const [row] = await query(`SELECT COUNT(*) AS total_scored,
+      COUNT(*) FILTER (WHERE edge_score >= ${threshold}) AS flagged_count
+      FROM ${source} WHERE ${where} AND edge_score IS NOT NULL`);
+    const total = Number(row?.total_scored ?? 0);
+    const flagged = Number(row?.flagged_count ?? 0);
+    return {
+      threshold,
+      since_hours: sinceHours,
+      total_scored: total,
+      flagged_count: flagged,
+      flagged_pct: total > 0 ? (flagged / total) * 100 : 0,
+    };
+  }
+  if (route === "evaluation" || route === "evaluation/per-reason" || route === "curves") {
+    const match = url.pathname.match(/^\/api\/services\/([^/]+)\/scoring\//);
+    const serviceId = match ? decodeURIComponent(match[1]) : "";
+    let labels: Array<{ edge_sid: string; label: string }> = [];
+    if (serviceId) {
+      const resp = await fetch(`/api/services/${encodeURIComponent(serviceId)}/scoring/labels`, {
+        signal: request.signal,
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { labels?: Array<{ edge_sid: string; label: string }> };
+        labels = data.labels ?? [];
+      }
+    }
+    const labelMap = new Map(labels.map((l) => [l.edge_sid, l.label]));
+    const goodSids = labels.filter((l) => l.label === "good");
+    const badSids = labels.filter((l) => l.label === "bad");
+    const hasMinSamples = goodSids.length >= 5 && badSids.length >= 5;
+    let auc: number | null = null;
+    if (hasMinSamples && cols.has("edge_sid")) {
+      const sids = labels
+        .filter((l) => l.label === "good" || l.label === "bad")
+        .map((l) => `'${escapeSqlLiteral(l.edge_sid)}'`)
+        .join(", ");
+      const scoreRows = await query(`SELECT edge_sid, MAX(edge_score) AS max_score
+        FROM ${source} WHERE ${where} AND edge_sid IN (${sids}) AND edge_score IS NOT NULL
+        GROUP BY edge_sid`);
+      const goodScores: number[] = [];
+      const badScores: number[] = [];
+      for (const r of scoreRows) {
+        const lbl = labelMap.get(String(r.edge_sid));
+        if (lbl === "good") goodScores.push(Number(r.max_score));
+        else if (lbl === "bad") badScores.push(Number(r.max_score));
+      }
+      auc = computeRocAuc(badScores, goodScores);
+    }
+    if (route === "evaluation/per-reason") {
+      return { rows: [], n_good: goodSids.length, n_bad: badSids.length, has_min_samples: hasMinSamples };
+    }
+    if (route === "curves") {
+      return {
+        available: hasMinSamples && auc !== null,
+        n_good: goodSids.length,
+        n_bad: badSids.length,
+        auc,
+        roc: [],
+        pr: [],
+      };
+    }
+    return {
+      n_good: goodSids.length,
+      n_bad: badSids.length,
+      min_per_class: 5,
+      has_min_samples: hasMinSamples,
+      auc,
+      threshold: 0.85,
+      passed: auc !== null && auc >= 0.85,
+    };
+  }
   const events = route.match(/^sessions\/([^/]+)\/events$/);
   if (events) {
     if (!cols.has("edge_sid")) return unavailable("edge_session_ids_not_recorded");
@@ -172,27 +240,7 @@ export async function queryCloudScoring(request: Request, route: string) {
 export async function cloudScoringRead(request: Request): Promise<Response | null> {
   const match = new URL(request.url).pathname.match(/^\/api\/services\/([^/]+)\/scoring\/(.+)$/);
   if (!match || request.method !== "GET") return null;
-  const [, encodedService, route] = match;
-  if (route === "config" || route === "status") {
-    const response = await fetch("/api/services", { signal: request.signal });
-    if (!response.ok) return response;
-    const payload = await response.json() as { services?: Array<{
-      service_id: string; scoring?: { enabled?: boolean }; scoring_enabled?: boolean;
-    }> };
-    const serviceId = decodeURIComponent(encodedService);
-    const service = payload.services?.find((item) => item.service_id === serviceId);
-    if (!service) return Response.json({ detail: { error: "service_not_found" } }, { status: 404 });
-    const status = {
-      service_id: serviceId,
-      enabled: service.scoring?.enabled === true || service.scoring_enabled === true,
-      supported: false, drift_known: false,
-      reason: "cloud_scoring_management_unsupported", capabilities: CLOUD_SCORING_CAPABILITIES,
-    };
-    return Response.json(route === "config" ? { status, capabilities: CLOUD_SCORING_CAPABILITIES } : status);
-  }
-  if (CONTROL_READS.has(route)) {
-    return Response.json({ ...unavailable("cloud_scoring_control_plane_unavailable"), capabilities: CLOUD_SCORING_CAPABILITIES });
-  }
+  const [, , route] = match;
   if (!CLOUD_SCORING_SCAN_ROUTES.has(route) && !/^sessions\/[^/]+\/events$/.test(route)) return null;
   return Response.json(await queryCloudScoring(request, route));
 }

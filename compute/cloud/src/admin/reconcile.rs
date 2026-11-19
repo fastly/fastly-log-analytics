@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub fn managed_name(name: &str) -> bool {
     name.starts_with("Fastly Log Analytics")
         || name.starts_with("Fastly Log Analysis")
+        || super::scoring::is_scoring_snippet_name(name)
         || matches!(
             name,
             "Fastly Object Storage Logs"
@@ -13,6 +14,7 @@ pub fn managed_name(name: &str) -> bool {
                 | "fastly_log_analytics_false"
                 | "fos_origin"
                 | "fos_credentials"
+                | "session_scorer"
         )
         || name.starts_with("flp-owner-")
 }
@@ -77,7 +79,10 @@ fn marker(service: &Service) -> String {
     format!("flp-owner-{}", service.owner)
 }
 
-fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
+fn desired(
+    _context: &Context<'_, impl Runtime>,
+    service: &Service,
+) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     let state = serialize(service)?;
     let mut snippets = list(
         &crate::logging::desired_snippets(&state)
@@ -153,6 +158,29 @@ fn desired(service: &Service) -> Result<BTreeMap<String, Vec<Value>>, Error> {
     } else {
         vec![]
     };
+    if let Some(sc) = service.scoring.as_ref().filter(|s| s.enabled) {
+        if service.capture != Capture::Attached {
+            let scoring_snippets = super::scoring::desired_scoring_snippets(
+                &service.service_id,
+                super::scoring::REQUEST_SECRET_PLACEHOLDER,
+                Some(&sc.exclude_url_regex),
+                sc.enforce_status_code,
+            )?;
+            snippets.extend(scoring_snippets);
+            backends.push(super::scoring::desired_scoring_backend(&sc.scoring_domain));
+            if !conditions
+                .iter()
+                .any(|c| c["name"] == "fastly_log_analytics_false")
+            {
+                conditions.push(json!({
+                    "name": "fastly_log_analytics_false",
+                    "type": "REQUEST",
+                    "priority": 10,
+                    "statement": "false",
+                }));
+            }
+        }
+    }
     if service.capture == Capture::Attached {
         snippets.retain(|snippet| snippet["name"] == marker(service));
         backends.clear();
@@ -374,7 +402,7 @@ fn discover(
     token: &str,
 ) -> Result<(), Error> {
     let version = active_version(context, &service.service_id, token)?;
-    let mut target = desired(service)?;
+    let mut target = desired(context, service)?;
     if job.kind == "teardown" {
         if job.options.remove_logging {
             target.insert("logging/fos".into(), vec![]);
@@ -435,6 +463,20 @@ fn discover(
             )?;
             current.insert(resource.to_owned(), list(&value)?.clone());
         }
+    } else if service.scoring.as_ref().is_some_and(|s| s.enabled)
+        || current["snippet"].iter().any(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(super::scoring::is_scoring_snippet_name)
+        })
+    {
+        let value = context.api(
+            "GET",
+            &format!("/service/{}/version/{version}/backend", service.service_id),
+            token,
+            None,
+        )?;
+        current.insert("backend".to_owned(), list(&value)?.clone());
     }
     let snippets = &current["snippet"];
     if snippets.iter().any(|v| {
@@ -862,6 +904,20 @@ fn apply(
             let (ak, sk) = fos::credentials(context, service)?;
             body["access_key"] = ak.into();
             body["secret_key"] = sk.into();
+        } else if change.resource == "snippet"
+            && change.name == super::scoring::SCORING_PASS_NAME
+            && change.action != "delete"
+        {
+            let req_secret =
+                context.secret(&super::scoring::request_secret_ref(&service.service_id))?;
+            super::scoring::validate_vcl_literal(&req_secret, false)?;
+            for field in ["content", "body"] {
+                if let Some(text) = body[field].as_str() {
+                    body[field] = text
+                        .replace(super::scoring::REQUEST_SECRET_PLACEHOLDER, &req_secret)
+                        .into();
+                }
+            }
         }
         upsert(context, &service.service_id, draft, token, change, &body)?;
     }

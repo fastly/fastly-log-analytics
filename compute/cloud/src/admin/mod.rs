@@ -5,6 +5,7 @@ mod model;
 mod reconcile;
 pub mod reset;
 pub mod schedule;
+pub mod scoring;
 pub mod stage;
 pub mod transport;
 
@@ -28,7 +29,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use transport::{encode, list, Context};
 pub use transport::{
-    kv_write_delay_ms, ApiRequest, ApiResponse, BackendBudget, FosRequest, FosResponse,
+    kv_write_delay_ms, ApiRawRequest, ApiRequest, ApiResponse, BackendBudget, FosRequest,
+    FosResponse,
 };
 
 #[derive(Debug)]
@@ -81,6 +83,31 @@ fn admin_audit(request: &Request) -> Option<(&'static str, String)> {
         ("POST", ["api", "admin", "services", sid, "delete-data", "cancel"]) => {
             Some(("delete_data_cancelled", (*sid).to_owned()))
         }
+        (
+            "POST",
+            ["api", "services", sid, "scoring", "enable"]
+            | ["api", "admin", "services", sid, "scoring", "enable"],
+        ) => Some(("scoring_enable_started", (*sid).to_owned())),
+        (
+            "POST",
+            ["api", "services", sid, "scoring", "disable"]
+            | ["api", "admin", "services", sid, "scoring", "disable"],
+        ) => Some(("scoring_disable_started", (*sid).to_owned())),
+        (
+            "POST",
+            ["api", "services", sid, "scoring", "teardown"]
+            | ["api", "admin", "services", sid, "scoring", "teardown"],
+        ) => Some(("scoring_teardown_started", (*sid).to_owned())),
+        (
+            "POST",
+            ["api", "services", sid, "scoring", "retrain"]
+            | ["api", "admin", "services", sid, "scoring", "retrain"],
+        ) => Some(("scoring_retrained", (*sid).to_owned())),
+        (
+            "POST",
+            ["api", "services", sid, "scoring", "rotate-key"]
+            | ["api", "admin", "services", sid, "scoring", "rotate-key"],
+        ) => Some(("scoring_key_rotated", (*sid).to_owned())),
         _ => None,
     }
 }
@@ -273,7 +300,11 @@ fn route(
                 "defaults": {
                     "endpoint_name": "Fastly Object Storage Logs",
                     "fos_region": "us-east-1",
-                    "fos_bucket_name": format!("fos-{}-logs", safe_service_id(sid)),
+                    "fos_bucket_name": if capture == Capture::Attached {
+                        format!("fos-{}-cloud-logs", safe_service_id(sid))
+                    } else {
+                        format!("fos-{}-logs", safe_service_id(sid))
+                    },
                     "fos_prefix": "",
                     "sample_rate": 100,
                     "edge_only": true,
@@ -399,6 +430,11 @@ fn route(
             "versions": crate::logging::rum::SUPPORTED_FARO_VERSIONS,
             "default": crate::logging::rum::DEFAULT_FARO_VERSION,
         })),
+        (
+            _,
+            ["api", "services", sid, "scoring", rest @ ..]
+            | ["api", "admin", "services", sid, "scoring", rest @ ..],
+        ) => scoring::route(context, actor, sid, rest, query, request),
         _ => Err(Error::new(404, "not_found")),
     }
 }
@@ -980,6 +1016,8 @@ fn new_job(
         retry: None,
         retry_attempts: Default::default(),
         uncertain_operations: Default::default(),
+        warnings: vec![],
+        delete_matrices: false,
     })
 }
 // A failed reconcile is superseded by the next one: it can fail for good (service_changed_rerun),
@@ -1154,6 +1192,7 @@ fn provision(
             input.wire_format
         },
         capture: input.capture,
+        scoring: None,
     };
     let previous: Option<Service> = context
         .get(&format!("svc:{}", input.service_id))?
@@ -1269,10 +1308,19 @@ fn teardown(
     if input["confirm_service_id"] != sid {
         return Err(Error::new(400, "typed_service_id_required"));
     }
-    let token = required(&input, "token")?.to_owned();
+    let (record, mut service) = load_service(context, &sid)?;
+    let token = match input["token"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        Some(t) => t.to_owned(),
+        None => context
+            .secret(&service.fastly_token_ref)
+            .map_err(|_| Error::new(400, "invalid_input"))?,
+    };
     preflight(context, &token, &sid, None, Capture::Managed)?;
     context.confirm_with_token(&token);
-    let (record, mut service) = load_service(context, &sid)?;
     check_generation(&record, &input)?;
     if service.status == "torn_down" {
         return Err(Error::new(409, "service_torn_down"));
@@ -1302,6 +1350,9 @@ fn teardown(
         service.pending_job_id = None;
     }
     let mut job = new_job(context, actor, &service, "teardown", false, true)?;
+    if service.scoring.is_some() {
+        job.step = "scoring_strip_logging_vcl".into();
+    }
     job.options = options;
     put_secret(context, &token, &service.fastly_token_ref, &token)?;
     start_job(context, &record, &mut service, job)
@@ -1456,6 +1507,11 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
         } else {
             job.status = "failed".into();
             job.error = Some(failure.code.into());
+            if job.kind == "scoring_enable" {
+                if let Ok((svc_rec, mut svc)) = load_service(context, &job.service_id) {
+                    scoring::rollback_failed_enable(context, &mut svc, &svc_rec, &job.actor);
+                }
+            }
         }
     } else if job.status != "complete" {
         job.status = "pending".into();
@@ -1584,6 +1640,9 @@ fn run_step(
         context.secret(&service.fastly_token_ref)?
     };
     fence(context, job)?;
+    if scoring::run_step(context, job, &record, &mut service, &token)? {
+        return Ok(());
+    }
     match job.step.as_str() {
         "bucket" | "bucket_probe" | "bucket_create" => {
             fos::bucket(context, job, &mut service, &record, &token)
@@ -1653,6 +1712,7 @@ fn run_step(
                 json!({"at":context.runtime.now(),"outcome":"complete","dry_run":job.dry_run,"activated":job.activate,"changes":public_job(job)["changes"]}),
             );
             save_job_service(context, &record, &service, job, "job.completed", "finalize")?;
+            scoring::on_job_finalized(context, job, &service);
             if job.kind == "teardown" {
                 let (record, mut install) = install(context)?;
                 if install.service_id.as_deref() == Some(&service.service_id) {

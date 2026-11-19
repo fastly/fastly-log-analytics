@@ -1369,7 +1369,7 @@ def test_contract_two_phase_execution_timestamps_and_state_export_before_webhook
     def mock_export(sid):
         execution_timeline.append(f"export_admin_state:{sid}")
 
-    def mock_post(*args, **kwargs):
+    def mock_send(client_self, request, **kwargs):
         execution_timeline.append("http_post")
         return MagicMock(status_code=200)
 
@@ -1385,7 +1385,8 @@ def test_contract_two_phase_execution_timestamps_and_state_export_before_webhook
         ),
         patch("backend.repositories.assets.update_last_triggered", side_effect=mock_update),
         patch("backend.core.metadata.base.export_admin_state", side_effect=mock_export),
-        patch("httpx.post", side_effect=mock_post),
+        patch("backend.utils.webhook_url.validate_webhook_destination", side_effect=lambda url: url),
+        patch("httpx.Client.send", autospec=True, side_effect=mock_send),
         patch("backend.cron.scheduler.start_progress"),
         patch("backend.cron.scheduler.end_progress"),
         patch("backend.cron.scheduler.cleanup_progress_and_reap"),
@@ -1423,8 +1424,15 @@ def test_contract_notification_dispatch_channel_payloads_and_timeouts():
     ]
     captured_posts: list[dict] = []
 
-    def fake_post(url, **kwargs):
-        captured_posts.append({"url": url, "kwargs": kwargs})
+    def fake_send(client_self, request, **kwargs):
+        import json
+
+        captured_posts.append(
+            {
+                "url": str(request.url),
+                "kwargs": {"timeout": client_self.timeout.read, "json": json.loads(request.content)},
+            }
+        )
         resp = MagicMock()
         resp.status_code = 200
         return resp
@@ -1443,7 +1451,8 @@ def test_contract_notification_dispatch_channel_payloads_and_timeouts():
         ),
         patch("backend.repositories.assets.update_last_triggered"),
         patch("backend.core.metadata.base.export_admin_state"),
-        patch("httpx.post", side_effect=fake_post),
+        patch("backend.utils.webhook_url.validate_webhook_destination", side_effect=lambda url: url),
+        patch("httpx.Client.send", autospec=True, side_effect=fake_send),
         patch("backend.cron.scheduler.start_progress"),
         patch("backend.cron.scheduler.end_progress"),
         patch("backend.cron.scheduler.cleanup_progress_and_reap"),
@@ -1497,7 +1506,8 @@ def test_contract_notification_failure_resilience_and_collection():
     ]
     attempted_urls: list[str] = []
 
-    def mock_post(url, **kwargs):
+    def mock_send(client_self, request, **kwargs):
+        url = str(request.url)
         attempted_urls.append(url)
         if "broken" in url:
             raise RuntimeError("Connection timed out (5s)")
@@ -1519,7 +1529,8 @@ def test_contract_notification_failure_resilience_and_collection():
         ),
         patch("backend.repositories.assets.update_last_triggered"),
         patch("backend.core.metadata.base.export_admin_state"),
-        patch("httpx.post", side_effect=mock_post),
+        patch("backend.utils.webhook_url.validate_webhook_destination", side_effect=lambda url: url),
+        patch("httpx.Client.send", autospec=True, side_effect=mock_send),
         patch("backend.cron.scheduler.start_progress"),
         patch("backend.cron.scheduler.end_progress"),
         patch("backend.cron.scheduler.cleanup_progress_and_reap"),

@@ -48,8 +48,6 @@ import {
   scoringConfigCompositeOptions,
 } from '@/components/SessionScoring/ScoringAdminPanels'
 import { useServiceStore } from '@/stores/filterStore'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { CloudScoringOverview } from '@/components/SessionScoring/CloudScoringOverview'
 import Loading from './loading'
 
 const PRESETS = [
@@ -379,7 +377,7 @@ function SessionScoringPageContent() {
 export default function SessionScoringPage() {
   return (
     <React.Suspense fallback={<Loading />}>
-      {isCloudMode() ? <CloudScoringOverview /> : <SessionScoringPageContent />}
+      <SessionScoringPageContent />
     </React.Suspense>
   )
 }

@@ -71,6 +71,32 @@ pub struct Service {
     pub data_reset: Option<DataReset>,
     #[serde(default, skip_serializing_if = "Capture::is_managed")]
     pub capture: Capture,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<ScoringConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScoringConfig {
+    pub enabled: bool,
+    pub scoring_service_id: String,
+    pub scoring_service_name: String,
+    pub scoring_domain: String,
+    pub scoring_keys_store_id: String,
+    pub scoring_config_store_id: String,
+    pub scoring_matrix_store_id: String,
+    pub enabled_at: String,
+    pub deployed_package_sha: String,
+    pub deployed_package_files_hash: String,
+    pub deployed_vcl_sha: String,
+    pub exclude_url_regex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_retrain_at: Option<String>,
 }
 
 /// Who owns the capture VCL. `Attached` reuses another install's capture snippets and
@@ -214,6 +240,10 @@ pub struct Job {
     pub retry_attempts: BTreeMap<String, u8>,
     #[serde(default)]
     pub uncertain_operations: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub delete_matrices: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -581,6 +611,7 @@ pub fn public_job(job: &Job) -> Value {
         "retry_at":job.retry.as_ref().and_then(|retry|(retry.at>0).then_some(retry.at)),
         "retry_attempt":job.retry.as_ref().map_or(0,|retry|retry.attempt),
         "retry_reason":job.retry.as_ref().map(|retry|&retry.reason),
+        "warnings":job.warnings,
     })
 }
 

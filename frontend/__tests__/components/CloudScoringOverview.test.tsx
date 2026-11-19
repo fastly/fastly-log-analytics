@@ -80,12 +80,15 @@ describe('Cloud scoring capability views', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Session scoring read failed (500)')
   })
 
-  it('suppresses session label reads and disables flags in Cloud', () => {
-    const get = vi.spyOn(client, 'GET')
+  it('allows session label reads and flags in Cloud', async () => {
+    const get = vi.spyOn(client, 'GET').mockResolvedValue({ data: { labels: [] }, response: new Response() } as never)
     renderHook(() => useScoringLabels('fixture-service'), { wrapper })
     render(<FlagSessionPopover serviceId="fixture-service" sid="sid-a" />, { wrapper })
-    const flag = screen.getByRole('button', { name: 'Session labels are unavailable in Cloud' })
-    expect(flag).toBeDisabled()
-    expect(get).not.toHaveBeenCalled()
+    const flag = screen.getByRole('button', { name: 'Flag this session' })
+    expect(flag).toBeEnabled()
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      '/api/services/{service_id}/scoring/labels',
+      expect.objectContaining({ params: { path: { service_id: 'fixture-service' } } }),
+    ))
   })
 })

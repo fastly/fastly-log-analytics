@@ -40,7 +40,7 @@ export function useScoringLabels(
   const { enabled = true } = opts
   const q = useQuery({
     queryKey: queryKeys.scoringLabels(serviceId),
-    enabled: enabled && !!serviceId && !isCloudMode(),
+    enabled: enabled && !!serviceId,
     queryFn: async ({ signal }) =>
       unwrapClient(
         client.GET('/api/services/{service_id}/scoring/labels', {

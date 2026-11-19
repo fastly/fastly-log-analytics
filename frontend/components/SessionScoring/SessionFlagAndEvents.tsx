@@ -79,8 +79,7 @@ export function FlagSessionPopover({
   const [open, setOpen] = React.useState(false)
   const [notes, setNotes] = React.useState('')
   const [error, setError] = React.useState('')
-  const cloudMode = isCloudMode()
-  const disabled = !sid || cloudMode
+  const disabled = !sid
 
   const submitMutation = useMutation({
     mutationFn: async (label: LabelValue) => {
@@ -137,7 +136,7 @@ export function FlagSessionPopover({
       <PopoverTrigger
         render={(props: React.ComponentPropsWithRef<'button'>) =>
           trigger ? (
-            <button {...props} disabled={disabled} title={cloudMode ? 'Session labels are unavailable in Cloud' : undefined}>{trigger}</button>
+            <button {...props} disabled={disabled}>{trigger}</button>
           ) : (
             <Button
               {...props}
@@ -145,8 +144,8 @@ export function FlagSessionPopover({
               size="icon"
               className="h-7 w-7"
               disabled={disabled}
-              aria-label={cloudMode ? 'Session labels are unavailable in Cloud' : disabled ? 'No session id (cookieless request)' : 'Flag this session'}
-              title={cloudMode ? 'Session labels are unavailable in Cloud' : disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+              aria-label={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+              title={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
             >
               <Flag
                 className={

@@ -4089,6 +4089,70 @@
           }
         }
       }
+    },
+    "/api/services/{service_id}/scoring/status": {
+      "get": { "responses": { "200": { "description": "Scoring status" } } }
+    },
+    "/api/services/{service_id}/scoring/config": {
+      "get": { "responses": { "200": { "description": "Scoring config composite" } } }
+    },
+    "/api/services/{service_id}/scoring/enable": {
+      "post": { "responses": { "200": { "description": "Start scoring enable job" } } }
+    },
+    "/api/services/{service_id}/scoring/disable": {
+      "post": { "responses": { "200": { "description": "Start scoring disable job" } } }
+    },
+    "/api/services/{service_id}/scoring/teardown": {
+      "post": { "responses": { "200": { "description": "Start scoring teardown job" } } }
+    },
+    "/api/services/{service_id}/scoring/retrain": {
+      "post": { "responses": { "200": { "description": "Persist retrained matrix" } } }
+    },
+    "/api/services/{service_id}/scoring/threshold": {
+      "get": { "responses": { "200": { "description": "Get advisory threshold" } } },
+      "put": { "responses": { "200": { "description": "Set advisory threshold" } } }
+    },
+    "/api/services/{service_id}/scoring/enforce-threshold": {
+      "get": { "responses": { "200": { "description": "Get enforce threshold" } } },
+      "put": { "responses": { "200": { "description": "Set enforce threshold" } } }
+    },
+    "/api/services/{service_id}/scoring/l2-enforce": {
+      "get": { "responses": { "200": { "description": "Get L2 enforce status" } } },
+      "put": { "responses": { "200": { "description": "Set L2 enforce status" } } }
+    },
+    "/api/services/{service_id}/scoring/exclude-regex": {
+      "get": { "responses": { "200": { "description": "Get exclude regex" } } },
+      "put": { "responses": { "200": { "description": "Update exclude regex" } } }
+    },
+    "/api/services/{service_id}/scoring/exclude-regex/validate": {
+      "post": { "responses": { "200": { "description": "Validate exclude regex" } } }
+    },
+    "/api/services/{service_id}/scoring/enforce-status-code": {
+      "get": { "responses": { "200": { "description": "Get enforce status code" } } },
+      "put": { "responses": { "200": { "description": "Set enforce status code" } } }
+    },
+    "/api/services/{service_id}/scoring/rotate-key": {
+      "post": { "responses": { "200": { "description": "Rotate AES-256 cookie key" } } }
+    },
+    "/api/services/{service_id}/scoring/matrix/versions": {
+      "get": { "responses": { "200": { "description": "List matrix versions" } } }
+    },
+    "/api/services/{service_id}/scoring/matrix/versions/restore": {
+      "post": { "responses": { "200": { "description": "Restore matrix version" } } }
+    },
+    "/api/services/{service_id}/scoring/matrix/active": {
+      "get": { "responses": { "200": { "description": "Get active matrix JSON" } } }
+    },
+    "/api/services/{service_id}/scoring/labels": {
+      "get": { "responses": { "200": { "description": "List session labels" } } },
+      "post": { "responses": { "200": { "description": "Create session label" } } }
+    },
+    "/api/services/{service_id}/scoring/labels/{label_id}": {
+      "patch": { "responses": { "200": { "description": "Update session label" } } },
+      "delete": { "responses": { "200": { "description": "Delete session label" } } }
+    },
+    "/api/services/{service_id}/scoring/audit": {
+      "get": { "responses": { "200": { "description": "List scoring audit events" } } }
     }
   },
   "components": {
