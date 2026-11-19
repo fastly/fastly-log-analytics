@@ -461,14 +461,18 @@ def test_remove_logging_endpoint_rolls_back_on_validation_failure():
 # ── ensure_cdn_service & redeploy_cdn_vcl ─────────────────────────────────
 
 
-def _reconciler_writing_cdn_id(cdn_id: str, *, then_raise: Exception | None = None, version: int = 1) -> MagicMock:
+def _reconciler_writing_cdn_id(
+    cdn_id: str, *, then_raise: Exception | None = None, version: int = 1, created: bool = True
+) -> MagicMock:
     """Stand-in for ``reconcile_cdn_service_state`` that persists the CDN id the way the real one does."""
 
-    def _reconcile(logging_service_id, token, status_cb=None, activate=True):
+    def _reconcile(logging_service_id, token, status_cb=None, activate=True, on_created=None):
         svcconfig.mutate_config(logging_service_id, lambda c: c.setdefault("fos_proxy", {}).update(service_id=cdn_id))
+        if created and on_created is not None:
+            on_created(cdn_id)
         if then_raise is not None:
             raise then_raise
-        return ReconciliationResult(service_id=cdn_id, activated_version=version)
+        return ReconciliationResult(service_id=cdn_id, activated_version=version, created=created)
 
     return MagicMock(side_effect=_reconcile)
 
@@ -527,12 +531,12 @@ def test_ensure_cdn_service_success():
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=True) as mock_detect,
     ):
         result = fastly_api.ensure_cdn_service(input_cfg, "AK", "SK", "tok", status_cb=statuses.append)
-        assert result == {"id": "cdn-new-123", "name": "MyCDN", "rate_limiting": True}
+        assert result == {"id": "cdn-new-123", "name": "MyCDN", "rate_limiting": True, "created": True}
         written_json = svcconfig.load_config("log-svc-123")
         assert written_json["fos_access_key_id"] == "AK" and written_json["fos_secret_access_key"] == "SK"
         assert written_json["cdn_service_name"] == "MyCDN"
         mock_reconcile.assert_called_with(
-            logging_service_id="log-svc-123", token="tok", status_cb=statuses.append, activate=True
+            logging_service_id="log-svc-123", token="tok", status_cb=statuses.append, activate=True, on_created=None
         )
         mock_detect.assert_called_with("tok", "log-svc-123")
 
@@ -552,13 +556,21 @@ def test_ensure_cdn_service_rate_limiting_scenarios(detection_val):
 
 
 @pytest.mark.usefixtures("_isolate_configs_dir")
-@pytest.mark.parametrize("then_raise", [None, RuntimeError("Validation failed")], ids=["success", "after_failure"])
-def test_ensure_cdn_service_on_created_callback(then_raise):
+@pytest.mark.parametrize(
+    ("then_raise", "created", "expected_ids"),
+    [
+        (None, True, ["cdn-new-123"]),
+        (RuntimeError("Validation failed"), True, ["cdn-new-123"]),
+        (None, False, []),
+    ],
+    ids=["success", "after_failure", "existing_reused"],
+)
+def test_ensure_cdn_service_on_created_callback(then_raise, created, expected_ids):
     created_ids = []
     with (
         patch(
             "backend.provision.declarative.reconciler.reconcile_cdn_service_state",
-            _reconciler_writing_cdn_id("cdn-new-123", then_raise=then_raise),
+            _reconciler_writing_cdn_id("cdn-new-123", then_raise=then_raise, created=created),
         ),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
     ):
@@ -571,7 +583,7 @@ def test_ensure_cdn_service_on_created_callback(then_raise):
             fastly_api.ensure_cdn_service(
                 {"logging_service_id": "log-svc-123"}, "AK", "SK", "tok", on_created=created_ids.append
             )
-    assert created_ids == ["cdn-new-123"]
+    assert created_ids == expected_ids
 
 
 # ── update_logging_endpoint (SSE generator) ──────────────────────────────
