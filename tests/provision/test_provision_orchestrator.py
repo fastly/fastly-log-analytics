@@ -2333,3 +2333,35 @@ def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
         and saved_dis["rum_vcl_sha"] == rum_vcl_fingerprint(SID_rum_orchestrator, saved_dis)
         and saved_dis["concurrent_key"] == "kept"
     )
+
+
+@pytest.mark.no_postgres
+def test_write_only_dictionary_parity():
+    from backend.provision.declarative.vcl_builder import desired_dictionaries
+
+    root = Path(__file__).resolve().parents[2]
+    rum_state = FeatureState(
+        service_id="svc_dict",
+        log_period=60,
+        sample_rate=100,
+        edge_only=True,
+        custom_condition="",
+        fos_prefix="",
+        fos_endpoint="us-east-1.object.fastlystorage.app",
+        fos_access_key_id="AK",
+        fos_secret_access_key="SK",
+        fos_bucket="bkt",
+        logging_enabled=True,
+        rum_enabled=True,
+    )
+    py_dicts = desired_dictionaries(rum_state)
+    assert [(d.name, d.write_only) for d in py_dicts] == [("fos_credentials", True)]
+
+    orchestrate_src = (root / "backend" / "provision" / "declarative" / "orchestrate.py").read_text()
+    assert 'ServiceDictionary(name="fos_credentials", write_only=True' in orchestrate_src
+    assert 'ServiceDictionary(name="cdn_auth", write_only=True' in orchestrate_src
+
+    reconcile_rs = (root / "compute" / "cloud" / "src" / "admin" / "reconcile.rs").read_text()
+    assert '"name": "fos_credentials",' in reconcile_rs
+    assert '"write_only": true,' in reconcile_rs
+    assert '"write_only":boolean(&value["write_only"],true)' in reconcile_rs
