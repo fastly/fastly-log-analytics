@@ -49,6 +49,7 @@ const ID_AFTER: &[&str] = &[
     "dictionary_item",
     "config",
     "views",
+    "labels",
 ];
 
 /// Literal path segments of our own routes and of the Fastly API calls we make. Anything else
@@ -157,6 +158,31 @@ const KNOWN_SEGMENTS: &[&str] = &[
     "entries",
     "info",
     "ops",
+    "scoring",
+    "enable",
+    "disable",
+    "teardown",
+    "retrain",
+    "threshold",
+    "enforce-threshold",
+    "l2-enforce",
+    "exclude-regex",
+    "enforce-status-code",
+    "rotate-key",
+    "matrix",
+    "restore",
+    "active",
+    "labels",
+    "audit",
+    "package",
+    "generated_vcl",
+    "resource",
+    "deactivate",
+    "enabled-products",
+    "v1",
+    "compute",
+    "config_store",
+    "kv_store",
 ];
 
 /// Drops the query and replaces identifiers with `:id` and unrecognized segments with

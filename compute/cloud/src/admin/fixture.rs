@@ -1,7 +1,10 @@
-use super::{ApiRequest, FosRequest, FosResponse, Record};
+use super::{ApiRawRequest, ApiRequest, FosRequest, FosResponse, Record};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 #[derive(Clone)]
 struct Version {
@@ -33,6 +36,11 @@ struct State {
     confirmation_delay: u32,
     stale_confirmations: BTreeMap<String, (u32, Option<Record>)>,
     kv_cache: BTreeMap<String, Option<Record>>,
+    config_stores: BTreeMap<String, (String, BTreeMap<String, String>)>,
+    kv_stores: BTreeMap<String, (String, BTreeMap<String, Vec<u8>>)>,
+    packages: BTreeMap<(String, u64), Vec<u8>>,
+    disabled_products: BTreeSet<String>,
+    pragmas_missing: BTreeSet<String>,
 }
 
 /// Deterministic native-only boundary. It has no network client or real credential path.
@@ -290,6 +298,46 @@ impl FixtureAdapter {
             return Err("injected_lost_ack".into());
         }
         Ok(response)
+    }
+    pub fn api_raw(&self, request: ApiRawRequest<'_>) -> Result<(u16, Value), String> {
+        let mut state = self.state.lock().map_err(|_| "fixture_lock")?;
+        state
+            .calls
+            .push((request.method.into(), request.path.into()));
+        if matches_failure(&mut state, request.method, request.path, false) {
+            return Err("injected_failure".into());
+        }
+        if !matches!(
+            request.token,
+            "fixture-token" | "fixture-read-only" | "fixture-wrong-account" | "fixture-limited"
+        ) {
+            return Ok((401, json!({"error":"invalid_token"})));
+        }
+        let parts: Vec<&str> = request.path.trim_matches('/').split('/').collect();
+        match (request.method, parts.as_slice()) {
+            ("PUT", ["service", sid, "version", num, "package"]) => {
+                let ver_num: u64 = num.parse().map_err(|_| "fixture_invalid_version")?;
+                let v = version_mut(&mut state, sid, num)?;
+                if v.locked || v.active {
+                    return Ok((400, json!({"error":"version_locked"})));
+                }
+                state
+                    .packages
+                    .insert(((*sid).to_owned(), ver_num), request.body.to_vec());
+                Ok((200, json!({"id": format!("pkg-{sid}-{ver_num}")})))
+            }
+            ("PUT", ["resources", "stores", "kv", store_id, "keys", key]) => {
+                let Some((_, entries)) = state.kv_stores.get_mut(*store_id) else {
+                    return Ok((404, json!({})));
+                };
+                entries.insert((*key).to_owned(), request.body.to_vec());
+                Ok((200, json!({"status":"ok"})))
+            }
+            _ => Err(format!(
+                "fixture_raw_unhandled:{}:{}",
+                request.method, request.path
+            )),
+        }
     }
     pub fn fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
         let mut state = self.state.lock().map_err(|_| "fixture_lock")?;
@@ -554,6 +602,54 @@ impl FixtureAdapter {
             .get_mut(sid)
             .expect("fixture service")["customer_id"] = customer.into();
     }
+    pub fn disable_product(&self, product: &str) {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .disabled_products
+            .insert(product.into());
+    }
+    pub fn set_pragmas_missing(&self, sid: &str, missing: bool) {
+        let mut state = self.state.lock().expect("fixture lock");
+        if missing {
+            state.pragmas_missing.insert(sid.into());
+        } else {
+            state.pragmas_missing.remove(sid);
+        }
+    }
+    pub fn kv_store_value(&self, store_id: &str, key: &str) -> Option<Vec<u8>> {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .kv_stores
+            .get(store_id)
+            .and_then(|(_, m)| m.get(key))
+            .cloned()
+    }
+    pub fn config_store_value(&self, store_id: &str, key: &str) -> Option<String> {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .config_stores
+            .get(store_id)
+            .and_then(|(_, m)| m.get(key))
+            .cloned()
+    }
+    pub fn record_snapshot(&self, key: &str) -> Option<Record> {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .records
+            .get(key)
+            .cloned()
+    }
+    pub fn has_service(&self, sid: &str) -> bool {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .services
+            .contains_key(sid)
+    }
 }
 fn matches_failure(state: &mut State, method: &str, path: &str, after: bool) -> bool {
     let matches = state
@@ -599,7 +695,10 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
             json!({"id":"fixtureUser","role":if request.token=="fixture-limited" {"user"} else {"superuser"},"limit_services":false}),
         ));
     }
-    if path == "/enabled-products/v1/object_storage" {
+    if let Some(product) = path.strip_prefix("/enabled-products/v1/") {
+        if state.disabled_products.contains(product) {
+            return Ok((200, json!({"enabled":false})));
+        }
         return Ok((200, json!({"enabled":true})));
     }
     if path == "/service" && method == "GET" {
@@ -608,9 +707,112 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
             Value::Array(state.services.values().cloned().collect()),
         ));
     }
+    if path == "/service" && method == "POST" {
+        if state.disabled_products.contains("compute") {
+            return Ok((403, json!({"error":"compute_not_enabled"})));
+        }
+        state.sequence += 1;
+        let sid = format!("fixtureScorer{}", state.sequence);
+        let svc = json!({
+            "id": sid,
+            "name": body["name"],
+            "type": body["type"].as_str().unwrap_or("wasm"),
+            "customer_id": "fixtureCustomer",
+        });
+        state.services.insert(sid.clone(), svc.clone());
+        state.versions.insert(
+            sid,
+            vec![Version {
+                number: 1,
+                active: false,
+                locked: false,
+                comment: String::new(),
+                resources: BTreeMap::new(),
+            }],
+        );
+        return Ok((200, svc));
+    }
     match (method,p.as_slice()) {
         ("GET",["service",sid])=>Ok(state.services.get(*sid).map(|v|(200,v.clone())).unwrap_or((404,json!({})))),
+        ("DELETE",["service",sid])=>{
+            state.services.remove(*sid);
+            state.versions.remove(*sid);
+            Ok((200,json!({"status":"ok"})))
+        }
         ("GET",["service",sid,"version"])=>Ok((200,Value::Array(state.versions.get(*sid).into_iter().flatten().map(|v|json!({"number":v.number,"active":v.active,"locked":v.locked,"comment":v.comment})).collect()))),
+        ("PUT",["service",sid,"version",number,"deactivate"])=>{
+            let versions=state.versions.get_mut(*sid).ok_or("fixture_service_missing")?;
+            for version in versions {if version.number.to_string()==*number {version.active=false;}}
+            Ok((200,json!({"number":number})))
+        }
+        ("GET",["service",sid,"version",_,"generated_vcl"])=>{
+            let content=if state.pragmas_missing.contains(*sid) {
+                "sub vcl_recv {}"
+            } else {
+                "pragma fix_unsent_body_drain true;\npragma no_body_if_bereq_is_get_or_head true;"
+            };
+            Ok((200,json!({"content":content})))
+        }
+        ("GET",["service",sid,"version",number,"package"])=>{
+            let ver_num:u64=number.parse().unwrap_or(1);
+            if let Some(bytes)=state.packages.get(&((*sid).to_owned(),ver_num)) {
+                Ok((200,json!({"metadata":{"files_hash":format!("fh-{}",bytes.len())}})))
+            } else {
+                Ok((404,json!({})))
+            }
+        }
+        ("GET",["resources","stores","config"])=>{
+            let items:Vec<_>=state.config_stores.iter().map(|(id,(name,_))|json!({"id":id,"name":name})).collect();
+            Ok((200,Value::Array(items)))
+        }
+        ("POST",["resources","stores","config"])=>{
+            if state.disabled_products.contains("config_store") {return Ok((403,json!({"error":"config_store_not_enabled"})));}
+            state.sequence+=1;
+            let id=format!("cfg-store-{}",state.sequence);
+            let name=body["name"].as_str().unwrap_or("").to_owned();
+            state.config_stores.insert(id.clone(),(name.clone(),BTreeMap::new()));
+            Ok((200,json!({"id":id,"name":name})))
+        }
+        ("DELETE",["resources","stores","config",id])=>{
+            if state.config_stores.remove(*id).is_some() {Ok((200,json!({"status":"ok"})))} else {Ok((404,json!({})))}
+        }
+        ("GET",["resources","stores","config",id,"item",key])=>{
+            let Some((_,items))=state.config_stores.get(*id) else {return Ok((404,json!({})));};
+            Ok(items.get(*key).map(|v|(200,json!({"item_key":key,"item_value":v}))).unwrap_or((404,json!({}))))
+        }
+        ("POST",["resources","stores","config",id,"item"])=>{
+            let Some((_,items))=state.config_stores.get_mut(*id) else {return Ok((404,json!({})));};
+            let k=body["item_key"].as_str().ok_or("fixture_cfg_key")?.to_owned();
+            let v=body["item_value"].as_str().unwrap_or("").to_owned();
+            items.insert(k.clone(),v.clone());
+            Ok((200,json!({"item_key":k,"item_value":v})))
+        }
+        ("PUT",["resources","stores","config",id,"item",key])=>{
+            let Some((_,items))=state.config_stores.get_mut(*id) else {return Ok((404,json!({})));};
+            if !items.contains_key(*key) {return Ok((404,json!({})));}
+            let v=body["item_value"].as_str().unwrap_or("").to_owned();
+            items.insert((*key).to_owned(),v.clone());
+            Ok((200,json!({"item_key":key,"item_value":v})))
+        }
+        ("GET",["resources","stores","kv"])=>{
+            let items:Vec<_>=state.kv_stores.iter().map(|(id,(name,_))|json!({"id":id,"name":name})).collect();
+            Ok((200,json!({"data":items})))
+        }
+        ("POST",["resources","stores","kv"])=>{
+            if state.disabled_products.contains("kv_store") {return Ok((403,json!({"error":"kv_store_not_enabled"})));}
+            state.sequence+=1;
+            let id=format!("kv-store-{}",state.sequence);
+            let name=body["name"].as_str().unwrap_or("").to_owned();
+            state.kv_stores.insert(id.clone(),(name.clone(),BTreeMap::new()));
+            Ok((200,json!({"id":id,"name":name})))
+        }
+        ("DELETE",["resources","stores","kv",id])=>{
+            if state.kv_stores.remove(*id).is_some() {Ok((200,json!({"status":"ok"})))} else {Ok((404,json!({})))}
+        }
+        ("DELETE",["resources","stores","kv",id,"keys",key])=>{
+            if let Some((_,entries))=state.kv_stores.get_mut(*id) {entries.remove(*key);}
+            Ok((204,json!({})))
+        }
         ("PUT",["service",sid,"version",source,"clone"])=>{
             let versions=state.versions.get_mut(*sid).ok_or("fixture_service_missing")?;
             let mut version=versions.iter().find(|v|v.number.to_string()==*source).ok_or("fixture_source_missing")?.clone();

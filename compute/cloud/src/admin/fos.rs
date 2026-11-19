@@ -272,6 +272,33 @@ pub fn put_object(
         Err(Error::new(502, "object_put_failed"))
     }
 }
+pub fn get_object(
+    context: &Context<'_, impl Runtime>,
+    service: &Service,
+    (ak, sk): &(String, String),
+    key: &str,
+) -> Result<Option<Vec<u8>>, Error> {
+    let response = context.fos(FosRequest {
+        method: "GET",
+        region: &service.fos_region,
+        bucket: &service.fos_bucket,
+        key,
+        query: "",
+        access_key: ak,
+        secret_key: sk,
+        body: Vec::new(),
+        timeout: super::transport::FOS_TIMEOUT,
+        response_limit: super::transport::FOS_RESPONSE_LIMIT,
+        content_md5: None,
+    })?;
+    if response.status == 404 {
+        Ok(None)
+    } else if (200..300).contains(&response.status) {
+        Ok(Some(response.body))
+    } else {
+        Err(Error::new(502, "object_get_failed"))
+    }
+}
 pub fn delete_object(
     context: &Context<'_, impl Runtime>,
     service: &Service,

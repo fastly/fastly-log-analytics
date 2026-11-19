@@ -159,6 +159,15 @@ pub trait Runtime: SetupStores {
     ) -> Result<crate::admin::ApiResponse, String> {
         Err("control_plane_unavailable".into())
     }
+    fn admin_api_raw(
+        &self,
+        _request: crate::admin::ApiRawRequest<'_>,
+    ) -> Result<crate::admin::ApiResponse, String> {
+        Err("control_plane_unavailable".into())
+    }
+    fn scorer_package(&self) -> Option<Vec<u8>> {
+        crate::admin::scoring::EMBEDDED_SCORER_PACKAGE.map(|bytes| bytes.to_vec())
+    }
     fn admin_fos(
         &self,
         _request: crate::admin::FosRequest<'_>,
@@ -801,7 +810,12 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             return crate::views::handle(self.runtime, &service.service_id, request);
         }
         let admin_page = is_admin_page_path(path);
-        if path.starts_with("/api/admin/") || path.starts_with("/api/provision/") || admin_page {
+        let scoring_api = path.starts_with("/api/services/") && path.contains("/scoring/");
+        if path.starts_with("/api/admin/")
+            || path.starts_with("/api/provision/")
+            || scoring_api
+            || admin_page
+        {
             if admin_page && matches!(request.method.as_str(), "GET" | "HEAD") && user.is_none() {
                 return Ok(Response::redirect(if auth.setup_complete()? {
                     "/sign-in"
@@ -1300,6 +1314,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         if path.starts_with("/api/admin/provision/")
             || path.starts_with("/api/provision/")
             || path.starts_with("/api/admin/services")
+            || (path.starts_with("/api/services/") && path.contains("/scoring/"))
             || path.starts_with("/api/admin/jobs/")
             || path.starts_with("/api/admin/log-fields/")
             || path.starts_with("/api/admin/rum/")

@@ -348,13 +348,6 @@ fn client_ip_reset_remains_early_and_future_features_are_rejected() {
         .unwrap();
     assert_eq!(reset["priority"], -100);
     assert_eq!(reset["subroutine"], "vcl_recv");
-    let feature = "scoring";
-    let mut state = json!({});
-    state[feature] = json!({"enabled":true});
-    assert_eq!(
-        logging::desired_snippets(&state).unwrap_err(),
-        format!("{feature} is outside Goal 2")
-    );
     assert!(!catalog::resolve_enabled_fields(
         &json!({"groups":["H"],"field_overrides":{"cookie_session":true}})
     )

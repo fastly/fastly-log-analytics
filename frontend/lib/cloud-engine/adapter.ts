@@ -785,6 +785,7 @@ async function handleCloudRequest(
     return withLoading("listing", () => cloudQuarantine(request));
   }
   if (/^\/api\/services\/[^/]+\/scoring\//.test(path) && !isLocalScan(path, request.method)) {
+    if (isNativeCloudRoute(request.method, path)) return null;
     return (await cloudScoringRead(request)) ?? unsupportedCloudEndpoint(request);
   }
   if (/^\/api\/services\/[^/]+\/(?:rum|cmcd)\/(?:status|versions)$/.test(path)) {
@@ -819,9 +820,7 @@ async function handleCloudRequest(
     return withLoading(stage, () => fetch(request));
   }
   if ((request.method !== "GET" && (
-    /^\/api\/services\/[^/]+\/(?:rum|cmcd)\//.test(path) && !isLocalScan(path, request.method) ||
-    /^\/api\/services\/[^/]+\/scoring\//.test(path) &&
-      !/\/(?:analytics|evaluation|threshold-preview|latency-timeseries|score-distribution|top-flagged|compliance-breakdown|audit|curves|health|events)$/.test(path)
+    /^\/api\/services\/[^/]+\/(?:rum|cmcd)\//.test(path) && !isLocalScan(path, request.method)
   )) || /^\/api\/services\/[^/]+\/(?:rum|cmcd)\/(?:enable|disable|upgrade|settings)$/.test(path)) {
     return unsupportedCloudEndpoint(request);
   }

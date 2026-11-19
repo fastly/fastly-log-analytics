@@ -15,6 +15,8 @@ import { Label } from '@/components/ui/label'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 import { useAutoFlash, useOpenGeneration } from '@/hooks/useSSE'
 import { client, unwrapClient } from '@/lib/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { retrainCloudScoring } from '@/lib/cloud-engine/scoring-train'
 import { formatCount, formatTimeAgo } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { AuditLogHelp } from './help-content'
@@ -82,12 +84,28 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
   const [sinceDays, setSinceDays] = React.useState(7)
   const [result, setResult] = React.useState<RetrainResult | null>(null)
   const mutation = useMutation({
-    mutationFn: (): Promise<RetrainResult> =>
-      unwrapClient(
+    mutationFn: async (): Promise<RetrainResult> => {
+      if (isCloudMode()) {
+        const res = await retrainCloudScoring(serviceId, { sinceDays })
+        return {
+          ok: res.ok,
+          version: res.version,
+          vocab_size: res.stats.routes_seen,
+          session_count: res.stats.sessions_kept,
+          transition_count: res.stats.transitions,
+          sessions_in: res.stats.sessions_in,
+          sessions_dropped_short: res.stats.sessions_dropped_short,
+          sessions_dropped_fast: res.stats.sessions_dropped_fast,
+          kv_pushed: res.kv_pushed ?? true,
+          auc: res.auc_against_labels,
+        } as unknown as RetrainResult
+      }
+      return unwrapClient(
         client.POST('/api/services/{service_id}/scoring/retrain', {
           params: { path: { service_id: serviceId }, query: { since_days: sinceDays } },
         }),
-      ),
+      )
+    },
     onSuccess: (data) => {
       setResult(data)
       invalidateServiceScoringQueries(queryClient, serviceId)

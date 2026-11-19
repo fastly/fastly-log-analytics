@@ -97,6 +97,14 @@ pub struct ApiRequest<'a> {
     pub body: Option<Value>,
     pub timeout: Duration,
 }
+pub struct ApiRawRequest<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub token: &'a str,
+    pub content_type: &'a str,
+    pub body: &'a [u8],
+    pub timeout: Duration,
+}
 pub struct ApiResponse {
     pub status: u16,
     pub body: Value,
@@ -516,6 +524,44 @@ impl<'a, R: Runtime> Context<'a, R> {
             Err(Error::new(
                 if status == 401 || status == 403 {
                     403
+                } else {
+                    502
+                },
+                "fastly_api_rejected",
+            ))
+        }
+    }
+    pub fn api_raw(
+        &self,
+        method: &str,
+        path: &str,
+        token: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<Value, Error> {
+        let timeout = request_timeout(FOS_TIMEOUT, self.started.elapsed());
+        if timeout.is_zero() {
+            return Err(Error::new(503, "wall_time_budget"));
+        }
+        let response = self
+            .runtime
+            .admin_api_raw(ApiRawRequest {
+                method,
+                path,
+                token,
+                content_type,
+                body,
+                timeout,
+            })
+            .map_err(|code| Error::new(502, fastly_transport_error(&code)))?;
+        if (200..300).contains(&response.status) {
+            Ok(response.body)
+        } else if response.status == 401 || response.status == 403 {
+            Err(Error::new(403, "fastly_token_scope_insufficient"))
+        } else {
+            Err(Error::new(
+                if (400..500).contains(&response.status) {
+                    400
                 } else {
                     502
                 },

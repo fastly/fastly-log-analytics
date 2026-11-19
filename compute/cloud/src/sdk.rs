@@ -1135,6 +1135,40 @@ impl Runtime for FastlyRuntime {
         }
         self.raw_admin_api(input)
     }
+    fn admin_api_raw(
+        &self,
+        input: crate::admin::ApiRawRequest<'_>,
+    ) -> Result<crate::admin::ApiResponse, String> {
+        self.budget.charge()?;
+        if !input.path.starts_with('/')
+            || input.path.contains("..")
+            || input.path.contains(['\r', '\n', '?'])
+        {
+            return Err("api_path_invalid".into());
+        }
+        let url = format!("https://api.fastly.com{}", input.path);
+        let request = Request::new(input.method, url)
+            .with_header("fastly-key", input.token)
+            .with_header("accept", "application/json")
+            .with_header("cache-control", "no-cache")
+            .with_header("content-type", input.content_type)
+            .with_body(input.body.to_vec());
+        let timeout = input.timeout.min(crate::admin::transport::FOS_TIMEOUT);
+        let mut response = bounded_send_with_timeout(request, "api_fastly", timeout)?;
+        let response_status = response.get_status().as_u16();
+        let retry_after =
+            crate::admin::transport::parse_retry_after(response.get_header_str("retry-after"));
+        let value = if (200..300).contains(&response_status) {
+            bounded_json(response.take_body())?
+        } else {
+            Value::Null
+        };
+        Ok(crate::admin::ApiResponse {
+            status: response_status,
+            body: value,
+            retry_after,
+        })
+    }
     fn admin_fos(
         &self,
         input: crate::admin::FosRequest<'_>,

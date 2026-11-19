@@ -16,7 +16,19 @@ import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { SSEModal } from '@/components/SSEModal'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { formatLocalDateTime } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { StatusPanelHelp } from './help-content'
@@ -136,6 +148,156 @@ function AucField({ evalData }: { evalData: ScoringEvaluation }) {
   )
 }
 
+type CloudJobAction = 'enable' | 'disable' | 'teardown'
+
+function CloudScoringJobButton({
+  serviceId,
+  action,
+  title,
+  description,
+  generation,
+  trigger,
+  onComplete,
+}: {
+  serviceId: string
+  action: CloudJobAction
+  title: string
+  description: React.ReactNode
+  generation?: string
+  trigger: React.ReactNode
+  onComplete: () => void
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [running, setRunning] = React.useState(false)
+  const [stepText, setStepText] = React.useState('')
+  const [errorText, setErrorText] = React.useState('')
+  const [needsToken, setNeedsToken] = React.useState(false)
+  const [token, setToken] = React.useState('')
+  const [confirmSid, setConfirmSid] = React.useState('')
+
+  const runCloudJob = async () => {
+    setRunning(true)
+    setErrorText('')
+    setStepText('Starting job...')
+    try {
+      const payload: Record<string, unknown> = {}
+      if (token.trim()) payload.token = token.trim()
+      if (action === 'teardown') {
+        payload.confirm_service_id = confirmSid.trim()
+        if (generation) payload.generation = generation
+      }
+      const res = await fetch(`/api/services/${encodeURIComponent(serviceId)}/scoring/${action}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const startBody = (await res.json()) as {
+        job?: { id: string; status: string; step: string; error?: string | null }
+        error?: string
+        detail?: { error?: string }
+      }
+      if (!res.ok) {
+        const err = startBody.detail?.error || startBody.error || `Request failed (${res.status})`
+        if (err === 'fastly_token_scope_insufficient') setNeedsToken(true)
+        setErrorText(err)
+        setRunning(false)
+        return
+      }
+      let job = startBody.job
+      while (job && job.status !== 'complete' && job.status !== 'failed') {
+        setStepText(`Running step: ${job.step}...`)
+        const stepRes = await fetch(`/api/admin/jobs/${encodeURIComponent(job.id)}/step`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        })
+        const stepBody = (await stepRes.json()) as {
+          job?: { id: string; status: string; step: string; error?: string | null }
+          error?: string
+        }
+        if (!stepRes.ok) {
+          setErrorText(stepBody.error || `Step failed (${stepRes.status})`)
+          setRunning(false)
+          return
+        }
+        job = stepBody.job
+      }
+      if (job?.status === 'failed') {
+        const err = job.error || 'Job failed'
+        if (err === 'fastly_token_scope_insufficient') setNeedsToken(true)
+        setErrorText(err)
+        setRunning(false)
+        return
+      }
+      setStepText('Complete')
+      setRunning(false)
+      setOpen(false)
+      onComplete()
+    } catch (e) {
+      setErrorText(e instanceof Error ? e.message : String(e))
+      setRunning(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={trigger as React.ReactElement} />
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <div className="text-sm text-muted-foreground">{description}</div>
+        </DialogHeader>
+        <div className="space-y-3 py-2 text-xs">
+          {action === 'teardown' && (
+            <div className="space-y-1">
+              <Label htmlFor="scoring-confirm-sid" className="text-xs">
+                Type <code>{serviceId}</code> to confirm teardown
+              </Label>
+              <Input
+                id="scoring-confirm-sid"
+                value={confirmSid}
+                onChange={(e) => setConfirmSid(e.target.value)}
+                placeholder={serviceId}
+                disabled={running}
+              />
+            </div>
+          )}
+          {needsToken && (
+            <div className="space-y-1">
+              <Label htmlFor="scoring-token-override" className="text-xs">
+                One-time scoped Fastly API token (stored in Secret Store, never in browser)
+              </Label>
+              <Input
+                id="scoring-token-override"
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder="Fastly API token"
+                disabled={running}
+              />
+            </div>
+          )}
+          {stepText && <div className="font-mono text-muted-foreground">{stepText}</div>}
+          {errorText && <div className="text-rose-600 font-medium">{errorText}</div>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => setOpen(false)} disabled={running}>
+            Cancel
+          </Button>
+          <Button
+            variant={action === 'disable' || action === 'teardown' ? 'destructive' : 'default'}
+            size="sm"
+            onClick={runCloudJob}
+            disabled={running || (action === 'teardown' && confirmSid.trim() !== serviceId)}
+          >
+            {running ? 'Running...' : title}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function StatusPanel({ serviceId }: StatusPanelProps) {
   const queryClient = useQueryClient()
   const { data, isLoading, isFetching, error, refetch } = useScoringQuery(
@@ -182,7 +344,111 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
         helpTitle="About Session Scoring"
         className="min-h-[236px]"
         headerAction={
-          enabled ? (
+          isCloudMode() ? (
+            enabled ? (
+              <div className="flex items-center gap-2">
+                <CloudScoringJobButton
+                  serviceId={serviceId}
+                  action="enable"
+                  title="Redeploy Scorer"
+                  description={
+                    <StepListDescription
+                      intro="Push the latest scorer build to the edge for"
+                      serviceId={serviceId}
+                      steps={REDEPLOY_STEPS}
+                    />
+                  }
+                  onComplete={refreshScoring}
+                  trigger={
+                    <Button
+                      variant={data?.scorer_drift ? 'default' : 'outline'}
+                      size="sm"
+                      data-testid="admin-session-scoring-redeploy-btn"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5 mr-1" /> Redeploy
+                    </Button>
+                  }
+                />
+                <CloudScoringJobButton
+                  serviceId={serviceId}
+                  action="disable"
+                  title="Disable Session Scoring"
+                  description={
+                    <StepListDescription
+                      intro="This will strip scoring VCL first and then delete scorer resources on"
+                      serviceId={serviceId}
+                      steps={DISABLE_STEPS}
+                    />
+                  }
+                  onComplete={refreshScoring}
+                  trigger={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-rose-700 border-rose-300 hover:bg-rose-50"
+                      data-testid="admin-session-scoring-disable-btn"
+                    >
+                      <PowerOff className="h-3.5 w-3.5 mr-1" /> Disable
+                    </Button>
+                  }
+                />
+                <CloudScoringJobButton
+                  serviceId={serviceId}
+                  action="teardown"
+                  title="Teardown Scorer"
+                  generation={(data as { generation?: string } | undefined)?.generation}
+                  description="Strips scoring VCL snippets and session_scorer backend first, then deletes the Compute scorer, stores, and FOS scoring artifacts."
+                  onComplete={refreshScoring}
+                  trigger={
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      data-testid="admin-session-scoring-teardown-btn"
+                    >
+                      Teardown
+                    </Button>
+                  }
+                />
+              </div>
+            ) : pragmasMissing ? (
+              <>
+                <Button
+                  variant="default"
+                  size="sm"
+                  data-testid="admin-session-scoring-enable-btn"
+                  onClick={() => setPragmaModalOpen(true)}
+                >
+                  <Power className="h-3.5 w-3.5 mr-1" /> Enable
+                </Button>
+                <PragmaMissingDialog
+                  serviceId={serviceId}
+                  open={pragmaModalOpen}
+                  onOpenChange={setPragmaModalOpen}
+                  isFetching={isFetching}
+                  onRecheck={() => refetch()}
+                />
+              </>
+            ) : (
+              <CloudScoringJobButton
+                serviceId={serviceId}
+                action="enable"
+                title="Enable Session Scoring"
+                description={
+                  <StepListDescription
+                    intro="This will enable session scoring on"
+                    serviceId={serviceId}
+                    steps={ENABLE_STEPS}
+                  />
+                }
+                onComplete={refreshScoring}
+                trigger={
+                  <Button variant="default" size="sm" data-testid="admin-session-scoring-enable-btn">
+                    <Power className="h-3.5 w-3.5 mr-1" /> Enable
+                  </Button>
+                }
+              />
+            )
+          ) : enabled ? (
             <div className="flex items-center gap-2">
               <SSEModal
                 title="Redeploy Scorer"

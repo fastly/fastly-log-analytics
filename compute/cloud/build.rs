@@ -232,13 +232,31 @@ fn collect(
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../frontend/out");
     println!("cargo:rerun-if-changed=web/out");
     println!("cargo:rerun-if-changed=src/csp.rs");
+    println!("cargo:rerun-if-changed=../scorer/pkg/session-scorer.tar.gz");
     println!("cargo:rerun-if-env-changed=FLP_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=FLP_ASSET_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=FLP_WEB_OUT");
+    println!("cargo:rerun-if-env-changed=FLP_SCORER_PACKAGE");
     let out_dir = Path::new(&env::var("OUT_DIR").expect("build output")).to_path_buf();
+    let scorer_pkg = env::var_os("FLP_SCORER_PACKAGE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("../scorer/pkg/session-scorer.tar.gz"));
+    let scorer_rs = if scorer_pkg.is_file() {
+        let canonical = scorer_pkg
+            .canonicalize()
+            .expect("canonicalize scorer package");
+        format!(
+            "pub static EMBEDDED_SCORER_PACKAGE: Option<&[u8]> = Some(include_bytes!({canonical:?}));\n"
+        )
+    } else {
+        "pub static EMBEDDED_SCORER_PACKAGE: Option<&[u8]> = None;\n".to_owned()
+    };
+    let scorer_dest = out_dir.join("scorer.rs");
+    fs::write(&scorer_dest, scorer_rs).expect("write scorer package index");
     let cache_dir = env::var_os("FLP_ASSET_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| out_dir.join("precompressed"));
