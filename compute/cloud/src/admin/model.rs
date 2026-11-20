@@ -708,9 +708,9 @@ mod tests {
     #[test]
     fn service_value_infers_cmcd_from_committed_fields() {
         let mut service = provision(json!({}))
-            .and_then(|input| {
+            .map(|input| {
                 let rum = input.effective_rum();
-                Ok(Service {
+                Service {
                     service_id: input.service_id,
                     name: "fixture".into(),
                     status: "active".into(),
@@ -751,7 +751,7 @@ mod tests {
                     capture: Capture::Attached,
                     scoring: None,
                     cdn_shield: String::new(),
-                })
+                }
             })
             .unwrap();
         service.log_fields["custom_fields"] = json!([
