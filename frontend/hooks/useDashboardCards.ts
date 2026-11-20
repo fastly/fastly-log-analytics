@@ -168,7 +168,7 @@ export function useServiceQuery<T>(
   })
   const waitingForDataReady =
     !isReady &&
-    (options?.enabled ?? true) &&
+    (options?.enabled === undefined || options.enabled === true) &&
     query.isPending &&
     query.data === undefined &&
     !query.isError

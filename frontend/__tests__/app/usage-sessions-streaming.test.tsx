@@ -335,6 +335,19 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(queryFn).not.toHaveBeenCalled()
   })
 
+  test('does not mark a callback-disabled service query as loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract-disabled-callback', 'test-svc'], queryFn, { enabled: () => false }),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(false)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
   test('usage page mounts and renders title', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     expect(screen.getByText('System Usage')).toBeInTheDocument()
