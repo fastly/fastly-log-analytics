@@ -278,7 +278,7 @@ fn route(
                 value => serde_json::from_value(value.clone())
                     .map_err(|_| Error::new(400, "invalid_capture"))?,
             };
-            let (service, snippets, conditions, token_info) = preflight(
+            let (service, snippets, conditions, token_info, endpoint_cmcd) = preflight(
                 context,
                 token,
                 sid,
@@ -340,7 +340,8 @@ fn route(
                 let cmcd_present = bodies
                     .iter()
                     .any(|b| b.to_ascii_lowercase().contains("req.http.x-cmcd:"))
-                    || snippets.iter().any(|v| v["name"] == "CMCD Extraction");
+                    || snippets.iter().any(|v| v["name"] == "CMCD Extraction")
+                    || endpoint_cmcd;
                 result["capture"] = json!({
                     "mode": "attached",
                     "missing_fields": missing,
@@ -600,7 +601,7 @@ fn preflight(
     sid: &str,
     endpoint: Option<&str>,
     capture: Capture,
-) -> Result<(Value, Vec<Value>, Vec<Value>, Value), Error> {
+) -> Result<(Value, Vec<Value>, Vec<Value>, Value, bool), Error> {
     if !valid_service_id(sid) {
         return Err(Error::new(400, "invalid_service_id"));
     }
@@ -634,6 +635,7 @@ fn preflight(
     let attached = capture == Capture::Attached;
     let mut snippets = Vec::new();
     let mut conditions = Vec::new();
+    let mut endpoint_cmcd = false;
     for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
         let current = context.api(
             "GET",
@@ -641,6 +643,14 @@ fn preflight(
             token,
             None,
         )?;
+        if resource == "logging/s3" || resource == "logging/fos" {
+            endpoint_cmcd = endpoint_cmcd
+                || list(&current)?.iter().any(|value| {
+                    value["format"]
+                        .as_str()
+                        .is_some_and(|format| format.to_ascii_lowercase().contains("\"cmcd_"))
+                });
+        }
         for value in list(&current)? {
             let name = value["name"].as_str().unwrap_or("");
             if !attached && endpoint.is_some() && resource == "snippet" && name == "CMCD Extraction"
@@ -670,7 +680,7 @@ fn preflight(
     if attached {
         reconcile::attach_condition_statement(&conditions, "")?;
     }
-    Ok((service, snippets, conditions, token_info))
+    Ok((service, snippets, conditions, token_info, endpoint_cmcd))
 }
 
 fn check_generation(record: &Record, input: &Value) -> Result<(), Error> {
@@ -1168,7 +1178,7 @@ fn provision(
         return Err(Error::new(400, "invalid_logging_settings"));
     }
     let logging_endpoint_name = input.endpoint_name();
-    let (target, _, _, _) = preflight(
+    let (target, _, _, _, _) = preflight(
         context,
         &input.token,
         &input.service_id,

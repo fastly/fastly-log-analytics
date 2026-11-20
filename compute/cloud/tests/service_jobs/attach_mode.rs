@@ -138,6 +138,7 @@ fn attach_alongside(other_has_rum: bool) {
         let now = platform.adapter.resources("fixtureService", resource);
         assert!(now.contains(value), "{resource} {} changed", value["name"]);
     }
+
     let names = |resource: &str| -> Vec<String> {
         let mut names: Vec<String> = platform
             .adapter
@@ -241,6 +242,38 @@ fn attach_alongside(other_has_rum: bool) {
         before.sort_by_key(|v| v["name"].to_string());
         assert_eq!(now, before, "{resource}");
     }
+}
+
+#[test]
+fn attach_detects_cmcd_from_existing_logging_endpoint_format() {
+    let platform = Platform::new();
+    let seeded = seed_other_install(&platform, None, false);
+    let endpoint = seeded
+        .iter()
+        .find(|(resource, value)| {
+            ["logging/s3", "logging/fos"].contains(resource)
+                && value["name"] == "Fastly Object Storage Logs"
+        })
+        .unwrap()
+        .1
+        .clone();
+    let mut with_cmcd = endpoint;
+    with_cmcd["format"] = json!(format!(
+        "{}{}",
+        with_cmcd["format"].as_str().unwrap(),
+        r#","cmcd_sid":"%{json.escape(req.http.x-cmcd-sid)}V""#
+    ));
+    platform
+        .adapter
+        .seed_resource("fixtureService", "logging/fos", with_cmcd);
+
+    let validated = platform.json(
+        "POST",
+        "/api/admin/provision/validate",
+        json!({"token":"fixture-token","service_id":"fixtureService","capture":"attached",
+            "log_fields":{"groups":["A","C"],"custom_fields":[],"field_overrides":{},"field_limits":{}}}),
+    );
+    assert_eq!(validated["capture"]["cmcd_present"], true);
 }
 
 #[test]
