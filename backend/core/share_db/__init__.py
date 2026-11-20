@@ -429,6 +429,9 @@ SAVED_VIEW_PII_FILTER_KEYS = PII_IP_KEYS | PII_SESSION_KEYS
 SHARED_PII_KEYS = SAVED_VIEW_PII_FILTER_KEYS
 _NONWORD_RE = re.compile(r"[^\w]")
 _NONWORD_UNDERSCORE_RE = re.compile(r"[^\w]+")
+_FILTER_NUM_SUFFIX_RE = re.compile(r"_\d+$")
+_PII_IP_NONWORD_KEYS = frozenset(_NONWORD_RE.sub("", k) for k in PII_IP_KEYS)
+_PII_SESSION_NONWORD_KEYS = frozenset(_NONWORD_RE.sub("", k) for k in PII_SESSION_KEYS)
 _MAYBE_IP_RE = re.compile(r"[0-9A-Fa-f:.]+")
 _BRACKET_PII_KEY_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
 _IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
@@ -474,6 +477,52 @@ def _canon_pii_key(val: str) -> str:
     return _NONWORD_UNDERSCORE_RE.sub("_", val.strip()).strip("_").lower()
 
 
+def _strip_filter_affixes(val: str) -> str:
+    col = val
+    for prefix in ("xfilter_", "filter_"):
+        if col.startswith(prefix):
+            col = col[len(prefix) :]
+            break
+    return _FILTER_NUM_SUFFIX_RE.sub("", col)
+
+
+def _pii_candidate_forms(cand: str) -> tuple[str, ...]:
+    c = cand.strip().lower()
+    if not c:
+        return ()
+    canon = _canon_pii_key(c)
+    stripped_c = _strip_filter_affixes(c)
+    stripped_canon = _strip_filter_affixes(canon)
+    nw_c = _NONWORD_RE.sub("", stripped_c)
+    nw_canon = _NONWORD_RE.sub("", stripped_canon)
+    nw_first = _strip_filter_affixes(_NONWORD_RE.sub("", c))
+    return (c, canon, stripped_c, stripped_canon, nw_c, nw_canon, nw_first)
+
+
+def _classify_saved_view_pii_key(key: str) -> str | None:
+    if not isinstance(key, str) or not key.strip():
+        return None
+    raw = key.strip().lower()
+    candidates = [raw]
+    for match in _BRACKET_PII_KEY_RE.finditer(raw):
+        inner = match.group(1).strip().lower()
+        if inner:
+            candidates.append(inner)
+    unbracketed = _BRACKET_PII_KEY_RE.sub("", raw)
+    if "." in unbracketed:
+        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
+    matched_ip = False
+    for cand in candidates:
+        for form in _pii_candidate_forms(cand):
+            if not form:
+                continue
+            if form in PII_SESSION_KEYS or form in _PII_SESSION_NONWORD_KEYS:
+                return "session"
+            if form in PII_IP_KEYS or form in _PII_IP_NONWORD_KEYS:
+                matched_ip = True
+    return "ip" if matched_ip else None
+
+
 _SAVED_VIEW_RECURSE_CONTAINERS = frozenset(
     {
         "filters",
@@ -491,24 +540,37 @@ _SAVED_VIEW_RECURSE_CONTAINERS = frozenset(
         "extras",
     }
 )
-_CLAUSE_FIELD_ATTRS: tuple[str, ...] = ("field", "column", "col", "key", "dimension")
+_CLAUSE_FIELD_ATTRS: tuple[str, ...] = ("field", "field_name", "column", "col", "key", "dimension")
 _CLAUSE_OP_SIBLINGS = frozenset(
     {
         "op",
         "operator",
         "value",
         "values",
+        "val",
+        "vals",
+        "pattern",
+        "match",
         "eq",
+        "equals",
         "ne",
         "neq",
+        "not_equals",
         "in",
         "nin",
         "not_in",
         "contains",
         "not_contains",
+        "starts_with",
+        "startswith",
+        "ends_with",
+        "endswith",
         "like",
         "ilike",
         "regex",
+        "wildcard",
+        "glob",
+        "search",
         "gt",
         "gte",
         "lt",
@@ -516,6 +578,12 @@ _CLAUSE_OP_SIBLINGS = frozenset(
         "between",
         "is_null",
         "not_null",
+        "exists",
+        "not_exists",
+        "rhs",
+        "right",
+        "case_sensitive",
+        "negate",
         "mode",
         "include",
         "exclude",
@@ -532,21 +600,7 @@ _SAVED_VIEW_INSPECT_ATTRS: tuple[str, ...] = (
 
 
 def is_saved_view_pii_key(key: str) -> bool:
-    if not isinstance(key, str) or not key.strip():
-        return False
-    raw = key.strip().lower()
-    candidates = [raw]
-    for match in _BRACKET_PII_KEY_RE.finditer(raw):
-        inner = match.group(1).strip().lower()
-        if inner:
-            candidates.append(inner)
-    unbracketed = _BRACKET_PII_KEY_RE.sub("", raw)
-    if "." in unbracketed:
-        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
-    for cand in candidates:
-        if cand in SAVED_VIEW_PII_FILTER_KEYS or _canon_pii_key(cand) in SAVED_VIEW_PII_FILTER_KEYS:
-            return True
-    return False
+    return _classify_saved_view_pii_key(key) is not None
 
 
 def _extract_saved_view_filter_keys(filters_raw: Any) -> tuple[set[str], bool]:
@@ -562,9 +616,14 @@ def _extract_saved_view_filter_keys(filters_raw: Any) -> tuple[set[str], bool]:
             try:
                 parsed = json.loads(stripped)
             except (ValueError, TypeError):
-                malformed = True
+                if structural:
+                    for match in _BRACKET_PII_KEY_RE.finditer(stripped):
+                        keys.add(match.group(1))
+                    for tok in _IDENT_TOKEN_RE.findall(stripped):
+                        keys.add(tok)
+                    malformed = True
                 return
-            _collect(parsed, structural=True)
+            _collect(parsed, structural=structural)
             return
         if structural:
             try:
@@ -591,15 +650,17 @@ def _extract_saved_view_filter_keys(filters_raw: Any) -> tuple[set[str], bool]:
             return
         if isinstance(node, dict):
             has_clause_field = False
-            for fk in _CLAUSE_FIELD_ATTRS:
-                fv = node.get(fk)
-                if isinstance(fv, str) and fv.strip():
-                    keys.add(fv.strip())
+            has_op_sibling = any(isinstance(nk, str) and nk.strip().lower() in _CLAUSE_OP_SIBLINGS for nk in node)
+            for nk, nv in node.items():
+                if not isinstance(nk, str):
+                    continue
+                nkl = nk.strip().lower()
+                if nkl in _CLAUSE_FIELD_ATTRS and isinstance(nv, str) and nv.strip():
+                    keys.add(nv.strip())
                     has_clause_field = True
-            name_val = node.get("name")
-            if isinstance(name_val, str) and name_val.strip() and any(sk in node for sk in _CLAUSE_OP_SIBLINGS):
-                keys.add(name_val.strip())
-                has_clause_field = True
+                elif nkl == "name" and has_op_sibling and isinstance(nv, str) and nv.strip():
+                    keys.add(nv.strip())
+                    has_clause_field = True
 
             for k, v in node.items():
                 if not isinstance(k, str):
@@ -809,6 +870,8 @@ def mask_ip_or_chain(val: str) -> str:
     if "," in val:
         parts = [p.strip() for p in val.split(",")]
         if len(parts) > 1 and all(parts):
+            if all(p != "[redacted]" and mask_ip(p) == p for p in parts):
+                return ", ".join(parts)
             masked_parts: list[str] = []
             for p in parts:
                 try:
@@ -853,66 +916,126 @@ def scrub_ip_text(val: str) -> str:
     return out
 
 
+_NON_PII_ENVELOPE_KEYS = frozenset(
+    {
+        "debug_calls",
+        "debug_postgres",
+        "debug_queries",
+        "debug_sqlite",
+        "freshness",
+        "history",
+        "metadata",
+        "plan",
+        "reader_coverage",
+        "response_cache",
+        "section_timings",
+    }
+)
+_PII_LIST_VALUE_CONTAINERS = frozenset(
+    {
+        "buckets",
+        "data",
+        "entries",
+        "items",
+        "results",
+        "rows",
+        "top",
+        "top_values",
+        "values",
+    }
+)
+
+
 def apply_pii_policy(obj: Any, policy: dict) -> Any:
     if not policy or not policy.get("mask_ips"):
         return obj
-    masked_keys = PII_IP_KEYS
 
-    def _is_session_key(k: Any) -> bool:
-        if not isinstance(k, str):
-            return False
-        return is_saved_view_pii_key(k) and (
-            k.strip().lower() in SESSION_ID_KEYS
-            or _canon_pii_key(k) in SESSION_ID_KEYS
-            or any(
-                seg in SESSION_ID_KEYS or _canon_pii_key(seg) in SESSION_ID_KEYS
-                for seg in [
-                    *(m.group(1).strip().lower() for m in _BRACKET_PII_KEY_RE.finditer(k)),
-                    *(s.strip().lower() for s in _BRACKET_PII_KEY_RE.sub("", k).split(".") if s.strip()),
-                ]
-            )
-        )
+    def _pii_ctx_kind(raw_key: Any) -> str | None:
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            return None
+        classified = _classify_saved_view_pii_key(raw_key)
+        if classified is not None:
+            return classified
+        canon = _canon_pii_key(raw_key)
+        if canon == "origin_ip" or _strip_filter_affixes(canon) == "origin_ip":
+            return "ip"
+        for match in _BRACKET_PII_KEY_RE.finditer(raw_key):
+            if _strip_filter_affixes(_canon_pii_key(match.group(1))) == "origin_ip":
+                return "ip"
+        unbracketed = _BRACKET_PII_KEY_RE.sub("", raw_key)
+        if "." in unbracketed:
+            for seg in unbracketed.split("."):
+                if seg.strip() and _strip_filter_affixes(_canon_pii_key(seg)) == "origin_ip":
+                    return "ip"
+        return None
 
-    def _is_masked_ip_key(k: Any) -> bool:
-        if not isinstance(k, str):
-            return False
-        return is_saved_view_pii_key(k) and not _is_session_key(k)
+    def _resolve_declared_ctx(node: dict[str, Any], inherited_ctx: str | None) -> str | None:
+        saw_declared = False
+        saw_ip = False
+        for dk, dv in node.items():
+            if isinstance(dk, str) and dk.strip().lower() in ("field", "dimension"):
+                if isinstance(dv, str) and dv.strip():
+                    saw_declared = True
+                    kind = _pii_ctx_kind(dv)
+                    if kind == "session":
+                        return "session"
+                    if kind == "ip":
+                        saw_ip = True
+        if saw_ip:
+            return "ip"
+        if saw_declared:
+            return None
+        return inherited_ctx
 
-    def _walk(node: Any, parent_key: Any = None, field_ctx: Any = None) -> Any:
+    def _walk(node: Any, parent_key: Any = None, field_ctx: str | None = None) -> Any:
         if isinstance(node, dict):
             out: dict[str, Any] = {}
-            declared_field = node.get("field")
-            canon_field = _canon_pii_key(declared_field) if isinstance(declared_field, str) else None
-            eff_ctx = (
-                canon_field
-                if canon_field is not None and (canon_field in SESSION_ID_KEYS or canon_field in masked_keys)
-                else field_ctx
+            eff_ctx = _resolve_declared_ctx(node, field_ctx)
+            schema_col_kind = (
+                _pii_ctx_kind(node.get("column")) or _pii_ctx_kind(node.get("name"))
+                if ("min" in node or "max" in node)
+                else None
             )
             for k, v in node.items():
                 canon_k = _canon_pii_key(k) if isinstance(k, str) else k
+                key_kind = _pii_ctx_kind(k)
                 if canon_k == "top_ips" and isinstance(v, list):
                     out[k] = []
-                elif isinstance(v, str) and _is_session_key(k):
+                elif isinstance(v, str) and key_kind == "session":
                     out[k] = "[redacted]" if v else v
-                elif isinstance(v, str) and _is_masked_ip_key(k):
+                elif isinstance(v, str) and key_kind == "ip":
                     out[k] = mask_ip_or_chain(v)
                 elif k in ("min", "max") and isinstance(v, str):
-                    out[k] = _mask_ip_scalar(v)
-                elif k == "value" and isinstance(v, str) and eff_ctx in masked_keys:
-                    out[k] = _mask_ip_scalar(v)
-                elif k == "value" and isinstance(v, str) and eff_ctx in SESSION_ID_KEYS:
+                    out[k] = ("[redacted]" if v else v) if schema_col_kind == "session" else _mask_ip_scalar(v)
+                elif canon_k in ("value", "key") and isinstance(v, str) and eff_ctx == "ip":
+                    out[k] = mask_ip_or_chain(v)
+                elif canon_k in ("value", "key") and isinstance(v, str) and eff_ctx == "session":
                     out[k] = "[redacted]" if v else v
                 else:
-                    next_ctx = canon_k if (canon_k in masked_keys or canon_k in SESSION_ID_KEYS) else eff_ctx
+                    if key_kind in ("ip", "session"):
+                        next_ctx: str | None = key_kind
+                    elif isinstance(canon_k, str) and canon_k in _NON_PII_ENVELOPE_KEYS:
+                        next_ctx = None
+                    else:
+                        next_ctx = eff_ctx
                     out[k] = _walk(v, parent_key=k, field_ctx=next_ctx)
             return out
         if isinstance(node, list):
+            parent_kind = _pii_ctx_kind(parent_key)
+            canon_parent = _canon_pii_key(parent_key) if isinstance(parent_key, str) else None
+            list_elem_kind = (
+                parent_kind
+                if parent_kind is not None
+                else field_ctx
+                if canon_parent in _PII_LIST_VALUE_CONTAINERS
+                else None
+            )
             return [
                 (
                     ("[redacted]" if x else x)
-                    if isinstance(x, str) and _is_session_key(parent_key)
+                    if isinstance(x, str) and list_elem_kind == "session"
                     else mask_ip_or_chain(x)
-                    if isinstance(x, str) and _is_masked_ip_key(parent_key)
+                    if isinstance(x, str) and list_elem_kind == "ip"
                     else _walk(x, parent_key=parent_key, field_ctx=field_ctx)
                 )
                 for x in node

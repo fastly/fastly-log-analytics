@@ -314,6 +314,18 @@ def _enforce_live_stream_window(request: Request | None) -> None:
         )
 
 
+def _scrub_embedded_ips_recursive(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return scrub_ip_text(obj) if obj and obj != "[redacted]" else obj
+    if isinstance(obj, dict):
+        return {k: _scrub_embedded_ips_recursive(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_embedded_ips_recursive(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_embedded_ips_recursive(v) for v in obj)
+    return obj
+
+
 def _sanitize_realtime_tick(tick: dict[str, Any], request: Request | None) -> dict[str, Any]:
     state = getattr(request, "state", None) if request is not None else None
     if not mask_ips_for(getattr(state, "analyst_session", None)):
@@ -321,7 +333,8 @@ def _sanitize_realtime_tick(tick: dict[str, Any], request: Request | None) -> di
     sanitized = apply_pii_policy(dict(tick), {"mask_ips": True})
     if "top_ips" in sanitized:
         sanitized["top_ips"] = []
-    return sanitized
+    res: dict[str, Any] = _scrub_embedded_ips_recursive(sanitized)
+    return res
 
 
 @control_room_router.get(
@@ -398,13 +411,10 @@ def _mask_error_events(events: list[dict[str, Any]], request: Request) -> list[d
     masked_events = apply_pii_policy(events, {"mask_ips": True})
     out: list[dict[str, Any]] = []
     for orig_ev, ev in zip(events, masked_events, strict=False):
-        row = dict(ev)
+        row: dict[str, Any] = _scrub_embedded_ips_recursive(dict(ev))
         for k, orig_v in orig_ev.items():
             if isinstance(orig_v, str) and orig_v and k.strip().lower() in PII_IP_KEYS:
                 row[k] = _mask_ip_field(orig_v)
-        for k, v in list(row.items()):
-            if isinstance(v, str) and v and not is_saved_view_pii_key(k):
-                row[k] = scrub_ip_text(v)
         out.append(row)
     return out
 

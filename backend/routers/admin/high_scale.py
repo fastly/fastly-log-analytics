@@ -13,7 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from backend.core import metadata
 from backend.core.request_context import RequestContext, build_request_context, require_admin
 from backend.core.request_telemetry import HighScaleSections
-from backend.core.share_db import mask_ip
+from backend.core.share_db import (
+    PII_IP_KEYS,
+    SESSION_ID_KEYS,
+    _canon_pii_key,
+    _classify_saved_view_pii_key,
+    apply_pii_policy,
+    mask_ip_or_chain,
+    scrub_ip_text,
+)
 from backend.high_scale._common import raw_query_producer
 from backend.high_scale.aggregate_query import (
     DEFAULT_AGGREGATE_DIMENSIONS,
@@ -104,6 +112,14 @@ def _serialize_export_row(row: dict[str, Any]) -> bytes:
     return json.dumps(row, default=str, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _require_non_analyst(ctx: RequestContext) -> None:
+    if ctx.analyst_session is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "admin_only", "message": "This operation requires admin access."},
+        )
+
+
 @high_scale_router.post(
     "/services/{service_id}/exports",
     response_model=HighScaleExportResponse,
@@ -117,6 +133,7 @@ def request_export(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
     rows = _fetch_facts_page(service, req.domain, start=start, end=end, limit=req.limit, cursor=req.cursor).rows
@@ -144,6 +161,7 @@ def export_status(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     with _export_owners_lock:
         owner = _export_owners.get(export_id)
@@ -171,6 +189,7 @@ def cancel_export(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     with _export_owners_lock:
         owner = _export_owners.get(export_id)
@@ -558,14 +577,30 @@ def aggregates(
         ) from None
 
     dimension = req.dimension or DEFAULT_AGGREGATE_DIMENSIONS[req.domain]
+    should_mask_ips = mask_ips_for(ctx.analyst_session)
+    dim_kind = _classify_saved_view_pii_key(dimension) if should_mask_ips else None
+    canon_dim = _canon_pii_key(dimension) if should_mask_ips else ""
+    if should_mask_ips and (dim_kind == "session" or canon_dim in SESSION_ID_KEYS):
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "pii_policy_violation",
+                f"Aggregating by {dimension!r} is disabled when IP masking is active.",
+                field=dimension,
+            ),
+        )
     response = query_clickhouse_aggregate(
         service.client,
         AggregateRequest(service_id=ctx.service_id, domain=req.domain, start=start, end=end, dimension=dimension),
         watermark=watermark,
     )
     top_values = list(response.top_values)
-    if dimension == "client_ip" and mask_ips_for(ctx.analyst_session):
-        top_values = [(mask_ip(value), count) for value, count in top_values]
+    if should_mask_ips and (dim_kind == "ip" or canon_dim in PII_IP_KEYS or canon_dim == "origin_ip"):
+        merged_counts: dict[str, int] = {}
+        for value, count in top_values:
+            masked_val = mask_ip_or_chain(value) if value else value
+            merged_counts[masked_val] = merged_counts.get(masked_val, 0) + count
+        top_values = sorted(merged_counts.items(), key=lambda kv: kv[1], reverse=True)
     return HighScaleAggregateResponse.with_telemetry(
         service_id=response.service_id,
         domain=response.domain,
@@ -624,12 +659,30 @@ def _fetch_facts_page(
     )
 
 
+def _scrub_row_embedded_ips(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return scrub_ip_text(obj) if obj and obj != "[redacted]" else obj
+    if isinstance(obj, dict):
+        return {k: _scrub_row_embedded_ips(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_row_embedded_ips(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_row_embedded_ips(v) for v in obj)
+    return obj
+
+
 def _mask_client_ip_rows(rows: list[dict[str, Any]], ctx: RequestContext) -> list[dict[str, Any]]:
-    if mask_ips_for(ctx.analyst_session):
-        for row in rows:
-            value = row.get("client_ip")
-            if isinstance(value, str):
-                row["client_ip"] = mask_ip(value)
+    if not mask_ips_for(ctx.analyst_session):
+        return rows
+    masked_rows = apply_pii_policy(rows, {"mask_ips": True})
+    scrubbed_rows: list[dict[str, Any]] = []
+    for row in masked_rows:
+        row_copy = dict(row)
+        for k, val in list(row_copy.items()):
+            if isinstance(val, str) and val and k.strip().lower() in PII_IP_KEYS:
+                row_copy[k] = mask_ip_or_chain(val)
+        scrubbed_rows.append(_scrub_row_embedded_ips(row_copy))
+    rows[:] = scrubbed_rows
     return rows
 
 
@@ -755,6 +808,7 @@ def cancel_query_job(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     jobs: HistoricalJobManager = Depends(get_historical_job_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
     job = jobs.get(job_id)
     if job is None or job.plan.service_id != ctx.service_id:

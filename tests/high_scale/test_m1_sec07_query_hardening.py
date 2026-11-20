@@ -38,7 +38,11 @@ def test_sec07_wellknown_bots_binds_scalar_parameters_without_sql_interpolation(
     monkeypatch.setattr(
         bot_sources,
         "build_well_known_bots_matcher",
-        lambda: lambda ua: [{"name": "Googlebot", "category": "search"}] if "Googlebot" in ua else [],
+        lambda: (
+            lambda ua: (
+                [{"id": "google-crawler", "name": "Googlebot", "category": "search"}] if "Googlebot" in ua else []
+            )
+        ),
     )
 
     class _CapturingChTransport(httpx.BaseTransport):
@@ -327,3 +331,186 @@ def test_sec07_query_endpoint_isolates_tables_cache_key_and_redacts_18_pii_colum
     assert row["cookie_session"] == "[redacted]"
     assert row["arbitrary_alias"] == "203.0.113.xxx"
     hs_query._HS_QUERY_RESULT_CACHE.clear()
+
+
+# ── Iteration 3 Hardening Regressions (SEC-07.2 Finding 1 & Challenges 1, 4) ──
+
+
+@pytest.mark.security_regression
+def test_sec07_comma_lateral_nested_union_and_parenthesized_cte_rewrite_and_filter() -> None:
+    client = _RecordingConsoleClient()
+    svc = SimpleNamespace(service_id="svc_alpha", client=client)
+    masked_tables = {
+        "request_facts": "fla_cv_m_req",
+        "rum_vitals_facts": "fla_cv_m_vit",
+        "rum_error_facts": "fla_cv_m_err",
+    }
+
+    # 1. Comma join across RUM + request_facts under masked tables map
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT r.client_ip, v.pop FROM client_vitals v, request_facts r", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables=masked_tables,
+    )
+    assert "FROM fla_cv_m_vit v, fla_cv_m_req r" in client.last_sql
+    assert "v.pop" in client.last_sql
+    atf1 = ast.literal_eval(client.last_settings["additional_table_filters"])
+    assert set(atf1) == {"fla_cv_m_vit", "fla_cv_m_req"}
+
+    # 2. LATERAL join under masked tables map
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT b.client_ip FROM logs a CROSS JOIN LATERAL request_facts b", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables=masked_tables,
+    )
+    assert "FROM fla_cv_m_req a CROSS JOIN LATERAL fla_cv_m_req b" in client.last_sql
+    assert "request_facts" not in client.last_sql.replace("fla_cv_m_req", "")
+    atf2 = ast.literal_eval(client.last_settings["additional_table_filters"])
+    assert set(atf2) == {"fla_cv_m_req"}
+
+    # 3. Nested parenthesized UNION ALL subquery
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(
+            sql="SELECT * FROM ((SELECT url FROM logs) UNION ALL (SELECT page_url FROM rum_page_load_facts))",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables=masked_tables,
+    )
+    assert "FROM fla_cv_m_req" in client.last_sql
+    assert "FROM fla_cv_m_vit" in client.last_sql
+    assert "logs" not in client.last_sql and "rum_page_load_facts" not in client.last_sql
+    atf3 = ast.literal_eval(client.last_settings["additional_table_filters"])
+    assert set(atf3) == {"fla_cv_m_req", "fla_cv_m_vit"}
+
+    # 4. Parenthesized main query after multi-CTE header
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(
+            sql="WITH a AS (SELECT count() AS c FROM client_vitals), b AS (SELECT c FROM a) (SELECT client_ip, url FROM request_facts)",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables=masked_tables,
+    )
+    assert "FROM fla_cv_m_vit" in client.last_sql
+    assert "FROM fla_cv_m_req" in client.last_sql
+    assert "request_facts" not in client.last_sql.replace("fla_cv_m_req", "")
+    atf4 = ast.literal_eval(client.last_settings["additional_table_filters"])
+    assert set(atf4) == {"fla_cv_m_vit", "fla_cv_m_req"}
+
+    # 5. Admin comma self-join (tables=None)
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT a.url, b.url FROM logs a, logs b WHERE a.req_id = b.req_id", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=False,
+    )
+    assert "FROM request_facts a, request_facts b" in client.last_sql
+    assert "logs" not in client.last_sql
+
+    # 6. Case-insensitive custom_fields rewrite on logs vs native RUM columns
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT POP, CITY, STATUS FROM logs", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=False,
+    )
+    assert (
+        "SELECT custom_fields['pop'], custom_fields['city'], custom_fields['status'] FROM request_facts"
+        in client.last_sql
+    )
+
+    hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT POP, CITY FROM client_vitals", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=False,
+    )
+    assert "SELECT POP, CITY FROM rum_vitals_facts" in client.last_sql
+
+
+@pytest.mark.security_regression
+def test_sec07_post_allowed_tables_fails_closed_on_unmapped_tables_and_clickhouse_differentials() -> None:
+    client = _RecordingConsoleClient()
+    svc = SimpleNamespace(service_id="svc_alpha", client=client)
+
+    # Partial tables mapping must fail closed if query touches an unmapped domain
+    with pytest.raises(PermissionError):
+        hs_query.query_endpoint(
+            svc,
+            DashboardQueryRequest(sql="SELECT count() AS n FROM client_vitals", max_rows=10),
+            "2026-11-19T00:00:00Z",
+            "2026-11-19T01:00:00Z",
+            mask_ips=True,
+            tables={"request_facts": "fla_cv_m_req"},
+        )
+    assert client.last_sql == ""
+
+    # ClickHouse parser differentials: FROM (tbl) and bare IN tbl must be rejected before ClickHouse
+    for bad_sql in (
+        "SELECT * FROM (high_scale_batch_publications)",
+        "SELECT * FROM (request_facts)",
+        "SELECT url FROM logs WHERE service_id IN high_scale_batch_publications",
+        "SELECT url FROM logs WHERE client_ip IN request_facts",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                svc,
+                DashboardQueryRequest(sql=bad_sql, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+            )
+        assert client.last_sql == ""
+
+
+@pytest.mark.security_regression
+def test_sec07_query_endpoint_redacts_nested_custom_fields_and_embedded_url_ips_when_masked() -> None:
+    class _NestedRowClient:
+        _table_filters_verified = True
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None, *, settings: dict[str, Any] | None = None):
+            return [
+                {
+                    "custom_fields": {
+                        "cookie_session": "nested-cs-secret",
+                        "edge_sid": "nested-sid",
+                        "oip": "151.101.1.10",
+                        "c_ip": "198.51.100.8",
+                    },
+                    "url": "/cb?client=198.51.100.44",
+                    "ua": "Mozilla/5.0 Chrome/131.0.0.0 client=2001:db8:abcd::99",
+                }
+            ]
+
+    svc = SimpleNamespace(service_id="svc_alpha", client=_NestedRowClient())
+    out = hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT custom_fields, url, ua FROM logs", max_rows=10),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req"},
+    )
+    row = out["data"][0]
+    assert row["custom_fields"]["cookie_session"] == "[redacted]"
+    assert row["custom_fields"]["edge_sid"] == "[redacted]"
+    assert row["custom_fields"]["oip"] == "151.101.1.xxx"
+    assert row["custom_fields"]["c_ip"] == "198.51.100.xxx"
+    assert row["url"] == "/cb?client=198.51.100.xxx"
+    assert row["ua"] == "Mozilla/5.0 Chrome/131.0.0.0 client=2001:db8:abcd::"
