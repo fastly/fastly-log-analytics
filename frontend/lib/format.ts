@@ -133,12 +133,17 @@ export function formatCountMaybe(n: number | null | undefined, options?: Intl.Nu
 
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'null'
+  if (field === 'metro') return String(value).trim()
   if (field === 'asn' || field === 'client_asn') {
     const str = String(value).trim()
     if (!str) return ''
     return /^AS/i.test(str) ? `AS${str.slice(2)}` : `AS${str}`
   }
-  if (typeof value === 'number') return field?.includes('bytes') ? formatBytes(value) : formatCount(value)
+  if (typeof value === 'number') {
+    if (field?.includes('bytes')) return formatBytes(value)
+    if (field === 'ttl' || field === 'age') return formatCount(Math.round(value))
+    return formatCount(value)
+  }
   const str = String(value)
   if (field === 'country' && str.length === 2) return resolveCountryName(str)
   if (field === 'pop' || field === 'region') return str.toUpperCase()

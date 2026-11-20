@@ -9,7 +9,7 @@ import type {
 } from "./engine";
 import { numericFilterValue, type DashboardFilter } from "./filters";
 import { fetchManifest, filesOverlapping, type ManifestFile } from "./manifest";
-import { CARD_FIELDS, type CustomField } from "./summaries";
+import { CARD_FIELDS, normalizeDashboardValue, type CustomField } from "./summaries";
 import {
   boundedDuckDBCleanup,
   DuckDBBackendInitializationError,
@@ -20,6 +20,21 @@ import {
 // wasm32 caps the heap at 4 GiB; DuckDB's default (~3 GiB) would starve the tab.
 const MEMORY_LIMIT = "256MB";
 const MINUTE_MS = 60_000;
+
+function dashboardValueExpr(field: string): string {
+  const col = sqlIdent(field);
+  if (field === "ttl" || field === "age") return `CAST(ROUND(${col}) AS BIGINT)`;
+  if (field === "conn_requests") {
+    return `CASE
+      WHEN ${col} IS NULL OR TRY_CAST(${col} AS BIGINT) <= 0 THEN NULL
+      WHEN TRY_CAST(${col} AS BIGINT) = 1 THEN '1'
+      WHEN TRY_CAST(${col} AS BIGINT) <= 5 THEN '2–5'
+      WHEN TRY_CAST(${col} AS BIGINT) <= 20 THEN '6–20'
+      ELSE '21+'
+    END`;
+  }
+  return col;
+}
 
 export type DuckDBColumnType = "BIGINT" | "DOUBLE" | "BOOLEAN" | "VARCHAR";
 
@@ -1059,11 +1074,13 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     }
 
     if (fields.length > 0) {
+      const valueExprs = fields.map(dashboardValueExpr);
+      const valueSelect = valueExprs.map((expr, i) => `${expr} AS ${sqlIdent(fields[i])}`);
       const statsTable = await backend.query(
-        `${base} SELECT ${FILE_COLUMN} AS file, ${fields
+        `${base} SELECT ${FILE_COLUMN} AS file, ${valueExprs
           .map(
-            (field, i) =>
-              `COUNT(${sqlIdent(field)})::BIGINT AS nn_${i}, COUNT(DISTINCT ${sqlIdent(field)})::BIGINT AS d_${i}, MAX(length(CAST(${sqlIdent(field)} AS VARCHAR)))::BIGINT AS ml_${i}`,
+            (expr, i) =>
+              `COUNT(CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN ${expr} END)::BIGINT AS nn_${i}, COUNT(DISTINCT CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN ${expr} END)::BIGINT AS d_${i}, MAX(length(CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN CAST(${expr} AS VARCHAR) END))::BIGINT AS ml_${i}`,
           )
           .join(", ")} FROM base GROUP BY 1`,
         signal,
@@ -1112,14 +1129,14 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       }
 
       const cols = fields.map(sqlIdent);
-      const fieldIdx = `CASE ${cols.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
+      const fieldIdx = `CASE ${valueExprs.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
       const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
       const keyBytes = `48 + CASE field_idx ${cols.map((col, i) => `WHEN ${i} THEN 4 * length(CAST(${col} AS VARCHAR))`).join(" ")} ELSE 0 END`;
       const window = `PARTITION BY ${FILE_COLUMN}, field_idx ORDER BY cnt DESC`;
       for (const chunk of chunks) {
         const only = chunks.length > 1 ? ` WHERE ${FILE_COLUMN} IN (${chunk.join(", ")})` : "";
         const valuesTable = await backend.query(
-          `${base} SELECT ${FILE_COLUMN} AS file, field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${FILE_COLUMN}, ${fieldIdx} AS field_idx, ${cols.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base${only} GROUP BY GROUPING SETS (${cols.map((c) => `(${FILE_COLUMN}, ${c})`).join(", ")})) WHERE ${nonNull} QUALIFY row_number() OVER (${window}) <= ${candidateLimit} AND sum(${keyBytes}) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${fieldByteCap}`,
+          `${base} SELECT ${FILE_COLUMN} AS file, field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${FILE_COLUMN}, ${fieldIdx} AS field_idx, ${valueSelect.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base${only} GROUP BY GROUPING SETS (${valueExprs.map((c) => `(${FILE_COLUMN}, ${c})`).join(", ")})) WHERE ${nonNull} QUALIFY row_number() OVER (${window}) <= ${candidateLimit} AND sum(${keyBytes}) OVER (${window} ROWS UNBOUNDED PRECEDING) <= ${fieldByteCap}`,
           signal,
         );
         signal?.throwIfAborted();
@@ -1129,7 +1146,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         const valueCols = fields.map((field) => column(valuesTable, field));
         for (let r = 0; r < valuesTable.numRows; r++) {
           const i = Number(idxCol[r]);
-          const value = toScalarValue(valueCols[i][r]);
+          const value = normalizeDashboardValue(fields[i], toScalarValue(valueCols[i][r]));
           if (value === null) continue;
           parts.get(Number(vf[r]))?.fields[fields[i]]?.entries.push([value, Number(cntCol[r])]);
         }
@@ -1225,11 +1242,12 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
 
     const fieldAggregates: Record<string, FieldAggregate> = {};
     if (fields.length > 0) {
+      const statsExprs = fields.map(dashboardValueExpr);
       const statsTable = await backend.query(
-        `${base} SELECT ${fields
+        `${base} SELECT ${statsExprs
           .map(
-            (field, i) =>
-              `COUNT(${sqlIdent(field)})::BIGINT AS nn_${i}, COUNT(DISTINCT ${sqlIdent(field)})::BIGINT AS d_${i}`,
+            (expr, i) =>
+              `COUNT(CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN ${expr} END)::BIGINT AS nn_${i}, COUNT(DISTINCT CASE WHEN CAST(${expr} AS VARCHAR) != '' THEN ${expr} END)::BIGINT AS d_${i}`,
           )
           .join(", ")} FROM base`,
         signal,
@@ -1243,7 +1261,9 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
         topK === null || allValues.has(field) ? [i] : [],
       );
       const cols = fields.map(sqlIdent);
-      const fieldIdx = `CASE ${cols.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
+      const valueExprs = fields.map(dashboardValueExpr);
+      const valueSelect = valueExprs.map((expr, i) => `${expr} AS ${cols[i]}`);
+      const fieldIdx = `CASE ${valueExprs.map((c, i) => `WHEN GROUPING(${c}) = 0 THEN ${i}`).join(" ")} END`;
       const nonNull = `CASE field_idx ${cols.map((c, i) => `WHEN ${i} THEN ${c} IS NOT NULL`).join(" ")} END`;
       // RANK keeps every value tied at the K-th count, so the final order can
       // use Intl.Collator in JavaScript, which DuckDB collations can't match.
@@ -1266,7 +1286,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
           ? ""
           : ` QUALIFY ${fullIdx.length > 0 ? `field_idx IN (${fullIdx.join(", ")}) OR ` : ""}rank() OVER (PARTITION BY field_idx ORDER BY cnt DESC) <= ${topLimit}`;
       const valuesTable = await backend.query(
-        `${base} SELECT field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${fieldIdx} AS field_idx, ${cols.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base GROUP BY GROUPING SETS (${cols.map((c) => `(${c})`).join(", ")})) WHERE ${nonNull}${qualify}`,
+        `${base} SELECT field_idx, cnt, ${cols.join(", ")} FROM (SELECT ${fieldIdx} AS field_idx, ${valueSelect.join(", ")}, COUNT(*)::BIGINT AS cnt FROM base GROUP BY GROUPING SETS (${valueExprs.map((c) => `(${c})`).join(", ")})) WHERE ${nonNull}${qualify}`,
         signal,
       );
       signal?.throwIfAborted();
@@ -1285,7 +1305,7 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
       const valueCols = fields.map((field) => column(valuesTable, field));
       for (let r = 0; r < valuesTable.numRows; r++) {
         const i = Number(idxCol[r]);
-        const value = toScalarValue(valueCols[i][r]);
+        const value = normalizeDashboardValue(fields[i], toScalarValue(valueCols[i][r]));
         if (value === null) continue;
         fieldAggregates[fields[i]].entries.push([value, Number(cntCol[r])]);
       }

@@ -225,11 +225,31 @@ describe("summary readers", () => {
     for (const field of CARD_FIELDS) {
       const type = types.get(field);
       const expected =
-        type === "VARCHAR" ? "x" : type === "BOOLEAN" ? true : 12.5;
+        type === "VARCHAR"
+          ? "x"
+          : type === "BOOLEAN"
+            ? true
+            : field === "ttl" || field === "age"
+              ? 13
+              : field === "conn_requests"
+                ? "6–20"
+                : 12.5;
       const text =
         type === "BOOLEAN" ? "true" : type === "VARCHAR" ? "x" : "12.5";
       expect(summaryValue(field, text), field).toBe(expected);
     }
+  });
+
+  it("normalizes v2-compatible dashboard card values", () => {
+    expect(summaryValue("host", "")).toBeNull();
+    expect(summaryValue("io_input_format", "")).toBeNull();
+    expect(summaryValue("ttl", "3600.027")).toBe(3600);
+    expect(summaryValue("age", "0.5")).toBe(1);
+    expect(summaryValue("conn_requests", "1")).toBe("1");
+    expect(summaryValue("conn_requests", "2")).toBe("2–5");
+    expect(summaryValue("conn_requests", "6")).toBe("6–20");
+    expect(summaryValue("conn_requests", "21")).toBe("21+");
+    expect(summaryValue("conn_requests", "101")).toBe("21+");
   });
 
   it("fingerprints names like bundle.rs", () => {

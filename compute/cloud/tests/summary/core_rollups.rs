@@ -231,8 +231,8 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
         .for_each(|ip| hll.add_hash(summary::hll_hash(ip)));
     assert_eq!(ov["ip_sketch"], hex::encode(hll.to_bytes()));
 
-    // all_fields: CAST AS VARCHAR without NULL, '' kept as the dashboard counts it, exact
-    // floats for age, split+trim without empty tokens for waf_sig_ind.
+    // all_fields: CAST AS VARCHAR without NULL or empty strings; ttl/age round to whole seconds
+    // like the v2 dashboard, and waf_sig_ind splits and trims without empty tokens.
     let mut expected: BTreeMap<&str, BTreeMap<String, i64>> = BTreeMap::new();
     for row in &rows {
         let mut add = |field: &'static str, value: String| {
@@ -241,11 +241,12 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
         for field in ["cache", "status", "edge", "pop", "asn", "ip"] {
             match row.get(field) {
                 None | Some(Value::Null) => {}
-                Some(Value::String(v)) => add(field, v.clone()),
+                Some(Value::String(v)) if !v.is_empty() => add(field, v.clone()),
+                Some(Value::String(_)) => {}
                 Some(v) => add(field, v.to_string()),
             }
         }
-        add("age", f(row, "age").unwrap().to_string());
+        add("age", f(row, "age").unwrap().round().to_string());
         for token in s(row, "waf_sig").unwrap().split(',') {
             if !token.trim().is_empty() {
                 add("waf_sig_ind", token.trim().to_owned());
@@ -273,7 +274,8 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
         assert_eq!(total["truncated"], false);
     }
     assert!(expected["edge"].contains_key("true"));
-    assert!(expected["pop"].contains_key("") && expected["age"].contains_key("0.5"));
+    assert!(!expected["pop"].contains_key(""));
+    assert!(expected["age"].contains_key("1"));
     assert!(expected["waf_sig_ind"].keys().eq(["a", "b", "c"]));
 
     // all_fields_ip: only the fields a page reads sketches of, with exact distinct IPs per

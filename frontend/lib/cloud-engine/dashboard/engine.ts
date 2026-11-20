@@ -30,6 +30,7 @@ import {
   CARD_FIELDS,
   customFieldsKey,
   decodeSummary,
+  normalizeDashboardValue,
   planCoarsestFirst,
   planSummaries,
   SUMMARY_COLUMNS,
@@ -526,7 +527,7 @@ export class Aggregator {
         if (isCdnHit(state)) bucket.hits++;
       }
       for (const entry of fieldColumns) {
-        const value = toScalar(entry.column[i]);
+        const value = normalizeDashboardValue(entry.field, toScalar(entry.column[i]));
         if (value === null) continue;
         entry.counts.set(value, (entry.counts.get(value) ?? 0) + 1);
         entry.added++;

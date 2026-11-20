@@ -226,6 +226,27 @@ const NUMBER_FIELDS = new Set([
   "waf_ms",
 ]);
 
+export function normalizeDashboardValue(
+  field: string,
+  value: Scalar | null | undefined,
+): Scalar | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value === "") return null;
+  if (field === "ttl" || field === "age") {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  }
+  if (field === "conn_requests") {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (n === 1) return "1";
+    if (n <= 5) return "2–5";
+    if (n <= 20) return "6–20";
+    return "21+";
+  }
+  return value;
+}
+
 /** A custom field a run aggregates and its value type. */
 export type CustomField = Pick<CustomCard, "id" | "type">;
 
@@ -236,13 +257,13 @@ export function summaryValue(
   type?: CustomField["type"],
 ): Scalar | null {
   if (type === "boolean" || (!type && BOOLEAN_FIELDS.has(field))) {
-    return value === "true";
+    return normalizeDashboardValue(field, value === "true");
   }
   if (type === "number" || (!type && NUMBER_FIELDS.has(field))) {
     const n = Number(value);
-    return value === "" || Number.isNaN(n) ? null : n;
+    return normalizeDashboardValue(field, value === "" || Number.isNaN(n) ? null : n);
   }
-  return value;
+  return normalizeDashboardValue(field, value);
 }
 
 /** FNV-1a 64 over each name followed by `\n` (app/src/ingest/bundle.rs `fingerprint`). */
@@ -651,6 +672,7 @@ export async function decodeSummary(
   const buckets = new Map<number, MinuteBucket>();
   const counts = new Map<string, Map<Scalar, number>>();
   const nonNull: Record<string, number> = {};
+  const skipped: Record<string, number> = {};
   const cut = new Set<string>();
   let ipSketch: Hll | null = null;
   let total = 0;
@@ -699,13 +721,19 @@ export async function decodeSummary(
         const name = field[i] as string;
         if (!cards.has(name)) break;
         const typed = summaryValue(name, value[i] as string, types.get(name));
-        if (typed === null) break;
+        if (typed === null) {
+          skipped[name] = (skipped[name] ?? 0) + num(count[i]);
+          break;
+        }
         const map = counts.get(name) ?? new Map<Scalar, number>();
         map.set(typed, (map.get(typed) ?? 0) + num(count[i]));
         counts.set(name, map);
         break;
       }
     }
+  }
+  for (const [name, count] of Object.entries(skipped)) {
+    nonNull[name] = Math.max(0, (nonNull[name] ?? 0) - count);
   }
   if (custom.some((field) => !summarized.has(field.id))) return null;
   const sorted = [...buckets.values()].sort((a, b) => a.t - b.t);
