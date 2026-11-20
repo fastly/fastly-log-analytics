@@ -325,7 +325,7 @@ no duplicate initial API calls
 
 - [ ] **Step 3: Deploy and verify all three environments**
 
-Deploy the final SHA with the project orchestrator to `flp-cloud fla-elevation flp-se-demo`; verify each report separately and preserve explicit failures.
+Deploy the final SHA with the project orchestrator to all configured environments; verify each report separately and preserve explicit failures.
 
 - [ ] **Step 4: Commit any audit documentation and final integration fix**
 

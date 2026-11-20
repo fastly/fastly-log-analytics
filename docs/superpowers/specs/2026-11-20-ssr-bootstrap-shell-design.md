@@ -77,7 +77,7 @@ control; UI visibility is not authorization.
 - AppLayout test: RUM and Streaming are present in the first render when SSR bootstrap says
   enabled, with no later client update required.
 - AppLayout test: feature links remain absent when the canonical config says disabled.
-- Cloud/Elevation parity test for the same canonical service capability shape.
+- Cloud/High-Scale parity test for the same canonical service capability shape.
 - Mutation test: changing CMCD/RUM config invalidates bootstrap metadata and updates nav.
 - Focused SSR tests for each newly seeded page verify exact client/server query-key parity.
 - Existing Cloud browser, security, type, and lint suites remain green.
