@@ -23,6 +23,7 @@ import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES } from '@/lib/cloud-engine/usage/estimate'
+import { useServiceQuery } from '@/hooks/useDashboardCards'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -306,6 +307,32 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     useMockDataTable = false
     mockIsDataReady = null
     errorSpy.mockRestore()
+  })
+
+  test('treats a service query waiting for app data as initially loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract', 'test-svc'], queryFn),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(true)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  test('does not mark an explicitly disabled service query as loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract-disabled', 'test-svc'], queryFn, { enabled: false }),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(false)
+    expect(queryFn).not.toHaveBeenCalled()
   })
 
   test('usage page mounts and renders title', () => {

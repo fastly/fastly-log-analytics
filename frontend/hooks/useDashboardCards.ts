@@ -159,13 +159,21 @@ export function useServiceQuery<T>(
   serviceIdIndex = 2,
 ) {
   const isReady = useIsDataReady()
-  return useQuery<T, Error, T>({
+  const query = useQuery<T, Error, T>({
     ...options,
     queryKey,
     queryFn,
     enabled: isReady && (options?.enabled ?? true),
     placeholderData: keepPreviousWithinService(queryKey, serviceIdIndex),
   })
+  const waitingForDataReady =
+    !isReady &&
+    (options?.enabled ?? true) &&
+    query.isPending &&
+    query.data === undefined &&
+    !query.isError
+
+  return waitingForDataReady ? { ...query, isLoading: true } : query
 }
 
 type RumStatusWire = WithRequired<components['schemas']['RumStatusResponse'], 'enabled'>
