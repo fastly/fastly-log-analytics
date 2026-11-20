@@ -1677,3 +1677,22 @@ fn sec20a_service_patch_rejects_poisoned_custom_and_disabled_rum_conditions() {
     );
     assert_eq!(valid_patch.status, 200);
 }
+
+#[test]
+fn cleanup_temp_secrets_waits_for_permanent_credentials_before_deleting_temp_secrets() {
+    let platform = Platform::new();
+    let job = platform.until(platform.provision()["job"].clone(), "cleanup_temp_secrets");
+    platform.adapter.override_secret_reads("fos_sk.", Ok(None));
+    let next = platform.retry(&job);
+    assert_eq!(next["status"], "pending");
+    assert_eq!(next["step"], "cleanup_temp_secrets");
+    assert_eq!(next["retry_reason"], "credentials_pending");
+    assert!(
+        platform
+            .adapter
+            .secret("fos_tmp_ak.fixtureService")
+            .unwrap()
+            .is_some(),
+        "must not delete temp secret before permanent credentials propagate"
+    );
+}

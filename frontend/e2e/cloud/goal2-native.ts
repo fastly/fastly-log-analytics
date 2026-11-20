@@ -106,8 +106,8 @@ export async function goal2Native(page: Page) {
   const customField = {
     name: "browser_fixture_value",
     label: "Browser Fixture Value",
-    vcl: "%{req.http.X-Synthetic}V",
-    vcl_log_expression: "%{req.http.X-Synthetic}V",
+    vcl: "req.http.X-Synthetic",
+    vcl_log_expression: "req.http.X-Synthetic",
     parquet_type: "Utf8",
     duckdb_type: "VARCHAR",
     value_type: "string",

@@ -416,14 +416,10 @@ pub fn cleanup_temp_secrets(
     service: &Service,
     token: &str,
 ) -> Result<(), Error> {
+    let (perm_ak, _) = credentials(context, service)?;
     let store = config(context.runtime, "secret_store_id")?;
     let (ak, sk) = temporary_refs(service);
-    let mut names = vec![ak, sk];
-    if let Ok(perm_ak) = context.secret(&service.fos_access_key_ref) {
-        if !perm_ak.is_empty() {
-            names.push(recovery_ref(service, &perm_ak));
-        }
-    }
+    let names = [ak, sk, recovery_ref(service, &perm_ak)];
     for name in names {
         let (status, _) = context.api_status(
             "DELETE",
