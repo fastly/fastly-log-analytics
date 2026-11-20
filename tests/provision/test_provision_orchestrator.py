@@ -2361,8 +2361,8 @@ def test_write_only_dictionary_parity():
     assert [(d.name, d.write_only) for d in py_dicts] == [("fos_credentials", True)]
 
     orchestrate_src = (root / "backend" / "provision" / "declarative" / "orchestrate.py").read_text()
-    assert 'ServiceDictionary(name="fos_credentials", write_only=True' in orchestrate_src
-    assert 'ServiceDictionary(name="cdn_auth", write_only=True' in orchestrate_src
+    assert re.search(r'ServiceDictionary\(\s*name="fos_credentials",\s*write_only=True', orchestrate_src)
+    assert re.search(r'ServiceDictionary\(\s*name="cdn_auth",\s*write_only=True', orchestrate_src)
 
     reconcile_rs = (root / "compute" / "cloud" / "src" / "admin" / "reconcile.rs").read_text()
     assert '"name": "fos_credentials",' in reconcile_rs

@@ -38,7 +38,7 @@ def test_sec07_wellknown_bots_binds_scalar_parameters_without_sql_interpolation(
     monkeypatch.setattr(
         bot_sources,
         "build_well_known_bots_matcher",
-        lambda: lambda ua: "Googlebot" in ua,
+        lambda: lambda ua: [{"name": "Googlebot", "category": "search"}] if "Googlebot" in ua else [],
     )
 
     class _CapturingChTransport(httpx.BaseTransport):

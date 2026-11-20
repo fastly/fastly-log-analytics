@@ -835,8 +835,8 @@ def test_scenario_e6_preserved_fdt_deployment_readiness_and_light_traffic_compat
     ch_recorder: RecordingClickHouseClient,
     cloud_server: CloudTestServer,
 ) -> None:
-    """Scenario E6: Complete local fdt compatibility simulation across fla-elevation, flp-cloud, and flp-se-demo."""
-    # 1. fla-elevation: mTLS admin-gateway reconcile + loopback /metrics & /health + fdt SQL verification
+    """Scenario E6: Complete local harness compatibility simulation across high-scale k8s, cloud compute, and se demo."""
+    # 1. high-scale k8s: mTLS admin-gateway reconcile + loopback /metrics & /health + SQL verification
     gw_secret = "test-sentinel-fdt-admin-gw-32bytes"
     monkeypatch.setenv("ADMIN_GATEWAY_REQUIRED", "1")
     monkeypatch.setenv("ADMIN_GATEWAY_SECRET", gw_secret)
@@ -907,7 +907,7 @@ sub test_fdt_dual_cdn_dict {{
         )
         assert res_hs.returncode == 0, f"Dual cdn_auth compatibility failed for {key_entry}:\n{res_hs.stdout}"
 
-    # 2. flp-cloud & flp-se-demo: /version, /, /_tick, /_flush, flp_session + X-FLP-Harness, X-LT-* fields, flp_cdn refresh
+    # 2. cloud compute & se demo: /version, /, /_tick, /_flush, flp_session + X-FLP-Harness, X-LT-* fields, flp_cdn refresh
     assert cloud_server.request("GET", "/version").status_code == 200
     assert cloud_server.request("GET", "/").status_code == 200
     assert (

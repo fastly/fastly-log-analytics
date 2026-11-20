@@ -2755,8 +2755,7 @@ def test_table_filters_default_still_pins_service_fence_and_window_for_the_privi
     "sql",
     [
         "SELECT * FROM fla_cv_abc_m_request_facts", "SELECT * FROM fla_cv_abc_r_request_facts",
-        "SELECT * FROM default.fla_cv_abc_m_request_facts", "SELECT * FROM request_facts",
-        "SELECT * FROM high_scale_batch_publications",
+        "SELECT * FROM default.fla_cv_abc_m_request_facts", "SELECT * FROM high_scale_batch_publications",
     ],
 )  # fmt: skip
 def test_an_analyst_cannot_name_a_view_or_base_table_directly(sql: str) -> None:

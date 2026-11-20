@@ -576,7 +576,7 @@ jobs:
           make vcl-test
 
       - name: Offline 4-tier E2E security suite
-        run: uv run pytest -n 0 tests/e2e_security
+        run: uv run pytest -n 0 --timeout=300 tests/e2e_security
 
       - name: Cloud Python infra/tools tests & secret value scan
         run: make cloud-infra-test

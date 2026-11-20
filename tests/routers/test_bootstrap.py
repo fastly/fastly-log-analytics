@@ -1061,16 +1061,22 @@ def test_custom_fields_rejects_unauthorized_analyst(app_with_session, method: st
 
 @pytest.mark.security_regression
 @pytest.mark.parametrize(
-    "service_id,headers",
-    [("svc-anything", {}), ("svc-A", {"x-test-session-services": "svc-A"})],
-    ids=["admin_unrestricted", "in_scope_analyst"],
+    "service_id,headers,expect_403",
+    [("svc-anything", {}, False), ("svc-A", {"x-test-session-services": "svc-A"}, True)],
+    ids=["admin_unrestricted", "in_scope_analyst_blocked_admin_only"],
 )
-def test_custom_fields_authorized_callers_reach_handler(app_with_session, service_id: str, headers: dict):
+def test_custom_fields_authorized_callers_reach_handler(
+    app_with_session, service_id: str, headers: dict, expect_403: bool
+):
     with (
         patch("backend.utils.router_utils.load_service_config", return_value={"log_fields": {"custom_fields": []}}),
         TestClient(app_with_session) as c,
     ):
-        assert c.get(f"/api/services/{service_id}/custom-fields", headers=headers).status_code != 403
+        resp = c.get(f"/api/services/{service_id}/custom-fields", headers=headers)
+        if expect_403:
+            assert resp.status_code == 403 and resp.json()["detail"]["error"] == "admin_only"
+        else:
+            assert resp.status_code != 403
 
 
 @pytest.mark.security_regression

@@ -1738,19 +1738,20 @@ def test_cdn_get_blocks_invalid_redirects():
     assert captured_handler is not None
     handler_inst = captured_handler() if isinstance(captured_handler, type) else captured_handler
 
-    # 1. Test redirect to safe URL
+    # 1. Test redirect to safe same-host HTTPS URL
     req_mock = MagicMock()
     # It delegates to super().redirect_request, so let's mock the super class call or verify it doesn't raise
     with patch("urllib.request.HTTPRedirectHandler.redirect_request") as mock_super_redirect:
-        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "https://cdn-another.fastly.net/safe")
+        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "https://cdn-test.fastly.net/safe")
         mock_super_redirect.assert_called_once_with(
-            req_mock, None, 302, "Found", {}, "https://cdn-another.fastly.net/safe"
+            req_mock, None, 302, "Found", {}, "https://cdn-test.fastly.net/safe"
         )
 
-    # 2. Test redirect to unsafe URL (e.g. localhost, cloud metadata, or anything not ending in .fastly.net/.fastlystorage.app)
-    with pytest.raises(urllib.error.URLError) as excinfo:
-        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "http://169.254.169.254/")
-    assert "Redirected to an invalid URL" in str(excinfo.value)
+    # 2. Test redirect to unsafe URL (cross-host or cloud metadata)
+    for bad_url in ("https://cdn-another.fastly.net/safe", "http://169.254.169.254/"):
+        with pytest.raises(urllib.error.URLError) as excinfo:
+            handler_inst.redirect_request(req_mock, None, 302, "Found", {}, bad_url)
+        assert "Cross-host or non-HTTPS CDN redirect blocked" in str(excinfo.value)
 
 
 def test_cloud_copy_deletions_bill_for_thirty_days_and_old_rows_are_pruned():

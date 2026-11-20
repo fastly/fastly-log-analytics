@@ -656,7 +656,7 @@ _CONSOLE_SQL_LEX_RE = re.compile(
     r'|(?P<DQUOTE>"(?:""|[^"])*"|`(?:``|[^`])*`)'
     r"|(?P<WS>\s+)"
     r"|(?P<NUM>-?\d+(?:\.\d+)?)"
-    r"|(?P<IDENT>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|(?P<IDENT>" + SAFE_IDENT_RE.pattern + ")"
     r"|(?P<OP><=|>=|!=|<>|[=<>(),.\[\]*+-/;])"
     r"|(?P<OTHER>.)"
 )
