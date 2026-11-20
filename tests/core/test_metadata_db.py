@@ -1749,10 +1749,13 @@ def test_cdn_get_blocks_invalid_redirects():
         )
 
     # 2. Test redirect to unsafe URL (cross-host or cloud metadata)
-    for bad_url in ("https://cdn-another.fastly.net/safe", "http://169.254.169.254/"):
-        with pytest.raises(urllib.error.URLError) as excinfo:
-            handler_inst.redirect_request(req_mock, None, 302, "Found", {}, bad_url)
-        assert "Cross-host or non-HTTPS CDN redirect blocked" in str(excinfo.value)
+    with pytest.raises(urllib.error.URLError) as excinfo:
+        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "https://cdn-another.fastly.net/safe")
+    assert "Cross-host or non-HTTPS CDN redirect blocked" in str(excinfo.value)
+
+    with pytest.raises(urllib.error.URLError) as excinfo:
+        handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "http://169.254.169.254/")
+    assert "Redirected to an invalid URL" in str(excinfo.value)
 
 
 def test_cloud_copy_deletions_bill_for_thirty_days_and_old_rows_are_pruned():

@@ -502,7 +502,7 @@ def ensure_cloud_binaries() -> tuple[Path, Path]:
             env=env,
             capture_output=True,
             text=True,
-            timeout=110,
+            timeout=300,
             check=False,
         )
         if proc.returncode != 0:

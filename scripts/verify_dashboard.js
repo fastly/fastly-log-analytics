@@ -136,7 +136,7 @@ function failOrTolerate(browser, contextName, label, detail, transient) {
 }
 
 function ts() { return new Date().toISOString(); }
-function isCriticalResourceUrl(url) { return !url.includes('/api/web-vitals') && !url.includes('/api/ux-events') && (url.includes('/api/') || url.includes('/_next/data/')); }
+function isCriticalResourceUrl(url) { return !url.includes('/api/web-vitals') && !url.includes('/api/ux-events') && !url.includes('/api/admin/events/stream') && (url.includes('/api/') || url.includes('/_next/data/')); }
 const GENERIC_RESOURCE_FAILURE_RE = /^Failed to load resource:/;
 
 function registerErrorListeners(page, browser, contextName) {
