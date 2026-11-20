@@ -211,6 +211,15 @@ pub fn validate_custom_field(field: &Value, existing_names: &[String]) -> Vec<St
     if crate::logging::cmcd::reserved_name(name) {
         errors.push("CMCD field names are reserved for system-managed capture".into());
     }
+    if name.starts_with("rum_")
+        || crate::logging::rum::RUM_FIELD_NAMES.contains(&name)
+        || name.starts_with("edge_")
+        || crate::admin::scoring::SCORING_FIELD_NAMES.contains(&name)
+    {
+        errors.push(format!(
+            "Custom field '{name}' conflicts with a system-managed field"
+        ));
+    }
     if name.is_empty()
         || name.len() > 48
         || !name.as_bytes()[0].is_ascii_lowercase()

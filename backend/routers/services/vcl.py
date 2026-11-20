@@ -210,7 +210,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
                 continue
             all_hard_errors.extend(validate_custom_field_entry(cf_dict, seen_cf_names, system_names=system_names))
             cf_name = cf_dict.get("name")
-            if isinstance(cf_name, str) and cf_name not in system_names:
+            if isinstance(cf_name, str):
                 seen_cf_names.append(cf_name)
         if all_hard_errors:
             raise HTTPException(status_code=422, detail={"errors": all_hard_errors})
@@ -243,6 +243,13 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
                 else:
                     canonicalized_cfs.append(cf)
             new_lf["custom_fields"] = canonicalized_cfs
+    if isinstance(new_lf.get("custom_fields"), list):
+        new_lf["custom_fields"] = [
+            {**cf, "description": ""}
+            if isinstance(cf, dict) and "description" in cf and cf["description"] is None
+            else cf
+            for cf in new_lf["custom_fields"]
+        ]
     new_lf["schema_version"] = 2
     old_hash = old_lf.get("format_hash")
     new_hash = lf_module.format_hash(new_lf)

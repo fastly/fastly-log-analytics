@@ -1113,3 +1113,95 @@ fn sec20ab_vcl_condition_and_log_expression_validators_block_breakouts_and_exfil
         }
     }
 }
+
+#[test]
+fn sec21_vcl_validators_block_setcookie_rtime_adjacency_unary_table_and_unicode_percent_null() {
+    let parity_bad = [
+        "setcookie.get_value_by_name(resp, \"sid\")",
+        "setcookie.delete_by_name(resp, \"rum_cid\")",
+        "setcookie.get_by_name(resp, \"sid\")",
+        "SETCOOKIE . GET_VALUE_BY_NAME(resp, \"sid\")",
+        "now + 0msheader.get(req, \"Authorization\")",
+        "now + 0.msheader.get(req, \"Authorization\")",
+        "now + 0.5wsetcookie.delete_by_name(resp, \"sid\")",
+        "now + 0mtable.lookup(fos_credentials, \"secret_key\")",
+        "now + 0msfos_credentials",
+        "now + 0.5wauth_fail_rc",
+        "now + 0.5wauth_fail_pb",
+        "now + 0msx-fastly-key",
+        "-table.lookup_integer(solution_config, \"k\")",
+        "+table.lookup_float(solution_config, \"k\")",
+        "!table.lookup_bool(solution_config, \"k\")",
+        "table /*x*/ . lookup(fos_credentials, \"secret_key\")",
+        "\"foo%u0000bar\"",
+        "\"foo%U0000bar\"",
+        "\"foo%u{00}bar\"",
+        "\"foo%u0041bar\"",
+        "req.http.X \\",
+        "req.url == \"/\"\n",
+        "req.url == \"/\"\u{2028}",
+        "req.url == \"/\"\u{2029}",
+    ];
+    for bad in parity_bad {
+        assert!(
+            logging::validate_vcl_condition(bad).is_err(),
+            "expected validate_vcl_condition to reject: {bad:?}"
+        );
+        assert!(
+            logging::rum::validate_custom_condition(bad).is_err(),
+            "expected rum::validate_custom_condition to reject: {bad:?}"
+        );
+        assert!(
+            !logging::validate_vcl_log_expression(bad).is_empty(),
+            "expected validate_vcl_log_expression to reject: {bad:?}"
+        );
+    }
+
+    assert!(logging::rum::validate_custom_condition("(now + 0msreq.url.path) != \"\"").is_err());
+    assert!(logging::rum::validate_custom_condition("(now + 0.5wreq.url) != \"\"").is_err());
+    assert!(
+        logging::rum::validate_custom_condition("(now +\u{00a0}0msreq . url . path) != \"\"")
+            .is_err()
+    );
+
+    let poisoned_shield = "iad-va-us); set req.http.X-Pwn = \"1";
+    assert!(logging::rum::asset_fetch_vcl(poisoned_shield, Some("2.13.0")).is_err());
+    assert!(logging::desired_snippets(&json!({
+        "logging_enabled": true,
+        "rum_enabled": true,
+        "cdn_shield": poisoned_shield
+    }))
+    .is_err());
+    assert!(logging::desired_snippets(&json!({
+        "logging_enabled": true,
+        "rum_enabled": false,
+        "cdn_shield": poisoned_shield
+    }))
+    .is_err());
+    assert!(logging::rum::asset_fetch_vcl("  iad-va-us  ", Some("2.13.0")).is_ok());
+
+    for benign in [
+        "req.http.X-Header.Get",
+        "req.http.X-Table.Lookup",
+        "resp.http.X-Setcookie",
+        "req.http.X-LT-Run-Id",
+        "req.http.X-LT-Request-Id",
+    ] {
+        assert!(
+            logging::validate_vcl_log_expression(benign).is_empty(),
+            "expected benign log expression to pass: {benign}"
+        );
+        assert!(
+            logging::validate_vcl_condition(&format!("{benign} != \"\"")).is_ok(),
+            "expected benign condition to pass: {benign}"
+        );
+    }
+    assert!(
+        logging::validate_vcl_condition("(req.restarts == 0 && req.http.Set-Cookie == \"\")")
+            .is_ok()
+    );
+    assert!(logging::validate_vcl_condition(
+        "req.http.Host == \"www.example.com\" && req.url.ext != \"ico\""
+    )
+    .is_ok());
+}

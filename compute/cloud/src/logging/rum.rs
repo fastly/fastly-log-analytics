@@ -129,12 +129,25 @@ pub fn validate_faro_version(version: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_shield_pop(raw: &str) -> Result<&str, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 64
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err(format!("invalid shield_pop: {raw:?}"));
+    }
+    Ok(trimmed)
+}
+
 pub fn validate_custom_condition(condition: &str) -> Result<(), String> {
+    super::validate_vcl_condition(condition)?;
     let trimmed = condition.trim();
     if trimmed.is_empty() {
         return Ok(());
     }
-    super::validate_vcl_condition(trimmed)?;
     // Check for req.url or req.url.path predicate
     if contains_req_url_predicate(trimmed) {
         return Err(
@@ -153,8 +166,11 @@ fn contains_req_url_predicate(s: &str) -> bool {
     while idx + needle.len() <= bytes.len() {
         if let Some(pos) = lower[idx..].find("req.url") {
             let start = idx + pos;
-            let before_ok = start == 0
-                || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            let before_ok = super::is_vcl_token_start(bytes, start)
+                && !(start >= 2
+                    && bytes[start - 1] == b'.'
+                    && (bytes[start - 2].is_ascii_alphanumeric()
+                        || matches!(bytes[start - 2], b'_' | b'-')));
             let end = start + needle.len();
             let rest = &lower[end..];
             let after_end = if rest.starts_with(".path") {
@@ -298,8 +314,11 @@ pub fn beacon_response_vcl() -> &'static str {
 }
 
 pub fn asset_fetch_vcl(shield_pop: &str, faro_version: Option<&str>) -> Result<String, String> {
-    let backend_str = if !shield_pop.is_empty() && !shield_pop.eq_ignore_ascii_case("none") {
-        let shield_var = format!("ssl_shield_{}", shield_pop.replace('-', "_"));
+    let trimmed_shield = shield_pop.trim();
+    let backend_str = if !trimmed_shield.is_empty() && !trimmed_shield.eq_ignore_ascii_case("none")
+    {
+        let valid_pop = validate_shield_pop(trimmed_shield)?;
+        let shield_var = format!("ssl_shield_{}", valid_pop.replace('-', "_"));
         format!("fastly.try_select_shield({shield_var}, F_fos_origin)")
     } else {
         "F_fos_origin".to_string()

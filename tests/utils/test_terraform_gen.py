@@ -522,6 +522,11 @@ def test_sec14_scoring_backend_in_terraform_enforces_tls_and_override_host():
         ({"custom_condition": 'table.lookup(fos_credentials, "secret_key", "") != ""'}, "custom_condition"),
         ({"rum_enabled": True, "rum": {"enabled": True, "custom_condition": "true /* x */"}}, "rum_custom_condition"),
         (
+            {"rum_enabled": True, "rum": {"enabled": True, "custom_condition": 'req.url.path == "/foo"'}},
+            "rum_custom_condition",
+        ),
+        ({"rum_enabled": True, "rum_custom_condition": '(now + 0msreq.url.path) != ""'}, "rum_custom_condition"),
+        (
             {
                 "log_fields": {
                     "groups": ["A"],

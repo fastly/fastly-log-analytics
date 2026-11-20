@@ -15,7 +15,7 @@ from typing import Any
 
 from backend import config
 from backend.core.clickhouse import ClickHouseClient
-from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.core.share_db import SHARED_PII_KEYS
 from backend.high_scale._common import clickhouse_string_literal
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
@@ -27,11 +27,7 @@ PROFILE = "fla_console_ro"
 MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
 REDACTED = "[redacted]"
-MASKED_KEYS = tuple(
-    sorted(
-        IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_id", "sid", "x-forwarded-for", "true-client-ip", "fastly-client-ip"}
-    )
-)
+MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS))
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_SETTINGS = (
     "readonly = 1, additional_table_filters CHANGEABLE_IN_READONLY, "

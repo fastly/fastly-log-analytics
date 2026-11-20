@@ -28,7 +28,6 @@ const FORBIDDEN_VCL_KEYWORDS: &[&str] = &[
 ];
 
 const FORBIDDEN_VCL_CALLS: &[&str] = &[
-    "table.lookup",
     "table.contains",
     "header.get",
     "header.filter_except",
@@ -44,6 +43,8 @@ const FORBIDDEN_VCL_IDENTIFIERS: &[&str] = &[
     "flp_fos_credentials",
     "flp_front_auth",
     "flp_fos_buckets",
+    "auth_fail_rc",
+    "auth_fail_pb",
 ];
 
 const FORBIDDEN_LOG_HEADERS: &[&str] = &[
@@ -58,11 +59,72 @@ const FORBIDDEN_LOG_HEADERS: &[&str] = &[
     "cookie",
 ];
 
+fn ends_with_vcl_rtime(bytes: &[u8], end: usize) -> bool {
+    let prefix = &bytes[..end];
+    let unit_len = if prefix.len() >= 2 && prefix[prefix.len() - 2..].eq_ignore_ascii_case(b"ms") {
+        2
+    } else if !prefix.is_empty()
+        && matches!(
+            prefix[prefix.len() - 1].to_ascii_lowercase(),
+            b's' | b'm' | b'h' | b'd' | b'y' | b'w'
+        )
+    {
+        1
+    } else {
+        return false;
+    };
+    let mut i = prefix.len() - unit_len;
+    let mut tail_digits = 0usize;
+    while i > 0 && prefix[i - 1].is_ascii_digit() {
+        i -= 1;
+        tail_digits += 1;
+    }
+    if i > 0 && prefix[i - 1] == b'.' {
+        i -= 1;
+        let mut head_digits = 0usize;
+        while i > 0 && prefix[i - 1].is_ascii_digit() {
+            i -= 1;
+            head_digits += 1;
+        }
+        if head_digits == 0 {
+            return false;
+        }
+    } else if tail_digits == 0 {
+        return false;
+    }
+    if i == 0 {
+        return true;
+    }
+    let prev = prefix[i - 1];
+    if prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b'.') {
+        return false;
+    }
+    if prev == b'-' && i >= 2 && (prefix[i - 2].is_ascii_alphanumeric() || prefix[i - 2] == b'_') {
+        return false;
+    }
+    true
+}
+
+pub(crate) fn is_vcl_token_start(bytes: &[u8], start: usize) -> bool {
+    if start == 0 {
+        return true;
+    }
+    let prev = bytes[start - 1];
+    if prev.is_ascii_alphanumeric() || prev == b'_' {
+        return ends_with_vcl_rtime(bytes, start);
+    }
+    if prev == b'-' {
+        return !(start >= 2
+            && (bytes[start - 2].is_ascii_alphanumeric() || bytes[start - 2] == b'_'));
+    }
+    true
+}
+
 /// Scans a VCL boolean/log expression for balanced `"` and `(` / `)` without C-style `\"`
 /// escaping (Fastly VCL `"..."` strings do NOT escape `"` with `\`, and `\"` closes the string)
-/// or `%XX` hex escapes inside double-quoted literals (which Fastly VCL decodes at compile time).
-/// Replaces quoted string interiors with spaces in the returned unquoted projection so keyword,
-/// function, dictionary, and header checks can inspect unquoted VCL tokens cleanly.
+/// or `%XX` / `%uXXXX` / `%u{...}` hex escapes inside double-quoted literals (which Fastly VCL
+/// decodes at compile time). Replaces quoted string interiors with spaces in the returned unquoted
+/// projection so keyword, function, dictionary, and header checks can inspect unquoted VCL tokens.
 pub(super) fn scan_vcl_delimiters(input: &str) -> Result<String, &'static str> {
     let bytes = input.as_bytes();
     let mut depth: i32 = 0;
@@ -76,8 +138,9 @@ pub(super) fn scan_vcl_delimiters(input: &str) -> Result<String, &'static str> {
             }
             if ch == '%'
                 && idx + 2 < bytes.len()
-                && bytes[idx + 1].is_ascii_hexdigit()
-                && bytes[idx + 2].is_ascii_hexdigit()
+                && ((bytes[idx + 1].is_ascii_hexdigit() && bytes[idx + 2].is_ascii_hexdigit())
+                    || (matches!(bytes[idx + 1], b'u' | b'U')
+                        && (bytes[idx + 2] == b'{' || bytes[idx + 2].is_ascii_hexdigit())))
             {
                 return Err("percent-encoded hex escapes are not allowed in VCL string literals");
             }
@@ -90,6 +153,9 @@ pub(super) fn scan_vcl_delimiters(input: &str) -> Result<String, &'static str> {
                 unquoted.push(' ');
             }
             continue;
+        }
+        if ch == '\\' {
+            return Err("backslashes are not valid outside VCL string literals");
         }
         if input[idx..].starts_with("*/") {
             return Err("orphan block-comment closer");
@@ -120,9 +186,8 @@ fn contains_vcl_keyword(unquoted_lower: &str, keyword: &str) -> bool {
     let bytes = unquoted_lower.as_bytes();
     for (start, matched) in unquoted_lower.match_indices(keyword) {
         let end = start + matched.len();
-        let before_ok = start == 0
-            || !(bytes[start - 1].is_ascii_alphanumeric()
-                || matches!(bytes[start - 1], b'_' | b'.' | b'-' | b':'));
+        let before_ok = is_vcl_token_start(bytes, start)
+            && (start == 0 || !matches!(bytes[start - 1], b'.' | b':'));
         let after_ok = end >= bytes.len()
             || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
         if before_ok && after_ok {
@@ -137,9 +202,8 @@ fn contains_forbidden_identifier(unquoted_lower: &str) -> Option<&'static str> {
     for &ident in FORBIDDEN_VCL_IDENTIFIERS {
         for (start, matched) in unquoted_lower.match_indices(ident) {
             let end = start + matched.len();
-            let before_ok = start == 0
-                || !(bytes[start - 1].is_ascii_alphanumeric()
-                    || matches!(bytes[start - 1], b'_' | b'-'));
+            let before_ok = is_vcl_token_start(bytes, start)
+                && (start == 0 || !matches!(bytes[start - 1], b'.' | b':'));
             let after_ok = end >= bytes.len()
                 || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
             if before_ok && after_ok {
@@ -150,29 +214,63 @@ fn contains_forbidden_identifier(unquoted_lower: &str) -> Option<&'static str> {
     None
 }
 
-fn contains_forbidden_vcl_call(s: &str) -> Option<&'static str> {
-    let compact: String = s
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    FORBIDDEN_VCL_CALLS
-        .iter()
-        .copied()
-        .find(|call| compact.contains(call))
+fn is_vcl_fn_call_start(bytes: &[u8], start: usize) -> bool {
+    is_vcl_token_start(bytes, start)
+        && !(start >= 2
+            && bytes[start - 1] == b'.'
+            && (bytes[start - 2].is_ascii_alphanumeric()
+                || matches!(bytes[start - 2], b'_' | b'-')))
+}
+
+fn contains_forbidden_vcl_call(unquoted_lower: &str) -> Option<&'static str> {
+    let normalized = normalize_vcl_dots(unquoted_lower);
+    let bytes = normalized.as_bytes();
+    for (start, matched) in normalized.match_indices("table.lookup") {
+        if !is_vcl_fn_call_start(bytes, start) {
+            continue;
+        }
+        let mut end = start + matched.len();
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end >= bytes.len() || bytes[end] != b'-' {
+            return Some("table.lookup");
+        }
+    }
+    for &call in FORBIDDEN_VCL_CALLS {
+        for (start, matched) in normalized.match_indices(call) {
+            let end = start + matched.len();
+            let after_ok = end >= bytes.len()
+                || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
+            if is_vcl_fn_call_start(bytes, start) && after_ok {
+                return Some(call);
+            }
+        }
+    }
+    for (start, matched) in normalized.match_indices("setcookie.") {
+        let end = start + matched.len();
+        if is_vcl_fn_call_start(bytes, start)
+            && bytes
+                .get(end)
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        {
+            return Some("setcookie");
+        }
+    }
+    None
 }
 
 pub(super) fn normalize_vcl_dots(unquoted_lower: &str) -> String {
     let mut out = String::with_capacity(unquoted_lower.len());
     let mut chars = unquoted_lower.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch.is_ascii_whitespace() {
-            while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+        if ch.is_whitespace() {
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
                 chars.next();
             }
             if chars.peek() == Some(&'.') {
                 chars.next();
-                while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
                     chars.next();
                 }
                 out.push('.');
@@ -180,7 +278,7 @@ pub(super) fn normalize_vcl_dots(unquoted_lower: &str) -> String {
                 out.push(' ');
             }
         } else if ch == '.' {
-            while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
                 chars.next();
             }
             out.push('.');
@@ -229,9 +327,7 @@ fn contains_forbidden_secret_header(unquoted_lower: &str, allow_req_set_cookie: 
         }
         for (start, matched) in unquoted_lower.match_indices(header) {
             let end = start + matched.len();
-            let before_ok = start == 0
-                || !(bytes[start - 1].is_ascii_alphanumeric()
-                    || matches!(bytes[start - 1], b'_' | b'-'));
+            let before_ok = is_vcl_token_start(bytes, start);
             let after_ok = end >= bytes.len()
                 || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
             if before_ok && after_ok {
@@ -243,6 +339,13 @@ fn contains_forbidden_secret_header(unquoted_lower: &str, allow_req_set_cookie: 
 }
 
 pub fn validate_vcl_condition(condition: &str) -> Result<(), String> {
+    if condition.contains(['\n', '\r'])
+        || condition
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err("custom_condition contains forbidden characters or comments".into());
+    }
     let trimmed = condition.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -250,8 +353,7 @@ pub fn validate_vcl_condition(condition: &str) -> Result<(), String> {
     if trimmed.len() > 2048 {
         return Err("custom_condition exceeds maximum length of 2048 characters".into());
     }
-    if trimmed.chars().any(char::is_control)
-        || trimmed.contains([';', '{', '}'])
+    if trimmed.contains([';', '{', '}'])
         || trimmed.contains("%{")
         || trimmed.contains("}V")
         || trimmed.contains("//")
@@ -292,8 +394,17 @@ pub fn validate_vcl_condition(condition: &str) -> Result<(), String> {
 
 pub fn validate_vcl_log_expression(expression: &str) -> Vec<String> {
     let mut errors = Vec::new();
-    if expression.contains(['\n', '\r']) || expression.chars().any(char::is_control) {
+    if expression.contains(['\n', '\r']) {
         errors.push("'vcl_log_expression' must not contain raw newlines".into());
+        return errors;
+    }
+    if expression
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        errors.push(
+            "'vcl_log_expression' must not contain control characters or line separators".into(),
+        );
         return errors;
     }
     if expression.contains(';') {
@@ -951,18 +1062,26 @@ pub fn desired_snippets(state: &Value) -> Result<Value, String> {
     } else {
         json!({})
     };
-    let shield_pop = state
+    let shield_pop = match state
         .get("cdn_shield")
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            state
-                .get("fos_region")
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-                .map(rum::shield_for_region)
-                .unwrap_or("iad-va-us")
-        });
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw_pop) => {
+            if !raw_pop.eq_ignore_ascii_case("none") {
+                rum::validate_shield_pop(raw_pop)?;
+            }
+            raw_pop
+        }
+        None => state
+            .get("fos_region")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(rum::shield_for_region)
+            .unwrap_or("iad-va-us"),
+    };
     let mut snippets = Vec::new();
     for subroutine in [
         "vcl_recv",

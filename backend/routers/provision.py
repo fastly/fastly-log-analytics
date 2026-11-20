@@ -922,7 +922,7 @@ def _validate_provision_vcl_inputs(cfg: dict[str, Any], *, strict_rum_path: bool
                 raise HTTPException(status_code=400, detail=make_error("invalid_custom_field", hard_errs[0]))
             if "description" in cf and cf["description"] is None:
                 cf["description"] = ""
-            if isinstance(cf.get("name"), str) and cf["name"] not in system_names:
+            if isinstance(cf.get("name"), str):
                 seen_names.append(cf["name"])
     elif lf is not None:
         raise HTTPException(

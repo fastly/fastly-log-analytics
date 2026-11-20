@@ -34,7 +34,12 @@ def _dump(obj: dict) -> str:
 
 from backend.config import is_rum_enabled  # noqa: E402
 from backend.core.catalog import validate_vcl_custom_condition  # noqa: E402
-from backend.core.fastly.client import _assert_faro_version_safe, load_vcl, parse_period  # noqa: E402
+from backend.core.fastly.client import (  # noqa: E402
+    _assert_faro_version_safe,
+    load_vcl,
+    parse_period,
+    validate_rum_custom_condition,
+)
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.core.vcl_generator import validate_quoted_literal, validate_url_exclusion_regex
 
@@ -139,7 +144,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     top_rum_cond = _tf_str(cfg.get("rum_custom_condition"), "rum_custom_condition").strip()
     nested_rum_cond = _tf_str(rum_dict.get("custom_condition"), "rum.custom_condition").strip()
     for rval in (top_rum_cond, nested_rum_cond):
-        if rval and (rum_cond_msg := validate_vcl_custom_condition(rval)):
+        if rval and (rum_cond_msg := validate_rum_custom_condition(rval)):
             raise ValueError(f"Invalid rum_custom_condition: {rum_cond_msg}")
     rum_cond = top_rum_cond if cfg.get("rum_custom_condition") is not None else nested_rum_cond
 

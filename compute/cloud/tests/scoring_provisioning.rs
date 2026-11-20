@@ -502,3 +502,307 @@ fn full_teardown_strips_scoring_vcl_and_deletes_scorer_before_logging_teardown()
         "scorer must be deleted before FOS access keys"
     );
 }
+
+#[test]
+fn sec21_scoring_validators_backend_tls_and_cookie_scrub_parity() {
+    for bad_regex in [
+        "^/api/%00admin",
+        "^/api/%u0000admin",
+        "^/api/%U0000admin",
+        "^/api/%U{000}admin",
+        "^/api/\u{2028}admin",
+        "^/api/\u{2029}admin",
+        "^/api/admin\n",
+    ] {
+        assert!(
+            admin::scoring::validate_exclude_url_regex(bad_regex).is_err(),
+            "expected validate_exclude_url_regex to reject {bad_regex:?}"
+        );
+        assert!(
+            admin::scoring::validate_vcl_literal(bad_regex, true).is_err(),
+            "expected validate_vcl_literal to reject {bad_regex:?}"
+        );
+    }
+    assert_eq!(
+        admin::scoring::validate_exclude_url_regex("^/quote%22path$").unwrap(),
+        "^/quote%22path$"
+    );
+
+    let backend = admin::scoring::desired_scoring_backend("scorer.edgecompute.app");
+    assert_eq!(backend["ssl_check_cert"], true);
+    assert_eq!(backend["use_ssl"], true);
+    assert_eq!(backend["ssl_cert_hostname"], "scorer.edgecompute.app");
+    assert_eq!(backend["ssl_sni_hostname"], "scorer.edgecompute.app");
+
+    assert!(admin::scoring::pass_snippet("bad\"; unset req.url; //", "secret").is_err());
+    let pass_vcl = admin::scoring::pass_snippet("fixtureService", "secret-token").unwrap();
+    assert!(
+        pass_vcl.contains("unset bereq.http.Cookie;"),
+        "pass_snippet must scrub customer cookies: {pass_vcl}"
+    );
+    assert!(
+        pass_vcl.contains("subfield(req.http.Cookie, \"X-Session-State\", \";\")")
+            && pass_vcl.contains("subfield(req.http.Cookie, \"_ess\", \";\")"),
+        "pass_snippet must preserve allowlisted scorer cookies: {pass_vcl}"
+    );
+}
+
+#[test]
+fn sec21_active_scoring_service_patch_round_trips_canonical_fields_and_blocks_spoof() {
+    let p = Platform::new();
+    p.provision_logging_service();
+    let en = p.ok(
+        "POST",
+        "/api/services/fixtureService/scoring/enable",
+        json!({}),
+    );
+    assert_eq!(p.run_job(en["job"].clone())["status"], "complete");
+
+    let svc_get = p.ok("GET", "/api/admin/services/fixtureService", json!({}));
+    let gen = svc_get["generation"].as_str().unwrap().to_owned();
+    let mut lf = svc_get["service"]["log_fields"].clone();
+    lf["custom_fields"].as_array_mut().unwrap().push(json!({
+        "name": "lt_run_id",
+        "label": "LT Run ID",
+        "vcl_log_expression": "req.http.X-LT-Run-Id",
+        "collection_stage": "edge",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 36,
+        "enabled": true
+    }));
+
+    let patched = p.ok(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": gen,
+            "custom_condition": "req.url.ext != \"ico\"",
+            "log_fields": lf
+        }),
+    );
+    let next_gen = patched["generation"].as_str().unwrap().to_owned();
+
+    let mut spoofed_lf = patched["service"]["log_fields"].clone();
+    for cf in spoofed_lf["custom_fields"].as_array_mut().unwrap() {
+        if cf["name"] == "edge_score" {
+            cf["vcl_log_expression"] = json!("req.http.X-Spoofed-Score");
+        }
+    }
+    let (bad_status, bad_body) = p.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": next_gen,
+            "log_fields": spoofed_lf
+        }),
+    );
+    assert_eq!(bad_status, 400);
+    assert_eq!(bad_body["error"], "invalid_custom_field");
+
+    // Shadow-key ("vcl" / "parquet_type" / "system_managed") & type/byte_limit/optional-field spoofing
+    let base_lf = patched["service"]["log_fields"].clone();
+    for (label, expected_err, patch_fn) in [
+        (
+            "shadow_vcl",
+            "invalid_custom_field",
+            &(|cf: &mut Value| {
+                cf["vcl"] = json!("req.http.X-Spoofed-Score");
+            }) as &dyn Fn(&mut Value),
+        ),
+        (
+            "shadow_parquet_type",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["parquet_type"] = json!("VARCHAR");
+            },
+        ),
+        (
+            "mismatched_duckdb_type",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["duckdb_type"] = json!("BOOLEAN");
+            },
+        ),
+        (
+            "negative_byte_limit",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["byte_limit"] = json!(-5);
+            },
+        ),
+        (
+            "boolean_byte_limit",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["byte_limit"] = json!(true);
+            },
+        ),
+        (
+            "string_byte_limit",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["byte_limit"] = json!("64");
+            },
+        ),
+        (
+            "system_managed_false",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["system_managed"] = json!(false);
+            },
+        ),
+        (
+            "system_managed_true",
+            "system_field_locked",
+            &|cf: &mut Value| {
+                cf["system_managed"] = json!(true);
+            },
+        ),
+        (
+            "control_char_label",
+            "invalid_custom_field",
+            &|cf: &mut Value| {
+                cf["label"] = json!("Edge\nScore");
+            },
+        ),
+    ] {
+        let mut candidate_lf = base_lf.clone();
+        for cf in candidate_lf["custom_fields"].as_array_mut().unwrap() {
+            if cf["name"] == "edge_score" {
+                patch_fn(cf);
+            }
+        }
+        let (st_patch, body_patch) = p.call(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({
+                "generation": next_gen,
+                "log_fields": candidate_lf
+            }),
+        );
+        assert_eq!(
+            st_patch, 400,
+            "expected PATCH 400 for {label}, got {st_patch}: {body_patch}"
+        );
+        assert_eq!(body_patch["error"], expected_err, "{label}");
+
+        let (st_prev, body_prev) = p.call(
+            "POST",
+            "/api/admin/log-fields/preview",
+            json!({
+                "scoring": {"enabled": true},
+                "log_fields": candidate_lf
+            }),
+        );
+        assert_eq!(
+            st_prev, 400,
+            "expected preview 400 for {label}, got {st_prev}: {body_prev}"
+        );
+        assert_eq!(body_prev["error"], expected_err, "{label} preview");
+    }
+
+    // Duplicate edge_score entries must return 400 invalid_custom_field
+    let mut dup_lf = base_lf.clone();
+    let dup_edge = dup_lf["custom_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|cf| cf["name"] == "edge_score")
+        .unwrap()
+        .clone();
+    dup_lf["custom_fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(dup_edge);
+    let (dup_status, dup_body) = p.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": next_gen,
+            "log_fields": dup_lf
+        }),
+    );
+    assert_eq!(dup_status, 400);
+    assert_eq!(dup_body["error"], "invalid_custom_field");
+
+    // Forged committed=true before ingest commits must return 400 committed_flag_reserved
+    let mut forged_committed_lf = base_lf.clone();
+    for cf in forged_committed_lf["custom_fields"].as_array_mut().unwrap() {
+        if cf["name"] == "edge_score" {
+            cf["committed"] = json!(true);
+        }
+    }
+    let (forged_patch_st, forged_patch_body) = p.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": next_gen,
+            "log_fields": forged_committed_lf
+        }),
+    );
+    assert_eq!(forged_patch_st, 400);
+    assert_eq!(forged_patch_body["error"], "committed_flag_reserved");
+
+    let (forged_prev_st, forged_prev_body) = p.call(
+        "POST",
+        "/api/admin/log-fields/preview",
+        json!({
+            "scoring": {"enabled": true},
+            "log_fields": forged_committed_lf
+        }),
+    );
+    assert_eq!(forged_prev_st, 400);
+    assert_eq!(forged_prev_body["error"], "committed_flag_reserved");
+
+    // Once KV svc:fixtureService marks edge_score committed=true, canonical PATCH with committed=true
+    // succeeds (200 OK) while omitting edge_score returns 409 committed_field_locked.
+    let rec = p.admin_get("svc:fixtureService").unwrap().unwrap();
+    let mut stored_svc = rec.value;
+    for cf in stored_svc["log_fields"]["custom_fields"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if cf["name"] == "edge_score" {
+            cf["committed"] = json!(true);
+        }
+    }
+    assert!(p
+        .admin_cas("svc:fixtureService", Some(&rec.generation), &stored_svc)
+        .unwrap());
+
+    let committed_get = p.ok("GET", "/api/admin/services/fixtureService", json!({}));
+    let committed_gen = committed_get["generation"].as_str().unwrap().to_owned();
+    let mut committed_lf = committed_get["service"]["log_fields"].clone();
+    for cf in committed_lf["custom_fields"].as_array_mut().unwrap() {
+        if cf["name"] == "edge_score" {
+            cf["duckdb_type"] = json!("INTEGER");
+            cf["byte_limit"] = json!(64);
+        }
+    }
+    let committed_ok = p.ok(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": committed_gen,
+            "log_fields": committed_lf
+        }),
+    );
+    let post_committed_gen = committed_ok["generation"].as_str().unwrap().to_owned();
+
+    let mut dropped_lf = committed_ok["service"]["log_fields"].clone();
+    dropped_lf["custom_fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|cf| cf["name"] != "edge_score");
+    let (drop_st, drop_body) = p.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": post_committed_gen,
+            "log_fields": dropped_lf
+        }),
+    );
+    assert_eq!(drop_st, 409);
+    assert_eq!(drop_body["error"], "committed_field_locked");
+}

@@ -529,10 +529,10 @@ def test_path_within_dir_and_sql_quote_helpers(tmp_path, monkeypatch):
 
 def test_validate_url_exclusion_regex_and_lint_vcl():
     assert validate_url_exclusion_regex("") == ""
-    assert validate_url_exclusion_regex("   \t  ") == ""
+    assert validate_url_exclusion_regex("     ") == ""
     assert validate_url_exclusion_regex(r"\.(css|js|png)$") == r"\.(css|js|png)$"
     assert validate_url_exclusion_regex(r"^/healthz") == r"^/healthz"
-    assert validate_url_exclusion_regex("\\.css$\n") == r"\.css$"
+    assert validate_url_exclusion_regex("^/quote%22path$") == "^/quote%22path$"
     assert validate_url_exclusion_regex("  \\.css$  ") == r"\.css$"
 
     for bad_type in (b"bytes", 42):
@@ -544,7 +544,16 @@ def test_validate_url_exclusion_regex_and_lint_vcl():
         validate_url_exclusion_regex("a" * (MAX_REGEX_BYTES + 1))
     assert exc.value.reason == "too_long"
 
-    for bad_char in ('foo"bar', *(f"foo{c}bar" for c in ("\x00", "\x01", "\x07", "\x1b"))):
+    for bad_char in (
+        'foo"bar',
+        "   \t  ",
+        "\\.css$\n",
+        "\n^/healthz$",
+        "\r^/healthz$",
+        "\u2028^/healthz$",
+        "\u2029^/healthz$",
+        *(f"foo{c}bar" for c in ("\x00", "\x01", "\x07", "\x1b", "\x7f", "\x85")),
+    ):
         with pytest.raises(RegexValidationError) as exc:
             validate_url_exclusion_regex(bad_char)
         assert exc.value.reason == "disallowed_char"
@@ -1916,7 +1925,7 @@ def test_sec15_vcl_forbidden_header_and_setcookie_functions_blocked() -> None:
         )
         assert cf_errs, f"Expected validate_custom_field rejection for: {expr}"
 
-    with pytest.raises(ValueError, match=r"header\.get"):
+    with pytest.raises(ValueError, match=r"header\.get|percent-encoded hex escapes"):
         FeatureState(
             service_id="svc_hdr_fn",
             log_period=60,
@@ -2216,3 +2225,137 @@ def test_sec15_wave7_catalog_custom_field_null_description_and_strict_types():
     ):
         errs_p = validate_custom_field_entry(bad_partial, [], system_names=set(_CANONICAL_SYSTEM_FIELD_SPECS))
         assert errs_p, f"Expected errors from validate_custom_field_entry for {bad_partial}"
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_m4_parity_setcookie_wildcard_unary_table_system_byte_limit_and_string_bytes_estimate():
+    from backend.core.catalog import (
+        estimate_log_line_bytes,
+        validate_custom_field_entry,
+        validate_vcl_custom_condition,
+        validate_vcl_log_expression,
+    )
+    from backend.core.vcl_generator import generate_log_format
+
+    for forbidden_expr in (
+        'setcookie.get_by_name(resp, "sid")',
+        'SETCOOKIE . custom_helper(resp, "sid")',
+        '-table.lookup_integer(solution_config, "k")',
+        '+table.lookup_float(solution_config, "k")',
+        '!table.lookup_bool(solution_config, "k")',
+    ):
+        assert validate_vcl_log_expression(forbidden_expr), f"Expected log-expr rejection for {forbidden_expr}"
+        assert validate_vcl_custom_condition(f'{forbidden_expr} != ""') is not None
+
+    for benign_hdr in ("req.http.X-Table.Lookup", "req.http.X-Header.Get", "resp.http.X-Setcookie"):
+        assert validate_vcl_log_expression(benign_hdr) == []
+        assert validate_vcl_custom_condition(f'{benign_hdr} == "1"') is None
+
+    sys_names = frozenset({"edge_score"})
+    assert validate_custom_field_entry({"name": "edge_score", "byte_limit": 64}, [], system_names=sys_names) == []
+    for bad_bl in ("not-an-int", -5, 0, True, 999999):
+        assert validate_custom_field_entry({"name": "edge_score", "byte_limit": bad_bl}, [], system_names=sys_names), (
+            f"Expected system_names byte_limit rejection for {bad_bl!r}"
+        )
+
+    str_est_cfg = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "str_est_cf",
+                "label": "Str Est",
+                "vcl_log_expression": "req.http.X-Str-Est",
+                "collection_stage": "edge",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+                "bytes_estimate": "48",
+                "enabled": True,
+            }
+        ],
+    }
+    int_est_cfg = {
+        "groups": ["A"],
+        "custom_fields": [{**str_est_cfg["custom_fields"][0], "bytes_estimate": 48}],
+    }
+    assert estimate_log_line_bytes(str_est_cfg) == estimate_log_line_bytes(int_est_cfg)
+    assert generate_log_format(str_est_cfg) == generate_log_format(int_est_cfg)
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_m4_wave2_cross_edition_vcl_validator_and_duplicate_system_field_parity():
+    from backend.core.catalog import (
+        validate_custom_field_entry,
+        validate_vcl_custom_condition,
+        validate_vcl_log_expression,
+    )
+    from backend.core.fastly.client import validate_rum_custom_condition
+
+    # Challenge 1: Allow req.http.Set-Cookie / bereq.http.Set-Cookie in conditions only
+    for allowed_cond in (
+        '(req.restarts == 0 && req.http.Set-Cookie == "")',
+        'bereq.http.Set-Cookie:foo == ""',
+    ):
+        assert validate_vcl_custom_condition(allowed_cond) is None, f"Unexpected condition error for {allowed_cond}"
+        assert validate_rum_custom_condition(allowed_cond) is None, f"Unexpected RUM condition error for {allowed_cond}"
+
+    for blocked_cond_hdr in (
+        "req.http.Cookie",
+        "bereq.http.Cookie",
+        "resp.http.Cookie",
+        "resp.http.Set-Cookie",
+        "beresp.http.Set-Cookie",
+        "obj.http.Set-Cookie",
+    ):
+        assert validate_vcl_custom_condition(f'{blocked_cond_hdr} == ""') is not None
+        assert validate_rum_custom_condition(f'{blocked_cond_hdr} == ""') is not None
+
+    for blocked_log_hdr in (
+        "req.http.Cookie",
+        "bereq.http.Cookie",
+        "req.http.Set-Cookie",
+        "bereq.http.Set-Cookie",
+        "resp.http.Set-Cookie",
+        "beresp.http.Set-Cookie",
+        "obj.http.Set-Cookie",
+    ):
+        assert validate_vcl_log_expression(blocked_log_hdr), f"Expected log-expr rejection for {blocked_log_hdr}"
+
+    # Challenge 2: Reject %XX and %uXXXX / %UXXXX / %u{...} inside VCL string literals
+    for pct_lit in (
+        '"foo%00bar"',
+        '"foo%u0000bar"',
+        '"foo%U0000bar"',
+        '"foo%u{0}bar"',
+        '"foo%u0041bar"',
+        '"foo%22bar"',
+    ):
+        assert validate_vcl_custom_condition(f"req.http.X-Test == {pct_lit}") is not None, pct_lit
+        assert validate_vcl_log_expression(pct_lit), pct_lit
+    assert validate_vcl_custom_condition('req.http.X-Test == "100% ok"') is None
+    assert validate_vcl_log_expression('"100% ok"') == []
+
+    # Challenge 3: RUM req.url / req.url.path RTIME adjacency, whitespace, and case-insensitive rejection
+    for bad_rum in (
+        '(now + 0msreq.url.path) != ""',
+        '(now + 0.5wreq.url) != ""',
+        'REQ.URL.PATH == "/rum-beacon"',
+        'req . url . path == "/rum-beacon"',
+    ):
+        assert validate_rum_custom_condition(bad_rum) is not None, f"Expected RUM rejection for {bad_rum}"
+    assert validate_rum_custom_condition('req.url.ext != "png"') is None
+
+    # Minor Finding 2: Reject duplicate system_names entries across catalog and provision validator
+    from fastapi import HTTPException
+
+    from backend.routers.provision import _validate_provision_vcl_inputs
+
+    sys_names = frozenset({"edge_score"})
+    dup_errs = validate_custom_field_entry({"name": "edge_score"}, ["edge_score"], system_names=sys_names)
+    assert any("already exists" in e for e in dup_errs), f"Expected duplicate error, got {dup_errs}"
+    with pytest.raises(HTTPException) as dup_exc:
+        _validate_provision_vcl_inputs(
+            {"log_fields": {"groups": ["A"], "custom_fields": [{"name": "edge_score"}, {"name": "edge_score"}]}}
+        )
+    assert dup_exc.value.status_code == 400

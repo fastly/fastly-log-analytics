@@ -1707,3 +1707,76 @@ fn cleanup_temp_secrets_waits_for_permanent_credentials_before_deleting_temp_sec
         "must not delete temp secret before permanent credentials propagate"
     );
 }
+
+#[test]
+fn sec21_service_patch_rejects_poisoned_disabled_rum_faro_version_and_reserved_custom_fields() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let generation = platform.service()["generation"].clone();
+
+    for bad_ver in ["../../evil", "../2.13.0", "2.13.0/../../pwn", "not-semver"] {
+        let resp = platform.call(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({
+                "generation": generation,
+                "rum_enabled": false,
+                "faro_version": bad_ver
+            }),
+        );
+        assert_eq!(
+            resp.status, 400,
+            "disabled RUM must reject faro_version={bad_ver}"
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "invalid_rum_settings");
+    }
+
+    let bad_shield = platform.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": generation,
+            "cdn_shield": "iad-va-us); set req.http.X-Pwn = \"1"
+        }),
+    );
+    assert_eq!(bad_shield.status, 400);
+
+    for reserved_name in [
+        "rum_lcp",
+        "rum_cid",
+        "service_id",
+        "fastly_req_id",
+        "edge_score",
+        "edge_custom",
+    ] {
+        let resp = platform.call(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({
+                "generation": generation,
+                "log_fields": {
+                    "groups": ["A", "C"],
+                    "field_overrides": {},
+                    "field_limits": {},
+                    "custom_fields": [{
+                        "name": reserved_name,
+                        "label": "Spoof",
+                        "vcl_log_expression": "req.http.X-Spoof",
+                        "collection_stage": "edge",
+                        "duckdb_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 24,
+                        "enabled": true
+                    }]
+                }
+            }),
+        );
+        assert_eq!(
+            resp.status, 400,
+            "PATCH must reject reserved custom field {reserved_name}"
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "invalid_custom_field");
+    }
+}

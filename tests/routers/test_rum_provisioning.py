@@ -71,6 +71,10 @@ def _settings_payload(custom_condition: str) -> dict[str, object]:
         'req.http.X-Probe == "session_scoring_secrets"',
         r'req.http.X-A == "\") || true || (req.http.X-B == "x" && req.http.X-C == "y\"',
         r"req.http.Host == \"ok\"",
+        'req.url !~ "^/healthz"',
+        'req.url.path == "/foo"',
+        '(now + 0msreq.url.path) != ""',
+        'REQ.URL.PATH == "/rum-beacon"',
     ],
 )
 def test_sec15_rum_settings_rejects_vcl_injection_and_secret_exfiltration(malicious_condition: str) -> None:
@@ -102,7 +106,8 @@ def test_sec15_rum_settings_rejects_vcl_injection_and_secret_exfiltration(malici
     [
         "",
         'req.http.Host == "example.com"',
-        'req.url !~ "^/healthz"',
+        'req.url.ext != "png"',
+        '(req.restarts == 0 && req.http.Set-Cookie == "")',
         'req.http.User-Agent !~ "bot\\b" && (client.geo.country_code == "US")',
     ],
 )

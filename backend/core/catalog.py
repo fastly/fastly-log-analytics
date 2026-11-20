@@ -304,7 +304,7 @@ def estimate_log_line_bytes(log_fields_config: dict) -> int:
     enabled = resolve_enabled_fields(log_fields_config)
     field_bytes = sum(f["typical_bytes"] for f in LOG_FIELD_CATALOG if f["id"] in enabled)
     custom_enabled = [cf for cf in log_fields_config.get("custom_fields", []) if cf.get("enabled", True)]
-    field_bytes += sum(cf.get("bytes_estimate", 0) for cf in custom_enabled)
+    field_bytes += sum(int(cf.get("bytes_estimate") or 0) for cf in custom_enabled)
     return 2 + (len(enabled) + len(custom_enabled)) * 5 + field_bytes
 
 
@@ -410,7 +410,7 @@ _VCL_TABLE_LOOKUP_RE = re.compile(
 _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE = re.compile(
     rf"{_VCL_FN_BOUNDARY}"
     r"(header\s*\.\s*(?:filter_except|filter|get|set|unset)"
-    r"|setcookie\s*\.\s*(?:get_value_by_name|delete_by_name))\b",
+    r"|setcookie\s*\.\s*[a-zA-Z_]\w*)\b",
     re.IGNORECASE,
 )
 _FORBIDDEN_VCL_IDENTIFIERS_RE = re.compile(
@@ -424,16 +424,36 @@ _FORBIDDEN_VCL_IDENTIFIERS_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_FORBIDDEN_VCL_CONDITION_IDENTIFIERS_RE = re.compile(
+    r"("
+    rf"{_VCL_ID_BOUNDARY}(?:fos_credentials|session_scoring_secrets|cdn_auth|auth_fail_rc|auth_fail_pb"
+    r"|flp_fos_credentials|flp_fos_buckets|flp_front_auth|fastly-key|authorization)\b"
+    r"|x-edge-scorer-auth"
+    r"|x-fastly-key"
+    r"|x-flp-"
+    r"|(?:req|bereq|resp|beresp|obj)\.http\.cookie(?=\b|:)"
+    r"|(?:resp|beresp|obj)\.http\.set-cookie(?=\b|:)"
+    r")",
+    re.IGNORECASE,
+)
+_VCL_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def check_vcl_quotes_and_parens(expr: str) -> str | None:
     """Verify balanced Fastly VCL double quotes, balanced parens outside quotes, and no bare backslashes."""
     in_quotes = False
     paren_depth = 0
-    for ch in expr:
+    for idx, ch in enumerate(expr):
         if ch == '"':
             in_quotes = not in_quotes
-        elif not in_quotes:
+        elif in_quotes:
+            if ch == "%" and idx + 2 < len(expr):
+                c1, c2 = expr[idx + 1], expr[idx + 2]
+                if (c1 in _VCL_HEX_DIGITS and c2 in _VCL_HEX_DIGITS) or (
+                    c1 in ("u", "U") and (c2 == "{" or c2 in _VCL_HEX_DIGITS)
+                ):
+                    return "must not contain percent-encoded hex escapes in VCL string literals"
+        else:
             if ch == "\\":
                 if expr.endswith("\\"):
                     return "must not end with a trailing backslash"
@@ -512,7 +532,7 @@ def validate_vcl_custom_condition(condition: str | None, *, field_name: str = "c
         return f"'{field_name}' must not call table.lookup(...)"
     if m := _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(raw):
         return f"'{field_name}' must not call '{m.group(1)}(...)'"
-    if m := _FORBIDDEN_VCL_IDENTIFIERS_RE.search(raw):
+    if m := _FORBIDDEN_VCL_CONDITION_IDENTIFIERS_RE.search(raw):
         return f"'{field_name}' must not reference sensitive dictionary or header '{m.group(1)}'"
     return None
 
@@ -689,6 +709,8 @@ def validate_custom_field_entry(
 
     if name in system_names:
         errs: list[str] = []
+        if name in existing_names:
+            errs.append(f"A custom field named '{name}' already exists on this service")
         canonical_spec = _CANONICAL_SYSTEM_FIELD_SPECS.get(name)
         raw_stage = field.get("collection_stage")
         if raw_stage is not None:
@@ -716,6 +738,15 @@ def validate_custom_field_entry(
             )
             if sys_be_err:
                 errs.append(sys_be_err)
+        if field.get("byte_limit") is not None:
+            _, sys_bl_err = _parse_strict_custom_field_int(
+                field["byte_limit"],
+                field_name="byte_limit",
+                min_val=1,
+                max_val=FASTLY_LOG_LINE_DELIVER_MAX,
+            )
+            if sys_bl_err:
+                errs.append(sys_bl_err)
         return errs
 
     full_keys = ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate")

@@ -514,3 +514,27 @@ def test_sec07_query_endpoint_redacts_nested_custom_fields_and_embedded_url_ips_
     assert row["custom_fields"]["c_ip"] == "198.51.100.xxx"
     assert row["url"] == "/cb?client=198.51.100.xxx"
     assert row["ua"] == "Mozilla/5.0 Chrome/131.0.0.0 client=2001:db8:abcd::"
+
+
+@pytest.mark.security_regression
+def test_sec08_console_access_masked_keys_matches_18_shared_pii_keys_and_masks_underscore_origin_keys() -> None:
+    from backend.core.share_db import SHARED_PII_KEYS
+    from backend.high_scale.postgres_control import console_access
+
+    assert len(SHARED_PII_KEYS) == 18
+    assert set(console_access.MASKED_KEYS) == set(SHARED_PII_KEYS)
+    assert console_access.MASKED_KEYS == tuple(sorted(SHARED_PII_KEYS))
+
+    view_sql = console_access._view_select(
+        "fla_db",
+        "request_facts",
+        [
+            ("service_id", "String"),
+            ("client_ip", "String"),
+            ("custom_fields", "Map(String, String)"),
+        ],
+        "svc_alpha",
+        masked=True,
+    )
+    for key in ("c_ip", "fastly_client_ip", "oip", "true_client_ip", "x_forwarded_for"):
+        assert f"'{key}'" in view_sql, f"Masked ClickHouse view missing PII key {key!r}"

@@ -132,6 +132,8 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
             )
     now = datetime.now(UTC).isoformat()
     updated = {**old_field, **{k: v for k, v in updates.items() if v is not None}, "updated_at": now}
+    if updated.get("description") is None:
+        updated["description"] = ""
     other_names = [cf["name"] for cf in existing if cf["name"] != field_name]
     new_custom = existing[:idx] + [updated] + existing[idx + 1 :]
     return _validate_and_save_custom_field(service_id, cfg, lf, updated, other_names, new_custom, now)
@@ -146,7 +148,10 @@ def api_delete_custom_field(request: Request, service_id: str, field_name: str):
     new_custom = [cf for cf in existing if cf["name"] != field_name]
     now = datetime.now(UTC).isoformat()
     _persist_custom_fields_change(service_id, cfg, lf, new_custom, {**lf, "custom_fields": new_custom}, now)
-    return {"ok": True, "field": field}
+    return {
+        "ok": True,
+        "field": {**field, "description": "" if field.get("description") is None else field.get("description", "")},
+    }
 
 
 @router.post("/services/{service_id}/custom-fields/validate-vcl", response_model=VclLintResponse)

@@ -1876,3 +1876,41 @@ def test_completed_run_streams_from_db_and_cross_tenant_isolation(isolate_metada
 
     for event in _parse_sse_events(iso_body):
         assert "tenant-b" not in (event.get("message") or "")
+
+
+@pytest.mark.no_postgres
+def test_custom_fields_null_description_coalesced_across_log_fields_set_patch_and_delete():
+    cf_null_desc = {
+        **_FIELD_CREATE_BODY,
+        "description": None,
+    }
+    with _mutate_cfg_ctx(_cfg(log_fields=_BASE_LF)) as saved_set:
+        resp_set = _client().post(
+            "/api/services/svc1/log-fields",
+            json={
+                "log_fields": {
+                    "preset": "standard",
+                    "groups": ["A"],
+                    "schema_version": 2,
+                    "custom_fields": [cf_null_desc],
+                }
+            },
+        )
+    assert resp_set.status_code == 200
+    persisted_cf = next(cf for cf in saved_set["log_fields"]["custom_fields"] if cf["name"] == "cf_env")
+    assert persisted_cf["description"] == ""
+
+    legacy_null_cfg = _cfg_with_field()
+    legacy_null_cfg["log_fields"]["custom_fields"][0]["description"] = None
+    with _mutate_cfg_ctx(
+        copy.deepcopy(legacy_null_cfg), patch("backend.provision.validate_log_format", return_value=[])
+    ):
+        resp_patch = _client().patch("/api/services/svc1/custom-fields/cf_env", json={"label": "Env Updated"})
+    assert resp_patch.status_code == 200
+    assert resp_patch.json()["field"]["description"] == ""
+    assert resp_patch.json()["field"]["label"] == "Env Updated"
+
+    with _mutate_cfg_ctx(copy.deepcopy(legacy_null_cfg)):
+        resp_del = _client().delete("/api/services/svc1/custom-fields/cf_env")
+    assert resp_del.status_code == 200
+    assert resp_del.json()["field"]["description"] == ""

@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal
 import tenacity
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
-from backend.core.catalog import _opt_int, validate_vcl_custom_condition
+from backend.core.catalog import _VCL_ID_BOUNDARY, _opt_int, validate_vcl_custom_condition
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.runtime_modes import mock_mode_enabled
 
@@ -427,7 +427,10 @@ RUM_SNIPPET_NAMES = frozenset(
 )
 
 _FARO_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-_RUM_PATH_PREDICATE = re.compile(r"\breq\.url(?:\.path\b|(?!\.))")
+_RUM_PATH_PREDICATE = re.compile(
+    rf"(?<!\.){_VCL_ID_BOUNDARY}req\s*\.\s*url(?:\s*\.\s*path\b|(?!\s*\.))",
+    re.IGNORECASE,
+)
 
 
 def validate_rum_custom_condition(condition: str | None) -> str | None:

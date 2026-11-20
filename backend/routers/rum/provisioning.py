@@ -345,10 +345,10 @@ def update_rum_settings(
 ) -> dict[str, Any]:
     """Update RUM capture settings and re-deploy rum-tracker.js (admin-only)."""
     require_service_in_scope(request, service_id)
-    from backend.core.catalog import validate_vcl_custom_condition
+    from backend.core.fastly.client import validate_rum_custom_condition
 
     raw_cond = body.custom_condition
-    cond_msg = validate_vcl_custom_condition(raw_cond)
+    cond_msg = validate_rum_custom_condition(raw_cond)
     if cond_msg:
         raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_msg))
 

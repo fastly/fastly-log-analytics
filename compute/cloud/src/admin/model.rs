@@ -73,6 +73,8 @@ pub struct Service {
     pub capture: Capture,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scoring: Option<ScoringConfig>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cdn_shield: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +422,8 @@ pub struct Provision {
     pub _service_name: Option<String>,
     #[serde(default)]
     pub capture: Capture,
+    #[serde(default)]
+    pub cdn_shield: String,
 }
 
 impl Provision {

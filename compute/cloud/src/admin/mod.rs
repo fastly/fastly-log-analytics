@@ -417,7 +417,11 @@ fn route(
             let mut fields = input["log_fields"].clone();
             crate::logging::cmcd::reconcile_fields(&mut fields, &cmcd, None, true)
                 .map_err(|_| Error::new(400, "system_field_locked"))?;
-            validate_fields(&fields, None)?;
+            validate_fields(
+                &fields,
+                None,
+                input["scoring"]["enabled"].as_bool().unwrap_or(false),
+            )?;
             let format = crate::logging::generate_log_format(&fields)
                 .map_err(|_| Error::new(400, "invalid_log_format"))?;
             Ok(json!({"format_length":format.len(),"format":format,"max_length":12288}))
@@ -676,7 +680,11 @@ fn check_generation(record: &Record, input: &Value) -> Result<(), Error> {
         Ok(())
     }
 }
-fn validate_fields(fields: &Value, previous: Option<&Value>) -> Result<(), Error> {
+fn validate_fields(
+    fields: &Value,
+    previous: Option<&Value>,
+    scoring_enabled: bool,
+) -> Result<(), Error> {
     if !fields.is_object() || fields["groups"].as_array().is_none_or(|v| v.len() > 32) {
         return Err(Error::new(400, "invalid_log_fields"));
     }
@@ -705,14 +713,23 @@ fn validate_fields(fields: &Value, previous: Option<&Value>) -> Result<(), Error
     if custom.len() > 64 {
         return Err(Error::new(400, "too_many_custom_fields"));
     }
+    let is_managed = |v: &Value| {
+        crate::logging::cmcd::managed_field(v) || (scoring_enabled && scoring::managed_field(v))
+    };
     let mut names = Vec::new();
     for field in custom {
-        if !crate::logging::cmcd::managed_field(field)
-            && !crate::catalog::validate_custom_field(field, &names).is_empty()
-        {
+        let fname = field["name"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| Error::new(400, "invalid_custom_field"))?
+            .to_owned();
+        if names.iter().any(|n| n == &fname) {
             return Err(Error::new(400, "invalid_custom_field"));
         }
-        names.push(required(field, "name")?.to_owned());
+        if !is_managed(field) && !crate::catalog::validate_custom_field(field, &names).is_empty() {
+            return Err(Error::new(400, "invalid_custom_field"));
+        }
+        names.push(fname);
     }
     if let Some(previous) = previous {
         for old in previous["custom_fields"]
@@ -727,8 +744,14 @@ fn validate_fields(fields: &Value, previous: Option<&Value>) -> Result<(), Error
                 .ok_or_else(|| Error::new(409, "committed_field_locked"))?;
             let old_normalized = crate::catalog::normalize_custom_field(old);
             let next_normalized = crate::catalog::normalize_custom_field(next);
-            let old_type = &old_normalized["duckdb_type"];
-            let next_type = &next_normalized["duckdb_type"];
+            let old_type = old_normalized
+                .get("duckdb_type")
+                .filter(|v| !v.is_null())
+                .or_else(|| old_normalized.get("sql_type"));
+            let next_type = next_normalized
+                .get("duckdb_type")
+                .filter(|v| !v.is_null())
+                .or_else(|| next_normalized.get("sql_type"));
             if old_type != next_type || next["committed"] != true {
                 return Err(Error::new(409, "committed_field_locked"));
             }
@@ -770,9 +793,13 @@ fn validate_service(
     previous: Option<&Service>,
     window_s: i64,
 ) -> Result<(), Error> {
+    let trimmed_shield = service.cdn_shield.trim();
     if !valid_bucket(&service.fos_bucket)
         || !valid_prefix(&service.fos_prefix)
         || !REGIONS.contains(&service.fos_region.as_str())
+        || (!trimmed_shield.is_empty()
+            && !trimmed_shield.eq_ignore_ascii_case("none")
+            && crate::logging::rum::validate_shield_pop(trimmed_shield).is_err())
     {
         return Err(Error::new(400, "invalid_storage_configuration"));
     }
@@ -819,7 +846,9 @@ fn validate_service(
         }
     }
     if !service.rum.enabled
-        && crate::logging::rum::validate_custom_condition(&service.rum.custom_condition).is_err()
+        && (crate::logging::rum::validate_custom_condition(&service.rum.custom_condition).is_err()
+            || (!service.rum.faro_version.is_empty()
+                && crate::logging::rum::validate_faro_version(&service.rum.faro_version).is_err()))
     {
         return Err(Error::new(400, "invalid_rum_settings"));
     }
@@ -856,7 +885,11 @@ fn validate_service(
     {
         return Err(Error::new(400, "invalid_field_limits"));
     }
-    validate_fields(&service.log_fields, previous.map(|s| &s.log_fields))
+    validate_fields(
+        &service.log_fields,
+        previous.map(|s| &s.log_fields),
+        service.scoring.as_ref().is_some_and(|s| s.enabled),
+    )
 }
 
 fn patch_service(
@@ -878,6 +911,7 @@ fn patch_service(
         "edge_only",
         "custom_condition",
         "fos_prefix",
+        "cdn_shield",
         "log_fields",
         "field_limits",
         "cmcd",
@@ -957,6 +991,7 @@ fn patch_service(
     if service.wire_format.is_empty() {
         service.wire_format = "array".into();
     }
+    service.cdn_shield = service.cdn_shield.trim().to_owned();
     if service.log_fields.get("field_limits").is_some() && input.get("log_fields").is_some() {
         service.field_limits = service.log_fields["field_limits"].clone();
     } else {
@@ -1204,6 +1239,7 @@ fn provision(
         },
         capture: input.capture,
         scoring: None,
+        cdn_shield: input.cdn_shield.trim().to_owned(),
     };
     let previous: Option<Service> = context
         .get(&format!("svc:{}", input.service_id))?

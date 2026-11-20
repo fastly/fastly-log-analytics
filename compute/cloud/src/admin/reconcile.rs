@@ -132,7 +132,15 @@ fn desired(
     )?
     .clone();
     let host = &service.fos_endpoint;
-    let shield = crate::logging::rum::shield_for_region(&service.fos_region);
+    let trimmed_shield = service.cdn_shield.trim();
+    let shield = if trimmed_shield.is_empty() {
+        crate::logging::rum::shield_for_region(&service.fos_region)
+    } else if trimmed_shield.eq_ignore_ascii_case("none") {
+        ""
+    } else {
+        crate::logging::rum::validate_shield_pop(trimmed_shield)
+            .map_err(|_| Error::new(400, "invalid_snippets"))?
+    };
     let mut backends = if service.rum.enabled && service.capture != Capture::Attached {
         vec![json!({
             "name": "fos_origin",
@@ -971,6 +979,8 @@ fn sync_rum_fos_objects(
     service: &Service,
     delete: bool,
 ) -> Result<(), Error> {
+    crate::logging::rum::validate_faro_version(&service.rum.faro_version)
+        .map_err(|_| Error::new(400, "invalid_rum_settings"))?;
     let faro_key = crate::logging::rum::faro_object_key(&service.rum.faro_version);
     let tracker_key = crate::logging::rum::TRACKER_OBJECT_KEY;
     let credentials = fos::credentials(context, service)?;

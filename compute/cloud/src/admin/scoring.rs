@@ -173,6 +173,74 @@ pub fn scoring_custom_fields() -> Vec<Value> {
     ]
 }
 
+pub fn managed_field(field: &Value) -> bool {
+    const ALLOWED_KEYS: &[&str] = &[
+        "name",
+        "label",
+        "description",
+        "vcl_log_expression",
+        "collection_stage",
+        "sql_type",
+        "duckdb_type",
+        "value_type",
+        "bytes_estimate",
+        "byte_limit",
+        "enabled",
+        "committed",
+    ];
+    let Some(obj) = field.as_object() else {
+        return false;
+    };
+    if obj.keys().any(|k| !ALLOWED_KEYS.contains(&k.as_str())) {
+        return false;
+    }
+    if let Some(v) = obj.get("label") {
+        let Some(s) = v.as_str() else {
+            return false;
+        };
+        if s.trim().is_empty() || s.chars().count() > 80 || s.chars().any(char::is_control) {
+            return false;
+        }
+    }
+    if let Some(v) = obj.get("description") {
+        let Some(s) = v.as_str() else {
+            return false;
+        };
+        if s.chars().count() > 500 || s.chars().any(char::is_control) {
+            return false;
+        }
+    }
+    if obj.get("enabled").is_some_and(|v| !v.is_boolean())
+        || obj.get("committed").is_some_and(|v| !v.is_boolean())
+    {
+        return false;
+    }
+    if let Some(v) = obj.get("byte_limit") {
+        if !v.is_null()
+            && (v.is_boolean()
+                || v.is_string()
+                || !crate::catalog::integer(v)
+                    .is_some_and(|n| (1..=crate::catalog::LOG_LINE_MAX_BYTES).contains(&n)))
+        {
+            return false;
+        }
+    }
+    (obj.contains_key("sql_type") || obj.contains_key("duckdb_type"))
+        && scoring_custom_fields().iter().any(|canonical| {
+            canonical["name"] == field["name"]
+                && canonical["vcl_log_expression"] == field["vcl_log_expression"]
+                && canonical["collection_stage"] == field["collection_stage"]
+                && obj
+                    .get("sql_type")
+                    .is_none_or(|v| v == &canonical["sql_type"])
+                && obj
+                    .get("duckdb_type")
+                    .is_none_or(|v| v == &canonical["sql_type"])
+                && canonical["value_type"] == field["value_type"]
+                && canonical["bytes_estimate"] == field["bytes_estimate"]
+        })
+}
+
 pub fn merge_scoring_custom_fields(log_fields: &mut Value) {
     let mut existing: Vec<Value> = log_fields["custom_fields"]
         .as_array()
@@ -209,7 +277,43 @@ pub fn resolve_exclude_url_regex(override_val: Option<&str>) -> String {
     }
 }
 
+fn contains_vcl_percent_null(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 < bytes.len() && bytes[i + 1] == b'0' && bytes[i + 2] == b'0' {
+                return true;
+            }
+            if i + 5 < bytes.len()
+                && matches!(bytes[i + 1], b'u' | b'U')
+                && &bytes[i + 2..i + 6] == b"0000"
+            {
+                return true;
+            }
+            if i + 3 < bytes.len() && matches!(bytes[i + 1], b'u' | b'U') && bytes[i + 2] == b'{' {
+                let mut j = i + 3;
+                while j < bytes.len() && bytes[j] == b'0' {
+                    j += 1;
+                }
+                if j > i + 3 && j < bytes.len() && bytes[j] == b'}' {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 pub fn validate_exclude_url_regex(raw: &str) -> Result<String, &'static str> {
+    if raw.contains(['\n', '\r'])
+        || raw
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err("exclude_regex_unsafe_chars");
+    }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(String::new());
@@ -217,9 +321,9 @@ pub fn validate_exclude_url_regex(raw: &str) -> Result<String, &'static str> {
     if trimmed.len() > 4096 {
         return Err("exclude_regex_too_long");
     }
-    if trimmed
-        .chars()
-        .any(|c| c.is_control() || matches!(c, '"' | '\n' | '\r' | '{' | '}'))
+    if trimmed.chars().any(|c| {
+        c.is_control() || matches!(c, '"' | '\n' | '\r' | '{' | '}' | '\u{2028}' | '\u{2029}')
+    }) || contains_vcl_percent_null(trimmed)
     {
         return Err("exclude_regex_unsafe_chars");
     }
@@ -274,9 +378,10 @@ fn enforce_reason_phrase(code: u16) -> &'static str {
 pub fn validate_vcl_literal(value: &str, allow_backslash: bool) -> Result<(), Error> {
     if value.chars().any(|c| {
         c.is_control()
-            || matches!(c, '"' | '\n' | '\r' | '{' | '}')
+            || matches!(c, '"' | '\n' | '\r' | '{' | '}' | '\u{2028}' | '\u{2029}')
             || (!allow_backslash && c == '\\')
-    }) {
+    }) || contains_vcl_percent_null(value)
+    {
         return Err(Error::new(400, "invalid_vcl_literal"));
     }
     Ok(())
@@ -316,6 +421,7 @@ if (req.restarts == 1) {{
 }
 
 pub fn pass_snippet(logging_service_id: &str, request_secret: &str) -> Result<String, Error> {
+    validate_vcl_literal(logging_service_id, false)?;
     validate_vcl_literal(request_secret, false)?;
     Ok(format!(
         r#"# Session Scoring: inject auth + service-id on the scorer sub-fetch.
@@ -324,6 +430,18 @@ if (req.backend == {SCORING_BACKEND_VCL_NAME}) {{
   set bereq.http.X-Edge-Service-Id = "{logging_service_id}";
   set bereq.http.X-Edge-Scorer-Auth = "{request_secret}";
   unset bereq.http.X-Edge-Scoring-Pass;
+  declare local var.scorer_state_cookie STRING;
+  declare local var.scorer_ess_cookie STRING;
+  set var.scorer_state_cookie = subfield(req.http.Cookie, "X-Session-State", ";");
+  set var.scorer_ess_cookie = subfield(req.http.Cookie, "_ess", ";");
+  unset bereq.http.Cookie;
+  if (var.scorer_state_cookie != "" && var.scorer_ess_cookie != "") {{
+    set bereq.http.Cookie = "X-Session-State=" + var.scorer_state_cookie + "; _ess=" + var.scorer_ess_cookie;
+  }} else if (var.scorer_state_cookie != "") {{
+    set bereq.http.Cookie = "X-Session-State=" + var.scorer_state_cookie;
+  }} else if (var.scorer_ess_cookie != "") {{
+    set bereq.http.Cookie = "_ess=" + var.scorer_ess_cookie;
+  }}
 }}
 unset bereq.http.x-edge-score;"#
     ))
@@ -424,7 +542,7 @@ pub fn desired_scoring_backend(scoring_domain: &str) -> Value {
         "address": scoring_domain,
         "port": 443,
         "use_ssl": true,
-        "ssl_check_cert": false,
+        "ssl_check_cert": true,
         "ssl_cert_hostname": scoring_domain,
         "ssl_sni_hostname": scoring_domain,
         "override_host": scoring_domain,

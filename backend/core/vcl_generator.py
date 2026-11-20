@@ -72,8 +72,9 @@ def generate_log_format(log_fields_config: dict) -> str:
     for idx, cf in enumerate(sorted_cfs):
         name = cf["name"]
         value_type = cf.get("value_type", "string")
-        estimate = cf.get("bytes_estimate")
-        default_limit = min(max((estimate or 0) * 4, 40), 2000) if estimate else 2000
+        raw_est = cf.get("bytes_estimate")
+        estimate = int(raw_est) if raw_est not in (None, "") else 0
+        default_limit = min(max(estimate * 4, 40), 2000) if estimate else 2000
         req_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
         if value_type in ("numeric", "boolean"):
             req_limit = min(req_limit, _NUMERIC_FIELD_MAX_LEN)
@@ -387,6 +388,15 @@ def validate_url_exclusion_regex(value: str) -> str:
     """Cheap input policing on a user-typed regex before VCL interpolation."""
     if not isinstance(value, str):
         raise RegexValidationError("type", f"regex must be a string, got {type(value).__name__}")
+    for ch in value:
+        cp = ord(ch)
+        if ch in ("\n", "\r", "\u2028", "\u2029") or cp < 32 or 0x7F <= cp <= 0x9F:
+            raise RegexValidationError(
+                "disallowed_char",
+                f"regex contains disallowed character (codepoint U+{cp:04X}): "
+                "double-quotes and control characters are not permitted because they "
+                "would break the surrounding VCL string literal",
+            )
     cleaned = value.strip()
     if not cleaned:
         return ""
