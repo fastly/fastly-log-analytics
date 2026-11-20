@@ -1349,10 +1349,11 @@ class TestDebugEndpoints:
         _is_remote_flag = True
         set_setting("query_debug_visibility", "disabled")
         res_blocked = client.get("/api/debug/recent-sqlite")
-        assert res_blocked.status_code == 403 and res_blocked.json()["detail"]["error"] == "sql_debug_disabled"
+        assert res_blocked.status_code == 403 and res_blocked.json()["detail"]["error"] == "admin_only"
 
         set_setting("query_debug_visibility", "both")
-        assert client.get("/api/debug/recent-sqlite").status_code == 200
+        res_both = client.get("/api/debug/recent-sqlite")
+        assert res_both.status_code == 403 and res_both.json()["detail"]["error"] == "admin_only"
 
         res_clear = client.post("/api/debug/clear-sqlite")
         assert res_clear.status_code == 403 and res_clear.json()["detail"]["error"] == "admin_only"

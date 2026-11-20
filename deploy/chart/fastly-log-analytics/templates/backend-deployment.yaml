@@ -56,6 +56,18 @@ spec:
                   key: ADMIN_GATEWAY_SECRET
             {{- end }}
             {{- include "fastly-log-analytics.sharedEnv" . | nindent 12 }}
+            {{- if include "fastly-log-analytics.hasSecret" . }}
+            - name: SESSION_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fastly-log-analytics.secretName" . }}
+                  key: SESSION_TOKEN_SECRET
+                  optional: true
+            {{- end }}
+            {{- if .Values.config.metricsScrapeCidrs }}
+            - name: METRICS_SCRAPE_CIDRS
+              value: {{ .Values.config.metricsScrapeCidrs | quote }}
+            {{- end }}
             - name: SSE_BACKPLANE
               value: {{ .Values.config.sseBackplane | quote }}
             - name: BACKEND_GRACEFUL_RESTART_RSS_MB

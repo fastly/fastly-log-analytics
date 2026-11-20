@@ -604,7 +604,7 @@ def test_download_file_from_local_cache_fos_and_cdn(client, override_source, tmp
             mock_record.assert_called_once()
             fake_body.close.assert_called_once()
 
-        override_source["cdn_url"], override_source["cdn_secret"] = "http://mycdn.com", "secret123"
+        override_source["cdn_url"], override_source["cdn_secret"] = "https://mycdn.global.ssl.fastly.net", "secret123"
         fake_resp = MagicMock(headers={"Content-Type": "text/plain", "Content-Length": "8"})
         fake_resp.read.side_effect = [b"cdn-data", b""]
         with (
@@ -1873,7 +1873,7 @@ def test_download_file_streams_through_backend_when_cdn_configured(client, test_
     """When ``cdn_url`` is configured, stream through backend with ``x-fastly-key`` header."""
     app.dependency_overrides[get_source] = lambda: {
         **test_service_source,
-        "cdn_url": "https://cdn.example.com",
+        "cdn_url": "https://cdn.global.ssl.fastly.net",
         "cdn_secret": "secret123",
     }
 
@@ -1904,7 +1904,7 @@ def test_download_file_streams_through_backend_when_cdn_configured(client, test_
     headers_lc = {k.lower(): v for k, v in captured_request["headers"].items()}
     assert headers_lc.get("x-fastly-key") == "secret123"
     assert "?key=" not in captured_request["url"]
-    assert captured_request["url"].startswith("https://cdn.example.com/raw/")
+    assert captured_request["url"].startswith("https://cdn.global.ssl.fastly.net/raw/")
     assert resp.content == b"helloworld"
     assert "filename=" in resp.headers.get("content-disposition", "")
 
@@ -1949,7 +1949,7 @@ def test_download_file_502s_when_fos_raises(client, test_service_source):
         patch("backend.core.fos_client._cache_dir", return_value="/nonexistent"),
         patch("backend.core.fos_client._get_fos_client", return_value=fake_s3),
     ):
-        resp = client.get("/api/download", headers=SVC_HEADERS, params={"key": "x"})
+        resp = client.get("/api/download", headers=SVC_HEADERS, params={"key": "raw/x"})
     assert resp.status_code == 502
     detail = resp.json()["detail"]
     assert detail["error"] == "fos_fetch_failed" and "error_id" in detail
@@ -2247,20 +2247,20 @@ def _run_fetch_file_to_zip(*, src: dict, cdn_url: str, urlopen_side_effect=None,
 def test_fetch_file_to_zip_uses_cdn_first_and_adds_secret_header():
     """When cdn URL + cdn_secret are set, fetch via HTTP from CDN with ``x-fastly-key`` and skip FOS."""
     ok, mock_open, fos_client = _run_fetch_file_to_zip(
-        src={"bucket": "b", "cdn_secret": "my-secret"}, cdn_url="https://cdn.example"
+        src={"bucket": "b", "cdn_secret": "my-secret"}, cdn_url="https://cdn.global.ssl.fastly.net"
     )
     assert ok is True
     req = mock_open.call_args[0][0]
-    assert "cdn.example" in req.full_url and req.get_header("X-fastly-key") == "my-secret"
+    assert "cdn.global.ssl.fastly.net" in req.full_url and req.get_header("X-fastly-key") == "my-secret"
     fos_client.get_object.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("cdn_url", "urlopen_err", "fos_err", "expected_ok", "expect_urlopen", "expect_fos"),
     [
-        ("https://cdn.example", RuntimeError("CDN timeout"), None, True, True, True),
+        ("https://cdn.global.ssl.fastly.net", RuntimeError("CDN timeout"), None, True, True, True),
         ("", None, None, True, False, True),
-        ("https://cdn.example", RuntimeError("CDN timeout"), RuntimeError("FOS down"), False, True, True),
+        ("https://cdn.global.ssl.fastly.net", RuntimeError("CDN timeout"), RuntimeError("FOS down"), False, True, True),
     ],
 )
 def test_fetch_file_to_zip_fallback_and_failure_matrix(
@@ -2407,11 +2407,13 @@ def test_download_all_rejects_path_traversal_in_prefix(client, tmp_path):
 
 
 def test_download_all_local_mode_zips_cache_files(client, tmp_path, test_service_source):
-    """``include=local`` packs every file under the per-service cache dir."""
+    """``include=local`` packs raw/ and processed/ files under the per-service cache dir."""
     cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    (cache_dir / "parquet1.parquet").write_bytes(b"P1")
-    (cache_dir / "parquet2.parquet").write_bytes(b"P2")
+    (cache_dir / "raw").mkdir(parents=True)
+    (cache_dir / "processed").mkdir(parents=True)
+    (cache_dir / "raw" / "parquet1.parquet").write_bytes(b"P1")
+    (cache_dir / "processed" / "parquet2.parquet").write_bytes(b"P2")
+    (cache_dir / "top_level_metadata.json").write_text('{"ignored": true}')
 
     src = {"name": "svc", "service_id": "svc", "bucket": "b"}
 
@@ -2427,8 +2429,7 @@ def test_download_all_local_mode_zips_cache_files(client, tmp_path, test_service
     assert resp.status_code == 200
     with zipfile.ZipFile(io.BytesIO(body)) as zf:
         names = set(zf.namelist())
-    assert any(n.endswith("parquet1.parquet") for n in names)
-    assert any(n.endswith("parquet2.parquet") for n in names)
+    assert sorted(names) == ["processed/parquet2.parquet", "raw/parquet1.parquet"]
 
 
 # ── GET /sync-status ─────────────────────────────────────────────────────

@@ -2,8 +2,9 @@ mod session;
 pub mod settings;
 pub mod webauthn;
 pub use session::{
-    cdn_cookie_valid, clear_cdn_cookie, cookie_header, issue_cdn_cookie, logout_cookie,
-    setup_cookie, HOST_CDN_COOKIE_NAME,
+    cdn_cookie_valid, clear_cdn_cookie, clear_host_cdn_cookie, clear_setup_cookie, cookie_header,
+    issue_cdn_cookie, issue_cdn_cookies, logout_cookie, setup_cookie, CDN_COOKIE_MIN_REMAINING,
+    CDN_COOKIE_TTL, HOST_CDN_COOKIE_NAME,
 };
 
 use crate::state::{StateError, StateStore};
@@ -137,6 +138,17 @@ pub struct RateState {
     pub challenges: u32,
     pub blocked_until: u64,
 }
+pub const MAX_REVOKED_SESSIONS: usize = 256;
+pub const MAX_USER_REVOKED_SESSIONS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokedSession {
+    pub digest: String,
+    pub expires_at: u64,
+    #[serde(default)]
+    pub revoked_at: u64,
+}
+
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AuthState {
     pub users: BTreeMap<String, User>,
@@ -155,6 +167,14 @@ pub struct AuthState {
     pub policy_version: u64,
     #[serde(default)]
     pub usage_logging: settings::UsageLogging,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_sessions: Vec<RevokedSession>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_revoked_sessions: BTreeMap<String, Vec<RevokedSession>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_min_session_exp: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub auth_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -603,8 +623,12 @@ impl<'a, S: StateStore> AuthService<'a, S> {
     }
 
     pub fn authenticate(&self, cookie: &str, now: u64) -> Result<User, Error> {
-        self.authenticate_with_settings(cookie, now)
-            .map(|(user, _)| user)
+        self.authenticate_full(cookie, now).map(|(user, _, _)| user)
+    }
+
+    pub fn authenticate_session(&self, cookie: &str, now: u64) -> Result<(User, u64), Error> {
+        self.authenticate_full(cookie, now)
+            .map(|(user, _, auth_epoch)| (user, auth_epoch))
     }
 
     pub fn authenticate_with_settings(
@@ -612,12 +636,40 @@ impl<'a, S: StateStore> AuthService<'a, S> {
         cookie: &str,
         now: u64,
     ) -> Result<(User, settings::UsageLogging), Error> {
+        self.authenticate_full(cookie, now)
+            .map(|(user, usage, _)| (user, usage))
+    }
+
+    fn authenticate_full(
+        &self,
+        cookie: &str,
+        now: u64,
+    ) -> Result<(User, settings::UsageLogging, u64), Error> {
         let claims = session::verify(cookie, &self.config.session_key, now)?;
         let materialized = self
             .store
             .load_user(&claims.sub)?
             .ok_or(Error::Unauthorized)?;
         let state = self.store.load()?.state;
+        let digest = hash(cookie);
+        if state
+            .revoked_sessions
+            .iter()
+            .any(|s| s.digest == digest && s.expires_at > now)
+            || state
+                .user_revoked_sessions
+                .get(&claims.sub)
+                .is_some_and(|ring| {
+                    ring.iter()
+                        .any(|s| s.digest == digest && s.expires_at > now)
+                })
+            || state
+                .user_min_session_exp
+                .get(&claims.sub)
+                .is_some_and(|&floor| floor > now && claims.exp <= floor)
+        {
+            return Err(Error::Unauthorized);
+        }
         let user = state
             .users
             .get(&claims.sub)
@@ -629,7 +681,66 @@ impl<'a, S: StateStore> AuthService<'a, S> {
         if claims.policy_version != state.policy_version {
             return Err(Error::Unauthorized);
         }
-        Ok((materialized, state.usage_logging))
+        Ok((materialized, state.usage_logging, state.auth_epoch))
+    }
+
+    pub fn logout(&self, cookie: &str, ip: &str, now: u64) -> Result<(), Error> {
+        let Ok(claims) = session::verify(cookie, &self.config.session_key, now) else {
+            return Ok(());
+        };
+        let digest = hash(cookie);
+        self.update(|state| {
+            let active_user = state
+                .users
+                .get(&claims.sub)
+                .is_some_and(|u| !u.revoked && u.credentials.iter().any(|c| !c.revoked));
+            if !active_user || claims.policy_version != state.policy_version {
+                return Ok(());
+            }
+            prune(state, now);
+            if state.revoked_sessions.iter().any(|s| s.digest == digest) {
+                return Ok(());
+            }
+            let ring = state
+                .user_revoked_sessions
+                .entry(claims.sub.clone())
+                .or_default();
+            if ring.iter().any(|s| s.digest == digest) {
+                return Ok(());
+            }
+            ring.push(RevokedSession {
+                digest: digest.clone(),
+                expires_at: claims.exp,
+                revoked_at: now,
+            });
+            if ring.len() > MAX_USER_REVOKED_SESSIONS {
+                if let Some((oldest_idx, _)) =
+                    ring.iter().enumerate().min_by_key(|(_, s)| s.revoked_at)
+                {
+                    let evicted = ring.remove(oldest_idx);
+                    let floor = state
+                        .user_min_session_exp
+                        .entry(claims.sub.clone())
+                        .or_default();
+                    *floor = (*floor).max(evicted.expires_at);
+                }
+            }
+            audit(state, &claims.sub, "logout", &claims.sub, ip, now);
+            Ok(())
+        })
+    }
+
+    pub fn auth_epoch(&self) -> Result<u64, Error> {
+        Ok(self.store.load()?.state.auth_epoch)
+    }
+
+    pub fn advance_auth_epoch(&self, epoch: u64) -> Result<(), Error> {
+        self.update(|state| {
+            if epoch > state.auth_epoch {
+                state.auth_epoch = epoch;
+            }
+            Ok(())
+        })
     }
     fn signed_in(&self, user: User, policy_version: u64, now: u64) -> Result<SignedIn, Error> {
         let cookie = session::issue(&user, policy_version, now, &self.config.session_key)?;
@@ -653,8 +764,9 @@ impl<'a, S: StateStore> AuthService<'a, S> {
             state.invites.into_values().filter(|i| !i.revoked).collect(),
         ))
     }
-    pub fn audit_entries(&self) -> Result<Vec<AuditEntry>, Error> {
+    pub fn audit_entries(&self, actor: &str) -> Result<Vec<AuditEntry>, Error> {
         let state = self.store.load()?.state;
+        admin(&state, actor)?;
         let mut entries: Vec<AuditEntry> =
             state.recent_audit.into_iter().chain(state.audit).collect();
         if entries.len() > 50 {
@@ -730,6 +842,7 @@ impl<'a, S: StateStore> AuthService<'a, S> {
             }
             protect_last_admin(state, target, role != Role::Admin)?;
             state.users.get_mut(target).ok_or(Error::NotFound)?.role = role;
+            state.auth_epoch = state.auth_epoch.saturating_add(1);
             audit(state, actor, "role_changed", target, ip, now);
             Ok(())
         })
@@ -740,6 +853,9 @@ impl<'a, S: StateStore> AuthService<'a, S> {
             admin(state, actor)?;
             protect_last_admin(state, target, true)?;
             state.users.get_mut(target).ok_or(Error::NotFound)?.revoked = true;
+            state.user_revoked_sessions.remove(target);
+            state.user_min_session_exp.remove(target);
+            state.auth_epoch = state.auth_epoch.saturating_add(1);
             audit(state, actor, "user_revoked", target, ip, now);
             Ok(())
         })
@@ -768,6 +884,7 @@ impl<'a, S: StateStore> AuthService<'a, S> {
                 .find(|c| c.id == credential_id)
                 .ok_or(Error::NotFound)?
                 .revoked = true;
+            state.auth_epoch = state.auth_epoch.saturating_add(1);
             audit(state, actor, "credential_revoked", target, ip, now);
             Ok(())
         })
@@ -802,9 +919,10 @@ impl<'a, S: StateStore> AuthService<'a, S> {
     }
 
     pub fn check_rate_limit(&self, ip: &str, challenge: bool, now: u64) -> Result<(), Error> {
+        let rl_key = hash(&rate_limit_key(ip));
         if !challenge {
             let state = self.store.load()?.state;
-            return match state.rates.get(&hash(ip)) {
+            return match state.rates.get(&rl_key) {
                 Some(rate) if rate.blocked_until > now => Err(Error::RateLimited {
                     retry_after: rate.blocked_until - now,
                 }),
@@ -813,7 +931,7 @@ impl<'a, S: StateStore> AuthService<'a, S> {
         }
         self.update(|state| {
             prune(state, now);
-            let rate = state.rates.entry(hash(ip)).or_default();
+            let rate = state.rates.entry(rl_key.clone()).or_default();
             if rate.blocked_until > now {
                 return Err(Error::RateLimited {
                     retry_after: rate.blocked_until - now,
@@ -847,8 +965,9 @@ impl<'a, S: StateStore> AuthService<'a, S> {
         if endpoint.len() > 100 || reason.len() > 100 {
             return Err(Error::InvalidInput);
         }
+        let rl_key = hash(&rate_limit_key(ip));
         self.update(|state| {
-            let rate = state.rates.entry(hash(ip)).or_default();
+            let rate = state.rates.entry(rl_key.clone()).or_default();
             if rate.minute != now / 60 {
                 rate.minute = now / 60;
                 rate.failures = 0;
@@ -861,6 +980,19 @@ impl<'a, S: StateStore> AuthService<'a, S> {
             audit(state, "anonymous", reason, endpoint, ip, now);
             Ok(())
         })
+    }
+}
+
+fn rate_limit_key(ip: &str) -> String {
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let segs = v6.segments();
+            let hi = ((segs[0] as u32) << 16) | (segs[1] as u32);
+            let lo = ((segs[2] as u32) << 16) | (segs[3] as u32);
+            format!("v6:{hi}:{lo}")
+        }
+        Ok(std::net::IpAddr::V4(v4)) => v4.to_string(),
+        Err(_) => ip.to_owned(),
     }
 }
 
@@ -957,4 +1089,15 @@ fn prune(state: &mut AuthState, now: u64) {
     state
         .rates
         .retain(|_, r| r.blocked_until > now || r.minute == now / 60);
+    state.revoked_sessions.retain(|s| s.expires_at > now);
+    state.user_revoked_sessions.retain(|uid, ring| {
+        if state.users.get(uid).is_none_or(|u| u.revoked) {
+            return false;
+        }
+        ring.retain(|s| s.expires_at > now);
+        !ring.is_empty()
+    });
+    state
+        .user_min_session_exp
+        .retain(|uid, floor| *floor > now && state.users.get(uid).is_some_and(|u| !u.revoked));
 }

@@ -1694,12 +1694,13 @@ def test_rate_limiter_lru_eviction(monkeypatch):
     # Order of lockouts should be: "3.3.3.3", "1.1.1.1", "4.4.4.4"
     assert list(rl._locks.keys()) == ["3.3.3.3", "1.1.1.1", "4.4.4.4"]
 
-    # Trigger a lockout for "5.5.5.5". "3.3.3.3" (oldest lockout) should be evicted.
+    # Trigger a lockout for "5.5.5.5". Active lockouts must stay pinned; surge lockout engages.
     for _ in range(rate_limiter.LOGIN_FAILURE_THRESHOLD):
         rl.record_failure("5.5.5.5")
 
-    assert list(rl._locks.keys()) == ["1.1.1.1", "4.4.4.4", "5.5.5.5"]
-    assert "3.3.3.3" not in rl._locks
+    assert len(rl._locks) <= 3
+    assert rl.is_locked("3.3.3.3")[0] is True
+    assert rl.is_locked("5.5.5.5")[0] is True
 
 
 # ── F014: mid-session permission revocation propagation ──────────────────

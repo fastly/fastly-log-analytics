@@ -13,6 +13,9 @@ ratecounter auth_challenge_rc {}
 sub vcl_recv {
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
     set req.http.Fastly-Client-IP = client.ip;
+    if (req.url ~ "^//") {
+      set req.url = regsub(req.url, "^/+", "/");
+    }
     unset req.http.x-flp-front-key;
     unset req.http.x-flp-front-rl;
     unset req.http.x-flp-clock-secret;
@@ -29,102 +32,136 @@ sub vcl_recv {
     }
     set req.http.x-flp-front-rl = "1";
     #RATELIMIT_BEGIN
-    if (req.url.path ~ "^/(setup|share-login|auth|api)(\.(html|txt)|/|$)") {
-      if (ratelimit.penaltybox_has(auth_fail_pb, req.http.Fastly-Client-IP)) {
+    declare local var.rl_ip IP;
+    declare local var.rl_key STRING;
+    set var.rl_ip = std.str2ip(req.http.Fastly-Client-IP, "0.0.0.0");
+    if (addr.is_ipv6(var.rl_ip)) {
+      set var.rl_key = "v6:" + addr.extract_bits(var.rl_ip, 96, 32) + ":" + addr.extract_bits(var.rl_ip, 64, 32);
+    } else {
+      set var.rl_key = req.http.Fastly-Client-IP;
+    }
+    if (
+      req.url.path ~ "^/+(setup|share-login|sign-in|invite|auth|api)(\.(html|txt)|/|$)" ||
+      req.url.path ~ "^/+fos(/|$)" ||
+      req.url.path ~ "^/+(?:[A-Za-z0-9._-]+/)+processed/"
+    ) {
+      if (ratelimit.penaltybox_has(auth_fail_pb, var.rl_key)) {
         error 618 "Too Many Requests";
       }
     }
-    if (req.url.path ~ "^/(api/)?auth/.*(challenge|options|begin)$") {
+    if (req.url.path ~ "^/+(api/)?auth/.*(challenge|options|begin)$") {
       declare local var.challenges INTEGER;
-      set var.challenges = ratelimit.ratecounter_increment(auth_challenge_rc, req.http.Fastly-Client-IP, 1);
+      set var.challenges = ratelimit.ratecounter_increment(auth_challenge_rc, var.rl_key, 1);
       if (var.challenges > 30) {
         error 619 "Too Many Requests";
       }
     }
     #RATELIMIT_END
-    if (!req.http.Cookie:flp_cdn && req.http.Cookie:__Host-flp_cdn) {
-      set req.http.Cookie:flp_cdn = req.http.Cookie:__Host-flp_cdn;
+    declare local var.cdn_cookie STRING;
+    if (req.http.Cookie:__Host-flp_cdn && req.http.Cookie:__Host-flp_cdn != "") {
+      set var.cdn_cookie = req.http.Cookie:__Host-flp_cdn;
+    } else if (req.http.Cookie:flp_cdn && req.http.Cookie:flp_cdn != "") {
+      set var.cdn_cookie = req.http.Cookie:flp_cdn;
+    } else {
+      set var.cdn_cookie = "";
     }
     declare local var.browser_file_key STRING;
     set var.browser_file_key = "";
-    if ((req.method == "GET" || req.method == "HEAD") && (req.http.Cookie:flp_cdn || req.http.Cookie:flp_session)) {
+    if ((req.method == "GET" || req.method == "HEAD") && (var.cdn_cookie != "" || req.http.Cookie:flp_session)) {
       if (req.url.path == "/api/file") {
         set var.browser_file_key = regsuball(subfield(req.url.qs, "key", "&"), "\+", "%20");
-      } else if ((!req.http.x-fastly-key || req.http.x-fastly-key == "") && req.url.path ~ "^/fos/pq/((?:[A-Za-z0-9._-]+/)?processed/(?:request|rum|ops|summary|summary_bundle)/.+\.parquet)$") {
+      } else if ((!req.http.x-fastly-key || req.http.x-fastly-key == "") && req.url.path ~ "^/fos/pq/((?:[A-Za-z0-9._-]+/)*processed/(?:request|rum|ops|summary|summary_bundle)/.+\.parquet)$") {
         set var.browser_file_key = re.group.1;
-      } else if ((!req.http.x-fastly-key || req.http.x-fastly-key == "") && req.url.path ~ "^/fos/((?:[A-Za-z0-9._-]+/)?processed/(?:request|rum|ops|summary|summary_bundle)/.+\.parquet)$") {
+      } else if ((!req.http.x-fastly-key || req.http.x-fastly-key == "") && req.url.path ~ "^/fos/((?:[A-Za-z0-9._-]+/)*processed/(?:request|rum|ops|summary|summary_bundle)/.+\.parquet)$") {
         set var.browser_file_key = re.group.1;
-      } else if (req.url.path ~ "^/([A-Za-z0-9._-]+/processed/(?:request|rum|ops|summary|summary_bundle)/.+\.parquet)$") {
+      } else if (req.url.path ~ "^/((?:[A-Za-z0-9._-]+/)+processed/(?:request|rum|ops|summary|summary_bundle)/.+\.parquet)$") {
         set var.browser_file_key = re.group.1;
       }
     }
-    if ((req.url.path == "/api/file" || var.browser_file_key != "") && (req.method == "GET" || req.method == "HEAD") && req.http.Cookie:flp_cdn && req.http.Cookie:flp_session) {
+    if ((req.url.path == "/api/file" || var.browser_file_key != "") && (req.method == "GET" || req.method == "HEAD") && var.cdn_cookie != "") {
       declare local var.cdn_secret STRING;
+      declare local var.auth_epoch STRING;
       set var.cdn_secret = table.lookup(flp_front_auth, "cdn_key", "");
-      if (var.cdn_secret != "" && req.http.Cookie:flp_cdn ~ "^(([A-Za-z0-9]{22})~(admin|analyst|no_pii)~([0-9]{10})~([0-9a-f]{16})~([A-Za-z0-9._/-]*))~([0-9a-f]{64})$") {
-        declare local var.cdn_payload STRING;
-        declare local var.cdn_sid STRING;
-        declare local var.cdn_role STRING;
-        declare local var.cdn_exp STRING;
-        declare local var.cdn_shash STRING;
-        declare local var.cdn_scope STRING;
-        declare local var.cdn_sig STRING;
-        set var.cdn_payload = re.group.1;
-        set var.cdn_sid = re.group.2;
-        set var.cdn_role = re.group.3;
-        set var.cdn_exp = re.group.4;
-        set var.cdn_shash = re.group.5;
-        set var.cdn_scope = re.group.6;
-        set var.cdn_sig = re.group.7;
-        if (
-          var.cdn_shash == substr(digest.hash_sha256(req.http.Cookie:flp_session), 0, 16) &&
-          digest.secure_is_equal(digest.hmac_sha256(var.cdn_secret, "flp-cdn-v1~" + var.cdn_payload), "0x" + var.cdn_sig) &&
-          std.atoi(var.cdn_exp) > std.atoi(strftime({"%s"}, now)) &&
-          table.lookup(flp_fos_buckets, var.cdn_sid, "") != "" &&
-          table.lookup(flp_fos_credentials, var.cdn_sid + ".ak", "") != "" &&
-          table.lookup(flp_fos_credentials, var.cdn_sid + ".sk", "") != ""
-        ) {
-          if (var.cdn_role == "no_pii") {
-            error 624 "Forbidden";
+      set var.auth_epoch = table.lookup(flp_front_auth, "auth_epoch", "0");
+      if (var.auth_epoch == "" || var.auth_epoch !~ "^[0-9]{1,20}$") {
+        set var.auth_epoch = "0";
+      }
+      if (var.cdn_secret != "") {
+        if (var.cdn_cookie ~ "^(([A-Za-z0-9]{22})~(admin|analyst|no_pii)~([0-9]{10})~([0-9a-f]{16})(?:~([0-9]{1,20}))?~([A-Za-z0-9._/-]*))~([0-9a-f]{64})$") {
+          declare local var.cdn_payload STRING;
+          declare local var.cdn_msg STRING;
+          declare local var.cdn_sid STRING;
+          declare local var.cdn_role STRING;
+          declare local var.cdn_exp STRING;
+          declare local var.cdn_shash STRING;
+          declare local var.cdn_epoch STRING;
+          declare local var.cdn_scope STRING;
+          declare local var.cdn_sig STRING;
+          set var.cdn_payload = re.group.1;
+          set var.cdn_sid = re.group.2;
+          set var.cdn_role = re.group.3;
+          set var.cdn_exp = re.group.4;
+          set var.cdn_shash = re.group.5;
+          set var.cdn_epoch = if(re.group.6 && re.group.6 != "", re.group.6, "0");
+          set var.cdn_scope = re.group.7;
+          set var.cdn_sig = re.group.8;
+          set var.cdn_msg = if(re.group.6 && re.group.6 != "", "flp-cdn-v2~" + var.cdn_payload, "flp-cdn-v1~" + var.cdn_payload);
+          if (!digest.secure_is_equal(digest.hmac_sha256(var.cdn_secret, var.cdn_msg), "0x" + var.cdn_sig)) {
+            error 629 "Forbidden";
           }
-          if (var.browser_file_key == "") {
-            error 625 "Bad Request";
-          }
-          declare local var.file_key STRING;
-          declare local var.rel_key STRING;
-          set var.file_key = urldecode(var.browser_file_key);
           if (
-            std.strlen(var.file_key) > 512 ||
-            std.strlen(var.file_key) <= std.strlen(var.cdn_scope) ||
-            substr(var.file_key, 0, std.strlen(var.cdn_scope)) != var.cdn_scope
+            req.http.Cookie:flp_session &&
+            var.cdn_shash == substr(digest.hash_sha256(req.http.Cookie:flp_session), 0, 16) &&
+            var.cdn_epoch == var.auth_epoch &&
+            std.atoi(var.cdn_exp) > std.atoi(strftime({"%s"}, now)) &&
+            table.lookup(flp_fos_buckets, var.cdn_sid, "") != "" &&
+            table.lookup(flp_fos_credentials, var.cdn_sid + ".ak", "") != "" &&
+            table.lookup(flp_fos_credentials, var.cdn_sid + ".sk", "") != ""
           ) {
-            error 626 "Bad Request";
+            if (var.cdn_role == "no_pii") {
+              error 624 "Forbidden";
+            }
+            if (var.browser_file_key == "") {
+              error 625 "Bad Request";
+            }
+            declare local var.file_key STRING;
+            declare local var.rel_key STRING;
+            set var.file_key = urldecode(var.browser_file_key);
+            if (
+              std.strlen(var.file_key) > 512 ||
+              std.strlen(var.file_key) <= std.strlen(var.cdn_scope) ||
+              substr(var.file_key, 0, std.strlen(var.cdn_scope)) != var.cdn_scope
+            ) {
+              error 626 "Bad Request";
+            }
+            set var.rel_key = substr(var.file_key, std.strlen(var.cdn_scope));
+            if (
+              var.rel_key !~ "^processed/(request|rum|ops|summary|summary_bundle)/" ||
+              var.file_key !~ "\.parquet$" ||
+              var.file_key ~ "(\.\.|//|[^A-Za-z0-9._=/\-])"
+            ) {
+              error 626 "Bad Request";
+            }
+            if (var.rel_key ~ "^processed/ops/" && var.cdn_role != "admin") {
+              error 624 "Forbidden";
+            }
+            set req.http.x-flp-api-file = "1";
+            set req.http.x-fastly-key = var.cdn_secret;
+            set req.url = "/fos/" + var.cdn_sid + "/" + var.file_key;
           }
-          set var.rel_key = substr(var.file_key, std.strlen(var.cdn_scope));
-          if (
-            var.rel_key !~ "^processed/(request|rum|ops|summary|summary_bundle)/" ||
-            var.file_key !~ "\.parquet$" ||
-            var.file_key ~ "(\.\.|//|[^A-Za-z0-9._=/\-])"
-          ) {
-            error 626 "Bad Request";
-          }
-          if (var.rel_key ~ "^processed/ops/" && var.cdn_role != "admin") {
-            error 624 "Forbidden";
-          }
-          set req.http.x-flp-api-file = "1";
-          set req.http.x-fastly-key = var.cdn_secret;
-          set req.url = "/fos/" + var.cdn_sid + "/" + var.file_key;
+        } else {
+          error 629 "Forbidden";
         }
       }
     }
     if (!req.http.x-flp-api-file && req.url.path != "/api/file" && var.browser_file_key != "") {
       set req.url = "/api/file?key=" + urlencode(urldecode(var.browser_file_key));
     }
-    if (req.url.path ~ "^/fos(/|$)") {
+    if (req.url.path ~ "^/+fos(/|$)") {
       declare local var.cdn_key STRING;
       declare local var.registry STRING;
       set var.cdn_key = table.lookup(flp_front_auth, "cdn_key", "");
-      if (var.cdn_key == "" || req.http.x-fastly-key != var.cdn_key) {
+      if (var.cdn_key == "" || !req.http.x-fastly-key || !digest.secure_is_equal(var.cdn_key, req.http.x-fastly-key)) {
         error 622 "Forbidden";
       }
       if (req.method != "GET" && req.method != "HEAD") {
@@ -385,10 +422,18 @@ sub vcl_deliver {
 #FASTLY deliver
   #RATELIMIT_BEGIN
   if (fastly.ff.visits_this_service == 0 && resp.http.x-flp-auth-fail == "1") {
+    declare local var.rl_ip IP;
+    declare local var.rl_key STRING;
     declare local var.failures INTEGER;
-    set var.failures = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
+    set var.rl_ip = std.str2ip(req.http.Fastly-Client-IP, "0.0.0.0");
+    if (addr.is_ipv6(var.rl_ip)) {
+      set var.rl_key = "v6:" + addr.extract_bits(var.rl_ip, 96, 32) + ":" + addr.extract_bits(var.rl_ip, 64, 32);
+    } else {
+      set var.rl_key = req.http.Fastly-Client-IP;
+    }
+    set var.failures = ratelimit.ratecounter_increment(auth_fail_rc, var.rl_key, 1);
     if (var.failures >= 10) {
-      ratelimit.penaltybox_add(auth_fail_pb, req.http.Fastly-Client-IP, 15m);
+      ratelimit.penaltybox_add(auth_fail_pb, var.rl_key, 15m);
     }
   }
   #RATELIMIT_END
@@ -441,7 +486,7 @@ sub vcl_deliver {
 
 
 sub vcl_error {
-  if (obj.status >= 624 && obj.status <= 628) {
+  if (obj.status >= 624 && obj.status <= 629) {
     set obj.http.Content-Type = "application/json";
     set obj.http.Cache-Control = "private, no-store";
     set obj.http.Vary = "Cookie";
@@ -451,6 +496,7 @@ sub vcl_error {
     if (obj.status == 624) {
       set obj.status = 403;
       set obj.response = "Forbidden";
+      set obj.http.x-flp-auth-fail = "1";
       synthetic {"{"error":"forbidden","detail":"Insufficient role." }"};
     } else if (obj.status == 625) {
       set obj.status = 400;
@@ -464,10 +510,17 @@ sub vcl_error {
       set obj.status = 404;
       set obj.response = "Not Found";
       synthetic {"{"error":"not_found","detail":"File not found" }"};
-    } else {
+    } else if (obj.status == 628) {
       set obj.status = 502;
       set obj.response = "Bad Gateway";
       synthetic {"{"error":"bad_gateway","detail":"File read failed" }"};
+    } else {
+      set obj.status = 403;
+      set obj.response = "Forbidden";
+      set obj.http.x-flp-auth-fail = "1";
+      set obj.http.Set-Cookie = "flp_cdn=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax";
+      add obj.http.Set-Cookie = "__Host-flp_cdn=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax";
+      synthetic {"{"error":"forbidden","detail":"Invalid CDN credential." }"};
     }
     return(deliver);
   }
@@ -479,6 +532,7 @@ sub vcl_error {
       set obj.status = 403;
       set obj.response = "Forbidden";
     }
+    set obj.http.x-flp-auth-fail = "1";
     set obj.http.Cache-Control = "private, no-store";
     synthetic {"Storage request denied"};
     return(deliver);

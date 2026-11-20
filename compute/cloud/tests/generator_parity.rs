@@ -809,3 +809,307 @@ fn cloud_endpoints_never_use_a_period_below_one_minute() {
         .iter()
         .all(|e| e["period"] == 60));
 }
+
+#[test]
+fn sec16_rum_fos_request_scrubbing_and_sigv4_backend_path_guard() {
+    let templates: Value =
+        serde_json::from_str(include_str!("../vcl/capture/templates.json")).unwrap();
+    assert!(templates["scrub_headers"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("X-FOS-Request")));
+    assert!(templates["rum_recv"]
+        .as_str()
+        .unwrap()
+        .contains("unset req.http.X-FOS-Request;"));
+    assert!(templates["rum_deliver"]
+        .as_str()
+        .unwrap()
+        .contains("; Path=/; SameSite=Lax; Secure\""));
+
+    let with_faro = logging::rum::sigv4_sign_vcl(Some("2.13.0")).unwrap();
+    assert!(with_faro.contains(
+        r#"if (req.http.X-FOS-Request == "1" && req.backend == F_fos_origin && !req.backend.is_shield && (req.url.path == "/js/rum.js" || req.url.path == "/js/faro-sdk.js")) {"#
+    ));
+    let no_faro = logging::rum::sigv4_sign_vcl(None).unwrap();
+    assert!(no_faro.contains(
+        r#"if (req.http.X-FOS-Request == "1" && req.backend == F_fos_origin && !req.backend.is_shield && req.url.path == "/js/rum.js") {"#
+    ));
+    assert!(!no_faro.contains("faro-sdk.js"));
+
+    for (logging_enabled, rum_enabled) in [(true, false), (true, true), (false, true)] {
+        let state = json!({
+            "logging_enabled": logging_enabled,
+            "log_fields": {"groups": ["A"], "custom_fields": [], "field_overrides": {}, "field_limits": {}},
+            "rum": {"enabled": rum_enabled, "faro_version": "2.13.0"}
+        });
+        let snippets = logging::desired_snippets(&state).unwrap();
+        let recv = snippets
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["subroutine"] == "vcl_recv")
+            .expect("vcl_recv snippet")["body"]
+            .as_str()
+            .unwrap();
+        let scrub_pos = recv
+            .find("unset req.http.X-FOS-Request;")
+            .expect("recv must scrub X-FOS-Request");
+        assert!(
+            recv.contains("unset req.http.x-fos-edge-data;"),
+            "recv must scrub x-fos-edge-data when logging={logging_enabled}, rum={rum_enabled}"
+        );
+        for sub in ["vcl_miss", "vcl_pass"] {
+            let body = snippets
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["subroutine"] == sub)
+                .unwrap()["body"]
+                .as_str()
+                .unwrap();
+            assert!(
+                body.contains("unset bereq.http.x-fos-edge-data;"),
+                "{sub} must strip bereq.http.x-fos-edge-data when logging={logging_enabled}, rum={rum_enabled}"
+            );
+        }
+        assert!(recv.contains("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {"));
+        if rum_enabled {
+            let set_pos = recv
+                .find("set req.http.X-FOS-Request = \"1\";")
+                .expect("rum asset fetch sets X-FOS-Request");
+            assert!(
+                scrub_pos < set_pos,
+                "X-FOS-Request scrub must run strictly before asset_fetch_vcl"
+            );
+
+            // Lint wrapped snippets in falco to prove valid VCL with F_fos_origin
+            let mut vcl = String::from(
+                "backend F_customer_origin { .host = \"origin.example.com\"; }\n\
+                 backend F_fos_origin { .host = \"us-east-1.object.fastlystorage.app\"; }\n\
+                 backend ssl_shield_iad_va_us { .host = \"shield.example.com\"; }\n\
+                 table fos_credentials {\n  \"access_key\": \"test\",\n  \"secret_key\": \"test\",\n  \"bucket\": \"b\",\n  \"region\": \"us-east-1\",\n}\n",
+            );
+            for snip in snippets.as_array().unwrap() {
+                let sub_name = snip["subroutine"].as_str().unwrap();
+                let short = sub_name.trim_start_matches("vcl_");
+                let body = snip["body"].as_str().unwrap();
+                vcl.push_str(&format!(
+                    "sub {sub_name} {{\n  #FASTLY {short}\n{body}\n}}\n"
+                ));
+            }
+            let tmp = std::env::temp_dir().join(format!(
+                "flp-sec16-{logging_enabled}-{rum_enabled}-{}.vcl",
+                std::process::id()
+            ));
+            std::fs::write(&tmp, &vcl).unwrap();
+            let out = std::process::Command::new("falco")
+                .arg("lint")
+                .arg(&tmp)
+                .output();
+            let _ = std::fs::remove_file(&tmp);
+            let out = out.expect("falco binary must run");
+            assert!(
+                out.status.success(),
+                "falco lint failed for logging={logging_enabled}, rum={rum_enabled}:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn sec20ab_vcl_condition_and_log_expression_validators_block_breakouts_and_exfiltration() {
+    let valid_conditions = [
+        "",
+        "req.method == \"GET\"",
+        "req.url.path !~ \"^/health\"",
+        "(req.restarts == 0 && req.http.Set-Cookie == \"\")",
+        "req.http.x-error-code != \"500\"",
+    ];
+    for cond in valid_conditions {
+        assert!(
+            logging::validate_vcl_condition(cond).is_ok(),
+            "expected valid condition: {cond}"
+        );
+    }
+
+    let malicious_conditions = [
+        ") || true || (",
+        "(req.method == \"GET\"",
+        "req.http.X == \"unterminated",
+        r#"req.http.X == "\") || true || (req.http.Y == "\\\""#,
+        "req.method == \"GET\"; unset req.url",
+        "req.method == \"GET\"\n&& true",
+        "req.method == \"GET\"\r&& true",
+        "req.method == \"GET\" { }",
+        "req.method == 'GET'",
+        "req.method == \"GET\" // comment",
+        "req.method == \"GET\" /* comment */",
+        "req.method == \"GET\" */",
+        "req.method == \"GET\" # comment",
+        "table.lookup(fos_credentials, \"secret_key\") != \"\"",
+        "TABLE . LOOKUP(fos_credentials, \"secret_key\") != \"\"",
+        "table.contains(flp_front_auth, \"front_key\")",
+        "header.get(req, \"Auth\" + \"orization\") != \"\"",
+        "HEADER . GET(req, \"x-fastly-key\") != \"\"",
+        "header.filter(req, \"Cookie\")",
+        "header.filter_except(req, \"Host\")",
+        "req.http.X == \"%22) || true || (\"",
+        "req.http.x-fastly-key != \"\"",
+        "req.http.Fastly-Key != \"\"",
+        "req . http . Authorization != \"\"",
+        "bereq.http.Proxy-Authorization != \"\"",
+        "req.http.x-edge-scorer-auth != \"\"",
+        "req.http.x-flp-front-key != \"\"",
+        "req.http.x-flp-worker-key != \"\"",
+        "req.http.x-flp-internal != \"\"",
+        "req.http.Cookie != \"\"",
+        "req.http.Cookie:flp_session != \"\"",
+        "resp.http.Set-Cookie != \"\"",
+        "beresp.http.Set-Cookie != \"\"",
+        "fos_credentials != \"\"",
+        "session_scoring_secrets != \"\"",
+        "cdn_auth != \"\"",
+        "flp_fos_credentials != \"\"",
+        "flp_front_auth != \"\"",
+        "flp_fos_buckets != \"\"",
+        "synthetic \"x\"",
+        "call my_sub",
+        "return(pass)",
+        "error 600",
+        "restart",
+        "set req.url = \"/\"",
+        "unset req.http.Host",
+        "add req.http.X = \"1\"",
+        "esi",
+        "include \"foo\"",
+        "import std",
+        "declare local var.x STRING",
+    ];
+    for bad in malicious_conditions {
+        assert!(
+            logging::validate_vcl_condition(bad).is_err(),
+            "expected validate_vcl_condition to reject: {bad}"
+        );
+        assert!(
+            logging::rum::validate_custom_condition(bad).is_err(),
+            "expected rum::validate_custom_condition to reject: {bad}"
+        );
+        assert!(
+            logging::desired_conditions(&json!({"custom_condition": bad})).is_err(),
+            "expected desired_conditions to reject: {bad}"
+        );
+    }
+    for rum_url_bypass in [
+        "req.url == \"/x\"",
+        "REQ.URL.path ~ \"^/secret\"",
+        "Req . Url != \"\"",
+    ] {
+        assert!(
+            logging::rum::validate_custom_condition(rum_url_bypass).is_err(),
+            "expected rum::validate_custom_condition to reject case-insensitive req.url: {rum_url_bypass}"
+        );
+    }
+    assert!(logging::rum::validate_custom_condition("req.url.qs != \"\"").is_ok());
+
+    let valid_exprs = [
+        "req.http.X-Custom-Header",
+        "resp.http.X-Cache-Status",
+        "beresp.http.Cache-Control",
+        "if(req.http.X-A != \"\", req.http.X-A, \"none\")",
+    ];
+    for expr in valid_exprs {
+        assert!(
+            logging::validate_vcl_log_expression(expr).is_empty(),
+            "expected valid expression: {expr}"
+        );
+        let good_cf = json!({
+            "name": "good_field",
+            "vcl_log_expression": expr,
+            "parquet_type": "Utf8",
+            "collection_stage": "edge"
+        });
+        assert!(
+            catalog::validate_custom_field(&good_cf, &[]).is_empty(),
+            "expected catalog::validate_custom_field to accept: {expr}"
+        );
+    }
+
+    let malicious_exprs = [
+        "x;\nunset req.url;",
+        "req.http.X\r",
+        "req.http.X; set req.url = \"/\"",
+        "req.http.X { }",
+        "%{req.http.X}V",
+        "req.http.X }V",
+        "'single'",
+        "req.http.X // comment",
+        "req.http.X /* comment */",
+        "req.http.X # comment",
+        "if(req.http.X != \"\"",
+        "req.http.X)",
+        r#"if(req.http.X == "\"", "a", "b")"#,
+        "table.lookup(fos_credentials, \"secret_key\")",
+        "TABLE . LOOKUP(flp_front_auth, \"front_key\")",
+        "return(pass)",
+        "req.http.X-Edge-Scorer-Auth",
+        "req.http.Authorization",
+        "req.http.authorization:Bearer",
+        "bereq.http.X-Fastly-Key",
+        "req.http.X-FLP-Front-Key",
+        "req.http.X-FLP-Worker-Key",
+        "req.http.X-FLP-Clock-Secret",
+        "req.http.x-flp-any-internal",
+        "req.http.Fastly-Key",
+        "bereq.http.Proxy-Authorization",
+        "req.http.Cookie",
+        "req.http.Cookie:flp_session",
+        "req.http.Set-Cookie",
+        "resp.http.Set-Cookie",
+        "header.get(req, \"Auth\" + \"orization\")",
+        "table.contains(fos_credentials, \"secret_key\")",
+        "if(req.http.X == \"%22\", \"a\", \"b\")",
+        "req.http.X */",
+        "session_scoring_secrets",
+        "declare local var.x STRING",
+    ];
+    for bad in malicious_exprs {
+        assert!(
+            !logging::validate_vcl_log_expression(bad).is_empty(),
+            "expected validate_vcl_log_expression to reject: {bad}"
+        );
+        let cf = json!({
+            "name": "bad_field",
+            "vcl_log_expression": bad,
+            "parquet_type": "Utf8",
+            "collection_stage": "edge"
+        });
+        assert!(
+            !catalog::validate_custom_field(&cf, &[]).is_empty(),
+            "expected catalog::validate_custom_field to reject: {bad}"
+        );
+        let cfg = json!({
+            "groups": ["A"],
+            "custom_fields": [cf],
+            "field_overrides": {},
+            "field_limits": {}
+        });
+        assert!(
+            logging::generate_log_format(&cfg).is_err(),
+            "expected generate_log_format to reject: {bad}"
+        );
+        assert!(
+            logging::generate_compact_log_format(&cfg).is_err(),
+            "expected generate_compact_log_format to reject: {bad}"
+        );
+        for stage in ["edge", "origin", "deliver"] {
+            let mut staged = cfg.clone();
+            staged["custom_fields"][0]["collection_stage"] = json!(stage);
+            assert!(
+                logging::generate_capture_vcl(&staged).is_err(),
+                "expected generate_capture_vcl({stage}) to reject: {bad}"
+            );
+        }
+    }
+}

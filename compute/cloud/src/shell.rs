@@ -458,11 +458,13 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             Ok(response) => response,
             Err(failure) => auth_error(failure, &request.path),
         };
-        if matches!(response.status, 401 | 403)
-            && request.cookie("flp_cdn").is_some()
-            && !response.headers.contains_key("set-cookie")
-        {
-            response = response.header("set-cookie", auth::clear_cdn_cookie());
+        if matches!(response.status, 401 | 403) {
+            if request.cookie("flp_cdn").is_some() {
+                response = response.cookie(auth::clear_cdn_cookie());
+            }
+            if request.cookie(auth::HOST_CDN_COOKIE_NAME).is_some() {
+                response = response.cookie(auth::clear_host_cdn_cookie());
+            }
         }
         self.record_request(request, response, started, vcpu)
     }
@@ -677,6 +679,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             || path.starts_with("/api/admin/log-fields/")
             || path.starts_with("/api/admin/logs/")
             || path.starts_with("/api/admin/usage/")
+            || path.starts_with("/api/admin/users/")
             || path.starts_with("/api/cron-runs")
             || matches!(
                 path,
@@ -743,13 +746,24 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             }
         }
         let is_auth = path == "/api/setup/accept" || path.starts_with("/api/auth/");
-        if !front_rl && (setup_page || path.starts_with("/api/") || path.starts_with("/auth/")) {
+        let is_auth_page = setup_page || legacy_auth_redirect(&request.path, path).is_some();
+        if !front_rl && (is_auth_page || path.starts_with("/api/") || path.starts_with("/auth/")) {
             auth.check_rate_limit(ip, is_auth && path.ends_with("/options"), now)?;
         }
         let outcome = self.auth_route(&auth, request, path, setup_grant, ip, now);
         if let Some(result) = outcome {
             return match result {
                 Err(failure) if is_signin_failure(&failure) => {
+                    if path == "/api/auth/register/options"
+                        && matches!(failure, AuthError::Unauthorized | AuthError::SetupClosed)
+                        && setup_grant.is_none()
+                        && !has_nonempty_invite_token(&request.body)
+                    {
+                        return Err(failure);
+                    }
+                    let clear_setup = path == "/api/auth/register/options"
+                        && matches!(failure, AuthError::Unauthorized | AuthError::SetupClosed)
+                        && setup_grant.is_some();
                     if !front_rl {
                         auth.record_failure(
                             ip,
@@ -758,320 +772,436 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                             now,
                         )?;
                     }
-                    Ok(auth_error(failure, path).header("x-flp-auth-fail", "1"))
+                    let mut resp = auth_error(failure, path).header("x-flp-auth-fail", "1");
+                    if clear_setup {
+                        resp = resp.cookie(auth::clear_setup_cookie());
+                    }
+                    Ok(resp)
                 }
                 other => other,
             };
         }
-        let user = request
-            .cookie("flp_session")
-            .and_then(|cookie| match auth.authenticate(&cookie, now) {
-                Ok(user) => Some(Ok(user)),
-                Err(AuthError::Unauthorized) => None,
-                Err(other) => Some(Err(other)),
-            })
-            .transpose()?;
-        self.trace.borrow_mut().actor = user.as_ref().map(|user| user.id.clone());
-        if request.method == "POST" && path == "/api/telemetry/query" {
-            user.as_ref().ok_or(AuthError::Unauthorized)?;
-            return Ok(self.beacon(request));
-        }
-        if path == "/api/admin/system-checks" && matches!(request.method.as_str(), "GET" | "POST") {
-            match &user {
-                Some(user) if user.role == Role::Admin => (),
-                Some(_) => return Err(AuthError::Forbidden),
-                None => auth.check_setup_grant(setup_grant.ok_or(AuthError::Unauthorized)?, now)?,
+        let had_session_cookie = request.cookie("flp_session").is_some();
+        let checks_route =
+            path == "/api/admin/system-checks" && matches!(request.method.as_str(), "GET" | "POST");
+        let had_checks_setup_cookie = checks_route && setup_grant.is_some();
+        let result: Result<Response, AuthError> = (|| {
+            let authenticated = request
+                .cookie("flp_session")
+                .and_then(|cookie| match auth.authenticate_session(&cookie, now) {
+                    Ok(pair) => Some(Ok(pair)),
+                    Err(AuthError::Unauthorized) => None,
+                    Err(other) => Some(Err(other)),
+                })
+                .transpose()?;
+            let auth_epoch = authenticated.as_ref().map_or(0, |(_, epoch)| *epoch);
+            let user = authenticated.map(|(user, _)| user);
+            self.trace.borrow_mut().actor = user.as_ref().map(|user| user.id.clone());
+            if request.method == "POST" && path == "/api/telemetry/query" {
+                user.as_ref().ok_or(AuthError::Unauthorized)?;
+                return Ok(self.beacon(request));
             }
-            return Ok(json_response(
-                self.runtime.checks(front_rl).map_err(storage)?,
-            ));
-        }
-        if matches!(
-            path,
-            "/api/services" | "/api/log-fields/catalog" | "/api/rum/versions"
-        ) && request.method == "GET"
-        {
-            let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            let response = crate::admin::handle(self.runtime, &user.id, request);
-            if path == "/api/services" && user.role != Role::Admin {
-                return Ok(redact_services(response));
-            }
-            return Ok(response);
-        }
-        if path == "/api/views" || path.starts_with("/api/views/") {
-            user.as_ref().ok_or(AuthError::Unauthorized)?;
-            if !matches!(request.method.as_str(), "GET" | "POST" | "DELETE") {
-                return Err(AuthError::NotFound);
-            }
-            let service = crate::admin::active_service(self.runtime).map_err(storage)?;
-            let Some(service) = service else {
-                return Ok(error(409, "No active service is provisioned."));
-            };
-            return crate::views::handle(self.runtime, &service.service_id, request);
-        }
-        let admin_page = is_admin_page_path(path);
-        let scoring_api = path.starts_with("/api/services/") && path.contains("/scoring/");
-        if path.starts_with("/api/admin/")
-            || path.starts_with("/api/provision/")
-            || scoring_api
-            || admin_page
-        {
-            if admin_page && matches!(request.method.as_str(), "GET" | "HEAD") && user.is_none() {
-                return Ok(Response::redirect(if auth.setup_complete()? {
-                    "/sign-in"
-                } else {
-                    "/setup"
-                }));
-            }
-            let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            authorize_admin(user.role)?;
-            if admin_page && matches!(request.method.as_str(), "GET" | "HEAD") {
-                return Ok(self.static_response(request).private());
-            }
-            return self.admin_route(&auth, user, request, path, ip, now);
-        }
-        if matches!(path, "/setup" | "/setup.html" | "/setup.txt")
-            && matches!(request.method.as_str(), "GET" | "HEAD")
-            && auth.setup_complete()?
-        {
-            return Ok(Response::redirect("/admin"));
-        }
-        if request.method == "GET" && path.starts_with("/api/logs/") && path.ends_with("/live") {
-            let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            authorize_admin(user.role)?;
-            let kind = path
-                .strip_prefix("/api/logs/")
-                .and_then(|rest| rest.strip_suffix("/live"))
-                .and_then(crate::telemetry::LogKind::parse);
-            let Some(kind) = kind else {
-                return Ok(error(404, "Unknown log kind."));
-            };
-            let Some(service) = crate::admin::active_service(self.runtime).map_err(storage)? else {
-                return Ok(error(409, "No active service is provisioned."));
-            };
-            let query = request.path.split_once('?').map_or("", |(_, query)| query);
-            let param = |name: &str| {
-                url::form_urlencoded::parse(query.as_bytes())
-                    .find(|(key, _)| key == name)
-                    .map(|(_, value)| value.into_owned())
-            };
-            let page = crate::telemetry::read_live(
-                self.runtime,
-                &service.service_id,
-                kind,
-                param("since").and_then(|v| v.parse().ok()),
-                param("limit").and_then(|v| v.parse().ok()),
-                param("cursor").as_deref(),
-            );
-            return Ok(match page {
-                Ok(page) => json_response(json!({
-                    "rows": page.rows,
-                    "next_cursor": page.next_cursor,
-                    "truncated": page.truncated,
-                })),
-                Err(code) if code == "live_source_changed" => {
-                    error(409, "Live log source changed.")
-                }
-                Err(_) => error(503, "Live log read failed."),
-            });
-        }
-        if matches!(
-            path,
-            "/api/log-extents" | "/api/files" | "/api/file" | "/api/ingest/events"
-        ) && (request.method == "GET" || request.method == "HEAD" && path == "/api/file")
-        {
-            let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            if path == "/api/file" && user.role == Role::AnalystNoPii {
-                return Err(AuthError::Forbidden);
-            }
-            let service = crate::admin::active_service(self.runtime).map_err(storage)?;
-            let Some(service) = service else {
-                return Ok(if path == "/api/log-extents" {
-                    json_response(
-                        json!({"configured":false,"earliest":null,"latest":null,"earliest_log_at":null,"latest_log_at":null}),
-                    )
-                } else {
-                    error(409, "No active service is provisioned.")
-                });
-            };
-            let query = request.path.split_once('?').map_or("", |(_, query)| query);
-            let wanted = |name: &str| {
-                url::form_urlencoded::parse(query.as_bytes())
-                    .find(|(key, _)| key == name)
-                    .map(|(_, value)| value.into_owned())
-            };
-            use crate::ingest::api;
-            let operational = match path {
-                "/api/files" => wanted("dataset").is_some_and(|d| d.starts_with("ops")),
-                "/api/file" => wanted("key").is_some_and(|k| api::is_ops_key(&service, &k)),
-                _ => false,
-            };
-            if operational {
-                authorize_admin(user.role)?;
-            }
-            let started = std::time::Instant::now();
-            let mut response = match path {
-                "/api/ingest/events" => {
-                    match crate::ingest::catalog::events(self.runtime, &service, query) {
-                        Ok(body) => Response::new(200, body)
-                            .header("content-type", "text/event-stream")
-                            .header("x-accel-buffering", "no")
-                            .private(),
-                        Err(_) => error(503, "Ingestion catalog is unavailable."),
+            if path == "/api/admin/system-checks"
+                && matches!(request.method.as_str(), "GET" | "POST")
+            {
+                match &user {
+                    Some(user) if user.role == Role::Admin => (),
+                    Some(_) => return Err(AuthError::Forbidden),
+                    None => {
+                        auth.check_setup_grant(setup_grant.ok_or(AuthError::Unauthorized)?, now)?
                     }
                 }
-                "/api/files" => api_json(api::files(self.runtime, &service, query, started)),
-                "/api/file" => {
-                    match api::file(self.runtime, &service, query, request.header("range")) {
-                        Ok(mut upstream) => {
-                            upstream.head_only = request.method == "HEAD";
-                            Response::streamed(upstream)
-                                .header("content-type", "application/vnd.apache.parquet")
-                                .header("cache-control", "private, max-age=31536000, immutable")
-                                .header("vary", "Cookie")
-                        }
-                        Err((status, detail)) => error(status, detail),
-                    }
-                }
-                _ => api_json(api::extents(self.runtime, &service, started)),
-            };
-            if response.status < 400 && !response.headers.contains_key("set-cookie") {
-                if let Some(cookie) = self.cdn_cookie_for(request, &service, user.role, now) {
-                    response = response.header("set-cookie", cookie);
-                }
+                return Ok(json_response(
+                    self.runtime.checks(front_rl).map_err(storage)?,
+                ));
             }
-            return Ok(response);
-        }
-        if request.method == "GET"
-            && matches!(
+            if matches!(
                 path,
-                "/api/sync-status" | "/api/cron-runs" | "/api/header-badge"
-            )
-        {
-            let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            // The header badge is the analyst-safe slice of sync-status, without cron or audit history.
-            if path != "/api/header-badge" {
-                authorize_admin(user.role)?;
+                "/api/services" | "/api/log-fields/catalog" | "/api/rum/versions"
+            ) && request.method == "GET"
+            {
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                let response = crate::admin::handle(self.runtime, &user.id, request);
+                if path == "/api/services" && user.role != Role::Admin {
+                    return Ok(redact_services(response));
+                }
+                return Ok(response);
             }
-            let fresh = if path == "/api/sync-status" {
+            if path == "/api/views" || path.starts_with("/api/views/") {
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                if !matches!(request.method.as_str(), "GET" | "POST" | "DELETE") {
+                    return Err(AuthError::NotFound);
+                }
+                if matches!(request.method.as_str(), "POST" | "DELETE") {
+                    authorize_admin(user.role)?;
+                }
+                let service = crate::admin::active_service(self.runtime).map_err(storage)?;
+                let Some(service) = service else {
+                    return Ok(error(409, "No active service is provisioned."));
+                };
+                return crate::views::handle(self.runtime, &service.service_id, user.role, request);
+            }
+            let admin_page = is_admin_page_path(path);
+            let scoring_api = path.starts_with("/api/services/") && path.contains("/scoring/");
+            if path.starts_with("/api/admin/")
+                || path.starts_with("/api/provision/")
+                || scoring_api
+                || admin_page
+            {
+                if admin_page && matches!(request.method.as_str(), "GET" | "HEAD") && user.is_none()
+                {
+                    let redirect = Response::redirect(if auth.setup_complete()? {
+                        "/sign-in"
+                    } else {
+                        "/setup"
+                    });
+                    return Ok(if had_session_cookie {
+                        clear_session_and_cdn_cookies(redirect)
+                    } else {
+                        redirect
+                    });
+                }
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                authorize_admin(user.role)?;
+                if admin_page && matches!(request.method.as_str(), "GET" | "HEAD") {
+                    return Ok(self.static_response(request).private());
+                }
+                return self.admin_route(&auth, user, request, path, ip, now);
+            }
+            if matches!(path, "/setup" | "/setup.html" | "/setup.txt")
+                && matches!(request.method.as_str(), "GET" | "HEAD")
+                && auth.setup_complete()?
+            {
+                return Ok(Response::redirect("/admin"));
+            }
+            if request.method == "GET" && path.starts_with("/api/logs/") && path.ends_with("/live")
+            {
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                authorize_admin(user.role)?;
+                let kind = path
+                    .strip_prefix("/api/logs/")
+                    .and_then(|rest| rest.strip_suffix("/live"))
+                    .and_then(crate::telemetry::LogKind::parse);
+                let Some(kind) = kind else {
+                    return Ok(error(404, "Unknown log kind."));
+                };
+                let Some(service) = crate::admin::active_service(self.runtime).map_err(storage)?
+                else {
+                    return Ok(error(409, "No active service is provisioned."));
+                };
                 let query = request.path.split_once('?').map_or("", |(_, query)| query);
-                url::form_urlencoded::parse(query.as_bytes())
-                    .find(|(key, _)| key == "fresh")
-                    .map(|(_, value)| value.parse::<bool>().map_err(|_| AuthError::InvalidInput))
-                    .transpose()?
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-            let name = path.trim_start_matches("/api/");
-            let sid = crate::admin::installed_service_id(self.runtime);
-            let cache_key = sid
-                .as_deref()
-                .map(|sid| crate::admin::status_cache_key(name, sid));
-            if !fresh {
-                if let Some(key) = &cache_key {
-                    if let Ok(Some((body, _))) = self.runtime.core_cache_lookup(key) {
-                        return Ok(Response::new(200, body)
-                            .header("content-type", "application/json")
-                            .private());
+                let param = |name: &str| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.into_owned())
+                };
+                let page = crate::telemetry::read_live(
+                    self.runtime,
+                    &service.service_id,
+                    kind,
+                    param("since").and_then(|v| v.parse().ok()),
+                    param("limit").and_then(|v| v.parse().ok()),
+                    param("cursor").as_deref(),
+                );
+                return Ok(match page {
+                    Ok(page) => json_response(json!({
+                        "rows": page.rows,
+                        "next_cursor": page.next_cursor,
+                        "truncated": page.truncated,
+                    })),
+                    Err(code) if code == "live_source_changed" => {
+                        error(409, "Live log source changed.")
+                    }
+                    Err(_) => error(503, "Live log read failed."),
+                });
+            }
+            if matches!(
+                path,
+                "/api/log-extents" | "/api/files" | "/api/file" | "/api/ingest/events"
+            ) && (request.method == "GET" || request.method == "HEAD" && path == "/api/file")
+            {
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                if path == "/api/file" && user.role == Role::AnalystNoPii {
+                    return Err(AuthError::Forbidden);
+                }
+                let service = crate::admin::active_service(self.runtime).map_err(storage)?;
+                let Some(service) = service else {
+                    return Ok(if path == "/api/log-extents" {
+                        json_response(
+                            json!({"configured":false,"earliest":null,"latest":null,"earliest_log_at":null,"latest_log_at":null}),
+                        )
+                    } else {
+                        error(409, "No active service is provisioned.")
+                    });
+                };
+                let query = request.path.split_once('?').map_or("", |(_, query)| query);
+                let wanted = |name: &str| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.into_owned())
+                };
+                use crate::ingest::api;
+                let operational = match path {
+                    "/api/files" => wanted("dataset").is_some_and(|d| d.starts_with("ops")),
+                    "/api/file" => wanted("key").is_some_and(|k| api::is_ops_key(&service, &k)),
+                    _ => false,
+                };
+                if operational {
+                    authorize_admin(user.role)?;
+                }
+                let started = std::time::Instant::now();
+                let mut response = match path {
+                    "/api/ingest/events" => {
+                        match crate::ingest::catalog::events(self.runtime, &service, query) {
+                            Ok(body) => Response::new(200, body)
+                                .header("content-type", "text/event-stream")
+                                .header("x-accel-buffering", "no")
+                                .private(),
+                            Err(_) => error(503, "Ingestion catalog is unavailable."),
+                        }
+                    }
+                    "/api/files" => api_json(api::files(self.runtime, &service, query, started)),
+                    "/api/file" => {
+                        match api::file(self.runtime, &service, query, request.header("range")) {
+                            Ok(mut upstream) => {
+                                upstream.head_only = request.method == "HEAD";
+                                Response::streamed(upstream)
+                                    .header("content-type", "application/vnd.apache.parquet")
+                                    .header("cache-control", "private, max-age=31536000, immutable")
+                                    .header("vary", "Cookie")
+                            }
+                            Err((status, detail)) => error(status, detail),
+                        }
+                    }
+                    _ => api_json(api::extents(self.runtime, &service, started)),
+                };
+                if response.status < 400 && response.cookies().is_empty() {
+                    for cookie in
+                        self.cdn_cookies_for(request, &service, user.role, auth_epoch, now)
+                    {
+                        response = response.cookie(cookie);
                     }
                 }
+                return Ok(response);
             }
-            let payload = match path {
-                "/api/sync-status" => self.sync_status(),
-                "/api/header-badge" => {
-                    let status = self.sync_status();
-                    json!({
-                        "configured": status["configured"],
-                        "request": status["request"],
-                        "rum": status["rum"],
-                    })
+            if request.method == "GET"
+                && matches!(
+                    path,
+                    "/api/sync-status" | "/api/cron-runs" | "/api/header-badge"
+                )
+            {
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                // The header badge is the analyst-safe slice of sync-status, without cron or audit history.
+                if path != "/api/header-badge" {
+                    authorize_admin(user.role)?;
                 }
-                _ => self.cron_runs(),
-            };
-            if let (Some(key), Some(sid)) = (&cache_key, &sid) {
-                let body = payload.to_string().into_bytes();
-                let surrogate = crate::admin::status_surrogate(sid);
-                let _ = self.runtime.core_cache_replace(
-                    key,
-                    &[surrogate.as_str()],
-                    crate::admin::STATUS_CACHE_TTL,
-                    &|_| (body.clone(), Vec::new()),
-                );
+                let fresh = if path == "/api/sync-status" {
+                    let query = request.path.split_once('?').map_or("", |(_, query)| query);
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .find(|(key, _)| key == "fresh")
+                        .map(|(_, value)| {
+                            value.parse::<bool>().map_err(|_| AuthError::InvalidInput)
+                        })
+                        .transpose()?
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let name = path.trim_start_matches("/api/");
+                let sid = crate::admin::installed_service_id(self.runtime);
+                let cache_key = sid
+                    .as_deref()
+                    .map(|sid| crate::admin::status_cache_key(name, sid));
+                if !fresh {
+                    if let Some(key) = &cache_key {
+                        if let Ok(Some((body, _))) = self.runtime.core_cache_lookup(key) {
+                            return Ok(Response::new(200, body)
+                                .header("content-type", "application/json")
+                                .private());
+                        }
+                    }
+                }
+                let payload = match path {
+                    "/api/sync-status" => self.sync_status(),
+                    "/api/header-badge" => {
+                        let status = self.sync_status();
+                        json!({
+                            "configured": status["configured"],
+                            "request": status["request"],
+                            "rum": status["rum"],
+                        })
+                    }
+                    _ => self.cron_runs(),
+                };
+                if let (Some(key), Some(sid)) = (&cache_key, &sid) {
+                    let body = payload.to_string().into_bytes();
+                    let surrogate = crate::admin::status_surrogate(sid);
+                    let _ = self.runtime.core_cache_replace(
+                        key,
+                        &[surrogate.as_str()],
+                        crate::admin::STATUS_CACHE_TTL,
+                        &|_| (body.clone(), Vec::new()),
+                    );
+                }
+                return Ok(json_response(payload));
             }
-            return Ok(json_response(payload));
-        }
-        if path == "/api/cron-runs/trigger" && request.method == "POST" {
-            let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
-            authorize_admin(user.role)?;
-            let _: Empty = parse(request)?;
-            let result = match crate::admin::record_tick(self.runtime, "manual", &user.id) {
-                Ok(val) => val,
-                Err(reason) if reason == "worker_tick_forbidden" => {
-                    return Err(AuthError::Forbidden)
-                }
-                Err(reason) if reason == "cron_busy" => {
-                    return Ok(error(
-                        409,
-                        "A scheduled cron run is in progress. Try again in a minute.",
-                    ))
-                }
-                Err(reason) if reason == "service_not_configured" => {
-                    return Ok(error(
-                        409,
-                        "No active service is provisioned. Provision a service in Admin before triggering a cron run.",
-                    ))
-                }
-                Err(reason) => return Err(storage(reason)),
-            };
-            return Ok(json_response(result));
-        }
-        if path.starts_with("/api/") {
-            if user.is_none() {
-                return Err(AuthError::Unauthorized);
+            if path == "/api/cron-runs/trigger" && request.method == "POST" {
+                let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
+                authorize_admin(user.role)?;
+                let _: Empty = parse(request)?;
+                let result = match crate::admin::record_tick(self.runtime, "manual", &user.id) {
+                    Ok(val) => val,
+                    Err(reason) if reason == "worker_tick_forbidden" => {
+                        return Err(AuthError::Forbidden)
+                    }
+                    Err(reason) if reason == "cron_busy" => {
+                        return Ok(error(
+                            409,
+                            "A scheduled cron run is in progress. Try again in a minute.",
+                        ))
+                    }
+                    Err(reason) if reason == "service_not_configured" => {
+                        return Ok(error(
+                            409,
+                            "No active service is provisioned. Provision a service in Admin before triggering a cron run.",
+                        ))
+                    }
+                    Err(reason) => return Err(storage(reason)),
+                };
+                return Ok(json_response(result));
             }
-            return Ok(error(404, "Not found"));
+            if path.starts_with("/api/") {
+                if user.is_none() {
+                    return Err(AuthError::Unauthorized);
+                }
+                return Ok(error(404, "Not found"));
+            }
+            if request.method != "GET" && request.method != "HEAD" {
+                return Ok(error(405, "Method not allowed").header("allow", "GET, HEAD"));
+            }
+            let response = self.static_response(request);
+            Ok(if setup_page || path.starts_with("/auth/") {
+                response.private()
+            } else {
+                response
+            })
+        })();
+        match result {
+            Err(AuthError::Unauthorized) if had_session_cookie || had_checks_setup_cookie => {
+                if !front_rl {
+                    let endpoint = if had_checks_setup_cookie && !had_session_cookie {
+                        "system_checks"
+                    } else {
+                        "session"
+                    };
+                    auth.record_failure(ip, endpoint, "authentication_failure", now)?;
+                }
+                let mut response = auth_error(AuthError::Unauthorized, &request.path)
+                    .header("x-flp-auth-fail", "1");
+                if had_session_cookie {
+                    response = clear_session_and_cdn_cookies(response);
+                }
+                if had_checks_setup_cookie {
+                    response = response.cookie(auth::clear_setup_cookie());
+                }
+                Ok(response)
+            }
+            other => other,
         }
-        if request.method != "GET" && request.method != "HEAD" {
-            return Ok(error(405, "Method not allowed").header("allow", "GET, HEAD"));
-        }
-        let response = self.static_response(request);
-        Ok(if setup_page || path.starts_with("/auth/") {
-            response.private()
-        } else {
-            response
-        })
     }
 
-    fn cdn_cookie_for(
+    fn cdn_cookies_for(
         &self,
         request: &Request,
         service: &crate::admin::Service,
         role: Role,
+        auth_epoch: u64,
         now: u64,
-    ) -> Option<String> {
-        let session = request.cookie("flp_session")?;
-        let cdn_key = self
+    ) -> Vec<String> {
+        let Some(session) = request.cookie("flp_session") else {
+            return Vec::new();
+        };
+        let Some(cdn_key) = self
             .runtime
             .secret("cdn_key")
             .ok()
             .flatten()
-            .filter(|k| !k.is_empty())?;
+            .filter(|k| !k.is_empty())
+        else {
+            return Vec::new();
+        };
         let scope = crate::ingest::scope(service);
-        if let Some(existing) = request.cookie("flp_cdn") {
+        let existing = request
+            .cookie(auth::HOST_CDN_COOKIE_NAME)
+            .filter(|v| !v.is_empty())
+            .or_else(|| request.cookie("flp_cdn").filter(|v| !v.is_empty()));
+        if let Some(existing) = existing {
             if auth::cdn_cookie_valid(
                 &existing,
                 &service.service_id,
                 &scope,
                 role,
                 &session,
+                auth_epoch,
                 now,
                 &cdn_key,
             ) {
-                return None;
+                return Vec::new();
             }
         }
-        auth::issue_cdn_cookie(&service.service_id, &scope, role, &session, now, &cdn_key)
+        let is_https = self
+            .runtime
+            .config("public_base_url")
+            .ok()
+            .flatten()
+            .is_some_and(|u| u.starts_with("https://"));
+        match auth::issue_cdn_cookies(
+            &service.service_id,
+            &scope,
+            role,
+            &session,
+            auth_epoch,
+            now,
+            &cdn_key,
+        ) {
+            Some((flp_cdn, host_flp_cdn)) if is_https => vec![flp_cdn, host_flp_cdn],
+            Some((flp_cdn, _)) => vec![flp_cdn],
+            None => Vec::new(),
+        }
+    }
+
+    fn sync_front_auth_epoch(&self, auth: &AuthService<'_, S>) {
+        let Ok(epoch) = auth.auth_epoch() else {
+            return;
+        };
+        let (Ok(Some(front_sid)), Ok(Some(dict_id)), Ok(Some(token))) = (
+            self.runtime.config("front_service_id"),
+            self.runtime.config("front_auth_dictionary_id"),
+            self.runtime.secret("fastly_token"),
+        ) else {
+            return;
+        };
+        if front_sid.is_empty() || dict_id.is_empty() || token.is_empty() {
+            return;
+        }
+        let path = format!("/service/{front_sid}/dictionary/{dict_id}/item/auth_epoch");
+        let epoch_str = epoch.to_string();
+        for _ in 0..2 {
+            let pushed = self.runtime.admin_api(crate::admin::ApiRequest {
+                method: "PUT",
+                path: &path,
+                query: "",
+                token: &token,
+                body: Some(json!({
+                    "item_key": "auth_epoch",
+                    "item_value": &epoch_str,
+                })),
+                timeout: std::time::Duration::from_secs(5),
+            });
+            if matches!(pushed, Ok(resp) if (200..500).contains(&resp.status)) {
+                break;
+            }
+        }
     }
 
     fn sync_status(&self) -> Value {
@@ -1207,12 +1337,31 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         now: u64,
     ) -> Option<Result<Response, AuthError>> {
         Some((|| match (request.method.as_str(), path) {
-            ("GET", "/api/setup") => Ok(json_response(json!({
-                "complete":auth.setup_complete()?,
-                "accepted":grant.is_some_and(|token| auth.check_setup_grant(token, now).is_ok()),
-                "missing":[],
-            }))),
+            ("GET", "/api/setup") => {
+                let mut stale_setup = false;
+                let accepted = match grant {
+                    Some(token) => match auth.check_setup_grant(token, now) {
+                        Ok(()) => true,
+                        Err(AuthError::Unauthorized) => {
+                            stale_setup = true;
+                            false
+                        }
+                        Err(other) => return Err(other),
+                    },
+                    None => false,
+                };
+                let mut response = json_response(json!({
+                    "complete":auth.setup_complete()?,
+                    "accepted":accepted,
+                    "missing":[],
+                }));
+                if stale_setup {
+                    response = response.cookie(auth::clear_setup_cookie());
+                }
+                Ok(response)
+            }
             ("GET", "/api/auth/session") => {
+                let mut stale_session = false;
                 let (user, debug) = match request.cookie("flp_session") {
                     Some(cookie) => match auth.authenticate_with_settings(&cookie, now) {
                         Ok((user, settings)) => {
@@ -1234,12 +1383,19 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                                 )),
                             )
                         }
-                        Err(AuthError::Unauthorized) => (None, None),
+                        Err(AuthError::Unauthorized) => {
+                            stale_session = true;
+                            (None, None)
+                        }
                         Err(other) => return Err(other),
                     },
                     None => (None, None),
                 };
-                Ok(json_response(self.session_body_with_debug(user, debug)))
+                let mut response = json_response(self.session_body_with_debug(user, debug));
+                if stale_session {
+                    response = clear_session_and_cdn_cookies(response);
+                }
+                Ok(response)
             }
             ("POST", "/api/setup/accept") => {
                 let body: SetupAccept = parse(request)?;
@@ -1249,8 +1405,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     now,
                     self.runtime.random().map_err(storage)?,
                 )?;
-                Ok(json_response(json!({"accepted":true}))
-                    .header("set-cookie", auth::setup_cookie(&token)))
+                Ok(json_response(json!({"accepted":true})).cookie(auth::setup_cookie(&token)))
             }
             ("POST", "/api/auth/register/options") => {
                 let body: Register = parse(request)?;
@@ -1285,7 +1440,12 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             }
             ("POST", "/api/auth/logout") => {
                 let _: Empty = parse(request)?;
-                Ok(json_response(json!({"ok":true})).header("set-cookie", auth::logout_cookie()))
+                if let Some(cookie) = request.cookie("flp_session") {
+                    auth.logout(&cookie, ip, now)?;
+                }
+                Ok(clear_session_and_cdn_cookies(json_response(
+                    json!({"ok":true}),
+                )))
             }
             _ => Err(AuthError::NotFound),
         })())
@@ -1453,6 +1613,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     ("PATCH", ["api", "admin", "users", target]) => {
                         let body: RoleChange = parse(request)?;
                         auth.set_role(&actor.id, target, body.role, ip, now)?;
+                        self.sync_front_auth_epoch(auth);
                         let user = auth
                             .users(&actor.id)?
                             .into_iter()
@@ -1463,6 +1624,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     ("POST", ["api", "admin", "users", target, "revoke"]) => {
                         let _: Empty = parse(request)?;
                         auth.revoke_user(&actor.id, target, ip, now)?;
+                        self.sync_front_auth_epoch(auth);
                         Ok(json_response(json!({"ok":true})))
                     }
                     (
@@ -1471,6 +1633,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     ) => {
                         let _: Empty = parse(request)?;
                         auth.revoke_credential(&actor.id, target, credential, ip, now)?;
+                        self.sync_front_auth_epoch(auth);
                         Ok(json_response(json!({"ok":true})))
                     }
                     ("POST", ["api", "admin", "invites", target, "revoke"]) => {
@@ -1649,6 +1812,9 @@ pub fn resolve_upstream<R: Runtime>(runtime: &R, mut response: Response) -> Resp
     response.status = fetched.status;
     response.body = fetched.body;
     response.headers.extend(fetched.headers);
+    for cookie in fetched.set_cookies {
+        response = response.cookie(cookie);
+    }
     response
 }
 
@@ -1716,22 +1882,19 @@ pub const ANALYTICS_SITE_ROUTES: &[&str] = &[
 ];
 
 pub fn is_admin_page_path(path: &str) -> bool {
-    let base = path
+    let clean = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    let base = clean
         .strip_suffix(".html")
-        .or_else(|| path.strip_suffix(".txt"))
-        .unwrap_or(path);
+        .or_else(|| clean.strip_suffix(".txt"))
+        .unwrap_or(clean);
     matches!(
         base,
-        "/admin"
-            | "/admin/share"
-            | "/admin/usage-log"
-            | "/admin/rum"
-            | "/admin/session-scoring"
-            | "/provision"
-            | "/log-fields"
-            | "/services"
-            | "/logs"
-    )
+        "/admin" | "/logs" | "/provision" | "/log-fields" | "/services"
+    ) || base.starts_with("/admin/")
+        || base.starts_with("/logs/")
+        || base.starts_with("/provision/")
+        || base.starts_with("/log-fields/")
+        || base.starts_with("/services/")
 }
 
 fn is_setup_page(path: &str) -> bool {
@@ -1762,6 +1925,19 @@ fn legacy_auth_redirect(request_path: &str, path: &str) -> Option<String> {
     }
 }
 
+fn has_nonempty_invite_token(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("invite_token")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|_| ())
+        })
+        .is_some()
+}
+
 fn is_signin_failure(error: &AuthError) -> bool {
     matches!(
         error,
@@ -1770,7 +1946,6 @@ fn is_signin_failure(error: &AuthError) -> bool {
             | AuthError::InvalidCredential
             | AuthError::CounterRegression
             | AuthError::ChallengeExpired
-            | AuthError::InvalidInput
     )
 }
 
@@ -1809,9 +1984,16 @@ fn invite_json(invite: &Invite, last_login_at: Option<u64>) -> Result<Value, Aut
     )
 }
 
+fn clear_session_and_cdn_cookies(response: Response) -> Response {
+    response
+        .cookie(auth::logout_cookie())
+        .cookie(auth::clear_cdn_cookie())
+        .cookie(auth::clear_host_cdn_cookie())
+}
+
 fn signed_in_response(signed: SignedIn) -> Response {
     json_response(json!({"user":user_json(&signed.user)}))
-        .header("set-cookie", auth::cookie_header(&signed.cookie))
+        .cookie(auth::cookie_header(&signed.cookie))
 }
 
 fn parse<T: serde::de::DeserializeOwned>(request: &Request) -> Result<T, AuthError> {
@@ -3160,5 +3342,214 @@ mod tests {
                 "expected {key} to remain uncached"
             );
         }
+    }
+
+    #[test]
+    fn forged_or_expired_session_cookie_emits_auth_fail_clears_cookies_and_rate_limits_ipv6_subnet()
+    {
+        let platform = platform(true);
+        let state = MemoryStore::default();
+        let shell = Shell::new(&platform, &state, &[]);
+
+        let cookieless = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/files".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("x-flp-front-rl".into(), "0".into()),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(cookieless.status, 401);
+        assert!(!cookieless.headers.contains_key("x-flp-auth-fail"));
+        assert!(cookieless.cookies().is_empty());
+
+        let stale_session = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/auth/session".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                (
+                    "cookie".into(),
+                    "flp_session=expired; flp_cdn=stale; __Host-flp_cdn=stale".into(),
+                ),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(stale_session.status, 200);
+        assert!(!stale_session.headers.contains_key("x-flp-auth-fail"));
+        let session_body: Value = serde_json::from_slice(&stale_session.body).unwrap();
+        assert_eq!(session_body["user"], Value::Null);
+        assert_eq!(stale_session.cookies().len(), 3);
+        assert!(stale_session.cookies()[0].starts_with("flp_session=;"));
+        assert!(stale_session.cookies()[1].starts_with("flp_cdn=;"));
+        assert!(stale_session.cookies()[2].starts_with("__Host-flp_cdn=;"));
+
+        for i in 0..10 {
+            let ip = if i < 5 {
+                "2001:db8:abcd:1234::1"
+            } else {
+                "2001:0db8:abcd:1234:ffff::2"
+            };
+            let forged = shell.handle(&Request {
+                method: "GET".into(),
+                path: "/api/files".into(),
+                headers: BTreeMap::from([
+                    ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                    ("fastly-client-ip".into(), ip.into()),
+                    ("x-flp-front-rl".into(), "0".into()),
+                    ("cookie".into(), "flp_session=forged".into()),
+                ]),
+                ..Default::default()
+            });
+            assert_eq!(forged.status, 401, "attempt {i}");
+            assert_eq!(
+                forged.headers.get("x-flp-auth-fail").map(String::as_str),
+                Some("1")
+            );
+            assert_eq!(forged.cookies().len(), 3);
+        }
+
+        let blocked_api = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/files".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "2001:db8:abcd:1234::99".into()),
+                ("x-flp-front-rl".into(), "0".into()),
+                ("cookie".into(), "flp_session=forged".into()),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(blocked_api.status, 429);
+        assert!(blocked_api.headers.contains_key("retry-after"));
+
+        let blocked_signin = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/sign-in".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "2001:db8:abcd:1234::99".into()),
+                ("x-flp-front-rl".into(), "0".into()),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(blocked_signin.status, 429);
+
+        let neighbor_subnet = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/files".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "2001:db8:abcd:1235::1".into()),
+                ("x-flp-front-rl".into(), "0".into()),
+                ("cookie".into(), "flp_session=forged".into()),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(neighbor_subnet.status, 401);
+    }
+
+    #[test]
+    fn valid_setup_cookie_is_preserved_on_unrelated_401_and_invalid_setup_cookie_is_cleared_on_checks_and_register(
+    ) {
+        let mut platform = platform(true);
+        platform.secrets.insert(
+            "admin_setup_hash".into(),
+            json!({"sha256": crate::auth::hash("setup-test"), "expires_at": 1000}).to_string(),
+        );
+        let state = MemoryStore::default();
+        let shell = Shell::new(&platform, &state, &[]);
+
+        let accepted = shell.handle(&Request {
+            method: "POST".into(),
+            path: "/api/setup/accept".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("origin".into(), "https://example.invalid".into()),
+                ("content-type".into(), "application/json".into()),
+                ("x-flp-front-rl".into(), "1".into()),
+            ]),
+            body: serde_json::to_vec(&json!({"code": "setup-test"})).unwrap(),
+        });
+        assert_eq!(accepted.status, 200);
+        let setup_cookie_kv = accepted.cookies()[0].split(';').next().unwrap().to_owned();
+
+        let unrelated_401 = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/files".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("x-flp-front-rl".into(), "1".into()),
+                ("cookie".into(), setup_cookie_kv),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(unrelated_401.status, 401);
+        assert!(!unrelated_401.headers.contains_key("x-flp-auth-fail"));
+        assert!(unrelated_401.cookies().is_empty());
+
+        let stale_get_setup = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/setup".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("x-flp-front-rl".into(), "1".into()),
+                ("cookie".into(), "flp_setup=forged".into()),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(stale_get_setup.status, 200);
+        assert!(!stale_get_setup.headers.contains_key("x-flp-auth-fail"));
+        assert!(stale_get_setup.cookies()[0].starts_with("flp_setup=;"));
+
+        let forged_checks = shell.handle(&Request {
+            method: "GET".into(),
+            path: "/api/admin/system-checks".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("x-flp-front-rl".into(), "1".into()),
+                ("cookie".into(), "flp_setup=forged".into()),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(forged_checks.status, 401);
+        assert_eq!(
+            forged_checks
+                .headers
+                .get("x-flp-auth-fail")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(forged_checks.cookies()[0].starts_with("flp_setup=;"));
+
+        let forged_register = shell.handle(&Request {
+            method: "POST".into(),
+            path: "/api/auth/register/options".into(),
+            headers: BTreeMap::from([
+                ("x-flp-front-key".into(), "front-test-key-never-real".into()),
+                ("fastly-client-ip".into(), "192.0.2.1".into()),
+                ("origin".into(), "https://example.invalid".into()),
+                ("content-type".into(), "application/json".into()),
+                ("x-flp-front-rl".into(), "1".into()),
+                ("cookie".into(), "flp_setup=forged".into()),
+            ]),
+            body: serde_json::to_vec(&json!({"display_name": "Admin"})).unwrap(),
+        });
+        assert_eq!(forged_register.status, 401);
+        assert_eq!(
+            forged_register
+                .headers
+                .get("x-flp-auth-fail")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(forged_register.cookies()[0].starts_with("flp_setup=;"));
     }
 }

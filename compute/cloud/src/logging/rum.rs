@@ -134,67 +134,31 @@ pub fn validate_custom_condition(condition: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Ok(());
     }
-    if trimmed.len() > 2048 {
-        return Err("custom_condition exceeds maximum length of 2048 characters".into());
-    }
-    if trimmed.contains(['\n', '\r', ';', '{', '}']) {
-        return Err("custom_condition contains forbidden characters".into());
-    }
-    if trimmed.contains('\'') {
-        return Err("VCL string literals use double quotes, not single quotes.".into());
-    }
+    super::validate_vcl_condition(trimmed)?;
     // Check for req.url or req.url.path predicate
     if contains_req_url_predicate(trimmed) {
         return Err(
             "A condition on req.url / req.url.path cannot work here: it is AND-ed onto req.url.path == \"/rum-beacon\", so the path is always \"/rum-beacon\". Such a condition is either a no-op or silently disables all RUM logging. To exclude beacons by page URL, filter in the tracker — the page URL is in the beacon's POST body, which VCL cannot read.".into()
         );
     }
-    let mut depth: i32 = 0;
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for ch in trimmed.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            in_quotes = !in_quotes;
-            continue;
-        }
-        if !in_quotes {
-            if ch == '(' {
-                depth += 1;
-            } else if ch == ')' {
-                depth -= 1;
-                if depth < 0 {
-                    return Err("custom_condition has unbalanced parentheses".into());
-                }
-            }
-        }
-    }
-    if in_quotes || depth != 0 {
-        return Err("custom_condition has unbalanced quotes or parentheses".into());
-    }
     Ok(())
 }
 
 fn contains_req_url_predicate(s: &str) -> bool {
-    let bytes = s.as_bytes();
+    let unquoted = super::scan_vcl_delimiters(s).unwrap_or_else(|_| s.to_owned());
+    let lower = super::normalize_vcl_dots(&unquoted.to_ascii_lowercase());
+    let bytes = lower.as_bytes();
     let needle = b"req.url";
     let mut idx = 0;
     while idx + needle.len() <= bytes.len() {
-        if let Some(pos) = s[idx..].find("req.url") {
+        if let Some(pos) = lower[idx..].find("req.url") {
             let start = idx + pos;
             let before_ok = start == 0
                 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
             let end = start + needle.len();
-            let rest = &s[end..];
-            let after_end = if let Some(stripped) = rest.strip_prefix(".path") {
-                end + 5 + (rest.len() - stripped.len() - 5)
+            let rest = &lower[end..];
+            let after_end = if rest.starts_with(".path") {
+                end + 5
             } else {
                 end
             };
@@ -364,12 +328,16 @@ pub fn asset_fetch_vcl(shield_pop: &str, faro_version: Option<&str>) -> Result<S
 }
 
 pub fn sigv4_sign_vcl(faro_version: Option<&str>) -> Result<String, String> {
-    let faro_rewrite = match faro_version.filter(|v| !v.is_empty()) {
-        None => String::new(),
+    let (path_condition, faro_rewrite) = match faro_version.filter(|v| !v.is_empty()) {
+        None => ("req.url.path == \"/js/rum.js\"".to_string(), String::new()),
         Some(ver) => {
             validate_faro_version(ver)?;
-            format!(
-                "\n\n    # If the user-facing path is /js/faro-sdk.js, point to the pinned Faro Web SDK object in FOS\n    if (bereq.url.path == \"/js/faro-sdk.js\") {{\n        set bereq.url = \"/rum/faro-web-sdk-v{ver}.iife.js\";\n    }}"
+            (
+                "(req.url.path == \"/js/rum.js\" || req.url.path == \"/js/faro-sdk.js\")"
+                    .to_string(),
+                format!(
+                    "\n\n    # If the user-facing path is /js/faro-sdk.js, point to the pinned Faro Web SDK object in FOS\n    if (bereq.url.path == \"/js/faro-sdk.js\") {{\n        set bereq.url = \"/rum/faro-web-sdk-v{ver}.iife.js\";\n    }}"
+                ),
             )
         }
     };
@@ -380,7 +348,12 @@ pub fn sigv4_sign_vcl(faro_version: Option<&str>) -> Result<String, String> {
     let default_faro_block = format!(
         "\n\n    # If the user-facing path is /js/faro-sdk.js, point to the pinned Faro Web SDK object in FOS\n    if (bereq.url.path == \"/js/faro-sdk.js\") {{\n        set bereq.url = \"/rum/faro-web-sdk-v{DEFAULT_FARO_VERSION}.iife.js\";\n    }}"
     );
-    Ok(base_tpl.replace(&default_faro_block, &faro_rewrite))
+    Ok(base_tpl
+        .replace(
+            "(req.url.path == \"/js/rum.js\" || req.url.path == \"/js/faro-sdk.js\")",
+            &path_condition,
+        )
+        .replace(&default_faro_block, &faro_rewrite))
 }
 
 pub fn fetch_caching_vcl(faro_version: Option<&str>) -> Result<String, String> {
@@ -418,11 +391,35 @@ pub fn error_beacon_vcl() -> &'static str {
         .expect("rum_error template must exist in templates.json")
 }
 
+pub fn validate_service_id(service_id: &str) -> Result<(), String> {
+    if service_id.is_empty()
+        || service_id.len() > 64
+        || !service_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err("invalid RUM service_id".into());
+    }
+    Ok(())
+}
+
+fn js_string_literal(value: &str) -> String {
+    serde_json::to_string(value)
+        .expect("string serialization cannot fail")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 /// The browser tracker. Faro collects; this wrapper drops Faro's own sends and batches every
 /// metric and error of a pageview into one `POST /rum-beacon` per flush (debounced, or on
 /// hide/pagehide via `sendBeacon`), split only when a URL would exceed `MAX_URL_CHARS`.
 /// Sampling is decided once per browser session.
 pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
+    let service_id_js = js_string_literal(service_id);
+    let beacon_endpoint_js = js_string_literal("/rum-beacon");
     let vitals = config.capture_vitals;
     let performance = config.capture_performance;
     let errors = config.capture_errors;
@@ -430,10 +427,10 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
     let sample_rate = config.sample_rate;
     let error_sample_rate = config.error_sample_rate;
     format!(
-        r#"/* Faro Web SDK wrapper for service {service_id} */
+        r#"/* Faro Web SDK wrapper */
 (function() {{
-  var SERVICE_ID = '{service_id}';
-  var BEACON_ENDPOINT = '/rum-beacon';
+  var SERVICE_ID = {service_id_js};
+  var BEACON_ENDPOINT = {beacon_endpoint_js};
   var CAPTURE_VITALS = {vitals};
   var CAPTURE_PERFORMANCE = {performance};
   var CAPTURE_ERRORS = {errors};
@@ -534,7 +531,7 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
         cid = cookieMatch[1];
       }}
     }}
-    var head = BEACON_ENDPOINT + '?service_id=' + SERVICE_ID + (cid ? '&cid=' + enc(cid) : '') +
+    var head = BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID) + (cid ? '&cid=' + enc(cid) : '') +
       '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE;
     var urls = [];
     var url = head;
@@ -678,7 +675,7 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
         name: 'rum-app',
         version: '1.0.0'
       }},
-      url: BEACON_ENDPOINT + '?service_id=' + SERVICE_ID,
+      url: BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID),
       instrumentations: instrumentations,
       samplingRate: 1,
       batching: {{

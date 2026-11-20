@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 import backend.routers.session_scoring as _admin
@@ -1251,7 +1251,13 @@ def test_scoring_time_window_and_endpoint_clamping(monkeypatch):
             or {sids[0]: [{"ts": "t", "url": "/secret", "status": 200, "ip": "1.2.3.4", "ua": "Mozilla"}]}
         ),
     )
-    _admin.scoring_session_events(request=_fake_request(session), service_id="svc", sid="abc", since_days=90)
+    with pytest.raises(HTTPException) as exc_info:
+        _admin.scoring_session_events(request=_fake_request(session), service_id="svc", sid="abc", since_days=90)
+    assert exc_info.value.status_code == 403 and exc_info.value.detail["error"] == "pii_policy_violation"
+    unmasked_session = SimpleNamespace(
+        query_window_hours=1, query_start_time=None, query_end_time=None, pii_policy={"mask_ips": False}
+    )
+    _admin.scoring_session_events(request=_fake_request(unmasked_session), service_id="svc", sid="abc", since_days=90)
     assert captured["ts_predicate"] is not None and "parseDateTime64BestEffort" in captured["ts_predicate"]
     _admin.scoring_session_events(request=_fake_request(None), service_id="svc", sid="abc", since_days=90)
     assert captured["ts_predicate"] is None

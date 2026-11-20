@@ -72,14 +72,16 @@ struct HistoryJob {
     error: Option<String>,
 }
 
-fn body_of(request: &Request) -> Result<Value, Outcome> {
+fn body_of(request: &Request) -> Result<Value, Box<Outcome>> {
     if request.body.is_empty() {
         return Ok(Value::Null);
     }
     if request.body.len() > 65_536 {
-        return Err(fail(413, "body_too_large"));
+        return Err(Box::new(fail(413, "body_too_large")));
     }
-    request.json().map_err(|_| fail(400, "invalid_input"))
+    request
+        .json()
+        .map_err(|_| Box::new(fail(400, "invalid_input")))
 }
 
 struct Installed {
@@ -89,13 +91,13 @@ struct Installed {
 }
 
 impl Installed {
-    fn load(runtime: &impl Runtime) -> Result<Self, Outcome> {
+    fn load(runtime: &impl Runtime) -> Result<Self, Box<Outcome>> {
         let service = load_installed_service(runtime)
-            .map_err(|e| fail(503, &e))?
+            .map_err(|e| Box::new(fail(503, &e)))?
             .1
-            .ok_or_else(|| fail(409, "service_not_configured"))?;
+            .ok_or_else(|| Box::new(fail(409, "service_not_configured")))?;
         let (access_key, secret_key) = fos_credentials(runtime, &service)
-            .ok_or_else(|| fail(503, "fos_credentials_unavailable"))?;
+            .ok_or_else(|| Box::new(fail(503, "fos_credentials_unavailable")))?;
         Ok(Self {
             service,
             access_key,
@@ -170,7 +172,7 @@ pub fn handle(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome
 fn patch_settings(runtime: &impl Runtime, request: &Request) -> Outcome {
     let patch = match body_of(request) {
         Ok(patch) => patch,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     match telemetry::api::patch_operational_settings(runtime, &patch) {
         Ok((settings, changed)) => {
@@ -220,7 +222,7 @@ fn flush_status(status: FlushStatus) -> &'static str {
 fn flush(runtime: &impl Runtime) -> Outcome {
     let installed = match Installed::load(runtime) {
         Ok(installed) => installed,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let service = &installed.service;
     let ops_prefix = format!("{}processed/ops/", scope(service));
@@ -259,7 +261,7 @@ fn flush(runtime: &impl Runtime) -> Outcome {
 fn clear_cache(runtime: &impl Runtime, request: &Request) -> Outcome {
     let body = match body_of(request) {
         Ok(body) => body,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let kind = match body["kind"].as_str() {
         Some("all") => None,
@@ -297,7 +299,7 @@ fn floor_hour(ts: i64) -> i64 {
 fn delete_history(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
     let body = match body_of(request) {
         Ok(body) => body,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let Some(kind) = body["kind"].as_str().and_then(LogKind::parse) else {
         return fail(400, "invalid_input");
@@ -314,7 +316,7 @@ fn delete_history(runtime: &impl Runtime, actor: &str, request: &Request) -> Out
     };
     let installed = match Installed::load(runtime) {
         Ok(installed) => installed,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let existing = match runtime.admin_get(JOB_KEY) {
         Ok(record) => record,
@@ -433,7 +435,7 @@ fn step_history<R: Runtime>(
 fn sweep(runtime: &impl Runtime) -> Outcome {
     let installed = match Installed::load(runtime) {
         Ok(installed) => installed,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     if reset::fencing(&installed.service) {
         return fail(409, "data_reset_in_progress");
@@ -712,28 +714,28 @@ fn logged_traffic(runtime: &impl Runtime) -> Outcome {
     }
 }
 
-fn opt_ts(body: &Value, key: &str) -> Result<Option<u64>, Outcome> {
+fn opt_ts(body: &Value, key: &str) -> Result<Option<u64>, Box<Outcome>> {
     match &body[key] {
         Value::Null => Ok(None),
         value => value
             .as_u64()
             .map(Some)
-            .ok_or_else(|| fail(400, "invalid_input")),
+            .ok_or_else(|| Box::new(fail(400, "invalid_input"))),
     }
 }
 
 fn backfill(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
     let body = match body_of(request) {
         Ok(body) => body,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let from_ts = match opt_ts(&body, "from_ts") {
         Ok(ts) => ts,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     let to_ts = match opt_ts(&body, "to_ts") {
         Ok(ts) => ts,
-        Err(outcome) => return outcome,
+        Err(outcome) => return *outcome,
     };
     if let (Some(from), Some(to)) = (from_ts, to_ts) {
         if from > to {

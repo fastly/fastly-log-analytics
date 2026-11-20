@@ -75,6 +75,8 @@ from backend.provision.session_scoring_orchestrator import (
 FALCO_INSTALLED = shutil.which("falco") is not None
 FALCO_REQUIRED = os.environ.get("FALCO_REQUIRED") == "1"
 
+pytestmark = pytest.mark.no_postgres
+
 if FALCO_REQUIRED and not FALCO_INSTALLED:
     raise RuntimeError(
         "FALCO_REQUIRED=1 but the falco binary is not on PATH. Install falco or unset FALCO_REQUIRED to allow skipping."
@@ -828,6 +830,7 @@ def test_deploy_and_delete_remote_frontend_variants():
             override_host="my-override.example.com",
         )
     backend_payload = next(c[2] for c in calls_ssl if c[1] == "/service/service123/version/1/backend")
+    assert backend_payload["ssl_check_cert"] is True
     assert (
         backend_payload["override_host"]
         == backend_payload["ssl_sni_hostname"]
@@ -1051,3 +1054,813 @@ def test_recorded_front_clock_and_write_only_dictionary_configuration() -> None:
         "front.example",
     )
     assert clock[0]["expected_response"] == 200
+
+
+# ─── M2 Security Regressions (SEC-11 / SEC-12 / SEC-14 / SEC-15 + Falco) ─────
+
+
+def _run_raw_falco_test(main_vcl: str, test_vcl: str) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main_path = Path(tmpdir) / "main.vcl"
+        test_path = Path(tmpdir) / "suite.test.vcl"
+        main_path.write_text(main_vcl)
+        test_path.write_text(test_vcl)
+        return subprocess.run(
+            [FALCO_PATH or "falco", "test", str(main_path)],
+            cwd=tmpdir,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+
+def _run_raw_falco_lint(main_vcl: str) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main_path = Path(tmpdir) / "main.vcl"
+        main_path.write_text(main_vcl)
+        return subprocess.run(
+            [FALCO_PATH or "falco", "lint", str(main_path)],
+            cwd=tmpdir,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec11_x_fos_request_scrubbed_and_sigv4_scoped_to_fos_rum_assets() -> None:
+    from backend.core.fastly.client import (
+        RUM_DELIVER_SET_COOKIE_NAME,
+        RUM_RECV_NAME,
+        _generate_sigv4_sign_vcl,
+        generate_rum_vcl,
+    )
+
+    assert "X-FOS-Request" in fa._SCRUB_HEADERS
+    assert fa._SCRUB_HEADERS[-1] == "X-FOS-Request"
+
+    # Both logging+RUM and RUM-only declarative vcl_recv scrub X-FOS-Request at the edge first hop
+    for logging_on in (True, False):
+        state = FeatureState(
+            service_id="svc_sec11",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+            logging_enabled=logging_on,
+            rum_enabled=True,
+            faro_version="2.9.0",
+        )
+        recv_vcl = generate_consolidated_snippet(state, "vcl_recv")
+        assert recv_vcl.count("unset req.http.X-FOS-Request;") == 1
+        miss_vcl = generate_consolidated_snippet(state, "vcl_miss")
+        assert (
+            'req.http.X-FOS-Request == "1" && req.backend == F_fos_origin && !req.backend.is_shield '
+            '&& (req.url.path == "/js/rum.js" || req.url.path == "/js/faro-sdk.js")'
+        ) in miss_vcl
+
+    standalone_rum = generate_rum_vcl("svc_sec11")
+    assert "unset req.http.X-FOS-Request;" in standalone_rum[RUM_RECV_NAME]
+    assert (
+        'req.http.X-FOS-Request == "1" && req.backend == F_fos_origin && !req.backend.is_shield '
+        '&& req.url.path == "/js/rum.js"'
+    ) in _generate_sigv4_sign_vcl(None)
+    assert "; Path=/; SameSite=Lax; Secure" in standalone_rum[RUM_DELIVER_SET_COOKIE_NAME]
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec11_falco_simulation_blocks_spoofed_x_fos_request_and_signs_only_rum_assets() -> None:
+    state = FeatureState(
+        service_id="svc_sec11",
+        log_period=60,
+        sample_rate=100,
+        edge_only=False,
+        custom_condition="",
+        fos_prefix="raw",
+        fos_endpoint="us-east-1.object.fastlystorage.app",
+        logging_enabled=False,
+        rum_enabled=True,
+        faro_version="2.9.0",
+    )
+    recv_body = generate_consolidated_snippet(state, "vcl_recv")
+    miss_body = generate_consolidated_snippet(state, "vcl_miss")
+
+    main_vcl = f"""
+backend F_customer_origin {{ .host = "origin.example.com"; .port = "443"; }}
+backend F_fos_origin {{ .host = "us-east-1.object.fastlystorage.app"; .port = "443"; }}
+backend ssl_shield_iad_va_us {{ .host = "shield.fastly.net"; .port = "443"; }}
+table fos_credentials {{
+  "access_key": "AKIA_TEST_KEY",
+  "secret_key": "SECRET_TEST_KEY",
+  "bucket": "my-rum-bucket",
+  "region": "us-east-1",
+}}
+
+sub vcl_recv {{
+  set req.backend = F_customer_origin;
+{recv_body}
+  return(lookup);
+}}
+
+sub vcl_miss {{
+{miss_body}
+  return(fetch);
+}}
+"""
+    lint_res = _run_raw_falco_lint(main_vcl)
+    assert lint_res.returncode == 0, f"falco lint failed:\n{lint_res.stdout}\n{lint_res.stderr}"
+
+    test_vcl = """
+// @scope: recv
+sub test_spoofed_x_fos_request_scrubbed_on_customer_route {
+  set req.method = "GET";
+  set req.url = "/account/profile";
+  set req.http.X-FOS-Request = "1";
+  testing.call_subroutine("vcl_recv");
+  assert.is_notset(req.http.X-FOS-Request);
+  assert.equal(req.backend, F_customer_origin);
+}
+
+// @scope: miss
+sub test_customer_backend_never_receives_fos_sigv4_even_with_header {
+  set req.method = "GET";
+  set req.url = "/js/rum.js";
+  set bereq.url = "/js/rum.js";
+  set req.http.X-FOS-Request = "1";
+  set req.backend = F_customer_origin;
+  testing.call_subroutine("vcl_miss");
+  assert.is_notset(bereq.http.Authorization);
+  assert.is_notset(bereq.http.x-amz-content-sha256);
+}
+
+// @scope: miss
+sub test_non_rum_path_on_fos_origin_never_signed {
+  set req.method = "GET";
+  set req.url = "/raw/request/secret.parquet";
+  set bereq.url = "/raw/request/secret.parquet";
+  set req.http.X-FOS-Request = "1";
+  set req.backend = F_fos_origin;
+  testing.call_subroutine("vcl_miss");
+  assert.is_notset(bereq.http.Authorization);
+}
+
+// @scope: miss
+sub test_legitimate_rum_and_faro_assets_signed_on_fos_origin {
+  set req.method = "GET";
+  set req.url = "/js/faro-sdk.js";
+  set bereq.url = "/js/faro-sdk.js";
+  set req.http.X-FOS-Request = "1";
+  set req.backend = F_fos_origin;
+  testing.call_subroutine("vcl_miss");
+    assert.equal(bereq.url, "/my-rum-bucket/rum/faro-web-sdk-v2.9.0.iife.js");
+  assert.match(bereq.http.Authorization, "^AWS4-HMAC-SHA256 Credential=AKIA_TEST_KEY/");
+}
+"""
+    res = _run_raw_falco_test(main_vcl, test_vcl)
+    assert res.returncode == 0, f"falco test failed:\n{res.stdout}\n{res.stderr}"
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec12_cdn_load_vcl_deterministic_and_falco_auth_ratelimit_simulation() -> None:
+    from backend.core.fastly.client import load_vcl
+
+    vcl_rl = load_vcl(rate_limiting=True)
+    assert vcl_rl == load_vcl(rate_limiting=True)
+    assert "unprovisioned-fallback" not in vcl_rl
+    vcl_no_rl = load_vcl(rate_limiting=False)
+    assert vcl_no_rl == load_vcl(rate_limiting=False)
+
+    preamble = """
+backend F_fos_origin { .host = "us-east-1.object.fastlystorage.app"; .port = "443"; }
+table fos_credentials {
+  "access_key": "AKIA_CDN",
+  "secret_key": "SECRET_CDN",
+  "bucket": "cdn-bucket",
+  "region": "us-east-1",
+}
+table cdn_auth {
+  "secret_key": "valid-cdn-secret-key",
+}
+"""
+    for variant in (vcl_rl, vcl_no_rl):
+        lint_res = _run_raw_falco_lint(preamble + "\n" + variant)
+        assert lint_res.returncode == 0, f"falco lint failed:\n{lint_res.stdout}\n{lint_res.stderr}"
+
+    test_vcl = r"""
+// @scope: recv
+sub test_valid_header_auth_scrubs_secrets_and_filters_querystring {
+  testing.inject_variable("client.ip", "198.51.100.10");
+  set req.method = "GET";
+  set req.url = "/?list-type=2&prefix=raw%2F&key=leaked&junk=1";
+  set req.http.x-fastly-key = "valid-cdn-secret-key";
+  set req.http.Cookie = "session=secret";
+  set req.http.Authorization = "Bearer leaked";
+  testing.call_subroutine("vcl_recv");
+  assert.state(lookup);
+  assert.is_notset(req.http.x-fastly-key);
+  assert.is_notset(req.http.Cookie);
+  assert.is_notset(req.http.Authorization);
+  assert.equal(req.url, {"/?list-type=2&prefix=raw%2F"});
+}
+
+// @scope: recv
+sub test_query_param_key_without_header_is_rejected_401 {
+  testing.inject_variable("client.ip", "198.51.100.20");
+  set req.method = "GET";
+  set req.url = "/raw/request/file.zst?key=valid-cdn-secret-key";
+  testing.call_subroutine("vcl_recv");
+  assert.error(401);
+}
+
+// @scope: recv
+sub test_legacy_secret_item_fallback_and_fail_closed_403_when_empty {
+  testing.inject_variable("client.ip", "198.51.100.30");
+  testing.table_set(cdn_auth, "secret_key", "");
+  testing.table_set(cdn_auth, "secret", "legacy-cdn-secret");
+  set req.method = "GET";
+  set req.url = "/meta/admin_state.json";
+  set req.http.x-fastly-key = "legacy-cdn-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.state(pass);
+
+  testing.table_set(cdn_auth, "secret", "");
+  set req.http.x-fastly-key = "";
+  testing.call_subroutine("vcl_recv");
+  assert.error(403);
+}
+
+// @scope: recv
+sub test_ipv6_slash64_penaltybox_enforced_before_valid_auth_ignoring_xff {
+  testing.table_set(cdn_auth, "secret_key", "valid-cdn-secret-key");
+  // 10 failures across distinct hosts inside 2001:db8:abcd:0012::/64 with spoofed XFF
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::1");
+  set req.http.X-Forwarded-For = "203.0.113.1";
+  set req.http.Fastly-Client-IP = "203.0.113.2";
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  assert.error(401);
+
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::2");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::3");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::4");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::5");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::6");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::7");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::8");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::9");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+  testing.inject_variable("client.ip", "2001:db8:abcd:12:dead:beef:cafe:10");
+  set req.http.x-fastly-key = "wrong";
+  testing.call_subroutine("vcl_recv");
+
+  // 11th request from a new host in the SAME /64 WITH the valid key is blocked 429 FIRST!
+  testing.inject_variable("client.ip", "2001:db8:abcd:12:ffff:ffff:ffff:ffff");
+  set req.method = "GET";
+  set req.url = "/raw/request/a.zst";
+  set req.http.x-fastly-key = "valid-cdn-secret-key";
+  testing.call_subroutine("vcl_recv");
+  assert.error(429);
+
+  // FASTLYPURGE from a penalty-boxed /64 MUST ALSO be blocked 429 FIRST (wrong key AND valid key)
+  testing.inject_variable("client.ip", "2001:db8:abcd:12::beef");
+  set req.method = "FASTLYPURGE";
+  set req.url = "/raw/request/a.zst";
+  set req.http.x-fastly-key = "wrong-purge-guess";
+  testing.call_subroutine("vcl_recv");
+  assert.error(429);
+
+  set req.method = "FASTLYPURGE";
+  set req.http.x-fastly-key = "valid-cdn-secret-key";
+  testing.call_subroutine("vcl_recv");
+  assert.error(429);
+
+  // Different /64 succeeds
+  testing.inject_variable("client.ip", "2001:db8:abcd:13::1");
+  set req.method = "GET";
+  set req.http.x-fastly-key = "valid-cdn-secret-key";
+  testing.call_subroutine("vcl_recv");
+  assert.state(lookup);
+}
+
+// @scope: recv
+sub test_disallowed_http_methods_rejected_405 {
+  testing.inject_variable("client.ip", "198.51.100.99");
+  testing.table_set(cdn_auth, "secret_key", "valid-cdn-secret-key");
+  set req.method = "DELETE";
+  set req.url = "/raw/request/a.zst";
+  set req.http.x-fastly-key = "valid-cdn-secret-key";
+  testing.call_subroutine("vcl_recv");
+  assert.error(405);
+
+  set req.method = "FASTLYPURGE";
+  set req.url = "/raw/request/a.zst";
+  set req.http.x-fastly-key = "valid-cdn-secret-key";
+  testing.call_subroutine("vcl_recv");
+  assert.error(405);
+}
+
+// @scope: error
+sub test_vcl_error_sets_no_store_allow_and_retry_after {
+  set obj.status = 429;
+  set obj.response = "Too Many Requests";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.http.Cache-Control, "no-store");
+  assert.equal(obj.http.Retry-After, "900");
+}
+"""
+    res = _run_raw_falco_test(preamble + "\n" + vcl_rl, test_vcl)
+    assert res.returncode == 0, f"falco test failed:\n{res.stdout}\n{res.stderr}"
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_scorer_pass_snippet_strips_customer_cookies_and_preserves_allowlist() -> None:
+    from backend.provision.session_scoring.wasm_deploy import SCORING_BACKEND_VCL_NAME, pass_snippet
+
+    snip = pass_snippet("svc_scorer_1", "scorer-sec-1")
+    assert "unset bereq.http.Cookie;" in snip
+    assert 'subfield(req.http.Cookie, "X-Session-State", ";")' in snip
+    assert 'subfield(req.http.Cookie, "_ess", ";")' in snip
+
+    main_vcl = f"""
+backend {SCORING_BACKEND_VCL_NAME} {{ .host = "scorer.edgecompute.app"; .port = "443"; }}
+
+sub vcl_pass {{
+{snip}
+  return(fetch);
+}}
+"""
+    test_vcl = f"""
+// @scope: pass
+sub test_strips_customer_cookies_and_keeps_x_session_state {{
+  set req.backend = {SCORING_BACKEND_VCL_NAME};
+  set req.http.Cookie = "session_id=secret123; X-Session-State=tok_abc; csrftoken=xyz";
+  set bereq.http.Cookie = req.http.Cookie;
+  testing.call_subroutine("vcl_pass");
+  assert.equal(bereq.http.Cookie, "X-Session-State=tok_abc");
+}}
+
+// @scope: pass
+sub test_strips_customer_cookies_and_keeps_both_scorer_cookies {{
+  set req.backend = {SCORING_BACKEND_VCL_NAME};
+  set req.http.Cookie = "session_id=secret123; _ess=ess_999; X-Session-State=tok_abc";
+  set bereq.http.Cookie = req.http.Cookie;
+  testing.call_subroutine("vcl_pass");
+  assert.equal(bereq.http.Cookie, "X-Session-State=tok_abc; _ess=ess_999");
+}}
+
+// @scope: pass
+sub test_strips_all_cookies_when_no_scorer_cookie_present {{
+  set req.backend = {SCORING_BACKEND_VCL_NAME};
+  set req.http.Cookie = "session_id=secret123; auth_token=topsecret";
+  set bereq.http.Cookie = req.http.Cookie;
+  testing.call_subroutine("vcl_pass");
+  assert.is_notset(bereq.http.Cookie);
+}}
+"""
+    res = _run_raw_falco_test(main_vcl, test_vcl)
+    assert res.returncode == 0, f"falco test failed:\n{res.stdout}\n{res.stderr}"
+
+    with pytest.raises(ValueError):
+        pass_snippet('svc"; set bereq.http.X-Pwn = "1', "scorer-sec-1")
+    with pytest.raises(ValueError):
+        pass_snippet("svc\npwn", "scorer-sec-1")
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "bad_expr",
+    [
+        "true) || (true",
+        "((true)",
+        "(true))",
+        'req.http.Host == "unterminated',
+        'req.http.Host == "ok"\\',
+        "req.http.Host == 'single'",
+        'req.http.X-Foo; set req.http.X-Pwn = "1"',
+        "req.http.X-Foo\nbar",
+        "req.http.X-Foo\rbar",
+        "req.http.X-Foo\x00bar",
+        '{"long_string"}',
+        "req.http.X-Foo // comment",
+        "req.http.X-Foo /* comment */",
+        "req.http.X-Foo */",
+        "req.http.X-Foo # comment",
+        'req.http.X-Foo "${pwn}"',
+        'req.http.X-Foo "%{if true}x%{endif}"',
+        "req.http.X-Foo }V",
+        'table.lookup(fos_credentials, "secret_key", "")',
+        'TABLE . LOOKUP(cdn_auth, "secret_key", "")',
+        'table.lookup_integer(my_dict, "k", 0)',
+        'table.lookup_bool(my_dict, "k", false)',
+        'table.lookup_regex(my_dict, "k", "")',
+        'table.contains(my_dict, "k")',
+        "req.http.X-Foo\u2028bar",
+        "req.http.X-Foo\u2029bar",
+        "req.http.X-Foo\x85bar",
+        "req.http.X-Edge-Scorer-Auth",
+        "req.http.x-fastly-key",
+        "req.http.Fastly-Key",
+        "req.http.x-flp-secret",
+        "req.http.Authorization",
+        "req.http.Cookie",
+        "bereq.http.Cookie",
+        "resp.http.Set-Cookie",
+        'subfield(req.http.Cookie, "session_id", ";")',
+        '"session_scoring_secrets"',
+        '"flp_fos_credentials"',
+        '"flp_fos_buckets"',
+        '"flp_front_auth"',
+        r'req.http.X-A == "\") || true || (req.http.X-B == "x" && req.http.X-C == "y\"',
+        r'(req.http.X-A == "\") || true || (req.http.X-B == "y\"',
+        r'req.http.X-A == "\""',
+        r"req.http.Host == \"ok\"",
+    ],
+)
+def test_sec15_vcl_validators_block_all_breakout_and_exfiltration_vectors(bad_expr: str) -> None:
+    from backend.core.catalog import validate_vcl_custom_condition, validate_vcl_log_expression
+    from backend.core.fastly.client import validate_rum_custom_condition
+
+    assert validate_vcl_custom_condition(bad_expr) is not None
+    assert validate_rum_custom_condition(bad_expr) is not None
+    assert len(validate_vcl_log_expression(bad_expr)) >= 1
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_valid_catalog_and_system_expressions_pass_validators_and_falco(run_falco_test) -> None:
+    from backend.core.catalog import LOG_FIELD_CATALOG, validate_vcl_custom_condition, validate_vcl_log_expression
+    from backend.core.fastly.client import validate_rum_custom_condition
+    from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+    from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS
+    from backend.provision.session_scoring.orchestrate import _SCORING_CUSTOM_FIELDS
+
+    for cond in (
+        None,
+        "",
+        'req.http.Host == "shop.example.com" && req.url.ext != "png"',
+        'req.http.User-Agent !~ "bot\\b" && (resp.status >= 200 && resp.status < 500)',
+    ):
+        assert validate_vcl_custom_condition(cond) is None
+        assert validate_rum_custom_condition(cond) is None
+
+    assert validate_rum_custom_condition('req.url.path == "/checkout"') is not None
+    assert validate_vcl_custom_condition('req.url.path == "/checkout"') is None
+
+    for cf in [*_CMCD_CUSTOM_FIELDS, *_RUM_CUSTOM_FIELDS, *_SCORING_CUSTOM_FIELDS]:
+        assert validate_vcl_log_expression(cf["vcl_log_expression"]) == [], cf
+    assert validate_vcl_log_expression("req.http.x-edge-cookie-compliance") == []
+
+    assert len(LOG_FIELD_CATALOG) >= 80
+    cfg = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "lt_run_id",
+                "vcl_log_expression": "req.http.X-LT-Run-Id",
+                "collection_stage": "origin",
+                "origin_log_frequency": "all",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+                "bytes_estimate": 48,
+                "enabled": True,
+            }
+        ],
+    }
+    valid, lint_errs = lint_log_format(generate_log_format(cfg))
+    assert valid, lint_errs
+    falco_res = run_falco_test(
+        cfg,
+        """
+// @scope: fetch
+sub test_lt_run_id_captured {
+    set req.http.X-LT-Run-Id = "run-123";
+    testing.call_subroutine("vcl_fetch");
+    assert.equal(beresp.http.x-fos-origin-data:lt_run_id, "run-123");
+}
+""",
+    )
+    assert falco_res.returncode == 0, f"{falco_res.stdout}\n{falco_res.stderr}"
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec11_sec14_scoring_scrub_without_logging_rum_add_set_cookie_and_rum_js_fetch_guard() -> None:
+    from backend.core.fastly.client import generate_rum_vcl
+    from backend.provision.declarative.models import FeatureState
+    from backend.provision.declarative.vcl_builder import generate_consolidated_snippet
+
+    # 1. Declarative vcl_recv with logging_enabled=False and scoring.enabled=True MUST scrub spoofed
+    #    scoring/NGWAF headers on external first hop before scoring routing.
+    scoring_only_state = FeatureState.from_config(
+        {
+            "service_id": "svc_score_only",
+            "log_period": 60,
+            "sample_rate": 100,
+            "logging_enabled": False,
+            "rum_enabled": False,
+            "scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "request_secret": "sec123"},
+            "log_fields": {"groups": []},
+        }
+    )
+    recv_snip = generate_consolidated_snippet(scoring_only_state, "vcl_recv")
+    main_scoring = f"""
+backend F_origin {{ .host = "origin.example.com"; .port = "443"; }}
+backend F_session_scorer {{ .host = "scorer.edgecompute.app"; .port = "443"; }}
+sub vcl_recv {{
+  set req.backend = F_origin;
+{recv_snip}
+  return(lookup);
+}}
+"""
+    test_scoring = r"""
+// @scope: recv
+sub test_spoofed_scoring_pass_scrubbed_and_routed_to_scorer_when_logging_disabled {
+  set req.url = "/checkout";
+  set req.http.X-Edge-Scoring-Pass = "1";
+  set req.http.x-edge-score = "0.0";
+  set req.http.X-Edge-Score = "0.0";
+  set req.http.X-Edge-Score-Reason = "clean";
+  set req.http.X-Edge-Score-Enforce = "allow";
+  set req.http.X-Edge-Sid = "forged-sid";
+  set req.http.X-Edge-Score-Set-Cookie = "X-Session-State=forged";
+  set req.http.X-Edge-Prev-Anchor = "/home";
+  set req.http.x-sigsci-skip-inspection-once = "1";
+  testing.call_subroutine("vcl_recv");
+  assert.state(pass);
+  assert.equal(req.backend, F_session_scorer);
+  assert.is_notset(req.http.x-edge-score);
+  assert.is_notset(req.http.X-Edge-Score);
+  assert.is_notset(req.http.X-Edge-Score-Reason);
+  assert.is_notset(req.http.X-Edge-Score-Enforce);
+  assert.is_notset(req.http.X-Edge-Sid);
+  assert.is_notset(req.http.X-Edge-Score-Set-Cookie);
+  assert.is_notset(req.http.X-Edge-Prev-Anchor);
+}
+
+// @scope: recv
+sub test_excluded_path_scrubs_spoofed_ngwaf_skip_on_origin_when_logging_disabled {
+  set req.url = "/favicon.ico";
+  set req.http.x-sigsci-skip-inspection-once = "1";
+  set req.http.X-Edge-Score = "0.0";
+  testing.call_subroutine("vcl_recv");
+  assert.state(lookup);
+  assert.equal(req.backend, F_origin);
+  assert.is_notset(req.http.x-sigsci-skip-inspection-once);
+  assert.is_notset(req.http.X-Edge-Score);
+}
+"""
+    res_scoring = _run_raw_falco_test(main_scoring, test_scoring)
+    assert res_scoring.returncode == 0, f"falco test failed:\n{res_scoring.stdout}\n{res_scoring.stderr}"
+
+    # 2. RUM - Set cookies must use `add resp.http.Set-Cookie` so customer/scorer Set-Cookie survives.
+    rum_snips = generate_rum_vcl("svc_rum_1")
+    deliver_cookie_vcl = rum_snips["RUM - Set cookies"]
+    assert "add resp.http.Set-Cookie =" in deliver_cookie_vcl
+    assert "set resp.http.Set-Cookie =" not in deliver_cookie_vcl
+
+    combo_state = FeatureState.from_config(
+        {
+            "service_id": "svc_rum_1",
+            "log_period": 60,
+            "sample_rate": 100,
+            "logging_enabled": False,
+            "rum_enabled": True,
+            "fos_bucket": "bkt",
+            "fos_endpoint": "us-east-1.object.fastlystorage.app",
+            "scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "request_secret": "sec123"},
+            "log_fields": {"groups": []},
+        }
+    )
+    combo_deliver_vcl = generate_consolidated_snippet(combo_state, "vcl_deliver")
+    assert 'if (req.restarts == 1 && fastly.ff.visits_this_service == 0 && req.url.path != "/rum-beacon")' in (
+        combo_deliver_vcl
+    )
+    assert "set resp.http.Set-Cookie =" not in combo_deliver_vcl
+    raw_deliver_main = f"""
+backend F_origin {{ .host = "origin.example.com"; .port = "443"; }}
+sub vcl_deliver {{
+{combo_deliver_vcl}
+  return(deliver);
+}}
+"""
+    assert _run_raw_falco_lint(raw_deliver_main).returncode == 0
+    # Note: falco test (variable/all.go:REQ_RESTARTS) keeps ctx.Restarts == 0 in unit-test mode
+    # without lookupOverride; adapt only the post-restart guard in the test harness so pass-2
+    # cookie emission executes end-to-end after pass-1 restart.
+    sim_deliver_vcl = combo_deliver_vcl.replace("req.restarts == 1", "req.restarts == 0", 1)
+    main_rum_cookie = f"""
+backend F_origin {{ .host = "origin.example.com"; .port = "443"; }}
+sub vcl_deliver {{
+{sim_deliver_vcl}
+  return(deliver);
+}}
+"""
+    test_rum_cookie = r"""
+// @scope: deliver
+sub test_rum_cid_preserves_origin_and_scorer_set_cookie_across_restart {
+  set req.url = "/home";
+  set req.http.X-Edge-Scoring-Pass = "1";
+  set resp.status = 200;
+  set resp.http.x-edge-sid = "cid_abc_123";
+  set resp.http.Set-Cookie = "X-Session-State=rot_tok; Path=/; Secure; HttpOnly";
+  testing.call_subroutine("vcl_deliver");
+  assert.state(restart);
+
+  // Pass 2: origin responds with its own Set-Cookie; scorer Set-Cookie + rum_cid are appended without clobbering!
+  set resp.status = 200;
+  set resp.http.Set-Cookie = "session_id=cust_999; Path=/; Secure; HttpOnly";
+  testing.call_subroutine("vcl_deliver");
+  assert.equal(setcookie.get_value_by_name(resp, "session_id"), "cust_999");
+  assert.equal(setcookie.get_value_by_name(resp, "X-Session-State"), "rot_tok");
+  assert.equal(setcookie.get_value_by_name(resp, "rum_cid"), "cid_abc_123");
+}
+"""
+    res_cookie = _run_raw_falco_test(main_rum_cookie, test_rum_cookie)
+    assert res_cookie.returncode == 0, f"falco test failed:\n{res_cookie.stdout}\n{res_cookie.stderr}"
+
+    # 3. Declarative vcl_fetch must gate /js/rum.js caching on req.http.X-FOS-Request == "1"
+    rum_state = FeatureState.from_config(
+        {
+            "service_id": "svc_rum_fetch",
+            "log_period": 60,
+            "sample_rate": 100,
+            "logging_enabled": False,
+            "rum_enabled": True,
+            "fos_bucket": "bkt",
+            "fos_endpoint": "us-east-1.object.fastlystorage.app",
+            "log_fields": {"groups": []},
+        }
+    )
+    fetch_snip = generate_consolidated_snippet(rum_state, "vcl_fetch")
+    main_fetch = f"""
+backend F_origin {{ .host = "origin.example.com"; .port = "443"; }}
+sub vcl_fetch {{
+{fetch_snip}
+  return(deliver);
+}}
+"""
+    test_fetch = r"""
+// @scope: fetch
+sub test_non_fos_post_to_rum_js_not_marked_public_cacheable {
+  set req.method = "POST";
+  set req.url = "/js/rum.js";
+  set beresp.status = 200;
+  set beresp.http.Cache-Control = "private, no-store";
+  testing.call_subroutine("vcl_fetch");
+  assert.equal(beresp.http.Cache-Control, "private, no-store");
+  assert.is_notset(beresp.http.Surrogate-Key);
+}
+
+// @scope: fetch
+sub test_fos_rum_js_marked_cacheable_on_200 {
+  set req.method = "GET";
+  set req.url = "/js/rum.js";
+  set req.http.X-FOS-Request = "1";
+  set beresp.status = 200;
+  testing.call_subroutine("vcl_fetch");
+  assert.equal(beresp.http.Cache-Control, "public, max-age=300");
+  assert.equal(beresp.http.Surrogate-Key, "rum-js");
+}
+"""
+    res_fetch = _run_raw_falco_test(main_fetch, test_fetch)
+    assert res_fetch.returncode == 0, f"falco test failed:\n{res_fetch.stdout}\n{res_fetch.stderr}"
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_vcl_backslash_quote_lexer_differential_blocked_and_regex_escape_allowed() -> None:
+    from backend.core.catalog import (
+        _CANONICAL_SYSTEM_FIELD_SPECS,
+        check_vcl_quotes_and_parens,
+        validate_custom_field_entry,
+        validate_vcl_custom_condition,
+        validate_vcl_log_expression,
+    )
+    from backend.core.fastly.client import validate_rum_custom_condition
+    from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS, _CMCD_FIELD_NAMES
+    from backend.provision.declarative.models import FeatureState
+    from backend.provision.declarative.vcl_builder import build_rum_log_condition
+    from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS, _RUM_FIELD_NAMES
+    from backend.provision.session_scoring.orchestrate import _SCORING_CUSTOM_FIELDS, _SCORING_FIELD_NAMES
+
+    # 1. Fastly VCL never treats \" as an escaped quote inside "..." — verify paren-breakout payloads fail
+    breakout_payload = r'req.http.X-A == "\") || true || (req.http.X-B == "x" && req.http.X-C == "y\"'
+    assert check_vcl_quotes_and_parens(breakout_payload) == "contains unbalanced parentheses"
+    assert check_vcl_quotes_and_parens('req.http.Host == "ok"\\') == "must not end with a trailing backslash"
+    assert (
+        check_vcl_quotes_and_parens(r"req.http.Host == \"ok\"") == "must not contain backslashes outside double quotes"
+    )
+    assert validate_vcl_custom_condition(breakout_payload) is not None
+    assert validate_rum_custom_condition(breakout_payload) is not None
+    assert len(validate_vcl_log_expression(breakout_payload)) >= 1
+    with pytest.raises(ValueError, match="unbalanced parentheses"):
+        FeatureState(
+            service_id="svc_breakout",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition=breakout_payload,
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+        )
+    with pytest.raises(ValueError, match="unbalanced parentheses"):
+        FeatureState(
+            service_id="svc_breakout",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition="",
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+            rum_enabled=True,
+            rum_custom_condition=breakout_payload,
+        )
+
+    # 2. Valid regex escape inside double quotes continues to pass validators, FeatureState, and falco lint
+    valid_regex_cond = r'req.http.User-Agent !~ "bot\b" && (client.geo.country_code == "US")'
+    assert validate_vcl_custom_condition(valid_regex_cond) is None
+    assert validate_rum_custom_condition(valid_regex_cond) is None
+    fs_ok = FeatureState(
+        service_id="svc_valid_regex",
+        log_period=60,
+        sample_rate=100,
+        edge_only=False,
+        custom_condition=valid_regex_cond,
+        fos_prefix="raw",
+        fos_endpoint="us-east-1.object.fastlystorage.app",
+        rum_enabled=True,
+        rum_custom_condition=valid_regex_cond,
+    )
+    rum_cond_vcl = build_rum_log_condition(fs_ok)
+    lint_vcl = f"""
+sub vcl_log {{
+  if ({rum_cond_vcl}) {{
+    log "syslog svc_valid_regex rum :: ok";
+  }}
+}}
+"""
+    lint_res = _run_raw_falco_lint(lint_vcl)
+    assert lint_res.returncode == 0, f"falco lint failed:\n{lint_res.stdout}\n{lint_res.stderr}"
+
+    # 3. Canonical system field specs in catalog match all 41 RUM/Scoring/CMCD definitions 1-to-1
+    expected_specs = {
+        cf["name"]: (cf["collection_stage"], cf["vcl_log_expression"])
+        for cf in (*_RUM_CUSTOM_FIELDS, *_SCORING_CUSTOM_FIELDS, *_CMCD_CUSTOM_FIELDS)
+    }
+    assert dict(_CANONICAL_SYSTEM_FIELD_SPECS) == expected_specs
+
+    system_names = set(_CMCD_FIELD_NAMES) | set(_RUM_FIELD_NAMES) | set(_SCORING_FIELD_NAMES)
+    # Partial toggle entries without stage/expression remain valid
+    assert (
+        validate_custom_field_entry(
+            {"name": "cmcd_sid", "sql_type": "VARCHAR", "enabled": True}, [], system_names=system_names
+        )
+        == []
+    )
+    # Exact canonical system field entries remain valid
+    for cf in (*_RUM_CUSTOM_FIELDS, *_SCORING_CUSTOM_FIELDS, *_CMCD_CUSTOM_FIELDS):
+        assert validate_custom_field_entry(dict(cf), [], system_names=system_names) == []
+
+    # Tampered collection_stage or vcl_log_expression on system fields is rejected
+    assert validate_custom_field_entry(
+        {"name": "rum_cid", "collection_stage": "deliver"}, [], system_names=system_names
+    )
+    assert validate_custom_field_entry(
+        {"name": "rum_cid", "collection_stage": "beacon", "vcl_log_expression": "resp.http.Server"},
+        [],
+        system_names=system_names,
+    )
+    assert validate_custom_field_entry(
+        {"name": "edge_score", "collection_stage": "edge"}, [], system_names=system_names
+    )
+    assert validate_custom_field_entry(
+        {"name": "cmcd_sid", "vcl_log_expression": "req.http.X-Other"}, [], system_names=system_names
+    )

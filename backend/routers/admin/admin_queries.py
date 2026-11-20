@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import os
+import re
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -83,6 +84,9 @@ class _CancelHistoryCache(BoundedTTLCache[str, deque[float]]):
         with _cancel_limiter._lock:
             _cancel_limiter._events.clear()
             _cancel_limiter._locks.clear()
+            _cancel_limiter._saturated.clear()
+            _cancel_limiter._single_hit_keys.clear()
+            _cancel_limiter._overflow_locked_until = 0.0
 
 
 _cancel_history: BoundedTTLCache = _CancelHistoryCache(maxsize=1024, ttl_seconds=60.0)
@@ -573,19 +577,39 @@ def usage_log_export(
                     row["status"],
                     row["count"] if "count" in row.keys() else 1,
                 ]
-                writer.writerow(
-                    [
-                        f"'{v}" if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@")) else v
-                        for v in row_data
-                    ]
-                )
+                writer.writerow([_sanitize_csv_cell(v) for v in row_data])
             buf.seek(0)
             yield buf.read()
             buf.seek(0)
             buf.truncate(0)
 
-    headers = {"Content-Disposition": "attachment; filename=usage_log.csv"}
+    headers = {"Content-Disposition": 'attachment; filename="usage_log.csv"'}
     return StreamingResponse(generate(), media_type="text/csv", headers=headers)
+
+
+_CLEAN_SIGNED_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$", re.ASCII)
+_CSV_DIRECT_DANGEROUS_LEAD = ("=", "+", "-", "@", "|", "%", "\t", "\r", "\n")
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "|", "%")
+_CSV_CONTROL_AND_ZERO_WIDTH = "".join(chr(c) for c in range(0x20)) + "\x7f\x85\ufeff\u200b\u200c\u200d\u2060"
+
+
+def _sanitize_csv_cell(val: Any) -> Any:
+    """Prefix spreadsheet formula triggers so Excel/Sheets treat them as literal text."""
+    if not isinstance(val, str) or not val:
+        return val
+    if val[0] in _CSV_DIRECT_DANGEROUS_LEAD:
+        if _CLEAN_SIGNED_DECIMAL_RE.fullmatch(val):
+            return val
+        return f"'{val}"
+    stripped = val
+    while stripped:
+        nxt = stripped.lstrip().lstrip(_CSV_CONTROL_AND_ZERO_WIDTH)
+        if nxt == stripped:
+            break
+        stripped = nxt
+    if stripped and stripped[0] in _CSV_FORMULA_TRIGGERS:
+        return f"'{val}"
+    return val
 
 
 @router.delete(

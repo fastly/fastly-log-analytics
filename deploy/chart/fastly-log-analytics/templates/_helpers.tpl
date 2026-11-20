@@ -57,7 +57,7 @@ Whether this chart templates its own connection-string Secret.
 */}}
 {{- define "fastly-log-analytics.managedSecret" -}}
 {{- if .Values.secrets.existingSecret -}}
-{{- else if or .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl .Values.secrets.clickhousePassword .Values.secrets.cursorSecret -}}
+{{- else if or .Values.secrets.metadataDsn .Values.secrets.celeryBrokerUrl .Values.secrets.clickhousePassword .Values.secrets.cursorSecret .Values.secrets.sessionTokenSecret -}}
 true
 {{- end -}}
 {{- end }}

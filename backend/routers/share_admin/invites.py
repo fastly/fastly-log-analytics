@@ -243,6 +243,7 @@ _USER_CODE = {
     "idp_unavailable": "idp_unavailable",
     "provider_unavailable": "idp_unavailable",
     "no_public_endpoint": "idp_unavailable",
+    "sharing_disabled": "sharing_disabled",
 }
 
 
@@ -364,6 +365,22 @@ def oauth_authorize(
     return_target: str = Query("/dashboard", alias="return"),
 ) -> RedirectResponse:
     ip = client_ip(request)
+    mgr = get_tunnel_manager()
+    limited, retry_after = mgr.check_oauth_rate_limit(ip)
+    if limited:
+        share_db.log_share_audit_event(
+            event_type="OAUTH_CALLBACK_FAIL",
+            email=None,
+            ip_address=ip,
+            details=f"reason=rate_limited retry_after_s={retry_after}",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limited", "retry_after_s": retry_after},
+            headers={"Retry-After": str(retry_after)},
+        )
+    if not mgr.is_sharing_active():
+        return _fail(ip, event="OAUTH_CALLBACK_FAIL", user_code="sharing_disabled", reason="sharing_disabled")
 
     prov = oauth_registry.get_provider(provider)
     if prov is None or not prov.enabled:
@@ -431,6 +448,22 @@ def oauth_callback(
     error: str | None = Query(None),
 ) -> RedirectResponse:
     ip = client_ip(request)
+    mgr_pre = get_tunnel_manager()
+    limited, retry_after = mgr_pre.check_oauth_rate_limit(ip)
+    if limited:
+        share_db.log_share_audit_event(
+            event_type="OAUTH_CALLBACK_FAIL",
+            email=None,
+            ip_address=ip,
+            details=f"reason=rate_limited retry_after_s={retry_after}",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limited", "retry_after_s": retry_after},
+            headers={"Retry-After": str(retry_after)},
+        )
+    if not mgr_pre.is_sharing_active():
+        return _fail(ip, event="OAUTH_CALLBACK_FAIL", user_code="sharing_disabled", reason="sharing_disabled")
 
     # 1. Open + authenticate the flow-state cookie. Provider identity comes ONLY
     #    from this sealed cookie, never a query param (§2.1.2).

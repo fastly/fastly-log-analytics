@@ -59,6 +59,7 @@ impl Request {
 pub struct Response {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    pub set_cookies: Vec<String>,
     pub body: Vec<u8>,
     /// A body to stream from the front's `/fos/<service>/<key>` path when the response is sent,
     /// replacing `body`; the upstream's status, length and range headers pass through.
@@ -80,6 +81,7 @@ impl Response {
         Self {
             status,
             headers: BTreeMap::new(),
+            set_cookies: Vec::new(),
             body: body.into(),
             upstream: None,
         }
@@ -103,7 +105,25 @@ impl Response {
         }
     }
 
+    pub fn cookie(mut self, value: impl Into<String>) -> Self {
+        let value = value.into();
+        self.headers
+            .entry("set-cookie".to_owned())
+            .or_insert_with(|| value.clone());
+        if !self.set_cookies.contains(&value) {
+            self.set_cookies.push(value);
+        }
+        self
+    }
+
+    pub fn cookies(&self) -> &[String] {
+        &self.set_cookies
+    }
+
     pub fn header(mut self, name: &str, value: impl Into<String>) -> Self {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            return self.cookie(value);
+        }
         self.headers.insert(name.to_owned(), value.into());
         self
     }
@@ -250,5 +270,26 @@ mod tests {
         );
         assert_eq!(request.query_param("limit"), None);
         assert_eq!(request.query_param("filter").as_deref(), Some("a+b"));
+    }
+
+    #[test]
+    fn multiple_set_cookie_headers_preserve_order_and_first_map_entry() {
+        let a = "flp_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+        let b = "flp_cdn=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+        let c = "__Host-flp_cdn=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+        let response = Response::new(200, "ok")
+            .cookie(a)
+            .cookie(b)
+            .cookie(a)
+            .header("Set-Cookie", c);
+
+        assert_eq!(
+            response.cookies(),
+            &[a.to_owned(), b.to_owned(), c.to_owned()]
+        );
+        assert_eq!(
+            response.headers.get("set-cookie").map(String::as_str),
+            Some(a)
+        );
     }
 }

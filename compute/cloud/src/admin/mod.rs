@@ -238,6 +238,15 @@ fn route(
                 )?;
                 service.config_version += 1;
                 service.updated_at = context.runtime.now();
+            } else {
+                if crate::logging::validate_vcl_condition(&service.custom_condition).is_err() {
+                    return Err(Error::new(400, "invalid_logging_settings"));
+                }
+                if crate::logging::rum::validate_custom_condition(&service.rum.custom_condition)
+                    .is_err()
+                {
+                    return Err(Error::new(400, "invalid_rum_settings"));
+                }
             }
             let job = new_job(
                 context,
@@ -775,10 +784,7 @@ fn validate_service(
             .logging_endpoint_name
             .chars()
             .any(|c| c.is_control())
-        || service.custom_condition.len() > 2048
-        || service
-            .custom_condition
-            .contains(['\n', '\r', ';', '{', '}'])
+        || crate::logging::validate_vcl_condition(&service.custom_condition).is_err()
         || !matches!(service.compression_codec.as_str(), "" | "zstd")
         || !matches!(service.wire_format.as_str(), "" | "array")
     {
@@ -811,6 +817,11 @@ fn validate_service(
         {
             return Err(Error::new(400, "attach_endpoint_name_reserved"));
         }
+    }
+    if !service.rum.enabled
+        && crate::logging::rum::validate_custom_condition(&service.rum.custom_condition).is_err()
+    {
+        return Err(Error::new(400, "invalid_rum_settings"));
     }
     if service.rum.enabled {
         crate::logging::rum::validate_config(&service.rum)

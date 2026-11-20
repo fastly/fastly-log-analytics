@@ -399,6 +399,113 @@ def get_groups_for_api() -> list:
 
 _BUILTIN_FIELD_NAMES = frozenset(f["id"] for f in LOG_FIELD_CATALOG)
 
+_VCL_CONTROL_CHAR_RE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
+_VCL_TABLE_LOOKUP_RE = re.compile(r"\btable\s*\.\s*(?:lookup\w*|contains)\b", re.IGNORECASE)
+_FORBIDDEN_VCL_IDENTIFIERS_RE = re.compile(
+    r"(?:"
+    r"\bfos_credentials\b"
+    r"|\bsession_scoring_secrets\b"
+    r"|\bcdn_auth\b"
+    r"|\bflp_fos_credentials\b"
+    r"|\bflp_fos_buckets\b"
+    r"|\bflp_front_auth\b"
+    r"|x-edge-scorer-auth"
+    r"|x-fastly-key"
+    r"|\bfastly-key\b"
+    r"|x-flp-"
+    r"|\bauthorization\b"
+    r"|(?:req|bereq|resp|beresp|obj)\.http\.(?:cookie|set-cookie)(?:\b|:)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def check_vcl_quotes_and_parens(expr: str) -> str | None:
+    """Verify balanced Fastly VCL double quotes, balanced parens outside quotes, and no bare backslashes."""
+    in_quotes = False
+    paren_depth = 0
+    for ch in expr:
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif not in_quotes:
+            if ch == "\\":
+                if expr.endswith("\\"):
+                    return "must not end with a trailing backslash"
+                return "must not contain backslashes outside double quotes"
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth -= 1
+                if paren_depth < 0:
+                    return "contains unbalanced parentheses"
+    if expr.endswith("\\"):
+        return "must not end with a trailing backslash"
+    if in_quotes:
+        return "contains unbalanced double quotes"
+    if paren_depth != 0:
+        return "contains unbalanced parentheses"
+    return None
+
+
+def validate_vcl_log_expression(expr: str, *, field_name: str = "vcl_log_expression") -> list[str]:
+    """Validate a custom-field VCL log expression against syntax breakout and secret exfiltration."""
+    if not isinstance(expr, str) or not expr.strip():
+        return [f"'{field_name}' must not be empty"]
+    errors: list[str] = []
+    if len(expr) > 512:
+        errors.append(f"'{field_name}' must be ≤ 512 characters (got {len(expr)})")
+    if "\n" in expr:
+        errors.append(f"'{field_name}' must not contain raw newlines")
+    if ";" in expr:
+        errors.append(f"'{field_name}' must not contain semicolons (;)")
+    if "//" in expr or "/*" in expr or "*/" in expr or "#" in expr:
+        errors.append(f"'{field_name}' must not contain VCL comments (//, /*, */, or #)")
+    if "\r" in expr or "\x00" in expr or _VCL_CONTROL_CHAR_RE.search(expr):
+        errors.append(f"'{field_name}' must not contain carriage returns, NUL, or control characters")
+    if "${" in expr or "%{" in expr or "}V" in expr or "{" in expr or "}" in expr:
+        errors.append(f"'{field_name}' must not contain braces or template markers ({{, }}, }}V, ${{, %{{)")
+    if "'" in expr:
+        errors.append(f"'{field_name}' must use double quotes, not single quotes")
+    quote_paren_err = check_vcl_quotes_and_parens(expr)
+    if quote_paren_err:
+        errors.append(f"'{field_name}' {quote_paren_err}")
+    if _VCL_TABLE_LOOKUP_RE.search(expr):
+        errors.append(f"'{field_name}' must not call table.lookup(...)")
+    if m := _FORBIDDEN_VCL_IDENTIFIERS_RE.search(expr):
+        errors.append(f"'{field_name}' must not reference sensitive dictionary or header '{m.group(0)}'")
+    return errors
+
+
+def validate_vcl_custom_condition(condition: str | None, *, field_name: str = "custom_condition") -> str | None:
+    """Validate a VCL boolean condition embedded inside ``if (<condition>)``."""
+    if condition is None:
+        return None
+    if not isinstance(condition, str):
+        return f"'{field_name}' must be a string"
+    if "\n" in condition or "\r" in condition or "\x00" in condition or _VCL_CONTROL_CHAR_RE.search(condition):
+        return f"'{field_name}' must be a single-line VCL boolean expression without control characters"
+    raw = condition.strip()
+    if not raw:
+        return None
+    if len(raw) > 2048:
+        return f"'{field_name}' exceeds maximum length of 2048 characters"
+    if ";" in raw:
+        return f"'{field_name}' must not contain semicolons (;)"
+    if "${" in raw or "%{" in raw or "}V" in raw or "{" in raw or "}" in raw:
+        return f"'{field_name}' must not contain braces or template markers ({{, }}, }}V, ${{, %{{)"
+    if "'" in raw:
+        return f"'{field_name}' must use double quotes, not single quotes"
+    if "//" in raw or "/*" in raw or "*/" in raw or "#" in raw:
+        return f"'{field_name}' must not contain VCL comments (//, /*, */, or #)"
+    quote_paren_err = check_vcl_quotes_and_parens(raw)
+    if quote_paren_err:
+        return f"'{field_name}' {quote_paren_err}"
+    if _VCL_TABLE_LOOKUP_RE.search(raw):
+        return f"'{field_name}' must not call table.lookup(...)"
+    if m := _FORBIDDEN_VCL_IDENTIFIERS_RE.search(raw):
+        return f"'{field_name}' must not reference sensitive dictionary or header '{m.group(0)}'"
+    return None
+
 
 def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
     """Validate a custom field definition dict; returns list of error/WARN strings."""
@@ -424,17 +531,7 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
         errors.append("'description' must not exceed 500 characters")
 
     expr = field.get("vcl_log_expression", "")
-    if not expr.strip():
-        errors.append("'vcl_log_expression' must not be empty")
-    elif len(expr) > 512:
-        errors.append(f"'vcl_log_expression' must be ≤ 512 characters (got {len(expr)})")
-    elif "\n" in expr:
-        errors.append("'vcl_log_expression' must not contain raw newlines")
-    else:
-        if ";" in expr:
-            errors.append("'vcl_log_expression' must not contain semicolons (;)")
-        if "//" in expr or "/*" in expr or "#" in expr:
-            errors.append("'vcl_log_expression' must not contain VCL comments (//, /*, or #)")
+    errors.extend(validate_vcl_log_expression(expr))
 
     valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
     sql_type = field.get("sql_type", "")
@@ -474,6 +571,112 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
                 f'({min_bytes} bytes for "{name}":). The estimate is likely too low.'
             )
     return errors
+
+
+_CANONICAL_SYSTEM_FIELD_SPECS: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "service_id": ("beacon", "req.service_id"),
+        "rum_cid": ("beacon", "req.http.x-fos-edge-data:rum_cid"),
+        "fastly_req_id": ("beacon", "req.http.x-fos-edge-data:fastly_req_id"),
+        "rum_metric_name": ("beacon", "req.http.x-fos-edge-data:rum_metric_name"),
+        "rum_metric_value": ("beacon", "req.http.x-fos-edge-data:rum_metric_value"),
+        "rum_metric_rating": ("beacon", "req.http.x-fos-edge-data:rum_metric_rating"),
+        "rum_error_message": ("beacon", "req.http.x-fos-edge-data:rum_error_message"),
+        "rum_error_stack": ("beacon", "req.http.x-fos-edge-data:rum_error_stack"),
+        "rum_trace_id": ("beacon", "req.http.x-fos-edge-data:rum_trace_id"),
+        "rum_span_id": ("beacon", "req.http.x-fos-edge-data:rum_span_id"),
+        "rum_pathname": ("beacon", "req.http.x-fos-edge-data:rum_pathname"),
+        "rum_connection_speed": ("beacon", "req.http.x-fos-edge-data:rum_connection_speed"),
+        "rum_dns_ms": ("beacon", "req.http.x-fos-edge-data:rum_dns_ms"),
+        "rum_tcp_ms": ("beacon", "req.http.x-fos-edge-data:rum_tcp_ms"),
+        "rum_tls_ms": ("beacon", "req.http.x-fos-edge-data:rum_tls_ms"),
+        "rum_ttfb_ms": ("beacon", "req.http.x-fos-edge-data:rum_ttfb_ms"),
+        "rum_raw_query": ("beacon", "req.http.x-fos-edge-data:rum_raw_query"),
+        "rum_body": ("beacon", "req.http.x-fos-edge-data:rum_body"),
+        "edge_score": ("deliver", "req.http.x-edge-score:score"),
+        "edge_score_l1": ("deliver", "req.http.x-edge-score:l1"),
+        "edge_score_l2": ("deliver", "req.http.x-edge-score:l2"),
+        "edge_cookie_compliance": ("deliver", "req.http.x-edge-score:compliance"),
+        "edge_score_reason": ("deliver", "req.http.x-edge-score:reason"),
+        "edge_sid": ("deliver", "req.http.x-edge-score:sid"),
+        "edge_score_rtt_us": ("deliver", "req.http.x-edge-score:rtt"),
+        "edge_score_exec_us": ("deliver", "req.http.x-edge-score:exec"),
+        "edge_matrix_version": ("deliver", "req.http.x-edge-score:matrix"),
+        "cmcd_sid": ("edge", "req.http.x-cmcd:sid"),
+        "cmcd_cid": ("edge", "req.http.x-cmcd:cid"),
+        "cmcd_br": ("edge", "req.http.x-cmcd:br"),
+        "cmcd_bl": ("edge", "req.http.x-cmcd:bl"),
+        "cmcd_bs": ("edge", "req.http.x-cmcd:bs"),
+        "cmcd_d": ("edge", "req.http.x-cmcd:d"),
+        "cmcd_dl": ("edge", "req.http.x-cmcd:dl"),
+        "cmcd_mtp": ("edge", "req.http.x-cmcd:mtp"),
+        "cmcd_ot": ("edge", "req.http.x-cmcd:ot"),
+        "cmcd_sf": ("edge", "req.http.x-cmcd:sf"),
+        "cmcd_st": ("edge", "req.http.x-cmcd:st"),
+        "cmcd_su": ("edge", "req.http.x-cmcd:su"),
+        "cmcd_tb": ("edge", "req.http.x-cmcd:tb"),
+        "cmcd_rtp": ("edge", "req.http.x-cmcd:rtp"),
+    }
+)
+
+
+def validate_custom_field_entry(
+    field: dict[str, Any],
+    existing_names: list[str],
+    *,
+    system_names: set[str] | frozenset[str] = frozenset(),
+) -> list[str]:
+    """Validate a full or partial custom-field entry in a ``log_fields`` payload."""
+    name = field.get("name")
+    if not isinstance(name, str) or not name:
+        return ["Missing required field: 'name'"]
+
+    if name in system_names:
+        errs: list[str] = []
+        canonical_spec = _CANONICAL_SYSTEM_FIELD_SPECS.get(name)
+        raw_stage = field.get("collection_stage")
+        if raw_stage is not None:
+            if raw_stage not in ("edge", "origin", "deliver", "beacon"):
+                errs.append(f"'collection_stage' must be a valid stage (got '{raw_stage}')")
+            elif canonical_spec is not None and raw_stage != canonical_spec[0]:
+                errs.append(
+                    f"System custom field '{name}' must keep canonical collection_stage "
+                    f"{canonical_spec[0]!r} (got {raw_stage!r})"
+                )
+        raw_expr = field.get("vcl_log_expression")
+        if raw_expr is not None:
+            expr_str = str(raw_expr)
+            errs.extend(validate_vcl_log_expression(expr_str))
+            if canonical_spec is not None and expr_str != canonical_spec[1]:
+                errs.append(f"System custom field '{name}' must keep its canonical vcl_log_expression")
+        return errs
+
+    full_keys = ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate")
+    if all(k in field and field[k] is not None for k in full_keys):
+        return [err_txt for err_txt in validate_custom_field(field, existing_names) if not err_txt.startswith("WARN:")]
+
+    errs = []
+    if not VALID_NAME_RE.fullmatch(name):
+        errs.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
+    if name in _SQL_RESERVED:
+        errs.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
+    if name in _BUILTIN_FIELD_NAMES:
+        errs.append(f"'{name}' is already a built-in field name")
+    if name in existing_names:
+        errs.append(f"A custom field named '{name}' already exists on this service")
+
+    stage = field.get("collection_stage", "edge")
+    if stage not in ("edge", "origin"):
+        errs.append(f"'collection_stage' must be 'edge' or 'origin' (got '{stage}')")
+
+    if field.get("sql_type") is not None:
+        valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
+        if field["sql_type"] not in valid_types:
+            errs.append(f"'sql_type' must be one of: {', '.join(sorted(valid_types))}")
+
+    if "vcl_log_expression" in field:
+        errs.extend(validate_vcl_log_expression(str(field.get("vcl_log_expression") or "")))
+    return errs
 
 
 def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:

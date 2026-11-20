@@ -8,10 +8,11 @@ import re
 import time
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
+from backend.core.request_context import require_admin
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.models.common import (
     CmcdSettingsResponse,
@@ -25,6 +26,7 @@ from backend.utils.auth import require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.router_utils import (
     load_service_config,
+    make_error,
     mutate_service_config,
     query_errors,
     stored_fastly_token,
@@ -35,7 +37,7 @@ from .crud import _record_audit_best_effort, _sse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 _LOGGING_SETTINGS_CACHE_TTL = 300.0
 _logging_settings_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOGGING_SETTINGS_CACHE_TTL)
@@ -178,7 +180,11 @@ def api_service_log_fields_get(request: Request, service_id: str):
     response_model_exclude_unset=True,
 )
 def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
-    from backend.provision.cmcd_fields import reconcile_system_custom_fields
+    from backend.config import is_rum_enabled
+    from backend.core.catalog import validate_custom_field_entry
+    from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_system_custom_fields
+    from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS, _RUM_FIELD_NAMES
+    from backend.provision.session_scoring.orchestrate import _SCORING_FIELD_NAMES
 
     require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
@@ -188,6 +194,26 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     )
     if not new_lf:
         raise HTTPException(status_code=400, detail={"error": "log_fields is required"})
+    caller_cfs = (
+        raw_lf.custom_fields
+        if hasattr(raw_lf, "custom_fields")
+        else (raw_lf.get("custom_fields") if isinstance(raw_lf, dict) else None)
+    )
+    if caller_cfs:
+        system_names = set(_CMCD_FIELD_NAMES) | set(_RUM_FIELD_NAMES) | set(_SCORING_FIELD_NAMES)
+        seen_cf_names: list[str] = []
+        all_hard_errors: list[str] = []
+        for cf in caller_cfs:
+            cf_dict = cf.model_dump(exclude_none=True) if hasattr(cf, "model_dump") else cf
+            if not isinstance(cf_dict, dict):
+                all_hard_errors.append("Custom field entry must be an object")
+                continue
+            all_hard_errors.extend(validate_custom_field_entry(cf_dict, seen_cf_names, system_names=system_names))
+            cf_name = cf_dict.get("name")
+            if isinstance(cf_name, str) and cf_name not in system_names:
+                seen_cf_names.append(cf_name)
+        if all_hard_errors:
+            raise HTTPException(status_code=422, detail={"errors": all_hard_errors})
     old_lf = cfg.get("log_fields", {})
     # Merge guard: preserve existing custom_fields unless caller explicitly sent a non-empty list,
     # then re-assert system custom fields (scoring + CMCD) keyed on current service state.
@@ -198,6 +224,25 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
         scoring_enabled=bool(cfg.get("scoring", {}).get("enabled")),
         cmcd_enabled=bool(cfg.get("cmcd", {}).get("enabled")),
     )
+    if any(isinstance(cf, dict) and cf.get("name") in _RUM_FIELD_NAMES for cf in new_lf["custom_fields"]):
+        if not is_rum_enabled(cfg):
+            new_lf["custom_fields"] = [
+                cf
+                for cf in new_lf["custom_fields"]
+                if not (isinstance(cf, dict) and cf.get("name") in _RUM_FIELD_NAMES)
+            ]
+        else:
+            rum_by_name = {cf["name"]: cf for cf in _RUM_CUSTOM_FIELDS}
+            canonicalized_cfs: list[dict] = []
+            for cf in new_lf["custom_fields"]:
+                if isinstance(cf, dict) and cf.get("name") in rum_by_name:
+                    canon_rum = dict(rum_by_name[cf["name"]])
+                    if "enabled" in cf and isinstance(cf["enabled"], bool):
+                        canon_rum["enabled"] = cf["enabled"]
+                    canonicalized_cfs.append(canon_rum)
+                else:
+                    canonicalized_cfs.append(cf)
+            new_lf["custom_fields"] = canonicalized_cfs
     new_lf["schema_version"] = 2
     old_hash = old_lf.get("format_hash")
     new_hash = lf_module.format_hash(new_lf)
@@ -253,6 +298,13 @@ def api_service_update_logging_settings(
     prefix = ""
     edge_only = old_edge_only if edge_only is None else edge_only
     custom_condition = old_custom_condition if custom_condition is None else custom_condition
+    if custom_condition is not None:
+        from backend.core.catalog import validate_vcl_custom_condition
+
+        cond_msg = validate_vcl_custom_condition(custom_condition)
+        if cond_msg:
+            raise HTTPException(status_code=400, detail=make_error("invalid_custom_condition", cond_msg))
+        custom_condition = custom_condition.strip()
     if not 1 <= period <= 86400:
         raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
     if not 1 <= sample_rate <= 100:

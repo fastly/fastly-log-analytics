@@ -756,12 +756,18 @@ def scoring_top_flagged(
 ) -> dict:
     """Recent rows with non-null edge_score, sorted by score DESC."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
-    return _cached_scoring_rows(
+    out = _cached_scoring_rows(
         ("top-flagged", service_id, since_hours, limit, win_disc),
         since_hours,
         lambda: _top_flagged_rows(service_id, src, ts_pred, limit),
         ts_field="timestamp",
     )
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if mask_ips_for(analyst_session):
+        from backend.core.share_db import apply_pii_policy
+
+        out = apply_pii_policy(out, {"mask_ips": True})
+    return out
 
 
 @router.get(
@@ -1044,6 +1050,16 @@ def scoring_session_events(
 ) -> dict:
     """Return the event timeline for a single session (up to 500 events)."""
     _enforce_scoring_service_scope(request, service_id)
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if mask_ips_for(analyst_session):
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "pii_policy_violation",
+                "Raw session event drill-down is blocked when IP masking is enabled",
+                field="sid",
+            ),
+        )
     ts_pred, disc = _scoring_time_window(request, int(since_days) * 24)
     grouped = _fetch_session_events(
         service_id, [sid], since_days=since_days, ts_predicate=(ts_pred if disc is not None else None)

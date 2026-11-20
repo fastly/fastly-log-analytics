@@ -984,6 +984,28 @@ def sync_catalog_and_templates(
     fixtures_path = ROOT / "tests/generator_fixtures.json"
     if fixtures_path.exists():
         fixtures_data = json.loads(fixtures_path.read_text(encoding="utf-8"))
+        scrub_headers = list(namespace["_SCRUB_HEADERS"])
+        if "X-FOS-Request" in scrub_headers:
+            old_line = "  unset req.http.x-sigsci-skip-inspection-once;\n"
+            new_line = old_line + "  unset req.http.X-FOS-Request;\n"
+            for bucket in ("cases", "cmcd_cases"):
+                for case in fixtures_data.get(bucket, []):
+                    recv_str = (case.get("capture") or {}).get("recv")
+                    if (
+                        isinstance(recv_str, str)
+                        and old_line in recv_str
+                        and "unset req.http.X-FOS-Request;" not in recv_str
+                    ):
+                        case["capture"]["recv"] = recv_str.replace(old_line, new_line)
+                    for snippet in case.get("snippets", []):
+                        body_str = snippet.get("body")
+                        if (
+                            snippet.get("subroutine") == "vcl_recv"
+                            and isinstance(body_str, str)
+                            and old_line in body_str
+                            and "unset req.http.X-FOS-Request;" not in body_str
+                        ):
+                            snippet["body"] = body_str.replace(old_line, new_line)
         for case in fixtures_data.get("cases", []):
             if "M" in (case.get("config") or {}).get("groups", []):
                 updated_capture = capture(case["config"])

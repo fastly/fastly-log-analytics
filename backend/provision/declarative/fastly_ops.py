@@ -269,24 +269,30 @@ def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
     """Fetch all backends for a service version."""
     try:
         resp = fastly("GET", f"/service/{service_id}/version/{version}/backend", token=token)
-        return [
-            Backend(
-                name=item.get("name", ""),
-                address=item.get("address", ""),
-                port=int(item.get("port", 443)),
-                ssl_check_cert=item.get("ssl_check_cert", True),
-                ssl_hostname=item.get("ssl_hostname", ""),
-                connect_timeout=int(item.get("connect_timeout", 1000)),
-                first_byte_timeout=int(item.get("first_byte_timeout", 15000)),
-                between_bytes_timeout=int(item.get("between_bytes_timeout", 10000)),
-                auto_loadbalance=item.get("auto_loadbalance", True),
-                use_ssl=item.get("use_ssl", True),
-                override_host=item.get("override_host", ""),
-                shield=item.get("shield") or "",
-                request_condition=item.get("request_condition") or "",
+        backends: list[Backend] = []
+        for item in _unwrap_fastly_list(resp):
+            cert_host = item.get("ssl_cert_hostname") or item.get("ssl_hostname") or ""
+            sni_host = item.get("ssl_sni_hostname") or item.get("ssl_hostname") or ""
+            backends.append(
+                Backend(
+                    name=item.get("name", ""),
+                    address=item.get("address", ""),
+                    port=int(item.get("port", 443)),
+                    ssl_check_cert=item.get("ssl_check_cert", True),
+                    ssl_hostname=cert_host or sni_host,
+                    connect_timeout=int(item.get("connect_timeout", 1000)),
+                    first_byte_timeout=int(item.get("first_byte_timeout", 15000)),
+                    between_bytes_timeout=int(item.get("between_bytes_timeout", 10000)),
+                    auto_loadbalance=item.get("auto_loadbalance", True),
+                    use_ssl=item.get("use_ssl", True),
+                    override_host=item.get("override_host") or "",
+                    shield=item.get("shield") or "",
+                    request_condition=item.get("request_condition") or "",
+                    ssl_cert_hostname=cert_host,
+                    ssl_sni_hostname=sni_host,
+                )
             )
-            for item in _unwrap_fastly_list(resp)
-        ]
+        return backends
     except Exception:
         return []
 
@@ -402,12 +408,15 @@ def delete_backend(service_id: str, version: int, backend_name: str, token: str)
 
 def create_or_update_backend(service_id: str, version: int, backend: Backend, token: str) -> None:
     """Create or update a backend."""
+    cert_host = backend.ssl_cert_hostname or backend.ssl_hostname
+    sni_host = backend.ssl_sni_hostname or backend.ssl_hostname
     body: dict[str, Any] = {
         "name": backend.name,
         "address": backend.address,
         "port": backend.port,
         "ssl_check_cert": backend.ssl_check_cert,
-        "ssl_hostname": backend.ssl_hostname,
+        "ssl_cert_hostname": cert_host or None,
+        "ssl_sni_hostname": sni_host or None,
         "connect_timeout": backend.connect_timeout,
         "first_byte_timeout": backend.first_byte_timeout,
         "between_bytes_timeout": backend.between_bytes_timeout,
@@ -426,15 +435,27 @@ def delete_dictionary(service_id: str, version: int, dict_name: str, token: str)
 
 
 def create_or_update_dictionary(service_id: str, version: int, dictionary: ServiceDictionary, token: str) -> None:
-    """Create or update a service dictionary and its items."""
-    resp = _upsert_version_resource(
-        service_id,
-        version,
-        "dictionary",
-        dictionary.name,
-        {"name": dictionary.name, "write_only": dictionary.write_only},
-        token,
-    )
+    """Create or update a service dictionary and its items without mutating immutable write_only."""
+    encoded_name = urllib.parse.quote(dictionary.name, safe="")
+    item_url = f"/service/{service_id}/version/{version}/dictionary/{encoded_name}"
+    collection_url = f"/service/{service_id}/version/{version}/dictionary"
+    try:
+        existing = fastly("GET", item_url, token=token)
+    except RuntimeError as exc:
+        err_text = str(exc)
+        if "404" not in err_text and "not found" not in err_text.lower():
+            raise
+        resp = fastly(
+            "POST",
+            collection_url,
+            {"name": dictionary.name, "write_only": dictionary.write_only},
+            token=token,
+        )
+    else:
+        if isinstance(existing, dict) and existing.get("id"):
+            resp = existing
+        else:
+            resp = fastly("PUT", item_url, {"name": dictionary.name}, token=token)
     if not (dict_id := resp.get("id", "")):
         raise RuntimeError(f"Failed to get dictionary ID for {dictionary.name}")
     if dictionary.items:

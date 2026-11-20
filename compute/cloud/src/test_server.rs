@@ -264,9 +264,18 @@ fn to_response(response: Response) -> tiny_http::ResponseBox {
             csp.push_str("; report-uri /__test/csp-reports");
         }
     }
-    let mut headers = Vec::with_capacity(response.headers.len());
+    let has_multi_cookies = !response.set_cookies.is_empty();
+    let mut headers = Vec::with_capacity(response.headers.len() + response.set_cookies.len());
     for (name, value) in response.headers {
+        if has_multi_cookies && name.eq_ignore_ascii_case("set-cookie") {
+            continue;
+        }
         if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            headers.push(header);
+        }
+    }
+    for cookie in response.set_cookies {
+        if let Ok(header) = tiny_http::Header::from_bytes(&b"set-cookie"[..], cookie.as_bytes()) {
             headers.push(header);
         }
     }

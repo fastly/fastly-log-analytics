@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 
 from backend.core import share_db
 from backend.utils.date_utils import iso_z_now, parse_iso_utc
+from backend.utils.rate_limit import SlidingWindowLimiter, normalize_rate_limit_ip
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,10 @@ LOGIN_FAILURE_WINDOW_S = 60
 LOGIN_FAILURE_THRESHOLD = 5
 LOGIN_LOCKOUT_S = 5 * 60
 MAX_TRACKED_IPS = 10000
+CLAIM_RATE_LIMIT = 10
+CLAIM_RATE_WINDOW_S = 60.0
+OAUTH_RATE_LIMIT = 20
+OAUTH_RATE_WINDOW_S = 60.0
 
 _UA_RE = re.compile(r"(Chrome|Firefox|Safari|Edge|OPR)/(\d+)")
 _OS_RE = re.compile(r"(Macintosh|Mac OS X|Windows|Linux|X11|iPhone|iPad|Android)")
@@ -172,8 +177,24 @@ def restore_direct_state(state: TunnelState) -> bool:
     try:
         import json
 
+        db_enabled: bool | None = None
+        db_endpoint: str | None = None
+        try:
+            db_enabled = share_db.get_sharing_enabled(bypass_cache=True)
+            if db_enabled is False:
+                return False
+            db_endpoint = share_db.get_sharing_public_endpoint(bypass_cache=True)
+        except Exception:
+            logger.debug("restore_direct_state: db sharing_enabled check failed (ignored)", exc_info=True)
+
         path = _state_file_path()
         if not os.path.exists(path):
+            if db_enabled is True and db_endpoint and db_endpoint.lower().startswith("https://"):
+                state.public_endpoint = db_endpoint
+                state.forward_port = 3000
+                state.started_at = iso_z_now()
+                logger.info("[tunnel] restored direct-mode share state from share_db for %s", state.public_endpoint)
+                return True
             try:
                 from backend import config
 
@@ -229,10 +250,18 @@ class TunnelManager:
         self._lock = threading.RLock()
         self._sessions: dict[str, AnalystSession] = {}
         self._rate_limiter = _LoginRateLimiter()
+        self._claim_limiter = SlidingWindowLimiter(window_s=CLAIM_RATE_WINDOW_S, max_keys=MAX_TRACKED_IPS)
+        self._oauth_limiter = SlidingWindowLimiter(window_s=OAUTH_RATE_WINDOW_S, max_keys=MAX_TRACKED_IPS)
         self._state = TunnelState()
         # Restore direct-mode share state from disk so a backend restart
         # doesn't drop the registered public_endpoint.
         restore_direct_state(self._state)
+        self._known_public_endpoint: str | None = self._state.public_endpoint
+        if self._known_public_endpoint is None:
+            try:
+                self._known_public_endpoint = share_db.get_sharing_public_endpoint(bypass_cache=True)
+            except Exception:
+                logger.debug("TunnelManager.__init__: known_public_endpoint lookup failed (ignored)", exc_info=True)
         # Observability counters. In-memory only; reset on process restart.
         # `_heartbeat_unauth_count` increments every time /api/share/heartbeat
         # returns 401/403, i.e. every time an analyst gets bounced to the
@@ -288,11 +317,35 @@ class TunnelManager:
 
     # ── Session ops ────────────────────────────────────────────────────
 
+    def _rehydrate_row(self, row: dict) -> AnalystSession | None:
+        try:
+            rehydrated = AnalystSession.from_row(row)
+            rehydrated.service_ids = share_db.get_remote_invite_services(row["invite_id"])
+            return rehydrated
+        except Exception:
+            logger.exception("[tunnel] failed to rehydrate session row")
+            return None
+
     def get_session(self, session_id: str | None) -> AnalystSession | None:
         if not session_id:
             return None
+        if self._sync_share_state_from_db() is False:
+            return None
+        try:
+            db_row = share_db.get_session(session_id)
+        except Exception:
+            db_row = None
         with self._lock:
-            return self._sessions.get(session_id)
+            if db_row is None:
+                self._sessions.pop(session_id, None)
+                return None
+            cached = self._sessions.get(session_id)
+            if cached is not None:
+                return cached
+            rehydrated = self._rehydrate_row(db_row)
+            if rehydrated is not None:
+                self._sessions[session_id] = rehydrated
+            return rehydrated
 
     def list_sessions(self) -> list[AnalystSession]:
         with self._lock:
@@ -346,6 +399,10 @@ class TunnelManager:
                         )
                     except Exception:
                         logger.exception("[tunnel] failed to record SESSION_BOOT for %s", prev.session_id)
+                try:
+                    share_db.delete_sessions_for_invite(invite_id)
+                except Exception:
+                    logger.exception("[tunnel] failed to delete cross-pod sessions for invite %s", invite_id)
 
             now = iso_z_now()
             session = AnalystSession(
@@ -379,7 +436,9 @@ class TunnelManager:
         session_id: str,
         *,
         last_activity: str | None = None,
+        action: str | None = None,
         new_ip: str | None = None,
+        new_ua: str | None = None,
         bump_active: bool = True,
     ) -> bool:
         """Bump ``last_active_time`` (and optionally last_activity / ip).
@@ -390,20 +449,37 @@ class TunnelManager:
         request, so bumping there would defeat the idle timeout regardless of
         the X-User-Active gate.
         """
+        act = last_activity if last_activity is not None else action
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 return False
             if bump_active:
                 session.last_active_time = iso_z_now()
-            if last_activity is not None:
-                session.last_activity = last_activity
+            if act is not None:
+                session.last_activity = act
             if new_ip is not None and new_ip != session.ip_address:
                 session.ip_address = new_ip
-            try:
-                share_db.upsert_session(session.to_dict())
-            except Exception:
-                logger.exception("[tunnel] failed to persist touched session")
+            if new_ua is not None and new_ua != session.user_agent:
+                session.user_agent = new_ua
+            snap_ip = session.ip_address
+            snap_ua = session.user_agent
+            snap_active = session.last_active_time
+            snap_act = session.last_activity
+        try:
+            updated = share_db.update_session_activity(
+                session_id,
+                ip_address=snap_ip,
+                user_agent=snap_ua,
+                last_active_time=snap_active,
+                last_activity=snap_act,
+            )
+            if not updated:
+                with self._lock:
+                    self._sessions.pop(session_id, None)
+                return False
+        except Exception:
+            logger.exception("[tunnel] failed to persist touched session %s", session_id[:8])
         return True
 
     def validate_session(self, session_id: str | None) -> AnalystSession | None:
@@ -419,23 +495,23 @@ class TunnelManager:
         """
         if not session_id:
             return None
+        if self._sync_share_state_from_db() is False:
+            return None
+        try:
+            db_row = share_db.get_session(session_id)
+        except Exception:
+            logger.debug("[tunnel] on-demand session lookup failed for %s", session_id[:8], exc_info=True)
+            db_row = None
         with self._lock:
+            if db_row is None:
+                self._sessions.pop(session_id, None)
+                return None
             session = self._sessions.get(session_id)
             if session is None:
-                try:
-                    row = share_db.get_session(session_id)
-                    if row:
-                        rehydrated = AnalystSession.from_row(row)
-                        rehydrated.service_ids = share_db.get_remote_invite_services(row["invite_id"])
-                        self._sessions[session_id] = rehydrated
-                        session = rehydrated
-                except Exception:
-                    logger.exception(
-                        "[tunnel] failed to rehydrate session %s on demand",
-                        session_id[:8] if session_id else "",
-                    )
-            if session is None:
-                return None
+                session = self._rehydrate_row(db_row)
+                if session is None:
+                    return None
+                self._sessions[session_id] = session
             now = datetime.now(UTC)
             login = parse_iso_utc(session.login_time)
             last = parse_iso_utc(session.last_active_time)
@@ -494,10 +570,29 @@ class TunnelManager:
     def boot_session(self, session_id: str, *, reason: str = "admin boot") -> bool:
         with self._lock:
             session = self._sessions.get(session_id)
-            if session is None:
-                return False
-            self._evict(session, reason=reason, event="SESSION_BOOT")
-            return True
+            if session is not None:
+                self._evict(session, reason=reason, event="SESSION_BOOT")
+                return True
+        try:
+            row = share_db.get_session(session_id)
+        except Exception:
+            row = None
+        if row is None:
+            return False
+        try:
+            share_db.delete_session(session_id)
+        except Exception:
+            logger.exception("[tunnel] failed to delete cross-pod session %s", session_id[:8])
+        try:
+            share_db.log_share_audit_event(
+                event_type="SESSION_BOOT",
+                email=row.get("email"),
+                ip_address=row.get("ip_address") or "0.0.0.0",
+                details=reason,
+            )
+        except Exception:
+            logger.exception("[tunnel] failed to audit cross-pod SESSION_BOOT")
+        return True
 
     def rotate_session_id(self, session_id: str) -> str | None:
         """Mint a fresh ``session_id`` for an existing session and persist it.
@@ -540,12 +635,17 @@ class TunnelManager:
             return new_id
 
     def boot_sessions_for_invite(self, invite_id: str, *, reason: str = "invite revoked") -> int:
-        n = 0
+        count = 0
         with self._lock:
-            for sid in [s.session_id for s in self._sessions.values() if s.invite_id == invite_id]:
+            ids = [s.session_id for s in self._sessions.values() if s.invite_id == invite_id]
+            for sid in ids:
                 if self.boot_session(sid, reason=reason):
-                    n += 1
-        return n
+                    count += 1
+        try:
+            count += share_db.delete_sessions_for_invite(invite_id)
+        except Exception:
+            logger.exception("[tunnel] failed to delete DB sessions for invite %s", invite_id)
+        return count
 
     def _evict(self, session: AnalystSession, *, reason: str, event: str) -> None:
         # Called under self._lock.
@@ -567,10 +667,25 @@ class TunnelManager:
     # ── Rate limiter passthrough ──────────────────────────────────────
 
     def check_rate_limit(self, ip: str) -> tuple[bool, int]:
-        return self._rate_limiter.is_locked(ip)
+        return self._rate_limiter.is_locked(normalize_rate_limit_ip(ip))
+
+    def check_claim_rate_limit(self, ip: str) -> tuple[bool, int]:
+        """Return ``(limited, retry_after_s)`` where ``limited=True`` rejects."""
+        allowed, retry_after = self._claim_limiter.try_acquire_with_retry(
+            normalize_rate_limit_ip(ip), max_events=CLAIM_RATE_LIMIT
+        )
+        return (not allowed), retry_after
+
+    def check_oauth_rate_limit(self, ip: str) -> tuple[bool, int]:
+        """Return ``(limited, retry_after_s)`` where ``limited=True`` rejects."""
+        allowed, retry_after = self._oauth_limiter.try_acquire_with_retry(
+            normalize_rate_limit_ip(ip), max_events=OAUTH_RATE_LIMIT
+        )
+        return (not allowed), retry_after
 
     def record_login_failure(self, ip: str, email: str | None) -> bool:
-        triggered = self._rate_limiter.record_failure(ip)
+        norm_ip = normalize_rate_limit_ip(ip)
+        triggered = self._rate_limiter.record_failure(norm_ip)
         if triggered:
             try:
                 share_db.log_share_audit_event(
@@ -585,12 +700,35 @@ class TunnelManager:
 
     # ── Direct-mode share state ───────────────────────────────────────
 
+    def _sync_share_state_from_db(self, *, force: bool = False) -> bool | None:
+        _ = force  # DB check is always authoritative (0ms stale window)
+        try:
+            db_enabled = share_db.get_sharing_enabled(bypass_cache=True)
+            db_endpoint = share_db.get_sharing_public_endpoint(bypass_cache=True)
+        except Exception:
+            return None
+        with self._lock:
+            if db_endpoint:
+                self._known_public_endpoint = db_endpoint
+            if db_enabled is False:
+                if self._state.public_endpoint is not None or self._sessions:
+                    self._state.public_endpoint = None
+                    self._state.started_at = None
+                    self._sessions.clear()
+                return False
+            if db_enabled is True and self._state.public_endpoint is None and db_endpoint:
+                self._state.public_endpoint = db_endpoint
+                self._state.started_at = self._state.started_at or iso_z_now()
+            return db_enabled
+
     @property
     def state(self) -> TunnelState:
         with self._lock:
             return self._state
 
-    def is_sharing_active(self) -> bool:
+    def is_sharing_active(self, *, sync_db: bool = True) -> bool:
+        if sync_db and self._sync_share_state_from_db() is False:
+            return False
         with self._lock:
             return bool(self._state.public_endpoint)
 
@@ -617,9 +755,17 @@ class TunnelManager:
                 "tunnel_uptime_history": list(self._tunnel_uptime_history[-20:]),
             }
 
-    def public_url(self) -> str | None:
+    def public_url(self, *, sync_db: bool = True) -> str | None:
+        if sync_db:
+            self._sync_share_state_from_db()
         with self._lock:
             return self._state.public_endpoint
+
+    def known_public_url(self, *, sync_db: bool = True) -> str | None:
+        if sync_db:
+            self._sync_share_state_from_db()
+        with self._lock:
+            return self._state.public_endpoint or self._known_public_endpoint
 
     def start_sharing(
         self,
@@ -648,11 +794,16 @@ class TunnelManager:
 
         with self._lock:
             self._state.public_endpoint = public_endpoint
+            self._known_public_endpoint = public_endpoint
             self._state.forward_port = forward_port
             self._state.started_at = iso_z_now()
             # Persist so a backend restart re-arms automatically.
             persist_direct_state(self._state)
 
+        try:
+            share_db.set_sharing_enabled(True, public_endpoint=public_endpoint)
+        except Exception:
+            logger.exception("[tunnel] failed to persist sharing_enabled=True in share_db")
         try:
             share_db.log_share_audit_event(
                 event_type="SHARE_START",
@@ -662,11 +813,13 @@ class TunnelManager:
             )
         except Exception:
             logger.exception("[tunnel] failed to write SHARE_START audit")
-        return {"public_url": self.public_url()}
+        return {"public_url": self.public_url(sync_db=False)}
 
     def stop_sharing(self) -> None:
         with self._lock:
             self._record_uptime_history(reason="stop")
+            if self._state.public_endpoint:
+                self._known_public_endpoint = self._state.public_endpoint
             self._state.public_endpoint = None
             self._state.started_at = None
             persist_stopped_state(self._state)
@@ -674,6 +827,11 @@ class TunnelManager:
             ids = list(self._sessions.keys())
             for sid in ids:
                 self.boot_session(sid, reason="sharing stopped")
+        try:
+            share_db.set_sharing_enabled(False)
+            share_db.delete_all_sessions()
+        except Exception:
+            logger.exception("[tunnel] failed to persist sharing_enabled=False in share_db")
         try:
             share_db.log_share_audit_event(
                 event_type="SHARE_STOP",
@@ -688,11 +846,19 @@ class TunnelManager:
         with self._lock:
             n = len(self._sessions)
             self._record_uptime_history(reason="panic")
+            if self._state.public_endpoint:
+                self._known_public_endpoint = self._state.public_endpoint
             for sid in list(self._sessions.keys()):
                 self.boot_session(sid, reason="panic")
             self._state.public_endpoint = None
             self._state.started_at = None
             persist_stopped_state(self._state)
+        try:
+            share_db.set_sharing_enabled(False)
+            db_booted = share_db.delete_all_sessions()
+            n += db_booted
+        except Exception:
+            logger.exception("[tunnel] failed to persist panic state in share_db")
         try:
             share_db.log_share_audit_event(
                 event_type="PANIC_TRIGGERED",
@@ -754,8 +920,8 @@ def build_share_live_payload() -> dict:
     cheap enough to sample per connection."""
     mgr = get_tunnel_manager()
     return {
-        "sharing_active": mgr.is_sharing_active(),
-        "public_url": mgr.public_url(),
+        "sharing_active": mgr.is_sharing_active(sync_db=False),
+        "public_url": mgr.public_url(sync_db=False),
         "active_session_count": mgr.active_session_count(),
         "rate_limits": mgr.get_rate_limit_snapshot(),
         "telemetry": mgr.get_telemetry(),
@@ -773,9 +939,6 @@ def reset_for_tests() -> None:
     global _singleton
     with _singleton_lock:
         _singleton = None
-
-
-from backend.utils.rate_limit import SlidingWindowLimiter
 
 
 class _LoginRateLimiter(SlidingWindowLimiter):

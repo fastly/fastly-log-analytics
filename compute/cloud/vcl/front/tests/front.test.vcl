@@ -503,3 +503,145 @@ sub fos_parquet_is_never_compressed {
   testing.call_subroutine("vcl_fetch");
   assert.false(beresp.gzip);
 }
+
+
+// @scope: deliver
+sub ipv6_same_64_subnet_shares_failure_counter_and_penalty_box {
+  testing.inject_variable("fastly.ff.visits_this_service", "0");
+  declare local var.i INTEGER;
+  set req.http.Fastly-Client-IP = "2001:db8:abcd:1234::1";
+  set resp.http.x-flp-auth-fail = "1";
+  testing.call_subroutine("vcl_deliver");
+  set var.i = ratelimit.ratecounter_increment(auth_fail_rc, "v6:536939960:2882343476", 8);
+  assert.false(ratelimit.penaltybox_has(auth_fail_pb, "v6:536939960:2882343476"));
+
+  set req.http.Fastly-Client-IP = "2001:0db8:abcd:1234:ffff:eeee:dddd:cccc";
+  set resp.http.x-flp-auth-fail = "1";
+  testing.call_subroutine("vcl_deliver");
+  assert.true(ratelimit.penaltybox_has(auth_fail_pb, "v6:536939960:2882343476"));
+  assert.false(ratelimit.penaltybox_has(auth_fail_pb, "v6:536939960:2882343477"));
+}
+
+
+// @scope: recv
+sub penalty_box_blocks_fos_parquet_and_signin_before_rewrites_while_keeping_public_and_clock_safe {
+  ratelimit.penaltybox_add(auth_fail_pb, "v6:536939960:2882343476", 15m);
+  testing.inject_variable("client.ip", "2001:0db8:abcd:1234:dead:beef:cafe:99");
+
+  set req.url = "/sign-in";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "/sign-in.txt";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "/invite";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/processed/request/a.parquet";
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  unset req.http.x-fastly-key;
+  set req.http.Cookie = "flp_session=test-session";
+  set req.url = "/fos/pq/goal2-live-20261029/processed/request/a.parquet";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "/goal2-live-20261029/processed/request/a.parquet";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+  assert.equal(req.url, "/goal2-live-20261029/processed/request/a.parquet");
+
+  // Multi-slash paths (in falco `set req.url`, //// yields a multi-slash req.url/req.url.path)
+  set req.url = "////fos/AAAAAAAAAAAAAAAAAAAAAA/processed/request/a.parquet";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "////api/file?key=processed%2Frequest%2Fa.parquet";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "////sign-in";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  set req.url = "////tenant/logs/processed/request/a.parquet";
+  testing.call_subroutine("vcl_recv");
+  assert.error(618);
+
+  unset req.http.Cookie;
+  set req.url = "/";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+
+  set req.url = "/version";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+
+  set req.url = "/_next/static/chunks/app.js";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+
+  set req.url = "/_tick";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+
+  set req.url = "/_flush";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+
+  testing.inject_variable("client.ip", "2001:db8:abcd:1235::1");
+  set req.url = "/sign-in";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+}
+
+
+// @scope: recv
+sub ipv6_same_64_subnet_shares_challenge_rate_limit {
+  declare local var.count INTEGER;
+  set var.count = ratelimit.ratecounter_increment(auth_challenge_rc, "v6:536939960:2882343476", 30);
+  testing.inject_variable("client.ip", "2001:0db8:abcd:1234:1111:2222:3333:4444");
+  set req.url = "/api/auth/login/options";
+  testing.call_subroutine("vcl_recv");
+  assert.error(619);
+}
+
+
+// @scope: error
+sub edge_auth_denials_emit_auth_fail_marker_and_clear_bad_cdn_cookies {
+  set obj.status = 621;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 404);
+  assert.equal(obj.http.x-flp-auth-fail, "1");
+
+  unset obj.http.x-flp-auth-fail;
+  set obj.status = 622;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 403);
+  assert.equal(obj.http.x-flp-auth-fail, "1");
+
+  unset obj.http.x-flp-auth-fail;
+  set obj.status = 624;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 403);
+  assert.equal(obj.http.x-flp-auth-fail, "1");
+
+  unset obj.http.x-flp-auth-fail;
+  set obj.status = 629;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 403);
+  assert.equal(obj.http.x-flp-auth-fail, "1");
+  assert.true(obj.http.Set-Cookie ~ "Max-Age=0");
+
+  unset obj.http.x-flp-auth-fail;
+  unset obj.http.Set-Cookie;
+  set obj.status = 626;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 400);
+  assert.is_notset(obj.http.x-flp-auth-fail);
+}

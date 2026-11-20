@@ -15,7 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.celery_app import publisher as sync_status_publisher
 from backend.core import fos_client as _db_mod
-from backend.core.request_context import get_service_id, get_source, require_service_access
+from backend.core.request_context import get_service_id, get_source, require_admin, require_service_access
 from backend.cron.scheduler import compute_sync_status_cached
 from backend.models.admin import (
     IngestedFilesResponse,
@@ -52,8 +52,16 @@ def _resolve_compute_sync_status_cached() -> Any:
     return compute_sync_status_cached
 
 
+_sync_alias_router = APIRouter(
+    prefix="/api",
+    tags=["admin"],
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(require_service_access), Depends(require_admin)],
+)
+
+
 @router.get("/admin/sync-status", response_model=SyncStatusResponse)
-@router.get("/sync-status", response_model=SyncStatusResponse)
+@_sync_alias_router.get("/sync-status", response_model=SyncStatusResponse)
 def sync_status(
     service_id: str | None = Depends(get_service_id),
     skip_fos: bool = Query(default=False),
@@ -95,6 +103,10 @@ def sync_status(
         return resp
     except Exception as e:
         raise_internal(logger, e, code="sync_status_failed")
+
+
+for _alias_route in reversed(_sync_alias_router.routes):
+    router.routes.insert(len(router.routes) - 1, _alias_route)
 
 
 @meta_router.get("/log-extents", response_model=LogExtentsResponse)

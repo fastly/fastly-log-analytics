@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import datetime as _dt
+import http.client
 import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from backend.core.fastly.client import validate_rum_custom_condition
+from backend.core.request_context import require_admin
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.models.admin import ProvisionService
 from backend.models.common import (
@@ -52,7 +57,12 @@ from backend.utils.sse import sse_payload as _sse
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/provision", tags=["provision"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter(
+    prefix="/api/provision",
+    tags=["provision"],
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(require_admin)],
+)
 provision_router = router
 
 _FASTLY_HTTP_ERROR_RE = re.compile(r"HTTP (\d+) ")
@@ -83,24 +93,176 @@ def _invalidate_service_credentials(service_id: str) -> None:
         logger.warning("[provision] credential cache invalidation failed for %s", service_id, exc_info=True)
 
 
+_PUBLIC_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})$"
+)
+_INTERNAL_DOMAIN_SUFFIXES = (
+    ".local",
+    ".localhost",
+    ".localdomain",
+    ".internal",
+    ".cluster.local",
+    ".svc",
+    ".home.arpa",
+    ".corp",
+    ".lan",
+)
+_DOMAIN_PROBE_MAX_BYTES = 8192
+
+
+def _is_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return _is_public_ip(ip.ipv4_mapped)
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        or not ip.is_global
+    ):
+        return False
+    return True
+
+
+def _validate_public_domain_syntax(raw_domain: str) -> tuple[str, str | None]:
+    """Normalize ``raw_domain`` and reject IP literals, single-label hosts, and internal suffixes."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_domain):
+        return "", "Invalid custom domain. Must be a valid public hostname."
+    clean = raw_domain.strip().rstrip(".").lower()
+    if not clean:
+        return (
+            clean,
+            "Invalid custom domain. Must be non-empty, contain at least one dot, and consist only of letters, digits, hyphens, and dots.",
+        )
+    unbracketed = clean[1:-1] if clean.startswith("[") and clean.endswith("]") else clean
+    try:
+        ipaddress.ip_address(unbracketed)
+        return clean, "Domain must be a public hostname (IP address literals are not allowed)"
+    except ValueError:
+        pass
+    if clean in {"localhost", "metadata"} or clean.endswith(_INTERNAL_DOMAIN_SUFFIXES):
+        return clean, "Domain must be a public hostname (internal domains are not allowed)"
+    if not _PUBLIC_DOMAIN_RE.fullmatch(clean):
+        return (
+            clean,
+            "Invalid custom domain. Must be non-empty, contain at least one dot, and consist only of letters, digits, hyphens, and dots.",
+        )
+    return clean, None
+
+
+def _resolve_pinned_public_ip(domain: str) -> tuple[str | None, str | None]:
+    """Resolve ``domain`` and ensure EVERY A/AAAA record is globally routable."""
+    try:
+        records = socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return None, "DNS/Connection error (likely available): domain did not resolve"
+    except OSError:
+        return None, "DNS/Connection error (likely available): resolution failed"
+    if not records:
+        return None, "DNS/Connection error (likely available): domain did not resolve"
+
+    first_ip: str | None = None
+    for _family, _socktype, _proto, _canonname, sockaddr in records:
+        ip_raw = str(sockaddr[0]).split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_raw)
+        except ValueError:
+            return None, "Domain resolves to a non-public IP address"
+        if not _is_public_ip(ip_obj):
+            return None, "Domain resolves to a non-public IP address"
+        if first_ip is None:
+            first_ip = ip_raw
+    return first_ip, None
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connect TCP to ``pinned_ip`` while verifying TLS cert + SNI against ``server_hostname``."""
+
+    def __init__(self, host: str, *, pinned_ip: str, server_hostname: str, **kwargs: Any) -> None:
+        super().__init__(host=host, **kwargs)
+        self._pinned_ip = pinned_ip
+        self._server_hostname = server_hostname
+
+    def connect(self) -> None:
+        raw_sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        try:
+            ctx = getattr(self, "_context", None) or ssl.create_default_context()
+            self.sock = ctx.wrap_socket(raw_sock, server_hostname=self._server_hostname)
+        except BaseException:
+            raw_sock.close()
+            raise
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, pinned_ip: str, server_hostname: str) -> None:
+        ctx = ssl.create_default_context()
+        super().__init__(context=ctx)
+        self._pinned_ip = pinned_ip
+        self._server_hostname = server_hostname
+        self._pinned_ctx = ctx
+
+    def https_open(self, req: urllib.request.Request):
+        return self.do_open(
+            lambda host, **kwargs: _PinnedHTTPSConnection(
+                host,
+                pinned_ip=self._pinned_ip,
+                server_hostname=self._server_hostname,
+                **kwargs,
+            ),
+            req,
+            context=self._pinned_ctx,
+        )
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow 3xx Location headers during domain availability probing."""
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+    http_error_302 = http_error_303 = http_error_307 = http_error_308 = http_error_301
+
+
 def _check_domain_available(domain: str, timeout: int = 10) -> tuple[bool, str | None]:
     from backend.utils.telemetry import tracked_call
 
-    with tracked_call("GET", domain, service="Domain Check"):
+    clean, syntax_err = _validate_public_domain_syntax(domain)
+    if syntax_err is not None:
+        return False, syntax_err
+
+    with tracked_call("GET", clean, service="Domain Check"):
+        pinned_ip, dns_note_or_err = _resolve_pinned_public_ip(clean)
+        if pinned_ip is None:
+            if dns_note_or_err and dns_note_or_err.startswith("DNS/Connection"):
+                return True, dns_note_or_err
+            return False, dns_note_or_err or "Domain resolves to a non-public IP address"
+
+        opener = urllib.request.build_opener(
+            _PinnedHTTPSHandler(pinned_ip, clean),
+            _NoRedirectHandler(),
+            urllib.request.ProxyHandler({}),
+        )
+        req = urllib.request.Request(f"https://{clean}/", headers={"Host": clean}, method="GET")
         try:
-            req = urllib.request.Request(f"https://{domain}", method="GET")
+            with opener.open(req, timeout=timeout):
+                return False, "Domain already in use (returned 200)"
+        except urllib.error.HTTPError as exc:
             try:
-                with urllib.request.urlopen(req, timeout=timeout):
-                    return False, "Domain already in use (returned 200)"
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode(errors="replace")
-                if "Please check that this domain has been added to a service." in body:
-                    return True, None
-                return False, "Domain already registered or in use"
-            except urllib.error.URLError as exc:
-                return True, f"DNS/Connection error (likely available): {exc.reason}"
-        except Exception as exc:
-            return False, str(exc)
+                if exc.code in (301, 302, 303, 307, 308):
+                    return False, "Domain already registered or in use"
+                body = exc.read(_DOMAIN_PROBE_MAX_BYTES).decode(errors="replace")
+            finally:
+                exc.close()
+            if "Please check that this domain has been added to a service." in body:
+                return True, None
+            return False, "Domain already registered or in use"
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError):
+            return True, "DNS/Connection error (likely available): connection failed"
+        except Exception:
+            logger.warning("[provision] Unexpected error probing domain %s", clean, exc_info=True)
+            return False, "Unable to verify domain availability"
 
 
 @provision_router.get("/services", response_model=list[ProvisionService])
@@ -190,11 +352,11 @@ def provision_check_domain(prefix: str = Query(...), is_custom: bool = Query(Fal
     if not prefix:
         raise HTTPException(status_code=400, detail={"error": "Prefix is required"})
     if is_custom:
-        domain = prefix.strip()
-        if not domain or "." not in domain or not re.fullmatch(r"^[a-zA-Z0-9.-]+$", domain):
+        domain, syntax_err = _validate_public_domain_syntax(prefix)
+        if syntax_err is not None:
             return {
                 "available": False,
-                "reason": "Invalid custom domain. Must be non-empty, contain at least one dot, and consist only of letters, digits, hyphens, and dots.",
+                "reason": syntax_err,
             }
     else:
         if not re.fullmatch(r"(?i)^([a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9])$", prefix):
@@ -407,6 +569,57 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     return sse_response(stream())
 
 
+def _validate_provision_vcl_inputs(cfg: dict[str, Any], *, strict_rum_path: bool = True) -> None:
+    """Validate custom_condition, rum_custom_condition, and log_fields custom_fields before VCL/Terraform emission."""
+    from backend.core.catalog import validate_custom_field_entry, validate_vcl_custom_condition
+    from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
+    from backend.provision.rum_orchestrator import _RUM_FIELD_NAMES
+    from backend.provision.session_scoring.orchestrate import _SCORING_FIELD_NAMES
+
+    cond_msg = validate_vcl_custom_condition(cfg.get("custom_condition"))
+    if cond_msg:
+        raise HTTPException(status_code=400, detail=make_error("invalid_custom_condition", cond_msg))
+
+    raw_prov = cfg.get("provisioning")
+    prov_dict: dict[str, Any] = raw_prov if isinstance(raw_prov, dict) else {}
+    if "custom_condition" in prov_dict:
+        p_msg = validate_vcl_custom_condition(prov_dict.get("custom_condition"))
+        if p_msg:
+            raise HTTPException(status_code=400, detail=make_error("invalid_custom_condition", p_msg))
+
+    raw_rum = cfg.get("rum")
+    rum_dict: dict[str, Any] = raw_rum if isinstance(raw_rum, dict) else {}
+    rum_cond_raw = (
+        cfg.get("rum_custom_condition")
+        if cfg.get("rum_custom_condition") is not None
+        else rum_dict.get("custom_condition")
+    )
+    if rum_cond_raw is not None:
+        r_validator = validate_rum_custom_condition if strict_rum_path else validate_vcl_custom_condition
+        r_msg = r_validator(rum_cond_raw)
+        if r_msg:
+            raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", r_msg))
+
+    lf = cfg.get("log_fields")
+    if isinstance(lf, dict):
+        system_names = set(_CMCD_FIELD_NAMES) | set(_RUM_FIELD_NAMES) | set(_SCORING_FIELD_NAMES)
+        seen_names: list[str] = []
+        for cf in lf.get("custom_fields") or []:
+            if not isinstance(cf, dict):
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_custom_field", "Each custom field must be an object")
+                )
+            hard_errs = validate_custom_field_entry(cf, seen_names, system_names=system_names)
+            if hard_errs:
+                raise HTTPException(status_code=400, detail=make_error("invalid_custom_field", hard_errs[0]))
+            if isinstance(cf.get("name"), str) and cf["name"] not in system_names:
+                seen_names.append(cf["name"])
+    elif lf is not None:
+        raise HTTPException(
+            status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
+        )
+
+
 @provision_router.post("/execute")
 def provision_execute(req: ProvisionExecuteRequest):
     from backend import config as svcconfig
@@ -442,9 +655,23 @@ def provision_execute(req: ProvisionExecuteRequest):
 
     if req.log_fields:
         try:
-            cfg["log_fields"] = json.loads(req.log_fields)
-        except Exception:
-            logger.debug("provision_execute: step failed (ignored)", exc_info=True)
+            parsed_lf = json.loads(req.log_fields)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=400, detail=make_error("invalid_log_fields", "log_fields must be valid JSON")
+            )
+        if not isinstance(parsed_lf, dict):
+            raise HTTPException(
+                status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
+            )
+        cfg["log_fields"] = parsed_lf
+
+    if getattr(req, "rum_custom_condition", None) is not None and not getattr(req, "rum_enabled", False):
+        raw_rum_cond = (getattr(req, "rum_custom_condition", None) or "").strip()
+        if raw_rum_cond:
+            early_rum_err = validate_rum_custom_condition(raw_rum_cond)
+            if early_rum_err:
+                raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", early_rum_err))
 
     if req.cmcd_enabled:
         cfg["cmcd"] = {
@@ -480,6 +707,8 @@ def provision_execute(req: ProvisionExecuteRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
+    _validate_provision_vcl_inputs(cfg, strict_rum_path=True)
+
     bucket = cfg["fos_bucket_name"]
     if not re.fullmatch(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
         raise HTTPException(
@@ -498,7 +727,40 @@ def provision_execute(req: ProvisionExecuteRequest):
         )
 
     if cfg.get("cdn_url"):
-        domain = cfg["cdn_url"].replace("https://", "")
+        from urllib.parse import urlsplit
+
+        raw_cdn_url = str(cfg["cdn_url"]).strip()
+        try:
+            parts = urlsplit(raw_cdn_url)
+            port = parts.port
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error(
+                    "invalid_cdn_url",
+                    "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
+                ),
+            ) from None
+        domain = (parts.hostname or "").rstrip(".").lower()
+        if (
+            any(ch in raw_cdn_url for ch in ("\r", "\n", "\t", "\x00"))
+            or parts.scheme.lower() != "https"
+            or parts.username is not None
+            or parts.password is not None
+            or port is not None
+            or parts.path not in ("", "/")
+            or bool(parts.query)
+            or bool(parts.fragment)
+            or not domain
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=make_error(
+                    "invalid_cdn_url",
+                    "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
+                ),
+            )
+        cfg["cdn_url"] = f"https://{domain}"
         available, reason = _check_domain_available(domain, timeout=5)
         if not available and reason and "DNS" not in reason:
             raise HTTPException(
@@ -600,9 +862,32 @@ def _render_terraform(body: ProvisionConfigRequest) -> dict[str, str]:
     from backend.utils.terraform_gen import generate_terraform
 
     cfg = body.model_dump(exclude_none=True)
+    raw_lf = cfg.get("log_fields")
+    if isinstance(raw_lf, str):
+        if raw_lf.strip():
+            try:
+                parsed_lf = json.loads(raw_lf)
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_log_fields", "log_fields must be valid JSON")
+                )
+            if not isinstance(parsed_lf, dict):
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
+                )
+            cfg["log_fields"] = parsed_lf
+        else:
+            cfg.pop("log_fields", None)
+    _validate_provision_vcl_inputs(cfg, strict_rum_path=False)
     access_key = cfg.get("fos_access_key") or "YOUR_FOS_ACCESS_KEY"
     secret_key = cfg.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
-    return generate_terraform(cfg, access_key, secret_key)
+    try:
+        return generate_terraform(cfg, access_key, secret_key)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("invalid_terraform_config", "Invalid Terraform provisioning configuration."),
+        )
 
 
 @provision_router.post("/terraform/preview", response_model=TerraformPreviewResponse)
@@ -660,6 +945,36 @@ def provision_ingest(payload: ProvisionConfigRequest):
             body["log_period"] = parse_period(body["log_period"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
+
+    precheck_cfg: dict[str, Any] = {
+        "custom_condition": body.get("custom_condition"),
+        "provisioning": body.get("provisioning") if isinstance(body.get("provisioning"), dict) else {},
+        "rum_custom_condition": body.get("rum_custom_condition"),
+        "rum": body.get("rum") if isinstance(body.get("rum"), dict) else {},
+    }
+    log_fields_raw = body.get("log_fields")
+    parsed_ingest_lf: dict[str, Any] | None = None
+    if log_fields_raw:
+        if isinstance(log_fields_raw, str):
+            try:
+                loaded_lf = json.loads(log_fields_raw)
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_log_fields", "log_fields must be valid JSON")
+                )
+            if not isinstance(loaded_lf, dict):
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
+                )
+            parsed_ingest_lf = loaded_lf
+        elif isinstance(log_fields_raw, dict):
+            parsed_ingest_lf = log_fields_raw
+        else:
+            raise HTTPException(
+                status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
+            )
+        precheck_cfg["log_fields"] = parsed_ingest_lf
+    _validate_provision_vcl_inputs(precheck_cfg, strict_rum_path=True)
 
     fos_access_key = body.get("fos_access_key")
     fos_secret_key = body.get("fos_secret_key")
@@ -724,12 +1039,8 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "provisioning": {"fos_key_id": fos_key_id},
     }
 
-    log_fields_raw = body.get("log_fields")
-    if log_fields_raw:
-        try:
-            state["log_fields"] = json.loads(log_fields_raw) if isinstance(log_fields_raw, str) else log_fields_raw
-        except Exception:
-            logger.debug("provision_ingest: step failed (ignored)", exc_info=True)
+    if parsed_ingest_lf is not None:
+        state["log_fields"] = parsed_ingest_lf
 
     now_iso = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
     if any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version")) or isinstance(body.get("cmcd"), dict):

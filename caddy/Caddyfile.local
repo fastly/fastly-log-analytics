@@ -27,6 +27,7 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-FLA-Admin-Gateway delete
 			}
 		}
 	}
@@ -39,6 +40,8 @@
 :80 {
 	# Even the optional local public entry cannot impersonate the mTLS gateway.
 	request_header -X-Admin-Gateway-Token
+	request_header -X-FLA-Admin-Gateway
+	request_header -X-FLA-Frontend-Proxy
 	# /api/* → backend (loopback in the shared netns). flush_interval -1 keeps
 	# SSE streams (e.g. /api/cron-runs/stream) unbuffered; the timeouts cover
 	# the occasional slow analytics query.

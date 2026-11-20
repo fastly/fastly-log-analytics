@@ -403,7 +403,9 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
             matching_uas = [str(r["ua"]) for r in ua_rollup_rows if r.get("ua") and matcher(str(r["ua"]))]
             if not matching_uas:
                 return []
-            in_list = ", ".join(repr(u) for u in matching_uas[:500])
+            capped_uas = matching_uas[:500]
+            ua_params = {f"wkb_ua_{idx}": ua for idx, ua in enumerate(capped_uas)}
+            in_list = ", ".join(f"{{{key}:String}}" for key in ua_params)
             wk_span_s = (scope.end - scope.start).total_seconds() if scope.start and scope.end else 0.0
             wk_stride = (
                 30
@@ -422,6 +424,7 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                 f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
                 f"PREWHERE __WHERE__{wk_stride_sql} AND custom_fields['ua'] IN ({in_list}) AND client_ip != '' "
                 "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
+                **ua_params,
             )
             if not rows and wk_stride > 1:
                 wk_stride = 1
@@ -432,6 +435,7 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                     f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
                     f"PREWHERE __WHERE__ AND custom_fields['ua'] IN ({in_list}) AND client_ip != '' "
                     "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
+                    **ua_params,
                 )
             return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"]) * wk_stride) for r in rows])
     pattern = get_bot_regex_pattern(500)

@@ -130,6 +130,8 @@ def publish_tos_version(version: str, text: str, *, con: Any = None) -> None:
 
 MAX_CONCURRENT_ANALYST_SESSIONS_KEY = "max_concurrent_analyst_sessions"
 SHARE_AUDIT_RETENTION_DAYS_KEY = "share_audit_retention_days"
+SHARING_ENABLED_KEY = "sharing_enabled"
+SHARING_PUBLIC_ENDPOINT_KEY = "sharing_public_endpoint"
 
 
 def get_setting(key: str, default: str | None = None, *, con: Any = None) -> str | None:
@@ -162,6 +164,42 @@ def get_max_concurrent_sessions(*, con: Any = None) -> int:
         return max(1, int(raw or "10"))
     except (TypeError, ValueError):
         return 10
+
+
+def _read_setting_uncached(key: str, *, con: Any = None) -> str | None:
+    c = con or get_global_share_con()
+    row = c.execute("SELECT value FROM share_settings WHERE key=?", (key,)).fetchone()
+    val = row["value"] if row else None
+    if con is None:
+        _SETTINGS_CACHE[key] = val
+    return val
+
+
+def get_sharing_enabled(*, bypass_cache: bool = False, con: Any = None) -> bool | None:
+    raw = (
+        _read_setting_uncached(SHARING_ENABLED_KEY, con=con)
+        if bypass_cache
+        else get_setting(SHARING_ENABLED_KEY, None, con=con)
+    )
+    if raw is None:
+        return None
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def get_sharing_public_endpoint(*, bypass_cache: bool = False, con: Any = None) -> str | None:
+    raw = (
+        _read_setting_uncached(SHARING_PUBLIC_ENDPOINT_KEY, con=con)
+        if bypass_cache
+        else get_setting(SHARING_PUBLIC_ENDPOINT_KEY, None, con=con)
+    )
+    cleaned = (raw or "").strip()
+    return cleaned or None
+
+
+def set_sharing_enabled(enabled: bool, *, public_endpoint: str | None = None, con: Any = None) -> None:
+    set_setting(SHARING_ENABLED_KEY, "1" if enabled else "0", con=con)
+    if public_endpoint and public_endpoint.strip():
+        set_setting(SHARING_PUBLIC_ENDPOINT_KEY, public_endpoint.strip(), con=con)
 
 
 # ── Persisted analyst session CRUD ──────────────────────────────────────────
@@ -198,6 +236,42 @@ def upsert_session(session: dict, *, con: Any = None) -> None:
 
 def delete_session(session_id: str, *, con: Any = None) -> None:
     _exec_rowcount("DELETE FROM remote_sessions WHERE session_id=?", (session_id,), con=con)
+
+
+def update_session_activity(
+    session_id: str,
+    *,
+    ip_address: str,
+    user_agent: str,
+    last_active_time: str,
+    last_activity: str | None,
+    con: Any = None,
+) -> bool:
+    """Update mutable activity fields on an EXISTING session row without ever resurrecting deleted rows."""
+    return _exec_rowcount(
+        """UPDATE remote_sessions
+              SET ip_address = ?,
+                  user_agent = ?,
+                  last_active_time = ?,
+                  last_activity = ?
+            WHERE session_id = ?""",
+        (ip_address, user_agent, last_active_time, last_activity, session_id),
+        con=con,
+    )
+
+
+def delete_sessions_for_invite(invite_id: str, *, con: Any = None) -> int:
+    c = con or get_global_share_con()
+    cur = c.execute("DELETE FROM remote_sessions WHERE invite_id=?", (invite_id,))
+    c.commit()
+    return int(cur.rowcount or 0)
+
+
+def delete_all_sessions(*, con: Any = None) -> int:
+    c = con or get_global_share_con()
+    cur = c.execute("DELETE FROM remote_sessions")
+    c.commit()
+    return int(cur.rowcount or 0)
 
 
 _JSON_DICT_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
@@ -337,9 +411,259 @@ def purge_all_share_records(
 _NAME_RE = re.compile(r"^[\w .,'\-]{1,80}$", re.UNICODE)
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 IP_FAMILY_KEYS = frozenset({"ip", "client_ip", "ip_address", "remote_addr"})
-SESSION_ID_KEYS = frozenset({"cookie_session", "cid"})
+EXTRA_IP_PII_KEYS = frozenset(
+    {
+        "c_ip",
+        "x-forwarded-for",
+        "x_forwarded_for",
+        "true-client-ip",
+        "true_client_ip",
+        "fastly-client-ip",
+        "fastly_client_ip",
+    }
+)
+SESSION_ID_KEYS = frozenset({"cookie_session", "cid", "client_id", "edge_sid", "sid", "session_id"})
+PII_IP_KEYS = IP_FAMILY_KEYS | EXTRA_IP_PII_KEYS | frozenset({"oip"})
+PII_SESSION_KEYS = SESSION_ID_KEYS
+SAVED_VIEW_PII_FILTER_KEYS = PII_IP_KEYS | PII_SESSION_KEYS
+SHARED_PII_KEYS = SAVED_VIEW_PII_FILTER_KEYS
 _NONWORD_RE = re.compile(r"[^\w]")
+_NONWORD_UNDERSCORE_RE = re.compile(r"[^\w]+")
 _MAYBE_IP_RE = re.compile(r"[0-9A-Fa-f:.]+")
+_BRACKET_PII_KEY_RE = re.compile(r"\[['\"`]?([^'\"`\]]+)['\"`]?\]")
+_IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
+_UA_PROD_VER_RE = re.compile(
+    r"\b(?:Mozilla|Chrome|Chromium|CriOS|Firefox|FxiOS|Safari|Version|Edg|EdgA|EdgiOS|OPR|AppleWebKit|Gecko|Mobile)"
+    r"/\d+(?:\.\d+){1,3}\b",
+    re.IGNORECASE,
+)
+_EMBEDDED_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+_EMBEDDED_IPV6_RE = re.compile(
+    r"(?<![A-Fa-f0-9:])(?:"
+    r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
+    r"|(?:[A-Fa-f0-9]{1,4}:){1,6}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
+    r"|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6})"
+    r")(?![A-Fa-f0-9:])"
+)
+_SAVED_VIEW_STRUCTURAL_KEYS = frozenset(
+    {
+        "logic",
+        "operator",
+        "op",
+        "value",
+        "values",
+        "filters",
+        "clauses",
+        "conditions",
+        "where",
+        "rules",
+        "timerange",
+        "time_range",
+        "start",
+        "end",
+        "service_id",
+        "serviceid",
+        "sort",
+        "order",
+        "limit",
+    }
+)
+
+
+def _canon_pii_key(val: str) -> str:
+    return _NONWORD_UNDERSCORE_RE.sub("_", val.strip()).strip("_").lower()
+
+
+_SAVED_VIEW_RECURSE_CONTAINERS = frozenset(
+    {
+        "filters",
+        "clauses",
+        "conditions",
+        "where",
+        "rules",
+        "and",
+        "or",
+        "not",
+        "query",
+        "query_filters",
+        "filters_json",
+        "_view_extras",
+        "extras",
+    }
+)
+_CLAUSE_FIELD_ATTRS: tuple[str, ...] = ("field", "column", "col", "key", "dimension")
+_CLAUSE_OP_SIBLINGS = frozenset(
+    {
+        "op",
+        "operator",
+        "value",
+        "values",
+        "eq",
+        "ne",
+        "neq",
+        "in",
+        "nin",
+        "not_in",
+        "contains",
+        "not_contains",
+        "like",
+        "ilike",
+        "regex",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "is_null",
+        "not_null",
+        "mode",
+        "include",
+        "exclude",
+    }
+)
+_SAVED_VIEW_INSPECT_ATTRS: tuple[str, ...] = (
+    "filters_json",
+    "filters",
+    "query_filters",
+    "query",
+    "_view_extras",
+    "extras",
+)
+
+
+def is_saved_view_pii_key(key: str) -> bool:
+    if not isinstance(key, str) or not key.strip():
+        return False
+    raw = key.strip().lower()
+    candidates = [raw]
+    for match in _BRACKET_PII_KEY_RE.finditer(raw):
+        inner = match.group(1).strip().lower()
+        if inner:
+            candidates.append(inner)
+    unbracketed = _BRACKET_PII_KEY_RE.sub("", raw)
+    if "." in unbracketed:
+        candidates.extend(seg.strip() for seg in unbracketed.split(".") if seg.strip())
+    for cand in candidates:
+        if cand in SAVED_VIEW_PII_FILTER_KEYS or _canon_pii_key(cand) in SAVED_VIEW_PII_FILTER_KEYS:
+            return True
+    return False
+
+
+def _extract_saved_view_filter_keys(filters_raw: Any) -> tuple[set[str], bool]:
+    keys: set[str] = set()
+    malformed = False
+
+    def _collect_string(raw_str: str, *, structural: bool) -> None:
+        nonlocal malformed
+        stripped = raw_str.strip()
+        if not stripped:
+            return
+        if stripped[0] in ("{", "["):
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                malformed = True
+                return
+            _collect(parsed, structural=True)
+            return
+        if structural:
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                for match in _BRACKET_PII_KEY_RE.finditer(stripped):
+                    keys.add(match.group(1))
+                for tok in _IDENT_TOKEN_RE.findall(stripped):
+                    keys.add(tok)
+                malformed = True
+                return
+            _collect(parsed, structural=True)
+
+    def _collect(node: Any, *, structural: bool = False) -> None:
+        nonlocal malformed
+        if node is None or node == "" or node == [] or node == {}:
+            return
+        if isinstance(node, str):
+            _collect_string(node, structural=structural)
+            return
+        if isinstance(node, list):
+            for item in node:
+                _collect(item, structural=structural)
+            return
+        if isinstance(node, dict):
+            has_clause_field = False
+            for fk in _CLAUSE_FIELD_ATTRS:
+                fv = node.get(fk)
+                if isinstance(fv, str) and fv.strip():
+                    keys.add(fv.strip())
+                    has_clause_field = True
+            name_val = node.get("name")
+            if isinstance(name_val, str) and name_val.strip() and any(sk in node for sk in _CLAUSE_OP_SIBLINGS):
+                keys.add(name_val.strip())
+                has_clause_field = True
+
+            for k, v in node.items():
+                if not isinstance(k, str):
+                    continue
+                kl = k.strip().lower()
+                if kl in _SAVED_VIEW_RECURSE_CONTAINERS:
+                    _collect(v, structural=True)
+                    continue
+                if kl in _SAVED_VIEW_STRUCTURAL_KEYS:
+                    if isinstance(v, (dict, list)):
+                        _collect(v, structural=False)
+                    elif isinstance(v, str) and v.strip().startswith(("{", "[")):
+                        _collect_string(v, structural=False)
+                    continue
+                if not (has_clause_field and kl in (*_CLAUSE_FIELD_ATTRS, "name", *_CLAUSE_OP_SIBLINGS)):
+                    if v not in (None, "", [], {}):
+                        keys.add(k)
+                if isinstance(v, (dict, list)):
+                    _collect(v, structural=False)
+                elif isinstance(v, str) and v.strip().startswith(("{", "[")):
+                    _collect_string(v, structural=False)
+            return
+        if structural and not isinstance(node, (int, float, bool)):
+            malformed = True
+
+    _collect(filters_raw, structural=True)
+    return keys, malformed
+
+
+def saved_view_contains_pii(view: Any) -> bool:
+    sources: list[Any] = []
+    if isinstance(view, dict):
+        for attr in _SAVED_VIEW_INSPECT_ATTRS:
+            if attr in view and view.get(attr) is not None:
+                sources.append(view.get(attr))
+    else:
+        for attr in _SAVED_VIEW_INSPECT_ATTRS:
+            raw_val = getattr(view, attr, None)
+            if raw_val is not None:
+                sources.append(raw_val)
+        model_extra = getattr(view, "model_extra", None)
+        if isinstance(model_extra, dict):
+            for attr in _SAVED_VIEW_INSPECT_ATTRS:
+                if attr in model_extra and model_extra.get(attr) is not None:
+                    sources.append(model_extra.get(attr))
+    for src in sources:
+        ek, em = _extract_saved_view_filter_keys(src)
+        if em or any(is_saved_view_pii_key(k) for k in ek):
+            return True
+    return False
+
+
+def filter_saved_views_for_pii(
+    views: list[Any] | None,
+    pii_policy: dict[str, Any] | None = None,
+    *,
+    mask_ips: bool | None = None,
+) -> list[Any]:
+    if not views:
+        return []
+    should_mask = mask_ips if mask_ips is not None else bool(pii_policy and pii_policy.get("mask_ips"))
+    if not should_mask:
+        return list(views)
+    return [view for view in views if not saved_view_contains_pii(view)]
 
 
 class InvalidNameError(ValueError):
@@ -479,26 +803,99 @@ def mask_ip(ip: str) -> str:
     return str(ipaddress.IPv6Address(bytes(packed)))
 
 
+def mask_ip_or_chain(val: str) -> str:
+    if not val:
+        return val
+    if "," in val:
+        parts = [p.strip() for p in val.split(",")]
+        if len(parts) > 1 and all(parts):
+            masked_parts: list[str] = []
+            for p in parts:
+                try:
+                    ipaddress.ip_address(p)
+                except ValueError:
+                    return mask_ip(val)
+                masked_parts.append(mask_ip(p))
+            return ", ".join(masked_parts)
+    return mask_ip(val)
+
+
+def scrub_ip_text(val: str) -> str:
+    """Mask IPv4/IPv6 literals embedded in URLs or free text while preserving UA version tokens."""
+    if not isinstance(val, str) or not val or ("." not in val and ":" not in val):
+        return val
+    ua_spans = [(m.start(), m.end()) for m in _UA_PROD_VER_RE.finditer(val)]
+
+    def _in_ua(start: int, end: int) -> bool:
+        return any(s <= start and end <= e for s, e in ua_spans)
+
+    def _sub_v4(match: re.Match[str]) -> str:
+        if _in_ua(match.start(), match.end()):
+            return match.group(0)
+        cand = match.group(0)
+        try:
+            ipaddress.IPv4Address(cand)
+        except ValueError:
+            return cand
+        return mask_ip(cand)
+
+    def _sub_v6(match: re.Match[str]) -> str:
+        cand = match.group(0)
+        try:
+            ipaddress.IPv6Address(cand)
+        except ValueError:
+            return cand
+        return mask_ip(cand)
+
+    out = _EMBEDDED_IPV4_RE.sub(_sub_v4, val) if "." in val else val
+    if ":" in out:
+        out = _EMBEDDED_IPV6_RE.sub(_sub_v6, out)
+    return out
+
+
 def apply_pii_policy(obj: Any, policy: dict) -> Any:
     if not policy or not policy.get("mask_ips"):
         return obj
-    masked_keys = IP_FAMILY_KEYS
+    masked_keys = PII_IP_KEYS
+
+    def _is_session_key(k: Any) -> bool:
+        if not isinstance(k, str):
+            return False
+        return is_saved_view_pii_key(k) and (
+            k.strip().lower() in SESSION_ID_KEYS
+            or _canon_pii_key(k) in SESSION_ID_KEYS
+            or any(
+                seg in SESSION_ID_KEYS or _canon_pii_key(seg) in SESSION_ID_KEYS
+                for seg in [
+                    *(m.group(1).strip().lower() for m in _BRACKET_PII_KEY_RE.finditer(k)),
+                    *(s.strip().lower() for s in _BRACKET_PII_KEY_RE.sub("", k).split(".") if s.strip()),
+                ]
+            )
+        )
+
+    def _is_masked_ip_key(k: Any) -> bool:
+        if not isinstance(k, str):
+            return False
+        return is_saved_view_pii_key(k) and not _is_session_key(k)
 
     def _walk(node: Any, parent_key: Any = None, field_ctx: Any = None) -> Any:
         if isinstance(node, dict):
             out: dict[str, Any] = {}
             declared_field = node.get("field")
-            canon_field = _NONWORD_RE.sub("", declared_field).lower() if isinstance(declared_field, str) else None
+            canon_field = _canon_pii_key(declared_field) if isinstance(declared_field, str) else None
             eff_ctx = (
                 canon_field
                 if canon_field is not None and (canon_field in SESSION_ID_KEYS or canon_field in masked_keys)
                 else field_ctx
             )
             for k, v in node.items():
-                if isinstance(v, str) and k in SESSION_ID_KEYS:
+                canon_k = _canon_pii_key(k) if isinstance(k, str) else k
+                if canon_k == "top_ips" and isinstance(v, list):
+                    out[k] = []
+                elif isinstance(v, str) and _is_session_key(k):
                     out[k] = "[redacted]" if v else v
-                elif isinstance(v, str) and k in masked_keys:
-                    out[k] = mask_ip(v)
+                elif isinstance(v, str) and _is_masked_ip_key(k):
+                    out[k] = mask_ip_or_chain(v)
                 elif k in ("min", "max") and isinstance(v, str):
                     out[k] = _mask_ip_scalar(v)
                 elif k == "value" and isinstance(v, str) and eff_ctx in masked_keys:
@@ -506,7 +903,6 @@ def apply_pii_policy(obj: Any, policy: dict) -> Any:
                 elif k == "value" and isinstance(v, str) and eff_ctx in SESSION_ID_KEYS:
                     out[k] = "[redacted]" if v else v
                 else:
-                    canon_k = _NONWORD_RE.sub("", k).lower() if isinstance(k, str) else k
                     next_ctx = canon_k if (canon_k in masked_keys or canon_k in SESSION_ID_KEYS) else eff_ctx
                     out[k] = _walk(v, parent_key=k, field_ctx=next_ctx)
             return out
@@ -514,9 +910,9 @@ def apply_pii_policy(obj: Any, policy: dict) -> Any:
             return [
                 (
                     ("[redacted]" if x else x)
-                    if isinstance(x, str) and parent_key in SESSION_ID_KEYS
-                    else mask_ip(x)
-                    if isinstance(x, str) and parent_key in masked_keys
+                    if isinstance(x, str) and _is_session_key(parent_key)
+                    else mask_ip_or_chain(x)
+                    if isinstance(x, str) and _is_masked_ip_key(parent_key)
                     else _walk(x, parent_key=parent_key, field_ctx=field_ctx)
                 )
                 for x in node

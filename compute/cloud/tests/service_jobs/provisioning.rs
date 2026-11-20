@@ -1603,3 +1603,77 @@ fn superseded_teardown_cannot_delete_data_after_loading_service_before_lease() {
     );
     assert_eq!(platform.service()["service"]["status"], "torn_down");
 }
+
+#[test]
+fn sec20a_service_patch_rejects_poisoned_custom_and_disabled_rum_conditions() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    let generation = platform.service()["generation"].clone();
+
+    for bad_cond in [
+        ") || true || (",
+        "req.http.x-fastly-key != \"\"",
+        "header.get(req, \"Auth\" + \"orization\") != \"\"",
+        "req.http.Cookie:flp_session != \"\"",
+    ] {
+        let bad_custom = platform.call(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({
+                "generation": generation,
+                "custom_condition": bad_cond
+            }),
+        );
+        assert_eq!(bad_custom.status, 400, "PATCH must reject {bad_cond}");
+    }
+
+    for bad_rum in [
+        ") || table.lookup(fos_credentials, \"secret_key\") != \"\" || (",
+        "req.http.x-flp-front-key != \"\"",
+        "REQ.URL.path ~ \"^/secret\"",
+    ] {
+        let bad_disabled_rum = platform.call(
+            "PATCH",
+            "/api/admin/services/fixtureService",
+            json!({
+                "generation": generation,
+                "rum_enabled": false,
+                "rum_custom_condition": bad_rum
+            }),
+        );
+        assert_eq!(
+            bad_disabled_rum.status, 400,
+            "PATCH rum must reject {bad_rum}"
+        );
+        let body: Value = serde_json::from_slice(&bad_disabled_rum.body).unwrap();
+        assert_eq!(body["error"], "invalid_rum_settings");
+
+        let bad_reconcile = platform.call(
+            "POST",
+            "/api/admin/services/fixtureService/reconcile",
+            json!({
+                "generation": generation,
+                "rum": {
+                    "enabled": true,
+                    "custom_condition": bad_rum
+                }
+            }),
+        );
+        assert_eq!(
+            bad_reconcile.status, 400,
+            "reconcile rum must reject {bad_rum}"
+        );
+    }
+
+    let valid_patch = platform.call(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": generation,
+            "custom_condition": "req.method == \"GET\"",
+            "rum_enabled": false,
+            "rum_custom_condition": "req.http.User-Agent !~ \"bot\""
+        }),
+    );
+    assert_eq!(valid_patch.status, 200);
+}

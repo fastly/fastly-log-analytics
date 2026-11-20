@@ -12,6 +12,337 @@ pub const DEFAULT_LOG_PERIOD: i64 = 60;
 /// it, so shorter periods add files and compaction work without making the dashboard fresher.
 pub const MIN_LOG_PERIOD: i64 = 60;
 
+const FORBIDDEN_VCL_KEYWORDS: &[&str] = &[
+    "synthetic",
+    "call",
+    "return",
+    "error",
+    "restart",
+    "set",
+    "unset",
+    "add",
+    "esi",
+    "include",
+    "import",
+    "declare",
+];
+
+const FORBIDDEN_VCL_CALLS: &[&str] = &[
+    "table.lookup",
+    "table.contains",
+    "header.get",
+    "header.filter_except",
+    "header.filter",
+    "header.set",
+    "header.unset",
+];
+
+const FORBIDDEN_VCL_IDENTIFIERS: &[&str] = &[
+    "fos_credentials",
+    "session_scoring_secrets",
+    "cdn_auth",
+    "flp_fos_credentials",
+    "flp_front_auth",
+    "flp_fos_buckets",
+];
+
+const FORBIDDEN_LOG_HEADERS: &[&str] = &[
+    "x-edge-scorer-auth",
+    "authorization",
+    "proxy-authorization",
+    "fastly-key",
+    "x-fastly-key",
+    "x-flp-front-key",
+    "x-flp-worker-key",
+    "x-flp-clock-secret",
+    "cookie",
+];
+
+/// Scans a VCL boolean/log expression for balanced `"` and `(` / `)` without C-style `\"`
+/// escaping (Fastly VCL `"..."` strings do NOT escape `"` with `\`, and `\"` closes the string)
+/// or `%XX` hex escapes inside double-quoted literals (which Fastly VCL decodes at compile time).
+/// Replaces quoted string interiors with spaces in the returned unquoted projection so keyword,
+/// function, dictionary, and header checks can inspect unquoted VCL tokens cleanly.
+pub(super) fn scan_vcl_delimiters(input: &str) -> Result<String, &'static str> {
+    let bytes = input.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_quotes = false;
+    let mut prev_backslash_in_quotes = false;
+    let mut unquoted = String::with_capacity(input.len());
+    for (idx, ch) in input.char_indices() {
+        if in_quotes {
+            if prev_backslash_in_quotes && ch == '"' {
+                return Err("backslash-escaped quotes are not valid in Fastly VCL strings");
+            }
+            if ch == '%'
+                && idx + 2 < bytes.len()
+                && bytes[idx + 1].is_ascii_hexdigit()
+                && bytes[idx + 2].is_ascii_hexdigit()
+            {
+                return Err("percent-encoded hex escapes are not allowed in VCL string literals");
+            }
+            prev_backslash_in_quotes = ch == '\\';
+            if ch == '"' {
+                in_quotes = false;
+                prev_backslash_in_quotes = false;
+                unquoted.push('"');
+            } else {
+                unquoted.push(' ');
+            }
+            continue;
+        }
+        if input[idx..].starts_with("*/") {
+            return Err("orphan block-comment closer");
+        }
+        if ch == '"' {
+            in_quotes = true;
+            prev_backslash_in_quotes = false;
+            unquoted.push('"');
+            continue;
+        }
+        if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth -= 1;
+            if depth < 0 {
+                return Err("unbalanced parentheses");
+            }
+        }
+        unquoted.push(ch);
+    }
+    if in_quotes || depth != 0 {
+        return Err("unbalanced quotes or parentheses");
+    }
+    Ok(unquoted)
+}
+
+fn contains_vcl_keyword(unquoted_lower: &str, keyword: &str) -> bool {
+    let bytes = unquoted_lower.as_bytes();
+    for (start, matched) in unquoted_lower.match_indices(keyword) {
+        let end = start + matched.len();
+        let before_ok = start == 0
+            || !(bytes[start - 1].is_ascii_alphanumeric()
+                || matches!(bytes[start - 1], b'_' | b'.' | b'-' | b':'));
+        let after_ok = end >= bytes.len()
+            || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_forbidden_identifier(unquoted_lower: &str) -> Option<&'static str> {
+    let bytes = unquoted_lower.as_bytes();
+    for &ident in FORBIDDEN_VCL_IDENTIFIERS {
+        for (start, matched) in unquoted_lower.match_indices(ident) {
+            let end = start + matched.len();
+            let before_ok = start == 0
+                || !(bytes[start - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[start - 1], b'_' | b'-'));
+            let after_ok = end >= bytes.len()
+                || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
+            if before_ok && after_ok {
+                return Some(ident);
+            }
+        }
+    }
+    None
+}
+
+fn contains_forbidden_vcl_call(s: &str) -> Option<&'static str> {
+    let compact: String = s
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    FORBIDDEN_VCL_CALLS
+        .iter()
+        .copied()
+        .find(|call| compact.contains(call))
+}
+
+pub(super) fn normalize_vcl_dots(unquoted_lower: &str) -> String {
+    let mut out = String::with_capacity(unquoted_lower.len());
+    let mut chars = unquoted_lower.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_whitespace() {
+            while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                chars.next();
+            }
+            if chars.peek() == Some(&'.') {
+                chars.next();
+                while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                    chars.next();
+                }
+                out.push('.');
+            } else {
+                out.push(' ');
+            }
+        } else if ch == '.' {
+            while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+                chars.next();
+            }
+            out.push('.');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn contains_forbidden_secret_header(unquoted_lower: &str, allow_req_set_cookie: bool) -> bool {
+    let normalized = normalize_vcl_dots(unquoted_lower);
+    let norm_bytes = normalized.as_bytes();
+    for (pos, _) in normalized.match_indices(".http.") {
+        let mut scope_start = pos;
+        while scope_start > 0
+            && (norm_bytes[scope_start - 1].is_ascii_alphanumeric()
+                || matches!(norm_bytes[scope_start - 1], b'_' | b'-'))
+        {
+            scope_start -= 1;
+        }
+        let scope = &normalized[scope_start..pos];
+        let hdr_start = pos + ".http.".len();
+        let mut hdr_end = hdr_start;
+        while hdr_end < norm_bytes.len()
+            && (norm_bytes[hdr_end].is_ascii_alphanumeric()
+                || matches!(norm_bytes[hdr_end], b'_' | b'-'))
+        {
+            hdr_end += 1;
+        }
+        let header = &normalized[hdr_start..hdr_end];
+        if FORBIDDEN_LOG_HEADERS.contains(&header)
+            || header == "x-flp"
+            || header.starts_with("x-flp-")
+        {
+            return true;
+        }
+        if header == "set-cookie" && (!allow_req_set_cookie || !matches!(scope, "req" | "bereq")) {
+            return true;
+        }
+    }
+    let bytes = unquoted_lower.as_bytes();
+    for header in FORBIDDEN_LOG_HEADERS {
+        if *header == "cookie" {
+            continue;
+        }
+        for (start, matched) in unquoted_lower.match_indices(header) {
+            let end = start + matched.len();
+            let before_ok = start == 0
+                || !(bytes[start - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[start - 1], b'_' | b'-'));
+            let after_ok = end >= bytes.len()
+                || !(bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'-'));
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn validate_vcl_condition(condition: &str) -> Result<(), String> {
+    let trimmed = condition.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    if trimmed.len() > 2048 {
+        return Err("custom_condition exceeds maximum length of 2048 characters".into());
+    }
+    if trimmed.chars().any(char::is_control)
+        || trimmed.contains([';', '{', '}'])
+        || trimmed.contains("%{")
+        || trimmed.contains("}V")
+        || trimmed.contains("//")
+        || trimmed.contains("/*")
+        || trimmed.contains('#')
+    {
+        return Err("custom_condition contains forbidden characters or comments".into());
+    }
+    if trimmed.contains('\'') {
+        return Err("VCL string literals use double quotes, not single quotes.".into());
+    }
+    let unquoted =
+        scan_vcl_delimiters(trimmed).map_err(|reason| format!("custom_condition has {reason}"))?;
+    let unquoted_lower = unquoted.to_ascii_lowercase();
+    if let Some(call) = contains_forbidden_vcl_call(&unquoted_lower) {
+        return Err(format!("custom_condition must not call {call}"));
+    }
+    if let Some(ident) = contains_forbidden_identifier(&unquoted_lower) {
+        return Err(format!(
+            "custom_condition must not reference dictionary '{ident}'"
+        ));
+    }
+    for kw in FORBIDDEN_VCL_KEYWORDS {
+        if contains_vcl_keyword(&unquoted_lower, kw) {
+            return Err(format!(
+                "custom_condition contains forbidden VCL keyword '{kw}'"
+            ));
+        }
+    }
+    if contains_forbidden_secret_header(&unquoted_lower, true) {
+        return Err(
+            "custom_condition must not reference internal, authentication, or cookie headers"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_vcl_log_expression(expression: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    if expression.contains(['\n', '\r']) || expression.chars().any(char::is_control) {
+        errors.push("'vcl_log_expression' must not contain raw newlines".into());
+        return errors;
+    }
+    if expression.contains(';') {
+        errors.push("'vcl_log_expression' must not contain semicolons (;)".into());
+    }
+    if expression.contains("//") || expression.contains("/*") || expression.contains('#') {
+        errors.push("'vcl_log_expression' must not contain VCL comments (//, /*, or #)".into());
+    }
+    if expression.contains(['{', '}']) || expression.contains("%{") || expression.contains("}V") {
+        errors.push(
+            "'vcl_log_expression' must not contain braces or format specifiers ({, }, %{, }V)"
+                .into(),
+        );
+    }
+    if expression.contains('\'') {
+        errors.push("'vcl_log_expression' must not contain single quotes (')".into());
+    }
+    match scan_vcl_delimiters(expression) {
+        Ok(unquoted) => {
+            let unquoted_lower = unquoted.to_ascii_lowercase();
+            if let Some(call) = contains_forbidden_vcl_call(&unquoted_lower) {
+                errors.push(format!("'vcl_log_expression' must not call {call}"));
+            }
+            if let Some(ident) = contains_forbidden_identifier(&unquoted_lower) {
+                errors.push(format!(
+                    "'vcl_log_expression' must not reference dictionary '{ident}'"
+                ));
+            }
+            for kw in FORBIDDEN_VCL_KEYWORDS {
+                if contains_vcl_keyword(&unquoted_lower, kw) {
+                    errors.push(format!(
+                        "'vcl_log_expression' contains forbidden VCL keyword '{kw}'"
+                    ));
+                }
+            }
+            if contains_forbidden_secret_header(&unquoted_lower, false) {
+                errors.push(
+                    "'vcl_log_expression' must not reference internal, authentication, or cookie headers"
+                        .into(),
+                );
+            }
+        }
+        Err(reason) => {
+            errors.push(format!("'vcl_log_expression' has {reason}"));
+        }
+    }
+    errors
+}
+
 pub(crate) fn templates() -> &'static Value {
     static DATA: OnceLock<Value> = OnceLock::new();
     DATA.get_or_init(|| {
@@ -118,8 +449,15 @@ pub fn generate_log_format(config: &Value) -> Result<String, String> {
         limit = limit.min(budget).max(0);
         budget -= limit;
         let stage = text(&field, "collection_stage", "edge");
+        let raw = text(&field, "vcl_log_expression", "");
+        if !raw.is_empty() {
+            let errs = validate_vcl_log_expression(raw);
+            if !errs.is_empty() {
+                return Err(errs.join("; "));
+            }
+        }
         let expression = if stage == "deliver" {
-            text(&field, "vcl_log_expression", "").to_owned()
+            raw.to_owned()
         } else {
             format!(
                 "req.http.x-fos-{}-data:{name}",
@@ -239,8 +577,15 @@ pub fn generate_compact_log_format(config: &Value) -> Result<String, String> {
         limit = limit.min(budget).max(0);
         budget -= limit;
         let stage = text(&field, "collection_stage", "edge");
+        let raw = text(&field, "vcl_log_expression", "");
+        if !raw.is_empty() {
+            let errs = validate_vcl_log_expression(raw);
+            if !errs.is_empty() {
+                return Err(errs.join("; "));
+            }
+        }
         let expression = if stage == "deliver" {
-            text(&field, "vcl_log_expression", "").to_owned()
+            raw.to_owned()
         } else {
             format!(
                 "req.http.x-fos-{}-data:{name}",
@@ -354,6 +699,10 @@ fn capture_statements(config: &Value) -> Result<Vec<String>, String> {
             let expression = field["vcl_log_expression"]
                 .as_str()
                 .ok_or_else(|| format!("Missing VCL expression for custom field '{name}'"))?;
+            let errs = validate_vcl_log_expression(expression);
+            if !errs.is_empty() {
+                return Err(errs.join("; "));
+            }
             lines.push(format!(
                 "set req.http.x-fos-edge-data:{name} = {expression};"
             ));
@@ -441,10 +790,15 @@ pub fn generate_capture_vcl_with_cmcd(
         fetch_lines.push("# --- Custom Origin Fields Start ---".into());
         fetch_lines.push("if (req.backend.is_origin) {".into());
         for field in &origin {
+            let expression = text(field, "vcl_log_expression", "");
+            let errs = validate_vcl_log_expression(expression);
+            if !errs.is_empty() {
+                return Err(errs.join("; "));
+            }
             fetch_lines.push(format!(
                 "  set beresp.http.x-fos-origin-data:{} = {};",
                 text(field, "name", ""),
-                text(field, "vcl_log_expression", "")
+                expression
             ));
         }
         fetch_lines.push("}".into());
@@ -488,6 +842,10 @@ pub fn generate_capture_vcl_with_cmcd(
         for field in deliver {
             let name = text(field, "name", "");
             let expression = text(field, "vcl_log_expression", "");
+            let errs = validate_vcl_log_expression(expression);
+            if !errs.is_empty() {
+                return Err(errs.join("; "));
+            }
             deliver_lines.push(format!("if ({expression} != \"\") {{"));
             deliver_lines.push(format!(
                 "  set req.http.x-fos-edge-data:{name} = {expression};"
@@ -626,6 +984,17 @@ pub fn desired_snippets(state: &Value) -> Result<Value, String> {
                         .iter()
                         .map(|line| format!("  {line}")),
                 );
+            } else if rum.enabled {
+                restarts_lines.push(
+                    "  # [security] strip client-supplied internal-routing headers".to_owned(),
+                );
+                restarts_lines.extend(
+                    scrub_statements(&config)
+                        .iter()
+                        .map(|line| format!("  {line}")),
+                );
+                restarts_lines.push("  unset req.http.x-skip-rum-logging;".to_owned());
+                restarts_lines.push("  unset req.http.x-rum-req-id;".to_owned());
             }
             if rum.enabled {
                 restarts_lines
@@ -696,6 +1065,14 @@ pub fn desired_snippets(state: &Value) -> Result<Value, String> {
                         parts.push(format!(
                             "# Section 6: Log Field Capture ({subroutine})\n{section}"
                         ));
+                    }
+                }
+            } else if rum.enabled && matches!(subroutine, "vcl_miss" | "vcl_pass") {
+                if let Some(base_scrub) =
+                    templates()["base"][subroutine.trim_start_matches("vcl_")].as_str()
+                {
+                    if !base_scrub.trim().is_empty() {
+                        parts.push(base_scrub.trim_end().to_owned());
                     }
                 }
             }
@@ -913,6 +1290,7 @@ pub fn desired_conditions(state: &Value) -> Result<Value, String> {
         }
         let condition = text(state, "custom_condition", "").trim();
         if !condition.is_empty() {
+            validate_vcl_condition(condition)?;
             parts.push(format!("({condition})"));
         }
         conditions.push(

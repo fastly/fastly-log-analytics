@@ -261,15 +261,8 @@ pub fn validate_custom_field(field: &Value, existing_names: &[String]) -> Vec<St
             "'vcl_log_expression' must be ≤ 512 characters (got {})",
             expression.chars().count()
         ));
-    } else if expression.contains('\n') {
-        errors.push("'vcl_log_expression' must not contain raw newlines".into());
     } else {
-        if expression.contains(';') {
-            errors.push("'vcl_log_expression' must not contain semicolons (;)".into());
-        }
-        if expression.contains("//") || expression.contains("/*") || expression.contains('#') {
-            errors.push("'vcl_log_expression' must not contain VCL comments (//, /*, or #)".into());
-        }
+        errors.extend(crate::logging::validate_vcl_log_expression(expression));
     }
     let kind = field["duckdb_type"].as_str().unwrap_or("");
     let compatible: &[&str] = match kind {

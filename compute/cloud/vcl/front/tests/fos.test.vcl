@@ -439,3 +439,173 @@ sub direct_fos_parquet_path_falls_back_to_api_file_when_session_cookie_changes()
   assert.state(pass);
   assert.equal(req.url, {"/api/file?key=goal2-live-20261029%2Fprocessed%2Frequest%2Fa.parquet"});
 }
+
+
+// @scope: recv
+sub fos_constant_time_key_check_rejects_wrong_or_partial_keys {
+  set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
+  unset req.http.x-fastly-key;
+  testing.call_subroutine("vcl_recv");
+  assert.error(622);
+
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secreX";
+  testing.call_subroutine("vcl_recv");
+  assert.error(622);
+
+  set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret-extra";
+  testing.call_subroutine("vcl_recv");
+  assert.error(622);
+}
+
+
+// @scope: recv
+sub api_file_and_fos_pq_fall_through_cleanly_on_missing_expired_or_epoch_stale_cdn_cookie {
+  testing.fixed_time("2026-10-29 12:34:56");
+  declare local var.shash STRING;
+  declare local var.payload STRING;
+  declare local var.sig STRING;
+
+  // Case A: missing flp_cdn falls through to Compute /api/file without error
+  set req.url = "/fos/pq/goal2-live-20261029/processed/request/a.parquet";
+  set req.http.Cookie = "flp_session=test-session";
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(pass);
+  assert.equal(req.url, {"/api/file?key=goal2-live-20261029%2Fprocessed%2Frequest%2Fa.parquet"});
+
+  // Case B1: valid HMAC but naturally expired (exp <= now) falls through without error
+  set var.shash = substr(digest.hash_sha256("test-session"), 0, 16);
+  set var.payload = "AAAAAAAAAAAAAAAAAAAAAA~admin~1700000000~" + var.shash + "~goal2-live-20261029/";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v1~" + var.payload), 2, 64);
+  set req.url = "/fos/pq/goal2-live-20261029/processed/request/a.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=" + var.payload + "~" + var.sig;
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(pass);
+  assert.equal(req.url, {"/api/file?key=goal2-live-20261029%2Fprocessed%2Frequest%2Fa.parquet"});
+
+  // Case B2: epoch-0 v1 cookie falls through cleanly when auth_epoch bumps to 1
+  testing.table_set(flp_front_auth, "auth_epoch", "1");
+  set var.payload = "AAAAAAAAAAAAAAAAAAAAAA~admin~1893456000~" + var.shash + "~goal2-live-20261029/";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v1~" + var.payload), 2, 64);
+  set req.url = "/api/file?key=goal2-live-20261029%2Fprocessed%2Frequest%2Fa.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=" + var.payload + "~" + var.sig;
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(pass);
+
+  // Case B3: valid v2 HMAC with stale auth_epoch falls through without error
+  testing.table_set(flp_front_auth, "auth_epoch", "2");
+  set var.payload = "AAAAAAAAAAAAAAAAAAAAAA~admin~1893456000~" + var.shash + "~1~goal2-live-20261029/";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v2~" + var.payload), 2, 64);
+  set req.url = "/api/file?key=goal2-live-20261029%2Fprocessed%2Frequest%2Fa.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=" + var.payload + "~" + var.sig;
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(pass);
+}
+
+
+// @scope: recv
+sub api_file_with_valid_v2_epoch_cdn_cookie_rewrites_directly_to_fos_cache_lookup {
+  testing.fixed_time("2026-10-29 12:34:56");
+  testing.table_set(flp_front_auth, "auth_epoch", "1");
+  declare local var.shash STRING;
+  declare local var.payload STRING;
+  declare local var.sig STRING;
+  set var.shash = substr(digest.hash_sha256("test-session"), 0, 16);
+  set var.payload = "AAAAAAAAAAAAAAAAAAAAAA~admin~1893456000~" + var.shash + "~1~goal2-live-20261029/";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v2~" + var.payload), 2, 64);
+  set req.url = "/api/file?key=goal2-live-20261029%2Fprocessed%2Frequest%2Fa.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=" + var.payload + "~" + var.sig;
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(lookup);
+  assert.equal(req.url, "/fos/AAAAAAAAAAAAAAAAAAAAAA/goal2-live-20261029/processed/request/a.parquet");
+  assert.equal(req.http.x-flp-fos-service, "AAAAAAAAAAAAAAAAAAAAAA");
+  assert.equal(req.http.x-flp-fos-bucket, "fos-test-logs");
+  assert.equal(req.http.x-flp-fos-region, "us-east-1");
+  assert.equal(req.http.x-flp-api-file, "1");
+  assert.is_notset(req.http.Cookie);
+  assert.true(req.enable_segmented_caching);
+}
+
+
+// @scope: recv
+sub api_file_and_fos_pq_reject_malformed_or_tampered_cdn_cookie_at_edge {
+  testing.fixed_time("2026-10-29 12:34:56");
+  declare local var.shash STRING;
+  declare local var.valid_payload STRING;
+  declare local var.tampered_payload STRING;
+  declare local var.sig STRING;
+
+  set req.url = "/api/file?key=processed%2Frequest%2Fa.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=forged-garbage";
+  testing.call_subroutine("vcl_recv");
+  assert.error(629);
+
+  set req.url = "/fos/pq/goal2-live-20261029/processed/request/a.parquet";
+  set req.http.Cookie = "flp_cdn=forged-garbage";
+  testing.call_subroutine("vcl_recv");
+  assert.error(629);
+
+  set var.shash = substr(digest.hash_sha256("analyst-session"), 0, 16);
+  set var.valid_payload = "AAAAAAAAAAAAAAAAAAAAAA~analyst~1893456000~" + var.shash + "~";
+  set var.tampered_payload = "AAAAAAAAAAAAAAAAAAAAAA~admin~1893456000~" + var.shash + "~";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v1~" + var.valid_payload), 2, 64);
+  set req.url = "/api/file?key=processed%2Fops%2Fapi_telemetry%2Fa.parquet";
+  set req.http.Cookie = "flp_session=analyst-session; flp_cdn=" + var.tampered_payload + "~" + var.sig;
+  testing.call_subroutine("vcl_recv");
+  assert.error(629);
+
+  testing.table_set(flp_front_auth, "auth_epoch", "2");
+  set var.valid_payload = "AAAAAAAAAAAAAAAAAAAAAA~analyst~1893456000~" + var.shash + "~1~";
+  set var.tampered_payload = "AAAAAAAAAAAAAAAAAAAAAA~analyst~1893456000~" + var.shash + "~2~";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v2~" + var.valid_payload), 2, 64);
+  set req.url = "/api/file?key=processed%2Frequest%2Fa.parquet";
+  set req.http.Cookie = "flp_session=analyst-session; flp_cdn=" + var.tampered_payload + "~" + var.sig;
+  testing.call_subroutine("vcl_recv");
+  assert.error(629);
+}
+
+
+// @scope: recv
+sub host_flp_cdn_overrides_tossed_flp_cdn_and_supports_multi_segment_fos_prefix {
+  testing.fixed_time("2026-10-29 12:34:56");
+  declare local var.shash STRING;
+  declare local var.payload STRING;
+  declare local var.sig STRING;
+  declare local var.valid_cookie STRING;
+
+  set var.shash = substr(digest.hash_sha256("test-session"), 0, 16);
+  set var.payload = "AAAAAAAAAAAAAAAAAAAAAA~admin~1893456000~" + var.shash + "~tenant/logs/";
+  set var.sig = substr(digest.hmac_sha256("test-cdn-key-not-a-live-secret", "flp-cdn-v1~" + var.payload), 2, 64);
+  set var.valid_cookie = var.payload + "~" + var.sig;
+
+  // Case 1: Subdomain-tossed flp_cdn=tossed_bad + valid __Host-flp_cdn + multi-segment prefix
+  set req.url = "/fos/pq/tenant/logs/processed/request/a.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=tossed_bad; __Host-flp_cdn=" + var.valid_cookie;
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(lookup);
+  assert.equal(req.url, "/fos/AAAAAAAAAAAAAAAAAAAAAA/tenant/logs/processed/request/a.parquet");
+
+  // Case 2: Empty flp_cdn= + valid __Host-flp_cdn
+  unset req.http.x-flp-api-file;
+  unset req.http.x-fastly-key;
+  set req.url = "/api/file?key=tenant%2Flogs%2Fprocessed%2Frequest%2Fa.parquet";
+  set req.http.Cookie = "flp_session=test-session; flp_cdn=; __Host-flp_cdn=" + var.valid_cookie;
+  testing.call_subroutine("vcl_recv");
+  assert.not_error();
+  assert.state(lookup);
+  assert.equal(req.url, "/fos/AAAAAAAAAAAAAAAAAAAAAA/tenant/logs/processed/request/a.parquet");
+
+  // Case 3: Unauthenticated multi-slash ////fos/... (falco's `set req.url` uses Go url.Parse,
+  // where //// produces a multi-slash path without consuming an authority) is blocked with 622 at edge.
+  unset req.http.x-flp-api-file;
+  unset req.http.x-fastly-key;
+  unset req.http.Cookie;
+  set req.url = "////fos/AAAAAAAAAAAAAAAAAAAAAA/raw/a.gz";
+  testing.call_subroutine("vcl_recv");
+  assert.error(622);
+}

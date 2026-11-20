@@ -230,3 +230,66 @@ fn sampling_is_decided_once_per_session_and_errors_use_their_own_rate() {
     let draw: f64 = fresh["draw"].as_str().unwrap().parse().unwrap();
     assert!((0.0..1.0).contains(&draw));
 }
+
+#[test]
+fn sec20d_validate_service_id_and_js_escaping_prevent_script_breakout() {
+    for valid in ["svc1", "svc-1", "fixtureService", "AbCdEfGhIjKlMnOpQrSt12"] {
+        assert!(
+            rum::validate_service_id(valid).is_ok(),
+            "expected valid service_id: {valid}"
+        );
+    }
+    for invalid in [
+        "",
+        &"a".repeat(65),
+        "svc'1",
+        "svc*/<script>",
+        "svc/1",
+        "svc 1",
+    ] {
+        assert!(
+            rum::validate_service_id(invalid).is_err(),
+            "expected invalid service_id: {invalid}"
+        );
+    }
+
+    let hostile = "svc'; globalThis.pwned = true; */ </script>";
+    let tracker = rum::generate_rum_tracker_js(hostile, &rum::Config::default());
+    assert!(!tracker.contains("</script>"));
+    assert!(!tracker.contains("/* Faro Web SDK wrapper for service"));
+    assert!(tracker
+        .contains(r#"var SERVICE_ID = "svc'; globalThis.pwned = true; */ \u003c/script\u003e";"#));
+    assert!(tracker.contains("'?service_id=' + enc(SERVICE_ID)"));
+
+    let script = format!(
+        "var PRESET_DRAW = 0.1;\nglobalThis.pwned = false;\n{HARNESS}\n{tracker}\n\
+         vital('fcp', 100, 'good'); runTimers();\n\
+         process.stdout.write(JSON.stringify({{ pwned: globalThis.pwned, urls: requests.map(r => r.url) }}));"
+    );
+    let mut child = Command::new("node")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("node is required");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["pwned"], false);
+    let first_url = parsed["urls"][0].as_str().unwrap();
+    assert!(
+        first_url.contains("service_id=svc'%3B%20globalThis.pwned%20%3D%20true"),
+        "{first_url}"
+    );
+}

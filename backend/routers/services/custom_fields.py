@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from backend.core import fos_client as _db
 from backend.core import log_fields as lf_module
 from backend.core.log_fields import _filter_user_custom_fields, _is_system_field
+from backend.core.request_context import require_admin
 from backend.models.common import (
     CustomFieldCreate,
     CustomFieldResponse,
@@ -28,7 +29,7 @@ from backend.utils.router_utils import load_service_config, mutate_service_confi
 from .storage import _check_storage_type_lock, _locked_storage_field_names
 from .vcl import _persist_log_fields, _validate_log_format_version
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 def _persist_custom_fields_change(

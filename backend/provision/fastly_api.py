@@ -144,6 +144,7 @@ _SCRUB_HEADERS = (
     "X-Edge-Score-Set-Cookie",
     "X-Edge-Prev-Anchor",
     "x-sigsci-skip-inspection-once",
+    "X-FOS-Request",
 )
 
 
@@ -891,6 +892,30 @@ def update_logging_endpoint(cfg: dict, token: str):
         cfg.get("log_period"),
         cfg.get("fos_path"),
     )
+    custom_condition_req = (
+        cfg["custom_condition"]
+        if "custom_condition" in cfg
+        else (cfg.get("provisioning") or {}).get("custom_condition")
+        if isinstance(cfg.get("provisioning"), dict) and "custom_condition" in cfg["provisioning"]
+        else None
+    )
+    if custom_condition_req is not None:
+        from backend.core.catalog import validate_vcl_custom_condition
+
+        cond_err = validate_vcl_custom_condition(custom_condition_req, field_name="custom_condition")
+        if cond_err:
+            raise ValueError(cond_err)
+    if isinstance(cfg.get("log_fields"), dict):
+        from backend.core.catalog import _is_system_field, validate_vcl_log_expression
+
+        for cf in cfg["log_fields"].get("custom_fields") or []:
+            if isinstance(cf, dict) and not _is_system_field(str(cf.get("name", ""))):
+                expr_errs = validate_vcl_log_expression(
+                    str(cf.get("vcl_log_expression") or ""),
+                    field_name=f"custom_fields[{cf.get('name', '?')}].vcl_log_expression",
+                )
+                if expr_errs:
+                    raise ValueError("; ".join(expr_errs))
     total_steps = 5
     yield {"type": "progress", "current": 0, "total": total_steps}
 
@@ -946,6 +971,8 @@ def update_logging_endpoint(cfg: dict, token: str):
             target["log_period"] = int(period)
         if endpoint_name is not None:
             prov["endpoint_name"] = endpoint_name
+        if custom_condition_req is not None:
+            prov["custom_condition"] = str(custom_condition_req).strip()
         if cfg.get("log_fields") is not None:
             incoming_lf = dict(cfg["log_fields"])
             if not incoming_lf.get("custom_fields"):
@@ -1097,7 +1124,7 @@ def deploy_remote_frontend(
         "address": origin_host,
         "port": origin_port,
         "use_ssl": use_ssl,
-        "ssl_check_cert": False,
+        "ssl_check_cert": True,
     }
     if override_host:
         backend_payload["override_host"] = override_host

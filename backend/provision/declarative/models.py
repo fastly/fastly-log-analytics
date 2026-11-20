@@ -10,8 +10,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter
 
 from backend.config import is_rum_enabled
+from backend.core.catalog import validate_vcl_custom_condition, validate_vcl_log_expression
 
 _AUTO_INJECTED_NAMES: set[str] = {
+    "service_id",
     "rum_cid",
     "fastly_req_id",
     "rum_metric_name",
@@ -53,6 +55,22 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "cmcd_tb",
     "cmcd_rtp",
 }
+
+_CANONICAL_SYSTEM_FIELDS_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def _canonical_system_fields() -> dict[str, dict[str, Any]]:
+    """Return canonical system custom-field definitions keyed by field name."""
+    global _CANONICAL_SYSTEM_FIELDS_CACHE
+    if _CANONICAL_SYSTEM_FIELDS_CACHE is None:
+        from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+        from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS
+        from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
+
+        _CANONICAL_SYSTEM_FIELDS_CACHE = {
+            f["name"]: dict(f) for f in (*_RUM_CUSTOM_FIELDS, *_SCORING_CUSTOM_FIELDS, *_CMCD_CUSTOM_FIELDS)
+        }
+    return _CANONICAL_SYSTEM_FIELDS_CACHE
 
 
 @dataclass(frozen=True)
@@ -119,10 +137,39 @@ class FeatureState:
             raise ValueError(f"rum_log_period must be in range [1, 3600], got {self.rum_log_period}")
         if not (1 <= self.sample_rate <= 100):
             raise ValueError(f"sample_rate must be in range [1, 100], got {self.sample_rate}")
+        if cond_err := validate_vcl_custom_condition(self.custom_condition, field_name="custom_condition"):
+            raise ValueError(cond_err)
+        if rum_cond_err := validate_vcl_custom_condition(self.rum_custom_condition, field_name="rum_custom_condition"):
+            raise ValueError(rum_cond_err)
+        canonical_fields = _canonical_system_fields()
         for field_dict in self.log_fields.custom_fields:
             field_name = field_dict.get("name", "")
             if not re.fullmatch(r"^[a-z_][a-z0-9_]*$", field_name):
                 raise ValueError(f"Custom field name '{field_name}' must be lowercase alphanumeric + underscore")
+            if "vcl_log_expression" in field_dict:
+                expr_errs = validate_vcl_log_expression(
+                    str(field_dict.get("vcl_log_expression") or ""),
+                    field_name=f"custom_fields[{field_name}].vcl_log_expression",
+                )
+                if expr_errs:
+                    raise ValueError("; ".join(expr_errs))
+            stage = field_dict.get("collection_stage", "edge")
+            if field_name in _AUTO_INJECTED_NAMES and field_name in canonical_fields:
+                canonical_def = canonical_fields[field_name]
+                if "collection_stage" in field_dict and stage != canonical_def["collection_stage"]:
+                    raise ValueError(
+                        f"System custom field '{field_name}' must keep canonical collection_stage "
+                        f"{canonical_def['collection_stage']!r}, got {stage!r}"
+                    )
+                if (
+                    "vcl_log_expression" in field_dict
+                    and field_dict["vcl_log_expression"] != canonical_def["vcl_log_expression"]
+                ):
+                    raise ValueError(f"System custom field '{field_name}' must keep its canonical vcl_log_expression")
+            elif stage not in ("edge", "origin"):
+                raise ValueError(
+                    f"custom_fields[{field_name}].collection_stage must be 'edge' or 'origin', got {stage!r}"
+                )
         if self.cmcd.enabled and self.cmcd.mode not in ("query_string", "headers"):
             raise ValueError(f"cmcd.mode must be 'query_string' or 'headers', got {self.cmcd.mode!r}")
         if self.cmcd.enabled and self.cmcd.version not in (1, 2):
@@ -171,7 +218,27 @@ class FeatureState:
         log_groups = lf_cfg.get("groups") or cfg.get("log_groups") or cfg.get("groups") or []
         custom_fields = lf_cfg.get("custom_fields") or cfg.get("custom_fields") or []
         field_overrides = lf_cfg.get("field_overrides") or cfg.get("field_overrides") or {}
-        injected_fields = list(custom_fields) if custom_fields else []
+        canonical_fields = _canonical_system_fields()
+        injected_fields: list[dict[str, Any]] = []
+        for raw_f in custom_fields or []:
+            if isinstance(raw_f, dict):
+                fname = raw_f.get("name", "")
+                if "vcl_log_expression" in raw_f:
+                    expr_errs = validate_vcl_log_expression(
+                        str(raw_f.get("vcl_log_expression") or ""),
+                        field_name=f"custom_fields[{fname}].vcl_log_expression",
+                    )
+                    if expr_errs:
+                        raise ValueError("; ".join(expr_errs))
+                if fname in _AUTO_INJECTED_NAMES and fname in canonical_fields:
+                    canon_copy = dict(canonical_fields[fname])
+                    if "enabled" in raw_f and isinstance(raw_f["enabled"], bool):
+                        canon_copy["enabled"] = raw_f["enabled"]
+                    injected_fields.append(canon_copy)
+                else:
+                    injected_fields.append(raw_f)
+            else:
+                injected_fields.append(raw_f)
         for feat_on, mod_path, attr, as_copy in (
             (rum_enabled, "backend.provision.rum_orchestrator", "_RUM_CUSTOM_FIELDS", False),
             (scoring_enabled, "backend.provision.session_scoring_orchestrator", "_SCORING_CUSTOM_FIELDS", True),
@@ -290,6 +357,18 @@ class Backend:
     override_host: str = ""
     shield: str = ""
     request_condition: str = ""
+    ssl_cert_hostname: str = ""
+    ssl_sni_hostname: str = ""
+
+    def __post_init__(self) -> None:
+        host = self.ssl_cert_hostname or self.ssl_sni_hostname or self.ssl_hostname
+        if host:
+            if not self.ssl_cert_hostname:
+                self.ssl_cert_hostname = host
+            if not self.ssl_sni_hostname:
+                self.ssl_sni_hostname = host
+            if not self.ssl_hostname:
+                self.ssl_hostname = host
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

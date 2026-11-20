@@ -339,11 +339,11 @@ fn shield_clock_advertises_sleep_ttl_until_next_due_wake() {
     assert_eq!(tick0.status, 200);
     assert_eq!(
         tick0.headers.get("x-flp-tick-ttl").map(String::as_str),
-        Some("58")
+        Some("60")
     );
     assert_eq!(
         tick0.headers.get("cache-control").map(String::as_str),
-        Some("public, max-age=58")
+        Some("public, max-age=60")
     );
 
     let flush0 = h.send("GET", "/_flush", "anonymous");
@@ -361,7 +361,7 @@ fn shield_clock_advertises_sleep_ttl_until_next_due_wake() {
     let tick1 = h.send("GET", "/_tick", "anonymous");
     assert_eq!(
         tick1.headers.get("x-flp-tick-ttl").map(String::as_str),
-        Some("45")
+        Some("47")
     );
     let flush1 = h.send("GET", "/_flush", "anonymous");
     assert_eq!(

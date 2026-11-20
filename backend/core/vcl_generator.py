@@ -22,6 +22,15 @@ from backend.core.catalog import (
     LOG_FIELD_CATALOG,
     resolve_enabled_fields,
 )
+from backend.core.catalog import (
+    check_vcl_quotes_and_parens as check_vcl_quotes_and_parens,
+)
+from backend.core.catalog import (
+    validate_vcl_custom_condition as validate_vcl_custom_condition,
+)
+from backend.core.catalog import (
+    validate_vcl_log_expression as validate_vcl_log_expression,
+)
 from backend.core.fastly.client import fastly
 
 logger = structlog.get_logger(__name__)

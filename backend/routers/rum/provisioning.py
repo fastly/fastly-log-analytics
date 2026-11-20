@@ -17,6 +17,7 @@ from backend.core.request_context import (
     require_admin,
     require_service_access,
 )
+from backend.core.vcl_generator import validate_destructive_token
 from backend.models.analytics import (
     RumSettingsUpdateResponse,
     RumStatusResponse,
@@ -35,6 +36,7 @@ from backend.provision.rum_orchestrator import (
     rum_vcl_fingerprint,
     upgrade_faro_version,
 )
+from backend.utils.auth import require_service_in_scope
 from backend.utils.router_utils import (
     load_service_config,
     make_error,
@@ -71,10 +73,12 @@ def _normalize_sec(val: float | int | None) -> float | None:
 
 @rum_provisioning_router.post("/{service_id}/rum/enable", dependencies=[Depends(require_admin)])
 async def enable_rum_handler(
+    request: Request,
     service_id: str = Path(...),
     body: RumEnableRequest | None = None,
 ) -> EventSourceResponse:
     """Enable RUM for a service (admin-only, SSE stream)."""
+    require_service_in_scope(request, service_id)
     body = body or RumEnableRequest()
     token = body.token
 
@@ -86,10 +90,6 @@ async def enable_rum_handler(
 
     if not token:
         raise HTTPException(status_code=400, detail={"error": "Fastly API token is required to enable RUM."})
-
-    if token != stored_token:
-        cfg["fastly_api_key"] = token
-        svcconfig.mutate_config(service_id, lambda c: c.__setitem__("fastly_api_key", token))
 
     latest_faro_version = None
     try:
@@ -112,6 +112,9 @@ async def enable_rum_handler(
             ):
                 yield json.dumps(event)
 
+            if token != stored_token:
+                svcconfig.mutate_config(service_id, lambda c: c.__setitem__("fastly_api_key", token))
+
             updated_cfg = _reload_rum_scheduler_and_cfg(service_id, "enable")
             yield json.dumps(
                 {
@@ -133,10 +136,12 @@ async def enable_rum_handler(
 
 @rum_provisioning_router.post("/{service_id}/rum/disable", dependencies=[Depends(require_admin)])
 async def disable_rum_handler(
+    request: Request,
     service_id: str = Path(...),
     body: RumDisableRequest | None = None,
 ) -> EventSourceResponse:
     """Disable RUM for a service (admin-only, SSE stream)."""
+    require_service_in_scope(request, service_id)
     body = body or RumDisableRequest()
     token = require_fastly_token(service_id, body.token)
 
@@ -244,8 +249,9 @@ async def rum_status(
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-async def rum_versions(service_id: str = Path(...)) -> RumVersionsResponse:
+async def rum_versions(request: Request, service_id: str = Path(...)) -> RumVersionsResponse:
     """List available Faro Web SDK versions + the pinned/latest state (admin-only)."""
+    require_service_in_scope(request, service_id)
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
     current = rum_cfg.get("faro_version")
@@ -265,11 +271,15 @@ async def rum_versions(service_id: str = Path(...)) -> RumVersionsResponse:
 
 @rum_provisioning_router.post("/{service_id}/rum/upgrade", dependencies=[Depends(require_admin)])
 async def upgrade_rum_handler(
+    request: Request,
     service_id: str = Path(...),
     body: RumUpgradeRequest = Body(...),
 ) -> EventSourceResponse:
     """Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream)."""
+    require_service_in_scope(request, service_id)
     token = require_fastly_token(service_id, body.token)
+    if body.token and body.token.strip():
+        validate_destructive_token(body.token.strip(), service_id=service_id)
 
     try:
         available = await fetch_available_faro_versions()
@@ -329,11 +339,23 @@ async def upgrade_rum_handler(
     dependencies=[Depends(require_admin)],
 )
 def update_rum_settings(
+    request: Request,
     service_id: str = Path(...),
     body: RumSettingsUpdateRequest = Body(...),
 ) -> dict[str, Any]:
     """Update RUM capture settings and re-deploy rum-tracker.js (admin-only)."""
+    require_service_in_scope(request, service_id)
+    from backend.core.catalog import validate_vcl_custom_condition
+
+    raw_cond = body.custom_condition
+    cond_msg = validate_vcl_custom_condition(raw_cond)
+    if cond_msg:
+        raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_msg))
+
     cfg = load_service_config(service_id)
+    token = require_fastly_token(service_id, body.token)
+    if body.token and body.token.strip():
+        validate_destructive_token(body.token.strip(), service_id=service_id)
 
     import copy
 
@@ -357,8 +379,6 @@ def update_rum_settings(
                 rum_block.pop(key, None)
 
     svcconfig.mutate_config(service_id, _apply_settings)
-
-    token = require_fastly_token(service_id, body.token)
 
     from backend.provision.rum_assets import upload_rum_tracker_js
 

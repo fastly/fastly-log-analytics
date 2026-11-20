@@ -15,6 +15,8 @@ import httpx
 import pytest
 import vcr
 
+pytestmark = pytest.mark.no_postgres
+
 from backend import config as svcconfig
 from backend.core.fastly.client import fastly as real_fastly
 from backend.core.log_fields import resolve_enabled_fields
@@ -1290,6 +1292,7 @@ def test_deploy_and_delete_remote_frontend_flows():
             override_host="my-override.example.com",
         )
     backend_payload = next(c[2] for c in calls_ssl if c[1] == "/service/service123/version/1/backend")
+    assert backend_payload["ssl_check_cert"] is True
     assert (
         backend_payload["override_host"]
         == backend_payload["ssl_sni_hostname"]
@@ -2365,3 +2368,131 @@ def test_write_only_dictionary_parity():
     assert '"name": "fos_credentials",' in reconcile_rs
     assert '"write_only": true,' in reconcile_rs
     assert '"write_only":boolean(&value["write_only"],true)' in reconcile_rs
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_rum_tracker_js_escapes_script_and_string_breakout(monkeypatch) -> None:
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
+    injected_sid = "svc'; globalThis.pwned = 1; //</script><script>alert(1)</script>&x=1"
+    injected_beacon = "/rum-beacon'); globalThis.pwned = 2; //{service_id}"
+    js = generate_rum_tracker_js(injected_sid, beacon_endpoint=injected_beacon)
+    assert "</script>" not in js.lower()
+    assert "globalThis.pwned = 1;" in js  # inside JSON string literal only, never executed!
+
+    program = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+let calls = [];
+let config;
+const window = {
+  location: { pathname: '/home' },
+  addEventListener: function() {},
+  fetch: async (url, options) => { calls.push({ url, options }); },
+  Faro: {
+    ErrorsInstrumentation: class {},
+    initializeFaro: value => { config = value; },
+  },
+};
+const sandbox = {
+  pwned: 0,
+  alert: () => { throw new Error('XSS executed'); },
+  window,
+  console,
+  Response,
+  setTimeout,
+  encodeURIComponent,
+  document: { cookie: 'rum_cid=c1', addEventListener: function() {} },
+  navigator: {},
+};
+vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
+config.beforeSend({
+  type: 'measurement',
+  payload: { type: 'web-vitals', values: { LCP: 100 } },
+});
+window.fetch(config.url, { method: 'POST' });
+process.stdout.write(JSON.stringify({ pwned: sandbox.pwned, calls }));
+"""
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=js,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    out = json.loads(result.stdout)
+    assert out["pwned"] == 0
+    assert len(out["calls"]) == 1
+    from urllib.parse import parse_qs, urlparse
+
+    qparams = parse_qs(urlparse(out["calls"][0]["url"]).query, keep_blank_values=True)
+    assert qparams["service_id"] == [injected_sid]
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_rum_tracker_js_blocks_capture_flag_injection_none_and_format_leak(monkeypatch) -> None:
+    monkeypatch.setattr(
+        svcconfig,
+        "load_config",
+        lambda _sid: {
+            "rum": {
+                "capture_vitals": "false; globalThis.pwned = 1; //",
+                "capture_errors": "</script><script>alert(1)</script>",
+                "capture_performance": None,
+                "capture_events": "off",
+            }
+        },
+    )
+    sid_with_ls_ps = "svc_ls\u2028ps\u2029x"
+    beacon_fmt_trap = "/rum/{service_id.__class__.__name__}/{unmatched}/{service_id}"
+    js = generate_rum_tracker_js(sid_with_ls_ps, beacon_endpoint=beacon_fmt_trap)
+
+    assert "</script>" not in js.lower()
+    assert "globalThis.pwned" not in js
+    assert "str" not in js.split("BEACON_ENDPOINT = ", 1)[1].splitlines()[0]
+    assert "\u2028" not in js.splitlines()[0] and "\u2029" not in js.splitlines()[0]
+    assert "var CAPTURE_VITALS = true;" in js
+    assert "var CAPTURE_ERRORS = true;" in js
+    assert "var CAPTURE_PERFORMANCE = true;" in js
+    assert "var CAPTURE_EVENTS = false;" in js
+
+    program = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+let config;
+const window = {
+  location: { pathname: '/home' },
+  addEventListener: function() {},
+  fetch: async () => {},
+  Faro: {
+    ErrorsInstrumentation: class {},
+    initializeFaro: value => { config = value; },
+  },
+};
+const sandbox = {
+  pwned: 0,
+  alert: () => { throw new Error('XSS executed'); },
+  window,
+  console,
+  Response,
+  setTimeout,
+  encodeURIComponent,
+  document: { cookie: '', addEventListener: function() {} },
+  navigator: {},
+};
+vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
+process.stdout.write(JSON.stringify({ pwned: sandbox.pwned, url: config.url }));
+"""
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=js,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    out = json.loads(result.stdout)
+    assert out["pwned"] == 0
+    assert "{service_id.__class__.__name__}/{unmatched}/" in out["url"]

@@ -1007,6 +1007,12 @@ def bootstrap(
         {"item_value": values["cdn_key"]},
         form=True,
     )
+    api.request(
+        "PUT",
+        f"/service/{front_id}/dictionary/{dictionary_id}/item/auth_epoch",
+        {"item_value": "0"},
+        form=True,
+    )
     config = {
         **plan["config_defaults"],
         "install_name": plan["install_name"],

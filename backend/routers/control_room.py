@@ -19,7 +19,14 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.core.fos_client import get_source_for_service
 from backend.core.request_context import ServiceId, require_admin, require_service_access
-from backend.core.share_db import mask_ip
+from backend.core.share_db import (
+    PII_IP_KEYS,
+    SESSION_ID_KEYS,
+    apply_pii_policy,
+    is_saved_view_pii_key,
+    mask_ip,
+    scrub_ip_text,
+)
 from backend.high_scale.ingest_controller import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
@@ -33,8 +40,8 @@ from backend.models.common import (
     RealtimeSeedResponse,
 )
 from backend.utils.auth import mask_ips_for
-from backend.utils.date_utils import safe_iso
-from backend.utils.router_utils import query_errors
+from backend.utils.date_utils import parse_iso_utc, safe_iso
+from backend.utils.router_utils import make_error, query_errors
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -267,27 +274,79 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict[str, Any]]:
     return ticks[-count:]
 
 
+def _parse_session_bound_utc(raw: str | None) -> datetime | None:
+    if not raw or not str(raw).strip():
+        return None
+    dt = parse_iso_utc(str(raw).strip())
+    if dt is None:
+        raise HTTPException(
+            status_code=403,
+            detail=make_error("time_window_invalid", "Analyst session time window is invalid"),
+        )
+    return dt
+
+
+def _enforce_live_stream_window(request: Request | None) -> None:
+    if request is None:
+        return
+    state = getattr(request, "state", None)
+    session = getattr(state, "analyst_session", None)
+    if session is None:
+        return
+    now = datetime.now(UTC)
+    end_bound = _parse_session_bound_utc(getattr(session, "query_end_time", None))
+    if end_bound is not None and end_bound < now:
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "time_window_expired",
+                "Real-time streams are unavailable for historical analyst time windows",
+            ),
+        )
+    start_bound = _parse_session_bound_utc(getattr(session, "query_start_time", None))
+    if start_bound is not None and start_bound > now:
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "time_window_future",
+                "Real-time streams are unavailable before the analyst time window starts",
+            ),
+        )
+
+
+def _sanitize_realtime_tick(tick: dict[str, Any], request: Request | None) -> dict[str, Any]:
+    state = getattr(request, "state", None) if request is not None else None
+    if not mask_ips_for(getattr(state, "analyst_session", None)):
+        return tick
+    sanitized = apply_pii_policy(dict(tick), {"mask_ips": True})
+    if "top_ips" in sanitized:
+        sanitized["top_ips"] = []
+    return sanitized
+
+
 @control_room_router.get(
     "/services/{service_id}/realtime-seed", response_model=RealtimeSeedResponse, response_model_exclude_unset=True
 )
 @query_errors()
 async def realtime_seed(
+    request: Request,
     service_id: ServiceId,
     _access: str | None = Depends(require_service_access),
 ) -> RealtimeSeedResponse:
     """Return the last 60 metrics ticks for instant chart hydration."""
+    _enforce_live_stream_window(request)
     from backend.core.realtime import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
 
     ticks = await asyncio.to_thread(rt_publisher.get_recent_ticks, service_id, 60)
     if len(ticks) >= 60:
-        return RealtimeSeedResponse(ticks=ticks)
+        return RealtimeSeedResponse(ticks=[_sanitize_realtime_tick(t, request) for t in ticks])
 
     ticks = await asyncio.to_thread(_fetch_seed_ticks, service_id)
 
     poller.ensure_polling(service_id)
 
-    return RealtimeSeedResponse(ticks=ticks)
+    return RealtimeSeedResponse(ticks=[_sanitize_realtime_tick(t, request) for t in ticks])
 
 
 # ── SSE real-time stream ─────────────────────────────────────────────────────
@@ -300,6 +359,7 @@ async def realtime_stream(
     _access: str | None = Depends(require_service_access),
 ) -> EventSourceResponse:
     """Real-time metrics stream powered by rt.fastly.com polling."""
+    _enforce_live_stream_window(request)
     from backend.core.realtime import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
     from backend.utils.sse import iter_with_disconnect_ping
@@ -308,7 +368,12 @@ async def realtime_stream(
 
     async def stream() -> AsyncIterator[str]:
         async for payload in iter_with_disconnect_ping(rt_publisher.subscribe(service_id), request, ping_seconds=15):
-            yield json.dumps(payload)
+            try:
+                _enforce_live_stream_window(request)
+            except HTTPException:
+                break
+            safe_payload = _sanitize_realtime_tick(payload, request) if isinstance(payload, dict) else payload
+            yield json.dumps(safe_payload)
 
     return sse_response(stream())
 
@@ -320,10 +385,28 @@ def _recent_high_scale_errors(service: Any) -> list[dict[str, Any]]:
     return recent_high_scale_error_events(service.client, service.service_id)
 
 
+def _mask_ip_field(value: str) -> str:
+    if "," in value:
+        return ", ".join(mask_ip(part.strip()) for part in value.split(",") if part.strip())
+    return mask_ip(value.strip())
+
+
 def _mask_error_events(events: list[dict[str, Any]], request: Request) -> list[dict[str, Any]]:
-    if not mask_ips_for(getattr(request.state, "analyst_session", None)):
+    state = getattr(request, "state", None) if request is not None else None
+    if not mask_ips_for(getattr(state, "analyst_session", None)):
         return events
-    return [{**event, "client_ip": mask_ip(event["client_ip"])} for event in events]
+    masked_events = apply_pii_policy(events, {"mask_ips": True})
+    out: list[dict[str, Any]] = []
+    for orig_ev, ev in zip(events, masked_events, strict=False):
+        row = dict(ev)
+        for k, orig_v in orig_ev.items():
+            if isinstance(orig_v, str) and orig_v and k.strip().lower() in PII_IP_KEYS:
+                row[k] = _mask_ip_field(orig_v)
+        for k, v in list(row.items()):
+            if isinstance(v, str) and v and not is_saved_view_pii_key(k):
+                row[k] = scrub_ip_text(v)
+        out.append(row)
+    return out
 
 
 @control_room_router.get("/services/{service_id}/control-room/error-stream")
@@ -334,11 +417,16 @@ async def control_room_error_stream(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ) -> EventSourceResponse:
     """Stream bounded recent 4xx/5xx request events."""
+    _enforce_live_stream_window(request)
     high_scale_service = registry.resolve(service_id)
 
     async def stream() -> AsyncIterator[dict[str, Any]]:
         seen: set[str] = set()
         while not await request.is_disconnected():
+            try:
+                _enforce_live_stream_window(request)
+            except HTTPException:
+                break
             try:
                 if high_scale_service is not None:
                     events = await asyncio.to_thread(_recent_high_scale_errors, high_scale_service)
@@ -374,9 +462,23 @@ async def control_room_correlate(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ) -> dict[str, Any]:
     """Top-N breakdown by a log field within a recent time window."""
+    _enforce_live_stream_window(request)
     from backend.core import log_fields as field_registry
     from backend.high_scale._common import visible_publication_fence_sql
     from backend.high_scale.aggregate_query import _FACT_DIMENSION_EXPRESSIONS
+
+    state = getattr(request, "state", None)
+    analyst_session = getattr(state, "analyst_session", None)
+    should_mask_ips = mask_ips_for(analyst_session)
+    if should_mask_ips and body.dimension.strip().lower() in SESSION_ID_KEYS:
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "pii_policy_violation",
+                f"Correlating by {body.dimension!r} is disabled when IP masking is active.",
+                field=body.dimension,
+            ),
+        )
 
     field_def = field_registry.try_get(body.dimension)
     if field_def is None:
@@ -386,6 +488,16 @@ async def control_room_correlate(
         )
 
     col = field_def.code
+    if should_mask_ips and col in SESSION_ID_KEYS:
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "pii_policy_violation",
+                f"Correlating by {body.dimension!r} is disabled when IP masking is active.",
+                field=body.dimension,
+            ),
+        )
+
     window_minutes = body.window_minutes
     limit = body.limit
 
@@ -404,6 +516,19 @@ async def control_room_correlate(
 
     now_utc = datetime.now(UTC)
     start = now_utc - timedelta(minutes=window_minutes)
+    if analyst_session is not None:
+        start_bound = _parse_session_bound_utc(getattr(analyst_session, "query_start_time", None))
+        if start_bound is not None and start_bound > start:
+            start = start_bound
+        tw_hours = getattr(analyst_session, "query_window_hours", None)
+        if tw_hours is None:
+            tw_hours = getattr(analyst_session, "time_window_hours", None)
+        if (
+            isinstance(tw_hours, (int, float))
+            and tw_hours > 0
+            and getattr(analyst_session, "window_mode", None) != "historical"
+        ):
+            start = max(start, now_utc - timedelta(hours=float(tw_hours)))
     aggregate_dimension = "client_ip" if col == "ip" else col
     dim_expr = _FACT_DIMENSION_EXPRESSIONS["request"].get(
         aggregate_dimension,
@@ -427,8 +552,12 @@ async def control_room_correlate(
         for row in hs_rows
         if str(row.get("value") or "") != ""
     ][:limit]
-    if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
-        top_values = [(mask_ip(value), count) for value, count in top_values]
+    if should_mask_ips and (is_saved_view_pii_key(col) or is_saved_view_pii_key(body.dimension)):
+        merged_counts: dict[str, int] = {}
+        for value, count in top_values:
+            masked_val = _mask_ip_field(value)
+            merged_counts[masked_val] = merged_counts.get(masked_val, 0) + count
+        top_values = sorted(merged_counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
     freshness_lag = (
         max(0.0, (now_utc - watermark.coverage_end.astimezone(UTC)).total_seconds())
         if watermark.coverage_end is not None

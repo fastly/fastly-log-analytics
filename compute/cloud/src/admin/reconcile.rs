@@ -978,6 +978,8 @@ fn sync_rum_fos_objects(
         fos::delete_object(context, service, &credentials, &faro_key)?;
         fos::delete_object(context, service, &credentials, tracker_key)?;
     } else {
+        crate::logging::rum::validate_service_id(&service.service_id)
+            .map_err(|_| Error::new(400, "invalid_service_id"))?;
         let faro_bytes = crate::logging::rum::faro_bundle_bytes(&service.rum.faro_version)
             .map_err(|_| Error::new(400, "unsupported_faro_version"))?;
         let tracker_js =

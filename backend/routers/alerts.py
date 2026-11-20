@@ -14,7 +14,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 from backend import config as svcconfig
 from backend.core.clickhouse import get_clickhouse_client
 from backend.core.fos_client import _safe_table_name, get_source_for_service
-from backend.core.request_context import get_service_id
+from backend.core.request_context import get_service_id, require_admin
+from backend.core.share_db import filter_saved_views_for_pii
 from backend.high_scale._common import visible_publication_fence_sql
 from backend.high_scale.ingest_controller import get_high_scale_service_registry
 from backend.models.common import (
@@ -40,6 +41,7 @@ from backend.utils.auth import (
     analyst_allowed_services as _analyst_allowed_services,
 )
 from backend.utils.auth import (
+    mask_ips_for,
     require_owned_row,
     require_service_in_scope,
 )
@@ -902,13 +904,19 @@ def list_views(
     """Security: analyst can only list views for services in their scope."""
     require_service_in_scope(request, service_id)
     rows = repo.get_views(service_id)[:limit]
-    return [SavedViewRecord(**r) if isinstance(r, dict) else r for r in rows]
+    records = [SavedViewRecord(**r) if isinstance(r, dict) else r for r in rows]
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if mask_ips_for(analyst_session):
+        records = filter_saved_views_for_pii(records, {"mask_ips": True})
+    return records
 
 
 @views_router.post("/", status_code=201, response_model=ViewSaveResponse)
 def create_view(view: SavedView, request: Request) -> ViewSaveResponse:
     """Security: analyst can only create views for services in their scope."""
+    # SEC-08.2: Saved view creation is restricted to administrators.
     require_service_in_scope(request, view.service_id)
+    require_admin(request)
     res = repo.save_view(view)
     sync_admin_state(view.service_id)
     if isinstance(res, ViewSaveResponse):
@@ -920,6 +928,7 @@ def create_view(view: SavedView, request: Request) -> ViewSaveResponse:
 def delete_view(view_id: str, request: Request, service_id: str | None = Depends(get_service_id)) -> Response:
     resolved_id = require_service_id(service_id)
     require_owned_row(request, resolved_id, view_id, repo.get_view_by_id)
+    require_admin(request)
     res = repo.delete_view(view_id, resolved_id)
     sync_admin_state(res.get("service_id") or resolved_id)
     return Response(status_code=204)

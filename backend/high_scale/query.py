@@ -20,7 +20,7 @@ import orjson
 import zstandard as zstd
 
 from backend.core.log_fields import SqlType, try_get
-from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.share_db import is_saved_view_pii_key, mask_ip_values
 from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.high_scale._common import _FIELD_DIMENSIONS, clickhouse_string_literal
 from backend.high_scale._common import range_value as _range_value
@@ -650,6 +650,392 @@ def _reject_unsafe_functions(sql: str) -> None:
 _HS_QUERY_RESULT_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=15.0)
 CacheRegistry.register("high_scale.query._HS_QUERY_RESULT_CACHE", _HS_QUERY_RESULT_CACHE)
 
+_CONSOLE_SQL_LEX_RE = re.compile(
+    r"(?P<COMMENT>--[^\n]*|/\*[\s\S]*?\*/)"
+    r"|(?P<STR>'(?:''|[^'])*')"
+    r'|(?P<DQUOTE>"(?:""|[^"])*"|`(?:``|[^`])*`)'
+    r"|(?P<WS>\s+)"
+    r"|(?P<NUM>-?\d+(?:\.\d+)?)"
+    r"|(?P<IDENT>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|(?P<OP><=|>=|!=|<>|[=<>(),.\[\]*+-/;])"
+    r"|(?P<OTHER>.)"
+)
+_SQL_CLAUSE_STOPWORDS = frozenset(
+    {
+        "WHERE",
+        "GROUP",
+        "ORDER",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "JOIN",
+        "INNER",
+        "LEFT",
+        "RIGHT",
+        "FULL",
+        "CROSS",
+        "ON",
+        "USING",
+        "PREWHERE",
+        "FINAL",
+        "SAMPLE",
+        "SETTINGS",
+        "FORMAT",
+        "WINDOW",
+        "QUALIFY",
+        "ARRAY",
+        "AS",
+        "SELECT",
+        "FROM",
+        "SET",
+        "INTO",
+    }
+)
+_REQUEST_CF_FIELDS = frozenset(
+    f for f in _FIELD_DIMENSIONS.values() if f not in {"client_ip", "country", "url", "cmcd", "custom_fields"}
+)
+
+
+def _rewrite_console_sql(sql: str, *, svc_table: str, names: dict[str, str]) -> str:
+    import secrets as _secrets
+
+    iso_lit_re = re.compile(r"^'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'$")
+    cf_key_lit_re = re.compile(r"^'[A-Za-z0-9_]+'$")
+
+    def _normalize_iso(lit: str) -> str:
+        m_iso = iso_lit_re.fullmatch(lit)
+        if not m_iso:
+            return lit
+        raw = m_iso.group(1)
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(UTC)
+            return f"'{dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}'"
+        except ValueError:
+            return lit
+
+    table_map: dict[str, tuple[str, str]] = {
+        "logs": (names["request_facts"], "request"),
+        "request_facts": (names["request_facts"], "request"),
+        svc_table.lower(): (names["request_facts"], "request"),
+        "client_vitals": (names["rum_vitals_facts"], "rum_vitals"),
+        "rum_page_load_facts": (names["rum_vitals_facts"], "rum_vitals"),
+        "rum_vitals_facts": (names["rum_vitals_facts"], "rum_vitals"),
+        "client_errors": (names["rum_error_facts"], "rum_errors"),
+        "rum_error_facts": (names["rum_error_facts"], "rum_errors"),
+    }
+    for canonical, domain in _FACT_DOMAINS.items():
+        table_map[names[canonical].lower()] = (names[canonical], domain)
+
+    def _sig_indices(tokens: list[tuple[str, str]]) -> list[int]:
+        return [i for i, (k, _) in enumerate(tokens) if k not in ("WS", "COMMENT")]
+
+    def _find_matching_paren(tokens: list[tuple[str, str]], open_idx: int) -> int:
+        depth = 0
+        for idx in range(open_idx, len(tokens)):
+            k, t = tokens[idx]
+            if k == "OP" and t == "(":
+                depth += 1
+            elif k == "OP" and t == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return len(tokens) - 1
+
+    def _coerce_request_predicates(segment_tokens: list[tuple[str, str]]) -> str:
+        lit_nonce = _secrets.token_hex(8)
+        saved_lits: list[str] = []
+        parts: list[str] = []
+        sig_idxs = _sig_indices(segment_tokens)
+        sig_pos_map = {idx: pos for pos, idx in enumerate(sig_idxs)}
+        for idx, (k, t) in enumerate(segment_tokens):
+            if k == "STR":
+                t_norm = _normalize_iso(t)
+                s_pos = sig_pos_map.get(idx, -1)
+                is_cf_key = (
+                    cf_key_lit_re.fullmatch(t_norm) is not None
+                    and s_pos >= 2
+                    and s_pos + 1 < len(sig_idxs)
+                    and segment_tokens[sig_idxs[s_pos - 2]][1].lower() == "custom_fields"
+                    and segment_tokens[sig_idxs[s_pos - 1]] == ("OP", "[")
+                    and segment_tokens[sig_idxs[s_pos + 1]] == ("OP", "]")
+                )
+                if is_cf_key or t_norm.lower() in ("'true'", "'false'"):
+                    parts.append(t_norm)
+                else:
+                    s_idx = len(saved_lits)
+                    saved_lits.append(t_norm)
+                    parts.append(f"__fla_str_lit_{lit_nonce}_{s_idx}__")
+            else:
+                parts.append(t)
+        seg_sql = "".join(parts)
+        for b_field in ("edge", "is_ipv6", "waf"):
+            for pat, repl in (
+                (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
+                (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
+                (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
+                (r"=\s*'true'", "IN ('true', '1')"),
+                (r"=\s*'false'", "IN ('false', '0', '')"),
+                (r"=\s*\btrue\b", "IN ('true', '1')"),
+                (r"=\s*\bfalse\b", "IN ('false', '0', '')"),
+            ):
+                seg_sql = re.sub(
+                    rf"custom_fields\['{b_field}'\]\s*{pat}",
+                    f"lower(custom_fields['{b_field}']) {repl}",
+                    seg_sql,
+                    flags=re.IGNORECASE,
+                )
+        for pat, repl in (
+            (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b", r"\1 \2 '\3'"),
+            (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b", r"toFloat64OrZero(\1) \2 \3"),
+        ):
+            seg_sql = re.sub(pat, repl, seg_sql)
+        if saved_lits:
+            seg_sql = re.sub(rf"__fla_str_lit_{lit_nonce}_(\d+)__", lambda m: saved_lits[int(m.group(1))], seg_sql)
+        return seg_sql
+
+    def _rewrite_tokens(tokens: list[tuple[str, str]], inherited_ctes: dict[str, set[str]]) -> tuple[str, set[str]]:
+        ctes = dict(inherited_ctes)
+        sig = _sig_indices(tokens)
+        if not sig:
+            return "".join(t for _, t in tokens), set()
+
+        out_prefix = ""
+        if tokens[sig[0]][0] == "IDENT" and tokens[sig[0]][1].upper() == "WITH":
+            i_tok = 0
+            depth = 0
+            buf: list[str] = []
+            while i_tok < len(tokens):
+                k, t = tokens[i_tok]
+                if depth == 0 and k == "IDENT" and t.upper() == "SELECT":
+                    break
+                if depth == 0 and k == "IDENT" and t.upper() not in ("WITH", "RECURSIVE", "AS"):
+                    j = i_tok + 1
+                    while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
+                        j += 1
+                    if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() == "AS":
+                        j2 = j + 1
+                        while j2 < len(tokens) and tokens[j2][0] in ("WS", "COMMENT"):
+                            j2 += 1
+                        if j2 < len(tokens) and tokens[j2] == ("OP", "("):
+                            close_idx = _find_matching_paren(tokens, j2)
+                            inner_sql, inner_domains = _rewrite_tokens(tokens[j2 + 1 : close_idx], ctes)
+                            ctes[t.lower()] = inner_domains
+                            buf.extend(tk for _, tk in tokens[i_tok : j2 + 1])
+                            buf.append(inner_sql)
+                            buf.append(")")
+                            i_tok = close_idx + 1
+                            continue
+                if k == "OP" and t == "(":
+                    depth += 1
+                elif k == "OP" and t == ")":
+                    depth = max(0, depth - 1)
+                elif k == "STR":
+                    t = _normalize_iso(t)
+                buf.append(t)
+                i_tok += 1
+            out_prefix = "".join(buf)
+            tokens = tokens[i_tok:]
+            if not tokens:
+                return out_prefix, set()
+
+        branches: list[tuple[list[tuple[str, str]], list[tuple[str, str]]]] = []
+        cur_branch: list[tuple[str, str]] = []
+        i_tok = 0
+        depth = 0
+        while i_tok < len(tokens):
+            k, t = tokens[i_tok]
+            if k == "OP" and t == "(":
+                depth += 1
+            elif k == "OP" and t == ")":
+                depth = max(0, depth - 1)
+            elif depth == 0 and k == "IDENT" and t.upper() in ("UNION", "INTERSECT", "EXCEPT"):
+                sep: list[tuple[str, str]] = [tokens[i_tok]]
+                j = i_tok + 1
+                while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
+                    sep.append(tokens[j])
+                    j += 1
+                if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() in ("ALL", "DISTINCT"):
+                    sep.append(tokens[j])
+                    j += 1
+                branches.append((cur_branch, sep))
+                cur_branch = []
+                i_tok = j
+                continue
+            cur_branch.append(tokens[i_tok])
+            i_tok += 1
+        branches.append((cur_branch, []))
+
+        all_domains: set[str] = set()
+        rendered_parts: list[str] = [out_prefix]
+        for b_tokens, sep_tokens in branches:
+            b_sql, b_domains = _rewrite_single_branch(b_tokens, ctes)
+            all_domains |= b_domains
+            rendered_parts.append(b_sql)
+            rendered_parts.extend(tk for _, tk in sep_tokens)
+        return "".join(rendered_parts), all_domains
+
+    def _rewrite_single_branch(tokens: list[tuple[str, str]], ctes: dict[str, set[str]]) -> tuple[str, set[str]]:
+        domains: set[str] = set()
+        alias_domains: dict[str, set[str]] = {}
+        processed: list[tuple[str, str]] = []
+        subquery_placeholders: dict[str, str] = {}
+        sub_nonce = _secrets.token_hex(6)
+
+        i = 0
+        prev_sig: tuple[str, str] | None = None
+        while i < len(tokens):
+            k, t = tokens[i]
+            if k == "OP" and t == "(":
+                close_idx = _find_matching_paren(tokens, i)
+                inner = tokens[i + 1 : close_idx]
+                inner_sig = _sig_indices(inner)
+                if (
+                    inner_sig
+                    and inner[inner_sig[0]][0] == "IDENT"
+                    and inner[inner_sig[0]][1].upper() in ("SELECT", "WITH")
+                ):
+                    sub_sql, sub_domains = _rewrite_tokens(inner, ctes)
+                    if prev_sig and prev_sig[0] == "IDENT" and prev_sig[1].upper() in ("FROM", "JOIN"):
+                        domains |= sub_domains
+                        j = close_idx + 1
+                        while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
+                            j += 1
+                        if j < len(tokens) and tokens[j][0] == "IDENT" and tokens[j][1].upper() == "AS":
+                            j += 1
+                            while j < len(tokens) and tokens[j][0] in ("WS", "COMMENT"):
+                                j += 1
+                        if (
+                            j < len(tokens)
+                            and tokens[j][0] == "IDENT"
+                            and tokens[j][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                        ):
+                            alias_domains[tokens[j][1].lower()] = sub_domains
+                    ph = f"__fla_subq_{sub_nonce}_{len(subquery_placeholders)}__"
+                    subquery_placeholders[ph] = f"({sub_sql})"
+                    processed.append(("SUBQ", ph))
+                    prev_sig = ("SUBQ", ph)
+                    i = close_idx + 1
+                    continue
+            processed.append((k, t))
+            if k not in ("WS", "COMMENT"):
+                prev_sig = (k, t)
+            i += 1
+
+        sig_idxs = _sig_indices(processed)
+        table_token_idxs: dict[int, str] = {}
+        table_alias_idxs: set[int] = set()
+        depth = 0
+        for s_pos, idx in enumerate(sig_idxs):
+            k, t = processed[idx]
+            if k == "OP" and t == "(":
+                depth += 1
+                continue
+            if k == "OP" and t == ")":
+                depth = max(0, depth - 1)
+                continue
+            if depth == 0 and k == "IDENT" and t.upper() in ("FROM", "JOIN") and s_pos + 1 < len(sig_idxs):
+                t_idx = sig_idxs[s_pos + 1]
+                tk, tt = processed[t_idx]
+                if tk == "IDENT":
+                    low_tbl = tt.lower()
+                    if low_tbl in ctes:
+                        domains |= ctes[low_tbl]
+                        alias_domains[low_tbl] = ctes[low_tbl]
+                    elif low_tbl in table_map:
+                        mapped_name, dom = table_map[low_tbl]
+                        table_token_idxs[t_idx] = mapped_name
+                        domains.add(dom)
+                        alias_domains[low_tbl] = {dom}
+                        alias_domains[mapped_name.lower()] = {dom}
+                    a_pos = s_pos + 2
+                    if (
+                        a_pos < len(sig_idxs)
+                        and processed[sig_idxs[a_pos]][0] == "IDENT"
+                        and processed[sig_idxs[a_pos]][1].upper() == "AS"
+                    ):
+                        a_pos += 1
+                        if a_pos < len(sig_idxs) and processed[sig_idxs[a_pos]][0] == "IDENT":
+                            a_idx = sig_idxs[a_pos]
+                            table_alias_idxs.add(a_idx)
+                            alias_domains[processed[a_idx][1].lower()] = alias_domains.get(low_tbl, set())
+                    elif (
+                        a_pos < len(sig_idxs)
+                        and processed[sig_idxs[a_pos]][0] == "IDENT"
+                        and processed[sig_idxs[a_pos]][1].upper() not in _SQL_CLAUSE_STOPWORDS
+                    ):
+                        a_idx = sig_idxs[a_pos]
+                        table_alias_idxs.add(a_idx)
+                        alias_domains[processed[a_idx][1].lower()] = alias_domains.get(low_tbl, set())
+
+        touches_request = "request" in domains
+        touches_any_fact = bool(domains)
+        rewritten_tokens: list[tuple[str, str]] = []
+        sig_pos_by_idx = {idx: pos for pos, idx in enumerate(sig_idxs)}
+        for idx, (k, t) in enumerate(processed):
+            if idx in table_token_idxs:
+                rewritten_tokens.append(("IDENT", table_token_idxs[idx]))
+                continue
+            if idx in table_alias_idxs or k != "IDENT":
+                rewritten_tokens.append((k, t))
+                continue
+            s_pos = sig_pos_by_idx[idx]
+            prev_tok = processed[sig_idxs[s_pos - 1]] if s_pos > 0 else None
+            next_tok = processed[sig_idxs[s_pos + 1]] if s_pos + 1 < len(sig_idxs) else None
+            if prev_tok is not None and prev_tok[0] == "IDENT" and prev_tok[1].upper() == "AS":
+                rewritten_tokens.append((k, t))
+                continue
+            if next_tok == ("OP", "("):
+                rewritten_tokens.append((k, t))
+                continue
+            if next_tok == ("OP", "."):
+                low_q = t.lower()
+                if low_q in table_map and low_q not in ctes:
+                    rewritten_tokens.append(("IDENT", table_map[low_q][0]))
+                else:
+                    rewritten_tokens.append((k, t))
+                continue
+            if prev_tok == ("OP", "."):
+                qual_tok = processed[sig_idxs[s_pos - 2]] if s_pos >= 2 else None
+                q_domains = (
+                    alias_domains.get(qual_tok[1].lower(), domains)
+                    if (qual_tok and qual_tok[0] == "IDENT")
+                    else domains
+                )
+                low_c = t.lower()
+                if low_c == "timestamp" and q_domains:
+                    rewritten_tokens.append(("IDENT", "event_timestamp"))
+                elif low_c == "ip" and "request" in q_domains:
+                    rewritten_tokens.append(("IDENT", "client_ip"))
+                elif low_c in _REQUEST_CF_FIELDS and "request" in q_domains:
+                    rewritten_tokens.append(("IDENT", f"custom_fields['{low_c}']"))
+                else:
+                    rewritten_tokens.append((k, t))
+                continue
+            low_ident = t.lower()
+            if low_ident == "timestamp" and touches_any_fact:
+                rewritten_tokens.append(("IDENT", "event_timestamp"))
+            elif low_ident == "ip" and touches_request:
+                rewritten_tokens.append(("IDENT", "client_ip"))
+            elif t in _REQUEST_CF_FIELDS and touches_request:
+                rewritten_tokens.append(("IDENT", f"custom_fields['{t}']"))
+            else:
+                rewritten_tokens.append((k, t))
+
+        if touches_request:
+            branch_sql = _coerce_request_predicates(rewritten_tokens)
+        else:
+            branch_sql = "".join(_normalize_iso(tk) if kd == "STR" else tk for kd, tk in rewritten_tokens)
+        for ph, sub_rendered in subquery_placeholders.items():
+            branch_sql = branch_sql.replace(ph, sub_rendered)
+        return branch_sql, domains
+
+    tokens = [(m.lastgroup or "OTHER", m.group(0)) for m in _CONSOLE_SQL_LEX_RE.finditer(sql)]
+    rewritten, _ = _rewrite_tokens(tokens, {})
+    return rewritten
+
 
 def query_endpoint(
     service: HighScaleService,
@@ -670,7 +1056,18 @@ def query_endpoint(
     raw_sql = req.sql.strip()
     max_rows = max(1, min(int(req.max_rows), MAX_QUERY_ROWS))
     svc_table = _safe_table(service.service_id)
-    allowed_tables = frozenset({"logs", "client_vitals", "client_errors", svc_table.lower()})
+    allowed_tables = frozenset(
+        {
+            "logs",
+            "client_vitals",
+            "client_errors",
+            "request_facts",
+            "rum_vitals_facts",
+            "rum_error_facts",
+            "rum_page_load_facts",
+            svc_table.lower(),
+        }
+    )
     _t_val = time.perf_counter()
     _reject_ambiguous_syntax(raw_sql, allowed_tables | frozenset(names.values()))
     try:
@@ -683,57 +1080,29 @@ def query_endpoint(
     except SQLValidationError as exc:
         raise PermissionError(exc.message) from exc
     timer.mark("validate_user_sql", _t_val)
-    sql = raw_sql.rstrip().rstrip(";")
-    for pat, repl in (
-        *([(rf"\b{re.escape(svc_table)}\b", names["request_facts"])] if svc_table != "logs" else []),
-        (r"\blogs\b", names["request_facts"]),
-        (r"\bclient_vitals\b", names["rum_vitals_facts"]),
-        (r"\bclient_errors\b", names["rum_error_facts"]),
-        (r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp"),
-        (r"(?<!AS\s)(?<!')\bip\b(?!')", "client_ip"),
-    ):
-        sql = re.sub(pat, repl, sql, flags=re.IGNORECASE)
+    sql = _rewrite_console_sql(raw_sql.rstrip().rstrip(";"), svc_table=svc_table, names=names)
 
-    def _normalize_iso_literal(match: re.Match[str]) -> str:
-        raw = match.group(1)
-        try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(UTC)
-            return f"'{dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}'"
-        except ValueError:
-            return match.group(0)
-
-    sql = re.sub(
-        r"'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'", _normalize_iso_literal, sql
-    )
-    for field in _FIELD_DIMENSIONS.values():
-        if field in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
-            continue
-        sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
-    for b_field in ("edge", "is_ipv6", "waf"):
-        for pat, repl in (
-            (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
-            (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
-            (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
-            (r"=\s*'true'", "IN ('true', '1')"),
-            (r"=\s*'false'", "IN ('false', '0', '')"),
-        ):
-            sql = re.sub(
-                rf"custom_fields\['{b_field}'\]\s*{pat}",
-                f"lower(custom_fields['{b_field}']) {repl}",
-                sql,
-                flags=re.IGNORECASE,
-            )
-    for pat, repl in (
-        (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b", r"\1 \2 '\3'"),
-        (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b", r"toFloat64OrZero(\1) \2 \3"),
-    ):
-        sql = re.sub(pat, repl, sql)
+    post_allowed_tables = allowed_tables | frozenset(t.lower() for t in names.values())
+    _reject_ambiguous_syntax(sql, post_allowed_tables)
+    try:
+        validate_user_sql(
+            sql,
+            session_id=session_id,
+            service_id=service.service_id,
+            allowed_tables=post_allowed_tables,
+        )
+    except SQLValidationError as exc:
+        raise PermissionError(exc.message) from exc
+    code_sql = _code_only(sql)
     fact_tables = {
         names[canonical]: domain
         for canonical, domain in _FACT_DOMAINS.items()
-        if re.search(rf"\b{re.escape(names[canonical])}\b", sql, flags=re.IGNORECASE)
+        if re.search(rf"\b{re.escape(names[canonical])}\b", code_sql, flags=re.IGNORECASE)
     }
-    has_explicit_limit = bool(re.search(r"\bLIMIT\b", _code_only(sql), flags=re.IGNORECASE))
+    if any(re.search(rf"\b{re.escape(tbl)}\b", code_sql, flags=re.IGNORECASE) for tbl in post_allowed_tables):
+        if not fact_tables:
+            raise PermissionError("Query referenced an allowed table without resolving a scoped fact table")
+    has_explicit_limit = bool(re.search(r"\bLIMIT\b", code_sql, flags=re.IGNORECASE))
     _reject_unsafe_functions(sql)
     row_cap = (MAX_QUERY_ROWS if has_explicit_limit else max_rows) + 1
     sql = f"SELECT * FROM (\n{sql}\n) LIMIT {row_cap}"
@@ -758,6 +1127,7 @@ def query_endpoint(
             mask_ips,
             start_time,
             end_time,
+            tuple(sorted((tables or {}).items())),
             os.getenv("DEBUG_RESPONSES", ""),
         )
         if (cached_res := _HS_QUERY_RESULT_CACHE.get(cache_key)) is not None:
@@ -779,14 +1149,13 @@ def query_endpoint(
     _t_serialize = time.perf_counter()
     data: list[dict[str, Any]] = []
     cols = list(res[0].keys()) if res else []
-    redact_keys = IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_ip"}
     for d in res:
         row_copy = dict(d)
         for k, v in row_copy.items():
             if hasattr(v, "isoformat"):
                 val = v.isoformat()
                 row_copy[k] = val.replace("+00:00", "Z") if "+" in val else val + "Z"
-            elif mask_ips and k.lower() in redact_keys and v:
+            elif mask_ips and is_saved_view_pii_key(str(k)) and v:
                 row_copy[k] = "[redacted]"
         data.append(row_copy)
     if mask_ips:

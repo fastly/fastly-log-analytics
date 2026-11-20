@@ -41,7 +41,7 @@ from backend.utils.auth import (
     safe_audit_email,
     set_analyst_session_cookies,
 )
-from backend.utils.remote_access import client_ip
+from backend.utils.remote_access import client_ip, is_request_remote
 from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -195,6 +195,9 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         _audit(None, "LOGIN_FAIL", _safe_audit_email(payload.email), "passcode login disabled", ip=ip)
         raise HTTPException(status_code=403, detail={"error": "passcode_login_disabled"})
     mgr = get_tunnel_manager()
+    if not mgr.is_sharing_active():
+        _audit(None, "LOGIN_FAIL", _safe_audit_email(payload.email), "sharing disabled", ip=ip)
+        raise HTTPException(status_code=403, detail={"error": "sharing_disabled"})
     locked, remaining = mgr.check_rate_limit(ip)
     if locked:
         _audit(None, "LOGIN_FAIL", _safe_audit_email(payload.email), f"locked out (remaining {remaining}s)", ip=ip)
@@ -275,6 +278,8 @@ def share_get_tos(request: Request):
 
 @share_auth_router.post("/acknowledge", response_model=ShareAcknowledgeResponse)
 def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Response):
+    if not get_tunnel_manager().is_sharing_active():
+        raise HTTPException(status_code=403, detail={"error": "sharing_disabled"})
     mgr, session = _require_analyst_session(request, pending_first=True)
     tos = share_db.get_latest_tos()
     if tos and payload.version != tos["version"]:
@@ -308,6 +313,18 @@ def share_heartbeat(request: Request):
 @share_auth_router.post("/claim/{token}", response_model=ShareClaimResponse)
 def share_claim(token: str, request: Request):
     ip = client_ip(request)
+    mgr = get_tunnel_manager()
+    limited, retry_after = mgr.check_claim_rate_limit(ip)
+    if limited:
+        _audit(None, "CLAIM_FAIL", None, f"rate limited (retry_after={retry_after}s)", ip=ip)
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limited", "retry_after_s": retry_after},
+            headers={"Retry-After": str(retry_after)},
+        )
+    if (is_request_remote(request) or share_db.get_sharing_enabled() is False) and not mgr.is_sharing_active():
+        _audit(None, "CLAIM_FAIL", None, "sharing disabled", ip=ip)
+        raise HTTPException(status_code=403, detail={"error": "sharing_disabled"})
     row = share_db.claim_token(token, ip)
     if row is None:
         _audit(None, "CLAIM_FAIL", None, f"token {token[:6]}… invalid/expired/claimed", ip=ip)

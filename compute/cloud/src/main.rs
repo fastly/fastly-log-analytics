@@ -35,8 +35,15 @@ fn main() -> Result<(), fastly::Error> {
         .read_to_end(&mut input.body)?;
     let send_raw = |output: http::Response| {
         let mut response = fastly::Response::from_status(output.status).with_body(output.body);
+        let has_multi_cookies = !output.set_cookies.is_empty();
         for (name, value) in output.headers {
+            if has_multi_cookies && name.eq_ignore_ascii_case("set-cookie") {
+                continue;
+            }
             response.set_header(name, value);
+        }
+        for cookie in output.set_cookies {
+            response.append_header("set-cookie", cookie);
         }
         let status = response.get_status().as_u16();
         response.send_to_client();
@@ -100,8 +107,15 @@ fn stream(
     let send = |output: fastly_log_analytics::http::Response, body: fastly::Body| {
         let output = output.secured();
         let mut response = fastly::Response::from_status(output.status).with_body(body);
+        let has_multi_cookies = !output.set_cookies.is_empty();
         for (name, value) in output.headers {
+            if has_multi_cookies && name.eq_ignore_ascii_case("set-cookie") {
+                continue;
+            }
             response.set_header(name, value);
+        }
+        for cookie in output.set_cookies {
+            response.append_header("set-cookie", cookie);
         }
         if upstream.head_only {
             response

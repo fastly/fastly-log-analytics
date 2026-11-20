@@ -16,9 +16,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Final, Protocol
 
@@ -44,6 +46,26 @@ if _ROOT not in sys.path:
 logger = logging.getLogger(__name__)
 
 ServiceId = Annotated[str, Path(pattern=SERVICE_ID_PATTERN)]
+ACTIVE_SERVICE_COOKIE: Final[str] = "fla.activeServiceId"
+MAX_SERVICE_ID_LEN: Final[int] = 64
+_SERVICE_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]{1,64}$", re.ASCII)
+
+
+def _is_valid_service_id(value: object) -> bool:
+    return isinstance(value, str) and len(value) <= MAX_SERVICE_ID_LEN and bool(_SERVICE_ID_RE.fullmatch(value))
+
+
+def _str_param(value: object) -> str | None:
+    return value if isinstance(value, str) and value != "" else None
+
+
+def _valid_cookie_service_id(request: Request) -> str | None:
+    cookies = getattr(request, "cookies", None)
+    if not isinstance(cookies, Mapping):
+        return None
+    raw = cookies.get(ACTIVE_SERVICE_COOKIE)
+    return raw if _is_valid_service_id(raw) else None
+
 
 # ── Service resolution ────────────────────────────────────────────────────────
 
@@ -56,14 +78,49 @@ def get_service_id(
     x_service_id: str | None = Header(default=None, alias="x-service-id"),
 ) -> str | None:
     """Resolve the active service ID from headers, query params or the first configured service."""
-    res_sid = request.path_params.get("service_id") or service or sid or x_fastly_service_id or x_service_id
-    if res_sid:
+    path_params = getattr(request, "path_params", None) or {}
+    query_params = getattr(request, "query_params", None) or {}
+    headers = getattr(request, "headers", None) or {}
+    res_sid = (
+        _str_param(path_params.get("service_id"))
+        or _str_param(service)
+        or _str_param(query_params.get("service") if not isinstance(service, str) and service is not None else None)
+        or _str_param(sid)
+        or _str_param(query_params.get("service_id") if not isinstance(sid, str) and sid is not None else None)
+        or _str_param(x_fastly_service_id)
+        or _str_param(
+            headers.get("x-fastly-service-id")
+            if not isinstance(x_fastly_service_id, str) and x_fastly_service_id is not None
+            else None
+        )
+        or _str_param(x_service_id)
+        or _str_param(
+            headers.get("x-service-id") if not isinstance(x_service_id, str) and x_service_id is not None else None
+        )
+    )
+    if res_sid is not None:
+        if not _is_valid_service_id(res_sid):
+            return None
         if svcconfig.load_config(res_sid):
             return res_sid
+        mapped = svcconfig.get_cdn_service_id_map().get(res_sid, res_sid)
+        return mapped if _is_valid_service_id(mapped) else None
 
-        return svcconfig.get_cdn_service_id_map().get(res_sid, res_sid)
+    cookie_sid = _valid_cookie_service_id(request)
+    if cookie_sid:
+        resolved_cookie = (
+            cookie_sid
+            if svcconfig.load_config(cookie_sid)
+            else svcconfig.get_cdn_service_id_map().get(cookie_sid, cookie_sid)
+        )
+        if _is_valid_service_id(resolved_cookie):
+            analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+            if analyst_session is None or resolved_cookie in set(analyst_session.service_ids or []):
+                if svcconfig.load_config(resolved_cookie) or svcconfig.get_active_service_id() is None:
+                    return resolved_cookie
 
-    return svcconfig.get_active_service_id()
+    active_sid = svcconfig.get_active_service_id()
+    return active_sid if _is_valid_service_id(active_sid) else None
 
 
 def _resolve_source_or_400(service_id: str | None) -> dict:
@@ -141,13 +198,25 @@ def require_service_access(
 
 
 def require_admin(request: Request) -> None:
-    """Reject analyst sessions with 403 — admin-only endpoints."""
+    """Reject analyst sessions and remote callers with 403 — admin-only endpoints."""
     analyst_session = getattr(request.state, "analyst_session", None)
-    if analyst_session is not None:
+    if analyst_session is not None or getattr(request.state, "is_remote", False) is True:
         raise HTTPException(
             status_code=403,
             detail={"error": "admin_only", "message": "This operation requires admin access."},
         )
+    if (
+        isinstance(request, Request)
+        or getattr(request, "client", None) is not None
+        or bool(getattr(request, "headers", None))
+    ):
+        from backend.utils.remote_access import is_request_remote
+
+        if is_request_remote(request):
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "admin_only", "message": "This operation requires admin access."},
+            )
 
 
 class RangeWindowRequest(Protocol):
@@ -208,7 +277,9 @@ def _enforce_service_access(
     analyst_session = getattr(request.state, "analyst_session", None)
     if analyst_session is None:
         if not service_id and candidates:
-            service_id = _resolve_candidate_service_id(candidates[0])
+            cand = _resolve_candidate_service_id(candidates[0])
+            if _is_valid_service_id(cand):
+                service_id = cand
         if not service_id:
             raise HTTPException(
                 status_code=400,
@@ -310,7 +381,23 @@ def _resolve_key() -> bytes:
         with _key_lock:
             if _key is None:
                 env = os.getenv(_ENV_SECRET, "").strip()
-                _key = hashlib.sha256(env.encode("utf-8")).digest() if env else secrets.token_bytes(KEY_BYTES)
+                if env:
+                    _key = hashlib.sha256(env.encode("utf-8")).digest()
+                else:
+                    fallback = ""
+                    for fallback_name in ("HIGH_SCALE_CURSOR_SECRET", "CURSOR_SECRET"):
+                        cand = os.getenv(fallback_name, "").strip()
+                        if cand:
+                            fallback = cand
+                            break
+                    if fallback:
+                        _key = hashlib.sha256(b"fla-session-token-v1:" + fallback.encode("utf-8")).digest()
+                    else:
+                        logger.warning(
+                            "[session_token] %s is unset; falling back to per-process ephemeral key",
+                            _ENV_SECRET,
+                        )
+                        _key = secrets.token_bytes(KEY_BYTES)
     return _key
 
 

@@ -13,8 +13,69 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const STRIPPED_FORWARDED_HEADERS = new Set([
+  "fastly-client-ip",
+  "true-client-ip",
+  "x-real-ip",
+  "forwarded",
+  "x-remote-analyst",
+  "x-fla-frontend-proxy",
+  "x-admin-gateway-token",
+  "x-fla-admin-gateway",
+  "x-forwarded-for",
+  "x-proxied-by-caddy",
+  "x-fla-public-gateway",
+]);
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SSR_TIMEOUT_MS = 5000;
+
+let cachedLoopbackBlockList: import("node:net").BlockList | null | undefined;
+
+function getLoopbackBlockList(): import("node:net").BlockList | null {
+  if (cachedLoopbackBlockList !== undefined) return cachedLoopbackBlockList;
+  const netMod = process.getBuiltinModule("node:net") as typeof import("node:net") | undefined;
+  if (!netMod?.BlockList) {
+    cachedLoopbackBlockList = null;
+    return null;
+  }
+  const bl = new netMod.BlockList();
+  bl.addSubnet("127.0.0.0", 8, "ipv4");
+  bl.addSubnet("::1", 128, "ipv6");
+  bl.addSubnet("::ffff:127.0.0.0", 104, "ipv6");
+  cachedLoopbackBlockList = bl;
+  return bl;
+}
+
+function isLoopbackIpLiteral(ip: string): boolean {
+  const candidate = ip.trim();
+  const netMod = process.getBuiltinModule("node:net") as typeof import("node:net") | undefined;
+  const bl = getLoopbackBlockList();
+  if (netMod?.isIP && bl) {
+    const ver = netMod.isIP(candidate);
+    if (ver === 4) return bl.check(candidate, "ipv4");
+    if (ver === 6) return bl.check(candidate, "ipv6");
+    return true;
+  }
+  const lc = candidate.toLowerCase();
+  if (/^[0:]+1$/.test(lc)) return true;
+  const v4 = lc.startsWith("::ffff:") ? lc.slice(7) : lc;
+  return v4 === "127.0.0.1" || v4.startsWith("127.") || v4 === "7f00:1";
+}
+
+function sanitizeForwardedFor(raw: string | null): string | null {
+  if (!raw) return null;
+  const netMod = process.getBuiltinModule("node:net") as typeof import("node:net") | undefined;
+  const checkIp = netMod?.isIP;
+  const kept: string[] = [];
+  for (const token of raw.split(",")) {
+    const candidate = token.trim();
+    if (!candidate) continue;
+    if (checkIp ? checkIp(candidate) === 0 : !/^[0-9a-fA-F:.]+$/.test(candidate)) continue;
+    if (isLoopbackIpLiteral(candidate)) continue;
+    kept.push(candidate);
+  }
+  return kept.length > 0 ? kept.join(", ") : null;
+}
 
 function getNodeRequestFn(protocol: string) {
   const mod = process.getBuiltinModule(protocol === "https:" ? "node:https" : "node:http") as
@@ -46,11 +107,40 @@ function buildUpstreamHeaders(request: Request, targetUrl: URL, bodyBuffer?: Buf
   const out: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     const lower = key.toLowerCase();
-    if (!HOP_BY_HOP_HEADERS.has(lower) && lower !== "host" && lower !== "content-length" && lower !== "accept-encoding") out[key] = value;
+    if (
+      !HOP_BY_HOP_HEADERS.has(lower) &&
+      !STRIPPED_FORWARDED_HEADERS.has(lower) &&
+      lower !== "host" &&
+      lower !== "content-length" &&
+      lower !== "accept-encoding"
+    ) {
+      out[key] = value;
+    }
   });
+  const reqUrl = new URL(request.url);
+  const effectiveHost = request.headers.get("host") || reqUrl.host;
+  const { admin, gatewayAuthenticated } = classifySsrRequest({
+    get: (name: string) => (name.toLowerCase() === "host" ? effectiveHost : request.headers.get(name)),
+  });
+  const proxiedByCaddy =
+    Boolean(request.headers.get("x-proxied-by-caddy")?.trim()) ||
+    Boolean(request.headers.get("x-fla-public-gateway")?.trim());
+  if (proxiedByCaddy || gatewayAuthenticated) {
+    const sanitizedXff = sanitizeForwardedFor(request.headers.get("x-forwarded-for"));
+    if (sanitizedXff) out["x-forwarded-for"] = sanitizedXff;
+  }
   // Next strips Content-Encoding from route-handler responses, so a compressed upstream body would reach the browser undecoded.
   out["accept-encoding"] = "identity";
-  out["host"] = targetUrl.host;
+  if (gatewayAuthenticated) {
+    out["x-admin-gateway-token"] = process.env.ADMIN_GATEWAY_SECRET || "";
+    out["host"] = effectiveHost || targetUrl.host;
+  } else if (!admin) {
+    out["x-fla-frontend-proxy"] = "1";
+    out["x-remote-analyst"] = "1";
+    out["host"] = effectiveHost || targetUrl.host;
+  } else {
+    out["host"] = targetUrl.host;
+  }
   out["connection"] = "close";
   if (bodyBuffer && bodyBuffer.byteLength > 0) out["content-length"] = String(bodyBuffer.byteLength);
   return out;
@@ -244,17 +334,36 @@ function timingSafeStringEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+function hasNonEmptyHeader(headerBag: Pick<Headers, "get">, name: string): boolean {
+  const v = headerBag.get(name);
+  return Boolean(v && v.trim() !== "");
+}
+
 export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
   admin: boolean;
   gatewayAuthenticated: boolean;
   refusal: string | null;
 } {
-  const proxiedByCaddy = headerBag.get("x-proxied-by-caddy");
+  const proxiedByCaddy =
+    hasNonEmptyHeader(headerBag, "x-proxied-by-caddy") ||
+    hasNonEmptyHeader(headerBag, "x-fla-public-gateway");
+  const hasExternalProxyEvidence =
+    proxiedByCaddy ||
+    hasNonEmptyHeader(headerBag, "x-fla-frontend-proxy") ||
+    hasNonEmptyHeader(headerBag, "x-remote-analyst") ||
+    hasNonEmptyHeader(headerBag, "x-forwarded-for") ||
+    hasNonEmptyHeader(headerBag, "fastly-client-ip") ||
+    hasNonEmptyHeader(headerBag, "true-client-ip") ||
+    hasNonEmptyHeader(headerBag, "x-real-ip") ||
+    hasNonEmptyHeader(headerBag, "forwarded");
   const inboundHost = headerBag.get("host");
-  const gatewayToken = headerBag.get("x-admin-gateway-token");
+  const gatewayToken = headerBag.get("x-admin-gateway-token") ?? headerBag.get("x-fla-admin-gateway");
   const gatewaySecret = process.env.ADMIN_GATEWAY_SECRET || "";
   const gatewayAuthenticated =
-    !proxiedByCaddy && gatewaySecret.length >= 32 && timingSafeStringEqual(gatewayToken || "", gatewaySecret);
+    !proxiedByCaddy &&
+    !hasNonEmptyHeader(headerBag, "x-fla-frontend-proxy") &&
+    gatewaySecret.length >= 32 &&
+    timingSafeStringEqual(gatewayToken || "", gatewaySecret);
   let refusal: string | null = null;
   if (gatewayToken !== null && !gatewayAuthenticated) {
     refusal = "invalid admin gateway credential";
@@ -267,12 +376,14 @@ export function classifySsrRequest(headerBag: Pick<Headers, "get">): {
         headerBag.get("origin")?.toLowerCase() !== `https://${inboundHost?.toLowerCase()}`))
   ) {
     refusal = "cross-origin admin gateway request";
-  } else if (process.env.ADMIN_GATEWAY_REQUIRED === "1" && !gatewayAuthenticated && !proxiedByCaddy) {
+  } else if (hasExternalProxyEvidence) {
+    return { admin: false, gatewayAuthenticated: false, refusal: null };
+  } else if (process.env.ADMIN_GATEWAY_REQUIRED === "1" && !gatewayAuthenticated) {
     refusal = "authenticated admin gateway required";
-  } else if (!gatewayAuthenticated && !proxiedByCaddy && (!inboundHost || !isLoopbackHost(inboundHost))) {
+  } else if (!gatewayAuthenticated && (!inboundHost || !isLoopbackHost(inboundHost))) {
     refusal = `no X-Proxied-By-Caddy marker and non-loopback/absent Host=${inboundHost ?? "<none>"}`;
   }
-  return { admin: !refusal && !proxiedByCaddy, gatewayAuthenticated, refusal };
+  return { admin: !refusal && !hasExternalProxyEvidence, gatewayAuthenticated: !refusal && gatewayAuthenticated, refusal };
 }
 
 export interface SSRUpstreamResponse {
@@ -338,10 +449,12 @@ export async function ssrUpstreamGet({
     const nh = await resolveSsrHeaders();
     const [cookieJar, headerBag] = await Promise.all([nh.cookies(), nh.headers()]);
     const cookieHeader = cookieJar.toString();
-    const proxiedByCaddy = headerBag.get("x-proxied-by-caddy");
+    const proxiedByCaddy =
+      hasNonEmptyHeader(headerBag, "x-proxied-by-caddy") ||
+      hasNonEmptyHeader(headerBag, "x-fla-public-gateway");
     const inboundHost = headerBag.get("host");
     const gatewaySecret = process.env.ADMIN_GATEWAY_SECRET || "";
-    const { gatewayAuthenticated, refusal } = classifySsrRequest(headerBag);
+    const { admin, gatewayAuthenticated, refusal } = classifySsrRequest(headerBag);
     if (refusal) {
       console.warn(`[${logPrefix}] refusal: ${refusal} — falling back to client fetch`);
       return null;
@@ -356,7 +469,20 @@ export async function ssrUpstreamGet({
     const harnessTag = headerBag.get("x-fla-harness");
     if (harnessTag && HARNESS_TAG_RE.test(harnessTag)) upstreamHeaders["X-FLA-Harness"] = harnessTag;
     if (extraHeaders) {
-      const trustHeaders = new Set(["host", "x-remote-analyst", "x-admin-gateway-token"]);
+      const trustHeaders = new Set([
+        "host",
+        "x-remote-analyst",
+        "x-admin-gateway-token",
+        "x-fla-admin-gateway",
+        "x-fla-frontend-proxy",
+        "x-proxied-by-caddy",
+        "x-fla-public-gateway",
+        "x-forwarded-for",
+        "fastly-client-ip",
+        "true-client-ip",
+        "x-real-ip",
+        "forwarded",
+      ]);
       for (const [key, value] of Object.entries(extraHeaders)) {
         if (!trustHeaders.has(key.toLowerCase())) upstreamHeaders[key] = value;
       }
@@ -365,11 +491,12 @@ export async function ssrUpstreamGet({
       upstreamHeaders["X-Admin-Gateway-Token"] = gatewaySecret;
       if (inboundHost) upstreamHeaders.Host = inboundHost;
     }
-    if (proxiedByCaddy) {
+    if (proxiedByCaddy || !admin) {
       upstreamHeaders["X-Remote-Analyst"] = "1";
+      upstreamHeaders["X-FLA-Frontend-Proxy"] = "1";
       if (inboundHost) upstreamHeaders.Host = inboundHost;
     }
-    if (debugResponsesRequested && !proxiedByCaddy) upstreamHeaders["x-debug-responses"] = "1";
+    if (debugResponsesRequested && !proxiedByCaddy && admin) upstreamHeaders["x-debug-responses"] = "1";
     let serialisedBody: string | undefined;
     if (method === "POST" && body !== undefined) {
       serialisedBody = JSON.stringify(body);

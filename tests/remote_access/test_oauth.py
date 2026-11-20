@@ -1714,9 +1714,8 @@ def test_strip_envelope_admin_top_n_ip_panel_not_masked():
 
 
 @pytest.mark.security_regression
-def test_strip_envelope_leaves_oip_panel_visible_for_analyst():
-    """ACCEPTED-INTENT pin (2026-06-24 PII audit): the origin IP (``oip``)
-    top-N panel is INTENTIONALLY left visible to a mask_ips analyst."""
+def test_strip_envelope_masks_oip_panel_for_analyst():
+    """SEC-08 18-key PII policy: both ``ip`` and origin IP (``oip``) top-N values are masked when mask_ips=True."""
     payload = {
         "data": {
             "ip": {"top": [{"value": "203.0.113.45", "count": 9}], "total": 9},
@@ -1725,7 +1724,7 @@ def test_strip_envelope_leaves_oip_panel_visible_for_analyst():
     }
     _, parsed = _strip_json(payload, mask_ips=True)
     assert parsed["data"]["ip"]["top"][0]["value"] == "203.0.113.xxx"
-    assert parsed["data"]["oip"]["top"][0]["value"] == "151.101.1.51"
+    assert parsed["data"]["oip"]["top"][0]["value"] == "151.101.1.xxx"
 
 
 # ── apply_response_hardening ───────────────────────────────────────────────
@@ -2096,8 +2095,8 @@ def test_body_service_ids_helper_caps_buffered_body_at_4mib():
 @pytest.mark.parametrize(
     ("client_peer", "extra_headers", "expected"),
     [
-        # Loopback + X-Remote-Analyst: 1 but sharing inactive → still local.
-        (("127.0.0.1", 12345), [(b"host", b"testserver"), (b"x-remote-analyst", b"1")], False),
+        # Loopback + X-Remote-Analyst: 1 is ALWAYS classified remote even when sharing is inactive (SEC-03).
+        (("127.0.0.1", 12345), [(b"host", b"testserver"), (b"x-remote-analyst", b"1")], True),
         # Non-loopback peer is treated as remote regardless of sharing state.
         (("8.8.8.8", 12345), [], True),
         # No socket peer (request.client is None) fails closed as REMOTE.

@@ -413,6 +413,8 @@ def reconcile_cdn_service_state(
                     connect_timeout=5000,
                     first_byte_timeout=60000,
                     between_bytes_timeout=30000,
+                    ssl_cert_hostname=fos_host,
+                    ssl_sni_hostname=fos_host,
                 )
             ]
             fos_items = (
@@ -422,7 +424,11 @@ def reconcile_cdn_service_state(
             )
             desired_dictionaries_list = [
                 ServiceDictionary(name="fos_credentials", write_only=True, items=fos_items),
-                ServiceDictionary(name="cdn_auth", write_only=True, items={"secret": cdn_secret} if cdn_secret else {}),
+                ServiceDictionary(
+                    name="cdn_auth",
+                    write_only=True,
+                    items={"secret_key": cdn_secret, "secret": cdn_secret} if cdn_secret else {},
+                ),
             ]
             diff = compute_diff(
                 current_snippets,

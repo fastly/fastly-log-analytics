@@ -28,6 +28,42 @@ import { ACTIVE_SERVICE_COOKIE } from './lib/utils'
 
 const ANALYST_BLOCKED_PREFIXES = ['/admin', '/alerts', '/usage', '/high-scale']
 const PROXIED_BY_CADDY_HEADER = 'x-proxied-by-caddy'
+const PUBLIC_GATEWAY_HEADER = 'x-fla-public-gateway'
+const FRONTEND_PROXY_HEADER = 'x-fla-frontend-proxy'
+const ANALYST_SESSION_COOKIE = 'analyst_session_id'
+const SERVICE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+const PLAUSIBLE_SESSION_RE = /^[A-Za-z0-9_-]{16,128}$/
+
+function readCookieValue(request: NextRequest, name: string): string | null {
+  if (request.cookies?.get) {
+    const entry = request.cookies.get(name)
+    if (entry !== undefined) return entry.value
+  }
+  const rawCookie = request.headers.get('cookie')
+  if (!rawCookie) return null
+  for (const part of rawCookie.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq === -1) continue
+    const k = part.slice(0, eq).trim()
+    if (k === name) return part.slice(eq + 1).trim()
+  }
+  return null
+}
+
+function isTruthyProxyHeader(val: string | null): boolean {
+  if (!val) return false
+  const normalized = val.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true'
+}
+
+function isProxiedPublicRequest(request: NextRequest): boolean {
+  return (
+    isTruthyProxyHeader(request.headers.get(PROXIED_BY_CADDY_HEADER)) ||
+    isTruthyProxyHeader(request.headers.get(PUBLIC_GATEWAY_HEADER)) ||
+    isTruthyProxyHeader(request.headers.get(FRONTEND_PROXY_HEADER)) ||
+    isTruthyProxyHeader(request.headers.get('x-remote-analyst'))
+  )
+}
 
 // Same-origin /api/*, /js/* proxying for the production/
 // standalone build (dev mode fetches the backend directly cross-origin,
@@ -119,8 +155,7 @@ export function proxy(request: NextRequest) {
   const isGatedPath = ANALYST_BLOCKED_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`)) || isServerAction || isDataRequest
 
   if (isGatedPath) {
-    const proxiedByCaddy = request.headers.get(PROXIED_BY_CADDY_HEADER)
-    if (proxiedByCaddy === 'true') {
+    if (isProxiedPublicRequest(request)) {
       if (isServerAction || isDataRequest) {
         // Empty 403 body — no CSP needed.
         return new NextResponse(null, { status: 403 })
@@ -142,8 +177,10 @@ export function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers)
   requestHeaders.set('x-nonce', nonce)
 
-  const serviceParam = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
-  const serviceCookie = request.cookies?.get ? (request.cookies.get(ACTIVE_SERVICE_COOKIE)?.value || null) : null
+  const rawServiceParam = request.nextUrl?.searchParams?.get('service') || (request.url ? new URL(request.url).searchParams.get('service') : null)
+  const rawServiceCookie = readCookieValue(request, ACTIVE_SERVICE_COOKIE)
+  const serviceParam = rawServiceParam && SERVICE_ID_RE.test(rawServiceParam) ? rawServiceParam : null
+  const serviceCookie = rawServiceCookie && SERVICE_ID_RE.test(rawServiceCookie) ? rawServiceCookie : null
   const serviceId = serviceParam || serviceCookie
 
   if (serviceId) {
@@ -157,6 +194,18 @@ export function proxy(request: NextRequest) {
       path: '/',
       maxAge: 31536000,
       sameSite: 'lax',
+      secure: !IS_DEV,
+    })
+  }
+
+  const analystSessionVal = readCookieValue(request, ANALYST_SESSION_COOKIE)
+  if (analystSessionVal !== null && !PLAUSIBLE_SESSION_RE.test(analystSessionVal) && response.cookies) {
+    response.cookies.set(ANALYST_SESSION_COOKIE, '', {
+      path: '/',
+      maxAge: 0,
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: !IS_DEV,
     })
   }
 

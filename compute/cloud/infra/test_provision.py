@@ -787,6 +787,10 @@ def test_bootstrap_drafts_wire_isolated_resources_and_never_activate(
     }
     front_key = next(fields["item_value"] for method, path, fields, _ in api.calls if path.endswith("/item/front_key"))
     assert front_key == secret_writes["front_key"]
+    auth_epoch = next(
+        fields["item_value"] for method, path, fields, _ in api.calls if path.endswith("/item/auth_epoch")
+    )
+    assert auth_epoch == "0"
     assert set(secret_writes) == set(provision.resource_plan()["secret_keys"])
     assert secret_writes["fastly_token"] == "api-token"
     assert not any(method == "DELETE" for method, *_ in api.calls)
@@ -1435,3 +1439,27 @@ def test_render_terraform_delegates_to_shared_terraform_gen() -> None:
     assert "cloud_compute.tf.json" in files
     assert "team-a" in files["cloud_compute.tf.json"]
     assert "fastly_service_vcl" in files["cloud_compute.tf.json"]
+
+
+def test_bootstrap_seeds_auth_epoch_zero_and_deploy_leaves_epoch_untouched(package, inventory_path) -> None:
+    bootstrap_api = SyntheticBootstrapAPI()
+    provision.bootstrap(
+        bootstrap_api,
+        provision.resource_plan("team-a"),
+        inventory_path,
+        rate_limiting=True,
+        api_token="api-token",
+    )
+    epoch_writes = [
+        (method, path, payload, form)
+        for method, path, payload, form in bootstrap_api.calls
+        if path.endswith("/item/auth_epoch")
+    ]
+    assert epoch_writes == [
+        ("PUT", "/service/team-a-front-id/dictionary/flp_front_auth-id/item/auth_epoch", {"item_value": "0"}, True)
+    ]
+
+    _deploy_inventory(inventory_path)
+    deploy_api = SyntheticDeployAPI()
+    provision.deploy(deploy_api, inventory_path, package, "team-a")
+    assert not any(path.endswith("/item/auth_epoch") for _, path, *_ in deploy_api.calls)

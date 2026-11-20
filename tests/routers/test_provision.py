@@ -1030,10 +1030,17 @@ def test_check_domain_routes(query, mock_ret, expected_avail, expected_call_arg)
 
 
 def test_check_domain_available_helper_branches():
+    import socket
+
+    public_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("151.101.1.57", 443))]
     fake_resp = MagicMock()
     fake_resp.__enter__ = lambda s: s
     fake_resp.__exit__ = MagicMock(return_value=False)
-    with patch("urllib.request.urlopen", return_value=fake_resp), patch("backend.utils.telemetry.tracked_call"):
+    with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", return_value=fake_resp),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
         ok, reason = _check_domain_available("test.global.ssl.fastly.net")
         assert ok is False and "in use" in (reason or "").lower()
 
@@ -1041,8 +1048,9 @@ def test_check_domain_available_helper_branches():
         return urllib.error.HTTPError(url="https://x", code=404, msg="not found", hdrs={}, fp=BytesIO(body))  # type: ignore[arg-type]
 
     with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
         patch(
-            "urllib.request.urlopen",
+            "urllib.request.OpenerDirector.open",
             side_effect=_http_404(b"... Please check that this domain has been added to a service. ..."),
         ),
         patch("backend.utils.telemetry.tracked_call"),
@@ -1050,25 +1058,37 @@ def test_check_domain_available_helper_branches():
         assert _check_domain_available("test.global.ssl.fastly.net") == (True, None)
 
     with (
-        patch("urllib.request.urlopen", side_effect=_http_404(b"some other body")),
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", side_effect=_http_404(b"some other body")),
         patch("backend.utils.telemetry.tracked_call"),
     ):
         ok_o, reason_o = _check_domain_available("test.global.ssl.fastly.net")
         assert ok_o is False and "already registered" in (reason_o or "")
 
     with (
-        patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns failed")),
+        patch("backend.routers.provision.socket.getaddrinfo", side_effect=socket.gaierror("nxdomain")),
         patch("backend.utils.telemetry.tracked_call"),
     ):
         ok_dns, reason_dns = _check_domain_available("test.global.ssl.fastly.net")
         assert ok_dns is True and "DNS/Connection" in (reason_dns or "")
+        assert "nxdomain" not in (reason_dns or "")
 
     with (
-        patch("urllib.request.urlopen", side_effect=RuntimeError("unexpected")),
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", side_effect=urllib.error.URLError("tls handshake failed")),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
+        ok_conn, reason_conn = _check_domain_available("test.global.ssl.fastly.net")
+        assert ok_conn is True and "DNS/Connection" in (reason_conn or "")
+        assert "tls handshake failed" not in (reason_conn or "")
+
+    with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", side_effect=RuntimeError("unexpected internal detail")),
         patch("backend.utils.telemetry.tracked_call"),
     ):
         ok_ex, reason_ex = _check_domain_available("foo.example")
-        assert ok_ex is False and "unexpected" in (reason_ex or "")
+        assert ok_ex is False and "unexpected internal detail" not in (reason_ex or "")
 
 
 # ─── /api/provision/check-fos & /terraform/* ─────────────────────────────────
@@ -1582,3 +1602,367 @@ def test_reconcile_route_and_json_content_type():
         with pytest.raises(HTTPException) as exc:
             _require_json_content_type(req)
         assert exc.value.status_code == 415
+
+
+# ─── Milestone M2 Security Regressions (SEC-13 & SEC-15) ────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "bad_domain",
+    [
+        "127.0.0.1",
+        "169.254.169.254",
+        "10.0.0.1",
+        "[::1]",
+        "[::ffff:127.0.0.1]",
+        "localhost",
+        "metadata",
+        "metadata.google.internal",
+        "svc.cluster.local",
+        "printer.local",
+        "app.localhost",
+        "db.svc",
+        "host.corp",
+        "nas.lan",
+        "https://127.0.0.1:8443/admin",
+        "user@example.com",
+    ],
+)
+def test_sec13_check_domain_rejects_ip_literals_and_internal_suffixes(bad_domain: str):
+    with patch("backend.routers.provision.socket.getaddrinfo") as mock_dns:
+        available, reason = _check_domain_available(bad_domain)
+    assert available is False
+    assert reason is not None and "DNS" not in reason
+    mock_dns.assert_not_called()
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "records",
+    [
+        [(2, 1, 6, "", ("127.0.0.1", 443))],
+        [(2, 1, 6, "", ("10.0.0.5", 443))],
+        [(2, 1, 6, "", ("169.254.169.254", 443))],
+        [(10, 1, 6, "", ("::1", 443, 0, 0))],
+        [(10, 1, 6, "", ("::ffff:127.0.0.1", 443, 0, 0))],
+        [(2, 1, 6, "", ("93.184.216.34", 443)), (2, 1, 6, "", ("10.0.0.1", 443))],
+    ],
+)
+def test_sec13_check_domain_blocks_private_and_mapped_dns_answers(records: list[tuple]):
+    with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=records),
+        patch("backend.routers.provision.socket.create_connection") as mock_conn,
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
+        available, reason = _check_domain_available("rebind.example.com")
+    assert available is False
+    assert reason == "Domain resolves to a non-public IP address"
+    assert "DNS" not in reason
+    mock_conn.assert_not_called()
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec13_check_domain_pins_resolved_ip_and_disables_redirects():
+    import socket
+    import urllib.request
+
+    from backend.routers.provision import _NoRedirectHandler, _PinnedHTTPSConnection
+
+    fake_raw_sock = MagicMock()
+    fake_tls_sock = MagicMock()
+    fake_ctx = MagicMock()
+    fake_ctx.wrap_socket.return_value = fake_tls_sock
+
+    conn = _PinnedHTTPSConnection(
+        "custom.example.com",
+        pinned_ip="151.101.1.57",
+        server_hostname="custom.example.com",
+        timeout=5,
+        context=fake_ctx,
+    )
+    with patch("backend.routers.provision.socket.create_connection", return_value=fake_raw_sock) as mock_create_conn:
+        conn.connect()
+    mock_create_conn.assert_called_once_with(("151.101.1.57", 443), 5)
+    fake_ctx.wrap_socket.assert_called_once_with(fake_raw_sock, server_hostname="custom.example.com")
+    assert conn.sock is fake_tls_sock
+
+    no_redir = _NoRedirectHandler()
+    dummy_req = urllib.request.Request("https://custom.example.com/")
+    for code in (301, 302, 303, 307, 308):
+        handler_fn = getattr(no_redir, f"http_error_{code}")
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            handler_fn(
+                dummy_req,
+                BytesIO(b""),
+                code,
+                "Redirect",
+                {"Location": "http://169.254.169.254/latest/meta-data/"},
+            )
+        assert exc_info.value.code == code
+
+        public_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("151.101.1.57", 443))]
+        redir_err = urllib.error.HTTPError(
+            url="https://custom.example.com/",
+            code=code,
+            msg="Moved",
+            hdrs={"Location": "http://169.254.169.254/latest/meta-data/"},  # type: ignore[arg-type]
+            fp=BytesIO(b""),
+        )
+        with (
+            patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+            patch("urllib.request.OpenerDirector.open", side_effect=redir_err),
+            patch("backend.utils.telemetry.tracked_call"),
+        ):
+            available, reason = _check_domain_available("custom.example.com")
+        assert available is False
+        assert reason == "Domain already registered or in use"
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec13_routers_require_admin_blocks_analyst_sessions():
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from backend.routers.provision import router as prov_router
+    from backend.routers.services.custom_fields import router as cf_router
+    from backend.routers.services.vcl import router as vcl_router
+
+    session_holder: dict[str, object] = {"session": SimpleNamespace(session_id="s1", service_ids=["svc1"])}
+    sub_app = FastAPI()
+
+    @sub_app.middleware("http")
+    async def _attach_session(request: Request, call_next):
+        request.state.analyst_session = session_holder["session"]
+        return await call_next(request)
+
+    sub_app.include_router(prov_router)
+    sub_app.include_router(vcl_router, prefix="/api")
+    sub_app.include_router(cf_router, prefix="/api")
+    tc = TestClient(sub_app)
+
+    blocked_calls = [
+        ("GET", "/api/provision/check-domain?prefix=foo", None),
+        ("POST", "/api/provision/reconcile", {"service_id": "svc1", "token": "tok"}),
+        ("GET", "/api/services/svc1/logging-settings", None),
+        ("POST", "/api/services/svc1/log-fields", {"log_fields": {"groups": ["core"]}}),
+        ("POST", "/api/services/svc1/logging-settings/update?custom_condition=req.status%20%3D%3D%20200", None),
+        ("GET", "/api/services/svc1/custom-fields", None),
+        (
+            "POST",
+            "/api/services/svc1/custom-fields",
+            {
+                "name": "cf_test",
+                "label": "CF Test",
+                "vcl_log_expression": "req.http.X-Test",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+            },
+        ),
+    ]
+    for method, path, payload in blocked_calls:
+        res = tc.request(method, path, json=payload) if payload is not None else tc.request(method, path)
+        assert res.status_code == 403, f"expected 403 for {method} {path}, got {res.status_code}"
+        assert res.json()["detail"]["error"] == "admin_only"
+
+    session_holder["session"] = None
+    with patch("backend.routers.provision._check_domain_available", return_value=(True, None)):
+        admin_res = tc.get("/api/provision/check-domain?prefix=foo")
+    assert admin_res.status_code == 200
+    assert admin_res.json()["available"] is True
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_provision_and_vcl_routers_reject_malicious_vcl_inputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    (tmp_path / "cfgs").mkdir(parents=True, exist_ok=True)
+    svcconfig.save_config("svc1", _seed_cfg("svc1"))
+
+    bad_cond = 'table.lookup(fos_credentials, "secret_key") != ""'
+    unbalanced_cond = "true) || (true"
+    bad_cf_list = [
+        {
+            "name": "cf_leak",
+            "label": "Leak",
+            "vcl_log_expression": "req.http.X-Edge-Scorer-Auth",
+            "sql_type": "VARCHAR",
+            "value_type": "string",
+        }
+    ]
+    bad_lf_json = json.dumps({"groups": ["core"], "custom_fields": bad_cf_list})
+
+    # 1. /api/provision/execute rejects bad custom_condition, rum_custom_condition, custom_fields, & malformed JSON
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="svc"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision") as mock_prov,
+    ):
+        for extra in (
+            {"custom_condition": bad_cond},
+            {"custom_condition": unbalanced_cond},
+            {"rum_enabled": False, "rum_custom_condition": bad_cond},
+            {"log_fields": bad_lf_json},
+            {"log_fields": "{not-valid-json"},
+        ):
+            res = _client().post(
+                "/api/provision/execute",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "valid-bucket", **extra},
+            )
+            assert res.status_code == 400, f"expected 400 for execute extra={extra}, got {res.status_code}"
+        mock_prov.assert_not_called()
+
+    # 2. /api/provision/ingest rejects bad custom_condition, rum.custom_condition, custom_fields, & malformed JSON
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc1")),
+        patch("backend.provision.write_service_config") as mock_write_cfg,
+    ):
+        for ingest_extra in (
+            {"custom_condition": bad_cond},
+            {"rum": {"custom_condition": unbalanced_cond}},
+            {"log_fields": bad_lf_json},
+            {"log_fields": "{not-json"},
+        ):
+            res = _client().post(
+                "/api/provision/ingest",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "valid-bucket", **ingest_extra},
+            )
+            assert res.status_code == 400, f"expected 400 for ingest extra={ingest_extra}, got {res.status_code}"
+        mock_write_cfg.assert_not_called()
+
+    # 3. /api/provision/terraform/preview and /export reject malicious VCL conditions & custom_fields
+    with patch("backend.utils.terraform_gen.generate_terraform") as mock_tf:
+        for tf_path in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+            for tf_extra in (
+                {"custom_condition": bad_cond},
+                {"rum_custom_condition": unbalanced_cond},
+                {"log_fields": bad_lf_json},
+                {"log_fields": "{not-json"},
+            ):
+                res = _client().post(tf_path, json={"service_id": "svc1", **tf_extra})
+                assert res.status_code == 400, f"expected 400 for {tf_path} extra={tf_extra}, got {res.status_code}"
+        mock_tf.assert_not_called()
+
+    # 4. /api/services/{id}/logging-settings/update rejects bad custom_condition before Fastly mutation
+    with patch("backend.provision.fastly_api.update_logging_endpoint") as mock_upd_ep:
+        res_upd = _client().post(
+            "/api/services/svc1/logging-settings/update",
+            params={"custom_condition": bad_cond},
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert res_upd.status_code == 400
+        mock_upd_ep.assert_not_called()
+
+    # 5. /api/services/{id}/log-fields and /custom-fields reject secret-exfiltrating custom field expressions
+    with patch("backend.routers.services.vcl.mutate_service_config") as mock_mut_vcl:
+        for bad_cfs in (
+            bad_cf_list,
+            [{"name": "rum_cid", "collection_stage": "deliver", "vcl_log_expression": bad_cond}],
+            [{"name": "rum_cid", "collection_stage": "deliver", "vcl_log_expression": "resp.http.Server"}],
+            [{"name": "cf_sneaky", "collection_stage": "deliver"}],
+        ):
+            res_lf = _client().post(
+                "/api/services/svc1/log-fields",
+                json={"log_fields": {"groups": ["core"], "custom_fields": bad_cfs}},
+            )
+            assert res_lf.status_code == 422
+        mock_mut_vcl.assert_not_called()
+
+    # Legitimate RUM system fields (beacon/deliver) pass Terraform preview validation cleanly
+    valid_rum_lf = json.dumps(
+        {
+            "groups": ["core"],
+            "custom_fields": [
+                {
+                    "name": "rum_cid",
+                    "label": "RUM Session ID",
+                    "vcl_log_expression": "req.http.x-fos-edge-data:rum_cid",
+                    "collection_stage": "beacon",
+                    "sql_type": "VARCHAR",
+                    "value_type": "string",
+                    "bytes_estimate": 36,
+                    "enabled": True,
+                }
+            ],
+        }
+    )
+    with patch("backend.utils.terraform_gen.generate_terraform", return_value={"main.tf": "# ok"}):
+        res_tf_ok = _client().post(
+            "/api/provision/terraform/preview",
+            json={"service_id": "svc1", "log_fields": valid_rum_lf},
+        )
+        assert res_tf_ok.status_code == 200
+
+    res_cf = _client().post(
+        "/api/services/svc1/custom-fields",
+        json=bad_cf_list[0],
+    )
+    assert res_cf.status_code == 422
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec13_execute_normalizes_trailing_slash_cdn_url_and_rejects_malformed_cdn_url(isolated_configs_dir):
+    captured: dict = {}
+
+    def _fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
+        yield {"type": "done", "message": "ok"}
+
+    with (
+        patch("backend.routers.provision._check_domain_available", return_value=(True, None)) as mock_dom,
+        patch("backend.provision.provision", side_effect=_fake_provision),
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="My Svc"),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.scheduler.get_scheduler"),
+        TestClient(app) as client,
+    ):
+        res_ok = client.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok-test",
+                "service_id": "svc-cdn-norm",
+                "fos_bucket_name": "cdn-norm-bucket",
+                "cdn_url": "https://my-cdn.global.ssl.fastly.net/",
+            },
+        )
+        assert res_ok.status_code == 200, res_ok.text
+        mock_dom.assert_called_once_with("my-cdn.global.ssl.fastly.net", timeout=5)
+        assert captured["cfg"]["cdn_url"] == "https://my-cdn.global.ssl.fastly.net"
+
+        mock_dom.reset_mock()
+        captured.clear()
+        for bad_cdn_url in (
+            "http://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net:8443",
+            "https://my-cdn.global.ssl.fastly.net:abc",
+            "https://my-cdn.global.ssl.fastly.net:99999",
+            "https://[::1",
+            "https://[2001:db8::1",
+            "https://my-cdn.global.ssl.fastly.net/extra",
+            "https://user@my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net?a=1",
+            "https://my-cdn.global.ssl.fastly.net#frag",
+        ):
+            res_bad = client.post(
+                "/api/provision/execute",
+                json={
+                    "token": "tok-test",
+                    "service_id": "svc-cdn-norm",
+                    "fos_bucket_name": "cdn-norm-bucket",
+                    "cdn_url": bad_cdn_url,
+                },
+            )
+            assert res_bad.status_code == 400, f"Expected 400 for {bad_cdn_url!r}, got {res_bad.status_code}"
+            assert res_bad.json()["detail"]["error"] == "invalid_cdn_url"
+        mock_dom.assert_not_called()
+        assert "cfg" not in captured

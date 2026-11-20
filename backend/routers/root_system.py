@@ -406,16 +406,21 @@ _STUCK_SYNC_RUNNING_MINS = 15
 
 
 @router.get("/metrics", include_in_schema=False)
-def prometheus_metrics():
+def prometheus_metrics(request: Request):
+    from fastapi import HTTPException
+
+    from backend.utils.remote_access import is_allowed_metrics_scrape
+    from backend.utils.router_utils import make_error
+
+    if not is_allowed_metrics_scrape(request):
+        raise HTTPException(status_code=403, detail=make_error("admin_only", "Administrator access required"))
     try:
         from fastapi.responses import Response
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
     except ImportError:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=501, detail="Prometheus client not installed")
+        raise HTTPException(status_code=501, detail=make_error("not_implemented", "Prometheus client not installed"))
 
 
 @router.get(

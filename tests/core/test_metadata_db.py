@@ -1282,7 +1282,11 @@ def test_export_omits_custom_fields_when_config_missing():
 # ── _cdn_get: URL construction + telemetry ───────────────────────────────────
 
 
-def test_cdn_get_builds_url_with_secret_query_param():
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_cdn_get_sends_x_fastly_key_header_without_query_secret():
+    import urllib.request
+
     src = _src(cdn_url="https://cdn-test.fastly.net/", cdn_secret="topsecret")
 
     fake_resp = MagicMock()
@@ -1292,8 +1296,11 @@ def test_cdn_get_builds_url_with_secret_query_param():
     cm.__enter__.return_value = fake_resp
     cm.__exit__.return_value = False
 
+    fake_opener = MagicMock()
+    fake_opener.open.return_value = cm
+
     with (
-        patch("urllib.request.urlopen", return_value=cm) as mock_open,
+        patch("urllib.request.build_opener", return_value=fake_opener) as mock_build,
         patch("backend.utils.telemetry.record_cdn_call"),
     ):
         from backend.core.metadata.base import _cdn_get
@@ -1301,10 +1308,57 @@ def test_cdn_get_builds_url_with_secret_query_param():
         body = _cdn_get(src, "meta/admin_state.json")
 
     assert body == b"payload"
-    req = mock_open.call_args[0][0]
-    assert req.full_url == "https://cdn-test.fastly.net/meta/admin_state.json?key=topsecret"
+    req = fake_opener.open.call_args[0][0]
+    assert req.full_url == "https://cdn-test.fastly.net/meta/admin_state.json"
+    assert "?key=" not in req.full_url and "topsecret" not in req.full_url
+    assert req.get_header("X-fastly-key") == "topsecret"
+
+    # Verify SafeRedirectHandler blocks cross-host and scheme-downgrade redirects across *.global.ssl.fastly.net
+    import urllib.error
+
+    redirect_handler = next(
+        h() if isinstance(h, type) else h
+        for h in mock_build.call_args[0]
+        if (isinstance(h, type) and issubclass(h, urllib.request.HTTPRedirectHandler))
+        or isinstance(h, urllib.request.HTTPRedirectHandler)
+    )
+    orig_req = urllib.request.Request(
+        "https://cdn-a.global.ssl.fastly.net/meta/admin_state.json",
+        headers={"x-fastly-key": "topsecret"},
+    )
+    for bad_redirect_target in (
+        "https://cdn-b.global.ssl.fastly.net/meta/admin_state.json",
+        "//cdn-b.global.ssl.fastly.net/meta/admin_state.json",
+        "http://cdn-a.global.ssl.fastly.net/meta/admin_state.json",
+    ):
+        with pytest.raises(urllib.error.URLError):
+            redirect_handler.redirect_request(
+                orig_req,
+                None,
+                302,
+                "Found",
+                {},
+                bad_redirect_target,
+            )
+
+    # Same-host HTTPS redirect (absolute and relative) preserves x-fastly-key
+    for ok_redirect_target in (
+        "https://cdn-a.global.ssl.fastly.net/v2/meta/admin_state.json",
+        "/v2/meta/admin_state.json",
+    ):
+        redirected_same = redirect_handler.redirect_request(
+            orig_req,
+            None,
+            307,
+            "Temporary Redirect",
+            {},
+            ok_redirect_target,
+        )
+        assert redirected_same is not None
+        assert redirected_same.get_header("X-fastly-key") == "topsecret"
 
 
+@pytest.mark.no_postgres
 def test_cdn_get_records_telemetry_with_byte_count():
     """Every CDN hit must record a `record_cdn_call` entry so the usage
     page attributes the bytes — drift here under-reports egress."""

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
 from backend.core.fos_client import _safe_table_name, get_source_for_service
-from backend.core.request_context import get_service_id, get_source
+from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.models.analytics import InsightsAvailabilityResponse, PageTelemetryResponse
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
@@ -27,7 +27,8 @@ from backend.utils import telemetry as statement_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.router_utils import query_errors
+from backend.utils.remote_access import is_request_remote, validate_analyst_request_binding
+from backend.utils.router_utils import make_error, query_errors
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ async def bootstrap(
     # Coalesce + short-TTL cache the loopback admin bootstrap; run the
     # analyst/anonymous path fresh. The heavy work lives in _bootstrap_sync
     # (a sync def run in the threadpool).
-    is_remote = getattr(request.state, "is_remote", False)
+    is_remote = bool(getattr(request.state, "is_remote", False) or is_request_remote(request))
     # Analyst / anonymous: per-session, cheap — never cached.
     if is_remote or bool(request.cookies.get("analyst_session_id")):
         return await run_in_threadpool(_bootstrap_sync, request, service_id)
@@ -140,6 +141,19 @@ async def _bootstrap_compute_and_cache(request: Request, service_id: str | None,
         _bootstrap_inflight.pop(key, None)
 
 
+_ANALYST_BOOTSTRAP_SERVICE_KEYS: frozenset[str] = frozenset(
+    {"service_id", "name", "is_active", "cmcd_enabled", "rum_enabled", "rum_log_period"}
+)
+
+
+def _project_analyst_bootstrap_service(svc: dict) -> dict:
+    out = {k: svc[k] for k in _ANALYST_BOOTSTRAP_SERVICE_KEYS if k in svc}
+    raw_status = svc.get("status")
+    if isinstance(raw_status, dict) and "schema" in raw_status:
+        out["status"] = {"schema": raw_status.get("schema", []) or []}
+    return out
+
+
 def _bootstrap_sync(
     request: Request,
     service_id: str | None,
@@ -161,17 +175,28 @@ def _bootstrap_sync(
     # this path — we validate the cookie manually here so authenticated
     # analysts still get the full response with their scoped services.
     analyst_session = getattr(request.state, "analyst_session", None)
-    is_remote = getattr(request.state, "is_remote", False)
+    is_remote = bool(getattr(request.state, "is_remote", False) or is_request_remote(request))
     if analyst_session is None:
         sid = request.cookies.get("analyst_session_id")
         if sid:
             from backend.utils.tunnel import get_tunnel_manager
 
+            mgr = get_tunnel_manager()
+            if not mgr.is_sharing_active():
+                raise HTTPException(
+                    status_code=403, detail=make_error("sharing_disabled", "Remote sharing is disabled")
+                )
+
             def _validate():
-                return get_tunnel_manager().validate_session(sid)
+                return mgr.validate_session(sid)
 
             analyst_session = timer.call("validate_analyst_session", _validate)
             if analyst_session is not None:
+                if (bind_err := validate_analyst_request_binding(request, analyst_session, mgr=mgr)) is not None:
+                    raise HTTPException(
+                        status_code=bind_err[0],
+                        detail=make_error(bind_err[1], "Analyst session binding validation failed"),
+                    )
                 request.state.analyst_session = analyst_session
 
     # Anonymous remote visitor: return a minimal stub so the frontend hides
@@ -665,15 +690,17 @@ def _bootstrap_sync(
 
     storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
 
-    # Analysts need the capability flag, not the operator's workspace ID.
+    # Analysts receive only the explicit UI-safe service projection — never
+    # FOS bucket/region, origin CDN URLs, RUM cid_salt, or operator IDs.
     response_services = services
     if analyst_session is not None:
-        response_services = [{k: v for k, v in svc.items() if k != "ngwaf_workspace_id"} for svc in services]
+        response_services = [_project_analyst_bootstrap_service(svc) for svc in services]
         if mask_ips_for(analyst_session):
-            from backend.core.share_db import apply_pii_policy
+            from backend.core.share_db import apply_pii_policy, filter_saved_views_for_pii
 
             schema = apply_pii_policy(schema, {"mask_ips": True})
             response_services = apply_pii_policy(response_services, {"mask_ips": True})
+            views = filter_saved_views_for_pii(views, {"mask_ips": True})
 
     return BootstrapResponse.with_telemetry(
         active_service_id=valid_active_id,
@@ -837,7 +864,18 @@ def insight_availability(
 
 # ── Debug & telemetry endpoints (folded from backend.routers.debug) ─────────
 
-debug_router = APIRouter(prefix="/api", responses=DEFAULT_ERROR_RESPONSES)
+
+def _require_debug_admin(request: Request) -> None:
+    require_admin(request)
+    if getattr(request.state, "is_remote", False):
+        raise HTTPException(status_code=403, detail=make_error("admin_only", "Administrator access required"))
+
+
+debug_router = APIRouter(
+    prefix="/api",
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(_require_debug_admin)],
+)
 
 
 @debug_router.get("/debug/recent-postgres", tags=["debug"], response_model=RecentSqliteResponse)
@@ -850,18 +888,7 @@ def recent_sqlite(
     """Return up to ``limit`` most-recent Postgres statements captured since
     ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
     """
-    is_remote = getattr(request.state, "is_remote", False)
-    if is_remote:
-        from backend.core.share_db import get_setting
-
-        q_vis = get_setting("query_debug_visibility", "disabled")
-        if q_vis not in ("analysts", "both"):
-            from backend.utils.router_utils import make_error
-
-            raise HTTPException(
-                status_code=403, detail=make_error("sql_debug_disabled", "SQL debug is disabled for analysts")
-            )
-
+    _require_debug_admin(request)
     return statement_profiler.get_recent(limit=limit, since_seq=since_seq)
 
 
@@ -869,14 +896,7 @@ def recent_sqlite(
 @debug_router.post("/debug/clear-sqlite", tags=["debug"], response_model=ClearSqliteResponse)
 def clear_sqlite(request: Request):
     """Drain the Postgres ring buffer. Manual reset for the Debug Panel."""
-    is_remote = getattr(request.state, "is_remote", False)
-    if is_remote:
-        from backend.utils.router_utils import make_error
-
-        raise HTTPException(
-            status_code=403, detail=make_error("admin_only", "Only administrators can clear the Postgres debug buffer")
-        )
-
+    _require_debug_admin(request)
     statement_profiler.clear()
     return {"ok": True, **statement_profiler.buffer_stats()}
 

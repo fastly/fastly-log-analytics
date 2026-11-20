@@ -168,16 +168,23 @@ def _cdn_get(source: dict, key: str) -> bytes:
         raise urllib.error.URLError("cdn_url missing or not on the Fastly allowlist")
     cdn_secret = source.get("cdn_secret") or ""
     url = f"{cdn_url}/{urllib.parse.quote(key, safe='/')}"
+    req_headers: dict[str, str] = {}
     if cdn_secret:
-        url += f"?key={urllib.parse.quote(cdn_secret)}"
+        req_headers["x-fastly-key"] = cdn_secret
 
     class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
-            if not _safe_cdn_url(newurl):
+            orig_url = req.full_url if isinstance(getattr(req, "full_url", None), str) else ""
+            resolved_url = urllib.parse.urljoin(orig_url, newurl)
+            if not _safe_cdn_url(resolved_url):
                 raise urllib.error.URLError("Redirected to an invalid URL")
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
+            orig_parts = urllib.parse.urlsplit(orig_url)
+            new_parts = urllib.parse.urlsplit(resolved_url)
+            if new_parts.scheme.lower() != "https" or new_parts.netloc.lower() != orig_parts.netloc.lower():
+                raise urllib.error.URLError("Cross-host or non-HTTPS CDN redirect blocked")
+            return super().redirect_request(req, fp, code, msg, headers, resolved_url)
 
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(url, headers=req_headers)
     t0 = time.time()
     if hasattr(urllib.request.urlopen, "assert_called"):
         with urllib.request.urlopen(req, timeout=15) as resp:

@@ -644,6 +644,7 @@ if (req.restarts == 1) {{
 
 def pass_snippet(logging_service_id: str, request_secret: str) -> str:
     """vcl_pass snippet: when this is the scoring sub-fetch (backend ==     scorer), rewrite bereq.method to GET so the client request body stays     buffered at the edge for the restarts == 1 origin pass (paired with the     service's preflight body preservation pragmas), and inject the auth +     service-id headers on bereq for the upcoming sub-fetch. Also unset     bereq.http.x-edge-score so any attacker-supplied inbound x-edge-score     doesn't get echoed into the scorer's view of the request."""
+    _assert_vcl_string_safe(logging_service_id, field="logging_service_id")
     _assert_vcl_string_safe(request_secret, field="request_secret")  # EC-07
     return f"""# Session Scoring: inject auth + service-id on the scorer sub-fetch.
 # vcl_pass is the right subroutine for bereq mutations when recv used
@@ -657,10 +658,23 @@ if (req.backend == {SCORING_BACKEND_VCL_NAME}) {{
   # Shared-secret header — the scorer compares this to the
   # request_secret ConfigStore entry and 401s on mismatch. Embedded
   # literally in VCL which is compiled and never sent to clients.
-  set bereq.http.X-Edge-Scorer-Auth = "{request_secret}";
+    set bereq.http.X-Edge-Scorer-Auth = "{request_secret}";
   # X-Edge-Scoring-Pass is an internal marker; the scorer doesn't need
   # to see it and we don't want it polluting any downstream telemetry.
   unset bereq.http.X-Edge-Scoring-Pass;
+  # Forward only allowlisted scorer state cookies; never leak customer cookies.
+  declare local var.scorer_state_cookie STRING;
+  declare local var.scorer_ess_cookie STRING;
+  set var.scorer_state_cookie = subfield(req.http.Cookie, "X-Session-State", ";");
+  set var.scorer_ess_cookie = subfield(req.http.Cookie, "_ess", ";");
+  unset bereq.http.Cookie;
+  if (var.scorer_state_cookie != "" && var.scorer_ess_cookie != "") {{
+    set bereq.http.Cookie = "X-Session-State=" + var.scorer_state_cookie + "; _ess=" + var.scorer_ess_cookie;
+  }} else if (var.scorer_state_cookie != "") {{
+    set bereq.http.Cookie = "X-Session-State=" + var.scorer_state_cookie;
+  }} else if (var.scorer_ess_cookie != "") {{
+    set bereq.http.Cookie = "_ess=" + var.scorer_ess_cookie;
+  }}
 }}
 # Strip any inbound x-edge-score header an attacker may have set; the
 # real one is built by us in vcl_deliver after the scorer responds.

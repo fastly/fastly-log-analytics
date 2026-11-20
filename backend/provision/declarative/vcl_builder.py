@@ -125,7 +125,29 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
                 *(f"  {scrub}" for scrub in get_scrub_vcl_statements(log_fields_dict)),
             ]
         )
+    if not state.logging_enabled and state.scoring.enabled:
+        edge_first_hop_statements.extend(
+            [
+                "  # [security] strip client-supplied scoring & NGWAF headers when full log scrub is disabled",
+                "  unset req.http.X-Edge-Scoring-Pass;",
+                "  unset req.http.x-edge-score;",
+                "  unset req.http.X-Edge-Score;",
+                "  unset req.http.X-Edge-Score-Reason;",
+                "  unset req.http.X-Edge-Score-Enforce;",
+                "  unset req.http.X-Edge-Sid;",
+                "  unset req.http.X-Edge-Score-Set-Cookie;",
+                "  unset req.http.X-Edge-Prev-Anchor;",
+                "  unset req.http.x-sigsci-skip-inspection-once;",
+            ]
+        )
     if state.rum_enabled:
+        if not state.logging_enabled:
+            edge_first_hop_statements.extend(
+                [
+                    "  # [security] strip client-supplied FOS signing header when full log scrub is disabled",
+                    "  unset req.http.X-FOS-Request;",
+                ]
+            )
         edge_first_hop_statements.extend(
             [
                 "  # Mint a per-request ID for RUM beacons on fresh requests",
@@ -287,7 +309,7 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     if subroutine == "vcl_fetch":
         body = """# Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
-if (req.url.path == "/js/rum.js") {
+if (req.url.path == "/js/rum.js" && req.http.X-FOS-Request == "1") {
     if (beresp.status == 200) {
         set beresp.ttl = 86400s;
         set beresp.cacheable = true;
@@ -370,13 +392,17 @@ def desired_backends(state: FeatureState) -> list[Backend]:
                 name=SCORING_BACKEND_API_NAME,
                 address=state.scoring.domain,
                 port=443,
-                ssl_check_cert=False,
+                ssl_check_cert=True,
                 ssl_hostname=state.scoring.domain,
                 connect_timeout=100,
                 first_byte_timeout=100,
                 between_bytes_timeout=200,
                 auto_loadbalance=False,
+                use_ssl=True,
+                override_host=state.scoring.domain,
                 request_condition="fastly_log_analytics_false",
+                ssl_cert_hostname=state.scoring.domain,
+                ssl_sni_hostname=state.scoring.domain,
             )
         )
     if state.rum_enabled:
@@ -395,6 +421,8 @@ def desired_backends(state: FeatureState) -> list[Backend]:
                 auto_loadbalance=False,
                 shield=shield_pop if shield_pop.lower() != "none" else "",
                 request_condition="fastly_log_analytics_false",
+                ssl_cert_hostname=state.fos_endpoint,
+                ssl_sni_hostname=state.fos_endpoint,
             )
         )
     return backends

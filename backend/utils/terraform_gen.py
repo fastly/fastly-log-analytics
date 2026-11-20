@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -12,12 +13,27 @@ def _terraform_template_escape(value: object) -> str:
     return s.replace("${", "$${").replace("%{", "%%{")
 
 
+def _hcl_quoted_escape(value: object) -> str:
+    """Escape a string for safe interpolation inside an HCL double-quoted literal (README snippets)."""
+    s = "" if value is None else str(value)
+    s = s.replace("\x00", "").replace("\r", "").replace("\n", "")
+    s = s.replace("\\", "\\\\").replace('"', '\\"')
+    return _terraform_template_escape(s)
+
+
+def _safe_vcl_filename_stem(name: str) -> str:
+    """Sanitize an endpoint/snippet name into a safe relative filename stem (no quotes, ${, /, or ..)."""
+    cleaned = re.sub(r"[^a-z0-9_]+", "_", (name or "").lower()).strip("_")
+    return cleaned or "endpoint"
+
+
 def _dump(obj: dict) -> str:
     """Canonical .tf.json serialisation: 2-space indent, keys sorted, trailing newline."""
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
 
 
 from backend.config import is_rum_enabled  # noqa: E402
+from backend.core.catalog import validate_vcl_custom_condition  # noqa: E402
 from backend.core.fastly.client import load_vcl  # noqa: E402
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 
@@ -50,9 +66,29 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     edge_only = bool(edge_only)
     custom_condition = prov.get("custom_condition") if "custom_condition" in prov else cfg.get("custom_condition", "")
     custom_condition = (custom_condition or "").strip()
+    if custom_condition:
+        cond_msg = validate_vcl_custom_condition(custom_condition)
+        if cond_msg:
+            raise ValueError(f"Invalid custom_condition: {cond_msg}")
+    raw_rum = cfg.get("rum")
+    rum_dict: dict[str, Any] = raw_rum if isinstance(raw_rum, dict) else {}
+    rum_cond_raw = (
+        cfg.get("rum_custom_condition")
+        if cfg.get("rum_custom_condition") is not None
+        else rum_dict.get("custom_condition", "")
+    )
+    rum_cond = (rum_cond_raw or "").strip()
+    if rum_cond:
+        rum_cond_msg = validate_vcl_custom_condition(rum_cond)
+        if rum_cond_msg:
+            raise ValueError(f"Invalid rum_custom_condition: {rum_cond_msg}")
     cmcd_cfg = cfg.get("cmcd", {})
     scoring_cfg = cfg.get("scoring", {})
-    fs_cfg = {
+    scoring_enabled = bool(scoring_cfg.get("enabled", cfg.get("scoring_enabled", False)))
+    scoring_domain = str(
+        scoring_cfg.get("domain") or scoring_cfg.get("scoring_domain") or cfg.get("scoring_domain") or ""
+    )
+    fs_cfg: dict[str, Any] = {
         "service_id": service_id,
         "log_period": period,
         "rum_log_period": rum_period,
@@ -62,15 +98,16 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         "fos_prefix": prefix,
         "logging_enabled": bool(cfg.get("logging_enabled", True)),
         "rum_enabled": is_rum_enabled(cfg),
+        "rum": {**rum_dict, **({"custom_condition": rum_cond} if rum_cond else {})},
         "cmcd": {
             "enabled": bool(cmcd_cfg.get("enabled", False)),
             "mode": cmcd_cfg.get("mode", "query_string"),
             "version": int(cmcd_cfg.get("version", 1)),
         },
         "scoring": {
-            "enabled": bool(scoring_cfg.get("enabled", False)),
-            "domain": scoring_cfg.get("domain", ""),
-            "request_secret": scoring_cfg.get("request_secret", ""),
+            "enabled": scoring_enabled,
+            "domain": scoring_domain,
+            "request_secret": scoring_cfg.get("request_secret", cfg.get("scoring_request_secret", "")),
             "exclude_url_regex": scoring_cfg.get("exclude_url_regex", ""),
             "enforce_status_code": int(scoring_cfg.get("enforce_status_code", 429)),
         },
@@ -82,7 +119,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     cdn_vcl = load_vcl(rate_limiting=True)
     cond_parts = ["!segmented_caching.is_inner_req"]
     if edge_only:
-        if scoring_cfg.get("enabled", False):
+        if scoring_enabled:
             cond_parts.append("fastly.ff.visits_this_service == 0")
         else:
             cond_parts.append("(req.restarts == 0 && fastly.ff.visits_this_service == 0)")
@@ -133,6 +170,8 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
                 "address": _terraform_template_escape(fos_host),
                 "port": 443,
                 "use_ssl": True,
+                "ssl_check_cert": True,
+                "override_host": _terraform_template_escape(fos_host),
                 "ssl_cert_hostname": _terraform_template_escape(fos_host),
                 "ssl_sni_hostname": _terraform_template_escape(fos_host),
                 "connect_timeout": 5000,
@@ -164,7 +203,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
                     "cdn_auth": {
                         "service_id": "${fastly_service_vcl.cdn_proxy.id}",
                         "dictionary_id": '${{ for d in fastly_service_vcl.cdn_proxy.dictionary : d.name => d.dictionary_id }["cdn_auth"]}',
-                        "items": {"secret": _terraform_template_escape(cdn_secret)},
+                        "items": {"secret_key": _terraform_template_escape(cdn_secret)},
                     },
                 },
             },
@@ -185,7 +224,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
             seen_filenames.add(snip_filename)
         logging_snippet_blocks.append(
             {
-                "name": snippet.name,
+                "name": _terraform_template_escape(snippet.name),
                 "type": subroutine,
                 "priority": snippet.priority,
                 "content": f'${{file("${{path.module}}/{snip_filename}")}}',
@@ -203,7 +242,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
             format_filename = "log_format.vcl"
         else:
             resp_cond = ""
-            format_filename = f"{endpoint.name.lower().replace(' ', '_')}_format.vcl"
+            format_filename = f"{_safe_vcl_filename_stem(endpoint.name)}_format.vcl"
         files[format_filename] = endpoint.format_string
         block: dict[str, Any] = {
             "name": _terraform_template_escape(endpoint.name),
@@ -229,25 +268,38 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         else:
             block["region"] = _terraform_template_escape(region)
             logging_blocks["logging_fos"].append(block)
-    logging_backends: list[dict] = []
+    logging_backends: list[dict[str, Any]] = []
     for backend in desired_backends_list:
         address = backend.address
         if address == "fos.example.com":
             address = fos_host
-        logging_backends.append(
-            {
-                "name": backend.name,
-                "address": _terraform_template_escape(address),
-                "port": backend.port,
-                "use_ssl": True,
-                "ssl_cert_hostname": _terraform_template_escape(address),
-                "ssl_sni_hostname": _terraform_template_escape(address),
-                "connect_timeout": backend.connect_timeout,
-                "first_byte_timeout": backend.first_byte_timeout,
-                "between_bytes_timeout": backend.between_bytes_timeout,
-                "auto_loadbalance": backend.auto_loadbalance,
-            }
-        )
+        cert_host = backend.ssl_cert_hostname or backend.ssl_hostname or address
+        if cert_host == "fos.example.com":
+            cert_host = fos_host
+        sni_host = backend.ssl_sni_hostname or backend.ssl_hostname or cert_host
+        if sni_host == "fos.example.com":
+            sni_host = fos_host
+        override_host = backend.override_host
+        if override_host == "fos.example.com":
+            override_host = fos_host
+        b_block: dict[str, Any] = {
+            "name": _terraform_template_escape(backend.name),
+            "address": _terraform_template_escape(address),
+            "port": backend.port,
+            "use_ssl": backend.use_ssl,
+            "ssl_check_cert": backend.ssl_check_cert,
+            "ssl_cert_hostname": _terraform_template_escape(cert_host),
+            "ssl_sni_hostname": _terraform_template_escape(sni_host),
+            "connect_timeout": backend.connect_timeout,
+            "first_byte_timeout": backend.first_byte_timeout,
+            "between_bytes_timeout": backend.between_bytes_timeout,
+            "auto_loadbalance": backend.auto_loadbalance,
+        }
+        if override_host:
+            b_block["override_host"] = _terraform_template_escape(override_host)
+        if backend.shield:
+            b_block["shield"] = _terraform_template_escape(backend.shield)
+        logging_backends.append(b_block)
     logging_service_block: dict[str, Any] = {
         "name": _terraform_template_escape(cfg.get("service_name", "Logging Service")),
         "domain": [{"name": "example.com"}],
@@ -262,6 +314,9 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         {"resource": {"fastly_service_vcl": {"logging_service": logging_service_block}}}
     )
     # ── 6. instructions — companion README explaining the layout ──────────────
+    safe_region = _hcl_quoted_escape(region)
+    safe_fos_host = _hcl_quoted_escape(fos_host)
+    safe_service_id = _hcl_quoted_escape(service_id)
     files["instructions"] = f"""\
 # Fastly Log Analysis Terraform Export
 
@@ -285,10 +340,10 @@ Configuration is emitted as Terraform's JSON syntax (`.tf.json`). All Terraform 
 
 ```hcl
 provider "aws" {{
-  region                      = "{region}"
+  region                      = "{safe_region}"
   access_key                  = "<your fos access key>"
   secret_key                  = "<your fos secret key>"
-  endpoints {{ s3 = "https://{fos_host}" }}
+  endpoints {{ s3 = "https://{safe_fos_host}" }}
   skip_credentials_validation = true
   skip_region_validation      = true
   skip_requesting_account_id  = true
@@ -298,11 +353,12 @@ provider "aws" {{
 ## Instructions
 1. Review `fos.tf.json` and ensure the `aws` provider above is correctly configured.
 2. `cdn_proxy.tf.json` creates a NEW Fastly service to accelerate your log reads.
-3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_fos` (or `logging_s3`), `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `{service_id}`. Applying a `logging_fos` block needs a Fastly token with the Engineer role and access to all services, or Superuser.
+3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_fos` (or `logging_s3`), `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `{safe_service_id}`. Applying a `logging_fos` block needs a Fastly token with the Engineer role and access to all services, or Superuser.
 4. Run `terraform init` and `terraform apply` to deploy the changes.
 """
     if cfg.get("deployment_mode") == "cloud":
-        install_name = _terraform_template_escape(cfg.get("install_name", "flp"))
+        raw_install = str(cfg.get("install_name", "flp")).replace("\x00", "").replace("\r", "").replace("\n", "")
+        install_name = _terraform_template_escape(re.sub(r"[^a-zA-Z0-9_-]", "-", raw_install).strip("-") or "flp")
         files["cloud_compute.tf.json"] = _dump(
             {
                 "resource": {

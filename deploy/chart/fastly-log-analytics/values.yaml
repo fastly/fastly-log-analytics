@@ -128,6 +128,8 @@ config:
   # through the frontend is classified remote/analyst and gets the
   # needs_login redirect. Never set this to something a public Ingress can reach.
   localAdminCidrs: ""
+  # Optional comma-separated private CIDRs permitted to scrape GET /metrics directly.
+  metricsScrapeCidrs: ""
   # Additional comma-separated hostnames to permit in LOCAL_HOSTS (e.g.
   # "backend-svc,frontend-svc" when service names differ from the release name).
   localHosts: ""
@@ -157,6 +159,8 @@ secrets:
   clickhousePassword: ""
   # Stable HMAC key used to sign opaque high-scale pagination cursors.
   cursorSecret: ""
+  # Optional dedicated AES-256-GCM secret for opaque session tokens (falls back to domain-separated cursorSecret).
+  sessionTokenSecret: ""
 
 # Stateless ClickHouse ingest worker (`python -m backend.high_scale.worker`),
 # defaulting to the proven lightweight pod profile (1 vCPU / 2 GiB).

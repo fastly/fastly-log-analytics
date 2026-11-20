@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -117,6 +118,31 @@ def _assemble_dashboard_bundle_response(
     }
 
 
+_CLEAN_SIGNED_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$", re.ASCII)
+_CSV_DIRECT_DANGEROUS_LEAD = ("=", "+", "-", "@", "|", "%", "\t", "\r", "\n")
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "|", "%")
+_CSV_CONTROL_AND_ZERO_WIDTH = "".join(chr(c) for c in range(0x20)) + "\x7f\x85\ufeff\u200b\u200c\u200d\u2060"
+
+
+def _sanitize_csv_cell(val: Any) -> Any:
+    """Prefix spreadsheet formula triggers so Excel/Sheets treat them as literal text."""
+    if not isinstance(val, str) or not val:
+        return val
+    if val[0] in _CSV_DIRECT_DANGEROUS_LEAD:
+        if _CLEAN_SIGNED_DECIMAL_RE.fullmatch(val):
+            return val
+        return f"'{val}"
+    stripped = val
+    while stripped:
+        nxt = stripped.lstrip().lstrip(_CSV_CONTROL_AND_ZERO_WIDTH)
+        if nxt == stripped:
+            break
+        stripped = nxt
+    if stripped and stripped[0] in _CSV_FORMULA_TRIGGERS:
+        return f"'{val}"
+    return val
+
+
 @router.post("/raw/csv")
 @query_errors()
 def dashboard_raw_csv(
@@ -131,15 +157,32 @@ def dashboard_raw_csv(
     if df.empty:
         return StreamingResponse(iter([b""]), media_type="text/csv")
 
+    df = df.copy()
     if mask_ips_for(ctx.analyst_session):
-        from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip
+        from backend.core.share_db import (
+            SESSION_ID_KEYS,
+            _canon_pii_key,
+            is_saved_view_pii_key,
+            mask_ip_or_chain,
+            scrub_ip_text,
+        )
 
-        for col in IP_FAMILY_KEYS:
-            if col in df.columns:
-                df[col] = df[col].apply(lambda v: mask_ip(v) if isinstance(v, str) else v)
-        for col in SESSION_ID_KEYS:
-            if col in df.columns:
-                df[col] = df[col].apply(lambda v: ("[redacted]" if v else v) if isinstance(v, str) else v)
+        for col in df.columns:
+            col_str = str(col)
+            if is_saved_view_pii_key(col_str):
+                tail = col_str.strip().lower().rsplit(".", 1)[-1].strip("[]'\"`")
+                is_sess = tail in SESSION_ID_KEYS or _canon_pii_key(tail) in SESSION_ID_KEYS
+                if is_sess:
+                    df[col] = df[col].map(lambda v: ("[redacted]" if v else v) if isinstance(v, str) else v)
+                else:
+                    df[col] = df[col].map(lambda v: mask_ip_or_chain(v) if isinstance(v, str) and v else v)
+            elif df[col].dtype == object or str(df[col].dtype).startswith(("string", "str")):
+                df[col] = df[col].map(lambda v: scrub_ip_text(v) if isinstance(v, str) and v else v)
+
+    for col in df.columns:
+        if df[col].dtype == object or str(df[col].dtype).startswith(("string", "str")):
+            df[col] = df[col].map(_sanitize_csv_cell)
+    df.columns = [_sanitize_csv_cell(str(c)) for c in df.columns]
 
     def csv_chunks() -> Iterator[bytes]:
         chunk_rows = 2000
@@ -149,12 +192,13 @@ def dashboard_raw_csv(
             yield slice_df.to_csv(header=first, index=False).encode("utf-8")
             first = False
 
-    source_name = high_scale_service.service_id
-    filename = f"logs_{source_name}_{int(time.time())}.csv"
+    raw_source_name = str(high_scale_service.service_id or "service")
+    safe_source = re.sub(r"[^A-Za-z0-9_.-]", "_", raw_source_name).strip("._")[:64] or "service"
+    filename = f"logs_{safe_source}_{int(time.time())}.csv"
     return StreamingResponse(
         csv_chunks(),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
