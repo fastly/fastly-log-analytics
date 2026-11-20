@@ -56,9 +56,16 @@ This is a shared behavior correction for analytics queries and cards. It does no
 
 - add polling or retries
 - change CMCD rollup/raw fallback decisions
+- move Cloud analytics out of the browser
+- bypass the identity/service-scoped browser file cache on reload
 - alter server-side seeds
 - change filter, cancellation, or caching behavior
 - require page-specific copy for every card
+
+For Cloud reads, cached Parquet or summary bytes remain available through the shared
+browser `CacheStorage` source after a page reload. Summary decoding and aggregation
+continue in the dashboard Web Worker, while raw fallback analytics continue in the
+browser's DuckDB-WASM read context.
 
 ## Error and refresh behavior
 
@@ -90,6 +97,8 @@ lint on changed files. Use the existing full CI workflows as the integration gat
   request begins.
 - All `AnalyticsCard` users receive the same accessible contextual default unless
   they already define a more precise message.
+- Reloading a Cloud page still reuses its identity/service-scoped files, and its
+  analytics still execute in the browser.
 - No visible loading regression appears during background refreshes or when a query
   is intentionally disabled.
 - The implementation requires no page-by-page audit patches beyond a regression
