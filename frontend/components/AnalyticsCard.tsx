@@ -279,7 +279,7 @@ interface AnalyticsCardProps {
   footer?: React.ReactNode
   helpContent?: React.ReactNode
   helpTitle?: string
-  /** Contextual copy shown during initial loading (defaults to "Loading data..."). */
+  /** Contextual copy shown during initial loading (defaults to the card title). */
   loadingMessage?: string
 }
 
@@ -319,6 +319,7 @@ export function AnalyticsCard({
   const showError = !showLoading && error != null
   const showEmpty = !showLoading && !showError && isEmpty === true
   const is403 = showError && error?.status === 403
+  const effectiveLoadingMessage = loadingMessage ?? `Loading ${title}...`
 
   return (
     <>
@@ -362,7 +363,7 @@ export function AnalyticsCard({
           // The refetch-with-old-data UX is preserved by the separate
           // `isFetching && !isLoading` opacity-40 branch on the children below.
           // A-10 (WCAG 4.1.3 Status Messages): role=status + aria-live=polite so
-          // screen readers announce "Loading data..." when the overlay appears
+          // screen readers announce the loading message when the overlay appears
           // and an implicit "data loaded" when it's removed. The spinner stays
           // aria-hidden — the text node carries the announcement.
           <div
@@ -372,7 +373,9 @@ export function AnalyticsCard({
           >
             <div className="flex flex-col items-center gap-2">
               <Loader2 className="h-6 w-6 animate-spin text-primary" aria-hidden="true" />
-              <span className="text-xs text-foreground animate-pulse font-medium">{loadingMessage ?? "Loading data..."}</span>
+              <span className="text-xs text-foreground animate-pulse font-medium">
+                {effectiveLoadingMessage}
+              </span>
             </div>
           </div>
         ) : null}
