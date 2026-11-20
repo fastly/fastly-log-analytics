@@ -9,9 +9,24 @@ const METADATA_MAX_AGE_MS = 60_000;
 type MetadataSnapshot = { status: number; contentType: string | null; body: string };
 type MetadataEntry = { at: number; usedAt: number; identity: string | null; value: Promise<MetadataSnapshot> };
 const metadataCache = new Map<string, MetadataEntry>();
+const metadataInvalidationListeners = new Set<() => void>();
 
 export function resetCloudMetadataCache(): void {
   metadataCache.clear();
+}
+
+export function resetCloudMetadataPaths(paths: readonly string[]): void {
+  for (const path of paths) metadataCache.delete(path);
+}
+
+export function subscribeCloudMetadataInvalidation(listener: () => void): () => void {
+  metadataInvalidationListeners.add(listener);
+  return () => metadataInvalidationListeners.delete(listener);
+}
+
+export function invalidateCloudConfigMetadata(): void {
+  resetCloudMetadataPaths(["/api/services", "/api/bootstrap", "/api/log-fields/catalog"]);
+  for (const listener of metadataInvalidationListeners) listener();
 }
 
 export async function fetchCloudMetadata(path: string, signal: AbortSignal): Promise<Response> {

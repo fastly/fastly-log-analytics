@@ -66,6 +66,52 @@ describe("Cloud scan metadata", () => {
     }
   });
 
+  it("refreshes service metadata after a successful config mutation without evicting unrelated metadata", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = input instanceof Request ? new URL(input.url).pathname : String(input);
+      if (path === "/api/auth/session") return Response.json({ user: { id: "u1", role: "admin" } });
+      if (path === "/api/services") {
+        return Response.json({ services: [{ service_id: "fixture-a" }] });
+      }
+      if (path === "/api/log-extents") {
+        return Response.json({ latest_log_at: "2026-11-02T00:00:00Z" });
+      }
+      if (path === "/api/admin/services/fixture-a" && init?.method === "PATCH") {
+        return Response.json({
+          service: { log_fields: { custom_fields: [] } },
+          generation: "generation-2",
+        });
+      }
+      if (path === "/api/admin/services/fixture-a") {
+        return Response.json({
+          service: { log_fields: { custom_fields: [] } },
+          generation: "generation-1",
+        });
+      }
+      return Response.json({});
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap")))?.ok).toBe(true);
+    expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/log-extents")))?.ok).toBe(true);
+
+    const mutation = await handleCloudAnalyticalRequest(new Request(
+      "http://localhost/api/services/fixture-a/log-fields",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ log_fields: { custom_fields: [] } }),
+      },
+    ));
+    expect(mutation?.ok).toBe(true);
+
+    expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap")))?.ok).toBe(true);
+    expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/log-extents")))?.ok).toBe(true);
+    const paths = calls(fetcher);
+    expect(paths.filter((path) => path === "/api/services")).toHaveLength(2);
+    expect(paths.filter((path) => path === "/api/log-extents")).toHaveLength(1);
+  });
+
   it("keeps sharing one lookup across a page load whose scans run past the reuse window, up to a hard cap", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {

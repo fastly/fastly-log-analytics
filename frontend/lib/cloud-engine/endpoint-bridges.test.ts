@@ -1,5 +1,10 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cloudStreamFetch, handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
+import { useBootstrap } from "@/hooks/useBootstrap";
+import { queryKeys } from "@/lib/api";
 import contract from "./cloud-openapi.json";
 import { cloudLoadingStore } from "./loading-progress";
 import { NATIVE_ROUTES, isNativeCloudRoute } from "./native-routes";
@@ -30,6 +35,50 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); resetCloudMetadataCache(); });
 
 describe("Cloud endpoint bridges", () => {
+  it("invalidates bootstrap and services React Query metadata after a config mutation", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: "cloud",
+      user: { id: "fixture-user", role: "admin" },
+      services: [{ service_id: "fixture-a" }],
+      active_service_id: "fixture-a",
+    });
+    queryClient.setQueryData(queryKeys.services(), {
+      services: [{ service_id: "fixture-a" }],
+    });
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    renderHook(() => useBootstrap(), { wrapper });
+    invalidateQueries.mockClear();
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/admin/services/fixture-a" && init?.method === "PATCH") {
+        return Response.json({ service: { log_fields: {} }, generation: "generation-2" });
+      }
+      if (path === "/api/admin/services/fixture-a") {
+        return Response.json({ service: { log_fields: {} }, generation: "generation-1" });
+      }
+      return Response.json({
+        user: { id: "fixture-user", role: "admin" },
+        services: [{ service_id: "fixture-a" }],
+      });
+    }));
+
+    const response = await handleCloudAnalyticalRequest(request("/api/services/fixture-a/log-fields", "POST", {
+      log_fields: {},
+    }));
+    expect(response?.ok).toBe(true);
+
+    await waitFor(() => {
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.bootstrap() });
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: queryKeys.services() });
+    });
+  });
+
   it("uses the native RUM default version without claiming an up-to-date SDK needs updating", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) =>
       String(input) === "/api/services"

@@ -20,6 +20,7 @@ import {
 } from '@/lib/cloud-engine/mode'
 import { syncOpsCacheForSession } from '@/lib/cloud-engine/telemetry/sources'
 import { cloudCacheIdentity } from '@/lib/cloud-engine/cache-identity'
+import { subscribeCloudMetadataInvalidation } from '@/lib/cloud-engine/metadata-cache'
 
 export {
   useUrlServiceSync,
@@ -277,6 +278,12 @@ export function useBootstrapSyncEffects(
 
 export function useBootstrap() {
   const queryClient = useQueryClient()
+  useEffect(() => subscribeCloudMetadataInvalidation(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.logFieldsCatalog() })
+  }), [queryClient])
+
   const query = useQuery({
     queryKey: queryKeys.bootstrap(),
     queryFn: async ({ signal }) => {

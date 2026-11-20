@@ -49,7 +49,11 @@ import { isNativeCloudRoute } from "./native-routes";
 import { valueStatsDecorator } from "./value-stats";
 import { migrateLegacySavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
-import { fetchCloudMetadata, resetCloudMetadataCache } from "./metadata-cache";
+import {
+  fetchCloudMetadata,
+  invalidateCloudConfigMetadata,
+  resetCloudMetadataCache,
+} from "./metadata-cache";
 import { cloudRumMutation } from "./rum-management";
 import { cloudLoggingSettings } from "./logging-settings";
 import { cloudDeleteData } from "./delete-data";
@@ -751,10 +755,37 @@ async function handleCloudRequest(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const path = url.pathname;
-  if (!["GET", "HEAD"].includes(request.method) && !isLocalScan(path, request.method)) {
+  const configMutation = isCloudConfigMutation(request.method, path);
+  if (!configMutation &&
+      !["GET", "HEAD"].includes(request.method) &&
+      !isLocalScan(path, request.method)) {
     resetCloudMetadataCache();
     resetUsageSettingsCache();
   }
+  const response = await handleCloudRequestInner(request, origin);
+  if (configMutation && response?.ok) invalidateCloudConfigMetadata();
+  return response;
+}
+
+function isCloudConfigMutation(method: string, path: string): boolean {
+  if (method === "POST" && ["/api/provision/execute", "/api/provision/teardown"].includes(path)) {
+    return true;
+  }
+  if (method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
+    return true;
+  }
+  if (method === "GET" && /^\/api\/services\/[^/]+\/logging-settings\/update$/.test(path)) {
+    return true;
+  }
+  return method === "POST" && /^\/api\/services\/[^/]+\/log-fields$/.test(path);
+}
+
+async function handleCloudRequestInner(
+  request: Request,
+  origin?: CloudQueryContext,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const path = url.pathname;
   const runJobStream = (jobId: string, signal: AbortSignal) => {
     return sseResponse((emit) => stepJobToCompletion(jobId, emit, signal), signal);
   };
