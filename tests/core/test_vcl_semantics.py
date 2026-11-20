@@ -1925,7 +1925,7 @@ def test_sec15_vcl_forbidden_header_and_setcookie_functions_blocked() -> None:
         )
         assert cf_errs, f"Expected validate_custom_field rejection for: {expr}"
 
-    with pytest.raises(ValueError, match=r"header\.get|percent-encoded hex escapes"):
+    with pytest.raises(ValueError, match=r"header\.get"):
         FeatureState(
             service_id="svc_hdr_fn",
             log_period=60,
@@ -2335,6 +2335,24 @@ def test_m4_wave2_cross_edition_vcl_validator_and_duplicate_system_field_parity(
         assert validate_vcl_log_expression(pct_lit), pct_lit
     assert validate_vcl_custom_condition('req.http.X-Test == "100% ok"') is None
     assert validate_vcl_log_expression('"100% ok"') == []
+
+    # Reviewer Iter 2 Finding 2: Reject \" inside double-quoted VCL string literals while preserving regex escapes
+    for bs_quote_expr in (
+        r'req.http.Host == "foo\" || true || req.http.Host == "bar\"',
+        r'req.http.Host == "foo\" || true || req.http.Host == "bar\""',
+        r'req.http.X-Test == "foo\"',
+    ):
+        assert validate_vcl_custom_condition(bs_quote_expr) is not None, bs_quote_expr
+        assert validate_rum_custom_condition(bs_quote_expr) is not None, bs_quote_expr
+        assert validate_vcl_log_expression(bs_quote_expr), bs_quote_expr
+    for valid_regex_cond in (
+        r'req.url ~ "bot\b"',
+        r'req.url.path ~ "\.css$"',
+    ):
+        assert validate_vcl_custom_condition(valid_regex_cond) is None, valid_regex_cond
+    assert validate_rum_custom_condition(r'req.http.User-Agent ~ "bot\b"') is None
+    assert validate_rum_custom_condition(r'req.url.ext ~ "\.css$"') is None
+    assert validate_vcl_log_expression(r'regsub(req.url, "\.css$", "")') == []
 
     # Challenge 3: RUM req.url / req.url.path RTIME adjacency, whitespace, and case-insensitive rejection
     for bad_rum in (

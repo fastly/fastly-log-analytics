@@ -559,6 +559,26 @@ fn sec21_active_scoring_service_patch_round_trips_canonical_fields_and_blocks_sp
     assert_eq!(p.run_job(en["job"].clone())["status"], "complete");
 
     let svc_get = p.ok("GET", "/api/admin/services/fixtureService", json!({}));
+    let initial_schema = fastly_log_analytics::ingest::convert::RequestSchema::for_fields(
+        &svc_get["service"]["log_fields"],
+    );
+    let initial_arrow = initial_schema.arrow();
+    for edge_col in admin::scoring::SCORING_FIELD_NAMES {
+        assert!(
+            initial_arrow.field_with_name(edge_col).is_ok(),
+            "expected {edge_col} in RequestSchema::arrow() immediately after scoring/enable"
+        );
+        let custom_col = initial_schema
+            .custom()
+            .iter()
+            .find(|c| c.name == *edge_col)
+            .unwrap_or_else(|| panic!("missing CustomColumn for {edge_col}"));
+        assert!(
+            !custom_col.slot_only,
+            "expected {edge_col} to have slot_only=false after scoring/enable"
+        );
+    }
+
     let gen = svc_get["generation"].as_str().unwrap().to_owned();
     let mut lf = svc_get["service"]["log_fields"].clone();
     lf["custom_fields"].as_array_mut().unwrap().push(json!({
@@ -772,6 +792,15 @@ fn sec21_active_scoring_service_patch_round_trips_canonical_fields_and_blocks_sp
         .unwrap());
 
     let committed_get = p.ok("GET", "/api/admin/services/fixtureService", json!({}));
+    let pre_committed_schema = fastly_log_analytics::ingest::convert::RequestSchema::for_fields(
+        &committed_get["service"]["log_fields"],
+    );
+    assert!(pre_committed_schema
+        .arrow()
+        .field_with_name("edge_score")
+        .is_ok());
+    let expected_schema_hash = pre_committed_schema.hash().to_owned();
+
     let committed_gen = committed_get["generation"].as_str().unwrap().to_owned();
     let mut committed_lf = committed_get["service"]["log_fields"].clone();
     for cf in committed_lf["custom_fields"].as_array_mut().unwrap() {
@@ -788,9 +817,52 @@ fn sec21_active_scoring_service_patch_round_trips_canonical_fields_and_blocks_sp
             "log_fields": committed_lf
         }),
     );
-    let post_committed_gen = committed_ok["generation"].as_str().unwrap().to_owned();
+    let with_duckdb_schema = fastly_log_analytics::ingest::convert::RequestSchema::for_fields(
+        &committed_ok["service"]["log_fields"],
+    );
+    assert!(with_duckdb_schema
+        .arrow()
+        .field_with_name("edge_score")
+        .is_ok());
+    assert_eq!(with_duckdb_schema.hash(), expected_schema_hash);
+    let with_duckdb_gen = committed_ok["generation"].as_str().unwrap().to_owned();
 
-    let mut dropped_lf = committed_ok["service"]["log_fields"].clone();
+    // Round-trip omitting duckdb_type (sending canonical sql_type + committed=true) must preserve
+    // edge_score in RequestSchema::arrow() and keep RequestSchema::hash() invariant (8B-R).
+    let mut omit_duckdb_lf = committed_ok["service"]["log_fields"].clone();
+    for cf in omit_duckdb_lf["custom_fields"].as_array_mut().unwrap() {
+        if cf["name"] == "edge_score" {
+            cf.as_object_mut().unwrap().remove("duckdb_type");
+            cf["sql_type"] = json!("INTEGER");
+            cf["committed"] = json!(true);
+        }
+    }
+    let omit_duckdb_ok = p.ok(
+        "PATCH",
+        "/api/admin/services/fixtureService",
+        json!({
+            "generation": with_duckdb_gen,
+            "log_fields": omit_duckdb_lf
+        }),
+    );
+    let omit_duckdb_schema = fastly_log_analytics::ingest::convert::RequestSchema::for_fields(
+        &omit_duckdb_ok["service"]["log_fields"],
+    );
+    assert!(
+        omit_duckdb_schema
+            .arrow()
+            .field_with_name("edge_score")
+            .is_ok(),
+        "committed PATCH omitting duckdb_type must not drop edge_score Arrow column"
+    );
+    assert_eq!(
+        omit_duckdb_schema.hash(),
+        expected_schema_hash,
+        "committed PATCH omitting duckdb_type must preserve RequestSchema::hash() (8B-R)"
+    );
+    let post_committed_gen = omit_duckdb_ok["generation"].as_str().unwrap().to_owned();
+
+    let mut dropped_lf = omit_duckdb_ok["service"]["log_fields"].clone();
     dropped_lf["custom_fields"]
         .as_array_mut()
         .unwrap()

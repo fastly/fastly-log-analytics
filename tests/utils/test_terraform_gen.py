@@ -519,8 +519,14 @@ def test_sec14_scoring_backend_in_terraform_enforces_tls_and_override_host():
     ("bad_cfg_patch", "match_re"),
     [
         ({"custom_condition": "true) || (true"}, "custom_condition"),
+        ({"custom_condition": "\nreq.restarts == 0\n"}, "custom_condition"),
+        ({"provisioning": {"custom_condition": "\nreq.restarts == 0\n"}}, "custom_condition"),
         ({"custom_condition": 'table.lookup(fos_credentials, "secret_key", "") != ""'}, "custom_condition"),
         ({"rum_enabled": True, "rum": {"enabled": True, "custom_condition": "true /* x */"}}, "rum_custom_condition"),
+        (
+            {"rum_enabled": True, "rum": {"enabled": True, "custom_condition": "\nreq.restarts == 0\n"}},
+            "rum_custom_condition",
+        ),
         (
             {"rum_enabled": True, "rum": {"enabled": True, "custom_condition": 'req.url.path == "/foo"'}},
             "rum_custom_condition",
@@ -728,6 +734,13 @@ def test_sec15_wave7_generate_terraform_empty_service_id_and_scoring_aliases():
 
     out_crlf_sid = generate_terraform({"logging_service_id": "\r\n"}, "AKIA", "sec")
     assert "YOUR_SERVICE_ID" in out_crlf_sid["instructions"]
+
+    out_ws_cond = generate_terraform(
+        {**_baseline_cfg(), "custom_condition": "   ", "rum_custom_condition": "   "},
+        "AKIA",
+        "sec",
+    )
+    assert "logging_service.tf.json" in out_ws_cond
 
     out_null_desc = generate_terraform(
         {

@@ -134,18 +134,22 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     sample_rate = prov_sr if prov_sr is not None else (top_sr if top_sr is not None else 100)
     edge_only = bool(prov.get("edge_only") if "edge_only" in prov else cfg.get("edge_only", False))
 
-    prov_cond = _tf_str(prov.get("custom_condition"), "provisioning.custom_condition").strip()
-    top_cond = _tf_str(cfg.get("custom_condition"), "custom_condition").strip()
-    for cval in (prov_cond, top_cond):
+    raw_prov_cond = _tf_str(prov.get("custom_condition"), "provisioning.custom_condition")
+    raw_top_cond = _tf_str(cfg.get("custom_condition"), "custom_condition")
+    for cval in (raw_prov_cond, raw_top_cond):
         if cval and (cond_msg := validate_vcl_custom_condition(cval)):
             raise ValueError(f"Invalid custom_condition: {cond_msg}")
+    prov_cond = raw_prov_cond.strip()
+    top_cond = raw_top_cond.strip()
     custom_condition = prov_cond if prov.get("custom_condition") is not None else top_cond
 
-    top_rum_cond = _tf_str(cfg.get("rum_custom_condition"), "rum_custom_condition").strip()
-    nested_rum_cond = _tf_str(rum_dict.get("custom_condition"), "rum.custom_condition").strip()
-    for rval in (top_rum_cond, nested_rum_cond):
+    raw_top_rum_cond = _tf_str(cfg.get("rum_custom_condition"), "rum_custom_condition")
+    raw_nested_rum_cond = _tf_str(rum_dict.get("custom_condition"), "rum.custom_condition")
+    for rval in (raw_top_rum_cond, raw_nested_rum_cond):
         if rval and (rum_cond_msg := validate_rum_custom_condition(rval)):
             raise ValueError(f"Invalid rum_custom_condition: {rum_cond_msg}")
+    top_rum_cond = raw_top_rum_cond.strip()
+    nested_rum_cond = raw_nested_rum_cond.strip()
     rum_cond = top_rum_cond if cfg.get("rum_custom_condition") is not None else nested_rum_cond
 
     nested_faro = _tf_str(rum_dict.get("faro_version"), "rum.faro_version")

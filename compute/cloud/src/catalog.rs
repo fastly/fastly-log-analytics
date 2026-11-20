@@ -161,12 +161,24 @@ pub(crate) fn integer(value: &Value) -> Option<i64> {
 
 pub fn normalize_custom_field(field: &Value) -> Value {
     let mut result = field.clone();
-    if field.get("vcl").is_none() && field.get("parquet_type").is_none() {
+    let has_v3_shorthand = field.get("vcl").is_some() || field.get("parquet_type").is_some();
+    let sql_type_fallback = field
+        .get("duckdb_type")
+        .is_none_or(Value::is_null)
+        .then(|| field["sql_type"].as_str())
+        .flatten();
+    if !has_v3_shorthand && sql_type_fallback.is_none() {
         return result;
     }
     let Some(object) = result.as_object_mut() else {
         return result;
     };
+    if !has_v3_shorthand {
+        if let Some(sql_ty) = sql_type_fallback {
+            object.insert("duckdb_type".into(), json!(sql_ty));
+        }
+        return result;
+    }
     if let Some(vcl) = field.get("vcl") {
         object.insert("vcl_log_expression".into(), vcl.clone());
     }
@@ -181,6 +193,8 @@ pub fn normalize_custom_field(field: &Value) -> Value {
         };
         object.insert("duckdb_type".into(), json!(duck));
         object.entry("value_type").or_insert(json!(value));
+    } else if let Some(sql_ty) = sql_type_fallback {
+        object.insert("duckdb_type".into(), json!(sql_ty));
     }
     object
         .entry("label")

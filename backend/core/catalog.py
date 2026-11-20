@@ -439,20 +439,32 @@ _FORBIDDEN_VCL_CONDITION_IDENTIFIERS_RE = re.compile(
 _VCL_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
+_VCL_PCT_ESCAPE_ERR = "must not contain percent-encoded hex escapes in VCL string literals"
+_VCL_BS_QUOTE_ERR = 'Backslash-escaped quotes (\\") are not permitted inside VCL string literals'
+_VCL_DEFERRED_QUOTE_ERRS = (_VCL_PCT_ESCAPE_ERR, _VCL_BS_QUOTE_ERR)
+
+
 def check_vcl_quotes_and_parens(expr: str) -> str | None:
     """Verify balanced Fastly VCL double quotes, balanced parens outside quotes, and no bare backslashes."""
     in_quotes = False
+    prev_backslash_in_quotes = False
+    has_pct_escape = False
+    has_backslash_quote = False
     paren_depth = 0
     for idx, ch in enumerate(expr):
         if ch == '"':
+            if in_quotes and prev_backslash_in_quotes:
+                has_backslash_quote = True
             in_quotes = not in_quotes
+            prev_backslash_in_quotes = False
         elif in_quotes:
             if ch == "%" and idx + 2 < len(expr):
                 c1, c2 = expr[idx + 1], expr[idx + 2]
                 if (c1 in _VCL_HEX_DIGITS and c2 in _VCL_HEX_DIGITS) or (
                     c1 in ("u", "U") and (c2 == "{" or c2 in _VCL_HEX_DIGITS)
                 ):
-                    return "must not contain percent-encoded hex escapes in VCL string literals"
+                    has_pct_escape = True
+            prev_backslash_in_quotes = ch == "\\"
         else:
             if ch == "\\":
                 if expr.endswith("\\"):
@@ -470,6 +482,10 @@ def check_vcl_quotes_and_parens(expr: str) -> str | None:
         return "contains unbalanced double quotes"
     if paren_depth != 0:
         return "contains unbalanced parentheses"
+    if has_backslash_quote:
+        return _VCL_BS_QUOTE_ERR
+    if has_pct_escape:
+        return _VCL_PCT_ESCAPE_ERR
     return None
 
 
@@ -526,12 +542,14 @@ def validate_vcl_custom_condition(condition: str | None, *, field_name: str = "c
     if "//" in raw or "/*" in raw or "*/" in raw or "#" in raw:
         return f"'{field_name}' must not contain VCL comments (//, /*, */, or #)"
     quote_paren_err = check_vcl_quotes_and_parens(raw)
-    if quote_paren_err:
+    if quote_paren_err and quote_paren_err not in _VCL_DEFERRED_QUOTE_ERRS:
         return f"'{field_name}' {quote_paren_err}"
     if _VCL_TABLE_LOOKUP_RE.search(raw):
         return f"'{field_name}' must not call table.lookup(...)"
     if m := _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(raw):
         return f"'{field_name}' must not call '{m.group(1)}(...)'"
+    if quote_paren_err:
+        return f"'{field_name}' {quote_paren_err}"
     if m := _FORBIDDEN_VCL_CONDITION_IDENTIFIERS_RE.search(raw):
         return f"'{field_name}' must not reference sensitive dictionary or header '{m.group(1)}'"
     return None
