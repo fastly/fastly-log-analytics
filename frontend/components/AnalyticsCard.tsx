@@ -250,6 +250,15 @@ export function UpdatingBadge() {
   )
 }
 
+function loadingTitleText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(loadingTitleText).join('')
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return loadingTitleText(node.props.children)
+  }
+  return ''
+}
+
 // U-9: surface distinct UX for loading vs empty vs 403. Callers were collapsing
 // all three into a single "No data available" string, so a slow connection,
 // a filter with zero rows, and a real permission denial all rendered the same.
@@ -319,7 +328,8 @@ export function AnalyticsCard({
   const showError = !showLoading && error != null
   const showEmpty = !showLoading && !showError && isEmpty === true
   const is403 = showError && error?.status === 403
-  const effectiveLoadingMessage = loadingMessage ?? `Loading ${title}...`
+  const titleText = loadingTitleText(title).trim()
+  const effectiveLoadingMessage = loadingMessage ?? (titleText ? `Loading ${titleText}...` : 'Loading data...')
 
   return (
     <>

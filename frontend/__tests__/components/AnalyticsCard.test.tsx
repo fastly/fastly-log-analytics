@@ -27,4 +27,14 @@ describe('AnalyticsCard loading copy', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('Reading streaming summaries...')
   })
+
+  it('extracts text from an element-valued title', () => {
+    render(
+      <AnalyticsCard title={<span>Active Viewers</span>} isLoading>
+        <div>loaded content</div>
+      </AnalyticsCard>,
+    )
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading Active Viewers...')
+  })
 })

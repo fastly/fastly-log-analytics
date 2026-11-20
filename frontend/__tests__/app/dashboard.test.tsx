@@ -893,7 +893,7 @@ describe('UI primitives & a11y', () => {
     expect(screen.queryByTestId('help-body')).not.toBeInTheDocument()
 
     rerender(<AnalyticsCard title="Loading Card" isLoading isFetching><p>placeholder</p></AnalyticsCard>)
-    expect(screen.getByText(/loading data/i)).toBeInTheDocument()
+    expect(screen.getByText('Loading Loading Card...')).toBeInTheDocument()
     expect(container.querySelector('svg.animate-spin')).toBeInTheDocument()
     expect(await axe(container)).toHaveNoViolations()
 
