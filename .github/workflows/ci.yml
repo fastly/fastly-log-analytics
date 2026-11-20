@@ -239,7 +239,7 @@ jobs:
         #   Run 2: terraform tests serial, --cov-append so the single
         #          --cov-fail-under=85 gate sees the COMBINED coverage.
         run: |
-          uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --cov=backend --cov-report=
+          uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --ignore=tests/e2e_security --cov=backend --cov-report=
           uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
 
       - name: Worker-crash diagnostics (memory and kernel log)
@@ -574,6 +574,9 @@ jobs:
           make compute-test
           make compute-wasm-check
           make vcl-test
+
+      - name: Offline 4-tier E2E security suite
+        run: uv run pytest -n 0 tests/e2e_security
 
       - name: Cloud Python infra/tools tests & secret value scan
         run: make cloud-infra-test

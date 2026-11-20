@@ -293,6 +293,8 @@ def _pg_worker_schema():
         reset_conn.execute("CREATE SCHEMA public")
 
     _os.environ["METADATA_DSN"] = worker_dsn
+    pg_connection.close_all_pg_connections()
+    pg_connection.reset_pg_pool_for_tests()
 
     pg_schema.ensure_pg_schema(force=True)
 
