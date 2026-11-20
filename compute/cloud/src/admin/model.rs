@@ -603,6 +603,10 @@ pub fn valid_prefix(value: &str) -> bool {
 
 pub fn service_value(service: &Service, generation: &str) -> Value {
     let mut value = serde_json::to_value(service).unwrap_or(Value::Null);
+    let cmcd_enabled = service.cmcd.enabled
+        || crate::catalog::active_log_field_ids(&service.log_fields)
+            .iter()
+            .any(|id| id.starts_with("cmcd_"));
     value["generation"] = generation.into();
     value["rum_enabled"] = json!(service.rum.enabled);
     value["rum_log_period"] = json!(service.rum.log_period);
@@ -614,6 +618,11 @@ pub fn service_value(service: &Service, generation: &str) -> Value {
     value["capture_errors"] = json!(service.rum.capture_errors);
     value["capture_events"] = json!(service.rum.capture_events);
     value["capture"] = json!(service.capture);
+    value["cmcd"] = json!({
+        "enabled": cmcd_enabled,
+        "mode": service.cmcd.mode,
+        "version": service.cmcd.version,
+    });
     value
 }
 
@@ -694,5 +703,61 @@ mod tests {
         assert_eq!(chosen.unwrap().effective_rum().faro_version, "2.10.0");
         let top_level = provision(json!({"rum": {"enabled": true}, "faro_version": "2.10.0"}));
         assert_eq!(top_level.unwrap().effective_rum().faro_version, "2.10.0");
+    }
+
+    #[test]
+    fn service_value_infers_cmcd_from_committed_fields() {
+        let mut service = provision(json!({}))
+            .map(|input| {
+                let rum = input.effective_rum();
+                Service {
+                    service_id: input.service_id,
+                    name: "fixture".into(),
+                    status: "active".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    config_version: 1,
+                    logging_enabled: true,
+                    logging_endpoint_name: "logs".into(),
+                    log_period: 60,
+                    sample_rate: 100,
+                    edge_only: false,
+                    custom_condition: String::new(),
+                    fos_bucket: "fixture".into(),
+                    fos_prefix: String::new(),
+                    fos_region: "us-east-1".into(),
+                    fos_endpoint: "us-east-1.object.fastlystorage.app".into(),
+                    field_limits: json!({}),
+                    log_fields: input.log_fields,
+                    cmcd: crate::logging::cmcd::Config::default(),
+                    rum,
+                    fastly_token_ref: "token".into(),
+                    fos_access_key_ref: "ak".into(),
+                    fos_secret_key_ref: "sk".into(),
+                    owner: "fixture-owner".into(),
+                    bucket_adopted: true,
+                    bucket_checked: true,
+                    last_activated_version: Some(1),
+                    last_reconcile: None,
+                    pending_job_id: None,
+                    owned_endpoint_names: vec!["logs".into()],
+                    delete_after: true,
+                    log_retention_days: 30,
+                    rum_retention_days: 30,
+                    compaction: Compaction::default(),
+                    compression_codec: "zstd".into(),
+                    wire_format: "array".into(),
+                    data_reset: None,
+                    capture: Capture::Attached,
+                    scoring: None,
+                    cdn_shield: String::new(),
+                }
+            })
+            .unwrap();
+        service.log_fields["custom_fields"] = json!([
+            {"name":"cmcd_sid","enabled":true,"committed":true}
+        ]);
+
+        assert_eq!(service_value(&service, "g")["cmcd"]["enabled"], true);
     }
 }
