@@ -256,12 +256,10 @@ export function summaryValue(
   value: string,
   type?: CustomField["type"],
 ): Scalar | null {
-  if (type === "boolean" || (!type && BOOLEAN_FIELDS.has(field))) {
-    return normalizeDashboardValue(field, value === "true");
-  }
+  if (type === "boolean" || (!type && BOOLEAN_FIELDS.has(field))) return value === "true";
   if (type === "number" || (!type && NUMBER_FIELDS.has(field))) {
     const n = Number(value);
-    return normalizeDashboardValue(field, value === "" || Number.isNaN(n) ? null : n);
+    return value === "" || Number.isNaN(n) ? null : n;
   }
   return normalizeDashboardValue(field, value);
 }
@@ -672,7 +670,6 @@ export async function decodeSummary(
   const buckets = new Map<number, MinuteBucket>();
   const counts = new Map<string, Map<Scalar, number>>();
   const nonNull: Record<string, number> = {};
-  const skipped: Record<string, number> = {};
   const cut = new Set<string>();
   let ipSketch: Hll | null = null;
   let total = 0;
@@ -721,19 +718,13 @@ export async function decodeSummary(
         const name = field[i] as string;
         if (!cards.has(name)) break;
         const typed = summaryValue(name, value[i] as string, types.get(name));
-        if (typed === null) {
-          skipped[name] = (skipped[name] ?? 0) + num(count[i]);
-          break;
-        }
+        if (typed === null) break;
         const map = counts.get(name) ?? new Map<Scalar, number>();
         map.set(typed, (map.get(typed) ?? 0) + num(count[i]));
         counts.set(name, map);
         break;
       }
     }
-  }
-  for (const [name, count] of Object.entries(skipped)) {
-    nonNull[name] = Math.max(0, (nonNull[name] ?? 0) - count);
   }
   if (custom.some((field) => !summarized.has(field.id))) return null;
   const sorted = [...buckets.values()].sort((a, b) => a.t - b.t);

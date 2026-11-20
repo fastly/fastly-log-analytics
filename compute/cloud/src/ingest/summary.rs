@@ -593,28 +593,6 @@ enum Key<'a> {
     F(u64),
 }
 
-fn dashboard_key<'a>(field: &str, key: Key<'a>) -> Option<Key<'a>> {
-    match key {
-        Key::S("") => None,
-        Key::F(bits) if field == "ttl" || field == "age" => {
-            Some(Key::I(f64::from_bits(bits).round() as i64))
-        }
-        Key::I(n) if field == "conn_requests" => {
-            if n <= 0 {
-                None
-            } else {
-                Some(Key::S(match n {
-                    1 => "1",
-                    2..=5 => "2\u{2013}5",
-                    6..=20 => "6\u{2013}20",
-                    _ => "21+",
-                }))
-            }
-        }
-        _ => Some(key),
-    }
-}
-
 impl<'a> Key<'a> {
     fn render(&self) -> Cow<'a, str> {
         match self {
@@ -3368,11 +3346,7 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
             };
             for i in r.live() {
                 let ip_id = if sketched { r.ip_id[i] } else { NO_IP };
-                col.for_each_key(i, true, |key| {
-                    if let Some(key) = dashboard_key(field, key) {
-                        count_key(&mut aggs, key, ip_id);
-                    }
-                });
+                col.for_each_key(i, false, |key| count_key(&mut aggs, key, ip_id));
             }
         }
         let total: i64 = aggs.values().map(|a| a.count).sum();

@@ -970,7 +970,10 @@ async def test_analyst_can_read_enabled_field(with_config):
 # ── Section 2: RUM Settings, Versions, Enable/Disable/Upgrade & RBAC ─────────
 
 
-@pytest.mark.parametrize(("custom_condition", "expect_reconcile"), [("", False), ('req.url !~ "^/healthz"', True)])
+@pytest.mark.parametrize(
+    ("custom_condition", "expect_reconcile"),
+    [("", False), ('req.http.Host == "example.com"', True)],
+)
 def test_update_settings_reconcile_and_missing(custom_condition: str, expect_reconcile: bool):
     test_client = TestClient(_make_app(analyst=False))
     with patch("backend.config.load_config", return_value=None):

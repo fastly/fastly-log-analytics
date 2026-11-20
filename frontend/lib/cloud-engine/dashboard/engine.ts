@@ -527,7 +527,7 @@ export class Aggregator {
         if (isCdnHit(state)) bucket.hits++;
       }
       for (const entry of fieldColumns) {
-        const value = normalizeDashboardValue(entry.field, toScalar(entry.column[i]));
+        const value = toScalar(entry.column[i]);
         if (value === null) continue;
         entry.counts.set(value, (entry.counts.get(value) ?? 0) + 1);
         entry.added++;
@@ -758,7 +758,12 @@ export class Aggregator {
       const summary = this.topSummaries.get(field);
       const rankedLimit = RANKED_FIELDS[field];
       if (summary) {
-        const entries = new Map(summary.entries);
+        const entries = new Map<Scalar, number>();
+        for (const [raw, count] of summary.entries) {
+          const value = normalizeDashboardValue(field, raw);
+          if (value === null) continue;
+          entries.set(value, (entries.get(value) ?? 0) + count);
+        }
         cards[field] = {
           total: summary.nonNull,
           distinct: summary.distinct,
@@ -767,7 +772,13 @@ export class Aggregator {
         };
         continue;
       }
-      const counts = this.counts.get(field)!;
+      const rawCounts = this.counts.get(field)!;
+      const counts = new Map<Scalar, number>();
+      for (const [raw, count] of rawCounts) {
+        const value = normalizeDashboardValue(field, raw);
+        if (value === null) continue;
+        counts.set(value, (counts.get(value) ?? 0) + count);
+      }
       const top = topEntries(counts, TOP_N);
       const approximate = this.truncated.has(field);
       const total = this.nonNull.get(field)!;
