@@ -202,7 +202,7 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           icon={Gauge}
           loading={loading}
           value={overview?.total_requests != null ? formatCompactCount(overview.total_requests) : '—'}
-          sub={withReported('processed at the edge', reported && (
+          sub={withReported('processed', reported && (
             <FastlyReportedLine
               reported={reported}
               value={formatCompactCount(reported.requests)}
