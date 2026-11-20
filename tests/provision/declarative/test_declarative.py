@@ -1820,7 +1820,10 @@ if (req.url.path == "/js/rum.js" && req.http.X-FOS-Request == "1") {
         assert [set(k.split()) for k in keys] == [{"rum-js"}, {"rum-faro-sdk", "rum-js"}]
 
     def test_faro_version_invalid_rejected_at_generation(self):
-        state = self._rum_state(faro_version="not-a-version")
+        with pytest.raises(ValueError, match="faro_version must be a plain"):
+            self._rum_state(faro_version="not-a-version")
+        state = self._rum_state(faro_version="2.9.0")
+        object.__setattr__(state, "faro_version", "not-a-version")
         for sub in ("vcl_recv", "vcl_miss"):
             with pytest.raises(ValueError, match="faro_version must be a plain"):
                 generate_consolidated_snippet(state, sub)
@@ -3123,3 +3126,401 @@ def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(moc
         assert r_off.status_code == 200, r_off.text
         persisted_off = json.loads(cfg_off_path.read_text())
         assert [cf["name"] for cf in persisted_off["log_fields"]["custom_fields"]] == ["my_user_cf"]
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanly_after_rum_toggle(
+    mock_config_dir,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from backend.main import app
+    from backend.provision import orchestrator
+
+    sid = "svc_rum_cf_endpoints"
+    cfg_path = mock_config_dir / f"{sid}.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "service_id": sid,
+                "name": "RUM CF Endpoints Svc",
+                "log_period": 60,
+                "rum_enabled": True,
+                "rum": {"enabled": True},
+                "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+            }
+        )
+    )
+
+    with (
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.provision.validate_log_format", return_value=[]),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        r_set = client.post(
+            f"/api/services/{sid}/log-fields",
+            json={
+                "log_fields": {
+                    "groups": ["A"],
+                    "custom_fields": [
+                        {"name": "rum_cid", "sql_type": "VARCHAR", "enabled": False},
+                        {
+                            "name": "user_edge_cf",
+                            "label": "User Edge CF",
+                            "vcl_log_expression": "req.http.X-User",
+                            "collection_stage": "edge",
+                            "sql_type": "VARCHAR",
+                            "value_type": "string",
+                            "bytes_estimate": 25,
+                            "enabled": True,
+                        },
+                    ],
+                }
+            },
+        )
+        assert r_set.status_code == 200, r_set.text
+
+        r_list = client.get(f"/api/services/{sid}/custom-fields")
+        assert r_list.status_code == 200, f"GET /custom-fields failed with {r_list.status_code}: {r_list.text}"
+        assert [f["name"] for f in r_list.json()["fields"]] == ["user_edge_cf"]
+
+        r_export = client.get(f"/api/services/{sid}/custom-fields/export")
+        assert r_export.status_code == 200
+        assert [f["name"] for f in r_export.json()["custom_fields"]] == ["user_edge_cf"]
+
+        before_cfg = json.loads(cfg_path.read_text())
+
+        for sys_name in ("service_id", "rum_cid", "fastly_req_id", "rum_body", "edge_score", "cmcd_sid"):
+            r_post = client.post(
+                f"/api/services/{sid}/custom-fields",
+                json={
+                    "name": sys_name,
+                    "label": "Spoofed",
+                    "vcl_log_expression": "req.http.User-Agent",
+                    "collection_stage": "edge",
+                    "sql_type": "VARCHAR",
+                    "value_type": "string",
+                    "bytes_estimate": 30,
+                },
+            )
+            assert r_post.status_code == 422, f"POST {sys_name!r} returned {r_post.status_code}: {r_post.text}"
+
+            r_patch = client.patch(
+                f"/api/services/{sid}/custom-fields/{sys_name}",
+                json={"collection_stage": "edge", "vcl_log_expression": "req.http.User-Agent"},
+            )
+            assert r_patch.status_code == 422, f"PATCH {sys_name!r} returned {r_patch.status_code}: {r_patch.text}"
+
+            r_del = client.delete(f"/api/services/{sid}/custom-fields/{sys_name}")
+            assert r_del.status_code == 422, f"DELETE {sys_name!r} returned {r_del.status_code}: {r_del.text}"
+
+            r_imp = client.post(
+                f"/api/services/{sid}/custom-fields/import",
+                json={
+                    "custom_fields": [
+                        {
+                            "name": sys_name,
+                            "label": "Spoofed",
+                            "vcl_log_expression": "resp.http.Server",
+                            "collection_stage": "origin",
+                            "sql_type": "VARCHAR",
+                            "value_type": "string",
+                            "bytes_estimate": 30,
+                        }
+                    ]
+                },
+            )
+            assert r_imp.status_code == 422, f"IMPORT {sys_name!r} returned {r_imp.status_code}: {r_imp.text}"
+
+        assert json.loads(cfg_path.read_text()) == before_cfg
+
+    sid_ingest = "svc_rum_ingest_strip"
+    orchestrator.write_service_config(
+        {
+            "logging_service_id": sid_ingest,
+            "fos_bucket_name": "bucket-test",
+            "fos_region": "us-east-1",
+            "rum_enabled": True,
+            "log_fields": {
+                "groups": ["A"],
+                "custom_fields": [
+                    {"name": "rum_cid", "sql_type": "VARCHAR", "enabled": False},
+                    {
+                        "name": "user_kept_cf",
+                        "label": "User Kept",
+                        "vcl_log_expression": "req.http.X-Kept",
+                        "collection_stage": "edge",
+                        "sql_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 25,
+                    },
+                ],
+            },
+        }
+    )
+    ingested_cfg = json.loads((mock_config_dir / f"{sid_ingest}.json").read_text())
+    assert [cf["name"] for cf in ingested_cfg["log_fields"]["custom_fields"]] == ["user_kept_cf"]
+
+
+@pytest.mark.security_regression
+def test_sec15_declarative_rejects_exclude_url_regex_scoring_and_shield_breakouts():
+    """SEC-15 Wave 5: FeatureState and generate_consolidated_snippet reject scoring & shield VCL breakouts."""
+    breakout_regex = r'") { error 999; } if (req.url !~ "'
+    for bad_cfg in (
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "exclude_url_regex": breakout_regex},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring_enabled": True,
+            "scoring_domain": "scorer.edgecompute.app",
+            "scoring_exclude_url_regex": breakout_regex,
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": 'sec"; set req.http.X = "1',
+            },
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": 'scorer.edgecompute.app"; error 999; //'},
+        },
+        {
+            "service_id": 'svc"breakout',
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "scorer.edgecompute.app"},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "cdn_shield": "iad); error 999; //",
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "fos_region": "us-east-1); error 999; //",
+        },
+    ):
+        with pytest.raises(ValueError):
+            FeatureState.from_config(bad_cfg)
+
+    valid_state = FeatureState.from_config(
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "fos_region": "us-east-1",
+            "cdn_shield": "iad-va-us",
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": "hexsecret0123456789",  # gitleaks:allow
+                "exclude_url_regex": r"^/(?:health|metrics|static/)",
+            },
+        }
+    )
+    recv_vcl = generate_consolidated_snippet(valid_state, "vcl_recv")
+    assert r'std.tolower(req.url) !~ "^/(?:health|metrics|static/)"' in recv_vcl
+    assert "fastly.try_select_shield(ssl_shield_iad_va_us, F_fos_origin)" in recv_vcl
+
+    # Defense-in-depth at builder boundary even if FeatureState.__post_init__ is bypassed via object.__setattr__
+    tampered_scoring = ScoringConfig(enabled=True, domain="scorer.edgecompute.app")
+    object.__setattr__(tampered_scoring, "exclude_url_regex", breakout_regex)
+    object.__setattr__(valid_state, "scoring", tampered_scoring)
+    with pytest.raises(ValueError):
+        generate_consolidated_snippet(valid_state, "vcl_recv")
+
+
+@pytest.mark.security_regression
+def test_sec15_wave6_feature_state_type_safety_faro_and_shield_aliases():
+    """SEC-15 Wave 6: FeatureState handles null strings cleanly and raises ValueError on JSON type confusion & bad faro/shield aliases."""
+    # Benign null custom_condition and container nulls coalesce cleanly
+    null_state = FeatureState.from_config(
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "provisioning": None,
+            "cmcd": None,
+            "scoring": None,
+            "fos_proxy": None,
+            "custom_condition": None,
+            "rum": {"enabled": True, "custom_condition": None, "endpoint_name": "Custom RUM Logs"},
+            "faro_version": "2.9.0",
+        }
+    )
+    assert null_state.rum_enabled is True
+    assert null_state.custom_condition == ""
+    assert null_state.rum_custom_condition == ""
+    assert null_state.rum_endpoint_name == "Custom RUM Logs"
+    assert null_state.faro_version == "2.9.0"
+
+    shield_via_prov = FeatureState.from_config(
+        {"service_id": "svc1", "log_period": 60, "provisioning": {"cdn_shield": "bfi-wa-us"}}
+    )
+    assert shield_via_prov.cdn_shield == "bfi-wa-us"
+
+    shield_via_proxy = FeatureState.from_config(
+        {"service_id": "svc1", "log_period": 60, "fos_proxy": {"shield": "london-uk"}}
+    )
+    assert shield_via_proxy.cdn_shield == "london-uk"
+
+    for bad_fs in (
+        {"service_id": "svc1", "log_period": 60, "provisioning": ["bad"]},
+        {"service_id": "svc1", "log_period": 60, "rum": ["bad"]},
+        {"service_id": "svc1", "log_period": 60, "cmcd": 123},
+        {"service_id": "svc1", "log_period": 60, "scoring": "bad"},
+        {"service_id": "svc1", "log_period": 60, "fos_proxy": ["bad"]},
+        {"service_id": "svc1", "log_period": True},
+        {"service_id": "svc1", "log_period": []},
+        {"service_id": "svc1", "log_period": 60, "sample_rate": True},
+        {"service_id": "svc1", "log_period": 60, "provisioning": {"sample_rate": []}},
+        {"service_id": "svc1", "log_period": 60, "rum_log_period": []},
+        {"service_id": "svc1", "log_period": 60, "cmcd": {"enabled": True, "version": []}},
+        {"service_id": "svc1", "log_period": 60, "cmcd": {"enabled": True, "version": True}},
+        {"service_id": "svc1", "log_period": 60, "custom_condition": 123},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "rum": {"custom_condition": 123}},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "rum_enabled": True,
+            "rum_custom_condition": "",
+            "rum": {"custom_condition": 'req.http.Host != "x") { error 999; } if (true'},
+        },
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "rum": {"faro_version": '1.0.0"; error 999;'}},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "faro_version": '1.0.0"; error 999;'},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "faro_version": 123},
+        {"service_id": "svc1", "log_period": 60, "provisioning": {"cdn_shield": "iad); error 999;"}},
+        {"service_id": "svc1", "log_period": 60, "fos_proxy": {"shield": "iad); error 999;"}},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": "bad"},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": True},
+        },
+    ):
+        with pytest.raises(ValueError):
+            FeatureState.from_config(bad_fs)
+
+    # Direct __post_init__ checks
+    with pytest.raises(ValueError, match="faro_version"):
+        FeatureState("svc1", 60, 100, False, "", "", "fos.example.com", faro_version='1.0.0"; error 999;')
+    with pytest.raises(ValueError, match="enforce_status_code"):
+        FeatureState(
+            "svc1",
+            60,
+            100,
+            False,
+            "",
+            "",
+            "fos.example.com",
+            scoring=ScoringConfig(enabled=True, domain="a.example.com", enforce_status_code=True),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.security_regression
+def test_sec15_wave7_feature_state_custom_fields_null_desc_and_type_confusion():
+    """SEC-15 Wave 7: FeatureState normalizes description=None and raises ValueError (never AttributeError/TypeError) on mistyped custom_fields."""
+    valid_cf_null_desc = {
+        "name": "my_cf",
+        "label": "My CF",
+        "description": None,
+        "vcl_log_expression": "req.http.X-My-Hdr",
+        "sql_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 24,
+    }
+    st_ok = FeatureState.from_config(
+        {"service_id": "svc1", "log_period": 60, "log_fields": {"custom_fields": [valid_cf_null_desc]}}
+    )
+    assert len(st_ok.log_fields.custom_fields) == 1
+    assert st_ok.log_fields.custom_fields[0]["description"] == ""
+
+    for bad_fs in (
+        {"service_id": "svc1", "log_period": 60, "custom_fields": "not-a-list"},
+        {"service_id": "svc1", "log_period": 60, "log_fields": {"custom_fields": False}},
+        {"service_id": "svc1", "log_period": 60, "rum_enabled": True, "custom_fields": ["not-a-dict"]},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "scoring_enabled": True,
+            "scoring_domain": "s.example.com",
+            "custom_fields": [123],
+        },
+        {"service_id": "svc1", "log_period": 60, "log_fields": {"custom_fields": [{"name": ["unhashable"]}]}},
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{"name": "my_cf", "vcl_log_expression": [1, 2]}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{"name": "my_cf", "vcl_log_expression": True}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{"name": "service_id", "vcl_log_expression": 123}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "label": 123}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "label": ["bad"]}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "description": 123}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "sql_type": ["VARCHAR"]}]},
+        },
+        {
+            "service_id": "svc1",
+            "log_period": 60,
+            "log_fields": {"custom_fields": [{**valid_cf_null_desc, "bytes_estimate": True}]},
+        },
+    ):
+        with pytest.raises(ValueError):
+            FeatureState.from_config(bad_fs)
+
+    for bad_cfs in (
+        ["not-a-dict"],  # type: ignore[list-item]
+        [{"name": ["unhashable"]}],
+        [{"name": "my_cf", "vcl_log_expression": [1, 2]}],
+        [{"name": "my_cf", "collection_stage": ["edge"]}],
+    ):
+        with pytest.raises(ValueError):
+            FeatureState(
+                "svc1",
+                60,
+                100,
+                False,
+                "",
+                "",
+                "fos.example.com",
+                log_fields=LogFieldsConfig(custom_fields=bad_cfs),
+            )

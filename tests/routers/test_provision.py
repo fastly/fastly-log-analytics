@@ -1197,7 +1197,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
     ):
         r_new = _client().post(
             "/api/provision/ingest",
-            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "fos_region": "us-east-1"},
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "fos_region": "us-east-1"},
         )
         assert r_new.status_code == 200
         mock_ensure.assert_called_once()
@@ -1213,7 +1213,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
     ):
         r_err = _client().post(
             "/api/provision/ingest",
-            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b"},
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "valid-bucket"},
         )
         assert r_err.status_code == 400
         assert r_err.json()["detail"]["error"] == "ensure_access_key_failed"
@@ -1232,7 +1232,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
             json={
                 "token": "t",
                 "service_id": "svc-1",
-                "fos_bucket_name": "b",
+                "fos_bucket_name": "valid-bucket",
                 "fos_access_key": "EXISTING_AK",
                 "fos_secret_key": "EXISTING_SK",
             },
@@ -1272,7 +1272,7 @@ def test_ingest_rerun_preserves_faro_pin_and_cdn_secret(tmp_path, monkeypatch):
         patch("backend.provision._sync_crontab"),
         patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        base_req = {"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "rum_enabled": True}
+        base_req = {"token": "t", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True}
         resp = _client().post("/api/provision/ingest", json=base_req)
         assert resp.status_code == 200
         assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
@@ -1941,17 +1941,57 @@ def test_sec13_execute_normalizes_trailing_slash_cdn_url_and_rejects_malformed_c
 
         mock_dom.reset_mock()
         captured.clear()
+        res_space_ok = client.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok-test",
+                "service_id": "svc-cdn-norm",
+                "fos_bucket_name": "cdn-norm-bucket",
+                "cdn_url": " https://my-cdn.global.ssl.fastly.net/ ",
+            },
+        )
+        assert res_space_ok.status_code == 200, res_space_ok.text
+        mock_dom.assert_called_once_with("my-cdn.global.ssl.fastly.net", timeout=5)
+        assert captured["cfg"]["cdn_url"] == "https://my-cdn.global.ssl.fastly.net"
+
+        mock_dom.reset_mock()
+        captured.clear()
         for bad_cdn_url in (
             "http://my-cdn.global.ssl.fastly.net",
             "https://my-cdn.global.ssl.fastly.net:8443",
             "https://my-cdn.global.ssl.fastly.net:abc",
             "https://my-cdn.global.ssl.fastly.net:99999",
+            "https://cdn.example.com:",
+            "https://cdn.example.com.:",
             "https://[::1",
             "https://[2001:db8::1",
+            "https://[::1]",
+            "https://127.0.0.1",
+            "https://cdn .example.com",
+            "https://cdn\x07.example.com",
+            "\nhttps://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\r\n",
+            "\thttps://my-cdn.global.ssl.fastly.net\t",
+            "\u00a0https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u00a0",
+            "\x85https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\x85",
+            "\u2000https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u2000",
+            "\u3000https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u3000",
+            "\u2028https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u2028",
+            "\u2029https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u2029",
+            "   ",
             "https://my-cdn.global.ssl.fastly.net/extra",
             "https://user@my-cdn.global.ssl.fastly.net",
+            "https://@my-cdn.global.ssl.fastly.net",
             "https://my-cdn.global.ssl.fastly.net?a=1",
+            "https://my-cdn.global.ssl.fastly.net?",
             "https://my-cdn.global.ssl.fastly.net#frag",
+            "https://my-cdn.global.ssl.fastly.net#",
         ):
             res_bad = client.post(
                 "/api/provision/execute",
@@ -1966,3 +2006,420 @@ def test_sec13_execute_normalizes_trailing_slash_cdn_url_and_rejects_malformed_c
             assert res_bad.json()["detail"]["error"] == "invalid_cdn_url"
         mock_dom.assert_not_called()
         assert "cfg" not in captured
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_provision_routers_reject_exclude_url_regex_and_cdn_shield_breakouts(tmp_path, monkeypatch):
+    """SEC-15 Wave 5: /terraform/{preview,export}, /ingest, /execute, and /reconcile reject scoring & shield breakouts."""
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    (tmp_path / "cfgs").mkdir(parents=True, exist_ok=True)
+    svcconfig.save_config("svc1", _seed_cfg("svc1"))
+
+    breakout_regex = r'") { set req.http.X-Exfil = table.lookup(fos_credentials, "secret_key"); } if (req.url !~ "'
+    breakout_shield = (
+        'iad_va_us, F_fos_origin); set req.http.X_Exfil = table.lookup(fos_credentials, "secret_key"); '
+        "set req.backend = fastly.try_select_shield(ssl_shield_iad_va_us"
+    )
+
+    bad_payloads = (
+        {
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "exclude_url_regex": breakout_regex,
+            }
+        },
+        {
+            "scoring_enabled": True,
+            "scoring_domain": "scorer.edgecompute.app",
+            "scoring_exclude_url_regex": breakout_regex,
+        },
+        {
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": 'sec" || true || "',
+            }
+        },
+        {
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app/evil",
+            }
+        },
+        {"rum_enabled": True, "cdn_shield": breakout_shield},
+        {"fos_region": "us-east-1; error 999"},
+        {"rum": {"enabled": True, "faro_version": '2.13.0"; error 999; //'}},
+    )
+
+    for tf_path in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+        for extra in bad_payloads:
+            r_tf = _client().post(tf_path, json={"service_id": "svc1", "fos_bucket_name": "my-bucket", **extra})
+            assert r_tf.status_code == 400, f"Expected 400 on {tf_path} for {extra}, got {r_tf.status_code}"
+
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc1")),
+        patch("backend.provision.write_service_config") as mock_write_cfg,
+    ):
+        for extra in bad_payloads:
+            r_ing = _client().post(
+                "/api/provision/ingest",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "my-bucket", **extra},
+            )
+            assert r_ing.status_code == 400, f"Expected 400 on /ingest for {extra}, got {r_ing.status_code}"
+        mock_write_cfg.assert_not_called()
+
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="svc"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision") as mock_prov,
+    ):
+        for exec_extra in (
+            {"cdn_shield": breakout_shield},
+            {"fos_region": "us-east-1; error 999"},
+            {"rum_enabled": True, "faro_version": '2.13.0"; error 999; //'},
+        ):
+            r_exec = _client().post(
+                "/api/provision/execute",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "valid-bucket", **exec_extra},
+            )
+            assert r_exec.status_code == 400, f"Expected 400 on /execute for {exec_extra}, got {r_exec.status_code}"
+        mock_prov.assert_not_called()
+
+    with patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_rec:
+        r_bad_sid = _client().post("/api/provision/reconcile", json={"service_id": 'svc"1', "token": "tok"})
+        assert r_bad_sid.status_code == 400
+        svcconfig.save_config(
+            "svc_tainted",
+            {
+                **_seed_cfg("svc_tainted"),
+                "scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "exclude_url_regex": breakout_regex},
+            },
+        )
+        r_tainted = _client().post("/api/provision/reconcile", json={"service_id": "svc_tainted", "token": "tok"})
+        assert r_tainted.status_code == 400
+        mock_rec.assert_not_called()
+
+    # Valid exclude_url_regex and cdn_shield continue to succeed on /terraform/preview
+    r_valid_tf = _client().post(
+        "/api/provision/terraform/preview",
+        json={
+            "service_id": "svc1",
+            "fos_bucket_name": "my-bucket",
+            "rum_enabled": True,
+            "cdn_shield": "iad-va-us",
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": "secret-hex-0123456789",  # gitleaks:allow
+                "exclude_url_regex": r"^/(?:health|metrics|static/)",
+            },
+        },
+    )
+    assert r_valid_tf.status_code == 200, r_valid_tf.text
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_sec13_wave6_ingest_and_terraform_type_confusion_and_alias_hardening(tmp_path, monkeypatch):
+    """SEC-15 & SEC-13 Wave 6: /terraform/* null-coalescing & type safety + /ingest unmocked defaults, alias shadow & cdn_url."""
+    cfg_dir = tmp_path / "cfgs"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "CONFIGS_DIR", cfg_dir)
+    tc = TestClient(app, raise_server_exceptions=False)
+
+    # 1. Benign null custom_condition in rum must return 200 OK on /terraform/{preview,export}, never 500
+    for ep in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+        r_null = tc.post(
+            ep,
+            json={
+                "service_id": "svc1",
+                "fos_bucket_name": "my-bucket",
+                "rum": {"enabled": True, "custom_condition": None},
+            },
+        )
+        assert r_null.status_code == 200, (
+            f"Expected 200 on {ep} for rum.custom_condition=None, got {r_null.status_code}"
+        )
+
+    # 2. JSON type confusion & shield alias breakouts on /terraform/{preview,export} return 400/422, never 500
+    for bad_tf in (
+        {"service_id": "svc1", "provisioning": ["bad"]},
+        {"service_id": "svc1", "rum": ["bad"]},
+        {"service_id": "svc1", "cmcd": ["bad"]},
+        {"service_id": "svc1", "fos_proxy": ["bad"]},
+        {"service_id": "svc1", "cmcd": {"enabled": True, "version": []}},
+        {"service_id": "svc1", "cmcd": {"enabled": True, "version": True}},
+        {"service_id": "svc1", "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": []}},
+        {"service_id": "svc1", "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": True}},
+        {"service_id": "svc1", "provisioning": {"sample_rate": []}},
+        {"service_id": "svc1", "provisioning": {"sample_rate": True}},
+        {"service_id": "svc1", "provisioning": {"cdn_shield": "iad); error 999;"}},
+        {"service_id": "svc1", "fos_proxy": {"shield": "iad); error 999;"}},
+        {
+            "service_id": "svc1",
+            "rum_enabled": True,
+            "rum_custom_condition": "",
+            "rum": {"custom_condition": 'req.http.Host != "x") { error 999; } if (true'},
+        },
+    ):
+        for ep in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+            resp = tc.post(ep, json=bad_tf)
+            assert resp.status_code in (400, 422), f"Expected 400/422 on {ep} for {bad_tf}, got {resp.status_code}"
+
+    # 3. /api/provision/ingest with UNMOCKED real write_service_config: minimal valid payload -> 200 OK; hostile -> 400
+    with (
+        patch("backend.core.vcl_generator.validate_destructive_token", return_value={}),
+        patch("backend.utils.pop_utils.fetch_pop_locations", return_value={}),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.scheduler.get_scheduler"),
+    ):
+        r_ok = tc.post(
+            "/api/provision/ingest",
+            json={
+                "token": "tok",
+                "service_id": "svc_min",
+                "fos_bucket_name": "valid-bucket-123",
+                "fos_access_key": "AK",
+                "fos_secret_key": "SK",
+            },
+        )
+        assert r_ok.status_code == 200, f"Expected 200 on minimal valid ingest, got {r_ok.status_code}: {r_ok.text}"
+        persisted_min = svcconfig.load_config("svc_min")
+        assert persisted_min is not None
+        assert persisted_min["fos_region"] == "us-east-1"
+        assert persisted_min["log_retention_days"] == 30
+        assert persisted_min["cdn_url"] == ""
+
+        # Offline valid https:// cdn_url + numeric log_period succeed and normalize trailing slash without DNS lookup
+        with patch("backend.routers.provision._check_domain_available") as mock_dns_probe:
+            r_cdn_ok = tc.post(
+                "/api/provision/ingest",
+                json={
+                    "token": "tok",
+                    "service_id": "svc_cdn_ok",
+                    "fos_bucket_name": "valid-bucket-123",
+                    "fos_access_key": "AK",
+                    "fos_secret_key": "SK",
+                    "log_period": 60,
+                    "cdn_url": "https://cdn.example.com/",
+                },
+            )
+            assert r_cdn_ok.status_code == 200, r_cdn_ok.text
+            mock_dns_probe.assert_not_called()
+        persisted_cdn = svcconfig.load_config("svc_cdn_ok")
+        assert persisted_cdn is not None and persisted_cdn["cdn_url"] == "https://cdn.example.com"
+
+        base = {
+            "token": "tok",
+            "service_id": "svc_bad",
+            "fos_bucket_name": "valid-bucket-123",
+            "fos_region": "us-east-1",
+            "log_period": "1 minute",
+            "log_retention_days": 30,
+            "fos_access_key": "AK",
+            "fos_secret_key": "SK",
+        }
+        for bad_ing in (
+            {
+                **base,
+                "rum_enabled": True,
+                "rum_custom_condition": "",
+                "rum": {"custom_condition": 'req.url != "x") { error 999; } if (req.url != "y"'},
+            },
+            {**base, "cdn_url": "http://169.254.169.254/latest/meta-data/"},
+            {**base, "cdn_url": "https://127.0.0.1:8443"},
+            {**base, "cdn_url": "https://metadata.google.internal"},
+            {**base, "cdn_url": "https://cdn.example.com\u2028"},
+            {**base, "fos_bucket_name": "bad_underscore_bucket"},
+            {**base, "fos_prefix": "../bad;prefix"},
+            {**base, "scoring_enabled": True, "scoring": "not-a-dict"},
+            {**base, "provisioning": ["not-a-dict"]},
+            {**base, "rum": "not-a-dict"},
+            {**base, "cmcd": 123},
+            {**base, "fos_proxy": 123},
+        ):
+            r_b = tc.post("/api/provision/ingest", json=bad_ing)
+            assert r_b.status_code in (400, 422), f"Expected 400/422 on /ingest for {bad_ing}, got {r_b.status_code}"
+        assert svcconfig.load_config("svc_bad") is None
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_wave7_all_seven_routes_null_description_empty_sid_and_log_fields_schema(tmp_path, monkeypatch):
+    """SEC-15 Wave 7: description=None returns 200 OK across all 7 routes, empty logging_service_id never 500s, and bad custom_fields/log_fields return 400/422."""
+    from backend.provision.declarative.models import ReconciliationResult
+
+    cfg_dir = tmp_path / "cfgs_w7"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "CONFIGS_DIR", cfg_dir)
+    tc = TestClient(app, raise_server_exceptions=False)
+
+    valid_cf_null_desc = {
+        "name": "my_cf",
+        "label": "My CF",
+        "description": None,
+        "vcl_log_expression": "req.http.X-My-Hdr",
+        "sql_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 24,
+    }
+
+    # 1 & 2. /terraform/preview & /terraform/export: description=None -> 200; empty logging_service_id -> 200
+    for ep in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+        r_tf = tc.post(
+            ep,
+            json={
+                "service_id": "svc1",
+                "fos_bucket_name": "my-bucket",
+                "log_fields": {"custom_fields": [valid_cf_null_desc]},
+            },
+        )
+        assert r_tf.status_code == 200, (
+            f"Expected 200 on {ep} for description=None, got {r_tf.status_code}: {r_tf.text}"
+        )
+        for sid_body in ({"logging_service_id": ""}, {"service_id": "svc1", "logging_service_id": ""}):
+            r_sid = tc.post(ep, json=sid_body)
+            assert r_sid.status_code == 200, f"Expected 200 on {ep} for {sid_body}, got {r_sid.status_code}"
+
+    # 3..7. /ingest, /execute, /reconcile (even with raw description:null on disk), /log-fields, /custom-fields/import -> 200
+    with (
+        patch("backend.core.vcl_generator.validate_destructive_token", return_value={}),
+        patch("backend.utils.pop_utils.fetch_pop_locations", return_value={}),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.scheduler.get_scheduler"),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.config.fetch_service_name", return_value="W7 Svc"),
+        patch("backend.provision.provision", side_effect=lambda _c: iter([{"type": "done", "message": "ok"}])),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult("svc_w7", 2, ["updated"], 10),
+        ),
+    ):
+        r_ing = tc.post(
+            "/api/provision/ingest",
+            json={
+                "token": "tok",
+                "service_id": "svc_w7",
+                "fos_bucket_name": "valid-bucket-123",
+                "fos_access_key": "AK",
+                "fos_secret_key": "SK",
+                "log_fields": {
+                    "groups": ["A"],
+                    "field_overrides": {"ua": True},
+                    "field_limits": {"ua": 512},
+                    "custom_fields": [valid_cf_null_desc],
+                },
+            },
+        )
+        assert r_ing.status_code == 200, f"Expected 200 on /ingest, got {r_ing.status_code}: {r_ing.text}"
+
+        r_exec = tc.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc_w7",
+                "fos_bucket_name": "valid-bucket-123",
+                "log_fields": json.dumps({"groups": ["A"], "custom_fields": [valid_cf_null_desc]}),
+            },
+        )
+        assert r_exec.status_code == 200, f"Expected 200 on /execute, got {r_exec.status_code}: {r_exec.text}"
+
+        # Force raw description: null on disk to prove /reconcile + GET /custom-fields never 500
+        raw_disk = json.loads((cfg_dir / "svc_w7.json").read_text())
+        raw_disk["log_fields"] = {"groups": ["A"], "custom_fields": [valid_cf_null_desc]}
+        (cfg_dir / "svc_w7.json").write_text(json.dumps(raw_disk))
+
+        r_rec = tc.post("/api/provision/reconcile", json={"service_id": "svc_w7", "token": "tok"})
+        assert r_rec.status_code == 200, f"Expected 200 on /reconcile, got {r_rec.status_code}: {r_rec.text}"
+        assert '"type": "done"' in r_rec.text and '"success": true' in r_rec.text
+
+        r_list = tc.get("/api/services/svc_w7/custom-fields")
+        assert r_list.status_code == 200, f"Expected 200 on GET /custom-fields, got {r_list.status_code}: {r_list.text}"
+
+        r_lf_ok = tc.post(
+            "/api/services/svc_w7/log-fields",
+            json={
+                "log_fields": {
+                    "groups": ["A", "C"],
+                    "custom_fields": [{**valid_cf_null_desc, "label": "Updated My CF"}],
+                }
+            },
+        )
+        assert r_lf_ok.status_code == 200, f"Expected 200 on /log-fields, got {r_lf_ok.status_code}: {r_lf_ok.text}"
+
+        r_imp_ok = tc.post(
+            "/api/services/svc_w7/custom-fields/import",
+            json={"custom_fields": [valid_cf_null_desc]},
+        )
+        assert r_imp_ok.status_code == 200, (
+            f"Expected 200 on /custom-fields/import, got {r_imp_ok.status_code}: {r_imp_ok.text}"
+        )
+
+        # Mistyped custom_fields & non-str vcl_log_expression -> 400/422, never 500 or 200
+        for bad_cf in (
+            {**valid_cf_null_desc, "label": 123},
+            {**valid_cf_null_desc, "label": ["bad"]},
+            {**valid_cf_null_desc, "description": 123},
+            {**valid_cf_null_desc, "vcl_log_expression": [1, 2]},
+            {**valid_cf_null_desc, "sql_type": ["VARCHAR"]},
+            {**valid_cf_null_desc, "value_type": ["string"]},
+            {**valid_cf_null_desc, "bytes_estimate": True},
+            {**valid_cf_null_desc, "bytes_estimate": 1.5},
+            {"name": "my_cf", "sql_type": ["VARCHAR"]},
+            {"name": "my_cf", "vcl_log_expression": [1, 2]},
+            {"name": "my_cf", "vcl_log_expression": True},
+            {"name": "my_cf", "vcl_log_expression": 123},
+            {"name": "service_id", "vcl_log_expression": 123},
+        ):
+            r_tf_bad = tc.post(
+                "/api/provision/terraform/preview",
+                json={"service_id": "svc1", "fos_bucket_name": "my-bucket", "log_fields": {"custom_fields": [bad_cf]}},
+            )
+            assert r_tf_bad.status_code in (400, 422), f"Expected 400/422 on /terraform/preview for {bad_cf}"
+            r_lf_bad = tc.post(
+                "/api/services/svc_w7/log-fields",
+                json={"log_fields": {"groups": ["A"], "custom_fields": [bad_cf]}},
+            )
+            assert r_lf_bad.status_code in (400, 422), f"Expected 400/422 on /log-fields for {bad_cf}"
+            r_imp_bad = tc.post(
+                "/api/services/svc_w7/custom-fields/import",
+                json={"custom_fields": [bad_cf]},
+            )
+            assert r_imp_bad.status_code in (400, 422), f"Expected 400/422 on /custom-fields/import for {bad_cf}"
+
+        # Challenger 7_1 Challenge 2: log_fields.groups, field_overrides, field_limits schema validation on /ingest & /terraform/preview
+        for bad_lf_shape in (
+            {"groups": 123},
+            {"groups": [123]},
+            {"groups": ["NOT_A_VALID_GROUP"]},
+            {"groups": ["A"], "field_overrides": "not-a-dict"},
+            {"groups": ["A"], "field_overrides": {"ua": "yes"}},
+            {"groups": ["A"], "field_overrides": {"ua": 1}},
+            {"groups": ["A"], "field_limits": "not-a-dict"},
+            {"groups": ["A"], "field_limits": {"ua": "1000); error 999; //"}},
+            {"groups": ["A"], "field_limits": {"ua": True}},
+            {"groups": ["A"], "field_limits": {"ua": 0}},
+        ):
+            r_ing_lf = tc.post(
+                "/api/provision/ingest",
+                json={
+                    "token": "tok",
+                    "service_id": "svc_bad_lf",
+                    "fos_bucket_name": "valid-bucket-123",
+                    "fos_access_key": "AK",
+                    "fos_secret_key": "SK",
+                    "log_fields": bad_lf_shape,
+                },
+            )
+            assert r_ing_lf.status_code in (400, 422), f"Expected 400/422 on /ingest for {bad_lf_shape}"
+            r_tf_lf = tc.post(
+                "/api/provision/terraform/preview",
+                json={"service_id": "svc1", "fos_bucket_name": "my-bucket", "log_fields": bad_lf_shape},
+            )
+            assert r_tf_lf.status_code in (400, 422), f"Expected 400/422 on /terraform/preview for {bad_lf_shape}"

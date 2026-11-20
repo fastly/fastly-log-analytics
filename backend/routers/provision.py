@@ -569,42 +569,350 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     return sse_response(stream())
 
 
+def _require_int_field(val: Any, field_name: str, *, min_val: int | None = None, max_val: int | None = None) -> int:
+    if isinstance(val, bool) or not isinstance(val, (int, str)):
+        raise HTTPException(status_code=400, detail=make_error("invalid_config", f"{field_name} must be an integer."))
+    try:
+        parsed = int(val.strip() if isinstance(val, str) else val)
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=make_error("invalid_config", f"{field_name} must be an integer.")
+        ) from None
+    if (min_val is not None and parsed < min_val) or (max_val is not None and parsed > max_val):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("invalid_config", f"{field_name} is out of valid range."),
+        )
+    return parsed
+
+
+def _validate_fos_bucket_name(bucket: Any) -> str:
+    if not isinstance(bucket, str) or not re.fullmatch(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error(
+                "invalid_bucket",
+                f"Invalid bucket name: '{bucket}'. Use 3-63 alphanumeric characters or single hyphens.",
+            ),
+        )
+    return bucket
+
+
+def _validate_fos_prefix(prefix: Any) -> str:
+    if not isinstance(prefix, str) or (prefix and not re.fullmatch(r"^[A-Za-z0-9/_-]*$", prefix)):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("invalid_prefix", "Invalid prefix. Use alphanumerics, /, _, -."),
+        )
+    return prefix
+
+
+def _validate_and_normalize_cdn_url(raw_val: Any) -> tuple[str, str]:
+    from urllib.parse import urlsplit
+
+    if not isinstance(raw_val, str) or not raw_val.isascii() or any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_val):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error(
+                "invalid_cdn_url",
+                "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
+            ),
+        )
+    raw_cdn_url = raw_val.strip(" ")
+    try:
+        parts = urlsplit(raw_cdn_url)
+        port = parts.port
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error(
+                "invalid_cdn_url",
+                "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
+            ),
+        ) from None
+    domain = (parts.hostname or "").rstrip(".").lower()
+    validated_domain, domain_err = _validate_public_domain_syntax(domain)
+    if (
+        parts.scheme.lower() != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or port is not None
+        or parts.path not in ("", "/")
+        or "?" in raw_cdn_url
+        or "#" in raw_cdn_url
+        or bool(parts.query)
+        or bool(parts.fragment)
+        or not domain
+        or parts.netloc.rstrip(".").lower() != domain
+        or domain_err is not None
+        or validated_domain != domain
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error(
+                "invalid_cdn_url",
+                "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
+            ),
+        )
+    return f"https://{domain}", domain
+
+
 def _validate_provision_vcl_inputs(cfg: dict[str, Any], *, strict_rum_path: bool = True) -> None:
-    """Validate custom_condition, rum_custom_condition, and log_fields custom_fields before VCL/Terraform emission."""
+    """Validate custom_condition, rum_custom_condition, scoring, shield/region, and custom_fields before VCL/Terraform emission."""
     from backend.core.catalog import validate_custom_field_entry, validate_vcl_custom_condition
+    from backend.core.fastly.client import _assert_faro_version_safe
+    from backend.core.vcl_generator import validate_quoted_literal, validate_url_exclusion_regex
     from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
     from backend.provision.rum_orchestrator import _RUM_FIELD_NAMES
     from backend.provision.session_scoring.orchestrate import _SCORING_FIELD_NAMES
+
+    for sid_key in ("service_id", "logging_service_id"):
+        sid_val = cfg.get(sid_key)
+        if sid_val is not None and sid_val != "":
+            if not isinstance(sid_val, str) or "/" in sid_val or "\\" in sid_val or ".." in sid_val:
+                raise HTTPException(status_code=400, detail=make_error("invalid_service_id", f"Invalid {sid_key}"))
+            try:
+                validate_quoted_literal(sid_val, field=sid_key)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_service_id", f"Invalid {sid_key}")
+                ) from None
+
+    for container_key in ("provisioning", "rum", "fos_proxy", "cmcd", "scoring"):
+        raw_sub = cfg.get(container_key)
+        if raw_sub is not None and not isinstance(raw_sub, dict):
+            err_code = "invalid_scoring_config" if container_key == "scoring" else "invalid_config"
+            raise HTTPException(
+                status_code=400,
+                detail=make_error(err_code, f"{container_key} must be a JSON object"),
+            )
+
+    prov_dict: dict[str, Any] = cfg.get("provisioning") or {}
+    rum_dict: dict[str, Any] = cfg.get("rum") or {}
+    fos_proxy_dict: dict[str, Any] = cfg.get("fos_proxy") or {}
+    cmcd_dict: dict[str, Any] = cfg.get("cmcd") or {}
+    scoring_dict: dict[str, Any] = cfg.get("scoring") or {}
 
     cond_msg = validate_vcl_custom_condition(cfg.get("custom_condition"))
     if cond_msg:
         raise HTTPException(status_code=400, detail=make_error("invalid_custom_condition", cond_msg))
 
-    raw_prov = cfg.get("provisioning")
-    prov_dict: dict[str, Any] = raw_prov if isinstance(raw_prov, dict) else {}
     if "custom_condition" in prov_dict:
         p_msg = validate_vcl_custom_condition(prov_dict.get("custom_condition"))
         if p_msg:
             raise HTTPException(status_code=400, detail=make_error("invalid_custom_condition", p_msg))
 
-    raw_rum = cfg.get("rum")
-    rum_dict: dict[str, Any] = raw_rum if isinstance(raw_rum, dict) else {}
-    rum_cond_raw = (
-        cfg.get("rum_custom_condition")
-        if cfg.get("rum_custom_condition") is not None
-        else rum_dict.get("custom_condition")
+    r_validator = validate_rum_custom_condition if strict_rum_path else validate_vcl_custom_condition
+    for rum_cond_raw in (cfg.get("rum_custom_condition"), rum_dict.get("custom_condition")):
+        if rum_cond_raw is not None:
+            r_msg = r_validator(rum_cond_raw)
+            if r_msg:
+                raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", r_msg))
+
+    for faro_val in (cfg.get("faro_version"), rum_dict.get("faro_version")):
+        if faro_val is not None:
+            if not isinstance(faro_val, str):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_faro_version", "faro_version must be a plain X.Y.Z version string."),
+                )
+            if faro_val != "":
+                try:
+                    _assert_faro_version_safe(faro_val)
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=make_error("invalid_faro_version", "faro_version must be a plain X.Y.Z version string."),
+                    ) from None
+
+    for shield_val in (cfg.get("cdn_shield"), prov_dict.get("cdn_shield"), fos_proxy_dict.get("shield")):
+        if shield_val is not None:
+            if not isinstance(shield_val, str) or (
+                shield_val and not re.fullmatch(r"^[A-Za-z0-9_-]{1,64}$", shield_val)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_cdn_shield", "cdn_shield must match ^[A-Za-z0-9_-]{1,64}$."),
+                )
+
+    for reg_val in (cfg.get("fos_region"),):
+        if reg_val is not None:
+            if not isinstance(reg_val, str) or (reg_val and not re.fullmatch(r"^[A-Za-z0-9_-]{1,64}$", reg_val)):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_fos_region", "fos_region must match ^[A-Za-z0-9_-]{1,64}$."),
+                )
+
+    for lp_key, lp_val in (
+        ("log_period", cfg.get("log_period")),
+        ("provisioning.log_period", prov_dict.get("log_period")),
+        ("rum_log_period", cfg.get("rum_log_period")),
+        ("rum.log_period", rum_dict.get("log_period")),
+    ):
+        if lp_val is not None and (isinstance(lp_val, bool) or not isinstance(lp_val, (int, str))):
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("invalid_log_period", f"{lp_key} must be an integer or period string."),
+            )
+
+    for sr_key, sr_val in (
+        ("sample_rate", cfg.get("sample_rate")),
+        ("provisioning.sample_rate", prov_dict.get("sample_rate")),
+    ):
+        if sr_val is not None:
+            _require_int_field(sr_val, sr_key, min_val=1, max_val=100)
+
+    for ret_key in ("log_retention_days", "rum_retention_days"):
+        if cfg.get(ret_key) is not None:
+            _require_int_field(cfg[ret_key], ret_key, min_val=1, max_val=36500)
+
+    cmcd_enabled = bool(cfg["cmcd_enabled"] if cfg.get("cmcd_enabled") is not None else cmcd_dict.get("enabled", False))
+    for cm_mode in (cfg.get("cmcd_mode"), cmcd_dict.get("mode")):
+        if cm_mode is not None:
+            if not isinstance(cm_mode, str) or (cmcd_enabled and cm_mode not in ("query_string", "headers")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_config", "cmcd.mode must be 'query_string' or 'headers'."),
+                )
+    for cv_key, cv_val in (("cmcd_version", cfg.get("cmcd_version")), ("cmcd.version", cmcd_dict.get("version"))):
+        if cv_val is not None:
+            parsed_cv = _require_int_field(cv_val, cv_key)
+            if cmcd_enabled and parsed_cv not in (1, 2):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_config", "cmcd.version must be 1 or 2."),
+                )
+
+    scoring_enabled = bool(
+        cfg["scoring_enabled"] if cfg.get("scoring_enabled") is not None else scoring_dict.get("enabled", False)
     )
-    if rum_cond_raw is not None:
-        r_validator = validate_rum_custom_condition if strict_rum_path else validate_vcl_custom_condition
-        r_msg = r_validator(rum_cond_raw)
-        if r_msg:
-            raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", r_msg))
+
+    for enf_key, enf_val in (
+        ("scoring_enforce_status_code", cfg.get("scoring_enforce_status_code")),
+        ("scoring.enforce_status_code", scoring_dict.get("enforce_status_code")),
+    ):
+        if enf_val is not None:
+            if not isinstance(enf_val, int) or isinstance(enf_val, bool) or not (400 <= enf_val <= 599):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_scoring_config", f"{enf_key} must be an integer in [400, 599]."),
+                )
+
+    for excl_val in (cfg.get("scoring_exclude_url_regex"), scoring_dict.get("exclude_url_regex")):
+        if excl_val is not None:
+            try:
+                validate_url_exclusion_regex(excl_val)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_exclude_url_regex", "Invalid URL exclusion regex.")
+                ) from None
+
+    for sec_val in (cfg.get("scoring_request_secret"), scoring_dict.get("request_secret")):
+        if sec_val is not None:
+            try:
+                validate_quoted_literal(sec_val, field="scoring.request_secret")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_scoring_config", "Invalid scoring.request_secret.")
+                ) from None
+
+    domain_candidates = (
+        cfg.get("scoring_domain"),
+        scoring_dict.get("domain"),
+        scoring_dict.get("scoring_domain"),
+    )
+    resolved_scoring_domain = ""
+    for dom_val in domain_candidates:
+        if dom_val is not None:
+            if not isinstance(dom_val, str):
+                raise HTTPException(
+                    status_code=400, detail=make_error("invalid_scoring_domain", "scoring.domain must be a string")
+                )
+            if dom_val:
+                try:
+                    validate_quoted_literal(dom_val, field="scoring.domain")
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400, detail=make_error("invalid_scoring_domain", "Invalid scoring.domain.")
+                    ) from None
+                if ".." in dom_val or not re.fullmatch(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$", dom_val):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=make_error("invalid_scoring_domain", "scoring.domain must be a valid hostname."),
+                    )
+                if not resolved_scoring_domain:
+                    resolved_scoring_domain = dom_val
+    if scoring_enabled and not resolved_scoring_domain:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("invalid_scoring_domain", "scoring.domain is required when scoring is enabled."),
+        )
 
     lf = cfg.get("log_fields")
     if isinstance(lf, dict):
+        from backend.core.catalog import FASTLY_LOG_LINE_DELIVER_MAX, GROUP_INFO
+
+        valid_group_ids = {g for g in GROUP_INFO if isinstance(g, str)} | {"CORE", "core", "INTERNAL"}
+        raw_groups = lf.get("groups")
+        if raw_groups is not None:
+            if not isinstance(raw_groups, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_log_fields", "log_fields.groups must be a JSON array"),
+                )
+            for grp in raw_groups:
+                if not isinstance(grp, str) or grp not in valid_group_ids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=make_error("invalid_log_fields", "log_fields.groups contains an invalid group ID"),
+                    )
+
+        raw_overrides = lf.get("field_overrides")
+        if raw_overrides is not None:
+            if not isinstance(raw_overrides, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_log_fields", "log_fields.field_overrides must be a JSON object"),
+                )
+            for ov_k, ov_v in raw_overrides.items():
+                if not isinstance(ov_k, str) or not ov_k or not isinstance(ov_v, bool):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=make_error(
+                            "invalid_log_fields", "log_fields.field_overrides must map field names to booleans"
+                        ),
+                    )
+
+        raw_limits = lf.get("field_limits")
+        if raw_limits is not None:
+            if not isinstance(raw_limits, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("invalid_log_fields", "log_fields.field_limits must be a JSON object"),
+                )
+            for lim_k, lim_v in raw_limits.items():
+                if (
+                    not isinstance(lim_k, str)
+                    or not lim_k
+                    or not isinstance(lim_v, int)
+                    or isinstance(lim_v, bool)
+                    or not (1 <= lim_v <= FASTLY_LOG_LINE_DELIVER_MAX)
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=make_error(
+                            "invalid_log_fields", "log_fields.field_limits values must be positive integers"
+                        ),
+                    )
+
         system_names = set(_CMCD_FIELD_NAMES) | set(_RUM_FIELD_NAMES) | set(_SCORING_FIELD_NAMES)
         seen_names: list[str] = []
-        for cf in lf.get("custom_fields") or []:
+        raw_cfs = lf.get("custom_fields")
+        if raw_cfs is not None and not isinstance(raw_cfs, list):
+            raise HTTPException(
+                status_code=400, detail=make_error("invalid_log_fields", "custom_fields must be a JSON array")
+            )
+        for cf in raw_cfs or []:
             if not isinstance(cf, dict):
                 raise HTTPException(
                     status_code=400, detail=make_error("invalid_custom_field", "Each custom field must be an object")
@@ -612,6 +920,8 @@ def _validate_provision_vcl_inputs(cfg: dict[str, Any], *, strict_rum_path: bool
             hard_errs = validate_custom_field_entry(cf, seen_names, system_names=system_names)
             if hard_errs:
                 raise HTTPException(status_code=400, detail=make_error("invalid_custom_field", hard_errs[0]))
+            if "description" in cf and cf["description"] is None:
+                cf["description"] = ""
             if isinstance(cf.get("name"), str) and cf["name"] not in system_names:
                 seen_names.append(cf["name"])
     elif lf is not None:
@@ -708,59 +1018,11 @@ def provision_execute(req: ProvisionExecuteRequest):
         raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
 
     _validate_provision_vcl_inputs(cfg, strict_rum_path=True)
-
-    bucket = cfg["fos_bucket_name"]
-    if not re.fullmatch(r"^[A-Za-z0-9](?!.*--)[A-Za-z0-9-]{1,61}[A-Za-z0-9]$", bucket):
-        raise HTTPException(
-            status_code=400,
-            detail=make_error(
-                "invalid_bucket",
-                f"Invalid bucket name: '{bucket}'. Use 3-63 alphanumeric characters or single hyphens.",
-            ),
-        )
-
-    prefix = cfg.get("fos_prefix", "")
-    if prefix and not re.fullmatch(r"^[A-Za-z0-9/_-]*$", prefix):
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("invalid_prefix", "Invalid prefix. Use alphanumerics, /, _, -."),
-        )
+    _validate_fos_bucket_name(cfg["fos_bucket_name"])
+    _validate_fos_prefix(cfg.get("fos_prefix", ""))
 
     if cfg.get("cdn_url"):
-        from urllib.parse import urlsplit
-
-        raw_cdn_url = str(cfg["cdn_url"]).strip()
-        try:
-            parts = urlsplit(raw_cdn_url)
-            port = parts.port
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=make_error(
-                    "invalid_cdn_url",
-                    "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
-                ),
-            ) from None
-        domain = (parts.hostname or "").rstrip(".").lower()
-        if (
-            any(ch in raw_cdn_url for ch in ("\r", "\n", "\t", "\x00"))
-            or parts.scheme.lower() != "https"
-            or parts.username is not None
-            or parts.password is not None
-            or port is not None
-            or parts.path not in ("", "/")
-            or bool(parts.query)
-            or bool(parts.fragment)
-            or not domain
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=make_error(
-                    "invalid_cdn_url",
-                    "cdn_url must be an https:// origin URL without port, credentials, path, query, or fragment.",
-                ),
-            )
-        cfg["cdn_url"] = f"https://{domain}"
+        cfg["cdn_url"], domain = _validate_and_normalize_cdn_url(cfg["cdn_url"])
         available, reason = _check_domain_available(domain, timeout=5)
         if not available and reason and "DNS" not in reason:
             raise HTTPException(
@@ -830,8 +1092,14 @@ def provision_reconcile(body: ProvisionReconcileRequest):
     if not body.service_id or not body.token:
         raise HTTPException(status_code=400, detail=make_error("service_id and token are required"))
 
+    from backend import config as svcconfig
     from backend.provision.declarative.reconciler import reconcile_vcl_state
     from backend.utils.sse import stream_sse_from_worker
+
+    _validate_provision_vcl_inputs({"service_id": body.service_id}, strict_rum_path=False)
+    existing_cfg = svcconfig.load_config(body.service_id)
+    if isinstance(existing_cfg, dict):
+        _validate_provision_vcl_inputs(existing_cfg, strict_rum_path=False)
 
     def worker(events):
         try:
@@ -883,11 +1151,11 @@ def _render_terraform(body: ProvisionConfigRequest) -> dict[str, str]:
     secret_key = cfg.get("fos_secret_key") or "YOUR_FOS_SECRET_KEY"
     try:
         return generate_terraform(cfg, access_key, secret_key)
-    except ValueError:
+    except (ValueError, KeyError):
         raise HTTPException(
             status_code=400,
-            detail=make_error("invalid_terraform_config", "Invalid Terraform provisioning configuration."),
-        )
+            detail=make_error("invalid_config", "Invalid Terraform configuration parameters"),
+        ) from None
 
 
 @provision_router.post("/terraform/preview", response_model=TerraformPreviewResponse)
@@ -926,12 +1194,23 @@ def provision_ingest(payload: ProvisionConfigRequest):
     from backend.provision import ensure_fos_access_key, find_fos_key, parse_period, write_service_config
     from backend.utils.pop_utils import fetch_pop_locations
 
-    body: dict[str, Any] = payload.model_dump(exclude_none=False)
+    body: dict[str, Any] = payload.model_dump(exclude_none=True)
     token = body.get("token")
-    if not token:
+    if not isinstance(token, str) or not token:
         raise HTTPException(status_code=400, detail={"error": "Token is required"})
 
     logging_service_id = body.get("service_id") or body.get("logging_service_id") or ""
+    if not isinstance(logging_service_id, str) or not logging_service_id:
+        raise HTTPException(status_code=400, detail=make_error("invalid_service_id", "service_id is required"))
+    _validate_provision_vcl_inputs(
+        {"service_id": body.get("service_id"), "logging_service_id": body.get("logging_service_id")},
+        strict_rum_path=False,
+    )
+    try:
+        svcconfig._validate_service_id(logging_service_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=make_error("invalid_service_id", "Invalid service_id")) from None
+
     validate_destructive_token(token, service_id=logging_service_id)
     fetch_pop_locations(token)
 
@@ -940,41 +1219,84 @@ def provision_ingest(payload: ProvisionConfigRequest):
     if not isinstance(existing_fos_proxy, dict):
         existing_fos_proxy = {}
 
-    try:
-        if body.get("log_period"):
-            body["log_period"] = parse_period(body["log_period"])
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
+    if "log_period" in body and body["log_period"] != "":
+        raw_lp = body["log_period"]
+        if isinstance(raw_lp, bool) or not isinstance(raw_lp, (int, str)):
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("invalid_log_period", "log_period must be an integer or period string"),
+            )
+        try:
+            parsed_lp = parse_period(str(raw_lp))
+            if not (1 <= parsed_lp <= 3600):
+                raise ValueError(f"log_period must be in range [1, 3600], got {parsed_lp}")
+            body["log_period"] = parsed_lp
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=make_error("invalid_log_period", str(e)))
+    elif body.get("log_period") == "":
+        body.pop("log_period", None)
 
+    raw_scoring = body.get("scoring")
+    scoring_sub = raw_scoring if isinstance(raw_scoring, dict) else {}
+    scoring_enabled_flag = body["scoring_enabled"] if "scoring_enabled" in body else scoring_sub.get("enabled", False)
     precheck_cfg: dict[str, Any] = {
+        "service_id": body.get("service_id"),
+        "logging_service_id": body.get("logging_service_id"),
         "custom_condition": body.get("custom_condition"),
-        "provisioning": body.get("provisioning") if isinstance(body.get("provisioning"), dict) else {},
+        "provisioning": body.get("provisioning"),
+        "sample_rate": body.get("sample_rate"),
         "rum_custom_condition": body.get("rum_custom_condition"),
-        "rum": body.get("rum") if isinstance(body.get("rum"), dict) else {},
+        "rum": body.get("rum"),
+        "rum_log_period": body.get("rum_log_period"),
+        "faro_version": body.get("faro_version"),
+        "cdn_shield": body.get("cdn_shield"),
+        "fos_region": body.get("fos_region"),
+        "fos_proxy": body.get("fos_proxy"),
+        "cmcd": body.get("cmcd"),
+        "cmcd_enabled": body.get("cmcd_enabled"),
+        "cmcd_mode": body.get("cmcd_mode"),
+        "cmcd_version": body.get("cmcd_version"),
+        "scoring": raw_scoring,
+        "scoring_enabled": bool(scoring_enabled_flag),
+        "scoring_domain": body.get("scoring_domain"),
+        "scoring_request_secret": body.get("scoring_request_secret"),
+        "scoring_exclude_url_regex": body.get("scoring_exclude_url_regex"),
+        "scoring_enforce_status_code": body.get("scoring_enforce_status_code"),
+        "log_retention_days": body.get("log_retention_days"),
+        "rum_retention_days": body.get("rum_retention_days"),
     }
-    log_fields_raw = body.get("log_fields")
     parsed_ingest_lf: dict[str, Any] | None = None
-    if log_fields_raw:
+    if "log_fields" in body:
+        log_fields_raw = body.get("log_fields")
         if isinstance(log_fields_raw, str):
-            try:
-                loaded_lf = json.loads(log_fields_raw)
-            except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=400, detail=make_error("invalid_log_fields", "log_fields must be valid JSON")
-                )
-            if not isinstance(loaded_lf, dict):
-                raise HTTPException(
-                    status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
-                )
-            parsed_ingest_lf = loaded_lf
+            if log_fields_raw.strip():
+                try:
+                    loaded_lf = json.loads(log_fields_raw)
+                except json.JSONDecodeError:
+                    raise HTTPException(
+                        status_code=400, detail=make_error("invalid_log_fields", "log_fields must be valid JSON")
+                    )
+                if not isinstance(loaded_lf, dict):
+                    raise HTTPException(
+                        status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
+                    )
+                parsed_ingest_lf = loaded_lf
         elif isinstance(log_fields_raw, dict):
             parsed_ingest_lf = log_fields_raw
         else:
             raise HTTPException(
                 status_code=400, detail=make_error("invalid_log_fields", "log_fields must be a JSON object")
             )
-        precheck_cfg["log_fields"] = parsed_ingest_lf
+        if parsed_ingest_lf is not None:
+            precheck_cfg["log_fields"] = parsed_ingest_lf
     _validate_provision_vcl_inputs(precheck_cfg, strict_rum_path=True)
+
+    if "fos_bucket_name" in body:
+        _validate_fos_bucket_name(body["fos_bucket_name"])
+    if "fos_prefix" in body:
+        _validate_fos_prefix(body["fos_prefix"])
+    if body.get("cdn_url"):
+        body["cdn_url"], _ = _validate_and_normalize_cdn_url(body["cdn_url"])
 
     fos_access_key = body.get("fos_access_key")
     fos_secret_key = body.get("fos_secret_key")
@@ -1006,6 +1328,8 @@ def provision_ingest(payload: ProvisionConfigRequest):
                 fos_access_key = new_key["access_key"]
                 fos_secret_key = new_key["secret_key"]
                 fos_key_id = new_key["id"]
+            except HTTPException:
+                raise
             except Exception as e:
                 raise_internal(logger, e, code="ensure_access_key_failed", status=400)
 
@@ -1014,13 +1338,13 @@ def provision_ingest(payload: ProvisionConfigRequest):
             existing_cfg.get("cdn_secret") or existing_fos_proxy.get("secret") or secrets.token_urlsafe(24)
         )
 
-    state = {
+    state: dict[str, Any] = {
         "admin_token": token,
-        "logging_service_id": body.get("service_id") or body.get("logging_service_id"),
-        "name": body.get("service_name") or body.get("service_id"),
+        "logging_service_id": logging_service_id,
+        "name": body.get("service_name") or logging_service_id,
         "endpoint_name": body.get("endpoint_name", "Fastly Object Storage Logs"),
-        "fos_region": body.get("fos_region", "us-east-1"),
-        "fos_bucket_name": body.get("fos_bucket_name"),
+        "fos_region": body.get("fos_region") or "us-east-1",
+        "fos_bucket_name": body.get("fos_bucket_name") or existing_cfg.get("fos_bucket", ""),
         "fos_prefix": body.get("fos_prefix", ""),
         "fos_access_key_id": fos_access_key,
         "fos_secret_access_key": fos_secret_key,
@@ -1029,28 +1353,32 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "custom_condition": body.get("custom_condition", ""),
         "log_period": body.get("log_period", DEFAULT_LOG_PERIOD_SECONDS),
         "cdn_service_name": body.get("cdn_service_name"),
-        "cdn_url": body.get("cdn_url"),
-        "cdn_shield": body.get("cdn_shield", "none"),
+        "cdn_url": body.get("cdn_url") or "",
+        "cdn_shield": body.get("cdn_shield") or "none",
         "cdn_secret": body.get("cdn_secret"),
         "enable_cron_sync": body.get("enable_cron_sync", True),
         "delete_after": body.get("delete_after", True),
-        "log_retention_days": body.get("log_retention_days", 30),
-        "rum_retention_days": body.get("rum_retention_days", 30),
+        "log_retention_days": int(body.get("log_retention_days", 30)),
+        "rum_retention_days": int(body.get("rum_retention_days", 30)),
         "provisioning": {"fos_key_id": fos_key_id},
     }
+    if "logging_enabled" in body:
+        state["logging_enabled"] = bool(body["logging_enabled"])
+    if "rum_enabled" in body:
+        state["rum_enabled"] = bool(body["rum_enabled"])
 
     if parsed_ingest_lf is not None:
         state["log_fields"] = parsed_ingest_lf
 
     now_iso = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
-    if any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version")) or isinstance(body.get("cmcd"), dict):
-        existing_cmcd = body.get("cmcd", {}) if isinstance(body.get("cmcd"), dict) else {}
+    raw_cmcd = body.get("cmcd")
+    if any(k in body for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version")) or isinstance(raw_cmcd, dict):
+        existing_cmcd: dict[str, Any] = raw_cmcd if isinstance(raw_cmcd, dict) else {}
+        raw_cv = body["cmcd_version"] if "cmcd_version" in body else existing_cmcd.get("version")
         state["cmcd"] = {
-            "enabled": body.get("cmcd_enabled", existing_cmcd.get("enabled", False)),
-            "mode": body.get("cmcd_mode") or existing_cmcd.get("mode", "query_string"),
-            "version": body.get("cmcd_version")
-            if body.get("cmcd_version") is not None
-            else existing_cmcd.get("version", 1),
+            "enabled": bool(body.get("cmcd_enabled", existing_cmcd.get("enabled", False))),
+            "mode": body.get("cmcd_mode") or existing_cmcd.get("mode") or "query_string",
+            "version": int(raw_cv) if raw_cv is not None else 1,
             "enabled_at": existing_cmcd.get("enabled_at") or now_iso,
         }
 
@@ -1061,30 +1389,66 @@ def provision_ingest(payload: ProvisionConfigRequest):
         "scoring_exclude_url_regex",
         "scoring_enforce_status_code",
     )
-    if any(k in body for k in scoring_keys) or isinstance(body.get("scoring"), dict):
-        existing_scoring = body.get("scoring", {}) if isinstance(body.get("scoring"), dict) else {}
+    raw_scoring = body.get("scoring")
+    if any(k in body for k in scoring_keys) or isinstance(raw_scoring, dict):
+        existing_scoring: dict[str, Any] = raw_scoring if isinstance(raw_scoring, dict) else {}
+        raw_enf = (
+            body["scoring_enforce_status_code"]
+            if "scoring_enforce_status_code" in body
+            else existing_scoring.get("enforce_status_code")
+        )
         state["scoring"] = {
-            "enabled": body.get("scoring_enabled", existing_scoring.get("enabled", False)),
-            "domain": body.get("scoring_domain") or existing_scoring.get("domain", ""),
-            "request_secret": body.get("scoring_request_secret", existing_scoring.get("request_secret", "")),
-            "exclude_url_regex": body.get("scoring_exclude_url_regex", existing_scoring.get("exclude_url_regex", "")),
-            "enforce_status_code": body.get(
-                "scoring_enforce_status_code", existing_scoring.get("enforce_status_code", 429)
+            "enabled": bool(body.get("scoring_enabled", existing_scoring.get("enabled", False))),
+            "domain": body.get("scoring_domain")
+            or existing_scoring.get("domain")
+            or existing_scoring.get("scoring_domain")
+            or "",
+            "request_secret": (
+                body["scoring_request_secret"]
+                if "scoring_request_secret" in body
+                else (existing_scoring.get("request_secret") or "")
             ),
+            "exclude_url_regex": (
+                body["scoring_exclude_url_regex"]
+                if "scoring_exclude_url_regex" in body
+                else (existing_scoring.get("exclude_url_regex") or "")
+            ),
+            "enforce_status_code": 429 if raw_enf is None else raw_enf,
             "enabled_at": existing_scoring.get("enabled_at") or now_iso,
         }
 
-    if body.get("rum_enabled"):
-        existing_rum = body.get("rum", {}) if isinstance(body.get("rum"), dict) else {}
+    raw_rum = body.get("rum")
+    incoming_rum: dict[str, Any] = raw_rum if isinstance(raw_rum, dict) else {}
+    rum_is_on = (
+        bool(incoming_rum["enabled"])
+        if incoming_rum.get("enabled") is not None
+        else bool(body.get("rum_enabled", False))
+    )
+    if rum_is_on:
+        state["rum_enabled"] = True
+        raw_on_disk_rum = existing_cfg.get("rum")
+        on_disk_rum: dict[str, Any] = raw_on_disk_rum if isinstance(raw_on_disk_rum, dict) else {}
+        if "rum_custom_condition" in body:
+            resolved_rum_cond = body["rum_custom_condition"].strip()
+        elif incoming_rum.get("custom_condition") is not None:
+            resolved_rum_cond = incoming_rum["custom_condition"].strip()
+        elif isinstance(on_disk_rum.get("custom_condition"), str) and not validate_rum_custom_condition(
+            on_disk_rum.get("custom_condition")
+        ):
+            resolved_rum_cond = on_disk_rum["custom_condition"].strip()
+        else:
+            resolved_rum_cond = ""
         state["rum"] = {
             "enabled": True,
-            "enabled_at": existing_rum.get("enabled_at") or now_iso,
-            "custom_condition": body.get("rum_custom_condition") or existing_rum.get("custom_condition") or "",
+            "enabled_at": incoming_rum.get("enabled_at") or on_disk_rum.get("enabled_at") or now_iso,
+            "custom_condition": resolved_rum_cond,
         }
-        on_disk_rum = existing_cfg.get("rum")
-        faro_src: dict[str, Any] = (
-            existing_rum if existing_rum.get("faro_version") else (on_disk_rum if isinstance(on_disk_rum, dict) else {})
-        )
+        if incoming_rum.get("faro_version"):
+            faro_src: dict[str, Any] = incoming_rum
+        elif body.get("faro_version"):
+            faro_src = {"faro_version": body["faro_version"]}
+        else:
+            faro_src = on_disk_rum
         if faro_src.get("faro_version"):
             for k in ("faro_version", "faro_content_hash", "faro_fos_etag_md5", "faro_last_upstream_check"):
                 if k in faro_src:

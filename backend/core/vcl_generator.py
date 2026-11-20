@@ -131,12 +131,15 @@ class VclSafetyError(ValueError):
     """
 
 
-_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f]')
-_FORBIDDEN_ALLOW_BACKSLASH = re.compile(r'["\x00-\x1f\x7f]')
+_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f-\x9f\u2028\u2029]')
+_FORBIDDEN_ALLOW_BACKSLASH = re.compile(r'["\x00-\x1f\x7f-\x9f\u2028\u2029]')
+_FORBIDDEN_QUOTED_SEQ = re.compile(r"\$\{|%\{|%00|%u0000|%u\{0+\}", re.IGNORECASE)
 
 
 def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field: str = "value") -> str:
     """Validate a value destined for a VCL double-quoted string literal."""
+    if not isinstance(value, str):
+        raise VclSafetyError(f"{field} must be a string, got {type(value).__name__}")
     pattern = _FORBIDDEN_ALLOW_BACKSLASH if allow_backslash else _FORBIDDEN_STRICT
     m = pattern.search(value)
     if m is not None:
@@ -145,6 +148,12 @@ def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field:
             f"{m.start()} ({value[m.start()]!r}); refusing to generate VCL "
             "(values are validated upstream + Fastly /validate-gated, so this "
             "indicates a caller that bypassed those checks)."
+        )
+    seq_m = _FORBIDDEN_QUOTED_SEQ.search(value)
+    if seq_m is not None:
+        raise VclSafetyError(
+            f"{field} contains a sequence unsafe to embed in a VCL/Terraform string literal at offset "
+            f"{seq_m.start()} ({seq_m.group(0)!r}); refusing to generate VCL."
         )
     return value
 
@@ -388,15 +397,20 @@ def validate_url_exclusion_regex(value: str) -> str:
         )
     try:
         validate_quoted_literal(cleaned, allow_backslash=True, field="regex")
-    except VclSafetyError:
+    except VclSafetyError as exc:
         m = _FORBIDDEN_ALLOW_BACKSLASH.search(cleaned)
-        ch = m.group(0) if m else "?"
+        if m is not None:
+            ch = m.group(0)
+            raise RegexValidationError(
+                "disallowed_char",
+                f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
+                "double-quotes and control characters are not permitted because they "
+                "would break the surrounding VCL string literal",
+            ) from exc
         raise RegexValidationError(
             "disallowed_char",
-            f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
-            "double-quotes and control characters are not permitted because they "
-            "would break the surrounding VCL string literal",
-        )
+            f"regex contains disallowed VCL/template sequence: {exc}",
+        ) from exc
     try:
         re.compile(cleaned)
     except re.error as exc:

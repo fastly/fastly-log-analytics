@@ -638,3 +638,124 @@ def test_sec14_terraform_gen_resolves_scoring_domain_variants_and_pins_cdn_proxy
     assert cdn_fos["override_host"] == "us-east-1.object.fastlystorage.app"
     assert cdn_fos["ssl_cert_hostname"] == "us-east-1.object.fastlystorage.app"
     assert cdn_fos["ssl_sni_hostname"] == "us-east-1.object.fastlystorage.app"
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_generate_terraform_rejects_exclude_url_regex_and_cdn_shield_breakouts():
+    breakout_regex = r'") { error 999; } if (req.url !~ "'
+    for bad_patch in (
+        {"scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "exclude_url_regex": breakout_regex}},
+        {
+            "scoring_enabled": True,
+            "scoring_domain": "scorer.edgecompute.app",
+            "scoring_exclude_url_regex": breakout_regex,
+        },
+        {"cdn_shield": "iad_va_us, F_fos_origin); error 999; //"},
+    ):
+        with pytest.raises(ValueError):
+            generate_terraform({**_baseline_cfg(), **bad_patch}, "AKIA", "sec")
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_wave6_generate_terraform_null_coalescing_and_type_confusion(monkeypatch):
+    from backend.provision.declarative.models import FeatureState
+    from backend.utils import terraform_gen
+
+    seen_states: list[FeatureState] = []
+    real_from_config = FeatureState.from_config
+
+    def _spy_from_config(fs_cfg: dict) -> FeatureState:
+        st = real_from_config(fs_cfg)
+        seen_states.append(st)
+        return st
+
+    monkeypatch.setattr(terraform_gen.FeatureState, "from_config", staticmethod(_spy_from_config))
+    out = generate_terraform(
+        {
+            **_baseline_cfg(),
+            "rum": {"enabled": True, "custom_condition": None},
+            "faro_version": "2.9.0",
+        },
+        "AKIA",
+        "sec",
+    )
+    assert "/rum-beacon" in out["capture_snippets/recv.vcl"]
+    assert len(seen_states) == 1
+    assert seen_states[0].faro_version == "2.9.0"
+    assert seen_states[0].rum_custom_condition == ""
+
+    for bad_patch in (
+        {"provisioning": ["bad"]},
+        {"rum": ["bad"]},
+        {"cmcd": ["bad"]},
+        {"scoring": "bad"},
+        {"fos_proxy": 123},
+        {"cmcd": {"enabled": True, "version": []}},
+        {"cmcd": {"enabled": True, "version": True}},
+        {"scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": []}},
+        {"scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": True}},
+        {"provisioning": {"sample_rate": []}},
+        {"provisioning": {"sample_rate": True}},
+        {"provisioning": {"cdn_shield": "iad); error 999;"}},
+        {"fos_proxy": {"shield": "iad); error 999;"}},
+        {"faro_version": '1.0.0"; error 999;'},
+        {
+            "rum_enabled": True,
+            "rum_custom_condition": "",
+            "rum": {"custom_condition": 'req.http.Host != "x") { error 999; } if (true'},
+        },
+    ):
+        with pytest.raises(ValueError):
+            generate_terraform({**_baseline_cfg(), **bad_patch}, "AKIA", "sec")
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_wave7_generate_terraform_empty_service_id_and_scoring_aliases():
+    """SEC-15 Wave 7: empty logging_service_id falls back cleanly and all scoring_* aliases are validated without short-circuiting."""
+    out_empty = generate_terraform({"logging_service_id": ""}, "AKIA", "sec")
+    assert "YOUR_SERVICE_ID" in out_empty["instructions"]
+
+    out_fallback_sid = generate_terraform({"service_id": "svc_fallback_1", "logging_service_id": ""}, "AKIA", "sec")
+    assert "svc_fallback_1" in out_fallback_sid["instructions"]
+
+    out_crlf_sid = generate_terraform({"logging_service_id": "\r\n"}, "AKIA", "sec")
+    assert "YOUR_SERVICE_ID" in out_crlf_sid["instructions"]
+
+    out_null_desc = generate_terraform(
+        {
+            **_baseline_cfg(),
+            "log_fields": {
+                "groups": ["A"],
+                "custom_fields": [
+                    {
+                        "name": "my_cf",
+                        "label": "My CF",
+                        "description": None,
+                        "vcl_log_expression": "req.http.X-My-Hdr",
+                        "sql_type": "VARCHAR",
+                        "value_type": "string",
+                        "bytes_estimate": 24,
+                    }
+                ],
+            },
+        },
+        "AKIA",
+        "sec",
+    )
+    assert "my_cf" in out_null_desc["capture_snippets/recv.vcl"]
+
+    for bad_cfg in (
+        {"logging_service_id": 123},
+        {"service_id": ["bad"]},
+        {"scoring": {"enabled": False, "domain": "valid.com"}, "scoring_domain": 'bad"domain'},
+        {"scoring_domain": "valid.com", "scoring": {"scoring_domain": "bad..domain"}},
+        {"scoring": {"request_secret": ""}, "scoring_request_secret": 'bad"sec'},
+        {"scoring_request_secret": "", "scoring": {"request_secret": "bad\\sec"}},
+        {"scoring_exclude_url_regex": "", "scoring": {"exclude_url_regex": '") { error 999; }'}},
+        {"scoring": {"exclude_url_regex": ""}, "scoring_exclude_url_regex": '") { error 999; }'},
+    ):
+        with pytest.raises(ValueError):
+            generate_terraform(bad_cfg, "AKIA", "sec")

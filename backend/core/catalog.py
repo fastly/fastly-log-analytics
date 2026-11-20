@@ -400,21 +400,27 @@ def get_groups_for_api() -> list:
 _BUILTIN_FIELD_NAMES = frozenset(f["id"] for f in LOG_FIELD_CATALOG)
 
 _VCL_CONTROL_CHAR_RE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
-_VCL_TABLE_LOOKUP_RE = re.compile(r"\btable\s*\.\s*(?:lookup\w*|contains)\b", re.IGNORECASE)
+_VCL_RTIME_BOUNDARY = r"(?<=\dms)|(?<=\d\.ms)|(?<=\d[smhdwy])|(?<=\d\.[smhdwy])"
+_VCL_FN_BOUNDARY = rf"(?:(?<![a-zA-Z0-9_.])(?<![a-zA-Z0-9_]-)|{_VCL_RTIME_BOUNDARY})"
+_VCL_ID_BOUNDARY = rf"(?:(?<![a-zA-Z0-9_])|{_VCL_RTIME_BOUNDARY})"
+_VCL_TABLE_LOOKUP_RE = re.compile(
+    rf"{_VCL_FN_BOUNDARY}(table\s*\.\s*(?:lookup\w*|contains))\b",
+    re.IGNORECASE,
+)
+_VCL_FORBIDDEN_HEADER_COOKIE_FN_RE = re.compile(
+    rf"{_VCL_FN_BOUNDARY}"
+    r"(header\s*\.\s*(?:filter_except|filter|get|set|unset)"
+    r"|setcookie\s*\.\s*(?:get_value_by_name|delete_by_name))\b",
+    re.IGNORECASE,
+)
 _FORBIDDEN_VCL_IDENTIFIERS_RE = re.compile(
-    r"(?:"
-    r"\bfos_credentials\b"
-    r"|\bsession_scoring_secrets\b"
-    r"|\bcdn_auth\b"
-    r"|\bflp_fos_credentials\b"
-    r"|\bflp_fos_buckets\b"
-    r"|\bflp_front_auth\b"
+    r"("
+    rf"{_VCL_ID_BOUNDARY}(?:fos_credentials|session_scoring_secrets|cdn_auth|auth_fail_rc|auth_fail_pb"
+    r"|flp_fos_credentials|flp_fos_buckets|flp_front_auth|fastly-key|authorization)\b"
     r"|x-edge-scorer-auth"
     r"|x-fastly-key"
-    r"|\bfastly-key\b"
     r"|x-flp-"
-    r"|\bauthorization\b"
-    r"|(?:req|bereq|resp|beresp|obj)\.http\.(?:cookie|set-cookie)(?:\b|:)"
+    r"|(?:req|bereq|resp|beresp|obj)\.http\.(?:cookie|set-cookie)(?=\b|:)"
     r")",
     re.IGNORECASE,
 )
@@ -471,8 +477,10 @@ def validate_vcl_log_expression(expr: str, *, field_name: str = "vcl_log_express
         errors.append(f"'{field_name}' {quote_paren_err}")
     if _VCL_TABLE_LOOKUP_RE.search(expr):
         errors.append(f"'{field_name}' must not call table.lookup(...)")
+    if m := _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(expr):
+        errors.append(f"'{field_name}' must not call '{m.group(1)}(...)'")
     if m := _FORBIDDEN_VCL_IDENTIFIERS_RE.search(expr):
-        errors.append(f"'{field_name}' must not reference sensitive dictionary or header '{m.group(0)}'")
+        errors.append(f"'{field_name}' must not reference sensitive dictionary or header '{m.group(1)}'")
     return errors
 
 
@@ -502,13 +510,32 @@ def validate_vcl_custom_condition(condition: str | None, *, field_name: str = "c
         return f"'{field_name}' {quote_paren_err}"
     if _VCL_TABLE_LOOKUP_RE.search(raw):
         return f"'{field_name}' must not call table.lookup(...)"
+    if m := _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(raw):
+        return f"'{field_name}' must not call '{m.group(1)}(...)'"
     if m := _FORBIDDEN_VCL_IDENTIFIERS_RE.search(raw):
-        return f"'{field_name}' must not reference sensitive dictionary or header '{m.group(0)}'"
+        return f"'{field_name}' must not reference sensitive dictionary or header '{m.group(1)}'"
     return None
+
+
+def _parse_strict_custom_field_int(
+    val: Any, *, field_name: str, min_val: int, max_val: int
+) -> tuple[int | None, str | None]:
+    """Parse an integer custom-field property, rejecting bool/float/non-int."""
+    if isinstance(val, (bool, float)) or not isinstance(val, (int, str)):
+        return None, f"'{field_name}' must be an integer"
+    try:
+        parsed = int(val.strip() if isinstance(val, str) else val)
+    except (TypeError, ValueError):
+        return None, f"'{field_name}' must be an integer"
+    if not (min_val <= parsed <= max_val):
+        return parsed, f"'{field_name}' must be between {min_val} and {max_val}"
+    return parsed, None
 
 
 def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
     """Validate a custom field definition dict; returns list of error/WARN strings."""
+    if not isinstance(field, dict):
+        return ["Custom field must be an object"]
     errors: list[str] = []
     name = field.get("name", "")
     for key in ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate"):
@@ -517,33 +544,54 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
     if errors:
         return errors
 
-    if not VALID_NAME_RE.fullmatch(name):
+    if not isinstance(name, str):
         errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
-    if name in _SQL_RESERVED:
-        errors.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
-    if name in _BUILTIN_FIELD_NAMES:
-        errors.append(f"'{name}' is already a built-in field name")
-    if name in existing_names:
-        errors.append(f"A custom field named '{name}' already exists on this service")
-    if not (1 <= len(field.get("label", "")) <= 80):
+    else:
+        if not VALID_NAME_RE.fullmatch(name):
+            errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
+        if name in _SQL_RESERVED:
+            errors.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
+        if name in _BUILTIN_FIELD_NAMES:
+            errors.append(f"'{name}' is already a built-in field name")
+        if _is_system_field(name):
+            errors.append(f"'{name}' is a system-managed field name")
+        if name in existing_names:
+            errors.append(f"A custom field named '{name}' already exists on this service")
+
+    raw_label = field.get("label")
+    if not isinstance(raw_label, str) or not (1 <= len(raw_label) <= 80):
         errors.append("'label' must be 1–80 characters")
-    if len(field.get("description", "")) > 500:
+
+    raw_desc = field.get("description")
+    if raw_desc is None:
+        raw_desc = ""
+    if not isinstance(raw_desc, str):
+        errors.append("'description' must be a string")
+    elif len(raw_desc) > 500:
         errors.append("'description' must not exceed 500 characters")
 
-    expr = field.get("vcl_log_expression", "")
-    errors.extend(validate_vcl_log_expression(expr))
+    expr = field.get("vcl_log_expression")
+    if not isinstance(expr, str):
+        errors.append("'vcl_log_expression' must be a non-empty string")
+    else:
+        errors.extend(validate_vcl_log_expression(expr))
 
     valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
-    sql_type = field.get("sql_type", "")
-    if sql_type not in valid_types:
+    sql_type = field.get("sql_type")
+    if not isinstance(sql_type, str) or sql_type not in valid_types:
         errors.append(f"'sql_type' must be one of: {', '.join(sorted(valid_types))}")
 
     all_value_types = {"string", "numeric", "boolean", "ip", "url"}
-    value_type = field.get("value_type", "")
-    if value_type not in all_value_types:
+    value_type = field.get("value_type")
+    if not isinstance(value_type, str) or value_type not in all_value_types:
         errors.append(f"'value_type' must be one of: {', '.join(sorted(all_value_types))}")
 
-    if sql_type in _SQL_TYPE_VALUE_TYPE_COMPAT and value_type in all_value_types:
+    if (
+        isinstance(sql_type, str)
+        and isinstance(value_type, str)
+        and sql_type in _SQL_TYPE_VALUE_TYPE_COMPAT
+        and value_type in all_value_types
+    ):
         if value_type not in _SQL_TYPE_VALUE_TYPE_COMPAT[sql_type]:
             compat = ", ".join(sorted(_SQL_TYPE_VALUE_TYPE_COMPAT[sql_type]))
             errors.append(
@@ -551,19 +599,25 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
                 f"Compatible value_types: {compat}"
             )
 
-    bytes_est = field.get("bytes_estimate", 0)
-    try:
-        bytes_est = int(bytes_est)
-        if not (1 <= bytes_est <= 1024):
-            errors.append("'bytes_estimate' must be between 1 and 1024")
-    except (TypeError, ValueError):
-        errors.append("'bytes_estimate' must be an integer")
+    bytes_est, bytes_err = _parse_strict_custom_field_int(
+        field.get("bytes_estimate"), field_name="bytes_estimate", min_val=1, max_val=1024
+    )
+    if bytes_err:
+        errors.append(bytes_err)
 
-    stage = field.get("collection_stage", "edge")
-    if stage not in ("edge", "origin"):
+    if "byte_limit" in field and field["byte_limit"] is not None:
+        _, bl_err = _parse_strict_custom_field_int(
+            field["byte_limit"], field_name="byte_limit", min_val=1, max_val=FASTLY_LOG_LINE_DELIVER_MAX
+        )
+        if bl_err:
+            errors.append(bl_err)
+
+    raw_stage = field.get("collection_stage", "edge")
+    stage = "edge" if raw_stage is None else raw_stage
+    if not isinstance(stage, str) or stage not in ("edge", "origin"):
         errors.append(f"'collection_stage' must be 'edge' or 'origin' (got '{stage}')")
 
-    if isinstance(bytes_est, int) and isinstance(name, str):
+    if bytes_est is not None and isinstance(name, str):
         min_bytes = len(name) + 5
         if 1 <= bytes_est < min_bytes:
             errors.append(
@@ -627,6 +681,8 @@ def validate_custom_field_entry(
     system_names: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     """Validate a full or partial custom-field entry in a ``log_fields`` payload."""
+    if not isinstance(field, dict):
+        return ["Custom field entry must be an object"]
     name = field.get("name")
     if not isinstance(name, str) or not name:
         return ["Missing required field: 'name'"]
@@ -636,19 +692,30 @@ def validate_custom_field_entry(
         canonical_spec = _CANONICAL_SYSTEM_FIELD_SPECS.get(name)
         raw_stage = field.get("collection_stage")
         if raw_stage is not None:
-            if raw_stage not in ("edge", "origin", "deliver", "beacon"):
+            if not isinstance(raw_stage, str) or raw_stage not in ("edge", "origin", "deliver", "beacon"):
                 errs.append(f"'collection_stage' must be a valid stage (got '{raw_stage}')")
             elif canonical_spec is not None and raw_stage != canonical_spec[0]:
                 errs.append(
                     f"System custom field '{name}' must keep canonical collection_stage "
                     f"{canonical_spec[0]!r} (got {raw_stage!r})"
                 )
-        raw_expr = field.get("vcl_log_expression")
-        if raw_expr is not None:
-            expr_str = str(raw_expr)
-            errs.extend(validate_vcl_log_expression(expr_str))
-            if canonical_spec is not None and expr_str != canonical_spec[1]:
-                errs.append(f"System custom field '{name}' must keep its canonical vcl_log_expression")
+        if "vcl_log_expression" in field:
+            raw_expr = field["vcl_log_expression"]
+            if not isinstance(raw_expr, str):
+                errs.append("'vcl_log_expression' must be a non-empty string")
+            else:
+                errs.extend(validate_vcl_log_expression(raw_expr))
+                if canonical_spec is not None and raw_expr != canonical_spec[1]:
+                    errs.append(f"System custom field '{name}' must keep its canonical vcl_log_expression")
+        for opt_str_key in ("label", "description", "sql_type", "value_type"):
+            if field.get(opt_str_key) is not None and not isinstance(field[opt_str_key], str):
+                errs.append(f"'{opt_str_key}' must be a string")
+        if field.get("bytes_estimate") is not None:
+            _, sys_be_err = _parse_strict_custom_field_int(
+                field["bytes_estimate"], field_name="bytes_estimate", min_val=1, max_val=1024
+            )
+            if sys_be_err:
+                errs.append(sys_be_err)
         return errs
 
     full_keys = ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate")
@@ -662,20 +729,70 @@ def validate_custom_field_entry(
         errs.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
     if name in _BUILTIN_FIELD_NAMES:
         errs.append(f"'{name}' is already a built-in field name")
+    if _is_system_field(name):
+        errs.append(f"'{name}' is a system-managed field name")
     if name in existing_names:
         errs.append(f"A custom field named '{name}' already exists on this service")
 
-    stage = field.get("collection_stage", "edge")
-    if stage not in ("edge", "origin"):
+    raw_stage = field.get("collection_stage", "edge")
+    stage = "edge" if raw_stage is None else raw_stage
+    if not isinstance(stage, str) or stage not in ("edge", "origin"):
         errs.append(f"'collection_stage' must be 'edge' or 'origin' (got '{stage}')")
 
-    if field.get("sql_type") is not None:
-        valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
-        if field["sql_type"] not in valid_types:
+    if "label" in field and field["label"] is not None:
+        if not isinstance(field["label"], str) or not (1 <= len(field["label"]) <= 80):
+            errs.append("'label' must be 1–80 characters")
+
+    if "description" in field and field["description"] is not None:
+        if not isinstance(field["description"], str):
+            errs.append("'description' must be a string")
+        elif len(field["description"]) > 500:
+            errs.append("'description' must not exceed 500 characters")
+
+    valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
+    has_valid_sql_type = False
+    if "sql_type" in field and field["sql_type"] is not None:
+        if not isinstance(field["sql_type"], str) or field["sql_type"] not in valid_types:
             errs.append(f"'sql_type' must be one of: {', '.join(sorted(valid_types))}")
+        else:
+            has_valid_sql_type = True
+
+    all_value_types = {"string", "numeric", "boolean", "ip", "url"}
+    has_valid_value_type = False
+    if "value_type" in field and field["value_type"] is not None:
+        if not isinstance(field["value_type"], str) or field["value_type"] not in all_value_types:
+            errs.append(f"'value_type' must be one of: {', '.join(sorted(all_value_types))}")
+        else:
+            has_valid_value_type = True
+
+    if has_valid_sql_type and has_valid_value_type:
+        if field["value_type"] not in _SQL_TYPE_VALUE_TYPE_COMPAT[field["sql_type"]]:
+            compat = ", ".join(sorted(_SQL_TYPE_VALUE_TYPE_COMPAT[field["sql_type"]]))
+            errs.append(
+                f"'value_type' '{field['value_type']}' is not compatible with 'sql_type' '{field['sql_type']}'. "
+                f"Compatible value_types: {compat}"
+            )
+
+    if "bytes_estimate" in field and field["bytes_estimate"] is not None:
+        _, be_err = _parse_strict_custom_field_int(
+            field["bytes_estimate"], field_name="bytes_estimate", min_val=1, max_val=1024
+        )
+        if be_err:
+            errs.append(be_err)
+
+    if "byte_limit" in field and field["byte_limit"] is not None:
+        _, bl_err = _parse_strict_custom_field_int(
+            field["byte_limit"], field_name="byte_limit", min_val=1, max_val=FASTLY_LOG_LINE_DELIVER_MAX
+        )
+        if bl_err:
+            errs.append(bl_err)
 
     if "vcl_log_expression" in field:
-        errs.extend(validate_vcl_log_expression(str(field.get("vcl_log_expression") or "")))
+        raw_expr = field["vcl_log_expression"]
+        if not isinstance(raw_expr, str):
+            errs.append("'vcl_log_expression' must be a non-empty string")
+        else:
+            errs.extend(validate_vcl_log_expression(raw_expr))
     return errs
 
 
@@ -687,7 +804,7 @@ def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
             "label": cf["label"],
             "group": "custom",
             "sql_type": cf.get("sql_type", "VARCHAR"),
-            "description": cf.get("description", ""),
+            "description": "" if cf.get("description") is None else cf.get("description", ""),
             "show_in_dashboard": cf.get("show_in_dashboard", False),
             "show_in_logs": cf.get("show_in_logs", True),
             "filterable": cf.get("filterable", True),
@@ -695,7 +812,7 @@ def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
             "is_custom": True,
         }
         for cf in log_fields_config.get("custom_fields", [])
-        if cf.get("enabled", True)
+        if isinstance(cf, dict) and cf.get("enabled", True)
     ]
 
 
@@ -875,11 +992,15 @@ def derived() -> tuple[LogField, ...]:
 
 
 def _is_system_field(field_name: str) -> bool:
-    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
+    if not isinstance(field_name, str):
+        return False
+    return (
+        field_name in _CANONICAL_SYSTEM_FIELD_SPECS or field_name.startswith("cmcd_") or field_name.startswith("edge_")
+    )
 
 
 def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:
-    return [f for f in custom_fields if not _is_system_field(f.get("name", ""))]
+    return [f for f in custom_fields if isinstance(f, dict) and not _is_system_field(f.get("name", ""))]
 
 
 # ── Encode tables (human-readable → single-char code) ─────────────────────────

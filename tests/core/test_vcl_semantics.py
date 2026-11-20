@@ -1864,3 +1864,355 @@ sub vcl_log {{
     assert validate_custom_field_entry(
         {"name": "cmcd_sid", "vcl_log_expression": "req.http.X-Other"}, [], system_names=system_names
     )
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_vcl_forbidden_header_and_setcookie_functions_blocked() -> None:
+    from backend.core.catalog import (
+        _CANONICAL_SYSTEM_FIELD_SPECS,
+        _filter_user_custom_fields,
+        _is_system_field,
+        validate_custom_field,
+        validate_vcl_custom_condition,
+        validate_vcl_log_expression,
+    )
+    from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+    from backend.provision.declarative.models import FeatureState
+    from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS
+    from backend.provision.session_scoring.orchestrate import _SCORING_CUSTOM_FIELDS
+
+    forbidden_calls = [
+        'header.get(req, "Cookie")',
+        'header.get(req, "%43ookie")',
+        'header.get(req, "%41uthorization")',
+        'header.get(req, "x-fastly-" + "key")',
+        'header.get(beresp, "Set-Cookie")',
+        'HEADER . GET(req, "Cookie")',
+        'header.set(req, "X-Test", "1")',
+        'header.unset(req, "X-Test")',
+        'header.filter(req, "X-Test")',
+        'header.filter_except(req, "Host")',
+        'setcookie.get_value_by_name(beresp, "sessionid")',
+        'setcookie.delete_by_name(resp, "rum_cid")',
+        'SETCOOKIE . DELETE_BY_NAME(resp, "rum_cid")',
+    ]
+    for expr in forbidden_calls:
+        assert validate_vcl_log_expression(expr), f"Expected log expression rejection for: {expr}"
+        cond = expr if "delete_by_name" in expr.lower() else f'{expr} != ""'
+        assert validate_vcl_custom_condition(cond) is not None, f"Expected condition rejection for: {cond}"
+        cf_errs = validate_custom_field(
+            {
+                "name": "user_cf",
+                "label": "User CF",
+                "vcl_log_expression": expr,
+                "collection_stage": "edge",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+                "bytes_estimate": 25,
+            },
+            [],
+        )
+        assert cf_errs, f"Expected validate_custom_field rejection for: {expr}"
+
+    with pytest.raises(ValueError, match=r"header\.get"):
+        FeatureState(
+            service_id="svc_hdr_fn",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition='header.get(req, "%41uthorization") != ""',
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+        )
+
+    assert validate_vcl_log_expression("req.http.X-Header-Get") == []
+    assert validate_vcl_custom_condition('req.http.X-Header-Get == "1" && resp.http.X-Setcookie == "0"') is None
+
+    all_system_cfs = [*_RUM_CUSTOM_FIELDS, *_SCORING_CUSTOM_FIELDS, *_CMCD_CUSTOM_FIELDS]
+    assert len(all_system_cfs) == 41
+    for sys_cf in all_system_cfs:
+        fname = sys_cf["name"]
+        assert fname in _CANONICAL_SYSTEM_FIELD_SPECS
+        assert _is_system_field(fname) is True, f"_is_system_field({fname!r}) returned False"
+        assert validate_vcl_log_expression(sys_cf["vcl_log_expression"]) == []
+        sys_errs = validate_custom_field(
+            {
+                "name": fname,
+                "label": "Attempted Override",
+                "vcl_log_expression": "req.http.User-Agent",
+                "collection_stage": "edge",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+                "bytes_estimate": 60,
+            },
+            [],
+        )
+        assert any("system-managed" in e for e in sys_errs), f"Expected system-managed error for {fname!r}: {sys_errs}"
+
+    mixed = [*all_system_cfs, {"name": "my_user_field", "collection_stage": "edge"}]
+    assert [f["name"] for f in _filter_user_custom_fields(mixed)] == ["my_user_field"]
+
+
+@requires_falco
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_vcl_rtime_adjacent_functions_and_identifiers_blocked() -> None:
+    from backend.core.catalog import (
+        _CANONICAL_SYSTEM_FIELD_SPECS,
+        _FORBIDDEN_VCL_IDENTIFIERS_RE,
+        _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE,
+        _VCL_TABLE_LOOKUP_RE,
+        LOG_FIELD_CATALOG,
+        validate_custom_field,
+        validate_vcl_custom_condition,
+        validate_vcl_log_expression,
+    )
+    from backend.provision.declarative.models import FeatureState
+
+    rtime_and_prefix_vectors = [
+        'now + 0msheader.get(req, "Cookie")',
+        'time.start + 0sheader.get(req, "%41uthorization")',
+        'now + 0dheader.get(req, "x-fastly-" + "key")',
+        'now + 0.5wheader.get(req, "Cookie")',
+        'now + 0.msheader.get(req, "Cookie")',
+        'now + 0mtable.lookup(custom_secrets, "token")',
+        'now + 0.mtable.lookup(custom_secrets, "token")',
+        'now + 0ytable.contains(custom_secrets, "token")',
+        '"" + -table.lookup_integer(custom_secrets, "pin", 0)',
+        'now + -table.lookup_rtime(custom_secrets, "ttl", 0s)',
+        'now + 0hsetcookie.get_value_by_name(resp, "session_id")',
+        'now + 0dsetcookie.delete_by_name(resp, "rum_cid")',
+        '"a"header.get(req, "Cookie")',
+        'C!header.get(req, "Cookie")',
+        "now + 0msreq.http.Cookie",
+        "now + 0msreq.http.Authorization",
+        "now + 0msreq.http.x-fastly-key",
+        "now + 0mscdn_auth",
+        "now + 0.msfos_credentials",
+        "now + 0msflp_fos_buckets",
+        "now + 0msauth_fail_rc",
+        "now + 0msauth_fail_pb",
+    ]
+    for expr in rtime_and_prefix_vectors:
+        errs = validate_vcl_log_expression(expr)
+        assert errs, f"Expected log expression rejection for: {expr}"
+        assert "0ms" not in errs[0] and "0.ms" not in errs[0], f"Expected clean matched token in error: {errs[0]}"
+        cond = f'{expr} != ""'
+        cond_err = validate_vcl_custom_condition(cond)
+        assert cond_err is not None, f"Expected condition rejection for: {cond}"
+        assert "0ms" not in cond_err and "0.ms" not in cond_err, f"Expected clean matched token in error: {cond_err}"
+        cf_errs = validate_custom_field(
+            {
+                "name": "user_cf",
+                "label": "User CF",
+                "vcl_log_expression": expr,
+                "collection_stage": "edge",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+                "bytes_estimate": 25,
+            },
+            [],
+        )
+        assert cf_errs, f"Expected validate_custom_field rejection for: {expr}"
+
+    with pytest.raises(ValueError, match=r"header\.get"):
+        FeatureState(
+            service_id="svc_rtime_fn",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition='now + 0msheader.get(req, "Cookie") != ""',
+            fos_prefix="raw",
+            fos_endpoint="us-east-1.object.fastlystorage.app",
+        )
+
+    for benign in (
+        "req.http.X-Header-Get",
+        "req.http.X-Header.Get",
+        "resp.http.X-Setcookie",
+        "req.http.X-Table-Lookup",
+        "req.http.X-Table.Lookup",
+        "req.http.x-edge-cookie-compliance",
+    ):
+        assert validate_vcl_log_expression(benign) == [], f"Unexpected false positive on {benign}"
+        assert validate_vcl_custom_condition(f'{benign} == "1"') is None
+
+    for entry in LOG_FIELD_CATALOG:
+        vcl_fmt = entry.get("vcl")
+        if vcl_fmt:
+            assert not _VCL_TABLE_LOOKUP_RE.search(vcl_fmt), f"Catalog {entry['id']} matched table RE: {vcl_fmt}"
+            assert not _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(vcl_fmt), f"Catalog {entry['id']} matched fn RE"
+            assert not _FORBIDDEN_VCL_IDENTIFIERS_RE.search(vcl_fmt), f"Catalog {entry['id']} matched id RE"
+            if vcl_fmt.startswith("%{") and vcl_fmt.endswith("}V"):
+                assert validate_vcl_log_expression(vcl_fmt[2:-2]) == [], f"Catalog {entry['id']} failed: {vcl_fmt}"
+
+    assert len(_CANONICAL_SYSTEM_FIELD_SPECS) == 41
+    for fname, (_stage, vcl_expr) in _CANONICAL_SYSTEM_FIELD_SPECS.items():
+        assert validate_vcl_log_expression(vcl_expr) == [], f"System field {fname} failed"
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_vcl_interpolation_sinks_exclude_regex_and_shield_pop_blocked():
+    """SEC-15 Wave 5: block exclude_url_regex & shield_pop VCL breakouts in generators."""
+    from backend.core.fastly.client import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
+
+    breakout_regex = r'") { set req.http.X-Exfil = table.lookup(fos_credentials, "secret_key"); } if (req.url !~ "'
+    for bad_regex in (
+        breakout_regex,
+        'foo"bar',
+        '{"breakout"}',
+        "foo\nbar",
+        "foo\u2028bar",
+        "^/api/${secret}",
+        "^/api/%{if true}x%{endif}",
+        "^/api/%00admin",
+        "[unclosed",
+    ):
+        with pytest.raises(ValueError):
+            generate_capture_vcl(
+                {"groups": ["A"]},
+                scoring_enabled=True,
+                scoring_exclude_url_regex=bad_regex,
+            )
+
+    for valid_regex in (r"^/(?:health|metrics|static/)", r"\.js$", r"\b", "", None):
+        cap = generate_capture_vcl(
+            {"groups": ["A"]},
+            scoring_enabled=True,
+            scoring_exclude_url_regex=valid_regex,
+        )
+        assert "std.tolower(req.url) !~" in cap["recv"]
+        assert lint_vcl(cap["recv"], snippet_name="capture_recv_valid").ok
+
+    # Empirically confirm %22 inside VCL double-quoted string stays inside token.STRING (no statement breakout)
+    pct22_cap = generate_capture_vcl(
+        {"groups": ["A"]},
+        scoring_enabled=True,
+        scoring_exclude_url_regex=r"^/quote%22path$",
+    )
+    assert lint_vcl(pct22_cap["recv"], snippet_name="capture_recv_pct22").ok
+
+    shield_breakout = (
+        'iad_va_us, F_fos_origin); set req.http.X_Shield_Exfil = table.lookup(fos_credentials, "secret_key"); '
+        "set req.backend = fastly.try_select_shield(ssl_shield_iad_va_us"
+    )
+    for bad_shield in (
+        shield_breakout,
+        "iad-va-us); error 999; //",
+        'iad"va',
+        "iad va",
+        "iad\nva",
+        "a" * 65,
+        "iad-\u00a0-us",
+    ):
+        with pytest.raises(ValueError, match="shield_pop"):
+            generate_rum_asset_fetch_vcl(bad_shield, "2.13.0")
+
+    iad_vcl = generate_rum_asset_fetch_vcl("iad-va-us", None)[RUM_ASSET_FETCH_NAME]
+    assert "fastly.try_select_shield(ssl_shield_iad_va_us, F_fos_origin)" in iad_vcl
+    none_vcl = generate_rum_asset_fetch_vcl("none", None)[RUM_ASSET_FETCH_NAME]
+    assert "set req.backend = F_fos_origin;" in none_vcl
+    empty_vcl = generate_rum_asset_fetch_vcl("", None)[RUM_ASSET_FETCH_NAME]
+    assert empty_vcl == none_vcl
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_get_capture_vcl_statements_coerces_and_rejects_bad_field_limits():
+    """SEC-15 Wave 6 defense-in-depth: get_capture_vcl_statements coerces int limits and rejects bool/non-int."""
+    from backend.provision.fastly_api import get_capture_vcl_statements
+
+    ok_lines = get_capture_vcl_statements(
+        {
+            "groups": ["A"],
+            "field_overrides": {"ua": True, "referer": True},
+            "field_limits": {"ua": "2048", "referer": 512},
+        }
+    )
+    assert any("substr(" in ln and ", 0, 2048)" in ln for ln in ok_lines)
+    assert any("substr(" in ln and ", 0, 512)" in ln for ln in ok_lines)
+
+    for bad_limit in (
+        '1000); set req.http.X = table.lookup(fos_credentials, "secret_key"); //',
+        True,
+        False,
+        ["bad"],
+        {"bad": 1},
+    ):
+        with pytest.raises(ValueError):
+            get_capture_vcl_statements(
+                {
+                    "groups": ["A"],
+                    "field_overrides": {"ua": True},
+                    "field_limits": {"ua": bad_limit},
+                }
+            )
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_wave7_catalog_custom_field_null_description_and_strict_types():
+    """SEC-15 Wave 7: validate_custom_field & validate_custom_field_entry handle description=None and reject mistyped fields cleanly."""
+    from backend.core.catalog import _CANONICAL_SYSTEM_FIELD_SPECS, validate_custom_field, validate_custom_field_entry
+
+    valid_cf = {
+        "name": "my_cf",
+        "label": "My CF",
+        "description": None,
+        "vcl_log_expression": "req.http.X-My-Hdr",
+        "sql_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 24,
+    }
+    assert [e for e in validate_custom_field(valid_cf, []) if not e.startswith("WARN:")] == []
+    assert validate_custom_field_entry(valid_cf, [], system_names=set(_CANONICAL_SYSTEM_FIELD_SPECS)) == []
+
+    for bad_non_dict in ("not-a-dict", 123, ["bad"]):
+        assert validate_custom_field(bad_non_dict, [])  # type: ignore[arg-type]
+        assert validate_custom_field_entry(bad_non_dict, [])  # type: ignore[arg-type]
+
+    for bad_full in (
+        {**valid_cf, "name": ["unhashable"]},
+        {**valid_cf, "label": 123},
+        {**valid_cf, "label": ["bad"]},
+        {**valid_cf, "description": 123},
+        {**valid_cf, "description": ["bad"]},
+        {**valid_cf, "vcl_log_expression": [1, 2]},
+        {**valid_cf, "vcl_log_expression": True},
+        {**valid_cf, "vcl_log_expression": 123},
+        {**valid_cf, "sql_type": ["VARCHAR"]},
+        {**valid_cf, "value_type": ["string"]},
+        {**valid_cf, "bytes_estimate": True},
+        {**valid_cf, "bytes_estimate": 1.5},
+        {**valid_cf, "collection_stage": ["edge"]},
+        {**valid_cf, "byte_limit": True},
+        {**valid_cf, "byte_limit": 1.5},
+    ):
+        errs_full = [e for e in validate_custom_field(bad_full, []) if not e.startswith("WARN:")]
+        assert errs_full, f"Expected errors from validate_custom_field for {bad_full}"
+        errs_entry = validate_custom_field_entry(bad_full, [], system_names=set(_CANONICAL_SYSTEM_FIELD_SPECS))
+        assert errs_entry, f"Expected errors from validate_custom_field_entry for {bad_full}"
+
+    for bad_partial in (
+        {"name": ["unhashable"]},
+        {"name": "my_cf", "label": 123},
+        {"name": "my_cf", "label": ["bad"]},
+        {"name": "my_cf", "description": 123},
+        {"name": "my_cf", "sql_type": ["VARCHAR"]},
+        {"name": "my_cf", "value_type": ["string"]},
+        {"name": "my_cf", "bytes_estimate": True},
+        {"name": "my_cf", "bytes_estimate": 1.5},
+        {"name": "my_cf", "collection_stage": ["edge"]},
+        {"name": "my_cf", "vcl_log_expression": [1, 2]},
+        {"name": "my_cf", "vcl_log_expression": True},
+        {"name": "my_cf", "vcl_log_expression": 123},
+        {"name": "my_cf", "vcl_log_expression": None},
+        {"name": "service_id", "vcl_log_expression": 123},
+        {"name": "service_id", "vcl_log_expression": [1, 2]},
+        {"name": "service_id", "collection_stage": ["beacon"]},
+    ):
+        errs_p = validate_custom_field_entry(bad_partial, [], system_names=set(_CANONICAL_SYSTEM_FIELD_SPECS))
+        assert errs_p, f"Expected errors from validate_custom_field_entry for {bad_partial}"

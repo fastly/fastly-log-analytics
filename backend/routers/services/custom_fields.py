@@ -82,7 +82,11 @@ def api_list_custom_fields(request: Request, service_id: str) -> CustomFieldsLis
     require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
     lf = lf_module.get_lf_config(cfg)
-    return CustomFieldsListResponse(fields=_filter_user_custom_fields(lf.get("custom_fields", [])))  # type: ignore
+    user_fields = [
+        {**cf, "description": "" if cf.get("description") is None else cf.get("description", "")}
+        for cf in _filter_user_custom_fields(lf.get("custom_fields", []))
+    ]
+    return CustomFieldsListResponse(fields=user_fields)  # type: ignore
 
 
 @router.post("/services/{service_id}/custom-fields", response_model=CustomFieldResponse)
@@ -209,7 +213,9 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
     cfg = load_service_config(service_id)
     fields_to_import = body.custom_fields
     lf = lf_module.get_lf_config(cfg)
-    existing_map = {cf["name"]: cf for cf in lf.get("custom_fields", [])}
+    existing_map = {
+        cf["name"]: cf for cf in lf.get("custom_fields", []) if isinstance(cf, dict) and isinstance(cf.get("name"), str)
+    }
     locked_field_names = _locked_storage_field_names(
         _db.get_source_for_service(service_id),
         error_lead="Could not verify committed fields for import",
@@ -220,9 +226,15 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
     type_lock_errors: list[str] = []
     validation_errors: list[str] = []
     for field_dict in fields_to_import:
+        if not isinstance(field_dict, dict):
+            validation_errors.append("Custom field entry must be an object")
+            continue
         if "name" not in field_dict:
             continue
         fname = field_dict["name"]
+        if not isinstance(fname, str) or not fname:
+            validation_errors.append("Custom field 'name' must be a non-empty string")
+            continue
         if _is_system_field(fname):
             validation_errors.append(f"{fname}: cannot import system-managed field")
             continue
@@ -238,15 +250,23 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
                 pass
             if any(fname in err for err in type_lock_errors):
                 continue
+        field_copy = dict(field_dict)
+        if field_copy.get("description") is None:
+            field_copy["description"] = ""
         other_names = [n for n in new_custom_map if n != fname]
-        for err in lf_module.validate_custom_field(field_dict, other_names):
+        for err in lf_module.validate_custom_field(field_copy, other_names):
             if not err.startswith("WARN:"):
                 validation_errors.append(f"{fname}: {err}")
-        field_dict.pop("created_at", None)
-        field_dict.pop("updated_at", None)
-        field_dict["created_at"] = existing_field.get("created_at", now)
-        field_dict["updated_at"] = now
-        new_custom_map[fname] = field_dict
+        if isinstance(field_copy.get("bytes_estimate"), str):
+            try:
+                field_copy["bytes_estimate"] = int(field_copy["bytes_estimate"].strip())
+            except ValueError:
+                pass
+        field_copy.pop("created_at", None)
+        field_copy.pop("updated_at", None)
+        field_copy["created_at"] = existing_field.get("created_at", now)
+        field_copy["updated_at"] = now
+        new_custom_map[fname] = field_copy
     if type_lock_errors:
         raise HTTPException(status_code=422, detail={"errors": type_lock_errors})
     if validation_errors:

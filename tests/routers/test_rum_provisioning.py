@@ -284,3 +284,44 @@ def test_sec13_rum_upgrade_and_settings_validate_explicit_caller_token() -> None
         assert res_set.json()["detail"]["error"] == "insufficient_scope"
         mock_mutate.assert_not_called()
         mock_upload.assert_not_called()
+
+
+@pytest.mark.security_regression
+@pytest.mark.parametrize(
+    "bad_condition",
+    [
+        'header.get(req, "Cookie") != ""',
+        'header.get(req, "%41uthorization") != ""',
+        'header.get(req, "x-fastly-" + "key") != ""',
+        'setcookie.get_value_by_name(beresp, "sessionid") != ""',
+        'setcookie.delete_by_name(resp, "rum_cid")',
+        'now + 0msheader.get(req, "Cookie") != ""',
+        'time.start + 0sheader.get(req, "%41uthorization") != ""',
+        'now + 0.msheader.get(req, "Cookie") != ""',
+        'now + 0mtable.lookup(custom_secrets, "token") != ""',
+        'now + 0hsetcookie.get_value_by_name(resp, "session_id") != ""',
+        'now + 0dsetcookie.delete_by_name(resp, "rum_cid") != ""',
+    ],
+)
+def test_sec15_rum_settings_rejects_header_and_setcookie_builtin_functions(bad_condition: str) -> None:
+    client = TestClient(_make_rum_app(analyst=False))
+    cfg = {
+        "service_id": SVC,
+        "fastly_api_key": "tok-stored",
+        "rum_enabled": True,
+        "rum": {"enabled": True, "custom_condition": ""},
+    }
+    with (
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.mutate_config") as mock_mutate,
+        patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}) as mock_upload,
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=MagicMock(error=None),
+        ) as mock_reconcile,
+    ):
+        res = client.post(f"/api/services/{SVC}/rum/settings", json=_settings_payload(bad_condition))
+        assert res.status_code == 400, f"Expected 400 for {bad_condition!r}, got {res.status_code}: {res.text}"
+        mock_mutate.assert_not_called()
+        mock_upload.assert_not_called()
+        mock_reconcile.assert_not_called()

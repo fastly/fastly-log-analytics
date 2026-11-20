@@ -172,7 +172,10 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
 
     required = set(get_required_edge_headers(log_fields_config)) - {"ip"}
     group_l = "L" in (log_fields_config.get("groups") or [])
-    limits = log_fields_config.get("field_limits") or {}
+    raw_limits = log_fields_config.get("field_limits")
+    if raw_limits is not None and not isinstance(raw_limits, dict):
+        raise ValueError("field_limits must be a dict")
+    limits = raw_limits or {}
     custom_edge = [
         cf for cf in _resolve_enabled_custom_fields(log_fields_config) if cf.get("collection_stage", "edge") == "edge"
     ]
@@ -188,7 +191,16 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
         if key in EDGE_DATA_MAPPING:
             expr = EDGE_DATA_MAPPING[key]
             if key in ("ua", "referer"):
-                expr = f"substr({expr}, 0, {limits.get(key, 1000)})"
+                raw_limit = limits.get(key, 1000)
+                if raw_limit is None:
+                    raw_limit = 1000
+                if isinstance(raw_limit, bool):
+                    raise ValueError(f"field_limits[{key!r}] must be an integer, got bool")
+                try:
+                    limit = int(raw_limit)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"field_limits[{key!r}] must be an integer, got {raw_limit!r}") from exc
+                expr = f"substr({expr}, 0, {limit})"
             lines.append(f"set req.http.x-fos-edge-data:{key} = {expr};")
 
     for cf in custom_edge:
@@ -268,9 +280,17 @@ def generate_capture_vcl(
         scrub_lines.append("  }")
 
     if scoring_enabled:
-        from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
+        from backend.core.vcl_generator import validate_url_exclusion_regex
+        from backend.provision.session_scoring_orchestrator import (
+            SCORING_BACKEND_VCL_NAME,
+            _assert_vcl_string_safe,
+            resolve_exclude_url_regex,
+        )
 
+        if scoring_exclude_url_regex is not None:
+            validate_url_exclusion_regex(scoring_exclude_url_regex)
         effective_regex = resolve_exclude_url_regex(scoring_exclude_url_regex)
+        _assert_vcl_string_safe(effective_regex, field="scoring_exclude_url_regex", allow_backslash=True)
         scrub_lines.extend(
             [
                 "  # Section 4: Session Scoring (vcl_recv)",

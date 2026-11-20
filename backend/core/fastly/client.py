@@ -519,6 +519,10 @@ error 611 "No Content";"""
 
 def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str | None = None) -> str:
     """Fetch /js/rum.js (and optionally /js/faro-sdk.js) from FOS with SigV4 signing."""
+    if shield_pop is not None and not isinstance(shield_pop, str):
+        raise ValueError(f"shield_pop must be a string; got {type(shield_pop).__name__}")
+    if shield_pop and not re.fullmatch(r"^[A-Za-z0-9_-]{1,64}$", shield_pop):
+        raise ValueError(f"shield_pop must match ^[A-Za-z0-9_-]{{1,64}}$; got {shield_pop!r}")
     if shield_pop and shield_pop.lower() != "none":
         shield_var = f"ssl_shield_{shield_pop.replace('-', '_')}"
         backend_str = f"fastly.try_select_shield({shield_var}, F_fos_origin)"

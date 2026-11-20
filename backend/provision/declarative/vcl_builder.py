@@ -187,9 +187,17 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
             ]
         )
     if state.scoring.enabled:
-        from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
+        from backend.core.vcl_generator import validate_url_exclusion_regex
+        from backend.provision.session_scoring_orchestrator import (
+            SCORING_BACKEND_VCL_NAME,
+            _assert_vcl_string_safe,
+            resolve_exclude_url_regex,
+        )
 
+        if state.scoring.exclude_url_regex is not None:
+            validate_url_exclusion_regex(state.scoring.exclude_url_regex)
         effective_regex = resolve_exclude_url_regex(state.scoring.exclude_url_regex)
+        _assert_vcl_string_safe(effective_regex, field="exclude_url_regex", allow_backslash=True)
         rum_asset_guard = (
             ' && req.url.path != "/js/rum.js" && req.url.path != "/js/faro-sdk.js"' if state.rum_enabled else ""
         )
