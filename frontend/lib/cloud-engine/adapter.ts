@@ -1013,7 +1013,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
             service_id: string;
             service_name?: string;
             name?: string;
-            rum_enabled?: boolean;
+            rum?: { enabled?: boolean };
             cmcd?: { enabled?: boolean };
             active_log_field_ids?: string[];
           }>;
@@ -1025,7 +1025,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       service_id: s.service_id,
       name: s.name || s.service_name || s.service_id,
       cmcd_enabled: Boolean(s.cmcd?.enabled),
-      rum_enabled: Boolean(s.rum_enabled),
+      rum_enabled: Boolean(s.rum?.enabled),
     }));
     const services = mappedServices;
     const requestedService = searchParams.get("service_id") ?? request.headers.get("x-service-id");

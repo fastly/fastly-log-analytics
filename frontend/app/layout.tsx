@@ -86,8 +86,11 @@ export default async function RootLayout({
   // path takes over unchanged. Never a broken page.
   const bootstrap = await fetchBootstrapServerSide();
   let dehydratedState: DehydratedState | null = null;
-  let isRumEnabled = false;
-  let sid: string | null = null;
+  const ssrShell = {
+    activeServiceId: bootstrap?.active_service_id ?? null,
+    isRumEnabled: false,
+    isCmcdEnabled: false,
+  };
 
   if (bootstrap) {
     const client = new QueryClient();
@@ -96,18 +99,19 @@ export default async function RootLayout({
     // seedBootstrapDependentCaches so hooks gated on the bootstrap status flip
     // find their slice in cache too.
     seedBootstrapDependentCaches(client, bootstrap);
-    sid = bootstrap.active_service_id ?? null;
-    const services = bootstrap.services;
-    if (Array.isArray(services) && sid) {
-      const activeSvc = services.find((s) => s.service_id === sid);
-      isRumEnabled = !!activeSvc?.rum_enabled;
+    if (ssrShell.activeServiceId) {
+      const activeSvc = bootstrap.services?.find(
+        (service) => service.service_id === ssrShell.activeServiceId,
+      );
+      ssrShell.isRumEnabled = activeSvc?.rum_enabled === true;
+      ssrShell.isCmcdEnabled = activeSvc?.cmcd_enabled === true;
     }
     dehydratedState = dehydrate(client);
   }
   const loadRumScript = shouldLoadRumScript({
     host: requestHeaders.get("host"),
     proxiedByCaddy: requestHeaders.get("x-proxied-by-caddy") === "true",
-    rumEnabled: isRumEnabled,
+    rumEnabled: ssrShell.isRumEnabled,
   });
 
   return (
@@ -168,8 +172,9 @@ export default async function RootLayout({
             <WebVitalsReporter />
             <AppLayout
               initialCollapsed={initialSidebarCollapsed}
-              ssrActiveServiceId={sid}
-              ssrIsRumEnabled={isRumEnabled}
+              ssrActiveServiceId={ssrShell.activeServiceId}
+              ssrIsRumEnabled={ssrShell.isRumEnabled}
+              ssrIsCmcdEnabled={ssrShell.isCmcdEnabled}
               serverFooter={
                 <Suspense fallback={<div aria-hidden="true" className="mt-12 h-[50px]" />}>
                   <ServerFooter />

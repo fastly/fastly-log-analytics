@@ -125,6 +125,68 @@ test('renders AppLayout with standard navigation', () => {
   expect(screen.getByText('Usage & Cost')).toBeInTheDocument()
 })
 
+test('renders RUM and Streaming on first paint from SSR capability props', () => {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: undefined,
+    isLoading: true,
+    isSuccess: false,
+  }))
+
+  renderWithQueryClient(
+    <AppLayout
+      ssrActiveServiceId="svc-1"
+      ssrIsRumEnabled
+      ssrIsCmcdEnabled
+    >
+      <div>Content</div>
+    </AppLayout>,
+  )
+
+  expect(screen.getByRole('link', { name: /^RUM$/ })).toHaveAttribute('href', expect.stringMatching(/^\/rum(?:\?|$)/))
+  expect(screen.getByRole('link', { name: /^Streaming$/ })).toHaveAttribute('href', expect.stringMatching(/^\/streaming(?:\?|$)/))
+})
+
+test('does not wait for client bootstrap to hide disabled capability links', () => {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: undefined,
+    isLoading: true,
+    isSuccess: false,
+  }))
+
+  renderWithQueryClient(
+    <AppLayout ssrActiveServiceId="svc-1" ssrIsRumEnabled={false} ssrIsCmcdEnabled={false}>
+      <div>Content</div>
+    </AppLayout>,
+  )
+
+  expect(screen.queryByRole('link', { name: /^RUM$/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /^Streaming$/ })).not.toBeInTheDocument()
+})
+
+test('client bootstrap refresh supersedes SSR capability props', () => {
+  vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+    data: partial<BootstrapData>({
+      services: [{
+        service_id: 'test-svc',
+        name: 'Test Service',
+        rum_enabled: false,
+        cmcd_enabled: false,
+      }],
+    }),
+    isLoading: false,
+    isSuccess: true,
+  }))
+
+  renderWithQueryClient(
+    <AppLayout ssrIsRumEnabled ssrIsCmcdEnabled>
+      <div>Content</div>
+    </AppLayout>,
+  )
+
+  expect(screen.queryByRole('link', { name: /^RUM$/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /^Streaming$/ })).not.toBeInTheDocument()
+})
+
 test('hides restricted items for analysts', async () => {
   const { useIsAnalyst } = await import('@/hooks/useBootstrap')
   vi.mocked(useIsAnalyst).mockReturnValue(true)

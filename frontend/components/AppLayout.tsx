@@ -68,12 +68,18 @@ const PageBoundary = React.memo(function PageBoundary({ children }: { children: 
 })
 
 export function AppLayout({
-  children, initialCollapsed = false, ssrActiveServiceId, ssrIsRumEnabled, serverFooter,
+  children,
+  initialCollapsed = false,
+  ssrActiveServiceId,
+  ssrIsRumEnabled,
+  ssrIsCmcdEnabled,
+  serverFooter,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
   ssrActiveServiceId?: string | null
   ssrIsRumEnabled?: boolean
+  ssrIsCmcdEnabled?: boolean
   serverFooter?: React.ReactNode
 }) {
   const pathname = usePathname()
@@ -136,9 +142,8 @@ export function AppLayout({
 
   const currentServiceId = activeServiceId || ssrActiveServiceId || bootstrapData?.active_service_id
   const activeSvc = bootstrapData?.services?.find(s => s.service_id === currentServiceId)
-  const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
-  const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
-  const hasRum = activeServiceId ? (activeSvc?.rum_enabled ?? false) : (ssrIsRumEnabled ?? activeSvc?.rum_enabled ?? false)
+  const hasCmcd = activeSvc ? activeSvc.cmcd_enabled === true : ssrIsCmcdEnabled === true
+  const hasRum = activeSvc ? activeSvc.rum_enabled === true : ssrIsRumEnabled === true
 
   const navActiveServiceId = activeServiceId || ssrActiveServiceId || null
 
