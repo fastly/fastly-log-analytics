@@ -27,6 +27,7 @@ vi.mock('@/components/ReportLayout', async (importOriginal) => {
 vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/page-smoke')).reactVirtualModuleMock())
 
 vi.mock('@/lib/cloud-engine/adapter', () => ({ handleCloudAnalyticalRequest: async () => null }))
+vi.mock('@/lib/cloud-engine/dashboard/client', () => ({ setDashboardCacheIdentity: vi.fn() }))
 
 vi.mock('@/components/PlotlyChart', () => ({
   PlotlyChart: ({ data }: { data: Array<{ x?: unknown[]; y?: unknown[] }> }) => (
