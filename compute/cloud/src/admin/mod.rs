@@ -595,13 +595,15 @@ fn validate_token_with_info(
     Ok((customer, token_info))
 }
 
+type PreflightResult = (Value, Vec<Value>, Vec<Value>, Value, bool);
+
 fn preflight(
     context: &Context<'_, impl Runtime>,
     token: &str,
     sid: &str,
     endpoint: Option<&str>,
     capture: Capture,
-) -> Result<(Value, Vec<Value>, Vec<Value>, Value, bool), Error> {
+) -> Result<PreflightResult, Error> {
     if !valid_service_id(sid) {
         return Err(Error::new(400, "invalid_service_id"));
     }
