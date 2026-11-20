@@ -193,7 +193,7 @@ export const ORIGIN_SSR_SECTIONS = [
 ] as const
 
 export const ORIGIN_SSR_DEFAULTS = {
-  bucketMinutes: 60,
+  bucketMinutes: 1,
   metric: 'ttfb' as const,
   percentile: 'p95' as const,
   slowUrlsLimit: 20,
@@ -409,6 +409,13 @@ export type ReportSearchParams = {
   end_time?: string | string[]
   range?: string | string[]
   filters?: string | string[]
+  metric?: string | string[]
+  percentile?: string | string[]
+  sort_by?: string | string[]
+  bucket_seconds?: string | string[]
+  top_n?: string | string[]
+  window?: string | string[]
+  baseline?: string | string[]
 }
 
 export async function resolveReportPageParams(
@@ -417,7 +424,17 @@ export async function resolveReportPageParams(
   const params: ReportSearchParams = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
   const serviceId = await resolvePageServiceId(params)
   const isDefaultView =
-    !params.start_time && !params.end_time && !params.range && !params.filters
+    !params.start_time &&
+    !params.end_time &&
+    !params.range &&
+    !params.filters &&
+    !params.metric &&
+    !params.percentile &&
+    !params.sort_by &&
+    !params.bucket_seconds &&
+    !params.top_n &&
+    !params.window &&
+    !params.baseline
   return { serviceId, isDefaultView }
 }
 

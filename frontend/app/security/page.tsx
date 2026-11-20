@@ -10,6 +10,8 @@ import {
   type ReportSearchParams,
 } from '@/lib/ssr/upstream'
 import SecurityClient from './_sections/SecurityClient'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
 
 // Per-request RSC shell for /security. Pre-fetches the DEFAULT security
 // aggregates selection server-side and dehydrates it so the cards render from
@@ -58,19 +60,21 @@ export default async function SecurityPage({
   // Pin a single render instant so the seed body anchor and the seed KEY anchor
   // agree (resolveSecurityDefaultKey + fetchSecurityServerSide both floor it).
   const now = new Date()
-  const seed = isDefaultView ? await fetchSecurityServerSide(serviceId, now) : null
+  const seed =
+    isDefaultView && !isCloudMode()
+      ? await fetchSecurityServerSide(serviceId, now)
+      : null
 
   const dehydratedState = seed
     ? seedDehydratedState(
-        [
-          'security',
-          'aggregates',
+        analyticsReportQueryKey({
+          namespace: ['security', 'aggregates'],
           serviceId,
-          seed.rangeToken,
-          seed.anchor,
-          {},
-          SECURITY_SSR_DEFAULTS.bucketSeconds,
-        ],
+          rangeToken: seed.rangeToken,
+          anchor: seed.anchor,
+          filterPayload: {},
+          keyParts: [SECURITY_SSR_DEFAULTS.bucketSeconds],
+        }),
         seed.data,
       )
     : null

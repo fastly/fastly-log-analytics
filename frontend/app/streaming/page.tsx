@@ -9,6 +9,8 @@ import {
 } from '@/lib/ssr/upstream'
 import StreamingLoading from './loading'
 import StreamingClient from './_sections/StreamingClient'
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 export const dynamic = 'force-dynamic'
 
@@ -34,12 +36,21 @@ async function StreamingPageContent({
   isDefaultView: boolean
 }) {
   const now = new Date()
-  const seed = isDefaultView ? await fetchStreamingServerSide(serviceId, now) : null
+  const seed =
+    isDefaultView && !isCloudMode()
+      ? await fetchStreamingServerSide(serviceId, now)
+      : null
   const seedData = seed?.data as { available?: boolean; has_data?: boolean } | null | undefined
   const dehydratedState =
     seed && seedData?.available && seedData?.has_data
       ? seedDehydratedState(
-          ['cmcd', 'aggregates', serviceId, seed.rangeToken, seed.anchor, {}],
+          analyticsReportQueryKey({
+            namespace: ['cmcd', 'aggregates'],
+            serviceId,
+            rangeToken: seed.rangeToken,
+            anchor: seed.anchor,
+            filterPayload: {},
+          }),
           seed.data,
         )
       : null

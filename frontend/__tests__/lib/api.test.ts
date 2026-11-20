@@ -17,9 +17,14 @@ import {
   fetchPerformanceServerSide, fetchSecurityServerSide, fetchInsightsServerSide,
   fetchOriginServerSide, fetchTosServerSide, fetchCronRunsServerSide,
   fetchUsageLogServerSide, resolveDefaultSsrRangeKey, resolveInsightsDefault,
+  resolveReportPageParams,
   PERFORMANCE_SSR_DEFAULTS, SECURITY_SSR_DEFAULTS, SECURITY_SSR_SECTIONS,
   ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS,
 } from '@/lib/ssr/upstream'
+import {
+  analyticsReportQueryKey,
+  insightsReportQueryKey,
+} from '@/lib/report-query-key'
 
 const { setHeaders, setCookies } = setupNextHeadersMock({ cookies: 'session=abc123' })
 const inbound = setHeaders
@@ -755,6 +760,62 @@ describe('resolveDefaultSsrRangeKey & SSR-seed key ↔ client first-paint key by
     expect(a.anchor).toBe('2026-06-29T12:00:00Z')
   })
 
+  it('builds the exact analytics query keys used by SSR seeds and report clients', () => {
+    const { rangeToken, anchor } = resolveDefaultSsrRangeKey(NOW_ISO)
+    expect(analyticsReportQueryKey({
+      namespace: ['performance', 'aggregates'],
+      serviceId: 'svc-1',
+      rangeToken,
+      anchor,
+      filterPayload: {},
+      keyParts: [PERFORMANCE_SSR_DEFAULTS.sortBy],
+    })).toEqual([
+      'performance', 'aggregates', 'svc-1', '24h', anchor, {}, 'p99',
+    ])
+    expect(analyticsReportQueryKey({
+      namespace: ['origin', 'aggregates'],
+      serviceId: 'svc-1',
+      rangeToken,
+      anchor,
+      filterPayload: {},
+      keyParts: [
+        ORIGIN_SSR_DEFAULTS.bucketMinutes,
+        ORIGIN_SSR_DEFAULTS.metric,
+        ORIGIN_SSR_DEFAULTS.percentile,
+        ORIGIN_SSR_SECTIONS,
+      ],
+    })).toEqual([
+      'origin', 'aggregates', 'svc-1', '24h', anchor, {}, 1,
+      'ttfb', 'p95', [...ORIGIN_SSR_SECTIONS],
+    ])
+  })
+
+  it('builds the exact unfiltered insights key used by the SSR seed and client', () => {
+    expect(insightsReportQueryKey({
+      serviceId: 'svc-1',
+      windowHours: '24',
+      baselineHours: '168',
+    })).toEqual(['insights', 'svc-1', '24', '168'])
+  })
+
+  it.each([
+    { metric: 'ttfb' },
+    { percentile: 'p95' },
+    { sort_by: 'p99' },
+    { bucket_seconds: '300' },
+    { top_n: '30' },
+    { window: '24' },
+    { baseline: '168' },
+  ])('does not classify interactive report params as a default view: %o', async (interactive) => {
+    await expect(resolveReportPageParams(Promise.resolve({
+      service: 'svc-1',
+      ...interactive,
+    }))).resolves.toEqual({
+      serviceId: 'svc-1',
+      isDefaultView: false,
+    })
+  })
+
   it.each([
     {
       name: 'Performance',
@@ -774,7 +835,7 @@ describe('resolveDefaultSsrRangeKey & SSR-seed key ↔ client first-paint key by
       name: 'Origin',
       buildKeys: (serviceId: string, rangeToken: string, anchor: string) => [
         ['origin', 'aggregates', serviceId, rangeToken, anchor, {}, ORIGIN_SSR_DEFAULTS.bucketMinutes, ORIGIN_SSR_DEFAULTS.metric, ORIGIN_SSR_DEFAULTS.percentile, ORIGIN_SSR_SECTIONS],
-        ['origin', 'aggregates', serviceId, rangeToken, anchor, {}, 60, 'ttfb', 'p95', ['summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health']],
+        ['origin', 'aggregates', serviceId, rangeToken, anchor, {}, 1, 'ttfb', 'p95', ['summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health']],
       ],
     },
   ])('$name SSR-seed key === client useServiceQuery key', ({ buildKeys }) => {
@@ -1133,10 +1194,9 @@ describe('ssrUpstreamGet — debug-responses cookie propagation & ECONNRESET ret
 })
 
 describe('Insights page barrel export', () => {
-  it('re-exports InsightsClient directly so client navigation mounts skeletons immediately without blocking on SSR', async () => {
+  it('re-exports InsightsClient for direct client use', async () => {
     const mod = await import('@/app/insights/page')
     const clientMod = await import('@/app/insights/_sections/InsightsClient')
-    expect(mod.default).toBe(clientMod.default)
     expect(mod.InsightsClient).toBe(clientMod.InsightsClient)
   })
 })

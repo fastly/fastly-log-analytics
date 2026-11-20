@@ -24,6 +24,7 @@ import { useDateFormat } from '@/hooks/useSSE'
 import { useTimezone } from '@/hooks/usePersistentPreferences'
 import { client, queryKeys, unwrapClient } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { insightsReportQueryKey } from '@/lib/report-query-key'
 import {
   groupInsightsBySection,
   historyHoursFromExtents,
@@ -97,9 +98,12 @@ function InsightsBody({
   const [activeTab, setActiveTab] = useQueryState('tab', parseAsString.withDefault(normalizeTabKey(initialTab)))
   const hasActiveFilters = Boolean(filterPayload && Object.keys(filterPayload).length > 0)
 
-  const insightsQueryKey = hasActiveFilters
-    ? ['insights', activeServiceId, windowHours, baselineHours, filterPayload]
-    : ['insights', activeServiceId, windowHours, baselineHours]
+  const insightsQueryKey = insightsReportQueryKey({
+    serviceId: activeServiceId,
+    windowHours,
+    baselineHours,
+    filterPayload: hasActiveFilters ? filterPayload : undefined,
+  })
   const { data, isLoading: scanLoading, error, isSuccess, isFetching, isPlaceholderData } = useQuery({
     queryKey: insightsQueryKey,
     queryFn: async ({ signal }) => {

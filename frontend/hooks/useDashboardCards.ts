@@ -16,6 +16,7 @@ import { INTERVAL_SECONDS, INTERVALS, historyHoursFromExtents, pickInsightsDefau
 import { useFilterStore } from '@/stores/filterStore'
 import type { Simplify, WithRequired, components } from '@/types/api'
 import { measureCloudQuery } from '@/lib/cloud-engine/readiness'
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
 
 export { useDebounce, useFilterPayload, useDebouncedFilterPayload }
 export * from './useDashboardCardDefinitions'
@@ -231,14 +232,14 @@ export function useAnalyticsReportQuery<TData>({
   queryOptions,
 }: AnalyticsReportQueryArgs<TData>) {
   const { rangeKey, rangeBody, rangeToken } = resolveRangeWire(range)
-  const queryKey: unknown[] = [
-    ...namespace,
+  const queryKey = analyticsReportQueryKey({
+    namespace,
     serviceId,
-    rangeKey,
-    range.anchor,
+    rangeToken: rangeKey,
+    anchor: range.anchor,
     filterPayload,
-    ...(keyParts ?? []),
-  ]
+    keyParts,
+  })
   return useServiceQuery<TData>(
     queryKey,
     ({ signal }) => measureCloudQuery(
