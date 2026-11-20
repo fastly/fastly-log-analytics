@@ -378,11 +378,7 @@ describe("Cloud RUM status and versions services lookup", () => {
     const listed = {
       services: [
         { service_id: "fixture-a", active_log_field_ids: ["status", "host"] },
-        {
-          service_id: "fixture-b",
-          active_log_field_ids: ["status", "pop", "tenant", "cmcd_sid"],
-          cmcd: { enabled: false },
-        },
+        { service_id: "fixture-b", active_log_field_ids: ["status", "pop", "tenant"], cmcd: { enabled: true } },
       ],
     };
     let servicesBody: unknown = listed;
@@ -396,7 +392,7 @@ describe("Cloud RUM status and versions services lookup", () => {
       (await handleCloudAnalyticalRequest(request("/api/bootstrap", "GET", undefined, serviceId)))!.json();
 
     const active = await boot("fixture-b");
-    expect(active.active_log_field_ids).toEqual(["status", "pop", "tenant", "cmcd_sid"]);
+    expect(active.active_log_field_ids).toEqual(["status", "pop", "tenant"]);
     expect(active.services.find((service: { service_id: string }) => service.service_id === "fixture-b").cmcd_enabled).toBe(true);
     expect(active.fastly_bots_available).toBe(true);
     expect(active.ngwaf_configured).toBe(false);

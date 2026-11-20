@@ -1024,9 +1024,7 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
       ...s,
       service_id: s.service_id,
       name: s.name || s.service_name || s.service_id,
-      cmcd_enabled:
-        Boolean(s.cmcd?.enabled) ||
-        (s.active_log_field_ids ?? []).some((field) => field.startsWith("cmcd_")),
+      cmcd_enabled: Boolean(s.cmcd?.enabled),
       rum_enabled: Boolean(s.rum_enabled),
     }));
     const services = mappedServices;
