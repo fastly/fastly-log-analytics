@@ -400,6 +400,7 @@ pub fn cleanup_temp(
     service: &Service,
     token: &str,
 ) -> Result<bool, Error> {
+    let _ = credentials(context, service)?;
     let inventory = keys(context, token)?;
     let description = temporary_description(service);
     if let Some(key) = inventory.iter().find(|v| v["description"] == description) {

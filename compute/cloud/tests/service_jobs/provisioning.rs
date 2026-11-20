@@ -1679,6 +1679,17 @@ fn sec20a_service_patch_rejects_poisoned_custom_and_disabled_rum_conditions() {
 }
 
 #[test]
+fn cleanup_temp_waits_for_permanent_credentials_before_deleting_temp_key() {
+    let platform = Platform::new();
+    let job = platform.until(platform.provision()["job"].clone(), "cleanup_temp");
+    platform.adapter.override_secret_reads("fos_sk.", Ok(None));
+    let next = platform.retry(&job);
+    assert_eq!(next["status"], "pending");
+    assert_eq!(next["step"], "cleanup_temp");
+    assert_eq!(next["retry_reason"], "credentials_pending");
+}
+
+#[test]
 fn cleanup_temp_secrets_waits_for_permanent_credentials_before_deleting_temp_secrets() {
     let platform = Platform::new();
     let job = platform.until(platform.provision()["job"].clone(), "cleanup_temp_secrets");
