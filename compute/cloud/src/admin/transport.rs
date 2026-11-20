@@ -606,7 +606,7 @@ impl<'a, R: Runtime> Context<'a, R> {
             }
             if !matches!(method, "GET" | "HEAD")
                 && self.dispatch_journal.borrow().is_some()
-                && (self.calls.get() + 3 + 4 > 24 || self.runtime.admin_remaining_calls() < 7)
+                && (self.calls.get() + 1 + 4 > 24 || self.runtime.admin_remaining_calls() < 5)
             {
                 return Err(self.retry_error(
                     &operation,
