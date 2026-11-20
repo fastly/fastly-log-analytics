@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cloudStreamFetch, handleCloudAnalyticalRequest } from "./adapter";
+import {
+  cloudStreamFetch,
+  handleCloudAnalyticalRequest,
+  resetCloudMetadataCache,
+} from "./adapter";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { cloudRumMutation } from "./rum-management";
 
@@ -47,6 +51,7 @@ function nativeApi({
 }
 
 afterEach(() => {
+  resetCloudMetadataCache();
   vi.unstubAllGlobals();
 });
 
@@ -146,6 +151,75 @@ describe("Cloud RUM native lifecycle bridge", () => {
       generation: "generation-7", activate: true, dry_run: false,
       rum: { ...rum, ...changes },
     });
+  });
+
+  it("does not cache stale bootstrap services while a streaming config mutation is running", async () => {
+    let completeJob!: () => void;
+    let jobStarted!: () => void;
+    const jobStartedPromise = new Promise<void>((resolve) => { jobStarted = resolve; });
+    const jobStep = new Promise<void>((resolve) => { completeJob = resolve; });
+    let configured = false;
+    const services = vi.fn(async () =>
+      Response.json({ services: [{
+        service_id: "svc-1",
+        rum: { ...rum, enabled: configured },
+      }] }),
+    );
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request
+        ? input
+        : new Request(new URL(String(input), "http://localhost"), init);
+      if (request.method === "GET" && request.url.endsWith("/api/auth/session")) {
+        return Response.json({ user: { id: "fixture-user", role: "admin" } });
+      }
+      if (request.method === "GET" && request.url.endsWith("/api/services")) return services();
+      if (request.method === "GET" && request.url.endsWith("/api/admin/services/svc-1")) {
+        return Response.json({ service: { rum: { ...rum, enabled: false } }, generation: "generation-7" });
+      }
+      if (request.method === "POST" && request.url.endsWith("/api/admin/services/svc-1/reconcile")) {
+        return Response.json({ job: { id: "job-1", status: "pending" } });
+      }
+      if (request.method === "POST" && request.url.endsWith("/api/admin/jobs/job-1/step")) {
+        jobStarted();
+        await jobStep;
+        configured = true;
+        return Response.json({ job: { id: "job-1", status: "complete" } });
+      }
+      throw new Error(`Unexpected native request: ${request.method} ${request.url}`);
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    const initial = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/bootstrap"),
+    );
+    expect(await initial?.json()).toMatchObject({
+      services: [{ service_id: "svc-1", rum_enabled: false }],
+    });
+
+    const mutation = await cloudStreamFetch(
+      "http://localhost/api/services/svc-1/rum/enable",
+      { method: "POST", body: "{}" },
+    );
+    await jobStartedPromise;
+
+    const during = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/bootstrap"),
+    );
+    expect(await during?.json()).toMatchObject({
+      services: [{ service_id: "svc-1", rum_enabled: false }],
+    });
+    expect(services).toHaveBeenCalledTimes(1);
+
+    completeJob();
+    await mutation.text();
+
+    const after = await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/bootstrap"),
+    );
+    expect(await after?.json()).toMatchObject({
+      services: [{ service_id: "svc-1", rum_enabled: true }],
+    });
+    expect(services).toHaveBeenCalledTimes(2);
   });
 
   it("does not report settings saved when native reconciliation fails", async () => {

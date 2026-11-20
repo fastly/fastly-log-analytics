@@ -763,7 +763,11 @@ async function handleCloudRequest(
     resetUsageSettingsCache();
   }
   const response = await handleCloudRequestInner(request, origin);
-  if (configMutation && response?.ok) invalidateCloudConfigMetadata();
+  const isEventStream =
+    response?.headers.get("content-type")?.includes("text/event-stream") === true;
+  if (configMutation && response?.ok && !isEventStream) {
+    invalidateCloudConfigMetadata();
+  }
   return response;
 }
 
@@ -787,7 +791,21 @@ async function handleCloudRequestInner(
   const url = new URL(request.url);
   const path = url.pathname;
   const runJobStream = (jobId: string, signal: AbortSignal) => {
-    return sseResponse((emit) => stepJobToCompletion(jobId, emit, signal), signal);
+    return sseResponse((emit) => {
+      let invalidated = false;
+      const emitAndInvalidate: SseEmit = (payload) => {
+        emit(payload);
+        if (
+          !invalidated &&
+          payload.type === "done" &&
+          payload.status === "complete"
+        ) {
+          invalidated = true;
+          invalidateCloudConfigMetadata();
+        }
+      };
+      return stepJobToCompletion(jobId, emitAndInvalidate, signal);
+    }, signal);
   };
   if (request.method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
     return cloudRumMutation(request, runJobStream);
