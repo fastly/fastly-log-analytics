@@ -1740,6 +1740,7 @@ def test_cdn_get_blocks_invalid_redirects():
 
     # 1. Test redirect to safe same-host HTTPS URL
     req_mock = MagicMock()
+    req_mock.full_url = "https://cdn-test.fastly.net/some/key.json"
     # It delegates to super().redirect_request, so let's mock the super class call or verify it doesn't raise
     with patch("urllib.request.HTTPRedirectHandler.redirect_request") as mock_super_redirect:
         handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "https://cdn-test.fastly.net/safe")

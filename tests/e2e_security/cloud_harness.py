@@ -556,6 +556,8 @@ def ensure_cloud_binaries() -> tuple[Path, Path]:
                 "-o",
                 str(helper_bin),
             ],
+            cwd=str(CLOUD_DIR),
+            env=env,
             capture_output=True,
             text=True,
             timeout=30,

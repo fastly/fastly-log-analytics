@@ -1056,7 +1056,7 @@ def test_views_delete_rejects_unauthorized_analyst(app_with_session, view_exists
 def test_custom_fields_rejects_unauthorized_analyst(app_with_session, method: str, path: str, body: dict | None):
     with TestClient(app_with_session) as c:
         r = c.request(method, path, json=body, headers={"x-test-session-services": "svc-A"})
-    assert _scope_403(r), r.text
+    assert r.status_code == 403 and r.json().get("detail", {}).get("error") == "admin_only", r.text
 
 
 @pytest.mark.security_regression
