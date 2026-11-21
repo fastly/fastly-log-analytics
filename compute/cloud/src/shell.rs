@@ -1392,10 +1392,20 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         }
         let service_body: Value =
             serde_json::from_slice(&service_response.body).map_err(|_| AuthError::Storage)?;
-        let services = service_body["services"]
+        let mut services = service_body["services"]
             .as_array()
             .cloned()
             .unwrap_or_default();
+        for service in &mut services {
+            if let Some(object) = service.as_object_mut() {
+                let cmcd_enabled = object
+                    .get("cmcd")
+                    .and_then(|cmcd| cmcd.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                object.insert("cmcd_enabled".into(), json!(cmcd_enabled));
+            }
+        }
         let requested = request
             .query_param("service_id")
             .or_else(|| request.header("x-service-id").map(str::to_owned));
@@ -1440,6 +1450,15 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             })
             .transpose()?
             .unwrap_or_default();
+        let header_badge = if matches!(user.role, Role::Analyst | Role::AnalystNoPii) {
+            let status = self.sync_status();
+            Some(json!({
+                "request": status["request"],
+                "rum": status["rum"],
+            }))
+        } else {
+            None
+        };
 
         Ok(json_response(json!({
             "runtime_mode": "cloud",
@@ -1449,6 +1468,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             "active_log_field_ids": active_fields,
             "log_fields_catalog": catalog,
             "views": views,
+            "header_badge": header_badge,
             "build_sha": env!("FLP_BUILD_SHA"),
             "ngwaf_configured": false,
             "fastly_bots_available": true,
@@ -2930,6 +2950,7 @@ mod tests {
         assert_eq!(response.status, 200);
         let body: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(body["services"][0]["service_id"], "fixtureService");
+        assert_eq!(body["services"][0]["cmcd_enabled"], false);
         assert_eq!(body["active_service_id"], "fixtureService");
         assert!(!body["active_log_field_ids"].as_array().unwrap().is_empty());
         assert!(!body["log_fields_catalog"]["fields"]
@@ -2971,6 +2992,8 @@ mod tests {
             assert!(service.get("fos_bucket").is_none());
             assert_eq!(service["service_id"], "fixtureService");
             assert_eq!(service["cmcd"]["enabled"], false);
+            assert_eq!(service["cmcd_enabled"], false);
+            assert!(body["header_badge"].is_object());
             assert!(!service["active_log_field_ids"]
                 .as_array()
                 .unwrap()
