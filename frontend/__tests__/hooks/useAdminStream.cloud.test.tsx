@@ -4,10 +4,9 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useHeaderBadgeStream } from '@/hooks/useAdminStream'
 import { queryKeys } from '@/lib/api'
-import type { readIngestEvents } from '@/lib/cloud-engine/telemetry/engine'
 
 const mocks = vi.hoisted(() => ({
-  readIngestEvents: vi.fn<typeof readIngestEvents>(),
+  fetch: vi.fn<typeof fetch>(),
   observeCatalogCommit: vi.fn(),
   service: { activeServiceId: 'svc-1' as string | null },
 }))
@@ -15,9 +14,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/cloud-engine/mode', () => ({
   IS_CLOUD_MODE: true,
   isCloudMode: () => true,
-}))
-vi.mock('@/lib/cloud-engine/telemetry/engine', () => ({
-  readIngestEvents: mocks.readIngestEvents,
 }))
 vi.mock('@/lib/cloud-engine/dashboard/catalog-manifest', () => ({
   observeCatalogCommit: mocks.observeCatalogCommit,
@@ -27,32 +23,36 @@ vi.mock('@/stores/filterStore', async (importOriginal) => ({
   useServiceStore: (selector: (state: typeof mocks.service) => unknown) => selector(mocks.service),
 }))
 
-type IngestResult = Awaited<ReturnType<typeof readIngestEvents>>
-
-function emptyResult(): IngestResult {
-  return { events: [], nextCursorMs: 0, seenIds: new Set() }
+function frame(
+  event: string,
+  cursor: string,
+  retry = 5000,
+  data: Record<string, unknown> = {
+    cursor,
+    generation: 42,
+    manifest: 'processed/_catalog/current.json',
+  },
+) {
+  return `retry: ${retry}\nid: ${cursor}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 }
 
-function commitResult(cursor: number, eventId = 'event-1'): IngestResult {
-  return {
-    events: [{
-      event_id: eventId, timestamp: cursor, key: 'request-file',
-      outcome: 'converted', rows_written: 1, bytes_read: 1, bytes_written: 1,
-    }],
-    nextCursorMs: cursor,
-    seenIds: new Set([eventId]),
-  }
+function response(body: string, status = 200) {
+  return new Response(body, { status })
 }
 
-function deferredResult() {
-  let resolve!: (result: IngestResult) => void
-  const promise = new Promise<IngestResult>((done) => { resolve = done })
+function deferredResponse() {
+  let resolve!: (value: Response) => void
+  const promise = new Promise<Response>((done) => { resolve = done })
   return { promise, resolve }
 }
 
 function setHidden(hidden: boolean) {
   Object.defineProperty(document, 'hidden', { configurable: true, value: hidden })
   document.dispatchEvent(new Event('visibilitychange'))
+}
+
+function requestUrls() {
+  return mocks.fetch.mock.calls.map(([url]) => String(url))
 }
 
 function mountStream() {
@@ -70,15 +70,11 @@ function mountStream() {
   return { ...hook, queryClient }
 }
 
-describe('Cloud header ingest-event polling visibility', () => {
+describe('Cloud header ingest events', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-11-06T00:00:00Z'))
-    mocks.readIngestEvents.mockReset().mockImplementation(async (_source, options) => ({
-      events: [],
-      nextCursorMs: options.lastCursorMs ?? 0,
-      seenIds: options.seenIds ?? new Set(),
-    }))
+    vi.stubGlobal('fetch', mocks.fetch)
+    mocks.fetch.mockReset().mockResolvedValue(response('retry: 5000\n\n'))
     mocks.observeCatalogCommit.mockReset()
     mocks.service.activeServiceId = 'svc-1'
     setHidden(false)
@@ -87,108 +83,153 @@ describe('Cloud header ingest-event polling visibility', () => {
   afterEach(() => {
     cleanup()
     setHidden(false)
+    vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
-  it('does not poll hidden tabs and immediately catches up with the retained cursor on return', async () => {
+  it('does not request while hidden and catches up with the retained SSE cursor', async () => {
     setHidden(true)
     const stream = mountStream()
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
-    expect(mocks.readIngestEvents).not.toHaveBeenCalled()
+    expect(mocks.fetch).not.toHaveBeenCalled()
 
-    const cursor = Date.now()
-    mocks.readIngestEvents.mockResolvedValueOnce(commitResult(cursor))
+    mocks.fetch.mockResolvedValueOnce(response(frame('commit', 'svc-1:42')))
     await act(async () => { setHidden(false); await vi.advanceTimersByTimeAsync(0) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/ingest\/events$/),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Accept: 'text/event-stream', 'x-service-id': 'svc-1' }),
+        signal: expect.any(AbortSignal),
+      }),
+    )
     expect(stream.queryClient.getQueryState(queryKeys.syncStatus('svc-1'))?.isInvalidated).toBe(true)
     expect(stream.queryClient.getQueryState(queryKeys.syncStatus('svc-2'))?.isInvalidated).toBe(false)
 
     await act(async () => { setHidden(true); await vi.advanceTimersByTimeAsync(60_000) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
     await act(async () => { setHidden(false); await vi.advanceTimersByTimeAsync(0) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(2)
-    expect(mocks.readIngestEvents.mock.calls[1][1]).toMatchObject({
-      from: new Date(cursor).toISOString(),
-      lastCursorMs: cursor,
-      seenIds: new Set(['event-1']),
-    })
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(3)
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
+    expect(mocks.fetch.mock.calls[1][0]).toContain('/api/ingest/events?cursor=svc-1%3A42')
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(3)
+    expect(requestUrls()).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('/api/logs/cron_runs/live'),
+      expect.stringContaining('/api/files'),
+    ]))
   })
 
-  it('coalesces visibility catch-up without overlapping an in-flight read', async () => {
-    const pending = deferredResult()
-    mocks.readIngestEvents.mockReturnValueOnce(pending.promise)
+  it('coalesces visibility catch-up without overlapping an in-flight request', async () => {
+    const pending = deferredResponse()
+    mocks.fetch.mockReturnValueOnce(pending.promise)
     mountStream()
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
     await act(async () => {
       setHidden(true)
       await vi.advanceTimersByTimeAsync(60_000)
       setHidden(false)
       document.dispatchEvent(new Event('visibilitychange'))
     })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(1)
-    const cursor = Date.now()
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
     await act(async () => {
-      pending.resolve(commitResult(cursor))
+      pending.resolve(response(frame('ready', 'svc-1:41')))
       await vi.advanceTimersByTimeAsync(0)
     })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(2)
-    expect(mocks.readIngestEvents.mock.calls[1][1].lastCursorMs).toBe(cursor)
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(3)
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
+    expect(mocks.fetch.mock.calls[1][0]).toContain('/api/ingest/events?cursor=svc-1%3A41')
   })
 
-  it('recovers after a transient failure and removes timers, visibility wakeups and late results on cleanup', async () => {
-    mocks.readIngestEvents.mockRejectedValueOnce(new Error('temporary listing failure'))
-    const pending = deferredResult()
-    mocks.readIngestEvents.mockReturnValueOnce(pending.promise)
+  it('initializes on ready and observes only commit and resync events', async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(response(frame('ready', 'svc-1:41')))
+      .mockResolvedValueOnce(response(frame('commit', 'svc-1:42')))
+      .mockResolvedValueOnce(response(frame('resync', 'svc-1:50')))
+    const { queryClient } = mountStream()
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(mocks.observeCatalogCommit).not.toHaveBeenCalled()
+    expect(invalidate).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
+      expect.any(Function),
+      { type: 'commit', generation: 42, manifest: 'processed/_catalog/current.json' },
+    )
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
+      expect.any(Function),
+      { type: 'resync', generation: 42, manifest: 'processed/_catalog/current.json' },
+    )
+    expect(invalidate).toHaveBeenCalledTimes(2)
+    expect(requestUrls().every((url) => url.includes('/api/ingest/events'))).toBe(true)
+  })
+
+  it('uses bounded server reconnect delays', async () => {
+    mocks.fetch
+      .mockResolvedValueOnce(response(frame('ready', 'svc-1:1', 20)))
+      .mockResolvedValueOnce(response(frame('ready', 'svc-1:2', 90_000)))
+    mountStream()
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(999) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
+    await act(async () => { await vi.advanceTimersByTimeAsync(29_999) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('recovers after a transient failure and removes timers, wakeups, and late results on cleanup', async () => {
+    mocks.fetch.mockRejectedValueOnce(new Error('temporary event failure'))
+    const pending = deferredResponse()
+    mocks.fetch.mockReturnValueOnce(pending.promise)
     const { unmount } = mountStream()
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
     await act(async () => { setHidden(true); await vi.advanceTimersByTimeAsync(60_000) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
     await act(async () => { setHidden(false); await vi.advanceTimersByTimeAsync(0) })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(2)
-    const signal = mocks.readIngestEvents.mock.calls[1][1].signal
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
+    const signal = mocks.fetch.mock.calls[1][1]?.signal
     unmount()
     expect(signal?.aborted).toBe(true)
     await act(async () => {
-      pending.resolve(commitResult(Date.now()))
+      pending.resolve(response(frame('commit', 'svc-1:42')))
       setHidden(true)
       setHidden(false)
       await vi.advanceTimersByTimeAsync(60_000)
     })
-    expect(mocks.readIngestEvents).toHaveBeenCalledTimes(2)
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
     expect(mocks.observeCatalogCommit).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('ignores a previous service read after replacement without contaminating its cursor or invalidating the new service', async () => {
-    const oldRead = deferredResult()
-    const newRead = deferredResult()
-    mocks.readIngestEvents.mockReturnValueOnce(oldRead.promise).mockReturnValueOnce(newRead.promise)
+  it('aborts an old service request and starts the replacement with a fresh cursor', async () => {
+    const oldRead = deferredResponse()
+    const newRead = deferredResponse()
+    mocks.fetch.mockReturnValueOnce(oldRead.promise).mockReturnValueOnce(newRead.promise)
     const { rerender, queryClient } = mountStream()
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    const oldSignal = mocks.readIngestEvents.mock.calls[0][1].signal
+    const oldSignal = mocks.fetch.mock.calls[0][1]?.signal
     mocks.service.activeServiceId = 'svc-2'
     rerender({ enabled: true })
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(oldSignal?.aborted).toBe(true)
+    expect(mocks.fetch.mock.calls[1][0]).toMatch(/\/api\/ingest\/events$/)
     await act(async () => {
-      mocks.readIngestEvents.mock.calls[0][1].seenIds?.add('stale-event')
-      oldRead.resolve(commitResult(Date.now(), 'stale-event'))
+      oldRead.resolve(response(frame('commit', 'svc-1:99')))
       await vi.advanceTimersByTimeAsync(0)
     })
     expect(mocks.observeCatalogCommit).not.toHaveBeenCalled()
     expect(queryClient.getQueryState(queryKeys.syncStatus('svc-1'))?.isInvalidated).toBe(false)
     expect(queryClient.getQueryState(queryKeys.syncStatus('svc-2'))?.isInvalidated).toBe(false)
     await act(async () => {
-      newRead.resolve(emptyResult())
-      await vi.advanceTimersByTimeAsync(15_000)
+      newRead.resolve(response('retry: 5000\n\n'))
+      await vi.advanceTimersByTimeAsync(5_000)
     })
-    expect(mocks.readIngestEvents.mock.calls[2][1].lastCursorMs).toBe(0)
-    expect(mocks.readIngestEvents.mock.calls[2][1].seenIds).toEqual(new Set())
+    expect(mocks.fetch.mock.calls[2][0]).toMatch(/\/api\/ingest\/events$/)
   })
 })
