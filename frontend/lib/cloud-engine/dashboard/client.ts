@@ -337,6 +337,13 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     const id = this.allocateId();
     worker.postMessage({ id, type: "prewarm" } satisfies WorkerRequest);
   }
+
+  catalogChanged(): void {
+    const worker = this.getWorker(this.handleMessage);
+    if (!worker) return;
+    const id = this.allocateId();
+    worker.postMessage({ id, type: "catalogChanged" } satisfies WorkerRequest);
+  }
 }
 
 let rpcClient: DashboardWorkerClient | null = null;
@@ -392,6 +399,10 @@ export function answerRollupInWorker(
 
 export function prewarmDashboardEngine(): void {
   getClient().prewarm();
+}
+
+export function notifyDashboardCatalogChange(): void {
+  rpcClient?.catalogChanged();
 }
 
 export async function clearDashboardData(): Promise<void> {

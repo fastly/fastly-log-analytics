@@ -8,6 +8,7 @@ import { queryKeys } from '@/lib/api'
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn<typeof fetch>(),
   observeCatalogCommit: vi.fn(),
+  notifyDashboardCatalogChange: vi.fn(),
   service: { activeServiceId: 'svc-1' as string | null },
 }))
 
@@ -17,6 +18,9 @@ vi.mock('@/lib/cloud-engine/mode', () => ({
 }))
 vi.mock('@/lib/cloud-engine/dashboard/catalog-manifest', () => ({
   observeCatalogCommit: mocks.observeCatalogCommit,
+}))
+vi.mock('@/lib/cloud-engine/dashboard/client', () => ({
+  notifyDashboardCatalogChange: mocks.notifyDashboardCatalogChange,
 }))
 vi.mock('@/stores/filterStore', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/stores/filterStore')>()),
@@ -76,6 +80,7 @@ describe('Cloud header ingest events', () => {
     vi.stubGlobal('fetch', mocks.fetch)
     mocks.fetch.mockReset().mockResolvedValue(response('retry: 5000\n\n'))
     mocks.observeCatalogCommit.mockReset()
+    mocks.notifyDashboardCatalogChange.mockReset()
     mocks.service.activeServiceId = 'svc-1'
     setHidden(false)
   })
@@ -140,7 +145,7 @@ describe('Cloud header ingest events', () => {
     expect(mocks.fetch.mock.calls[1][0]).toContain('/api/ingest/events?cursor=svc-1%3A41')
   })
 
-  it('initializes on ready and observes only commit and resync events', async () => {
+  it('synchronizes ready, commit, and resync events with page and worker catalogs', async () => {
     mocks.fetch
       .mockResolvedValueOnce(response(frame('ready', 'svc-1:41')))
       .mockResolvedValueOnce(response(frame('commit', 'svc-1:42')))
@@ -149,7 +154,11 @@ describe('Cloud header ingest events', () => {
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(mocks.observeCatalogCommit).not.toHaveBeenCalled()
+    expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
+      expect.any(Function),
+      { type: 'ready', generation: 42, manifest: 'processed/_catalog/current.json' },
+    )
+    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledTimes(1)
     expect(invalidate).not.toHaveBeenCalled()
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
     expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
@@ -157,12 +166,14 @@ describe('Cloud header ingest events', () => {
       { type: 'commit', generation: 42, manifest: 'processed/_catalog/current.json' },
     )
     expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledTimes(2)
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
     expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
       expect.any(Function),
       { type: 'resync', generation: 42, manifest: 'processed/_catalog/current.json' },
     )
     expect(invalidate).toHaveBeenCalledTimes(2)
+    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledTimes(3)
     expect(requestUrls().every((url) => url.includes('/api/ingest/events'))).toBe(true)
   })
 
@@ -180,6 +191,16 @@ describe('Cloud header ingest events', () => {
     expect(mocks.fetch).toHaveBeenCalledTimes(2)
     await act(async () => { await vi.advanceTimersByTimeAsync(1) })
     expect(mocks.fetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops polling after an authentication failure', async () => {
+    mocks.fetch.mockResolvedValueOnce(response('', 401))
+    mountStream()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('recovers after a transient failure and removes timers, wakeups, and late results on cleanup', async () => {

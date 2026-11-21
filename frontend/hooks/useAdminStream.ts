@@ -20,6 +20,7 @@ import {
 import { useEventStream } from './useEventStream'
 import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import { observeCatalogCommit } from '@/lib/cloud-engine/dashboard/catalog-manifest'
+import { notifyDashboardCatalogChange } from '@/lib/cloud-engine/dashboard/client'
 import { browserSource } from '@/lib/cloud-engine/dashboard/sources'
 
 // ── Service & Admin Multiplex Streams ────────────────────────────────────────
@@ -152,7 +153,10 @@ export function useHeaderBadgeStream(enabled: boolean) {
           credentials: 'include',
           signal: controller.signal,
         })
-        if (response.status === 401 || response.status === 403) return
+        if (response.status === 401 || response.status === 403) {
+          stopped = true
+          return
+        }
         if (!response.ok) throw new Error(`Ingest event read failed (${response.status})`)
         if (stopped || controller.signal.aborted || document.hidden) return
         const parsed = parseIngestEventFrame(await response.text())
@@ -161,7 +165,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
           reconnectMs = Math.min(30_000, Math.max(1_000, parsed.retry))
         }
         if (parsed.id) cursorRef.current = parsed.id
-        if (parsed.event === 'commit' || parsed.event === 'resync') {
+        if (parsed.event === 'ready' || parsed.event === 'commit' || parsed.event === 'resync') {
           const generation = Number(parsed.data?.generation)
           if (Number.isSafeInteger(generation) && generation >= 0) {
             observeCatalogCommit(source.fetchJson, {
@@ -169,7 +173,10 @@ export function useHeaderBadgeStream(enabled: boolean) {
               generation,
               manifest: typeof parsed.data?.manifest === 'string' ? parsed.data.manifest : undefined,
             })
-            void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+            notifyDashboardCatalogChange()
+            if (parsed.event !== 'ready') {
+              void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+            }
           }
         }
       } catch {

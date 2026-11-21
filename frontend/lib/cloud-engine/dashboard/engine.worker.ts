@@ -35,7 +35,7 @@ type SearchMessage = {
 
 type ControlMessage = {
   id: number;
-  type: "prewarm" | "clearCache";
+  type: "prewarm" | "clearCache" | "catalogChanged";
   pageLoadId?: string | null;
   reportApiCalls?: boolean;
 };
@@ -164,6 +164,13 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     sharedSource?.clearMemoryCache?.();
     await getDuckDBEngine().reset();
     ctx.post({ id: msg.id, type: "result", result: null });
+    return;
+  }
+  if (msg.type === "catalogChanged") {
+    clearDashboardMemo();
+    clearManifestCache();
+    sharedSource?.clearMemoryCache?.();
+    rollupBase?.clearMemoryCache?.();
     return;
   }
   if (msg.type === "execute_sql") {
