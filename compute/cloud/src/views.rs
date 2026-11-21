@@ -192,6 +192,9 @@ fn is_pii_identifier(raw: &str) -> bool {
 }
 
 fn decode_rfc8259_escapes(raw: &str) -> Option<String> {
+    if raw.contains('\0') {
+        return None;
+    }
     let bytes = raw.as_bytes();
     let mut out = String::with_capacity(raw.len());
     let mut idx = 0usize;
@@ -239,6 +242,9 @@ fn decode_rfc8259_escapes(raw: &str) -> Option<String> {
             b'u' => {
                 let hex_hi = std::str::from_utf8(bytes.get(idx + 2..idx + 6)?).ok()?;
                 let hi = u16::from_str_radix(hex_hi, 16).ok()?;
+                if hi == 0 {
+                    return None;
+                }
                 if (0xD800..=0xDBFF).contains(&hi) {
                     if bytes.get(idx + 6) != Some(&b'\\') || bytes.get(idx + 7) != Some(&b'u') {
                         return None;
@@ -261,10 +267,16 @@ fn decode_rfc8259_escapes(raw: &str) -> Option<String> {
             _ => return None,
         }
     }
+    if out.contains('\0') {
+        return None;
+    }
     Some(out)
 }
 
 fn check_single_key_or_json_path(raw: &str) -> bool {
+    if raw.contains('\0') {
+        return true;
+    }
     let trimmed = trim_sql_ws(raw);
     if trimmed.is_empty()
         || matches!(trimmed, "$" | "/" | "{}" | "[]")
@@ -309,35 +321,41 @@ fn is_pii_key_or_json_path(raw: &str) -> bool {
 }
 
 fn columns_arg_references_pii(lit: &str) -> bool {
-    if lit.trim().is_empty() || is_pii_identifier(lit) {
+    if lit.contains('\0') {
         return true;
     }
-    if lit.chars().any(|c| {
-        !(c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '-' | '^' | '$' | '(' | ')' | '|'))
-    }) {
+    let Some(inner) = trim_sql_ws(lit)
+        .strip_prefix('^')
+        .and_then(|s| s.strip_suffix('$'))
+    else {
+        return true;
+    };
+    let body = if let Some(unwrapped) = inner.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        if unwrapped.contains(['(', ')']) {
+            return true;
+        }
+        unwrapped
+    } else {
+        if inner.contains(['(', ')', '|']) {
+            return true;
+        }
+        inner
+    };
+    if body.is_empty() {
         return true;
     }
-    let bytes = lit.as_bytes();
-    for (idx, &b) in bytes.iter().enumerate() {
-        if b == b'('
-            && idx > 0
-            && (bytes[idx - 1].is_ascii_alphanumeric() || matches!(bytes[idx - 1], b'_' | b'-'))
-        {
-            return true;
-        }
-        if b == b')'
-            && idx + 1 < bytes.len()
-            && (bytes[idx + 1].is_ascii_alphanumeric() || matches!(bytes[idx + 1], b'_' | b'-'))
-        {
-            return true;
-        }
-    }
-    lit.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-        .any(|tok| {
-            !tok.is_empty()
-                && (is_pii_identifier(tok)
-                    || (tok.contains('-') && tok.split('-').any(is_pii_key_exact)))
-        })
+    body.split('|').any(|alt| {
+        alt.is_empty()
+            || !alt
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            || is_pii_identifier(alt)
+            || is_extra_column_ident(alt)
+            || (alt.contains('-')
+                && alt
+                    .split('-')
+                    .any(|seg| is_pii_key_exact(seg) || is_extra_column_ident(seg)))
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -361,6 +379,9 @@ fn decode_hex_char(bytes: &[u8]) -> Option<char> {
     }
     let hex_str = std::str::from_utf8(bytes).ok()?;
     let code = u32::from_str_radix(hex_str, 16).ok()?;
+    if code == 0 {
+        return None;
+    }
     char::from_u32(code)
 }
 
@@ -413,7 +434,7 @@ fn decode_sql_e_escape(s: &str, i: usize, out: &mut Option<String>) -> Option<us
             }
             let hex_str = std::str::from_utf8(&bytes[i + 2..i + 2 + count]).ok()?;
             let val = u8::from_str_radix(hex_str, 16).ok()?;
-            if val >= 0x80 {
+            if val == 0 || val >= 0x80 {
                 return None;
             }
             if let Some(buf) = out.as_mut() {
@@ -447,7 +468,7 @@ fn decode_sql_e_escape(s: &str, i: usize, out: &mut Option<String>) -> Option<us
             let oct_str = std::str::from_utf8(&bytes[i + 1..i + 1 + count]).ok()?;
             let val = u32::from_str_radix(oct_str, 8).ok()?;
             let byte = (val & 0xff) as u8;
-            if byte >= 0x80 {
+            if byte == 0 || byte >= 0x80 {
                 return None;
             }
             if let Some(buf) = out.as_mut() {
@@ -457,6 +478,9 @@ fn decode_sql_e_escape(s: &str, i: usize, out: &mut Option<String>) -> Option<us
         }
         _ => {
             let next_ch = s.get(i + 1..)?.chars().next()?;
+            if next_ch == '\0' {
+                return None;
+            }
             if let Some(buf) = out.as_mut() {
                 buf.push(next_ch);
             }
@@ -703,10 +727,12 @@ fn json_contains_object_is_safe(val: &Value, depth: usize) -> bool {
         return false;
     }
     map.iter().all(|(k, v)| {
-        !is_pii_key_or_json_path(k)
+        !k.contains('\0')
+            && !is_pii_key_or_json_path(k)
             && !is_extra_column_ident(k)
             && match v {
-                Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => true,
+                Value::String(s) => !s.contains('\0'),
+                Value::Number(_) | Value::Bool(_) | Value::Null => true,
                 Value::Object(_) => json_contains_object_is_safe(v, depth + 1),
                 Value::Array(_) => false,
             }
@@ -714,7 +740,7 @@ fn json_contains_object_is_safe(val: &Value, depth: usize) -> bool {
 }
 
 fn json_contains_needle_references_pii(lit: &str) -> bool {
-    if json_has_duplicate_keys(lit) {
+    if lit.contains('\0') || json_has_duplicate_keys(lit) {
         return true;
     }
     let Ok(parsed) = serde_json::from_str::<Value>(lit) else {
@@ -734,10 +760,11 @@ fn json_struct_schema_object_is_safe(val: &Value, depth: usize) -> bool {
         return false;
     }
     map.iter().all(|(k, v)| {
-        !is_pii_key_or_json_path(k)
+        !k.contains('\0')
+            && !is_pii_key_or_json_path(k)
             && !is_extra_column_ident(k)
             && match v {
-                Value::String(ty) => is_safe_duckdb_scalar_schema_type(ty),
+                Value::String(ty) => !ty.contains('\0') && is_safe_duckdb_scalar_schema_type(ty),
                 Value::Object(_) => json_struct_schema_object_is_safe(v, depth + 1),
                 _ => false,
             }
@@ -745,7 +772,7 @@ fn json_struct_schema_object_is_safe(val: &Value, depth: usize) -> bool {
 }
 
 fn json_struct_schema_references_pii(lit: &str) -> bool {
-    if json_has_duplicate_keys(lit) {
+    if lit.contains('\0') || json_has_duplicate_keys(lit) {
         return true;
     }
     let Ok(parsed) = serde_json::from_str::<Value>(lit) else {
@@ -1148,7 +1175,6 @@ fn is_from_alias_stop_keyword(lower: &str) -> bool {
             | "anti"
             | "positional"
             | "asof"
-            | "sample"
             | "tablesample"
             | "lateral"
             | "pivot"
@@ -1156,8 +1182,6 @@ fn is_from_alias_stop_keyword(lower: &str) -> bool {
             | "pivot_wider"
             | "pivot_longer"
             | "select"
-            | "set"
-            | "values"
             | "into"
             | "returning"
             | "for"
@@ -1410,6 +1434,11 @@ fn has_positional_wildcard_subquery_or_setop(
                 continue;
             }
             RelTok::Star => {
+                let nearest_query_disallows_wildcard = scopes
+                    .iter()
+                    .rev()
+                    .find(|sc| !sc.is_expr_paren)
+                    .is_some_and(|sc| sc.in_setop_branch || sc.in_disallowed_wildcard_subquery);
                 let is_qual_star = idx >= 2
                     && matches!(tokens.get(idx - 1), Some(RelTok::Dot))
                     && matches!(
@@ -1417,15 +1446,24 @@ fn has_positional_wildcard_subquery_or_setop(
                         Some(RelTok::Ident { .. } | RelTok::RParen)
                     );
                 if is_qual_star {
-                    if scopes
-                        .iter()
-                        .rev()
-                        .find(|sc| !sc.is_expr_paren)
-                        .is_some_and(|sc| sc.in_setop_branch || sc.in_disallowed_wildcard_subquery)
-                    {
+                    if nearest_query_disallows_wildcard {
                         return true;
                     }
-                } else if !cur.is_expr_paren && cur.in_select_list {
+                } else if cur.is_expr_paren {
+                    let is_paren_or_arg_star = idx > 0
+                        && matches!(tokens.get(idx - 1), Some(RelTok::LParen | RelTok::Comma));
+                    let is_count_star = idx >= 2
+                        && matches!(tokens.get(idx - 1), Some(RelTok::LParen))
+                        && matches!(
+                            tokens.get(idx - 2),
+                            Some(RelTok::Ident { lower: fn_kw, .. })
+                                if fn_kw == "count" && !is_preceded_by_non_schema_dot(tokens, idx - 2)
+                        )
+                        && matches!(tokens.get(idx + 1), Some(RelTok::RParen));
+                    if nearest_query_disallows_wildcard && is_paren_or_arg_star && !is_count_star {
+                        return true;
+                    }
+                } else if cur.in_select_list {
                     let prev_is_select_item_start = prev_rparen_was_distinct_on
                         || (idx > 0
                             && match &tokens[idx - 1] {
@@ -1533,7 +1571,6 @@ fn has_positional_wildcard_subquery_or_setop(
                     | "limit"
                     | "offset"
                     | "fetch"
-                    | "set"
                     | "into"
             ) {
                 if let Some(top) = scopes.last_mut() {
@@ -1565,7 +1602,7 @@ fn has_positional_wildcard_subquery_or_setop(
                 followed_by_open_paren,
             } = &tokens[idx]
             {
-                if !*quoted && lower == "lateral" {
+                if !*quoted && matches!(lower.as_str(), "lateral" | "only") {
                     idx += 1;
                     continue;
                 }
@@ -1817,7 +1854,6 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                         | "union"
                         | "intersect"
                         | "except"
-                        | "set"
                 )
             {
                 in_from = false;
@@ -1849,7 +1885,7 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
                 followed_by_open_paren,
             } = &tokens[idx]
             {
-                if !*quoted && lower == "lateral" {
+                if !*quoted && matches!(lower.as_str(), "lateral" | "only") {
                     idx += 1;
                     continue;
                 }
@@ -1968,6 +2004,9 @@ fn references_whole_row_relation_struct(tokens: &[RelTok]) -> bool {
 /// Single-pass `O(N)` DuckDB/PostgreSQL SQL & filter-expression lexical scanner.
 /// Fails closed (`true`) on unterminated comments, quotes, escapes, `UESCAPE`, or brackets.
 fn sql_or_filter_references_pii(text: &str) -> bool {
+    if text.contains('\0') {
+        return true;
+    }
     let s = trim_sql_ws(text);
     if s.is_empty() {
         return false;
@@ -2444,8 +2483,9 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                     break;
                 }
             }
-            while bytes.get(end) == Some(&b'-') {
-                let seg_start = end + 1;
+            let mut hyph_end = end;
+            while bytes.get(hyph_end) == Some(&b'-') {
+                let seg_start = hyph_end + 1;
                 let Some(&next) = bytes.get(seg_start) else {
                     break;
                 };
@@ -2459,18 +2499,25 @@ fn sql_or_filter_references_pii(text: &str) -> bool {
                 {
                     break;
                 }
-                end = seg_start + 1;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                hyph_end = seg_start + 1;
+                while hyph_end < bytes.len()
+                    && (bytes[hyph_end].is_ascii_alphanumeric() || bytes[hyph_end] == b'_')
                 {
-                    end += 1;
+                    hyph_end += 1;
+                }
+            }
+            if hyph_end > end {
+                let hyph_span = &s[start..hyph_end];
+                if is_pii_identifier(hyph_span)
+                    || hyph_span
+                        .split('-')
+                        .any(|seg| is_pii_key_exact(seg) || is_extra_column_ident(seg))
+                {
+                    return true;
                 }
             }
             let token = &s[start..end];
             if is_pii_identifier(token) || is_blocked_sql_keyword(token) {
-                return true;
-            }
-            if token.contains('-') && token.split('-').any(is_pii_key_exact) {
                 return true;
             }
             let followed_by_dot =
@@ -3287,10 +3334,10 @@ fn value_references_pii(
                 && object_allows_literal_value_suppression(map);
 
             map.iter().any(|(k, v)| {
-                if is_pii_identifier(k) || is_extra_column_ident(k) {
+                if k.contains('\0') || is_pii_identifier(k) || is_extra_column_ident(k) {
                     return true;
                 }
-                let key_norm = k.trim().to_ascii_lowercase();
+                let key_norm = trim_sql_ws(k).to_ascii_lowercase();
                 let child_in_query = obj_in_query || is_query_or_extras_key(k);
                 if child_in_query && is_query_or_extras_key(k) {
                     return value_references_pii(v, FilterSlot::QueryOrExtras, true, depth + 1);
@@ -3354,12 +3401,15 @@ fn value_references_pii(
             })
         }
         Value::String(s) => {
+            if s.contains('\0') {
+                return true;
+            }
             if slot == FilterSlot::FieldSelector
                 && (is_pii_identifier(s) || is_extra_column_ident(s))
             {
                 return true;
             }
-            let t = s.trim();
+            let t = trim_sql_ws(s);
             if t.len() > MAX_FILTERS_BYTES {
                 return true;
             }
@@ -3442,7 +3492,10 @@ fn value_references_pii(
 }
 
 pub fn filters_reference_pii(filters_json: &str) -> bool {
-    if filters_json.len() > MAX_FILTERS_BYTES || json_has_duplicate_keys(filters_json) {
+    if filters_json.len() > MAX_FILTERS_BYTES
+        || filters_json.contains('\0')
+        || json_has_duplicate_keys(filters_json)
+    {
         return true;
     }
     let Ok(parsed) = serde_json::from_str::<Value>(filters_json) else {
@@ -5173,6 +5226,195 @@ mod tests {
             (
                 "benign-r5-tvf-range-count-star",
                 r#"{"_view_extras":{"sql":"SELECT * FROM range((SELECT count(*) FROM logs WHERE status = 200))"}}"#,
+            ),
+        ];
+
+        for (case_id, payload) in allowed_vectors {
+            assert!(
+                !filters_reference_pii(payload),
+                "expected {case_id} to be allowed for AnalystNoPii: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn sec19_blocks_wave6_r6_columns_only_stop_kw_hyphen_nul_paren_star_and_bom() {
+        let blocked_vectors = [
+            // 1. COLUMNS(...) unanchored RE2 substrings, bare anchors, empty branches, unparenthesized '|', and '^_extra$'
+            (
+                "r6-columns-anchored-extra",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE COLUMNS('^_extra$') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-columns-prefix-oi",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE COLUMNS('^oi') = '203.0.113.9'"}}"#,
+            ),
+            (
+                "r6-columns-substr-xtra",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE COLUMNS('xtra') LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-columns-substr-ookie",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE COLUMNS('ookie') = 'sess_secret_99'"}}"#,
+            ),
+            (
+                "r6-columns-substr-dge-si",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE COLUMNS('dge_si') = 'esid_secret_77'"}}"#,
+            ),
+            (
+                "r6-columns-prefix-ci",
+                r#"{"_view_extras":{"sql":"SELECT * FROM client_vitals WHERE concat_ws('|', *COLUMNS('^ci')) LIKE '%cid_secret_99%'"}}"#,
+            ),
+            (
+                "r6-columns-unpack-caret",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE concat_ws('|', *COLUMNS('^')) LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-columns-unpack-empty-alt",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs WHERE concat_ws('|', *COLUMNS('status|')) LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-columns-unparen-pipe-anchor-split",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS('^status|oip$') FROM logs"}}"#,
+            ),
+            // 2. FROM ONLY logs & unreserved stop-keywords sample / set / values
+            (
+                "r6-from-only-logs-alias-cast",
+                r#"{"_view_extras":{"sql":"SELECT * FROM ONLY logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-from-only-logs-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM ONLY logs AS t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-from-only-implicit-alias-cast",
+                r#"{"_view_extras":{"sql":"SELECT * FROM ONLY logs t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-from-only-implicit-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM ONLY logs t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-stop-kw-sample-cast",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs sample WHERE sample::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-stop-kw-set-cast",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs set WHERE set::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-stop-kw-values-cast",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs values WHERE values::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-stop-kw-sample-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs sample(c1, c2) WHERE sample.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-stop-kw-set-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs set(c1, c2) WHERE set.c2 = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-stop-kw-values-col-list",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs values(c1, c2) WHERE values.c2 = '198.51.100.7'"}}"#,
+            ),
+            // 3. Unquoted hyphen-merge token smuggling (status-_extra.contains(...), status-map_contains_value(...))
+            (
+                "r6-hyphen-extra-contains",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE status-_extra.contains('198.51.100.7')::INT = 199"}}"#,
+            ),
+            (
+                "r6-hyphen-extra-instr",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE status-_extra.instr('198.51.100.7') < 200"}}"#,
+            ),
+            (
+                "r6-hyphen-extra-regexp",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE status-_extra.regexp_matches('198\\.51\\.100\\.7')::INT = 199"}}"#,
+            ),
+            (
+                "r6-hyphen-blind-fn",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE status-map_contains_value(kv, '198.51.100.7')::INT = 199"}}"#,
+            ),
+            // 4. Fail-closed NUL-byte ('\0' / \u0000) rejection
+            (
+                "r6-from-json-u0000-suffix",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"client_ip\\u0000safe\":\"VARCHAR\"}').client_ip = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-from-json-strict-sid-u0000",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE from_json_strict(_extra::JSON, '{\"sid\\u0000safe\":\"VARCHAR\"}').sid = 'sess_secret_99'"}}"#,
+            ),
+            (
+                "r6-json-transform-nested-u0000",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE json_transform(_extra, '{\"request\":{\"headers\":{\"x-forwarded-for\\u0000safe\":\"VARCHAR\"}}}')::VARCHAR LIKE '%198.51.100.7%'"}}"#,
+            ),
+            (
+                "r6-outer-json-u0000",
+                r#"{"url":{"mode":"include","values":["safe\u0000val"]}}"#,
+            ),
+            // 5. Parenthesized wildcard SELECT (*) / SELECT ((*)) in set-ops & subqueries
+            (
+                "r6-paren-star-union-rename",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL SELECT (*) FROM logs) sub WHERE sub.b = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-double-paren-star-union",
+                r#"{"_view_extras":{"sql":"SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL SELECT ((*)) FROM logs) sub WHERE sub.b = '198.51.100.7'"}}"#,
+            ),
+            (
+                "r6-paren-star-intersect-values",
+                r#"{"_view_extras":{"sql":"SELECT (*) FROM logs INTERSECT VALUES ('2026-01-01'::TIMESTAMPTZ, '198.51.100.7', '', '', 200, '/', '{}')"}}"#,
+            ),
+            (
+                "r6-paren-star-row-in-subquery",
+                r#"{"_view_extras":{"sql":"SELECT * FROM logs WHERE (logs.timestamp, '198.51.100.7', '', '', logs.status, logs.url, '') IN (SELECT (*) FROM logs)"}}"#,
+            ),
+            // 6. BOM / ZWSP / WJ before nested JSON string
+            (
+                "r6-bom-nested-json-u0063",
+                r#"{"custom_blob":"\ufeff{\"\\u0063lient_ip\":\"198.51.100.7\"}"}"#,
+            ),
+            (
+                "r6-zwsp-nested-json-u0063",
+                r#"{"custom_blob":"\u200b{\"\\u0063lient_ip\":\"198.51.100.7\"}"}"#,
+            ),
+            (
+                "r6-wj-nested-json-u0063",
+                r#"{"custom_blob":"\u2060{\"\\u0063lient_ip\":\"198.51.100.7\"}"}"#,
+            ),
+        ];
+
+        for (case_id, payload) in blocked_vectors {
+            assert!(
+                filters_reference_pii(payload),
+                "expected {case_id} to be blocked as PII-referencing: {payload}"
+            );
+        }
+
+        let allowed_vectors = [
+            (
+                "benign-r6-columns-single-anchored",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS('^status$') FROM logs"}}"#,
+            ),
+            (
+                "benign-r6-columns-multi-anchored",
+                r#"{"_view_extras":{"sql":"SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}"#,
+            ),
+            (
+                "benign-r6-subtraction-and-paren-mult",
+                r#"{"_view_extras":{"sql":"SELECT status - 200, status-200, (status + 1) * 2 FROM logs WHERE (SELECT count(*) FROM logs) > 0"}}"#,
+            ),
+            (
+                "benign-r6-tablesample-and-using-sample",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs TABLESAMPLE 10 PERCENT WHERE status = 200"}}"#,
+            ),
+            (
+                "benign-r6-using-sample",
+                r#"{"_view_extras":{"sql":"SELECT status, url FROM logs USING SAMPLE 10 ROWS"}}"#,
+            ),
+            (
+                "benign-r6-from-only-logs-safe-cols",
+                r#"{"_view_extras":{"sql":"SELECT t.status, t.url FROM ONLY logs AS t WHERE t.status = 200"}}"#,
             ),
         ];
 

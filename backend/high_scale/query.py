@@ -608,7 +608,9 @@ _STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 _QUOTE_SCAN = re.compile(r"""'(?:[^']|'')*'|\"""")
 _COMMENT_OR_ESCAPE = re.compile(r"--|/\*|\*/|#|\$|`")
 _RESULT_CLAUSES = re.compile(
-    r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b|\bRECURSIVE\b", re.IGNORECASE
+    r"\bSETTINGS\b|\bFORMAT\b(?!\s*\()|\bINTO\s+OUTFILE\b|\bINFILE\b|\bRECURSIVE\b"
+    r"|\bTABLE\b|\bPIVOT\b|\bUNPIVOT\b|\bPIVOT_WIDER\b|\bPIVOT_LONGER\b|\bONLY\b",
+    re.IGNORECASE,
 )
 
 
@@ -786,7 +788,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
         if not sig:
             return False
         k0, t0 = cur[sig[0]]
-        if k0 == "IDENT" and t0.upper() in ("SELECT", "WITH"):
+        if k0 == "IDENT" and t0.upper() in ("SELECT", "WITH", "FROM", "TABLE"):
             return True
         if k0 == "OP" and t0 == "(":
             close_first = _find_matching_paren(cur, sig[0])
@@ -999,7 +1001,20 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
             if k == "OP" and t == "(":
                 close_idx = _find_matching_paren(tokens, i)
                 inner = tokens[i + 1 : close_idx]
-                if _is_subquery_tokens(inner):
+                prev_sig_idx = next((p for p in range(i - 1, -1, -1) if tokens[p][0] not in ("WS", "COMMENT")), None)
+                prev_fn_upper = (
+                    tokens[prev_sig_idx][1].upper()
+                    if prev_sig_idx is not None and tokens[prev_sig_idx][0] == "IDENT"
+                    else ""
+                )
+                inner_sig = _sig_indices(inner)
+                is_trim_from = (
+                    prev_fn_upper in ("TRIM", "BTRIM", "LTRIM", "RTRIM")
+                    and bool(inner_sig)
+                    and inner[inner_sig[0]][0] == "IDENT"
+                    and inner[inner_sig[0]][1].upper() == "FROM"
+                )
+                if not is_trim_from and _is_subquery_tokens(inner):
                     sub_sql, sub_doms, sub_canons = _rewrite_tokens(inner, ctes)
                     branch_canonicals |= sub_canons
                     ph = f"__fla_subq_{sub_nonce}_{len(subquery_placeholders)}__"
@@ -1079,7 +1094,7 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 continue
 
             if in_from and expect_table:
-                if k == "IDENT" and t.upper() == "LATERAL":
+                if k == "IDENT" and t.upper() in ("LATERAL", "ONLY"):
                     s_pos += 1
                     continue
                 if k == "SUBQ":
@@ -1302,7 +1317,7 @@ def query_endpoint(
     post_allowed_tables = frozenset(t.lower() for t in names.values())
     _reject_ambiguous_syntax(sql, allowed_tables | post_allowed_tables)
     try:
-        validate_user_sql(
+        post_val = validate_user_sql(
             sql,
             session_id=session_id,
             service_id=service.service_id,
@@ -1310,6 +1325,32 @@ def query_endpoint(
         )
     except SQLValidationError as exc:
         raise PermissionError(exc.message) from exc
+
+    def _collect_non_cte_base_tables(node_obj: Any, active_ctes: frozenset[str] = frozenset()) -> set[str]:
+        found: set[str] = set()
+        if isinstance(node_obj, dict):
+            if isinstance(cte_map := node_obj.get("cte_map"), dict) and isinstance(entries := cte_map.get("map"), list):
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        key = entry.get("key")
+                        alias_fs = frozenset({key.strip().lower()}) if isinstance(key, str) and key else frozenset()
+                        if (val := entry.get("value")) is not None:
+                            found |= _collect_non_cte_base_tables(val, active_ctes)
+                        active_ctes = active_ctes | alias_fs
+            if node_obj.get("type") == "BASE_TABLE" or "table_name" in node_obj:
+                tname = str(node_obj.get("table_name") or "").strip().lower()
+                sname = str(node_obj.get("schema_name") or "").strip().lower()
+                cname = str(node_obj.get("catalog_name") or "").strip().lower()
+                if tname and not (tname in active_ctes and not sname and not cname):
+                    found.add(tname)
+            for k_child, v_child in node_obj.items():
+                if k_child != "cte_map":
+                    found |= _collect_non_cte_base_tables(v_child, active_ctes)
+        elif isinstance(node_obj, list):
+            for item in node_obj:
+                found |= _collect_non_cte_base_tables(item, active_ctes)
+        return found
+
     code_sql = _code_only(sql)
     fact_tables = {
         names[canonical]: domain
@@ -1320,6 +1361,10 @@ def query_endpoint(
             or re.search(rf"\b{re.escape(names[canonical])}\b", code_sql, flags=re.IGNORECASE)
         )
     }
+    non_cte_tables = _collect_non_cte_base_tables(post_val.parse_tree)
+    resolved_fact_lower = {tbl.lower() for tbl in fact_tables}
+    if non_cte_tables and (not fact_tables or not non_cte_tables.issubset(resolved_fact_lower)):
+        raise PermissionError("Query referenced an allowed table without resolving a scoped fact table")
     if any(re.search(rf"\b{re.escape(tbl)}\b", code_sql, flags=re.IGNORECASE) for tbl in post_allowed_tables):
         if not fact_tables:
             raise PermissionError("Query referenced an allowed table without resolving a scoped fact table")

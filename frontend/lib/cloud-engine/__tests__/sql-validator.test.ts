@@ -243,4 +243,29 @@ describe('T5-FE-04: cloud-engine SQL validator adversarial replacement-scan, sch
     const norm2 = validateUserSql(splice2, ['logs', 'requests']).normalizedSql
     await expect(engine.executeSql(norm2)).rejects.toThrow()
   })
+
+  it('rejects FROM ONLY / JOIN ONLY disallowed tables even when quoted CTE "only" is in scope while preserving valid quoted "only" CTE and FROM ONLY logs', async () => {
+    for (const blockedOnlySql of [
+      'WITH "only" AS (SELECT 1 AS x) SELECT secret_col FROM ONLY ops_secret',
+      'WITH "only" AS (SELECT 1 AS x) SELECT b.secret_col FROM logs AS a CROSS JOIN ONLY ops_secret AS b',
+      'WITH "only" AS (SELECT 1 AS x) SELECT b.secret_col FROM logs AS a, ONLY ops_secret AS b',
+      'WITH "only" AS (SELECT 1 AS x) SELECT secret_col FROM ONLY main.ops_secret',
+      'WITH "only" AS (SELECT 1 AS x) SELECT secret_col FROM ONLY (ops_secret)',
+      'WITH "only" AS (SELECT 1 AS x) SELECT count(*) AS n FROM ONLY client_vitals',
+      'SELECT * FROM ONLY WHERE 1=1',
+      'SELECT secret_col FROM ONLY ops_secret',
+    ]) {
+      expect(() => validateUserSql(blockedOnlySql, ['logs', 'requests']), blockedOnlySql).toThrow(
+        SQLValidationError,
+      )
+    }
+
+    const quotedCteSql = 'WITH "only" AS (SELECT 1 AS x) SELECT * FROM "only"'
+    expect(() => validateUserSql(quotedCteSql, ['logs', 'requests'])).not.toThrow()
+    const cteRows = await engine.executeSql(quotedCteSql)
+    expect(cteRows).toEqual([{ x: 1 }])
+
+    expect(() => validateUserSql('SELECT status FROM ONLY logs WHERE status = 200', ['logs', 'requests'])).not.toThrow()
+    expect(() => validateUserSql('SELECT status FROM ONLY main.logs WHERE status = 200', ['logs', 'requests'])).not.toThrow()
+  })
 })

@@ -555,7 +555,11 @@ function rewriteSqlTableRefs(
       }
     }
 
-    if (expectingTableRef && tok.kind === "word" && tok.lower === "lateral") {
+    if (
+      expectingTableRef &&
+      tok.kind === "word" &&
+      (tok.lower === "lateral" || tok.lower === "only")
+    ) {
       continue;
     }
 

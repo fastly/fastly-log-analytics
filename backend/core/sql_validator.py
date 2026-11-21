@@ -376,6 +376,22 @@ def _walk_and_validate(
                             cte_aliases=cte_aliases,
                         )
                 cte_aliases = cte_aliases | alias_fs
+        if node.get("type") == "DISALLOWED_SUBQUERY_STATEMENT":
+            _reject(
+                original_sql,
+                str(node.get("reason") or "statement_not_allowed"),
+                str(node.get("message") or "statement is not allowed in user queries"),
+                session_id,
+                service_id,
+            )
+        if node.get("type") == "PARSE_ERROR_NODE":
+            _reject(
+                original_sql,
+                "parse_error:SYNTAX",
+                str(node.get("message") or "SQL parse error"),
+                session_id,
+                service_id,
+            )
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
             _check_table_reference(
                 node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
@@ -401,6 +417,7 @@ _NON_SELECT_STATEMENTS = frozenset(
         "ATTACH",
         "DETACH",
         "INSTALL",
+        "UNINSTALL",
         "LOAD",
         "PRAGMA",
         "SET",
@@ -421,6 +438,7 @@ _NON_SELECT_STATEMENTS = frozenset(
         "BEGIN",
         "COMMIT",
         "ROLLBACK",
+        "TRANSACTION",
         "GRANT",
         "REVOKE",
         "TRUNCATE",
@@ -428,6 +446,13 @@ _NON_SELECT_STATEMENTS = frozenset(
         "CHECKPOINT",
         "MERGE",
         "REPLACE",
+        "PREPARE",
+        "EXECUTE",
+        "DEALLOCATE",
+        "PIVOT",
+        "UNPIVOT",
+        "PIVOT_WIDER",
+        "PIVOT_LONGER",
     }
 )
 _SHOW_REF_STATEMENTS = frozenset({"SHOW", "DESCRIBE", "SUMMARIZE", "DESC"})
@@ -439,6 +464,7 @@ _CLAUSE_STOP_KEYWORDS = frozenset(
         "ORDER",
         "LIMIT",
         "OFFSET",
+        "FETCH",
         "UNION",
         "INTERSECT",
         "EXCEPT",
@@ -448,12 +474,33 @@ _CLAUSE_STOP_KEYWORDS = frozenset(
         "FORMAT",
         "PREWHERE",
         "SAMPLE",
+        "INTO",
+        "FOR",
     }
 )
 _JOIN_MODIFIERS = frozenset(
-    {"JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "NATURAL", "GLOBAL", "ANY", "ALL", "ASOF"}
+    {
+        "JOIN",
+        "INNER",
+        "LEFT",
+        "RIGHT",
+        "FULL",
+        "OUTER",
+        "CROSS",
+        "NATURAL",
+        "GLOBAL",
+        "ANY",
+        "ALL",
+        "ASOF",
+        "SEMI",
+        "ANTI",
+        "POSITIONAL",
+    }
 )
-_NON_FUNCTION_KEYWORDS = frozenset(
+_SPECIAL_CALL_KEYWORDS = frozenset(
+    {"cast", "try_cast", "extract", "position", "substring", "trim", "btrim", "ltrim", "rtrim", "overlay"}
+)
+_NON_FUNCTION_KEYWORDS = _SPECIAL_CALL_KEYWORDS | frozenset(
     {
         "select",
         "from",
@@ -480,12 +527,6 @@ _NON_FUNCTION_KEYWORDS = frozenset(
         "else",
         "end",
         "exists",
-        "cast",
-        "extract",
-        "position",
-        "substring",
-        "trim",
-        "overlay",
         "filter",
         "over",
         "within",
@@ -498,6 +539,28 @@ _NON_FUNCTION_KEYWORDS = frozenset(
         "ilike",
     }
 )
+_SUBQUERY_HEAD_KEYWORDS = frozenset(
+    {
+        "SELECT",
+        "WITH",
+        "FROM",
+        "TABLE",
+        "VALUES",
+        "SHOW",
+        "DESCRIBE",
+        "SUMMARIZE",
+        "DESC",
+        "PIVOT",
+        "UNPIVOT",
+        "PIVOT_WIDER",
+        "PIVOT_LONGER",
+    }
+)
+_DUCKDB_UNICODE_SPACES = frozenset(
+    "\u00a0\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u202f\u205f\u2060\u3000\ufeff"
+)
+_DISALLOWED_CTRL_OR_SEP_RE = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f\u1680\u180e\u2028\u2029]")
+_DOLQ_TAG_RE = re.compile(r"\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$")
 
 
 @dataclass(slots=True)
@@ -506,18 +569,109 @@ class _Tok:
     val: str
 
 
+def _is_sql_horiz_space(ch: str) -> bool:
+    return ch in (" ", "\t", "\f") or ch in _DUCKDB_UNICODE_SPACES
+
+
+def _is_sql_whitespace(ch: str) -> bool:
+    return ch in ("\n", "\r") or _is_sql_horiz_space(ch)
+
+
+def _is_ident_start_char(ch: str) -> bool:
+    return (
+        bool(ch)
+        and not _is_sql_whitespace(ch)
+        and _DISALLOWED_CTRL_OR_SEP_RE.match(ch) is None
+        and (ch.isalpha() or ch == "_" or ord(ch) >= 0x80)
+    )
+
+
+def _is_ident_cont_char(ch: str) -> bool:
+    return (
+        bool(ch)
+        and not _is_sql_whitespace(ch)
+        and _DISALLOWED_CTRL_OR_SEP_RE.match(ch) is None
+        and (ch.isalnum() or ch in ("_", "$") or ord(ch) >= 0x80)
+    )
+
+
+def _scan_sql_number_end(sql: str, start: int) -> int:
+    n = len(sql)
+    i = start + 1
+    if sql[start] == "0" and i + 1 < n:
+        radix = sql[i]
+        if radix in ("x", "X") and (sql[i + 1].isdigit() or sql[i + 1] in "abcdefABCDEF_"):
+            i += 2
+            while i < n and (sql[i].isdigit() or sql[i] in "abcdefABCDEF_"):
+                i += 1
+            return i
+        if radix in ("b", "B") and sql[i + 1] in "01_":
+            i += 2
+            while i < n and sql[i] in "01_":
+                i += 1
+            return i
+        if radix in ("o", "O") and sql[i + 1] in "01234567_":
+            i += 2
+            while i < n and sql[i] in "01234567_":
+                i += 1
+            return i
+    while i < n:
+        c = sql[i]
+        if c.isdigit() or c in "._":
+            i += 1
+        elif c in ("e", "E") and i + 1 < n and sql[i + 1].isdigit():
+            i += 2
+        elif c in ("e", "E") and i + 2 < n and sql[i + 1] in ("+", "-") and sql[i + 2].isdigit():
+            i += 3
+        else:
+            break
+    return i
+
+
+def _find_quote_continuation(sql: str, pos: int) -> int:
+    n = len(sql)
+    j = pos
+    saw_newline = False
+    while j < n:
+        c = sql[j]
+        if _is_sql_horiz_space(c):
+            j += 1
+            continue
+        if c in ("\n", "\r"):
+            saw_newline = True
+            j += 1
+            continue
+        if c == "-" and j + 1 < n and sql[j + 1] == "-":
+            j += 2
+            while j < n and sql[j] not in ("\n", "\r"):
+                j += 1
+            continue
+        break
+    return j if (saw_newline and j < n and sql[j] == "'") else -1
+
+
 def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
     tokens: list[_Tok] = []
     i = 0
     n = len(sql)
+    prev_was_ident_or_num = False
     while i < n:
         ch = sql[i]
-        if ch.isspace():
+        at_word_start = not prev_was_ident_or_num
+        if _is_sql_whitespace(ch):
             i += 1
+            prev_was_ident_or_num = False
             continue
+        if _DISALLOWED_CTRL_OR_SEP_RE.match(ch) is not None:
+            return None, "unsupported control or separator character"
+        if at_word_start and ch in ("U", "u") and i + 2 < n and sql[i + 1] == "&" and sql[i + 2] in ("'", '"'):
+            return None, "unicode escape literals are not allowed"
         if ch == "-" and i + 1 < n and sql[i + 1] == "-":
-            nl = sql.find("\n", i + 2)
-            i = n if nl == -1 else nl + 1
+            j = i + 2
+            while j < n and sql[j] not in ("\n", "\r"):
+                j += 1
+            i = j
+            prev_was_ident_or_num = False
             continue
         if ch == "/" and i + 1 < n and sql[i + 1] == "*":
             depth = 1
@@ -534,27 +688,52 @@ def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
             if depth != 0:
                 return None, "unterminated block comment"
             i = j
+            prev_was_ident_or_num = False
             continue
-        if ch == "'":
-            j = i + 1
+        if (at_word_start and ch in ("E", "e") and i + 1 < n and sql[i + 1] == "'") or ch == "'":
+            is_escape_str = ch in ("E", "e")
+            j = i + 2 if is_escape_str else i + 1
             buf: list[str] = []
-            closed = False
-            while j < n:
-                if sql[j] == "'":
-                    if j + 1 < n and sql[j + 1] == "'":
-                        buf.append("'")
+            while True:
+                closed = False
+                while j < n:
+                    if is_escape_str and sql[j] == "\\":
+                        if j + 1 >= n:
+                            return None, "unterminated escape string literal"
+                        buf.append(sql[j + 1])
                         j += 2
                         continue
-                    closed = True
+                    if sql[j] == "'":
+                        if j + 1 < n and sql[j + 1] == "'":
+                            buf.append("'")
+                            j += 2
+                            continue
+                        closed = True
+                        j += 1
+                        break
+                    buf.append(sql[j])
                     j += 1
+                if not closed:
+                    return None, "unterminated string literal"
+                cont_quote = _find_quote_continuation(sql, j)
+                if cont_quote == -1:
                     break
-                buf.append(sql[j])
-                j += 1
-            if not closed:
-                return None, "unterminated string literal"
+                j = cont_quote + 1
             tokens.append(_Tok("STRING", "".join(buf)))
             i = j
+            prev_was_ident_or_num = False
             continue
+        if ch == "$" and at_word_start:
+            m_dolq = _DOLQ_TAG_RE.match(sql, i)
+            if m_dolq is not None:
+                tag = m_dolq.group(0)
+                end_idx = sql.find(tag, i + len(tag))
+                if end_idx == -1:
+                    return None, "unterminated dollar-quoted string literal"
+                tokens.append(_Tok("STRING", sql[i + len(tag) : end_idx]))
+                i = end_idx + len(tag)
+                prev_was_ident_or_num = False
+                continue
         if ch == '"':
             j = i + 1
             buf = []
@@ -574,44 +753,63 @@ def _tokenize_sql(sql: str) -> tuple[list[_Tok] | None, str | None]:
                 return None, "unterminated quoted identifier"
             tokens.append(_Tok("QIDENT", "".join(buf)))
             i = j
+            prev_was_ident_or_num = False
             continue
         if ch == "(":
             tokens.append(_Tok("LPAREN", "("))
             i += 1
+            prev_was_ident_or_num = False
             continue
         if ch == ")":
             tokens.append(_Tok("RPAREN", ")"))
             i += 1
+            prev_was_ident_or_num = False
             continue
         if ch == ",":
             tokens.append(_Tok("COMMA", ","))
             i += 1
+            prev_was_ident_or_num = False
             continue
         if ch == ".":
             tokens.append(_Tok("DOT", "."))
             i += 1
+            prev_was_ident_or_num = False
             continue
         if ch == ";":
             tokens.append(_Tok("SEMI", ";"))
             i += 1
+            prev_was_ident_or_num = False
             continue
-        if ch.isalpha() or ch == "_":
+        if _is_ident_start_char(ch):
             j = i + 1
-            while j < n and (sql[j].isalnum() or sql[j] in ("_", "$")):
+            while j < n and _is_ident_cont_char(sql[j]):
                 j += 1
-            tokens.append(_Tok("WORD", sql[i:j]))
+            word = sql[i:j]
+            if word.lower() == "uescape":
+                return None, "UESCAPE is not allowed"
+            tokens.append(_Tok("WORD", word))
             i = j
+            prev_was_ident_or_num = True
+            continue
+        if ch.isdigit():
+            num_end = _scan_sql_number_end(sql, i)
+            tokens.append(_Tok("OTHER", sql[i:num_end]))
+            i = num_end
+            prev_was_ident_or_num = True
             continue
         j = i + 1
         while (
             j < n
-            and not sql[j].isspace()
-            and sql[j] not in ("'", '"', "(", ")", ",", ".", ";", "-", "/")
-            and not (sql[j].isalpha() or sql[j] == "_")
+            and not _is_sql_whitespace(sql[j])
+            and _DISALLOWED_CTRL_OR_SEP_RE.match(sql[j]) is None
+            and sql[j] not in ("'", '"', "(", ")", ",", ".", ";", "-", "/", "$")
+            and not _is_ident_start_char(sql[j])
+            and not sql[j].isdigit()
         ):
             j += 1
         tokens.append(_Tok("OTHER", sql[i:j]))
         i = j
+        prev_was_ident_or_num = False
     return tokens, None
 
 
@@ -700,6 +898,23 @@ def _has_top_level_setop(tokens: list[_Tok]) -> bool:
     return False
 
 
+def _is_distinct_from_op(tokens: list[_Tok], idx: int) -> bool:
+    if idx < 2:
+        return False
+    p1 = tokens[idx - 1]
+    if p1.kind != "WORD" or p1.val.upper() != "DISTINCT":
+        return False
+    p2 = tokens[idx - 2]
+    if p2.kind != "WORD":
+        return False
+    if p2.val.upper() == "IS":
+        return True
+    if p2.val.upper() == "NOT" and idx >= 3:
+        p3 = tokens[idx - 3]
+        return p3.kind == "WORD" and p3.val.upper() == "IS"
+    return False
+
+
 def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     inner = _strip_outer_parens(tokens)
     k = 0
@@ -727,15 +942,15 @@ def _parse_recursive_cte_tokens(tokens: list[_Tok]) -> dict[str, Any]:
         return body
 
     after_union = last_idx + 1
-    while (
-        after_union < m
-        and inner[after_union].kind == "WORD"
-        and inner[after_union].val.upper() in ("ALL", "DISTINCT", "BY", "NAME")
-    ):
+    if after_union < m and inner[after_union].kind == "WORD" and inner[after_union].val.upper() in ("ALL", "DISTINCT"):
         after_union += 1
 
     right_tokens = inner[after_union:]
-    if not right_tokens or _has_top_level_setop(right_tokens):
+    if (
+        not right_tokens
+        or (right_tokens[0].kind == "WORD" and right_tokens[0].val.upper() == "BY")
+        or _has_top_level_setop(right_tokens)
+    ):
         body = _parse_query_tokens(inner)
         body["type"] = "RECURSIVE_CTE_NODE"
         return body
@@ -753,6 +968,27 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     node: dict[str, Any] = {"type": "SELECT_NODE", "children": []}
     if not tokens:
         return node
+
+    if tokens[0].kind == "WORD":
+        w0 = tokens[0].val.upper()
+        if w0 in _SHOW_REF_STATEMENTS:
+            node["children"].append(
+                {
+                    "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                    "reason": "show_ref",
+                    "message": "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query",
+                }
+            )
+            return node
+        if w0 in _NON_SELECT_STATEMENTS and not (len(tokens) > 1 and tokens[1].kind == "LPAREN"):
+            node["children"].append(
+                {
+                    "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                    "reason": f"statement_type:{w0}_NODE",
+                    "message": f"only SELECT / WITH / UNION statements allowed (got {w0}_NODE)",
+                }
+            )
+            return node
 
     i = 0
     n = len(tokens)
@@ -798,87 +1034,190 @@ def _parse_query_tokens(tokens: list[_Tok]) -> dict[str, Any]:
     return node
 
 
-def _scan_expr_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
+def _is_subquery_token_list(tokens: list[_Tok], *, enclosing_special_call: str | None = None) -> bool:
+    unwrapped = _strip_outer_parens(tokens)
+    if not unwrapped or unwrapped[0].kind != "WORD":
+        return False
+    w0 = unwrapped[0].val.upper()
+    if enclosing_special_call in {"trim", "btrim", "ltrim", "rtrim"} and len(unwrapped) == len(tokens) and w0 == "FROM":
+        return False
+    if w0 in _SUBQUERY_HEAD_KEYWORDS:
+        return True
+    return w0 in _NON_SELECT_STATEMENTS and not (len(unwrapped) > 1 and unwrapped[1].kind == "LPAREN")
+
+
+def _scan_expr_tokens(tokens: list[_Tok], node: dict[str, Any], *, enclosing_special_call: str | None = None) -> None:
+    if _is_subquery_token_list(tokens, enclosing_special_call=enclosing_special_call):
+        node["children"].append(_parse_query_tokens(_strip_outer_parens(tokens)))
+        return
+
     i = 0
     n = len(tokens)
     while i < n:
         tok = tokens[i]
+        if (
+            tok.kind == "WORD"
+            and tok.val.upper() in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER")
+            and not (i > 0 and tokens[i - 1].kind == "DOT")
+        ):
+            wu = tok.val.upper()
+            node["children"].append(
+                {
+                    "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                    "reason": f"statement_type:{wu}_NODE",
+                    "message": f"only SELECT / WITH / UNION statements allowed (got {wu}_NODE)",
+                }
+            )
+            i += 1
+            continue
         if tok.kind in ("WORD", "QIDENT") and i + 1 < n and tokens[i + 1].kind == "LPAREN":
             rp = _find_matching_rparen(tokens, i + 1)
             if rp != -1:
-                if tok.kind == "QIDENT" or tok.val.lower() not in _NON_FUNCTION_KEYWORDS:
-                    node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                if tok.kind == "WORD" and tok.val.lower() in _NON_FUNCTION_KEYWORDS:
+                    if tok.val.lower() in _SPECIAL_CALL_KEYWORDS:
+                        _scan_expr_tokens(tokens[i + 2 : rp], node, enclosing_special_call=tok.val.lower())
+                        i = rp + 1
+                        continue
+                    i += 1
+                    continue
+                node["children"].append({"class": "FUNCTION", "function_name": tok.val})
                 _scan_expr_tokens(tokens[i + 2 : rp], node)
                 i = rp + 1
                 continue
-        elif tok.kind == "LPAREN":
+        if tok.kind == "LPAREN":
             rp = _find_matching_rparen(tokens, i)
             if rp != -1:
-                inner = _strip_outer_parens(tokens[i + 1 : rp])
-                if inner and inner[0].kind == "WORD" and inner[0].val.upper() in ("SELECT", "WITH"):
-                    node["children"].append(_parse_query_tokens(inner))
-                else:
-                    _scan_expr_tokens(inner, node)
+                _scan_expr_tokens(tokens[i + 1 : rp], node)
                 i = rp + 1
                 continue
         i += 1
 
 
-def _scan_body_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
+def _scan_body_tokens(
+    tokens: list[_Tok],
+    node: dict[str, Any],
+    *,
+    in_from: bool = False,
+    expect_table: bool = False,
+) -> None:
     i = 0
     n = len(tokens)
-    in_from = False
-    expect_table = False
+    at_branch_start = not in_from
 
     while i < n:
         tok = tokens[i]
         if tok.kind == "WORD":
             wu = tok.val.upper()
+            prev_is_dot = i > 0 and tokens[i - 1].kind == "DOT"
+            if not prev_is_dot and wu in ("PIVOT", "UNPIVOT", "PIVOT_WIDER", "PIVOT_LONGER"):
+                node["children"].append(
+                    {
+                        "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                        "reason": f"statement_type:{wu}_NODE",
+                        "message": f"only SELECT / WITH / UNION statements allowed (got {wu}_NODE)",
+                    }
+                )
+                i += 1
+                continue
+            if at_branch_start and not prev_is_dot and not (i + 1 < n and tokens[i + 1].kind == "LPAREN"):
+                if wu in _SHOW_REF_STATEMENTS:
+                    node["children"].append(
+                        {
+                            "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                            "reason": "show_ref",
+                            "message": "SHOW / DESCRIBE / SUMMARIZE statements are not allowed via /api/query",
+                        }
+                    )
+                    return
+                if wu in _NON_SELECT_STATEMENTS:
+                    node["children"].append(
+                        {
+                            "type": "DISALLOWED_SUBQUERY_STATEMENT",
+                            "reason": f"statement_type:{wu}_NODE",
+                            "message": f"only SELECT / WITH / UNION statements allowed (got {wu}_NODE)",
+                        }
+                    )
+                    return
             if wu in ("UNION", "INTERSECT", "EXCEPT"):
+                if expect_table:
+                    node["children"].append(
+                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                    )
                 node["type"] = "SET_OPERATION_NODE"
                 in_from = False
                 expect_table = False
                 i += 1
+                while i < n and tokens[i].kind == "WORD" and tokens[i].val.upper() in ("ALL", "DISTINCT", "BY", "NAME"):
+                    i += 1
+                at_branch_start = True
                 continue
-            if wu == "FROM":
+            if wu == "SELECT":
+                if expect_table:
+                    node["children"].append(
+                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                    )
+                in_from = False
+                expect_table = False
+                at_branch_start = False
+                i += 1
+                continue
+            if (wu == "FROM" and not _is_distinct_from_op(tokens, i)) or (wu == "TABLE" and not prev_is_dot):
                 in_from = True
                 expect_table = True
+                at_branch_start = False
                 i += 1
                 continue
             if wu in _JOIN_MODIFIERS:
                 if wu == "JOIN":
                     in_from = True
                     expect_table = True
+                at_branch_start = False
                 i += 1
                 continue
             if wu in _CLAUSE_STOP_KEYWORDS:
+                if expect_table:
+                    node["children"].append(
+                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                    )
                 in_from = False
                 expect_table = False
+                at_branch_start = False
                 i += 1
                 continue
             if in_from and wu in ("ON", "USING"):
+                if expect_table:
+                    node["children"].append(
+                        {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                    )
                 expect_table = False
+                at_branch_start = False
                 i += 1
                 continue
 
         if in_from and tok.kind == "COMMA":
+            if expect_table:
+                node["children"].append(
+                    {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+                )
             expect_table = True
+            at_branch_start = False
             i += 1
             continue
 
         if in_from and expect_table:
-            if tok.kind == "WORD" and tok.val.upper() == "LATERAL":
+            if tok.kind == "WORD" and tok.val.upper() in ("LATERAL", "ONLY"):
                 i += 1
                 continue
             if tok.kind == "LPAREN":
                 rp = _find_matching_rparen(tokens, i)
                 if rp != -1:
                     inner = _strip_outer_parens(tokens[i + 1 : rp])
-                    if inner and inner[0].kind == "WORD" and inner[0].val.upper() in ("SELECT", "WITH"):
+                    if _is_subquery_token_list(inner):
                         node["children"].append(_parse_query_tokens(inner))
                     else:
-                        _scan_body_tokens(inner, node)
+                        _scan_body_tokens(inner, node, in_from=True, expect_table=True)
                     expect_table = False
+                    at_branch_start = False
                     i = rp + 1
                     continue
             if tok.kind == "STRING":
@@ -891,6 +1230,7 @@ def _scan_body_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
                     }
                 )
                 expect_table = False
+                at_branch_start = False
                 i += 1
                 continue
             if tok.kind in ("WORD", "QIDENT"):
@@ -917,7 +1257,8 @@ def _scan_body_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
                         if (
                             i < n
                             and tokens[i].kind in ("WORD", "QIDENT")
-                            and tokens[i].val.upper() not in (_CLAUSE_STOP_KEYWORDS | _JOIN_MODIFIERS | {"ON", "USING"})
+                            and tokens[i].val.upper()
+                            not in (_CLAUSE_STOP_KEYWORDS | _JOIN_MODIFIERS | {"ON", "USING", "SELECT"})
                         ):
                             i += 1
                             if i < n and tokens[i].kind == "LPAREN":
@@ -925,6 +1266,7 @@ def _scan_body_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
                                 if rp_alias != -1:
                                     i = rp_alias + 1
                         expect_table = False
+                        at_branch_start = False
                         continue
                 else:
                     if len(parts) == 1:
@@ -942,30 +1284,45 @@ def _scan_body_tokens(tokens: list[_Tok], node: dict[str, Any]) -> None:
                         }
                     )
                     expect_table = False
+                    at_branch_start = False
                     i = j
                     continue
+            node["children"].append(
+                {"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"}
+            )
+            expect_table = False
+            at_branch_start = False
+            i += 1
+            continue
+
+        at_branch_start = False
 
         # Scalar expression / subquery outside table-reference position
         if tok.kind in ("WORD", "QIDENT") and i + 1 < n and tokens[i + 1].kind == "LPAREN":
             rp = _find_matching_rparen(tokens, i + 1)
             if rp != -1:
-                if tok.kind == "QIDENT" or tok.val.lower() not in _NON_FUNCTION_KEYWORDS:
-                    node["children"].append({"class": "FUNCTION", "function_name": tok.val})
+                if tok.kind == "WORD" and tok.val.lower() in _NON_FUNCTION_KEYWORDS:
+                    if tok.val.lower() in _SPECIAL_CALL_KEYWORDS:
+                        _scan_expr_tokens(tokens[i + 2 : rp], node, enclosing_special_call=tok.val.lower())
+                        i = rp + 1
+                        continue
+                    i += 1
+                    continue
+                node["children"].append({"class": "FUNCTION", "function_name": tok.val})
                 _scan_expr_tokens(tokens[i + 2 : rp], node)
                 i = rp + 1
                 continue
         if tok.kind == "LPAREN":
             rp = _find_matching_rparen(tokens, i)
             if rp != -1:
-                inner = _strip_outer_parens(tokens[i + 1 : rp])
-                if inner and inner[0].kind == "WORD" and inner[0].val.upper() in ("SELECT", "WITH"):
-                    node["children"].append(_parse_query_tokens(inner))
-                else:
-                    _scan_expr_tokens(inner, node)
+                _scan_expr_tokens(tokens[i + 1 : rp], node)
                 i = rp + 1
                 continue
 
         i += 1
+
+    if expect_table:
+        node["children"].append({"type": "PARSE_ERROR_NODE", "message": "SQL parse error: expected table reference"})
 
 
 def _parse_single_select_node(
@@ -1024,7 +1381,7 @@ def _parse_single_select_node(
             f"statement_type:{node_type}",
             f"only SELECT / WITH / UNION statements allowed (got {node_type})",
         )
-    if first_upper not in ("SELECT", "WITH", "VALUES"):
+    if first_upper not in ("SELECT", "WITH", "VALUES", "FROM", "TABLE"):
         return None, None, "parse_error:SYNTAX", f"SQL parse error near {first.val!r}"
 
     syntax_err = _validate_select_syntax(stmt_tokens)

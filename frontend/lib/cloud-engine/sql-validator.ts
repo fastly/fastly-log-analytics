@@ -1370,7 +1370,7 @@ export function validateUserSql(
     }
 
     if (expectingTableRef) {
-      if (tok.kind === "word" && tok.lower === "lateral") {
+      if (tok.kind === "word" && (tok.lower === "lateral" || tok.lower === "only")) {
         continue;
       }
       if (tok.kind === "string") {

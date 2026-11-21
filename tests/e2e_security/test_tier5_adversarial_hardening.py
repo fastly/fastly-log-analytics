@@ -921,9 +921,116 @@ def test_t5_c08_cloud_views_redteam_dupkeys_sticky_slots_columns_lambda_concat_a
                 }
             }
         ),
+        # Wave 6 BUG-CLOUD-1-R6: COLUMNS anchoring/_extra, FROM ONLY + sample/set/values stop-keywords,
+        # unquoted hyphen-merge lookahead, NUL-byte fail-closed, parenthesized SELECT (*)/((*)), and BOM/ZWSP nested JSON
+        "bug-cloud-1-r6-columns-extra": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE COLUMNS('^_extra$') LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r6-columns-prefix-oi": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE COLUMNS('^oi') = '203.0.113.9'"}}
+        ),
+        "bug-cloud-1-r6-columns-substr-xtra": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE COLUMNS('xtra') LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r6-columns-substr-ookie": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE COLUMNS('ookie') = 'sess_secret_99'"}}
+        ),
+        "bug-cloud-1-r6-columns-substr-dge-si": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs WHERE COLUMNS('dge_si') = 'esid_secret_77'"}}
+        ),
+        "bug-cloud-1-r6-columns-prefix-ci": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM client_vitals WHERE concat_ws('|', *COLUMNS('^ci')) LIKE '%cid_secret_99%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-columns-caret": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status, url FROM logs WHERE concat_ws('|', *COLUMNS('^')) LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-columns-empty-alt": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status, url FROM logs WHERE concat_ws('|', *COLUMNS('status|')) LIKE '%198.51.100.7%'"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-columns-unparen-pipe": json.dumps(
+            {"_view_extras": {"sql": "SELECT COLUMNS('^status|oip$') FROM logs"}}
+        ),
+        "bug-cloud-1-r6-from-only-alias-cast": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM ONLY logs AS t WHERE t::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r6-from-only-col-list": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM ONLY logs t(c1, c2) WHERE t.c2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r6-stop-kw-sample": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs sample WHERE sample::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r6-stop-kw-set": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs set WHERE set::VARCHAR LIKE '%198.51.100.7%'"}}
+        ),
+        "bug-cloud-1-r6-stop-kw-values-cols": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs values(c1, c2) WHERE values.c2 = '198.51.100.7'"}}
+        ),
+        "bug-cloud-1-r6-hyphen-extra-contains": json.dumps(
+            {"_view_extras": {"sql": "SELECT * FROM logs WHERE status-_extra.contains('198.51.100.7')::INT = 199"}}
+        ),
+        "bug-cloud-1-r6-hyphen-blind-fn": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE status-map_contains_value(kv, '198.51.100.7')::INT = 199"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-from-json-u0000": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE from_json(_extra::JSON, '{\"client_ip\\u0000safe\":\"VARCHAR\"}').client_ip = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-json-transform-nested-u0000": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": 'SELECT * FROM logs WHERE json_transform(_extra, \'{"request":{"headers":{"x-forwarded-for\\u0000safe":"VARCHAR"}}}\')::VARCHAR LIKE \'%198.51.100.7%\''
+                }
+            }
+        ),
+        "bug-cloud-1-r6-paren-star-union": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM (SELECT now()::TIMESTAMPTZ AS a, '' AS b, '' AS c, '' AS d, 0 AS e, '' AS f, '' AS g WHERE 1=0 UNION ALL SELECT (*) FROM logs) sub WHERE sub.b = '198.51.100.7'"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-double-paren-star-in": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT * FROM logs WHERE (logs.timestamp, '198.51.100.7', '', '', logs.status, logs.url, '') IN (SELECT ((*)) FROM logs)"
+                }
+            }
+        ),
+        "bug-cloud-1-r6-bom-nested-json": '{"custom_blob":"\\ufeff{\\"\\\\u0063lient_ip\\":\\"198.51.100.7\\"}"}',
+        "bug-cloud-1-r6-zwsp-nested-json": '{"custom_blob":"\\u200b{\\"\\\\u0063lient_ip\\":\\"198.51.100.7\\"}"}',
     }
     benign_vectors: dict[str, str] = {
         "benign-columns-safe": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^(status|url|pop)$') FROM logs"}}),
+        "benign-r6-columns-single": json.dumps({"_view_extras": {"sql": "SELECT COLUMNS('^status$') FROM logs"}}),
+        "benign-r6-subtract-and-count-star": json.dumps(
+            {
+                "_view_extras": {
+                    "sql": "SELECT status - 200, status-200, (status + 1) * 2 FROM ONLY logs AS t WHERE (SELECT count(*) FROM logs) > 0"
+                }
+            }
+        ),
+        "benign-r6-tablesample": json.dumps(
+            {"_view_extras": {"sql": "SELECT status, url FROM logs TABLESAMPLE 10 PERCENT WHERE status = 200"}}
+        ),
         "benign-arr-index": json.dumps({"_view_extras": {"sql": "SELECT arr[1] FROM logs"}}),
         "benign-extra-safe": json.dumps({"_view_extras": {"sql": "SELECT _extra['safe'] FROM logs"}}),
         "benign-chained-extra-safe": json.dumps(
@@ -1765,6 +1872,15 @@ def test_t5_hs03_hs12_py08_sql_console_table_filter_parser_differentials_union_s
         "SELECT status FROM logs INTO OUTFILE '/tmp/x'",
         "WITH RECURSIVE r AS (SELECT 1 UNION ALL SELECT 1 FROM r) SELECT * FROM r",
         "SELECT $$secret$$ FROM logs",
+        "SELECT (SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT status FROM logs WHERE EXISTS (SELECT 1 FROM system.tables)",
+        "SELECT status FROM logs WHERE url IN (SELECT service_id FROM high_scale_batch_publications)",
+        "SELECT CASE WHEN (SELECT count() FROM information_schema.tables) > 0 THEN 1 ELSE 0 END AS leaked FROM logs LIMIT 1",
+        "SELECT ARRAY(SELECT service_id FROM high_scale_batch_publications) AS leaked FROM logs LIMIT 1",
+        "WITH c AS (TABLE high_scale_batch_publications) SELECT * FROM c",
+        "SELECT (FROM high_scale_batch_publications SELECT service_id LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT * FROM ONLY logs",
+        "WITH p AS (PIVOT logs ON status) SELECT * FROM p",
     ]
     c = _analyst_client(analyst)
     for bad_sql in adversarial_sqls:

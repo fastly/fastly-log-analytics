@@ -975,3 +975,136 @@ def test_recursive_cte_anchor_cannot_shadow_disallowed_base_table() -> None:
     ):
         res = validate_user_sql(legit_sql, allowed_tables={"logs"})
         assert res.parse_tree.get("statements")
+
+
+def test_sec_t5_iter5_py01_py02_py03_subquery_table_from_only_pivot_and_lexer_hardening() -> None:
+    from backend.core.sql_validator import SQLValidationError, validate_user_sql
+    from backend.high_scale import query as hs_query
+    from backend.models.analytics import QueryRequest as DashboardQueryRequest
+
+    # 1. SEC-T5-ITER5-PY-01: Subqueries after clause/operator keywords & ARRAY(SELECT ...)
+    for subq_attack in (
+        "SELECT (SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT status FROM logs WHERE EXISTS (SELECT 1 FROM system.tables)",
+        "SELECT status FROM logs WHERE url IN (SELECT service_id FROM high_scale_batch_publications)",
+        "SELECT CASE WHEN (SELECT count() FROM information_schema.tables) > 0 THEN 1 ELSE 0 END AS leaked FROM logs LIMIT 1",
+        "SELECT ARRAY(SELECT service_id FROM high_scale_batch_publications) AS leaked FROM logs LIMIT 1",
+        "WITH RECURSIVE ops_secret AS (SELECT (SELECT secret_col FROM ops_secret LIMIT 1) AS secret_col UNION ALL SELECT secret_col FROM ops_secret WHERE 1=0) SELECT * FROM ops_secret",
+        "SELECT (SELECT * FROM which_secret('s3://x', 'a') LIMIT 1) AS leaked FROM logs",
+        "SELECT (SELECT * FROM my_secret_tvf() LIMIT 1) AS leaked FROM logs",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(subq_attack, allowed_tables={"logs"})
+
+    # 2. SEC-T5-ITER5-PY-02 & Reviewer Finding 3: TABLE <rel>, (FROM <rel> ...), FROM ONLY, parenthesized JOIN, PIVOT/UNPIVOT, subquery SHOW/DESCRIBE/SUMMARIZE/DESC
+    for table_or_stmt_attack in (
+        "WITH c AS (TABLE high_scale_batch_publications) SELECT * FROM c",
+        "SELECT (FROM high_scale_batch_publications SELECT service_id LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "VALUES ((FROM ops_secret SELECT secret_col LIMIT 1))",
+        'WITH "only" AS (SELECT 1 AS x) SELECT secret_col FROM ONLY ops_secret',
+        'WITH "only" AS (SELECT 1 AS x) SELECT b.secret_col FROM logs AS a CROSS JOIN ONLY ops_secret AS b',
+        "SELECT a.secret_col FROM (ops_secret AS a CROSS JOIN logs AS b)",
+        "SELECT secret_col FROM (TABLE ops_secret)",
+        "SELECT url FROM logs UNION ALL TABLE ops_secret",
+        "TABLE ops_secret",
+        "FROM ops_secret SELECT secret_col",
+        "SELECT * FROM (DESCRIBE ops_secret) sub",
+        "SELECT * FROM (SUMMARIZE ops_secret) sub",
+        "SELECT * FROM (SHOW TABLES) sub",
+        "SELECT status FROM logs WHERE EXISTS (DESC ops_secret)",
+        "WITH p AS (PIVOT ops_secret ON secret_col) SELECT * FROM p",
+        "WITH p AS (UNPIVOT ops_secret ON secret_col) SELECT * FROM p",
+        "WITH p AS (PIVOT_WIDER ops_secret ON secret_col) SELECT * FROM p",
+        "WITH p AS (PIVOT_LONGER ops_secret ON secret_col) SELECT * FROM p",
+        "SELECT * FROM ONLY WHERE 1=1",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(table_or_stmt_attack, allowed_tables={"logs"})
+
+    # 3. SEC-T5-ITER5-PY-03: WITH RECURSIVE ... UNION [ALL] BY NAME & lexer CR-comment / $tag$ / E'...' / U&'...' / Unicode-ws / ctrl chars
+    for lexer_or_by_name_attack in (
+        "WITH RECURSIVE ops_secret AS (SELECT 'a' AS secret_col UNION BY NAME SELECT secret_col FROM ops_secret) SELECT * FROM ops_secret",
+        "WITH RECURSIVE ops_secret AS (SELECT 'a' AS secret_col UNION ALL BY NAME SELECT secret_col FROM ops_secret) SELECT * FROM ops_secret",
+        "SELECT status FROM logs -- comment\rUNION ALL SELECT secret_col FROM ops_secret",
+        "SELECT $a$'$a$ AS a, secret_col FROM ops_secret WHERE $a$'$a$ != ''",
+        r"SELECT E'\'' AS a, secret_col FROM ops_secret WHERE E'\'' != ''",
+        "SELECT E'a'\n'\\'' AS a, secret_col FROM ops_secret WHERE 'x' != E'\\''",
+        r"SELECT U&'\0027' FROM logs",
+        'SELECT U&"ops_secret" FROM logs',
+        "SELECT 'a' UESCAPE '#' FROM logs",
+        "SELECT status\x0bFROM logs",
+        "SELECT status\u2028FROM logs",
+        "SELECT * FROM\u200bops_secret",
+    ):
+        with pytest.raises(SQLValidationError):
+            validate_user_sql(lexer_or_by_name_attack, allowed_tables={"logs"})
+
+    # 4. Benign controls on validate_user_sql (TRIM(FROM ...), EXTRACT, SUBSTRING, quoted "only" CTE, ORDER BY DESC, replace/truncate scalar calls, Unicode spaces on allowed table)
+    for benign_sql in (
+        "SELECT TRIM(FROM url), TRIM(BOTH '/' FROM url), EXTRACT(EPOCH FROM timestamp), SUBSTRING(url FROM 1 FOR 5) FROM logs",
+        "SELECT replace(url, 'a', 'b'), truncate(1.234, 2) FROM logs ORDER BY url DESC",
+        'WITH "only" AS (SELECT 1 AS x) SELECT * FROM "only"',
+        "SELECT status FROM ONLY logs WHERE status = 200",
+        "SELECT $tag$keep ' inside$tag$ AS s, E'it\\'s ok' AS e, status\u00a0FROM\u200blogs WHERE'ok'='ok'",
+        "SELECT status IS DISTINCT FROM 200 AS d1, status IS NOT DISTINCT FROM 404 AS d2 FROM logs",
+    ):
+        assert validate_user_sql(benign_sql, allowed_tables={"logs"}).parse_tree.get("statements"), benign_sql
+
+    # 5. Live High-Scale query_endpoint blocks all subquery / TABLE / (FROM ...) / ONLY / PIVOT attacks before ClickHouse execution
+    executed: list[tuple[str, dict[str, object]]] = []
+
+    class _StubCH:
+        _table_filters_verified = True
+
+        def execute(
+            self,
+            sql: str,
+            params: dict[str, object] | None = None,
+            *,
+            settings: dict[str, object] | None = None,
+        ) -> list[dict[str, object]]:
+            del params
+            executed.append((sql, dict(settings or {})))
+            return [{"n": 1}]
+
+    stub_ch = _StubCH()
+    hs_svc = SimpleNamespace(service_id="svc_alpha", client=stub_ch)
+    for hs_attack in (
+        "SELECT (SELECT name FROM system.tables LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT status FROM logs WHERE EXISTS (SELECT 1 FROM system.tables)",
+        "SELECT status FROM logs WHERE url IN (SELECT service_id FROM high_scale_batch_publications)",
+        "SELECT CASE WHEN (SELECT count() FROM information_schema.tables) > 0 THEN 1 ELSE 0 END AS leaked FROM logs LIMIT 1",
+        "SELECT ARRAY(SELECT service_id FROM high_scale_batch_publications) AS leaked FROM logs LIMIT 1",
+        "WITH c AS (TABLE high_scale_batch_publications) SELECT * FROM c",
+        "SELECT (FROM high_scale_batch_publications SELECT service_id LIMIT 1) AS leaked FROM logs LIMIT 1",
+        "SELECT * FROM ONLY logs",
+        "WITH p AS (PIVOT logs ON status) SELECT * FROM p",
+    ):
+        with pytest.raises(PermissionError):
+            hs_query.query_endpoint(
+                hs_svc,
+                DashboardQueryRequest(sql=hs_attack, max_rows=10),
+                "2026-11-19T00:00:00Z",
+                "2026-11-19T01:00:00Z",
+                mask_ips=False,
+            )
+    assert executed == []
+
+    # Legitimate High-Scale scalar / IN / EXISTS subqueries on allowed tables rewrite canonical names & enforce additional_table_filters
+    hs_query.query_endpoint(
+        hs_svc,
+        DashboardQueryRequest(
+            sql="SELECT (SELECT count() FROM client_vitals) AS v_cnt, pop FROM logs WHERE url IN (SELECT url FROM logs WHERE status = 200)",
+            max_rows=10,
+        ),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=True,
+        tables={"request_facts": "fla_cv_m_req", "rum_vitals_facts": "fla_cv_m_vit"},
+    )
+    assert len(executed) == 1
+    ran_sql, ran_settings = executed[0]
+    assert "fla_cv_m_vit" in ran_sql and "fla_cv_m_req" in ran_sql
+    assert "client_vitals" not in ran_sql and "FROM logs" not in ran_sql
+    atf_str = str(ran_settings.get("additional_table_filters", ""))
+    assert "fla_cv_m_req" in atf_str and "fla_cv_m_vit" in atf_str

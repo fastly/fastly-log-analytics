@@ -546,5 +546,42 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
       expect(okText, benignSql).not.toContain('203.0.113.')
       expect(okText, benignSql).not.toContain('CANARY_SESS_')
     }
+
+    // 6. SEC-T5-ITER5-01: WITH "only" AS (...) SELECT ... FROM ONLY <disallowed> returns 403,
+    // while quoted CTE SELECT * FROM "only" and FROM ONLY logs / FROM ONLY main.logs work with PII masked
+    for (const blockedOnlySql of [
+      'WITH "only" AS (SELECT 1 AS x) SELECT client_id FROM ONLY client_vitals',
+      'WITH "only" AS (SELECT 1 AS x) SELECT b.client_id FROM logs AS a CROSS JOIN ONLY client_vitals AS b',
+      'WITH "only" AS (SELECT 1 AS x) SELECT b.client_id FROM logs AS a, ONLY client_vitals AS b',
+      'WITH "only" AS (SELECT 1 AS x) SELECT client_id FROM ONLY main.client_vitals',
+      'WITH "only" AS (SELECT 1 AS x) SELECT client_id FROM ONLY (client_vitals)',
+      'SELECT * FROM ONLY WHERE 1=1',
+    ]) {
+      const r = await executeCloudQuery(
+        { sql: blockedOnlySql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(r.status, blockedOnlySql).toBe(403)
+    }
+
+    const quotedOnlyRes = await executeCloudQuery(
+      { sql: 'WITH "only" AS (SELECT 1 AS x) SELECT * FROM "only"' },
+      { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+    )
+    expect(quotedOnlyRes.status).toBe(200)
+
+    for (const allowedOnlySql of [
+      'SELECT status, ip, cookie_session FROM ONLY logs',
+      'SELECT status, ip, cookie_session FROM ONLY main.logs',
+    ]) {
+      const onlyLogsRes = await executeCloudQuery(
+        { sql: allowedOnlySql },
+        { maskIps: true, tableName: 'requests', allowedTables: ['logs', 'requests'], runSql },
+      )
+      expect(onlyLogsRes.status, allowedOnlySql).toBe(200)
+      const onlyLogsText = JSON.stringify(onlyLogsRes.body)
+      expect(onlyLogsText, allowedOnlySql).not.toContain('203.0.113.')
+      expect(onlyLogsText, allowedOnlySql).not.toContain('CANARY_SESS_')
+    }
   })
 })
