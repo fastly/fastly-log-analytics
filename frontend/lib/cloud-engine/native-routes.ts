@@ -1,4 +1,5 @@
 export const NATIVE_ROUTES: ReadonlyArray<readonly [string, string]> = [
+  ["GET", "/api/bootstrap"],
   ["GET", "/api/services"],
   ["GET", "/api/admin/services"],
   ["GET,PATCH", "/api/admin/services/{service_id}"],

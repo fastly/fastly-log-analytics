@@ -295,6 +295,43 @@ async function withLoading<T>(stage: LoadingStage, work: () => Promise<T>): Prom
   }
 }
 
+async function processNativeCloudBootstrap(response: Response): Promise<Response> {
+  if (!response.ok) return response;
+  const payload = await response.clone().json() as Record<string, unknown>;
+  const user = payload.user;
+  const settings = payload.settings;
+  const debugState = payload.debug_state;
+  if (
+    payload.runtime_mode !== "cloud" ||
+    !(
+      user === null ||
+      (
+        typeof user === "object" &&
+        typeof (user as Record<string, unknown>).id === "string" &&
+        typeof (user as Record<string, unknown>).role === "string"
+      )
+    ) ||
+    !Array.isArray(payload.services) ||
+    !(payload.active_service_id === null || typeof payload.active_service_id === "string") ||
+    !Array.isArray(payload.active_log_field_ids) ||
+    !("log_fields_catalog" in payload) ||
+    !Array.isArray(payload.views) ||
+    typeof payload.build_sha !== "string" ||
+    payload.build_sha.length === 0 ||
+    typeof payload.ngwaf_configured !== "boolean" ||
+    typeof payload.fastly_bots_available !== "boolean" ||
+    !settings ||
+    typeof settings !== "object" ||
+    typeof (settings as Record<string, unknown>).needs_login !== "boolean" ||
+    !debugState ||
+    typeof debugState !== "object"
+  ) {
+    throw new Error("Invalid Cloud bootstrap response");
+  }
+  await setDashboardCacheIdentity(cloudCacheIdentity(payload));
+  return response;
+}
+
 async function loadCloudCatalog(request: Request) {
   const response = await fetchCloudMetadata("/api/log-fields/catalog", request.signal);
   if (!response.ok) return response;
@@ -861,7 +898,18 @@ async function handleCloudRequestInner(
   }
   const stage = path === "/api/bootstrap" || path === "/api/auth/session" || path === "/api/services"
     ? "session" : path === "/api/log-extents" ? "range" : path === "/api/files" ? "listing" : null;
-  if (stage && path !== "/api/bootstrap" && isNativeCloudRoute(request.method, path)) {
+  if (stage && isNativeCloudRoute(request.method, path)) {
+    if (path === "/api/bootstrap") {
+      return withLoading(stage, async () => {
+        const response = await fetchCloudMetadata(path, request.signal);
+        try {
+          return await processNativeCloudBootstrap(response);
+        } catch (error) {
+          resetCloudMetadataCache();
+          throw error;
+        }
+      });
+    }
     // The server answers extents for its one active service, so the page's
     // own read can share the lookup its scans make.
     if (path === "/api/log-extents" && !url.search) {
@@ -984,132 +1032,6 @@ async function dispatchCloudRequest(request: Request, origin?: CloudQueryContext
   // Silence high-scale-only browser beacons when running on Cloud Compute
   if (pathname === "/api/web-vitals" || pathname === "/api/ux-events") {
     return new Response(null, { status: 204 });
-  }
-
-  // Synthesize /api/bootstrap from Cloud Compute's /api/auth/session and /api/services
-  if (pathname === "/api/bootstrap" && method === "GET") {
-    const sessionRes = await fetch("/api/auth/session", {
-      credentials: "include",
-      signal: request.signal,
-    });
-    if (!sessionRes.ok && sessionRes.status !== 401) return sessionRes;
-    if (!sessionRes || !sessionRes.ok) {
-      return jsonResponse(
-        {
-          runtime_mode: "cloud",
-          user: null,
-          services: [],
-          active_service_id: null,
-          settings: {
-            needs_login: true,
-            is_remote_analyst: false,
-            initializing: false,
-          },
-          debug_state: {
-            query_debug_visibility: "disabled",
-            api_call_debug_visibility: "disabled",
-          },
-        },
-        request,
-      );
-    }
-    const sessionData = (await sessionRes.json().catch(() => ({}))) as {
-      user?: { id?: string; display_name?: string; role?: string } | null;
-      query_debug_visibility?: string;
-      api_call_debug_visibility?: string;
-    };
-    const user = sessionData.user ?? null;
-    if (!user) {
-      return jsonResponse(
-        {
-          runtime_mode: "cloud",
-          user: null,
-          services: [],
-          active_service_id: null,
-          settings: {
-            needs_login: true,
-            is_remote_analyst: false,
-            initializing: false,
-          },
-          debug_state: {
-            query_debug_visibility: "disabled",
-            api_call_debug_visibility: "disabled",
-          },
-        },
-        request,
-      );
-    }
-    // Rotating the cache scope supersedes in-flight file discovery, so it settles before the page can start scans,
-    // and before the services read so the page's later lookups under this identity share it.
-    await setDashboardCacheIdentity(cloudCacheIdentity({ user }));
-    const isRemoteAnalyst =
-      user.role === "analyst" || user.role === "analyst-no-pii";
-    // Analysts can't read the admin-only sync-status the header uses, so they get its analyst-safe slice here.
-    const headerBadge = isRemoteAnalyst
-      ? fetch("/api/header-badge", { credentials: "include", signal: request.signal })
-          .then(async (res) => {
-            if (!res.ok) return undefined;
-            const badge = (await res.json()) as { request?: unknown; rum?: unknown };
-            return { request: badge.request ?? null, rum: badge.rum ?? null };
-          })
-          .catch(() => undefined)
-      : undefined;
-    const servicesRes = await fetchCloudMetadata("/api/services", request.signal);
-    if (!servicesRes.ok) return servicesRes;
-    const servicesJson = servicesRes?.ok
-      ? ((await servicesRes.json().catch(() => ({ services: [] }))) as {
-          services?: Array<{
-            service_id: string;
-            service_name?: string;
-            name?: string;
-            rum?: { enabled?: boolean };
-            cmcd?: { enabled?: boolean };
-            active_log_field_ids?: string[];
-          }>;
-        })
-      : { services: [] };
-    const rawServices = servicesJson.services ?? [];
-    const mappedServices = rawServices.map((s) => ({
-      ...s,
-      service_id: s.service_id,
-      name: s.name || s.service_name || s.service_id,
-      cmcd_enabled: Boolean(s.cmcd?.enabled),
-      rum_enabled: Boolean(s.rum?.enabled),
-    }));
-    const services = mappedServices;
-    const requestedService = searchParams.get("service_id") ?? request.headers.get("x-service-id");
-    const activeServiceId = services.find((service) => service.service_id === requestedService)?.service_id ??
-      services[0]?.service_id ?? null;
-    // An older Compute omits the list; empty makes the dashboard treat every card as logged.
-    const activeLogFieldIds = rawServices.find((service) => service.service_id === activeServiceId)?.active_log_field_ids ?? [];
-    return jsonResponse(
-      {
-        runtime_mode: "cloud",
-        user,
-        services,
-        active_service_id: activeServiceId,
-        active_log_field_ids: activeLogFieldIds,
-        header_badge: await headerBadge,
-        // Cloud has no NGWAF; saying so up front keeps /security from drawing the NGWAF row then removing it.
-        ngwaf_configured: false,
-        // Cloud classifies the top user agents in the browser against the bundled
-        // well-known-bots seed; false hides the Fastly Bots card.
-        fastly_bots_available: true,
-        settings: {
-          needs_login: false,
-          is_remote_analyst: isRemoteAnalyst,
-          mask_ips: user.role === "analyst-no-pii",
-          initializing: false,
-        },
-        debug_state: {
-          query_debug_visibility:
-            sessionData.query_debug_visibility ?? "disabled",
-          api_call_debug_visibility:
-            sessionData.api_call_debug_visibility ?? "disabled",
-        },
-      },
-      request,
-    );
   }
 
   if (pathname === "/api/admin/debug-settings" && method === "GET") {

@@ -19,6 +19,29 @@ vi.mock("./range-loader", async (importOriginal) => ({
   ensureCloudRange: vi.fn(async () => getDuckDBEngine().readContext()),
 }));
 
+const nativeBootstrap = {
+  runtime_mode: "cloud",
+  user: { id: "fixture-user", display_name: "Fixture User", role: "admin" },
+  services: [{ service_id: "fixture-a", service_name: "Fixture A", active_log_field_ids: ["status"] }],
+  active_service_id: "fixture-a",
+  active_log_field_ids: ["status"],
+  log_fields_catalog: { groups: [], fields: [{ id: "status", label: "Status" }] },
+  views: [{ view_id: "view-1", name: "Errors", service_id: "fixture-a", state: {} }],
+  build_sha: "abc123",
+  ngwaf_configured: false,
+  fastly_bots_available: true,
+  settings: {
+    needs_login: false,
+    is_remote_analyst: false,
+    mask_ips: false,
+    initializing: false,
+  },
+  debug_state: {
+    query_debug_visibility: "disabled",
+    api_call_debug_visibility: "disabled",
+  },
+};
+
 function request(path: string, method = "GET", body?: unknown, serviceId?: string) {
   return new Request(`http://localhost${path}`, {
     method,
@@ -35,6 +58,28 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore.reset(); resetCloudMetadataCache(); });
 
 describe("Cloud endpoint bridges", () => {
+  it("forwards native bootstrap exactly once without synthesizing auth or services", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL) => Response.json(nativeBootstrap));
+    vi.stubGlobal("fetch", fetcher);
+
+    const response = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+
+    expect(await response?.json()).toEqual(nativeBootstrap);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe("/api/bootstrap");
+  });
+
+  it("rejects a malformed successful native bootstrap instead of synthesizing a fallback", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      runtime_mode: "cloud",
+      user: { id: "fixture-user", role: "admin" },
+    })));
+
+    await expect(
+      handleCloudAnalyticalRequest(request("/api/bootstrap")),
+    ).rejects.toThrow("Invalid Cloud bootstrap response");
+  });
+
   it("invalidates bootstrap and services React Query metadata after a config mutation", async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -189,6 +234,8 @@ describe("Cloud endpoint bridges", () => {
     const declared = Object.entries(contract.paths).flatMap(([path, operations]) =>
       Object.keys(operations).filter((key) => key !== "parameters").map((method) => `${method.toUpperCase()} ${path}`),
     ).sort();
+    declared.push("GET /api/bootstrap");
+    declared.sort();
     expect(NATIVE_ROUTES.flatMap(([methods, path]) => methods.split(",").map((method) => `${method} ${path}`)).sort()).toEqual(declared);
     expect(isNativeCloudRoute("POST", "/api/admin/invites/fixture/revoke")).toBe(true);
     expect(isNativeCloudRoute("DELETE", "/api/admin/invites/fixture/revoke")).toBe(false);
@@ -367,10 +414,12 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(servicesCalls()).toBe(1);
   });
 
-  it("reuses bootstrap's services lookup, so a cold /rum load reads services once", async () => {
+  it("uses native bootstrap, then shares one services lookup across cold RUM reads", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role: "admin" } });
+      if (path === "/api/bootstrap") {
+        return Response.json({ ...nativeBootstrap, services: services.services });
+      }
       if (path === "/api/services") return Response.json(services);
       return Response.json({ versions: ["2.13.0", "2.10.0"], default: "2.13.0" });
     });
@@ -383,47 +432,36 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(fetcher.mock.calls.filter(([input]) => String(input) === "/api/services")).toHaveLength(1);
   });
 
-  it("gives analysts the header's latest/total badge, which admins read live from sync-status", async () => {
+  it("preserves the native analyst header badge without follow-up requests", async () => {
     const badge = {
       configured: true,
       request: { latest_log_at: "2026-01-01T00:10:00Z", total_rows: 42, total_rows_partial: false, last_sync_at: "2026-01-01T00:11:00Z" },
       rum: { latest_log_at: "2026-01-01T00:09:00Z", total_rows: 7, last_sync_at: "2026-01-01T00:11:00Z" },
     };
-    let role = "analyst";
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role } });
-      if (path === "/api/services") return Response.json(services);
-      if (path === "/api/header-badge") return Response.json(badge);
-      return Response.json({}, { status: 404 });
+      expect(path).toBe("/api/bootstrap");
+      return Response.json({
+        ...nativeBootstrap,
+        user: { id: "fixture-user", role: "analyst" },
+        header_badge: { request: badge.request, rum: badge.rum },
+      });
     });
     vi.stubGlobal("fetch", fetcher);
     const analyst = await (await handleCloudAnalyticalRequest(request("/api/bootstrap")))!.json();
     expect(analyst.header_badge).toEqual({ request: badge.request, rum: badge.rum });
-
-    role = "admin";
-    resetCloudMetadataCache();
-    fetcher.mockClear();
-    const admin = await (await handleCloudAnalyticalRequest(request("/api/bootstrap")))!.json();
-    expect(admin.header_badge).toBeUndefined();
-    expect(fetcher.mock.calls.map(([input]) => String(input))).not.toContain("/api/header-badge");
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it("still boots an analyst when the header badge read fails", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const path = String(input);
-      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role: "analyst-no-pii" } });
-      if (path === "/api/services") return Response.json(services);
-      return Response.json({ detail: "unavailable" }, { status: 503 });
-    }));
+  it("passes through a failed native bootstrap without synthesizing a fallback", async () => {
+    const fetcher = vi.fn(async () => Response.json({ detail: "unavailable" }, { status: 503 }));
+    vi.stubGlobal("fetch", fetcher);
     const response = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
-    expect(response?.ok).toBe(true);
-    const body = await response!.json();
-    expect(body.user).toMatchObject({ role: "analyst-no-pii" });
-    expect(body.header_badge).toBeUndefined();
+    expect(response?.status).toBe(503);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it("boots the dashboard with the active service's logged fields and the Fastly Bots card", async () => {
+  it("passes through the active service's native logged fields and capability flags", async () => {
     const listed = {
       services: [
         { service_id: "fixture-a", active_log_field_ids: ["status", "host"] },
@@ -435,12 +473,20 @@ describe("Cloud RUM status and versions services lookup", () => {
         },
       ],
     };
-    let servicesBody: unknown = listed;
+    let bootstrapBody: Record<string, unknown> = {
+      ...nativeBootstrap,
+      services: listed.services.map((service) => ({
+        ...service,
+        cmcd_enabled: service.cmcd?.enabled ?? false,
+        rum_enabled: service.rum?.enabled ?? false,
+      })),
+      active_service_id: "fixture-b",
+      active_log_field_ids: ["status", "pop", "tenant"],
+    };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
-      if (path === "/api/auth/session") return Response.json({ user: { id: "fixture-user", role: "admin" } });
-      if (path === "/api/services") return Response.json(servicesBody);
-      return Response.json({}, { status: 404 });
+      expect(path).toBe("/api/bootstrap");
+      return Response.json(bootstrapBody);
     }));
     const boot = async (serviceId?: string) =>
       (await handleCloudAnalyticalRequest(request("/api/bootstrap", "GET", undefined, serviceId)))!.json();
@@ -455,7 +501,12 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(active.ngwaf_configured).toBe(false);
 
     resetCloudMetadataCache();
-    servicesBody = { services: [{ service_id: "fixture-a" }] };
+    bootstrapBody = {
+      ...bootstrapBody,
+      services: [{ service_id: "fixture-a", name: "fixture-a", active_log_field_ids: [] }],
+      active_service_id: "fixture-a",
+      active_log_field_ids: [],
+    };
     expect((await boot()).active_log_field_ids).toEqual([]);
   });
 

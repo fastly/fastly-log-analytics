@@ -1,5 +1,11 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
+import { useBootstrap } from "@/hooks/useBootstrap";
+import { queryKeys } from "@/lib/api";
+import { setCloudModeRuntime } from "./mode";
 import { ensureCloudRange } from "./range-loader";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { setDashboardCacheIdentity } from "./dashboard/client";
@@ -19,10 +25,34 @@ function scan() {
   });
 }
 
+const nativeBootstrap = {
+  runtime_mode: "cloud",
+  user: { id: "u1", display_name: "User One", role: "admin" },
+  services: [{ service_id: "fixture-a", name: "Fixture A", active_log_field_ids: ["status"] }],
+  active_service_id: "fixture-a",
+  active_log_field_ids: ["status"],
+  log_fields_catalog: { groups: [], fields: [{ id: "status", label: "Status" }] },
+  views: [{ view_id: "view-1", name: "Errors", service_id: "fixture-a", state: {} }],
+  build_sha: "abc123",
+  ngwaf_configured: false,
+  fastly_bots_available: true,
+  settings: {
+    needs_login: false,
+    is_remote_analyst: false,
+    mask_ips: false,
+    initializing: false,
+  },
+  debug_state: {
+    query_debug_visibility: "disabled",
+    api_call_debug_visibility: "disabled",
+  },
+};
+
 function metadataFetcher() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const path = input instanceof Request ? new URL(input.url).pathname : String(input);
     if (path === "/api/log-extents") return Response.json({ latest_log_at: "2026-11-02T00:00:00Z" });
+    if (path === "/api/bootstrap") return Response.json(nativeBootstrap);
     if (path === "/api/services") return Response.json({ services: [{ service_id: "fixture-a" }] });
     if (path === "/api/auth/session") return Response.json({ user: { id: "u1", role: "admin" } });
     return Response.json({ groups: [], fields: [] });
@@ -66,10 +96,10 @@ describe("Cloud scan metadata", () => {
     }
   });
 
-  it("refreshes service metadata after a successful config mutation without evicting unrelated metadata", async () => {
+  it("refreshes bootstrap service metadata after a successful config mutation without evicting unrelated metadata", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = input instanceof Request ? new URL(input.url).pathname : String(input);
-      if (path === "/api/auth/session") return Response.json({ user: { id: "u1", role: "admin" } });
+      if (path === "/api/bootstrap") return Response.json(nativeBootstrap);
       if (path === "/api/services") {
         return Response.json({ services: [{ service_id: "fixture-a" }] });
       }
@@ -108,7 +138,8 @@ describe("Cloud scan metadata", () => {
     expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap")))?.ok).toBe(true);
     expect((await handleCloudAnalyticalRequest(new Request("http://localhost/api/log-extents")))?.ok).toBe(true);
     const paths = calls(fetcher);
-    expect(paths.filter((path) => path === "/api/services")).toHaveLength(2);
+    expect(paths.filter((path) => path === "/api/bootstrap")).toHaveLength(2);
+    expect(paths.filter((path) => path === "/api/services")).toHaveLength(0);
     expect(paths.filter((path) => path === "/api/log-extents")).toHaveLength(1);
   });
 
@@ -166,6 +197,30 @@ describe("Cloud scan metadata", () => {
 });
 
 describe("Cloud bootstrap", () => {
+  it("seeds services, catalog, and views from one native bootstrap request", async () => {
+    setCloudModeRuntime(true);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("/api/bootstrap");
+      return Response.json(nativeBootstrap);
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    const { result } = renderHook(() => useBootstrap(), { wrapper });
+
+    await waitFor(() => expect(result.current.data).toEqual(nativeBootstrap));
+    expect(queryClient.getQueryData(queryKeys.services())).toEqual({
+      services: nativeBootstrap.services,
+      _section_timings: [],
+    });
+    expect(queryClient.getQueryData(queryKeys.logFieldsCatalog("fixture-a")))
+      .toEqual(nativeBootstrap.log_fields_catalog);
+    expect(queryClient.getQueryData(queryKeys.views("fixture-a"))).toEqual(nativeBootstrap.views);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("reports NGWAF as not configured, so /security never draws the NGWAF row and then drops it", async () => {
     vi.stubGlobal("fetch", metadataFetcher());
     const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/bootstrap"));
