@@ -647,6 +647,7 @@ pub(super) const DECLARED: &[(&str, Class)] = &[
     ("/api/auth/register/options", Class::Public),
     ("/api/auth/register/verify", Class::Public),
     ("/api/auth/logout", Class::Public),
+    ("/api/bootstrap", Class::Public),
     ("/api/setup", Class::Public),
     ("/api/setup/accept", Class::Public),
     ("/api/services", Class::Session),

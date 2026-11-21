@@ -59,14 +59,42 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cloudLoadingStore
 
 describe("Cloud endpoint bridges", () => {
   it("forwards native bootstrap exactly once without synthesizing auth or services", async () => {
-    const fetcher = vi.fn(async (_input: RequestInfo | URL) => Response.json(nativeBootstrap));
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(nativeBootstrap));
     vi.stubGlobal("fetch", fetcher);
 
-    const response = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+    const response = await handleCloudAnalyticalRequest(
+      request("/api/bootstrap?service_id=fixture-b", "GET", undefined, "fixture-b"),
+    );
 
     expect(await response?.json()).toEqual(nativeBootstrap);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls[0][0]).toBe("/api/bootstrap");
+    expect(fetcher.mock.calls[0][0]).toBe("/api/bootstrap?service_id=fixture-b");
+    expect(fetcher.mock.calls[0][1]).toMatchObject({
+      credentials: "include",
+      headers: expect.any(Headers),
+      signal: expect.any(AbortSignal),
+    });
+    expect(new Headers(fetcher.mock.calls[0][1]?.headers).get("x-service-id")).toBe("fixture-b");
+  });
+
+  it("always refetches bootstrap so auth changes cannot reuse cached state", async () => {
+    let bootstrapCalls = 0;
+    const fetcher = vi.fn(async () => {
+      bootstrapCalls += 1;
+      return Response.json({
+        ...nativeBootstrap,
+        user: bootstrapCalls === 1
+          ? nativeBootstrap.user
+          : { id: "other-user", display_name: "Other", role: "admin" },
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+    const second = await handleCloudAnalyticalRequest(request("/api/bootstrap"));
+
+    expect(await second?.json()).toMatchObject({ user: { id: "other-user" } });
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a malformed successful native bootstrap instead of synthesizing a fallback", async () => {

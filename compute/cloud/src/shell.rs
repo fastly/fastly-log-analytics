@@ -1421,9 +1421,12 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             .unwrap_or_default();
 
         let catalog = if let Some(service_id) = active_id.as_deref() {
+            let mut catalog_path = String::from("/api/log-fields/catalog");
+            catalog_path.push_str("?service_id=");
+            catalog_path.push_str(service_id);
             let catalog_request = Request {
                 method: "GET".into(),
-                path: format!("/api/log-fields/catalog?service_id={service_id}"),
+                path: catalog_path,
                 headers: base_headers,
                 body: Vec::new(),
             };
@@ -2944,7 +2947,7 @@ mod tests {
         let (state, cookie) = signed_bootstrap_state(Role::Admin);
         let shell = Shell::new(&platform, &state, &[]);
         let response = shell.handle(&bootstrap_request(
-            "/api/bootstrap?service_id=fixtureService",
+        "/api/bootstrap",
             Some(&format!("flp_session={cookie}")),
         ));
         assert_eq!(response.status, 200);
@@ -3009,14 +3012,13 @@ mod tests {
         let (state, cookie) = signed_bootstrap_state(Role::Admin);
         let shell = Shell::new(&platform, &state, &[]);
 
-        for path in [
-            "/api/bootstrap?service_id=fixtureService",
-            "/api/bootstrap?service_id=unknownService",
-        ] {
-            let response = shell.handle(&bootstrap_request(
-                path,
-                Some(&format!("flp_session={cookie}")),
-            ));
+        for selected in ["fixtureService", "unknownService"] {
+            let mut request =
+                bootstrap_request("/api/bootstrap", Some(&format!("flp_session={cookie}")));
+            request
+                .headers
+                .insert("x-service-id".into(), selected.into());
+            let response = shell.handle(&request);
             assert_eq!(response.status, 200);
             let body: Value = serde_json::from_slice(&response.body).unwrap();
             assert_eq!(body["active_service_id"], "fixtureService");
