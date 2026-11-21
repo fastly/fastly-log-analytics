@@ -110,6 +110,81 @@ describe("browserSource", () => {
     expect(await source.hasFile!("in-memory")).toBe(true);
   });
 
+  it("coalesces concurrent file misses and gives every waiter owned bytes", async () => {
+    let resolveFetch!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    const telemetry: unknown[] = [];
+    vi.stubGlobal("fetch", fetchMock);
+    const source = browserSource("", {
+      onApiCall: (call) => telemetry.push(call),
+    });
+
+    const pending = Array.from({ length: 25 }, () =>
+      source.fetchFile("shared", undefined, { transfer: true }),
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    resolveFetch(new Response(new Uint8Array([10, 20, 30])));
+
+    const files = await Promise.all(pending);
+    expect(files.filter((file) => file.cached)).toHaveLength(24);
+    expect(new Set(files.map((file) => file.bytes)).size).toBe(25);
+    structuredClone(files[0].bytes, { transfer: [files[0].bytes] });
+    expect(files[0].bytes.byteLength).toBe(0);
+    expect(files.slice(1).every((file) => file.bytes.byteLength === 3)).toBe(true);
+    expect(telemetry).toHaveLength(1);
+  });
+
+  it("keeps a shared file fetch alive when one waiter aborts", async () => {
+    let resolveFetch!: (response: Response) => void;
+    let networkSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          networkSignal = init?.signal as AbortSignal | undefined;
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const firstAbort = new AbortController();
+    const source = browserSource("");
+
+    const first = source.fetchFile("shared", firstAbort.signal);
+    const second = source.fetchFile("shared");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    firstAbort.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    expect(networkSignal?.aborted).toBe(false);
+
+    resolveFetch(new Response(new Uint8Array([7])));
+    expect(new Uint8Array((await second).bytes)).toEqual(new Uint8Array([7]));
+  });
+
+  it("aborts a shared file fetch when its last waiter aborts", async () => {
+    let networkSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          networkSignal = init?.signal as AbortSignal | undefined;
+          networkSignal?.addEventListener("abort", () => {
+            reject(networkSignal?.reason);
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const abort = new AbortController();
+    const pending = browserSource("").fetchFile("shared", abort.signal);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    abort.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(networkSignal?.aborted).toBe(true);
+  });
+
   it("hands transferred bytes to the caller without keeping a memory copy", async () => {
     const fetchMock = vi.fn(async () => new Response(new Uint8Array([1])));
     vi.stubGlobal("fetch", fetchMock);

@@ -479,6 +479,13 @@ export function browserSource(
   const memoryFiles = new Map<string, ArrayBuffer>();
   const memoryFileIdentities = new Map<string, string | undefined>();
   let memoryFileBytes = 0;
+  type InFlightFile = {
+    controller: AbortController;
+    promise: Promise<{ bytes: ArrayBuffer; cdn: string | null }>;
+    waiters: number;
+    settled: boolean;
+  };
+  const inFlightFiles = new Map<string, InFlightFile>();
   let fileCachePromise: Promise<Cache | null> | null = null;
   let rollupCachePromise: Promise<Cache | null> | null = null;
   let pruning = false;
@@ -1052,7 +1059,7 @@ export function browserSource(
           endpoint: "GET /api/file",
           page_load_id: pageLoadId,
         });
-        return { bytes: inMemory, cached: true, cdn: null };
+        return { bytes: inMemory.slice(0), cached: true, cdn: null };
       }
       const url = `${baseUrl}${reqPath}`;
       // A caller identity already carries the current scope; the one captured at creation can be stale.
@@ -1078,91 +1085,159 @@ export function browserSource(
           endpoint: "GET /api/file",
           page_load_id: pageLoadId,
         });
-        return { bytes, cached: true, cdn: null };
+        return { bytes: bytes.slice(0), cached: true, cdn: null };
       }
+      signal?.throwIfAborted();
       const headers = buildRequestHeaders(
         options,
         limits.foldFileTelemetry ? { "X-FLP-Fold-Telemetry": "1" } : undefined,
       );
-      const start =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      // CacheStorage is the only persistent copy; skip the HTTP cache, which
-      // would otherwise keep a second one because /api/file is immutable.
-      const response = await fetchRetrying(url, {
-        credentials: "same-origin",
-        cache: "no-store",
-        ...(headers ? { headers } : {}),
-        signal,
-      });
-      if (!response.ok) {
-        const end =
-          typeof performance !== "undefined" ? performance.now() : Date.now();
-        options?.onApiCall?.({
-          source: "Compute API",
-          method: "GET",
-          path,
-          status: response.status,
-          duration_ms: Math.max(0, Math.round(end - start)),
-          endpoint: "GET /api/file",
-          page_load_id: pageLoadId,
-        });
-        throw new Error(`File ${key} failed (${response.status})`);
+      let inFlight = inFlightFiles.get(cacheUrl);
+      const cached = inFlight !== undefined;
+      if (!inFlight) {
+        const controller = new AbortController();
+        const promise = (async () => {
+          await Promise.resolve();
+          try {
+            const start =
+              typeof performance !== "undefined"
+                ? performance.now()
+                : Date.now();
+            // CacheStorage is the only persistent copy; skip the HTTP cache,
+            // which would otherwise keep a second one because /api/file is immutable.
+            const response = await fetchRetrying(url, {
+              credentials: "same-origin",
+              cache: "no-store",
+              ...(headers ? { headers } : {}),
+              signal: controller.signal,
+            });
+            if (!response.ok) {
+              const end =
+                typeof performance !== "undefined"
+                  ? performance.now()
+                  : Date.now();
+              options?.onApiCall?.({
+                source: "Compute API",
+                method: "GET",
+                path,
+                status: response.status,
+                duration_ms: Math.max(0, Math.round(end - start)),
+                endpoint: "GET /api/file",
+                page_load_id: pageLoadId,
+              });
+              throw new Error(`File ${key} failed (${response.status})`);
+            }
+            const bytes = await response.arrayBuffer();
+            const end =
+              typeof performance !== "undefined"
+                ? performance.now()
+                : Date.now();
+            const cdn = response.headers.get("x-flp-cdn-cache");
+            const cdnHit = isCdnHit(cdn);
+            const vcpuMs = parseVcpuMsHeader(response.headers);
+            const directCdn = cdn !== null && vcpuMs === null;
+            if (limits.foldFileTelemetry && !directCdn) {
+              folded.requests += 1;
+              if (vcpuMs !== null) folded.vcpuMs += vcpuMs;
+            }
+            options?.onApiCall?.({
+              source: cdnHit
+                ? "CDN Cache"
+                : directCdn
+                  ? "FOS S3"
+                  : "Compute API",
+              method: "GET",
+              path,
+              status: response.status,
+              duration_ms: Math.max(0, Math.round(end - start)),
+              vcpu_ms: vcpuMs,
+              bytes: bytes.byteLength,
+              cache: cdnHit ? "cdn" : "miss",
+              endpoint: "GET /api/file",
+              page_load_id: pageLoadId,
+            });
+            emitDebugSubCalls(
+              response,
+              "GET /api/file",
+              pageLoadId,
+              options?.onApiCall,
+            );
+            if (cache) {
+              const byteLength = bytes.byteLength;
+              void store(
+                CACHE_NAME,
+                cache,
+                cacheUrl,
+                key,
+                async () => ({
+                  data: bytes.slice(0),
+                  bytes: byteLength,
+                  headers: response.headers,
+                }),
+                true,
+              );
+            }
+            return { bytes, cdn };
+          } finally {
+            const active = inFlightFiles.get(cacheUrl);
+            if (active?.controller === controller) {
+              active.settled = true;
+            }
+            if (
+              active?.waiters === 0 &&
+              active.controller === controller
+            ) {
+              inFlightFiles.delete(cacheUrl);
+            }
+          }
+        })();
+        const entry: InFlightFile = {
+          controller,
+          promise,
+          waiters: 0,
+          settled: false,
+        };
+        inFlightFiles.set(cacheUrl, entry);
+        inFlight = entry;
       }
-      const bytes = await response.arrayBuffer();
-      const end =
-        typeof performance !== "undefined" ? performance.now() : Date.now();
-      if (!transfer) rememberFile(key, bytes, mode?.identity);
-      const cdn = response.headers.get("x-flp-cdn-cache");
-      const cdnHit = isCdnHit(cdn);
-      const vcpuMs = parseVcpuMsHeader(response?.headers);
-      const directCdn = cdn !== null && vcpuMs === null;
-      if (limits.foldFileTelemetry && !directCdn) {
-        folded.requests += 1;
-        if (vcpuMs !== null) folded.vcpuMs += vcpuMs;
-      }
-      options?.onApiCall?.({
-        source: cdnHit
-          ? "CDN Cache"
-          : directCdn
-            ? "FOS S3"
-            : "Compute API",
-        method: "GET",
-        path,
-        status: response.status,
-        duration_ms: Math.max(0, Math.round(end - start)),
-        vcpu_ms: vcpuMs,
-        bytes: bytes.byteLength,
-        cache: cdnHit ? "cdn" : "miss",
-        endpoint: "GET /api/file",
-        page_load_id: pageLoadId,
-      });
-      emitDebugSubCalls(
-        response,
-        "GET /api/file",
-        pageLoadId,
-        options?.onApiCall,
-      );
-      if (cache) {
-        const byteLength = bytes.byteLength;
-        const cacheBytes = transfer ? bytes.slice(0) : bytes;
-        void store(
-          CACHE_NAME,
-          cache,
-          cacheUrl,
-          key,
-          async () => ({
-            data: cacheBytes,
-            bytes: byteLength,
-            headers: response.headers,
-          }),
-          true,
-        );
-      }
-      return {
-        bytes,
-        cached: false,
-        cdn,
+      const request = inFlight;
+      request.waiters += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        request.waiters -= 1;
+        if (request.waiters === 0) {
+          if (!request.settled) request.controller.abort();
+          if (inFlightFiles.get(cacheUrl) === request) {
+            inFlightFiles.delete(cacheUrl);
+          }
+        }
       };
+      let onAbort: (() => void) | undefined;
+      const aborted =
+        signal &&
+        new Promise<never>((_, reject) => {
+          onAbort = () => {
+            release();
+            reject(signal.reason);
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+      try {
+        const network = await (aborted
+          ? Promise.race([request.promise, aborted])
+          : request.promise);
+        if (!transfer) rememberFile(key, network.bytes.slice(0), mode?.identity);
+        return {
+          bytes: network.bytes.slice(0),
+          cached,
+          cdn: network.cdn,
+        };
+      } finally {
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+        release();
+      }
     },
     async hasFile(key) {
       if (memoryFiles.has(key) && memoryFileIdentities.get(key) === undefined) return true;
@@ -1301,6 +1376,10 @@ export function browserSource(
       }
     },
     clearMemoryCache() {
+      for (const request of inFlightFiles.values()) {
+        request.controller.abort();
+      }
+      inFlightFiles.clear();
       memoryRollups.clear();
       memoryRollupBytes = 0;
       memoryFiles.clear();
