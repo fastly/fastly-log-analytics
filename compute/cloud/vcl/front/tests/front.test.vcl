@@ -1,5 +1,48 @@
 // @scope: recv
+sub http_requests_redirect_to_https {
+  testing.inject_variable("req.is_ssl", false);
+  set req.url = "/usage?service=fixture";
+  set req.http.Host = "flp.example";
+  testing.call_subroutine("vcl_recv");
+  assert.error(801);
+}
+
+
+// @scope: error
+sub https_redirect_preserves_host_path_and_query {
+  set obj.status = 801;
+  set req.url = "/usage?service=fixture";
+  set req.http.Host = "flp.example";
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 301);
+  assert.equal(obj.http.Location, "https://flp.example/usage?service=fixture");
+  assert.state(deliver);
+}
+
+
+// @scope: recv
+sub public_shell_queries_share_a_cache_key {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/usage?campaign=one";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.url, "/usage");
+  assert.state(lookup);
+}
+
+
+// @scope: recv
+sub private_api_queries_keep_the_complete_cache_key {
+  testing.inject_variable("req.is_ssl", true);
+  set req.url = "/api/files?from=a&to=b&service=fixture";
+  testing.call_subroutine("vcl_recv");
+  assert.equal(req.url, "/api/files?from=a&to=b&service=fixture");
+  assert.state(pass);
+}
+
+
+// @scope: recv
 sub overwrites_untrusted_front_key_and_client_ip {
+  testing.inject_variable("req.is_ssl", true);
   set req.http.x-flp-front-key = "attacker";
   set req.http.x-flp-front-rl = "attacker";
   set req.http.Fastly-Client-IP = "192.0.2.99";
@@ -15,6 +58,7 @@ sub overwrites_untrusted_front_key_and_client_ip {
 
 // @scope: recv
 sub static_assets_drop_cookies {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/_next/static/chunks/abc123.js";
   set req.http.Cookie = "flp_session=private";
   testing.call_subroutine("vcl_recv");
@@ -25,6 +69,7 @@ sub static_assets_drop_cookies {
 
 // @scope: recv
 sub setup_is_never_cached {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/setup?next=/admin";
   testing.call_subroutine("vcl_recv");
   assert.state(pass);
@@ -33,6 +78,7 @@ sub setup_is_never_cached {
 
 // @scope: recv
 sub clock_normalizes_query_string_for_sleep_ttl_caching {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/_tick?b=7";
   testing.call_subroutine("vcl_recv");
   assert.equal(req.url, "/_tick");
@@ -43,6 +89,7 @@ sub clock_normalizes_query_string_for_sleep_ttl_caching {
 
 // @scope: recv
 sub flush_clock_normalizes_query_string_for_sleep_ttl_caching {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/_flush?b=7";
   testing.call_subroutine("vcl_recv");
   assert.equal(req.url, "/_flush");
@@ -53,6 +100,7 @@ sub flush_clock_normalizes_query_string_for_sleep_ttl_caching {
 
 // @scope: recv
 sub flush_clock_rejects_other_methods {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/_flush";
   set req.method = "POST";
   testing.call_subroutine("vcl_recv");
@@ -167,6 +215,7 @@ sub boxed_auth_returns_retry_after {
 
 // @scope: recv
 sub data_api_has_no_blanket_rate_cap {
+  testing.inject_variable("req.is_ssl", true);
   testing.inject_variable("client.ip", "192.0.2.55");
   declare local var.count INTEGER;
   set var.count = ratelimit.ratecounter_increment(auth_challenge_rc, "192.0.2.55", 1000);
@@ -179,6 +228,7 @@ sub data_api_has_no_blanket_rate_cap {
 
 // @scope: recv
 sub thirty_challenges_are_allowed {
+  testing.inject_variable("req.is_ssl", true);
   testing.inject_variable("client.ip", "192.0.2.55");
   declare local var.count INTEGER;
   set var.count = ratelimit.ratecounter_increment(auth_challenge_rc, "192.0.2.55", 29);
@@ -190,6 +240,7 @@ sub thirty_challenges_are_allowed {
 
 // @scope: recv
 sub thirty_first_challenge_is_rejected {
+  testing.inject_variable("req.is_ssl", true);
   testing.inject_variable("client.ip", "192.0.2.55");
   declare local var.count INTEGER;
   set var.count = ratelimit.ratecounter_increment(auth_challenge_rc, "192.0.2.55", 30);
@@ -246,6 +297,7 @@ sub successful_auth_does_not_increment_failure_counter {
 
 // @scope: recv
 sub absent_dictionary_key_fails_closed {
+  testing.inject_variable("req.is_ssl", true);
   testing.table_set(flp_front_auth, "front_key", "");
   set req.http.x-flp-front-key = "attacker";
   testing.call_subroutine("vcl_recv");
@@ -255,6 +307,7 @@ sub absent_dictionary_key_fails_closed {
 
 // @scope: recv
 sub boxed_client_never_reaches_compute {
+  testing.inject_variable("req.is_ssl", true);
   testing.inject_variable("client.ip", "192.0.2.55");
   ratelimit.penaltybox_add(auth_fail_pb, "192.0.2.55", 15m);
   set req.url = "/api/admin/users";
@@ -363,6 +416,7 @@ sub tick_failures_are_collapsed_for_the_bucket {
 
 // @scope: recv
 sub static_export_txt_and_html_variants_pass_and_enforce_penalty_box {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/admin.txt";
   testing.call_subroutine("vcl_recv");
   assert.state(pass);
@@ -387,6 +441,7 @@ sub static_export_protected_variants_are_never_cached {
 
 // @scope: recv
 sub duckdb_assets_drop_cookies_and_are_looked_up {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/duckdb/1.33.1-dev57.0/duckdb-eh.wasm";
   set req.http.Cookie = "flp_session=private";
   testing.call_subroutine("vcl_recv");
@@ -397,6 +452,7 @@ sub duckdb_assets_drop_cookies_and_are_looked_up {
 
 // @scope: recv
 sub accept_encoding_prefers_brotli_then_gzip_for_precompressed_assets {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/_next/static/chunks/abc123.js";
   set req.http.Fastly-Orig-Accept-Encoding = "gzip, deflate, br, zstd";
   set req.http.Accept-Encoding = "gzip";
@@ -419,6 +475,7 @@ sub accept_encoding_prefers_brotli_then_gzip_for_precompressed_assets {
 
 // @scope: recv
 sub fos_reads_keep_the_platform_accept_encoding {
+  testing.inject_variable("req.is_ssl", true);
   set req.url = "/fos/AAAAAAAAAAAAAAAAAAAAAA/processed/request/a.parquet";
   set req.http.x-fastly-key = "test-cdn-key-not-a-live-secret";
   set req.http.Fastly-Orig-Accept-Encoding = "gzip, br";
@@ -525,6 +582,7 @@ sub ipv6_same_64_subnet_shares_failure_counter_and_penalty_box {
 
 // @scope: recv
 sub penalty_box_blocks_fos_parquet_and_signin_before_rewrites_while_keeping_public_and_clock_safe {
+  testing.inject_variable("req.is_ssl", true);
   ratelimit.penaltybox_add(auth_fail_pb, "v6:536939960:2882343476", 15m);
   testing.inject_variable("client.ip", "2001:0db8:abcd:1234:dead:beef:cafe:99");
 
@@ -603,6 +661,7 @@ sub penalty_box_blocks_fos_parquet_and_signin_before_rewrites_while_keeping_publ
 
 // @scope: recv
 sub ipv6_same_64_subnet_shares_challenge_rate_limit {
+  testing.inject_variable("req.is_ssl", true);
   declare local var.count INTEGER;
   set var.count = ratelimit.ratecounter_increment(auth_challenge_rc, "v6:536939960:2882343476", 30);
   testing.inject_variable("client.ip", "2001:0db8:abcd:1234:1111:2222:3333:4444");

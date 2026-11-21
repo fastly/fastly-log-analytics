@@ -11,6 +11,9 @@ ratecounter auth_challenge_rc {}
 #RATELIMIT_END
 
 sub vcl_recv {
+  if (!req.is_ssl && req.url.path !~ "^/_tick$|^/_flush$") {
+    error 801 "Force TLS";
+  }
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
     set req.http.Fastly-Client-IP = client.ip;
     if (req.url ~ "^//") {
@@ -215,6 +218,9 @@ sub vcl_recv {
     unset req.http.Cookie;
   }
 #FASTLY recv
+  if (req.url.path ~ "^/(usage|how-it-works|share-login)(/acknowledge)?(\.html|\.txt)?/?$" || req.url.path == "/") {
+    set req.url = req.url.path;
+  }
   if (!req.http.x-flp-fos-service) {
     # Fastly normalizes to gzip unless the service enables Brotli; Compute holds br variants.
     declare local var.br STRING;
@@ -486,6 +492,13 @@ sub vcl_deliver {
 
 
 sub vcl_error {
+  if (obj.status == 801) {
+    set obj.http.Location = "https://" req.http.Host req.url;
+    set obj.status = 301;
+    set obj.response = "Moved Permanently";
+    synthetic {""};
+    return(deliver);
+  }
   if (obj.status >= 624 && obj.status <= 629) {
     set obj.http.Content-Type = "application/json";
     set obj.http.Cache-Control = "private, no-store";
