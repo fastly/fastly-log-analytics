@@ -44,7 +44,7 @@ export function filterUnavailableCustomFields<T extends CustomCard>(
 }
 
 export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
-const MAX_IDENTITIES = 16_384;
+export const MAX_IDENTITIES = 16_384;
 const MAX_REPLAY = 32;
 const MAX_SNAPSHOTS = 8;
 const MAX_DELTA_PAGES = 64;
